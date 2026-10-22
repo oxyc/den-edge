@@ -60,6 +60,11 @@ export interface LibraryFactManifest {
   complete: boolean;
   profileTopology: boolean;
   fullAuthority: boolean;
+  /**
+   * A newest-first import under way: every row from `floor` up to `head` is kept, and it resumes below `floor`.
+   * Absent for an oldest-first import, which resumes after `head`.
+   */
+  floor?: number;
 }
 
 export interface LibraryFactEntry {
@@ -160,7 +165,8 @@ const validManifest = (value: unknown): value is LibraryFactManifest => {
     held.head! >= 0 &&
     typeof held.complete === 'boolean' &&
     typeof held.profileTopology === 'boolean' &&
-    typeof held.fullAuthority === 'boolean'
+    typeof held.fullAuthority === 'boolean' &&
+    (held.floor === undefined || (Number.isSafeInteger(held.floor) && held.floor >= 0))
   );
 };
 
@@ -267,7 +273,7 @@ export class LibraryFactStore {
     head: number,
     entries: readonly LibraryFactEntry[],
     complete: boolean,
-    options: { readonly profileTopology?: boolean } = {},
+    options: { readonly profileTopology?: boolean; readonly floor?: number } = {},
   ): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation) {
@@ -321,6 +327,7 @@ export class LibraryFactStore {
       complete,
       profileTopology: this.profileTopology,
       fullAuthority: this.fullAuthority,
+      ...(options.floor !== undefined && !complete ? { floor: options.floor } : {}),
     };
     changes.push({
       kind: 'put',

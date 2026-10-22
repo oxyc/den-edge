@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
@@ -122,8 +122,27 @@ describe('finished library views', () => {
     const previousPieces = [...vault.values.keys()].filter(
       (key) => !key.endsWith(':finished-views.v1'),
     );
-    await writeFinishedLibraryViews(libraryKey, vault, value);
+    await writeFinishedLibraryViews(libraryKey, vault, {
+      ...value,
+      identity: { ...value.identity, head: value.identity.head + 1 },
+    });
     expect(previousPieces.every((key) => !vault.values.has(key))).toBe(true);
+  });
+
+  it('writes nothing when the same views are kept already', async () => {
+    const vault = new MemoryVault();
+    const value = await fixture();
+    await writeFinishedLibraryViews(libraryKey, vault, value);
+    const kept = new Map(vault.values);
+    const put = vi.spyOn(vault, 'put');
+    await expect(
+      writeFinishedLibraryViews(libraryKey, vault, structuredClone(value)),
+    ).resolves.toBe(true);
+    expect(put).not.toHaveBeenCalled();
+    expect(vault.values).toEqual(kept);
+    await expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject(
+      { identity: value.identity },
+    );
   });
 
   it('keeps the previous complete manifest when replacement is interrupted', async () => {

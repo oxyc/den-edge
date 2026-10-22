@@ -13,7 +13,7 @@ import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys, seal, type TitleRow } from './wire';
+import { deriveKeys, seal, type SettingsRow, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
@@ -225,7 +225,48 @@ it('opens completed capability facts without a monolithic snapshot or finished-v
   expect(openFull).toHaveBeenCalledOnce();
 });
 
-it('cold-imports bounded pages and serves the main startup capabilities without full hydration', async () => {
+/**
+ * den-edge's `/changes` over `entries`: oldest first after `since`, and — unless `older`, a den-edge that predates them
+ * and reads every request as one from `since=0` — newest first below `before` and the named `keys`. `limit` defaults
+ * as den-edge's does; `fail` throws for the requests it names.
+ */
+function changesEdge(
+  entries: ReadonlyArray<{ k: string; seq: number; v: string }>,
+  generation: string,
+  { older = false, fail }: { older?: boolean; fail?: (url: URL) => boolean } = {},
+) {
+  const requests: URL[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    requests.push(url);
+    if (fail?.(url)) throw new Error('device stopped');
+    const limit = Number(url.searchParams.get('limit') ?? 500);
+    const head = Math.max(0, ...entries.map((entry) => entry.seq));
+    const keys = url.searchParams.get('keys');
+    const before = url.searchParams.get('before');
+    let body: Record<string, unknown>;
+    if (!older && keys !== null) {
+      const named = new Set(keys.split(','));
+      body = {
+        entries: entries.filter((entry) => named.has(entry.k)),
+        more: false,
+        selected: true,
+      };
+    } else if (!older && before !== null) {
+      const below = entries.filter((entry) => entry.seq < Number(before)).reverse();
+      body = { entries: below.slice(0, limit), more: below.length > limit, order: 'desc' };
+    } else {
+      const since = Number(url.searchParams.get('since') ?? 0);
+      const after = entries.filter((entry) => entry.seq > since);
+      body = { entries: after.slice(0, limit), more: after.length > limit };
+    }
+    return new Response(JSON.stringify({ generation, head, ...body }), { status: 200 });
+  });
+  return { fetchImpl, requests };
+}
+
+it('cold-imports bounded pages from an older den-edge and serves the main startup capabilities without full hydration', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
   const keys = await deriveKeys(raw);
@@ -241,9 +282,10 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
   const fetchImpl = vi.fn<typeof fetch>(async (input) => {
     const url = new URL(String(input), 'https://den.test');
     if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
-    const since = Number(url.searchParams.get('since'));
-    const limit = Number(url.searchParams.get('limit'));
-    pageSizes.push(limit);
+    // An older den-edge reads a newest-first or by-key request as one from `since=0`, unmarked.
+    const since = Number(url.searchParams.get('since') ?? 0);
+    const limit = Number(url.searchParams.get('limit') ?? 500);
+    if (url.searchParams.has('since')) pageSizes.push(limit);
     const page = entries.filter((entry) => entry.seq > since).slice(0, limit);
     return new Response(
       JSON.stringify({
@@ -267,7 +309,8 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
     progress,
   );
 
-  // One round trip for the whole history; each committed checkpoint stays bounded, and says how far it is.
+  // Asked newest first, it answered unmarked: one oldest-first read of the whole history follows, each committed
+  // checkpoint bounded and saying how far it is.
   expect(pageSizes).toEqual([1000]);
   expect(commitBatch.mock.calls.map(([, , batch]) => batch.length)).toEqual([64, 64, 2]);
   commitBatch.mockRestore();
@@ -292,7 +335,7 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
   });
 });
 
-it('resumes a cold import from the last atomically committed page', async () => {
+it('resumes a cold import from an older den-edge from the last atomically committed page', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
   const keys = await deriveKeys(raw);
@@ -303,11 +346,11 @@ it('resumes a cold import from the last atomically committed page', async () => 
       return { ...(await seal(keys, value)), seq: index + 1 };
     }),
   );
-  let changes = 0;
   const interrupted = vi.fn<typeof fetch>(async (input) => {
     const url = new URL(String(input), 'https://den.test');
     if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
-    if (++changes > 1) throw new Error('device stopped');
+    // The device stops once the first page is read; an older den-edge answers every other request as `since=0`.
+    if (Number(url.searchParams.get('since') ?? 0) > 0) throw new Error('device stopped');
     return new Response(
       JSON.stringify({
         generation: 'generation-resume',
@@ -352,6 +395,129 @@ it('resumes a cold import from the last atomically committed page', async () => 
   });
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 90 }]),
+  });
+});
+
+/** A library whose oldest row is its preferences (anime hidden), then `titles` watchlisted titles, newest last. */
+async function settledLongAgo(titles: number) {
+  const keys = await deriveKeys(raw);
+  const prefs: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'prefs',
+    values: { 'den.hideAnime': { value: { bool: true }, at: [1, 0, 'device'] } },
+  };
+  const entries = [{ ...(await seal(keys, prefs)), seq: 1 }];
+  for (let id = 1; id <= titles; id += 1) {
+    const row = { ...factTitle('watchlist', id + 1), title: { type: 'movie' as const, id } };
+    entries.push({ ...(await seal(keys, row)), seq: id + 1 });
+  }
+  return entries;
+}
+
+it('draws a first open from its newest page and its settings by key, then reads the rest behind it', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(1_100);
+  const edge = changesEdge(entries, 'generation-newest');
+  // The rest of the history waits until the first page has been looked at.
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    const before = new URL(String(input), 'https://den.test').searchParams.get('before');
+    if (before !== null && Number(before) < Number.MAX_SAFE_INTEGER) await released;
+    return edge.fetchImpl(input, init);
+  });
+  const openFull = vi.fn(async () => fullAuthority());
+  const progress = vi.fn();
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    fetchImpl,
+    progress,
+  );
+
+  // Answered after one newest-first page, with the settings read by key beside it.
+  expect(edge.requests.map((url) => [...url.searchParams.keys()].sort().join('&'))).toEqual([
+    'before&limit',
+    'keys',
+  ]);
+  const first = (await opened!.authority.select({ kind: 'overview' })) as { watchlist: unknown[] };
+  expect(first.watchlist).toContainEqual({ type: 'movie', id: 1_100 });
+  expect(first.watchlist).not.toContainEqual({ type: 'movie', id: 1 });
+  // The oldest row of all, yet already applied.
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    preferences: { hideAnime: true },
+  });
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    head: 1_101,
+    complete: false,
+    floor: 102,
+  });
+  expect(progress.mock.calls.at(-1)![0]).toBeLessThan(1);
+
+  const changed = vi.fn();
+  opened!.authority.listen?.(changed);
+  release();
+  await vi.waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      head: 1_101,
+      complete: true,
+    }),
+  );
+  await vi.waitFor(() =>
+    expect(changed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'changed',
+        affected: expect.arrayContaining([{ kind: 'overview' }]),
+      }),
+    ),
+  );
+  const filled = (await opened!.authority.select({ kind: 'overview' })) as { watchlist: unknown[] };
+  expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
+  expect(progress.mock.calls.at(-1)![0]).toBe(1);
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('resumes a newest-first import below the last committed page, and opens the log when the rest stops', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(1_100);
+  // The device stops once the first page is kept.
+  const interrupted = changesEdge(entries, 'generation-newest', {
+    fail: (url) => Number(url.searchParams.get('before') ?? Infinity) < Number.MAX_SAFE_INTEGER,
+  });
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    interrupted.fetchImpl,
+  );
+  expect(opened).not.toBeNull();
+  // The stopped read leaves Home to the full log rather than to half a history.
+  await vi.waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+  await opened!.authority.close?.();
+
+  const resumed = changesEdge(entries, 'generation-newest');
+  const reopened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    resumed.fetchImpl,
+  );
+  // Below the floor the first open kept, without reading the settings again.
+  expect(resumed.requests.map((url) => url.searchParams.get('before'))).toEqual(['102']);
+  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+    head: 1_101,
+    complete: true,
+  });
+  await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    watchlist: expect.arrayContaining([{ type: 'movie', id: 1 }]),
   });
 });
 
@@ -489,6 +655,30 @@ it('keeps retained presentation hints without opening library documents', async 
     opened!.authority.command({ kind: 'preferences.seed', household: {} }, 'preference-seed'),
   ).resolves.toEqual({ outcome: 'unchanged', delivery: 'synced', affected: [] });
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('decides a first open’s preference seed from its settings facts, opening the log only to write one', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const edge = changesEdge(await settledLongAgo(10), 'generation-seed');
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    edge.fetchImpl,
+  );
+  // The profile has decided the one preference the household holds: nothing to write, and nothing kept said so.
+  const decided = { 'den.hideAnime': { value: { bool: false }, at: [1, 0, 'household'] } };
+  await expect(
+    opened!.authority.command({ kind: 'preferences.seed', household: decided }, 'seed-1'),
+  ).resolves.toEqual({ outcome: 'unchanged', delivery: 'synced', affected: [] });
+  expect(openFull).not.toHaveBeenCalled();
+  // One it has not decided is written, by the log.
+  const undecided = { 'den.hideWatched': { value: { bool: true }, at: [1, 0, 'household'] } };
+  await opened!.authority.command({ kind: 'preferences.seed', household: undecided }, 'seed-2');
+  expect(openFull).toHaveBeenCalledOnce();
 });
 
 it('keeps matching TV layouts lazy and promotes a changed layout', async () => {

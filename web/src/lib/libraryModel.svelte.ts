@@ -166,18 +166,18 @@ export class LibraryModel {
     const progress = (value: number) => {
       if (!this.#closed) noteLibraryOpening(this, value);
     };
-    this.ready = service
-      .open({ ...options, progress })
-      .finally(() => noteLibraryOpening(this, null))
-      .catch((error: unknown) => {
-        const failure = failureFrom(error);
-        if (!this.#closed) {
-          this.#openFailure = failure;
-          this.#connection = 'failed';
-          this.#status = Object.freeze({ kind: 'failed', error: failure });
-        }
-        throw error;
-      });
+    // Ready can come before the read is complete (the rest of the history follows the first page): the progress ends
+    // at 1, or with a failed open or a closed model.
+    this.ready = service.open({ ...options, progress }).catch((error: unknown) => {
+      noteLibraryOpening(this, null);
+      const failure = failureFrom(error);
+      if (!this.#closed) {
+        this.#openFailure = failure;
+        this.#connection = 'failed';
+        this.#status = Object.freeze({ kind: 'failed', error: failure });
+      }
+      throw error;
+    });
   }
 
   get overview(): LibraryModelSnapshot<LibraryOverviewView> {

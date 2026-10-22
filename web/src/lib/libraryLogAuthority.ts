@@ -34,12 +34,13 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
-import { noteLibraryFold } from './libraryStartupMetrics';
+import { noteFinishedViewsRewrite, noteLibraryFold } from './libraryStartupMetrics';
 import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
+  readFinishedLibraryViews,
   removeFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewPieces,
@@ -1866,12 +1867,22 @@ export class LibraryLogAuthority {
       this.#finishedPieces.recommendations = recommendations;
     } else if (kind === 'continue') {
       const view = value as Extract<LibrarySelectionValue, { kind: 'continue' }>;
+      // Continue is finished once every series in it has its layout: kept before then, it holds whichever layouts this
+      // page had learnt so far, which differ from one visit to the next, so the next visit opens the log to learn them
+      // again and keeps another partial Continue in its place.
+      if (view.needsShapes.length) {
+        delete this.#finishedPieces.continue;
+        this.#finishedPending = undefined;
+        return value;
+      }
       const required = new Set(this.#projected().home.requiredShapeRefs);
       this.#finishedPieces.continue = {
         view,
+        // In key order, not the order this page learnt them in: the same layouts keep the same views.
         layouts: Object.fromEntries(
           [...this.#shapes]
             .filter(([key]) => required.has(key))
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
             .map(([key, stored]) => [key, stored.digest]),
         ),
       };
@@ -1926,6 +1937,7 @@ export class LibraryLogAuthority {
     if (!this.#options.libraryKey || !this.#options.vault) return;
     revision ??= this.#finishedAuthorityRevision();
     if (this.#finishedRevision === revision) return;
+    const first = this.#finishedRevision === undefined;
     this.#finishedRevision = revision;
     this.#finishedPieces = {};
     this.#finishedPending = undefined;
@@ -1933,6 +1945,19 @@ export class LibraryLogAuthority {
     this.#finishedTimer = undefined;
     this.#finishedSaving = this.#finishedSaving
       .then(async () => {
+        // This authority's first revision: views kept by an earlier visit at the same revision still describe it, and
+        // removing them only had the views written again, whole, a moment later.
+        if (first) {
+          const kept = await readFinishedLibraryViews(
+            this.#options.libraryKey!,
+            this.#options.vault!,
+            [],
+          );
+          if (kept?.identity.authorityRevision === revision) return;
+          noteFinishedViewsRewrite(
+            kept ? 'discard:first revision differs' : 'discard:first none kept',
+          );
+        } else noteFinishedViewsRewrite('discard:revision changed');
         await removeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
       })
       .catch((error: unknown) =>

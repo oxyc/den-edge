@@ -42,7 +42,6 @@ type Pending = {
   timer?: ReturnType<typeof setTimeout>;
   /** Restart the timeout: the service said it is still working on this request. */
   arm?: () => void;
-  progress?: (progress: number) => void;
 };
 
 type Subscription = {
@@ -68,6 +67,7 @@ export class LibraryServiceClient {
   #nextSubscription = 0;
   #instance?: string;
   #stopRelayMembership?: () => void;
+  #progress?: (progress: number) => void;
   #closed = false;
 
   constructor(
@@ -90,6 +90,7 @@ export class LibraryServiceClient {
   }
 
   async #open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+    this.#progress = options.progress;
     const requestId = this.#requestId();
     const reply = await this.#request(
       {
@@ -103,7 +104,6 @@ export class LibraryServiceClient {
         ...(options.legacyClock ? { legacyClock: options.legacyClock } : {}),
       },
       this.startupTimeoutMs,
-      options.progress,
     );
     if (reply.type !== 'ready') throw this.#unexpected(reply, 'ready');
     this.#stopRelayMembership?.();
@@ -236,11 +236,10 @@ export class LibraryServiceClient {
   #request(
     message: LibraryServiceClientMessage,
     timeoutMs?: number,
-    progress?: (progress: number) => void,
   ): Promise<LibraryServiceServerMessage> {
     this.#assertOpen();
     return new Promise((resolve, reject) => {
-      const pending: Pending = { request: message, resolve, reject, progress };
+      const pending: Pending = { request: message, resolve, reject };
       if (timeoutMs !== undefined) {
         pending.arm = () => {
           clearTimeout(pending.timer);
@@ -309,11 +308,11 @@ export class LibraryServiceClient {
       return;
     }
     if (message.type === 'opening') {
+      // Before the hello answers it keeps the open alive; after it, the rest of a first read is still reported.
       const pending = this.#pending.get(message.requestId);
-      if (pending?.request.type !== 'hello') return;
-      pending.arm?.();
+      if (pending?.request.type === 'hello') pending.arm?.();
       try {
-        pending.progress?.(message.progress);
+        this.#progress?.(message.progress);
       } catch (error) {
         console.error('den: a library opening listener failed', error);
       }

@@ -197,6 +197,160 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
+  it('does not write the finished views again when an unchanged library is opened again', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const puts: string[] = [];
+      const put = vault.put;
+      vault.put = async (key, value) => {
+        if (key.includes(':finished-views.v1')) puts.push(key);
+        return put(key, value);
+      };
+      const all = [
+        'watchlist',
+        'continue',
+        'recommendations',
+        'settings',
+        'runtime',
+        'devices',
+      ] as const;
+      const visit = async (edit: boolean) => {
+        const log = (await LibraryLog.openLocal(KEY, vault))!;
+        const clock = await openClockStore(vault, {
+          key: 'finished-view-reopen-clock',
+          createDevice: () => '0123456789abcdef',
+        });
+        const opened = authority(log, clock, 'local', undefined, undefined, {
+          libraryKey: KEY,
+          vault,
+        });
+        if (edit) {
+          await opened.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
+          await opened.command({ kind: 'watchlist.add', title: series }, 'add-eleven');
+        }
+        await cacheSelections(opened);
+        await vi.advanceTimersByTimeAsync(250);
+        await opened.close();
+        return readFinishedLibraryViews(KEY, vault, [...all]);
+      };
+      const first = await visit(true);
+      expect(first).not.toBeNull();
+      puts.length = 0;
+      const second = await visit(false);
+      const kept = first!;
+      const differs = [
+        ...(Object.keys(kept.identity) as Array<keyof typeof kept.identity>).filter(
+          (field) =>
+            JSON.stringify(kept.identity[field]) !== JSON.stringify(second?.identity[field]),
+        ),
+        ...all.filter(
+          (piece) => JSON.stringify(kept.pieces[piece]) !== JSON.stringify(second?.pieces[piece]),
+        ),
+      ];
+      expect({ puts, differs }).toEqual({ puts: [], differs: [] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the finished views only once every series in Continue has its layout', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-layouts-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await opened.command(
+        {
+          kind: 'episode-watched.set',
+          episode: { ...series, season: 1, episode: 1 },
+          watched: true,
+        },
+        'watched-one',
+      );
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      // Its series' layout is not known yet: a Continue kept now would be partial.
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
+
+      await opened.observe({
+        kind: 'title-shape',
+        title: series,
+        seasons: [{ season: 1, episodes: 2 }],
+        lastAired: { season: 1, episode: 2 },
+      });
+      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
+        needsShapes: [],
+      });
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(async () =>
+        expect(
+          (await readFinishedLibraryViews(KEY, vault, ['continue']))?.pieces.continue?.view,
+        ).toMatchObject({ needsShapes: [], items: [{ title: series }] }),
+      );
+      await opened.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the same Continue layouts whatever order a page learnt them in', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const other = { type: 'tv' as const, id: 12 };
+      const kept = async (order: (typeof series)[]) => {
+        const vault = memoryVault();
+        const log = (await LibraryLog.openLocal(KEY, vault))!;
+        const clock = await openClockStore(vault, {
+          key: 'finished-view-layout-order-clock',
+          createDevice: () => '0123456789abcdef',
+        });
+        const opened = authority(log, clock, 'local', undefined, undefined, {
+          libraryKey: KEY,
+          vault,
+        });
+        for (const title of [series, other])
+          await opened.command(
+            {
+              kind: 'episode-watched.set',
+              episode: { ...title, season: 1, episode: 1 },
+              watched: true,
+            },
+            `watched-${title.id}`,
+          );
+        for (const title of order)
+          await opened.observe({
+            kind: 'title-shape',
+            title,
+            seasons: [{ season: 1, episodes: 2 }],
+            lastAired: { season: 1, episode: 2 },
+          });
+        await cacheSelections(opened);
+        await vi.advanceTimersByTimeAsync(250);
+        await opened.close();
+        return JSON.stringify(
+          (await readFinishedLibraryViews(KEY, vault, ['continue']))?.pieces.continue?.layouts,
+        );
+      };
+      const forwards = await kept([series, other]);
+      expect(forwards).toContain('tv:11');
+      expect(await kept([other, series])).toBe(forwards);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a projected PIN non-authoritative across reload until its exact row syncs', async () => {
     await ensureSyncPolicy();
     const vault = memoryVault();
