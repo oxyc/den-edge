@@ -1198,6 +1198,16 @@ export interface LibraryServiceStatus extends ServerMessage {
   status: LibrarySessionStatus;
 }
 
+/**
+ * Sent while a hello is still open and the library is being read from den-edge for the first time: how far through
+ * den-edge's history the read is, from 0 to 1. It also shows the open is alive, however long a big library takes.
+ */
+export interface LibraryServiceOpening extends ServerMessage {
+  type: 'opening';
+  requestId: string;
+  progress: number;
+}
+
 /** Replacements are intentional: one immutable assignment is one UI invalidation. */
 export interface LibraryServiceUpdate extends ServerMessage {
   type: 'update';
@@ -1222,5 +1232,6 @@ export type LibraryServiceServerMessage =
   | LibraryServiceUnsubscribed
   | LibraryServiceObserved
   | LibraryServiceStatus
+  | LibraryServiceOpening
   | LibraryServiceUpdate
   | LibraryServiceError;

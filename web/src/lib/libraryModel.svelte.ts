@@ -42,6 +42,7 @@ import type {
   TitleView,
 } from './libraryServiceProtocol';
 import type { LibraryRelayMembership } from './relayFetch';
+import { noteLibraryOpening } from './libraryOpening.svelte';
 import type {
   LibrarySelectionConnection,
   LibrarySelectionSnapshot,
@@ -162,7 +163,13 @@ export class LibraryModel {
       }),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
-    this.ready = service.open(options).catch((error: unknown) => {
+    const progress = (value: number) => {
+      if (!this.#closed) noteLibraryOpening(this, value);
+    };
+    // Ready can come before the read is complete (the rest of the history follows the first page): the progress ends
+    // at 1, or with a failed open or a closed model.
+    this.ready = service.open({ ...options, progress }).catch((error: unknown) => {
+      noteLibraryOpening(this, null);
       const failure = failureFrom(error);
       if (!this.#closed) {
         this.#openFailure = failure;
@@ -1044,6 +1051,7 @@ export class LibraryModel {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    noteLibraryOpening(this, null);
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();

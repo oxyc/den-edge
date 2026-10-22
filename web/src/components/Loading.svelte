@@ -36,7 +36,19 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+    align-items: center;
+    justify-content: center;
     pointer-events: none;
+
+    /* Shown only for a wait long enough to notice: a page that loads at once must not flash one. */
+    opacity: 0;
+    animation: appear 0.2s ease-out 0.4s forwards;
+  }
+
+  @keyframes appear {
+    to {
+      opacity: 1;
+    }
   }
 
   .spinner {

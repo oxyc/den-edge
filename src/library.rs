@@ -11,6 +11,9 @@
 //!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation } (gzip when accepted)
 //!                                                       (`&wait=S`: with nothing after `since`, held up to S ≤ 25
 //!                                                       seconds until a write to this library commits)
+//!                                                       (`&before=N` instead of `since`: the rows below N, newest
+//!                                                       first, marked `"order":"desc"`; `&keys=k1,k2…` (≤ 32): those
+//!                                                       rows' current values, marked `"selected":true`)
 //!   DELETE /lib/{id}                                   → { deleted: true }
 //!
 //! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
@@ -113,6 +116,18 @@ const MAX_CONFLICT_BYTES: usize = if cfg!(test) { 1024 * 1024 } else { 2 * 1024 
 pub const BATCH_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_LIMIT: usize = 500;
 const MAX_LIMIT: usize = 1000;
+/// Rows one `/changes?keys=` read may name: a client's few fixed rows (its settings) read before the rest.
+const MAX_SELECTED_KEYS: usize = 32;
+
+/// What a `/changes` read returns.
+enum Read {
+    /// Every row after a sequence, oldest first: the read every client catches up with.
+    Since(u64),
+    /// The rows below a sequence, newest first (`before=`): a first read that wants recent rows soonest.
+    Before(u64),
+    /// The current rows of the named keys (`keys=`).
+    Keys(Vec<String>),
+}
 /// Rows a library may hold: a long-time viewer's titles and episodes fit many times over; a stranger using the
 /// relay as free storage hits it (issue #8, #5).
 const MAX_ROWS: usize = if cfg!(test) { 8 } else { 50_000 };
@@ -872,15 +887,27 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .unwrap_or(DEFAULT_LIMIT)
                 .clamp(1, MAX_LIMIT);
             let (_, gzip, identity) = crate::web::encodings(req.headers());
-            // Only a GET is held: a HEAD asks about the answer, not for a wait.
+            let read = if let Some(keys) = query_param(&req, "keys") {
+                let keys: Vec<String> = keys.split(',').map(str::to_owned).collect();
+                if keys.len() > MAX_SELECTED_KEYS || keys.iter().any(|key| !valid_hex_id(key)) {
+                    return json_reply(StatusCode::BAD_REQUEST, &error("invalid_keys"));
+                }
+                Read::Keys(keys)
+            } else if let Some(before) = query_param(&req, "before").and_then(|s| s.parse().ok()) {
+                Read::Before(before)
+            } else {
+                Read::Since(since)
+            };
+            // Only a GET is held, and only a read of what follows `since`: a HEAD asks about the answer, not for a
+            // wait, and a newest-first or by-key read is answered at once.
             let hold = crate::hold::wait(query_param(&req, "wait"))
-                .filter(|_| req.method() == Method::GET)
+                .filter(|_| req.method() == Method::GET && matches!(read, Read::Since(_)))
                 .map(|wait| Hold {
                     wait,
                     generation: sent_generation.clone(),
                     admission: req.extensions().get::<crate::handler::AdmissionSlot>().cloned(),
                 });
-            changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity, hold).await
+            changes(state, id, token_hash, read, limit, gzip > 0 && gzip >= identity, hold).await
         }
         ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
         ("", Method::DELETE) => match reset_headers(req.headers()) {
@@ -1855,7 +1882,8 @@ fn row_fragment(seq: u64, k: &str, v: &str) -> Arc<[u8]> {
     Arc::from(serde_json::to_vec(&ResponseRow { k, seq, v }).expect("a library row always serializes"))
 }
 
-fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str) -> Vec<u8> {
+/// `extra`: further members of the answer, each with its leading comma (`Read`'s marker), or empty.
+fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str, extra: &str) -> Vec<u8> {
     use std::io::Write as _;
 
     let entries_bytes: usize = entries.iter().map(|entry| entry.len()).sum();
@@ -1867,7 +1895,7 @@ fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str) 
         }
         body.extend_from_slice(entry);
     }
-    write!(body, r#"],"head":{head},"more":{more},"generation":"{generation}"}}"#)
+    write!(body, r#"],"head":{head},"more":{more},"generation":"{generation}"{extra}}}"#)
         .expect("writing JSON to memory cannot fail");
     body
 }
@@ -1942,11 +1970,15 @@ async fn changes(
     state: &AppState,
     id: &str,
     token_hash: [u8; 32],
-    since: u64,
+    read: Read,
     limit: usize,
     gzip: bool,
     hold: Option<Hold>,
 ) -> Response {
+    let since = match read {
+        Read::Since(since) => since,
+        _ => 0,
+    };
     // Registered before the head is read: a write that lands after the read must still wake the wait.
     let mut hold = hold.and_then(|hold| Some((state.library_holds.hold(id, &[id])?, hold)));
     let (store, generation) = loop {
@@ -2003,7 +2035,7 @@ async fn changes(
         .acquire_many_owned(PAGE_BYTES as u32)
         .await
         .expect("the library response budget is never closed");
-    if !gzip {
+    if !gzip && matches!(read, Read::Since(_)) {
         let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
             page
         } else {
@@ -2023,14 +2055,26 @@ async fn changes(
         );
         return response;
     }
-    let page = match tokio::task::spawn_blocking(move || store.range(since, limit)).await {
+    // Named in the answer, so a client can tell the read it asked for from an older den-edge's ignoring it.
+    let marker = match read {
+        Read::Since(_) => "",
+        Read::Before(_) => r#","order":"desc""#,
+        Read::Keys(_) => r#","selected":true"#,
+    };
+    let page = match tokio::task::spawn_blocking(move || match read {
+        Read::Since(since) => store.range(since, limit),
+        Read::Before(before) => store.range_before(before, limit),
+        Read::Keys(keys) => store.rows(&keys),
+    })
+    .await
+    {
         Ok(Ok(page)) => page,
         Ok(Err(reason)) => return internal("library read", v3_io(reason)),
         Err(reason) => return internal("library read task", io::Error::other(reason)),
     };
     let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
 
-    let mut body = changes_body(&entries, page.head, page.more, &generation);
+    let mut body = changes_body(&entries, page.head, page.more, &generation, marker);
     if gzip && body.len() >= 1024 {
         if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
             let job = state.metrics.compression_started();
@@ -3478,6 +3522,48 @@ mod tests {
         assert_eq!((page["entries"].as_array().unwrap().len(), page["more"].clone()), (2, json!(true)));
         let (_, rest) = changes(&h, TOKEN, "?since=2&limit=10").await;
         assert_eq!((rest["entries"].as_array().unwrap().len(), rest["more"].clone()), (3, json!(false)));
+    }
+
+    #[tokio::test]
+    async fn changes_read_newest_first_below_a_sequence() {
+        let h = Harness::new();
+        let writes: Vec<Value> =
+            (0..5).map(|i| json!({ "k": format!("{i:016x}"), "base": 0, "v": "v" })).collect();
+        batch(&h, TOKEN, json!(writes)).await;
+        let seqs = |page: &Value| -> Vec<u64> {
+            page["entries"].as_array().unwrap().iter().map(|entry| entry["seq"].as_u64().unwrap()).collect()
+        };
+        let (status, page) = changes(&h, TOKEN, "?before=6&limit=2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (seqs(&page), page["more"].clone(), page["head"].clone()),
+            (vec![5, 4], json!(true), json!(5))
+        );
+        assert_eq!(page["order"], json!("desc"), "marked, so a client can tell an older den-edge ignored it");
+        let (_, rest) = changes(&h, TOKEN, "?before=4&limit=10").await;
+        assert_eq!((seqs(&rest), rest["more"].clone()), (vec![3, 2, 1], json!(false)));
+        let (_, plain) = changes(&h, TOKEN, "?since=0&limit=1").await;
+        assert!(plain.get("order").is_none(), "an ordinary read is unmarked");
+    }
+
+    #[tokio::test]
+    async fn changes_read_named_keys() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "a" }, { "k": K2, "base": 0, "v": "b" }])).await;
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "c" }])).await;
+        let (status, page) = changes(&h, TOKEN, &format!("?keys={K1},{}", "f".repeat(64))).await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "a key nobody wrote is absent");
+        assert_eq!(
+            (entries[0]["k"].clone(), entries[0]["v"].clone()),
+            (json!(K1), json!("c")),
+            "the current value"
+        );
+        assert_eq!((page["selected"].clone(), page["more"].clone()), (json!(true), json!(false)));
+        assert_eq!(changes(&h, TOKEN, "?keys=not-hex").await.0, StatusCode::BAD_REQUEST);
+        let many = vec!["a".repeat(64); super::MAX_SELECTED_KEYS + 1].join(",");
+        assert_eq!(changes(&h, TOKEN, &format!("?keys={many}")).await.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

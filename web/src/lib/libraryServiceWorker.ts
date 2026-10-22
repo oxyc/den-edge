@@ -10,8 +10,8 @@ const contentCredentials = new WorkerContentCredentials();
 const contentAuthority = new ContentAuthority(contentCredentials);
 new LibraryServiceWorkerHost(
   self as unknown as WorkerHostScope,
-  new LibraryServiceCore((request) =>
-    openLibraryServiceAuthority(request, undefined, contentCredentials, contentAuthority),
+  new LibraryServiceCore((request, progress) =>
+    openLibraryServiceAuthority(request, undefined, contentCredentials, contentAuthority, progress),
   ),
   new ContentServiceCore(contentAuthority),
 );
