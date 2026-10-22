@@ -348,6 +348,7 @@
         <div
           class="den-button den-button-secondary den-button-regular pick"
           class:on={reaction !== null}
+          class:disabled={mutationBlocked()}
           aria-busy={pressed.saving('reaction') || undefined}
           data-saving={pressed.saving('reaction') || undefined}
         >
@@ -543,15 +544,19 @@
       white-space: nowrap;
     }
 
+    /* stylelint-disable declaration-block-no-duplicate-custom-properties -- Static fallback precedes color-mix. */
     .detail-page .utilities > :global(.pill[aria-pressed='true']),
     .detail-page .utilities > .pick.on {
+      --button-bg: rgb(94 139 255 / 0.14);
       --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
       --button-border: transparent;
+      --button-fg: var(--fg);
       --button-fg: color-mix(in srgb, var(--fg) 78%, var(--accent));
 
       background: var(--button-bg);
       color: var(--button-fg);
     }
+    /* stylelint-enable declaration-block-no-duplicate-custom-properties -- End progressive color fallback. */
   }
 
   /* The focused element in the picker is the select inside, so its shell lights up with it. */
@@ -561,7 +566,7 @@
   }
 
   /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */
-  .pick:has(select:disabled) {
+  .pick.disabled {
     opacity: 0.45;
     cursor: progress;
   }
@@ -569,7 +574,7 @@
   /* A local save changes only its initiating state glyph. The shared command channel temporarily disables the
      other mutations, but dimming the whole row made one Watchlist press look like a full action-bar rerender. */
   .actions.saving :global(.den-button[aria-disabled='true']),
-  .actions.saving .pick:has(select:disabled) {
+  .actions.saving .pick.disabled {
     opacity: 1;
   }
 

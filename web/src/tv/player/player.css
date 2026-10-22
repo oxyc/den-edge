@@ -429,7 +429,8 @@
   box-shadow: none;
 }
 
-.den-tv.tv-remote-active .player .pick:focus-within {
+.den-tv.tv-remote-active .player .pick:focus-within,
+.den-tv.tv-remote-active.tv-no-focus-within .player .pick.tv-focus-within {
   border-color: var(--focus-ring);
   outline: var(--ring-width) solid var(--focus-ring);
   outline-offset: var(--ring-width);
@@ -437,6 +438,7 @@
 }
 
 .den-tv.tv-remote-active .full-tv-player footer .pick:focus-within,
+.den-tv.tv-remote-active.tv-no-focus-within .full-tv-player footer .pick.tv-focus-within,
 .den-tv.tv-remote-active .full-tv-player footer .pick-menu .trigger.pick:focus,
 .den-tv.tv-remote-active .full-tv-player footer .player-tv-action:focus {
   border-color: transparent;

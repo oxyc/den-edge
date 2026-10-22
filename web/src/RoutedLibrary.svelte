@@ -1705,8 +1705,10 @@
     width: fit-content;
     margin: 0 auto 16px;
     padding: 6px 11px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+    border: 1px solid var(--line);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
     border-radius: 999px;
+    background: var(--card);
     background: color-mix(in srgb, var(--card) 92%, var(--accent));
     color: var(--muted);
     font-size: 12px;

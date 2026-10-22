@@ -151,17 +151,22 @@ button[aria-disabled='true'] {
   --button-fg: var(--muted);
 }
 
+/* stylelint-disable declaration-block-no-duplicate-custom-properties -- Static fallback precedes color-mix. */
 .den-button-device {
   --button-bg: rgb(255 255 255 / 0.08);
   --button-border: rgb(255 255 255 / 0.14);
+  --button-fg: var(--fg);
   --button-fg: color-mix(in srgb, var(--fg) 84%, var(--accent));
 }
 
 .den-button-destructive {
+  --button-bg: rgb(255 107 107 / 0.12);
   --button-bg: color-mix(in srgb, var(--danger) 12%, transparent);
+  --button-border: rgb(255 107 107 / 0.48);
   --button-border: color-mix(in srgb, var(--danger) 48%, var(--line));
   --button-fg: #ff9a9a;
 }
+/* stylelint-enable declaration-block-no-duplicate-custom-properties -- End progressive color fallback. */
 
 .den-button-stateful[aria-pressed='true'] {
   --button-bg: var(--fg);
@@ -243,7 +248,9 @@ a[data-spatial-skip]:not(.slide-link):focus-visible {
 
 @media (hover: hover) and (pointer: fine) {
   .den-button:hover:not(:disabled, [aria-disabled='true']) {
+    border-color: var(--button-border);
     border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
+    background-color: var(--button-bg);
     background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
   }
 }

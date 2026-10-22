@@ -1261,7 +1261,11 @@
                 {row.name}
               {/if}<small>{deviceStatus(row, selfId, link?.libraryKey, day)}</small></span
             >
-            <div class="device-action">
+            <div
+              class="device-action"
+              class:self={row.device?.id === selfId}
+              class:confirm={row.device?.id !== selfId}
+            >
               {#if row.device?.id === selfId}
                 <span class="device-self">This device</span>
               {:else}
@@ -1552,7 +1556,7 @@
     font-size: 14px;
   }
 
-  .device-action:has(.device-self) {
+  .device-action.self {
     align-self: start;
   }
 
@@ -1560,7 +1564,7 @@
     margin-bottom: 4px;
   }
 
-  .device-action:has(:global(.confirm)) {
+  .device-action.confirm {
     grid-column: 1 / -1;
   }
 
@@ -1587,6 +1591,7 @@
   }
 
   .pair.scanned {
+    outline: 1px solid var(--accent);
     outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
   }
 

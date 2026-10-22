@@ -1,4 +1,5 @@
 import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+import { supportsFlexGap, supportsSelector } from './cssCapabilities';
 
 /** Only a disposable database is touched; never inspect the user's encrypted library. */
 async function storageProbe(): Promise<void> {
@@ -63,28 +64,6 @@ async function workerProbe(): Promise<void> {
     clearTimeout(timeout);
     worker.terminate();
   }
-}
-
-function supportsSelector(selector: string): boolean {
-  try {
-    return CSS.supports(`selector(${selector})`);
-  } catch {
-    return false;
-  }
-}
-
-// Parsing `gap` is not enough: older Chromium accepts the property while ignoring it in flex layout.
-function supportsFlexGap(): boolean {
-  const probe = document.createElement('div');
-  probe.style.cssText =
-    'position:absolute;left:-9999px;display:flex;flex-direction:column;row-gap:1px';
-  const child = document.createElement('div');
-  child.style.height = '1px';
-  probe.append(child, child.cloneNode());
-  document.body.append(probe);
-  const supported = probe.scrollHeight === 3;
-  probe.remove();
-  return supported;
 }
 
 /** Opt-in on-device evidence, deliberately excludes pairing keys, URLs and library contents. */

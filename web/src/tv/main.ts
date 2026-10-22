@@ -5,8 +5,10 @@ import './tv.css';
 import { installTVNavigation } from './navigation';
 import { registerSamsungKeys } from './platform';
 import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+import { installTvCssCapabilities } from './cssCapabilities';
 
 document.documentElement.dataset.denTv = tvRuntimePlatform();
+const stopCssCapabilities = installTvCssCapabilities();
 
 let remoteInstalled = false;
 function installRemote() {
@@ -18,6 +20,7 @@ function installRemote() {
     if (!event.persisted) {
       stop();
       stopKeys();
+      stopCssCapabilities();
     }
   });
 }

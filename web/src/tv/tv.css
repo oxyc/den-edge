@@ -262,7 +262,8 @@
   color: var(--muted);
 }
 
-.den-tv section.search .tv-search-editor:focus-within {
+.den-tv section.search .tv-search-editor:focus-within,
+.den-tv.tv-no-focus-within section.search .tv-search-editor.tv-focus-within {
   border-color: transparent;
   color: var(--fg);
 }
@@ -539,7 +540,9 @@
 /* Composite controls own one ring around the whole surface. Chrome 85 has :focus-within but not :has(), so
    make this explicit here instead of leaving a clipped ring on the invisible select or split-button region. */
 :root.den-tv.tv-remote-active .actions > .pick:focus-within,
-:root.den-tv.tv-remote-active .split-surface:focus-within {
+:root.den-tv.tv-remote-active .split-surface:focus-within,
+:root.den-tv.tv-remote-active.tv-no-focus-within .actions > .pick.tv-focus-within,
+:root.den-tv.tv-remote-active.tv-no-focus-within .split-surface.tv-focus-within {
   outline: var(--ring-width) solid var(--focus-ring);
   outline-offset: var(--ring-offset);
 }
@@ -551,7 +554,8 @@
   box-shadow: none;
 }
 
-:root.den-tv.tv-remote-active .tv-search-editor:focus-within {
+:root.den-tv.tv-remote-active .tv-search-editor:focus-within,
+:root.den-tv.tv-remote-active.tv-no-focus-within .tv-search-editor.tv-focus-within {
   outline: var(--ring-width) solid var(--focus-ring);
   outline-offset: var(--ring-offset);
   border-radius: 16px;
@@ -683,6 +687,203 @@
   outline-offset: calc(-1 * var(--ring-width));
   box-shadow: none;
 }
+
+/* Capability fallbacks are shared by every TV shell. Modern engines keep the component Grid/gap rules; an older
+   engine gets a deliberately simpler flex layout without platform forks or any bytes in the browser application. */
+
+/* These deliberately come after the modern declarations: capability classes must win the cascade. */
+/* stylelint-disable no-descending-specificity -- Capability overrides must follow modern declarations. */
+.den-tv.tv-no-grid .billboard .expand,
+.den-tv.tv-no-grid .billboard .dot,
+.den-tv.tv-no-grid .close,
+.den-tv.tv-no-grid .media .control,
+.den-tv.tv-no-grid .episode .play-glyph,
+.den-tv.tv-no-grid .episode .missing-art,
+.den-tv.tv-no-grid .episode-trigger,
+.den-tv.tv-no-grid .loading,
+.den-tv.tv-no-grid .tile .art,
+.den-tv.tv-no-grid .plate,
+.den-tv.tv-no-grid .profile-trigger,
+.den-tv.tv-no-grid .control,
+.den-tv.tv-no-grid .tv-bar nav a,
+.den-tv.tv-no-grid .tv-search-button,
+.den-tv.tv-no-grid .full-tv-transport button,
+.den-tv.tv-no-grid .full-tv-transport a,
+.den-tv.tv-no-grid .full-tv-player footer .player-tv-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.den-tv.tv-no-grid .episode {
+  display: flex;
+  align-items: center;
+}
+
+.den-tv.tv-no-grid .episode-play {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .episode-play > .still {
+  flex: 0 0 360px;
+  width: 360px;
+}
+
+.den-tv.tv-no-grid .episode-play > .about {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .episode-menu {
+  flex: 0 0 60px;
+}
+
+.den-tv.tv-no-grid section.search .explore,
+.den-tv.tv-no-grid .people .explore {
+  display: flex;
+  align-items: flex-start;
+}
+
+.den-tv.tv-no-grid section.search .rail,
+.den-tv.tv-no-grid .people .rail {
+  flex: 0 0 260px;
+}
+
+.den-tv.tv-no-grid section.search .feed,
+.den-tv.tv-no-grid .people .feed {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .grid,
+.den-tv.tv-no-grid .films {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.den-tv.tv-no-grid .actions.detail-page,
+.den-tv.tv-no-grid .actions.detail-page .pills {
+  display: flex;
+  flex-direction: column;
+}
+
+.den-tv.tv-no-grid .actions.detail-page .promoted,
+.den-tv.tv-no-grid .actions.detail-page .utilities {
+  display: flex;
+  flex-flow: row wrap;
+}
+
+.den-tv.tv-no-grid .actions.detail-page .promoted > *,
+.den-tv.tv-no-grid .actions.detail-page .utilities > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .settings {
+  display: flex;
+  align-items: flex-start;
+}
+
+.den-tv.tv-no-grid .settings > :last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .device-line {
+  display: flex;
+  align-items: center;
+}
+
+.den-tv.tv-no-grid .device-line .label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .full-tv-transport,
+.den-tv.tv-no-grid .full-tv-player .tv-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.den-tv.tv-no-grid .tv-timeline,
+.den-tv.tv-no-grid .tv-subtitle-timing {
+  display: flex;
+  align-items: center;
+}
+
+.den-tv.tv-no-grid .tv-subtitle-timing {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.den-tv.tv-no-grid .tv-timeline > span,
+.den-tv.tv-no-grid .tv-subtitle-timing > button {
+  flex: 0 0 auto;
+}
+
+.den-tv.tv-no-grid .tv-timeline > input,
+.den-tv.tv-no-grid .tv-subtitle-timing > strong {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.den-tv.tv-no-grid .tv-subtitle-timing > small {
+  flex: 0 0 100%;
+}
+
+.den-tv.tv-no-grid .pin-slots {
+  display: flex;
+}
+
+.den-tv.tv-no-grid .pin-slots > * {
+  flex: 1 1 0;
+}
+
+/* Flex `gap` support arrived much later than flex itself. These are the spacing relationships that materially
+   affect ten-foot navigation; incidental metadata can remain tighter on an old engine. */
+.den-tv.tv-no-flex-gap .tv-bar nav > * + *,
+.den-tv.tv-no-flex-gap .row .track > * + *,
+.den-tv.tv-no-flex-gap .tv-transport-actions > * + *,
+.den-tv.tv-no-flex-gap .tv-timeline > * + *,
+.den-tv.tv-no-flex-gap .tv-subtitle-timing > * + *,
+.den-tv.tv-no-flex-gap .pin-slots > * + * {
+  margin-left: 28px;
+}
+
+.den-tv.tv-no-flex-gap .episode > * + * {
+  margin-left: 12px;
+}
+
+.den-tv.tv-no-flex-gap .episode-play > * + * {
+  margin-left: 44px;
+}
+
+.den-tv.tv-no-flex-gap .full-tv-transport > * + *,
+.den-tv.tv-no-flex-gap dialog[role='menu'] .items > * + *,
+.den-tv.tv-no-flex-gap .episodes > * + *,
+.den-tv.tv-no-flex-gap .actions.detail-page > * + *,
+.den-tv.tv-no-flex-gap .actions.detail-page .pills > * + * {
+  margin-top: 24px;
+}
+
+.den-tv.tv-no-flex-gap .actions.detail-page .promoted > * + *,
+.den-tv.tv-no-flex-gap .actions.detail-page .utilities > * + *,
+.den-tv.tv-no-flex-gap section.search .filter > * + * {
+  margin-left: 10px;
+}
+
+.den-tv.tv-no-flex-gap .den-button > .den-button-label {
+  margin-left: 8px;
+}
+
+.den-tv.tv-no-focus-within .episode.tv-focus-within {
+  background: rgb(255 255 255 / 0.06);
+}
+/* stylelint-enable no-descending-specificity -- End capability overrides. */
 
 @media (prefers-reduced-motion: reduce) {
   .den-tv * {

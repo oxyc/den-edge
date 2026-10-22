@@ -213,8 +213,8 @@
     contain: layout style;
   }
 
-  .episode:has(.episode-play:hover),
-  .episode:has(.episode-play:focus-visible) {
+  .episode:hover,
+  .episode:focus-within {
     background: rgb(255 255 255 / 0.06);
   }
 

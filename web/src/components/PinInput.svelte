@@ -124,11 +124,13 @@
   }
 
   .pin-slot.filled {
+    border-color: var(--line);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
     background: rgb(255 255 255 / 0.09);
   }
 
   .pin-slot.ready {
+    border-color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
   }
 
@@ -139,6 +141,7 @@
 
   .pin-control.invalid .pin-slot {
     border-color: var(--bad, #ff9a9a);
+    background: transparent;
     background: color-mix(in srgb, var(--bad, #ff9a9a) 7%, transparent);
   }
 
