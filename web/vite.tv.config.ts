@@ -5,11 +5,17 @@ import { transformAsync } from '@babel/core';
 import presetEnv from '@babel/preset-env';
 import postcssCustomProperties from 'postcss-custom-properties';
 import postcssGlobalData from '@csstools/postcss-global-data';
+import postcssLogical from 'postcss-logical';
 import { Features as LightningCssFeatures } from 'lightningcss';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
 import { getTizenVersion, tvCsp } from './scripts/tv-csp.mjs';
+import {
+  tizen3FixedViewportMath,
+  tizen3ScrollLogical,
+  tizen3UnsupportedEnhancements,
+} from './scripts/tizen3-css-compat.ts';
 
 const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
@@ -287,13 +293,21 @@ const legacyScopedCss = {
 };
 
 // Run maintained CSS compatibility transforms before Svelte/Vite embeds component styles into the legacy chunks.
-// Global Data makes the fixed browser and TV tokens visible while each component stylesheet is processed, then
-// removes the injected rules again. This experiment deliberately does not invent fallbacks for scoped variables,
-// Grid or flex gap: the packaged-output report tells us how much genuinely non-mechanical work remains.
+// Global Data makes fixed browser and TV tokens visible while each component stylesheet is processed, then removes
+// the injected rules again. Fixed-viewport math is lowered only when it has an unambiguous numeric result; the
+// packaged-output report keeps genuinely dynamic/scoped values visible instead of guessing at their behavior.
 const tizen3CssPlugins = tizen3
   ? (() => {
       const globalData = postcssGlobalData({ files: [appCss, tvCss], lateRemover: true }).plugins;
-      return [globalData[0], postcssCustomProperties({ preserve: false }), globalData[1]];
+      return [
+        globalData[0],
+        tizen3UnsupportedEnhancements(),
+        postcssCustomProperties({ preserve: false }),
+        tizen3FixedViewportMath(),
+        tizen3ScrollLogical(),
+        postcssLogical({ blockDirection: 'top-to-bottom', inlineDirection: 'left-to-right' }),
+        globalData[1],
+      ];
     })()
   : [];
 
