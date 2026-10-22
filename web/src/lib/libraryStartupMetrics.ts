@@ -2,6 +2,9 @@
 export interface LibraryStartupMetrics {
   documentsDecrypted: number;
   documentsFolded: number;
+  documentsHydrated: number;
+  factsChanged: number;
+  factTransactions: number;
   decryptMs: number;
   foldMs: number;
   cacheBytesRead: number;
@@ -18,6 +21,9 @@ declare global {
 const empty = (): LibraryStartupMetrics => ({
   documentsDecrypted: 0,
   documentsFolded: 0,
+  documentsHydrated: 0,
+  factsChanged: 0,
+  factTransactions: 0,
   decryptMs: 0,
   foldMs: 0,
   cacheBytesRead: 0,
@@ -42,6 +48,16 @@ export function noteLibraryFold(documents: number, elapsedMs: number): void {
   held.documentsFolded += documents;
   held.foldMs += elapsedMs;
   held.viewSource = 'authoritative';
+}
+
+export function noteLibraryFactCommit(documents: number): void {
+  const held = metrics();
+  held.factsChanged += documents;
+  held.factTransactions += 1;
+}
+
+export function noteLibraryHydrate(documents = 1): void {
+  metrics().documentsHydrated += documents;
 }
 
 export function noteLibraryCacheIO(source: 'read' | 'write', bytes: number): void {

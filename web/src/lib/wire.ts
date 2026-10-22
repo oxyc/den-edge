@@ -250,6 +250,11 @@ async function rowMac(keys: LibraryKeys, name: string): Promise<Uint8Array<Array
   return new Uint8Array(await crypto.subtle.sign('HMAC', keys.mac, utf8.encode(name)));
 }
 
+/** The opaque den-edge key for a known row name, without sealing another copy of its value. */
+export async function rowKey(keys: LibraryKeys, name: string): Promise<string> {
+  return hex(await rowMac(keys, name));
+}
+
 /**
  * A row as den-edge stores it: `k` names the record, `v` is its sealed JSON — or, for a v4 document, den-core's
  * compressed encoding of it (§4), at the cap a merge may use. A write that must fit the smaller cap of a new write

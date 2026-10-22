@@ -9,6 +9,45 @@ const version = { instance: 'worker-1', generation: 'generation-3', revision: 14
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
+  it('carries Watchlist and recommendation inputs as independent bounded selections', () => {
+    for (const kind of ['watchlist', 'recommendations'])
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'subscribe',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: kind,
+          subscriptionId: kind,
+          selection: { kind },
+        }),
+      ).toMatchObject({ ok: true });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'watchlist',
+        version,
+        value: { kind: 'watchlist', titles: [{ type: 'movie', id: 7 }] },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'recommendations',
+        version,
+        value: {
+          kind: 'recommendations',
+          owned: [{ type: 'movie', id: 7 }],
+          watched: [],
+          standings: [],
+          weighted: [],
+          seeds: { watched: [], watchlisted: [{ type: 'movie', id: 7 }] },
+        },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('keeps the playback device capability small and strictly bounded', () => {
     expect(
       decodeLibraryServiceClientMessage({

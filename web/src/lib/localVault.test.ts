@@ -59,13 +59,29 @@ function fakeIndexedDB() {
                   if (!range || typeof range === 'string')
                     return range === undefined || key === range;
                   const bounds = range as IDBKeyRange;
-                  return key >= String(bounds.lower) && key <= String(bounds.upper);
+                  const above = bounds.lowerOpen
+                    ? key > String(bounds.lower)
+                    : key >= String(bounds.lower);
+                  const below = bounds.upperOpen
+                    ? key < String(bounds.upper)
+                    : key <= String(bounds.upper);
+                  return above && below;
                 })
                 .sort(([a], [b]) => a.localeCompare(b));
             const store = {
               get: (key: string) => request(data.get(key)),
-              getAllKeys: (range: IDBKeyRange) => request(selected(range).map(([key]) => key)),
-              getAll: (range: IDBKeyRange) => request(selected(range).map(([, value]) => value)),
+              getAllKeys: (range: IDBKeyRange, count?: number) =>
+                request(
+                  selected(range)
+                    .slice(0, count)
+                    .map(([key]) => key),
+                ),
+              getAll: (range: IDBKeyRange, count?: number) =>
+                request(
+                  selected(range)
+                    .slice(0, count)
+                    .map(([, value]) => value),
+                ),
               put: (value: unknown, key: string) => {
                 data.set(key, value);
                 return request(key);
@@ -217,7 +233,12 @@ describe('indexedVault', () => {
   it('scans one prefix in key order, deletes one exact key, and removes a whole prefix', async () => {
     const idb = fakeIndexedDB();
     vi.stubGlobal('IDBKeyRange', {
-      bound: (lower: IDBValidKey, upper: IDBValidKey) => ({ lower, upper }),
+      bound: (lower: IDBValidKey, upper: IDBValidKey, lowerOpen = false, upperOpen = false) => ({
+        lower,
+        upper,
+        lowerOpen,
+        upperOpen,
+      }),
     });
     const vault = indexedVault(idb.factory);
     const bytes = (value: number) => new Uint8Array([value]);
@@ -233,17 +254,36 @@ describe('indexedVault', () => {
       ['lib:pending:a:longer', bytes(3)],
       ['lib:pending:b', bytes(2)],
     ]);
+    expect(await vault.page?.('lib:pending:', undefined, 2)).toEqual([
+      ['lib:pending:a', bytes(1)],
+      ['lib:pending:a:longer', bytes(3)],
+    ]);
+    expect(await vault.page?.('lib:pending:', 'lib:pending:a:longer', 2)).toEqual([
+      ['lib:pending:b', bytes(2)],
+    ]);
 
-    await vault.delete('lib:pending:a');
-    expect(await vault.entries('lib:pending:a')).toEqual([['lib:pending:a:longer', bytes(3)]]);
+    await vault.commit?.([
+      { kind: 'put', key: 'lib:pending:c', value: bytes(6) },
+      { kind: 'delete', key: 'lib:pending:a' },
+      { kind: 'put', key: 'lib:meta', value: bytes(7) },
+    ]);
+    expect(await vault.entries('lib:pending:')).toEqual([
+      ['lib:pending:a:longer', bytes(3)],
+      ['lib:pending:b', bytes(2)],
+      ['lib:pending:c', bytes(6)],
+    ]);
+    expect(await vault.get('lib:meta')).toEqual(bytes(7));
+
+    await vault.delete('lib:pending:a:longer');
+    expect(await vault.entries('lib:pending:a')).toEqual([]);
 
     expect(await vault.update?.('lib:meta', (current) => bytes(current![0]! + 1))).toEqual(
-      bytes(5),
+      bytes(8),
     );
-    expect(await vault.get('lib:meta')).toEqual(bytes(5));
+    expect(await vault.get('lib:meta')).toEqual(bytes(8));
 
     await vault.remove('lib:pending:');
     expect(await vault.entries('lib:pending:')).toEqual([]);
-    expect(await vault.get('lib:meta')).toEqual(bytes(5));
+    expect(await vault.get('lib:meta')).toEqual(bytes(8));
   });
 });

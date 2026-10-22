@@ -71,7 +71,6 @@ import {
   type LibraryQuery,
   type LibraryQueryResult,
   type LibraryTask,
-  type RatingSource,
   type LibrarySelection,
   type LibrarySelectionValue,
   type LibraryServiceErrorCode,
@@ -95,6 +94,11 @@ import {
   randomHex,
   type AssistantRecords,
 } from './libraryAssistantAuthority';
+import {
+  selectedDevicesView,
+  selectedRuntimeView,
+  selectedSettingsView,
+} from './librarySelectedSettings';
 import type { Vault } from './localVault';
 import { keptSomething } from './localLibraryMove';
 import type { ContentReader } from './contentAuthority';
@@ -146,7 +150,6 @@ import {
   pinMatches,
   readDevices,
   readServers,
-  readSyncedPrefs,
   readTrust,
   selfEntry,
   type PrefChanges,
@@ -205,12 +208,6 @@ const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.
 
 const sameConfig = (a: ConfigValue | null, b: ConfigValue | null): boolean =>
   JSON.stringify(a) === JSON.stringify(b);
-
-const isRatingSource = (value: string): value is RatingSource =>
-  value === 'imdb' || value === 'tmdb' || value === 'rottenTomatoes' || value === 'metacritic';
-
-const uniqueSorted = <T>(values: Iterable<T>, compare?: (a: T, b: T) => number): T[] =>
-  [...new Set(values)].sort(compare);
 
 const webUrl = (value: string): boolean => {
   try {
@@ -567,6 +564,14 @@ export class LibraryLogAuthority {
     switch (selection.kind) {
       case 'overview':
         return this.#rememberFinished('overview', this.#overview());
+      case 'watchlist': {
+        const overview = this.#overview();
+        return { kind: 'watchlist', titles: overview.watchlist };
+      }
+      case 'recommendations': {
+        const { kind: _kind, watchlist: _watchlist, ...recommendations } = this.#overview();
+        return { kind: 'recommendations', ...recommendations };
+      }
       case 'continue':
         return this.#rememberFinished('continue', this.#continue());
       case 'history':
@@ -1589,57 +1594,9 @@ export class LibraryLogAuthority {
     // A profile-aware household holds no preferences (profiles-v1 §6): any `set:prefs` an older one still carries is a
     // stale seed, never drawn, so no frame is painted from it while the profile's own library opens.
     const profileAware = this.#log.wireMinimum >= 5 || this.#log.profileDirectory() !== null;
-    const stored = readSyncedPrefs(profileAware ? undefined : this.#log.settings('prefs'));
-    const validLanguage = (value: string | undefined): value is string =>
-      value !== undefined && /^[a-z]{2}$/.test(value);
-    const services = [
-      ...new Map(
-        stored.services
-          .filter(
-            ({ id, country }) => Number.isSafeInteger(id) && id > 0 && /^[A-Z]{2}$/.test(country),
-          )
-          .map((service) => [`${service.id}@${service.country}`, service] as const),
-      ).values(),
-    ]
-      .sort((a, b) => a.country.localeCompare(b.country) || a.id - b.id)
-      .slice(0, 256);
-    return {
-      kind: 'settings',
-      preferences: {
-        ...stored,
-        excludedGenres: uniqueSorted(
-          stored.excludedGenres.filter((id) => Number.isSafeInteger(id) && id > 0),
-          (a, b) => a - b,
-        ).slice(0, 256),
-        excludedLanguages: uniqueSorted(stored.excludedLanguages.filter(validLanguage)).slice(
-          0,
-          256,
-        ),
-        minReleaseYear:
-          stored.minReleaseYear !== undefined &&
-          stored.minReleaseYear >= 1800 &&
-          stored.minReleaseYear <= 3000
-            ? stored.minReleaseYear
-            : undefined,
-        audioLanguage: validLanguage(stored.audioLanguage) ? stored.audioLanguage : undefined,
-        subtitleLanguage: validLanguage(stored.subtitleLanguage)
-          ? stored.subtitleLanguage
-          : undefined,
-        shownSubtitleLanguages: uniqueSorted(
-          stored.shownSubtitleLanguages.filter(validLanguage),
-        ).slice(0, 256),
-        subtitlesPerLanguage:
-          Number.isSafeInteger(stored.subtitlesPerLanguage) && stored.subtitlesPerLanguage >= 0
-            ? stored.subtitlesPerLanguage
-            : 3,
-        ratingSources: [...new Set(stored.ratingSources.filter(isRatingSource))],
-        shownWarnings: uniqueSorted(
-          stored.shownWarnings.filter((warning) => warning.length > 0 && warning.length <= 4_096),
-        ).slice(0, 256),
-        services,
-      },
-      assistant: await this.#assistant.needs(),
-    };
+    const prefs = this.#log.settings('prefs');
+    const selected = selectedSettingsView(prefs ? [prefs] : [], profileAware)!;
+    return { ...selected, assistant: await this.#assistant.needs() };
   }
 
   #connections(): Extract<LibrarySelectionValue, { kind: 'connections' }> {
@@ -1714,23 +1671,8 @@ export class LibraryLogAuthority {
   }
 
   #devices(): Extract<LibrarySelectionValue, { kind: 'devices' }> {
-    return {
-      kind: 'devices',
-      devices: readDevices(this.#log.settings('devices'))
-        .filter(({ id }) => id.length > 0 && id.length <= 128)
-        .slice(0, 512)
-        .map(({ id, name, kind, seen, format }) => ({
-          id,
-          name: name.slice(0, 256),
-          kind,
-          ...(seen !== undefined && Number.isSafeInteger(seen) && seen >= 0
-            ? { lastSeenAt: seen }
-            : {}),
-          ...(format !== undefined && Number.isSafeInteger(format) && format >= 0
-            ? { libraryFormat: format }
-            : {}),
-        })),
-    };
+    const row = this.#log.settings('devices');
+    return selectedDevicesView(row ? [row] : []);
   }
 
   #downloads(): Extract<LibrarySelectionValue, { kind: 'downloads' }> {
@@ -1803,14 +1745,8 @@ export class LibraryLogAuthority {
   }
 
   #runtime(): Extract<LibrarySelectionValue, { kind: 'runtime' }> {
-    const remux = readPrivateAddresses(this.#log.settings(ADDRESSES)).remux;
-    return {
-      kind: 'runtime',
-      pluginManifestUrls: readPlugins(this.#log.settings('plugins'))
-        .filter((url) => url.length <= 4_096 && acceptsAddonURL(url))
-        .slice(0, 10_000),
-      privateRemuxUrl: remux ?? null,
-    };
+    const rows = ['plugins', ADDRESSES].flatMap((name) => this.#log.settings(name) ?? []);
+    return selectedRuntimeView(rows);
   }
 
   #profiles(): Extract<LibrarySelectionValue, { kind: 'profiles' }> {
