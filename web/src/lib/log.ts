@@ -526,6 +526,11 @@ export class LibraryLog {
   private readonly rejected = new Map<string, number>();
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
+  /**
+   * A narrow log's (`openNarrow`): the newest stamp of the whole library it did not read. Its other rows are not here,
+   * so it never keeps the finished-view marker, which is built from them.
+   */
+  private narrowNewest: Stamp | null = null;
   /** How many generation changes (library v2 §2) `refresh` has read and written back: a recovery reconcile follows each. */
   generationChanges = 0;
   /**
@@ -3543,6 +3548,7 @@ export class LibraryLog {
       for (const name of names) this.unkept.set(name, generation);
       throw error;
     }
+    if (this.narrowNewest) return;
     try {
       const summary = this.currentSummary();
       await this.keep(LIBRARY_LOCAL_AUTHORITY, {
@@ -3650,6 +3656,69 @@ export class LibraryLog {
       this.memberRegistered = false;
       return false;
     }
+  }
+
+  /**
+   * A log of `names` alone, read from the fact store, for one edit of those documents rather than an open of the whole
+   * library: each row it writes is read here first, and it stamps after every row the store holds (its manifest's
+   * `newest`). Null wherever that is not enough, and the whole log is opened instead: no complete store, a profile
+   * directory, kept work, a library not known to be v4 or not yet registered here, a stamp still ahead of this clock,
+   * or a row of an earlier or newer format. It never reads the rest of the library or keeps the finished-view marker.
+   */
+  static async openNarrow(
+    libraryKey: string,
+    names: readonly string[],
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    vault: Vault | null = libraryVault,
+    wire: LibraryWire = WIRE,
+  ): Promise<LibraryLog | null> {
+    if (!vault) return null;
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    const log = new LibraryLog(
+      keys,
+      fetchImpl,
+      typeof localStorage === 'undefined' ? undefined : localStorage,
+      { vault, key: await libraryLocalKey(raw) },
+      false,
+      vault,
+      wire,
+    );
+    await log.initializeRuntime();
+    if (log.wireMin < WIRE || log.pending.size || log.readOnly) return null;
+    const store = await LibraryFactStore.open(libraryKey, vault);
+    const manifest = await store?.manifest();
+    if (!store || !manifest?.complete || manifest.profileTopology || !manifest.newest) return null;
+    const { stamp, reconsiderAt } = manifest.newest;
+    if (reconsiderAt !== null && Date.now() >= reconsiderAt) return null;
+    if ((await log.kept<string>(MEMBER)) !== manifest.generation) return null;
+    await ensureSyncPolicy();
+    for (const name of names) {
+      const k = await rowKey(keys, name);
+      const stored = await store.document(manifest.generation, k);
+      if (!stored) continue;
+      const value =
+        stored.row ?? (stored.value ? await log.readEntry({ k, v: stored.value }) : null);
+      if (
+        !value ||
+        log.isProfileDirectory(value) ||
+        log.isKidTitleApprovals(value) ||
+        log.isInvalidProfileDirectory(value)
+      )
+        return null;
+      const row = value;
+      if (!wellFormed(row) || !isDocument(row) || row.format > 4) return null;
+      log.entries.set(name, { seq: stored.seq, row });
+      log.acknowledged.set(name, { seq: stored.seq, row });
+    }
+    log.factStore = store;
+    log.generation = manifest.generation;
+    log.head = manifest.head;
+    log.memberRegistered = true;
+    log.fromCache = true;
+    log.narrowNewest = stamp;
+    useLibraryCredential(keys);
+    return log;
   }
 
   /**
@@ -3884,7 +3953,7 @@ export class LibraryLog {
       now < cached.reconsiderAt
     )
       return { stamp: cached.stamp, reconsiderAt: cached.reconsiderAt, at: cached.at };
-    let latest = ZERO_STAMP;
+    let latest = this.narrowNewest ?? ZERO_STAMP;
     let reconsiderAt = Infinity;
     for (const { row } of this.entries.values()) {
       const summary = newestSummary(row, now);

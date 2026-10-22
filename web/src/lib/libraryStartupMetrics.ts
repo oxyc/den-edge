@@ -10,6 +10,8 @@ export interface LibraryStartupMetrics {
   cacheBytesRead: number;
   cacheBytesWritten: number;
   viewSource: 'none' | 'cache' | 'authoritative';
+  /** Edits made on a log of their own documents (`LibraryLog.openNarrow`), not the whole library. */
+  narrowEdits: number;
   promotion?: string;
   /** Why the kept finished views were discarded or written again, each reason once. */
   viewsRewritten?: string[];
@@ -31,6 +33,7 @@ const empty = (): LibraryStartupMetrics => ({
   cacheBytesRead: 0,
   cacheBytesWritten: 0,
   viewSource: 'none',
+  narrowEdits: 0,
 });
 
 const metrics = () => (globalThis.__denLibraryStartupMetrics ??= empty());
@@ -66,6 +69,10 @@ export function noteLibraryCacheIO(source: 'read' | 'write', bytes: number): voi
   const held = metrics();
   if (source === 'read') held.cacheBytesRead += bytes;
   else held.cacheBytesWritten += bytes;
+}
+
+export function noteNarrowEdit(): void {
+  metrics().narrowEdits += 1;
 }
 
 export function noteFinishedViewCacheHit(): void {

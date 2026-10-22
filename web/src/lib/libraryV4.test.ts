@@ -1470,6 +1470,66 @@ describe('a settings row riding with an edit (assistant v1 §6)', () => {
   });
 });
 
+describe('an edit made on a log of its own documents (LibraryLog.openNarrow)', () => {
+  const ref = { type: 'movie' as const, id: 550 };
+  const names = ['title:movie:550', 'rec:movie:550'];
+  const sent = (log: LibraryLog) => vi.waitFor(() => expect(log.pendingActions).toBe(0));
+
+  /** A library this browser has opened whole, so its fact store is complete and its membership kept. */
+  async function openedHere(fetchWrap?: (inner: typeof fetch) => typeof fetch) {
+    const server = await edge([filmDocument(1), filmDocument(2), filmDocument(550)]);
+    const fetchImpl = fetchWrap ? fetchWrap(server.fetchImpl) : server.fetchImpl;
+    const { vault } = memoryVault();
+    const full = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    expect(full.title(ref)?.status.value).toBe('watchlist');
+    full.close();
+    return { server, fetchImpl, vault };
+  }
+
+  it('reads only the documents it names, and its edit reaches den-edge whole', async () => {
+    const { server, fetchImpl, vault } = await openedHere();
+    const narrow = await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, vault);
+    expect(narrow, 'opened narrow').not.toBeNull();
+    expect(narrow!.title(ref)?.status.value).toBe('watchlist');
+    expect(
+      narrow!.title({ type: 'movie', id: 1 }),
+      'the other titles are not read',
+    ).toBeUndefined();
+
+    await narrow!.write(react(narrow!.title(ref)!, 'love', at(4000)));
+    await sent(narrow!);
+    narrow!.close();
+
+    const stored = document(await server.opened(), 'title:movie:550');
+    expect(stored?.reaction).toEqual({ value: 'love', at: at(4000) });
+    expect(stored?.status, 'the rest of the document kept').toEqual({
+      value: 'watchlist',
+      at: at(1000),
+    });
+  });
+
+  it('declines a browser with no fact store', async () => {
+    const { fetchImpl } = await openedHere();
+    expect(
+      await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, memoryVault().vault),
+    ).toBeNull();
+  });
+
+  it('declines while work is kept on this device', async () => {
+    let unreachable = false;
+    const { fetchImpl, vault } = await openedHere((inner) => async (input, init) => {
+      if (unreachable && init?.method === 'POST') throw new TypeError('network down');
+      return inner(input, init);
+    });
+    const full = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    unreachable = true;
+    await full.write(react(full.title(ref)!, 'like', at(4000)));
+    await vi.waitFor(() => expect(full.queuedActions, 'kept, not sent').toBe(1));
+    full.close();
+    expect(await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, vault)).toBeNull();
+  });
+});
+
 function memoryVault() {
   const data = new Map<string, Uint8Array>();
   const vault: Vault = {
