@@ -18,6 +18,7 @@ import type {
   LibraryMetadataShape,
   LibraryOverviewView,
   LibraryPreferencesPatch,
+  RecommendationInputsView,
   StoredPreferenceValues,
   LibraryQuery,
   LibraryQueryResult,
@@ -40,6 +41,7 @@ import type {
   SimklView,
   TitleRef,
   TitleView,
+  WatchlistView,
 } from './libraryServiceProtocol';
 import type { LibraryRelayMembership } from './relayFetch';
 import type {
@@ -104,6 +106,11 @@ type Observation<Kind extends LibraryObservation['kind']> = Extract<
 >;
 
 type LeasedView =
+  | LibraryOverviewView
+  | WatchlistView
+  | RecommendationInputsView
+  | ContinueView
+  | DevicesView
   | HistoryView
   | DownloadsView
   | ConnectionsView
@@ -116,15 +123,22 @@ type LeasedView =
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
 /** Thin page-side state over the supervised authority. It owns no storage, projection, polling, or transport policy. */
 export class LibraryModel {
-  #overview = $state.raw<LibraryModelSnapshot<LibraryOverviewView>>(connectingSnapshot());
-  #continue = $state.raw<LibraryModelSnapshot<ContinueView>>(connectingSnapshot());
-  #devices = $state.raw<LibraryModelSnapshot<DevicesView>>(connectingSnapshot());
   #settings = $state.raw<LibraryModelSnapshot<SettingsView>>(connectingSnapshot());
   #runtime = $state.raw<LibraryModelSnapshot<RuntimeDiscoveryView>>(connectingSnapshot());
   #connection = $state<LibraryModelConnection>('connecting');
   #status = $state.raw<LibraryModelStatus>(Object.freeze({ kind: 'connecting' }));
   #openFailure = $state.raw<Immutable<LibraryServiceFailure> | undefined>();
   readonly #rootStops: Array<() => void> = [];
+  #overview?: SharedSelection<LibraryOverviewView>;
+  #retainedOverview?: LibraryModelSnapshot<LibraryOverviewView>;
+  #watchlist?: SharedSelection<WatchlistView>;
+  #retainedWatchlist?: LibraryModelSnapshot<WatchlistView>;
+  #recommendations?: SharedSelection<RecommendationInputsView>;
+  #retainedRecommendations?: LibraryModelSnapshot<RecommendationInputsView>;
+  #continue?: SharedSelection<ContinueView>;
+  #retainedContinue?: LibraryModelSnapshot<ContinueView>;
+  #devices?: SharedSelection<DevicesView>;
+  #retainedDevices?: LibraryModelSnapshot<DevicesView>;
   #history?: SharedSelection<HistoryView>;
   #downloads?: SharedSelection<DownloadsView>;
   #connections?: SharedSelection<ConnectionsView>;
@@ -137,7 +151,7 @@ export class LibraryModel {
   readonly #readyWaiters = new Set<() => void>();
   #closed = false;
 
-  /** Settles only after the service and its Home-critical root replacements are ready. */
+  /** Settles after the service opens. Route-owned activity capabilities may still be connecting. */
   readonly ready: Promise<LibraryVersion>;
 
   constructor(
@@ -145,15 +159,6 @@ export class LibraryModel {
     options: LibraryServiceOpenOptions,
   ) {
     this.#rootStops.push(
-      service.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
-        this.#overview = modelSnapshot<LibraryOverviewView>(snapshot);
-      }),
-      service.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
-        this.#continue = modelSnapshot<ContinueView>(snapshot);
-      }),
-      service.subscribeSnapshot({ kind: 'devices' }, (snapshot) => {
-        this.#devices = modelSnapshot<DevicesView>(snapshot);
-      }),
       service.subscribeSnapshot({ kind: 'settings' }, (snapshot) => {
         this.#settings = modelSnapshot<SettingsView>(snapshot);
       }),
@@ -173,17 +178,111 @@ export class LibraryModel {
     });
   }
 
-  get overview(): LibraryModelSnapshot<LibraryOverviewView> {
-    return this.#overview;
+  /** Watchlist membership stays independent from recommendation/history inputs. */
+  watchlist(): LibraryModelLease<WatchlistView> {
+    this.#assertOpen();
+    if (!this.#watchlist) {
+      const source = new SharedSelection<WatchlistView>(
+        this.service,
+        { kind: 'watchlist' },
+        () => {
+          this.#retainedWatchlist = source.snapshot;
+          this.#watchlist = undefined;
+        },
+        this.#retainedWatchlist,
+      );
+      this.#watchlist = source;
+    }
+    return this.#watchlist.acquire();
   }
 
-  get continueWatching(): LibraryModelSnapshot<ContinueView> {
-    return this.#continue;
+  /** The compatibility presentation view is lazy even though it combines several independent fact families. */
+  overview(): LibraryModelLease<LibraryOverviewView> {
+    this.#assertOpen();
+    if (!this.#overview) {
+      const source = new SharedSelection<LibraryOverviewView>(
+        this.service,
+        { kind: 'overview' },
+        () => {
+          this.#retainedOverview = source.snapshot;
+          this.#overview = undefined;
+        },
+        this.#retainedOverview,
+      );
+      this.#overview = source;
+    }
+    return this.#overview.acquire();
+  }
+
+  /** Recommendation inputs are acquired by discovery surfaces, never by Settings or a direct title route. */
+  recommendations(): LibraryModelLease<RecommendationInputsView> {
+    this.#assertOpen();
+    return this.#recommendationSource().acquire();
+  }
+
+  /** One interaction-scoped read for history import; Settings does not hold recommendation inputs while idle. */
+  async watchedTitles(): Promise<readonly Immutable<TitleRef>[]> {
+    this.#assertOpen();
+    const source = this.#recommendationSource();
+    const lease = source.acquire();
+    try {
+      const value = await source.value();
+      return Object.freeze(value.watched.map((title) => Object.freeze({ ...title })));
+    } finally {
+      lease.release();
+    }
+  }
+
+  #recommendationSource(): SharedSelection<RecommendationInputsView> {
+    if (!this.#recommendations) {
+      const source = new SharedSelection<RecommendationInputsView>(
+        this.service,
+        { kind: 'recommendations' },
+        () => {
+          this.#retainedRecommendations = source.snapshot;
+          this.#recommendations = undefined;
+        },
+        this.#retainedRecommendations,
+      );
+      this.#recommendations = source;
+    }
+    return this.#recommendations;
+  }
+
+  /** Resume state is acquired only by surfaces that display or play titles. */
+  continueWatching(): LibraryModelLease<ContinueView> {
+    this.#assertOpen();
+    if (!this.#continue) {
+      const source = new SharedSelection<ContinueView>(
+        this.service,
+        { kind: 'continue' },
+        () => {
+          this.#retainedContinue = source.snapshot;
+          this.#continue = undefined;
+        },
+        this.#retainedContinue,
+      );
+      this.#continue = source;
+    }
+    return this.#continue.acquire();
   }
 
   /** Small playback capability; credentials and the rest of Settings' connection state stay lazy. */
-  get devices(): LibraryModelSnapshot<DevicesView> {
-    return this.#devices;
+  devices(): LibraryModelLease<DevicesView> {
+    this.#assertOpen();
+    if (!this.#devices) {
+      const source = new SharedSelection<DevicesView>(
+        this.service,
+        { kind: 'devices' },
+        () => {
+          this.#retainedDevices = source.snapshot;
+          this.#devices = undefined;
+        },
+        this.#retainedDevices,
+      );
+      this.#devices = source;
+    }
+    return this.#devices.acquire();
   }
 
   /** Watched history is intentionally lazy: Home must not transfer a potentially large Watchlist-only view. */
@@ -1050,9 +1149,16 @@ export class LibraryModel {
     for (const source of this.#presences.values()) source.close();
     this.#titles.clear();
     this.#presences.clear();
-    this.#overview = closedSnapshot(this.#overview);
-    this.#continue = closedSnapshot(this.#continue);
-    this.#devices = closedSnapshot(this.#devices);
+    this.#overview?.close();
+    this.#overview = undefined;
+    this.#watchlist?.close();
+    this.#watchlist = undefined;
+    this.#recommendations?.close();
+    this.#recommendations = undefined;
+    this.#continue?.close();
+    this.#continue = undefined;
+    this.#devices?.close();
+    this.#devices = undefined;
     this.#history?.close();
     this.#history = undefined;
     this.#downloads?.close();
@@ -1147,10 +1253,19 @@ class SharedSelection<View extends LeasedView> {
   readonly #stop: () => void;
   #references = 0;
   #closed = false;
+  readonly #waiters = new Set<{
+    resolve: (value: Immutable<View>) => void;
+    reject: (error: LibraryServiceError) => void;
+  }>();
 
   constructor(
     service: LibraryModelService,
     selection:
+      | { kind: 'overview' }
+      | { kind: 'watchlist' }
+      | { kind: 'recommendations' }
+      | { kind: 'continue' }
+      | { kind: 'devices' }
       | { kind: 'history' }
       | { kind: 'downloads' }
       | { kind: 'connections' }
@@ -1160,9 +1275,40 @@ class SharedSelection<View extends LeasedView> {
       | { kind: 'title'; title: TitleRef }
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,
+    retained?: LibraryModelSnapshot<View>,
   ) {
+    if (retained?.value)
+      this.#snapshot = Object.freeze({
+        connection: 'connecting',
+        value: retained.value,
+        ...(retained.version ? { version: retained.version } : {}),
+      });
     this.#stop = service.subscribeSnapshot(selection, (snapshot) => {
-      if (!this.#closed) this.#snapshot = modelSnapshot<View>(snapshot);
+      if (this.#closed) return;
+      const next = modelSnapshot<View>(snapshot);
+      const previous = this.#snapshot.value;
+      if (
+        selection.kind === 'continue' &&
+        next.value?.kind === 'continue' &&
+        !next.value.items.length &&
+        next.value.needsShapes.length &&
+        previous?.kind === 'continue' &&
+        previous.items.length
+      )
+        this.#snapshot = Object.freeze({
+          ...next,
+          value: Object.freeze({ ...next.value, items: previous.items }),
+        }) as LibraryModelSnapshot<View>;
+      else
+        this.#snapshot =
+          next.connection === 'connecting' && !next.value && previous
+            ? Object.freeze({
+                connection: 'connecting',
+                value: previous,
+                ...(this.#snapshot.version ? { version: this.#snapshot.version } : {}),
+              })
+            : next;
+      this.#settleWaiters();
     });
   }
 
@@ -1175,11 +1321,30 @@ class SharedSelection<View extends LeasedView> {
     return new SelectionLease(this, () => this.#release());
   }
 
+  value(): Promise<Immutable<View>> {
+    // A retained value is for stale-while-reconnect presentation only. Interaction reads wait for the authority's
+    // current replacement so an import cannot make decisions from an old recommendation snapshot.
+    const value = this.#snapshot.connection === 'ready' ? this.#snapshot.value : undefined;
+    if (value) return Promise.resolve(value);
+    const error = this.#snapshot.error;
+    if (error) return Promise.reject(new LibraryServiceError(error));
+    if (this.#closed)
+      return Promise.reject(
+        new LibraryServiceError({
+          code: 'cancelled',
+          message: 'library selection closed',
+          retryable: false,
+        }),
+      );
+    return new Promise((resolve, reject) => this.#waiters.add({ resolve, reject }));
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#stop();
     this.#snapshot = closedSnapshot(this.#snapshot);
+    this.#settleWaiters();
   }
 
   #release(): void {
@@ -1188,6 +1353,24 @@ class SharedSelection<View extends LeasedView> {
     if (this.#references > 0 || this.#closed) return;
     this.close();
     this.unused();
+  }
+
+  #settleWaiters(): void {
+    const value = this.#snapshot.connection === 'ready' ? this.#snapshot.value : undefined;
+    const failure = this.#snapshot.error;
+    if (!value && !failure && !this.#closed) return;
+    const error = failure
+      ? new LibraryServiceError(failure)
+      : new LibraryServiceError({
+          code: 'cancelled',
+          message: 'library selection closed',
+          retryable: false,
+        });
+    for (const waiter of [...this.#waiters]) {
+      this.#waiters.delete(waiter);
+      if (value) waiter.resolve(value);
+      else waiter.reject(error);
+    }
   }
 }
 

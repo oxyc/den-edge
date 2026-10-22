@@ -44,6 +44,7 @@
   import { blockedTitles } from './lib/blockedTitles.svelte';
   import { libraryShapes, libraryStandings } from './lib/standing.svelte';
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
+  import { libraryRouteCapabilities } from './lib/libraryRouteCapabilities';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { startupMarkOnce } from './lib/startupTiming';
@@ -154,6 +155,53 @@
   // Visitor owns only this device-local activity adapter. It is deliberately independent of LibraryModel, so none
   // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
   const profileActivity = untrack(() => session.profileActivity);
+  let watchlistLease = $state.raw<ReturnType<NonNullable<typeof model>['watchlist']>>();
+  let recommendationsLease = $state.raw<ReturnType<NonNullable<typeof model>['recommendations']>>();
+  let continueLease = $state.raw<ReturnType<NonNullable<typeof model>['continueWatching']>>();
+  let devicesLease = $state.raw<ReturnType<NonNullable<typeof model>['devices']>>();
+
+  // Activity projections belong to the routes that render them. A direct title or Downloads visit must not open
+  // Home's whole recommendation/watchlist input, while every discovery surface still gets the exact state its
+  // poster actions and Hide Watched policy require. Retained background routes release their leases; LibraryModel
+  // coalesces simultaneous owners of an identical capability.
+  const routeCapabilities = $derived(libraryRouteCapabilities(route));
+  const needsWatchlist = $derived(routeCapabilities.watchlist);
+  const needsRecommendations = $derived(routeCapabilities.recommendations);
+  const needsContinue = $derived(routeCapabilities.continue);
+  const needsDevices = $derived(routeCapabilities.devices);
+  $effect(() => {
+    if (!active || !model || !needsWatchlist) return;
+    const lease = untrack(() => model.watchlist());
+    watchlistLease = lease;
+    return () => {
+      lease.release();
+    };
+  });
+  $effect(() => {
+    if (!active || !model || !needsRecommendations) return;
+    const lease = untrack(() => model.recommendations());
+    recommendationsLease = lease;
+    return () => {
+      lease.release();
+    };
+  });
+  $effect(() => {
+    if (!active || !model || !needsContinue) return;
+    const lease = untrack(() => model.continueWatching());
+    continueLease = lease;
+    return () => {
+      lease.release();
+    };
+  });
+  $effect(() => {
+    const source = untrack(() => session.household.ownerSettingsModel());
+    if (!active || !source || !needsDevices) return;
+    const lease = untrack(() => source.devices());
+    devicesLease = lease;
+    return () => {
+      lease.release();
+    };
+  });
   const SHELF_TRANCHE = 8;
   let shelvesReady = $state(model === null);
   /**
@@ -254,10 +302,21 @@
     };
   });
 
-  const overview = $derived(model?.overview.value);
+  const watchlistView = $derived(watchlistLease?.snapshot.value);
+  const recommendationsView = $derived(recommendationsLease?.snapshot.value);
+  // Existing presentation code consumes one shape, while transport and storage remain independently selectable.
+  // Both source values are immutable, so recomposition does not clone their potentially large title arrays.
+  const overview = $derived.by(() => {
+    if (!watchlistView || !recommendationsView) return undefined;
+    return Object.freeze({
+      ...recommendationsView,
+      kind: 'overview' as const,
+      watchlist: watchlistView.titles,
+    });
+  });
   // One lookup index per immutable service snapshot; billboard renders and actions never scan the whole library.
   const overviewTitles = $derived(overview ? new OverviewTitleIndex(overview) : undefined);
-  const continueView = $derived(model?.continueWatching.value);
+  const continueView = $derived(continueLease?.snapshot.value);
   // Visitor reads the Owner's household policy but never receives the Owner's activity/write model.
   const settings = $derived(session.policy?.settings.value);
   /**
@@ -300,54 +359,41 @@
     profileActivity !== null || model === null || overview !== undefined,
   );
   const serviceFailed = $derived(
-    !!model && model.connection === 'failed' && model.overview.value === undefined,
+    !!model &&
+      model.connection === 'failed' &&
+      ((!needsWatchlist && !needsRecommendations) || overview === undefined),
   );
   const updateRequired = $derived(libraryUpdateRequired(model));
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
-  let connectionsLease = $state.raw<ReturnType<NonNullable<typeof model>['connections']>>();
   let downloadsLease = $state.raw<ReturnType<NonNullable<typeof model>['downloads']>>();
 
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
   $effect(() => {
     const opening = page;
     if (!model || !opening) return;
-    const lease = model.title(opening);
+    const lease = untrack(() => model.title(opening));
     titleLease = lease;
     return () => {
       lease.release();
-      if (titleLease === lease) titleLease = undefined;
     };
   });
   $effect(() => {
     if (!model || route.page !== 'watchlist') return;
-    const lease = model.history();
+    const lease = untrack(() => model.history());
     historyLease = lease;
     return () => {
       lease.release();
-      if (historyLease === lease) historyLease = undefined;
     };
   });
-  $effect(() => {
-    if (!model || route.page !== 'title') return;
-    const lease = model.connections();
-    connectionsLease = lease;
-    return () => {
-      lease.release();
-      if (connectionsLease === lease) connectionsLease = undefined;
-    };
-  });
-  // The household's device list, which says whether the device this browser linked through is a TV (`linkedTv`).
-  // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
-  const householdModel = untrack(() => session.household.ownerSettingsModel());
+  // Downloads are household work; acquire their queue only while a route can render it.
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
-    const lease = downloadsModel.downloads();
+    const lease = untrack(() => downloadsModel.downloads());
     downloadsLease = lease;
     return () => {
       lease.release();
-      if (downloadsLease === lease) downloadsLease = undefined;
     };
   });
 
@@ -829,7 +875,7 @@
    * Feedback from here on is the bottom toast (`playOnTv`), not `notice` — the press can be far from where
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
-  const tv = $derived(linkedTv(link, householdModel?.devices.value?.devices));
+  const tv = $derived(linkedTv(link, devicesLease?.snapshot.value?.devices));
   const play = $derived(
     tv
       ? async (title: Title, season?: number, episode?: number) => {
@@ -1859,7 +1905,7 @@
       again.
     </p>
   </section>
-{:else if link && model && !overview && !serviceFailed}
+{:else if link && model && (needsWatchlist || needsRecommendations) && (!watchlistView || !recommendationsView) && !serviceFailed}
   <Loading label="Loading your library" page />
 {:else if serviceFailed}
   <section class="library-failure" role="alert">

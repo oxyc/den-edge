@@ -40,7 +40,7 @@
   }: {
     ready: boolean;
     content: ContentServiceClientPort;
-    watched: readonly TitleRef[];
+    watched: () => Promise<readonly TitleRef[]>;
     importHistory: (
       items: readonly HistoryImportItem[],
     ) => Promise<{ written: number; total: number; complete: boolean }>;
@@ -56,7 +56,7 @@
         ),
       );
       state = { step: 'matching', done: 0, total: source.viewings.length };
-      const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
+      const watchedKeys = new Set((await watched()).map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
       const lookups = contentImportLookups(content);
       const plan = await planPrimeImport(

@@ -71,5 +71,9 @@ export function noteFinishedViewCacheHit(): void {
 }
 
 export function noteFinishedViewPromotion(reason: string): void {
-  metrics().promotion ??= reason.slice(0, 80);
+  const held = metrics();
+  held.promotion ??= reason.slice(0, 80);
+  // A cache hit that later opens the canonical authority is not a cache-only startup, even when that authority can
+  // answer a small selection without invoking the full Home fold.
+  held.viewSource = 'authoritative';
 }

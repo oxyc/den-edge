@@ -177,6 +177,17 @@ const revision = (): string =>
     .map((value) => value.toString(16).padStart(2, '0'))
     .join('');
 
+const sameIdentity = (left: FinishedLibraryViewIdentity, right: FinishedLibraryViewIdentity) =>
+  left.libraryId === right.libraryId &&
+  left.generation === right.generation &&
+  left.head === right.head &&
+  left.authorityRevision === right.authorityRevision &&
+  left.policyVersion === right.policyVersion &&
+  left.rowsVersion === right.rowsVersion &&
+  left.layoutVersion === right.layoutVersion &&
+  left.recommendationVersion === right.recommendationVersion &&
+  left.reconsiderAt === right.reconsiderAt;
+
 /** Authenticate and open only the small selected view; it never opens the saved document snapshot. */
 export async function readFinishedLibraryViews(
   libraryKey: string,
@@ -236,11 +247,27 @@ export async function writeFinishedLibraryViews(
 ): Promise<boolean> {
   const local = await libraryLocalMaterials(libraryKey);
   if (!local || !validEnvelope(value) || value.identity.libraryId !== local.libraryId) return false;
+  // Capability owners arrive independently. Preserve pieces from the same authoritative revision so a title-only
+  // visit cannot evict Home's Watchlist/recommendation cache (and vice versa). A different identity never mixes.
+  const manifestBytes = await vault.get(storedKey(local.libraryId));
+  let pieces = value.pieces;
+  if (manifestBytes)
+    try {
+      noteLibraryCacheIO('read', manifestBytes.byteLength);
+      const manifest = await openLibraryLocalValue(local.key, NAME, manifestBytes);
+      if (validManifest(manifest) && sameIdentity(manifest.identity, value.identity)) {
+        const previous = await readFinishedLibraryViews(libraryKey, vault, manifest.capabilities);
+        if (previous && sameIdentity(previous.identity, value.identity))
+          pieces = { ...previous.pieces, ...value.pieces };
+      }
+    } catch {
+      // A corrupt or interrupted old cache is disposable; publish only the new valid pieces.
+    }
   const nextRevision = revision();
-  const capabilities = Object.keys(value.pieces) as FinishedLibraryViewCapability[];
+  const capabilities = Object.keys(pieces) as FinishedLibraryViewCapability[];
   for (const capability of capabilities) {
     const aad = `${NAME}:${nextRevision}:${capability}`;
-    const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
+    const bytes = await sealLibraryLocalValue(local.key, aad, pieces[capability]);
     await vault.put(pieceKey(local.libraryId, nextRevision, capability), bytes);
     noteLibraryCacheIO('write', bytes.byteLength);
   }

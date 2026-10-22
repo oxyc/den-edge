@@ -445,7 +445,7 @@
       <ImportSection
         {ready}
         {content}
-        watched={model.overview.value?.watched ?? []}
+        watched={() => model.watchedTitles()}
         {importHistory}
         {exportHistory}
       />

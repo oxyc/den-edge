@@ -147,6 +147,30 @@ describe('LibraryLogAuthority', () => {
 
   const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
 
+  it('persists only the finished capability pieces a client selected', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-selected-capability-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await opened.select({ kind: 'watchlist' });
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(async () => expect(await cachedWatchlist(vault)).not.toBeNull());
+      await expect(readFinishedLibraryViews(KEY, vault, ['recommendations'])).resolves.toBeNull();
+      await opened.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('invalidates a published finished view as soon as a new revision is only partly selected', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();

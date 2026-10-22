@@ -53,9 +53,6 @@ class FakeService {
     this.opened.push(options);
     this.subscriptionsSeenAtOpen = this.subscriptions.map(({ selection }) => selection);
     if (this.openFailure) throw new LibraryServiceError(this.openFailure);
-    this.publish({ kind: 'overview' }, overviewValue(), 1);
-    this.publish({ kind: 'continue' }, continueValue(), 2);
-    this.publish({ kind: 'devices' }, devicesValue(), 3);
     this.publish({ kind: 'settings' }, settingsValue(), 4);
     this.publish({ kind: 'runtime' }, runtimeValue(), 4);
     this.status({ kind: 'ready', version: version(4) });
@@ -203,6 +200,19 @@ const overviewValue = (): LibrarySelectionValue => ({
   seeds: { watched: [], watchlisted: [{ type: 'movie', id: 1 }] },
 });
 
+const watchlistValue = (): LibrarySelectionValue => ({
+  kind: 'watchlist',
+  titles: [{ type: 'movie', id: 1 }],
+});
+
+const recommendationsValue = (): Extract<LibrarySelectionValue, { kind: 'recommendations' }> => {
+  const { watchlist: _watchlist, ...value } = overviewValue() as Extract<
+    LibrarySelectionValue,
+    { kind: 'overview' }
+  >;
+  return { ...value, kind: 'recommendations' };
+};
+
 const continueValue = (): LibrarySelectionValue => ({
   kind: 'continue',
   items: [{ title: { type: 'movie', id: 1 }, fraction: 0.4 }],
@@ -277,33 +287,42 @@ const retainedServicesValue = () => ({
   remux: 'https://remux.example',
 });
 
-it('opens only Home-critical roots and keeps history and downloads lazy', async () => {
+it('opens only session roots and acquires activity capabilities lazily', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);
 
-  expect(service.subscriptionsSeenAtOpen).toEqual([
-    { kind: 'overview' },
-    { kind: 'continue' },
-    { kind: 'devices' },
-    { kind: 'settings' },
-    { kind: 'runtime' },
-  ]);
+  expect(service.subscriptionsSeenAtOpen).toEqual([{ kind: 'settings' }, { kind: 'runtime' }]);
   await expect(model.ready).resolves.toEqual(version(4));
 
   expect(model.connection).toBe('ready');
   expect(model.status).toEqual({ kind: 'ready', version: version(4) });
-  expect(model.overview).toMatchObject({
+  const watchlist = model.watchlist();
+  const recommendations = model.recommendations();
+  const overview = model.overview();
+  const continuing = model.continueWatching();
+  const devices = model.devices();
+  service.publish({ kind: 'watchlist' }, watchlistValue(), 1);
+  service.publish({ kind: 'recommendations' }, recommendationsValue(), 1);
+  service.publish({ kind: 'overview' }, overviewValue(), 1);
+  service.publish({ kind: 'continue' }, continueValue(), 2);
+  service.publish({ kind: 'devices' }, devicesValue(), 3);
+  expect(watchlist.snapshot).toMatchObject({
     connection: 'ready',
-    value: { kind: 'overview', owned: [{ id: 1 }] },
+    value: { kind: 'watchlist', titles: [{ id: 1 }] },
     version: version(1),
   });
-  expect(model.continueWatching.value?.items[0]).toMatchObject({ fraction: 0.4 });
-  expect(model.devices.value?.devices[0]).toMatchObject({ id: 'tv-1', kind: 'tv' });
+  expect(recommendations.snapshot.value).toMatchObject({
+    kind: 'recommendations',
+    owned: [{ id: 1 }],
+  });
+  expect(overview.snapshot.value).toMatchObject({ kind: 'overview', owned: [{ id: 1 }] });
+  expect(continuing.snapshot.value?.items[0]).toMatchObject({ fraction: 0.4 });
+  expect(devices.snapshot.value?.devices[0]).toMatchObject({ id: 'tv-1', kind: 'tv' });
   expect(model.settings.value?.preferences.autoplayTrailers).toBe(true);
   expect(model.runtime.value).toMatchObject({
     pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],
   });
-  expect(Object.isFrozen(model.overview)).toBe(true);
+  expect(Object.isFrozen(watchlist.snapshot)).toBe(true);
 
   const history = model.history();
   expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'history' });
@@ -345,10 +364,142 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   downloads.release();
   expect(service.subscriptions.at(-1)?.stopped).toBe(true);
 
-  const before = model.continueWatching;
+  const before = continuing.snapshot;
   service.status({ kind: 'reconnecting', version: version(4) });
   service.publish({ kind: 'continue' }, continueValue(), 5);
-  expect(model.continueWatching).not.toBe(before);
+  expect(continuing.snapshot).not.toBe(before);
+  watchlist.release();
+  recommendations.release();
+  overview.release();
+  continuing.release();
+  devices.release();
+  model.close();
+});
+
+it('shares route capability leases and releases them after the last owner', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  const first = model.watchlist();
+  const second = model.watchlist();
+  const subscriptions = service.subscriptions.filter(
+    ({ selection }) => selection.kind === 'watchlist',
+  );
+  expect(subscriptions).toHaveLength(1);
+
+  first.release();
+  expect(subscriptions[0]?.stopped).toBe(false);
+  service.publish({ kind: 'watchlist' }, watchlistValue(), 5);
+  second.release();
+  expect(subscriptions[0]?.stopped).toBe(true);
+  model.close();
+});
+
+it('keeps the last route views while released capabilities reconnect', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  const firstOverview = model.overview();
+  const firstWatchlist = model.watchlist();
+  const firstRecommendations = model.recommendations();
+  service.publish({ kind: 'overview' }, overviewValue(), 5);
+  service.publish({ kind: 'watchlist' }, watchlistValue(), 5);
+  service.publish({ kind: 'recommendations' }, recommendationsValue(), 5);
+  firstOverview.release();
+  firstWatchlist.release();
+  firstRecommendations.release();
+  const overview = model.overview();
+  const watchlist = model.watchlist();
+  const recommendations = model.recommendations();
+
+  expect(overview.snapshot).toMatchObject({
+    connection: 'connecting',
+    value: { kind: 'overview', owned: [{ id: 1 }] },
+    version: version(5),
+  });
+  expect(watchlist.snapshot).toMatchObject({
+    connection: 'connecting',
+    value: { kind: 'watchlist', titles: [{ id: 1 }] },
+    version: version(5),
+  });
+  expect(recommendations.snapshot).toMatchObject({
+    connection: 'connecting',
+    value: { kind: 'recommendations', owned: [{ id: 1 }] },
+    version: version(5),
+  });
+  overview.release();
+  watchlist.release();
+  recommendations.release();
+  model.close();
+});
+
+it('keeps resolved Continue items while a promoted authority is still resolving shapes', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  const continuing = model.continueWatching();
+  service.publish({ kind: 'continue' }, continueValue(), 5);
+  service.publish(
+    { kind: 'continue' },
+    {
+      kind: 'continue',
+      items: [],
+      needsShapes: [{ type: 'tv', id: 2 }],
+    },
+    6,
+  );
+  expect(continuing.snapshot.value).toMatchObject({
+    items: [{ title: { id: 1 }, fraction: 0.4 }],
+    needsShapes: [{ id: 2 }],
+  });
+
+  service.publish({ kind: 'continue' }, { kind: 'continue', items: [], needsShapes: [] }, 7);
+  expect(continuing.snapshot.value).toEqual({ kind: 'continue', items: [], needsShapes: [] });
+  continuing.release();
+  model.close();
+});
+
+it('reads watched titles only for an import interaction and immediately unsubscribes', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  const watched = model.watchedTitles();
+  const subscription = service.subscriptions.at(-1)!;
+  expect(subscription.selection).toEqual({ kind: 'recommendations' });
+  expect(subscription.stopped).toBe(false);
+  service.publish({ kind: 'recommendations' }, recommendationsValue(), 5);
+
+  await expect(watched).resolves.toEqual([]);
+  expect(subscription.stopped).toBe(true);
+  model.close();
+});
+
+it('does not use a retained recommendation snapshot for an interaction read', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  const first = model.recommendations();
+  service.publish({ kind: 'recommendations' }, recommendationsValue(), 5);
+  first.release();
+
+  let settled = false;
+  const watched = model.watchedTitles().then((value) => {
+    settled = true;
+    return value;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  service.publish(
+    { kind: 'recommendations' },
+    { ...recommendationsValue(), watched: [{ type: 'movie', id: 2 }] },
+    6,
+  );
+  await expect(watched).resolves.toEqual([{ type: 'movie', id: 2 }]);
   model.close();
 });
 
@@ -746,11 +897,12 @@ it('exposes open failure, retries explicitly, and closes every source once', asy
   await expect(model.retry()).resolves.toEqual(version(9));
   expect(model.openFailure).toBeUndefined();
   const lease = model.title({ type: 'movie', id: 12 });
+  const continuing = model.continueWatching();
   model.close();
   model.close();
   expect(service.close).toHaveBeenCalledOnce();
   expect(model.connection).toBe('closed');
-  expect(model.overview.connection).toBe('closed');
+  expect(continuing.snapshot.connection).toBe('closed');
   expect(lease.snapshot.connection).toBe('closed');
   expect(() => model.title({ type: 'movie', id: 13 })).toThrow('library model is closed');
 });

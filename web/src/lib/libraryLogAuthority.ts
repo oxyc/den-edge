@@ -566,11 +566,17 @@ export class LibraryLogAuthority {
         return this.#rememberFinished('overview', this.#overview());
       case 'watchlist': {
         const overview = this.#overview();
-        return { kind: 'watchlist', titles: overview.watchlist };
+        return this.#rememberFinished('watchlist', {
+          kind: 'watchlist',
+          titles: overview.watchlist,
+        });
       }
       case 'recommendations': {
         const { kind: _kind, watchlist: _watchlist, ...recommendations } = this.#overview();
-        return { kind: 'recommendations', ...recommendations };
+        return this.#rememberFinished('recommendations', {
+          kind: 'recommendations',
+          ...recommendations,
+        });
       }
       case 'continue':
         return this.#rememberFinished('continue', this.#continue());
@@ -1847,7 +1853,16 @@ export class LibraryLogAuthority {
     return this.#projection;
   }
 
-  #rememberFinished<T extends 'overview' | 'continue' | 'settings' | 'runtime' | 'devices'>(
+  #rememberFinished<
+    T extends
+      | 'overview'
+      | 'watchlist'
+      | 'recommendations'
+      | 'continue'
+      | 'settings'
+      | 'runtime'
+      | 'devices',
+  >(
     kind: T,
     value: Extract<LibrarySelectionValue, { kind: T }>,
     computedRevision?: string,
@@ -1863,6 +1878,15 @@ export class LibraryLogAuthority {
       const overview = value as Extract<LibrarySelectionValue, { kind: 'overview' }>;
       this.#finishedPieces.watchlist = { titles: overview.watchlist };
       const { kind: _kind, watchlist: _watchlist, ...recommendations } = overview;
+      this.#finishedPieces.recommendations = recommendations;
+    } else if (kind === 'watchlist') {
+      const watchlist = value as Extract<LibrarySelectionValue, { kind: 'watchlist' }>;
+      this.#finishedPieces.watchlist = { titles: watchlist.titles };
+    } else if (kind === 'recommendations') {
+      const { kind: _kind, ...recommendations } = value as Extract<
+        LibrarySelectionValue,
+        { kind: 'recommendations' }
+      >;
       this.#finishedPieces.recommendations = recommendations;
     } else if (kind === 'continue') {
       const view = value as Extract<LibrarySelectionValue, { kind: 'continue' }>;
@@ -1883,15 +1907,7 @@ export class LibraryLogAuthority {
 
     const generation =
       this.#log.currentGeneration ?? (this.#options.mode === 'local' ? 'local' : undefined);
-    if (
-      generation &&
-      this.#finishedPieces.watchlist &&
-      this.#finishedPieces.continue &&
-      this.#finishedPieces.recommendations &&
-      this.#finishedPieces.settings &&
-      this.#finishedPieces.runtime &&
-      this.#finishedPieces.devices
-    ) {
+    if (generation && Object.keys(this.#finishedPieces).length) {
       const reconsiderAt = Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null;
       const pieces = structuredClone(this.#finishedPieces);
       this.#finishedPending = {

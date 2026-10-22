@@ -126,6 +126,26 @@ describe('finished library views', () => {
     expect(previousPieces.every((key) => !vault.values.has(key))).toBe(true);
   });
 
+  it('merges independently selected pieces from the same authority revision', async () => {
+    const vault = new MemoryVault();
+    const value = await fixture();
+    await writeFinishedLibraryViews(libraryKey, vault, value);
+    await writeFinishedLibraryViews(libraryKey, vault, {
+      ...value,
+      pieces: { watchlist: { titles: [{ type: 'movie', id: 99 }] } },
+    });
+
+    await expect(
+      readFinishedLibraryViews(libraryKey, vault, ['watchlist', 'continue', 'recommendations']),
+    ).resolves.toMatchObject({
+      pieces: {
+        watchlist: { titles: [{ id: 99 }] },
+        continue: value.pieces.continue,
+        recommendations: value.pieces.recommendations,
+      },
+    });
+  });
+
   it('keeps the previous complete manifest when replacement is interrupted', async () => {
     class InterruptingVault extends MemoryVault {
       interruptManifest = false;
