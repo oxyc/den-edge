@@ -184,6 +184,18 @@ describe('DurableOperationAuthority', () => {
     });
   });
 
+  it('keeps only the most recent receipts, so each write stays small however long the library is used', async () => {
+    const stored = storedLog();
+    const authority = new DurableOperationAuthority(base(), stored.log);
+    for (let id = 1; id <= 200; id++)
+      await authority.command({ kind: 'watchlist.add', title: { type: 'movie', id } }, `op-${id}`);
+
+    const journal = [...stored.kept.values()][0] as { operationId: string }[];
+    expect(journal).toHaveLength(64);
+    expect(journal.at(0)?.operationId).toBe('op-137');
+    expect(journal.at(-1)?.operationId).toBe('op-200');
+  });
+
   it('does not journal an incomplete import so the same operation can resume', async () => {
     const stored = storedLog();
     const authority = base();
