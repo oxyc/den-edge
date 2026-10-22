@@ -96,6 +96,12 @@ function workerCompatibility(): Plugin {
           map: null,
         };
       }
+      if (/\/src\/lib\/(?:recoveryCore|recoveryWorker)\.ts$/.test(id)) {
+        const original = '../vendor/den-core/recovery.js';
+        if (!code.includes(original))
+          throw new Error('TV recovery core seam no longer matches its loader');
+        code = code.replace(original, '../vendor/den-core-tv/recovery.js');
+      }
       if (/\/src\/lib\/(?:libraryServiceWorker|libraryWorker|recoveryWorker)\.ts$/.test(id))
         return {
           code: `import ${JSON.stringify(compat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
@@ -218,12 +224,12 @@ export default mergeConfig(
       __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(serviceOrigin),
     },
     // The TV artifact is built without Wasm reference types for one-table engines such as Chromium 87. Keep the
-    // browser's vendored den-core untouched; this config and its Worker builds alone resolve the two JS entry points
+    // browser's vendored den-core untouched; this config and its Worker builds alone resolve the JS entry points
     // to wrappers with byte-identical APIs beside the compatible generated modules.
     resolve: {
       alias: [
         {
-          find: /^(?:.*\/)?vendor\/den-core\/(index|assistant)\.js$/,
+          find: /^(?:.*\/)?vendor\/den-core\/(index|assistant|recovery)\.js$/,
           replacement: `${tvCore}/$1.js`,
         },
       ],

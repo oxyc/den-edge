@@ -12,7 +12,9 @@ export const tvCoreArtifacts = [
   'index.d.ts',
   'assistant.js',
   'assistant.d.ts',
-  ...['den_core', 'den_core_assistant'].flatMap((name) =>
+  'recovery.js',
+  'recovery.d.ts',
+  ...['den_core', 'den_core_assistant', 'den_core_recovery'].flatMap((name) =>
     [`${name}.js`, `${name}.d.ts`, `${name}_bg.wasm`, `${name}_bg.wasm.d.ts`].map(
       (file) => `generated/${file}`,
     ),
@@ -54,7 +56,15 @@ export function verifyTvCore() {
     throw new Error('TV den-core compatibility build recipe does not match the pinned generator');
   if (JSON.stringify(Object.keys(tv.artifacts).sort()) !== JSON.stringify(tvCoreArtifacts))
     throw new Error('TV den-core manifest has an incomplete artifact list');
-  for (const name of ['index.js', 'index.d.ts', 'assistant.js', 'assistant.d.ts', 'LICENSE']) {
+  for (const name of [
+    'index.js',
+    'index.d.ts',
+    'assistant.js',
+    'assistant.d.ts',
+    'recovery.js',
+    'recovery.d.ts',
+    'LICENSE',
+  ]) {
     if (!readFileSync(resolve(browserCore, name)).equals(readFileSync(resolve(tvCore, name))))
       throw new Error(`TV den-core wrapper differs from the shared core: ${name}`);
   }

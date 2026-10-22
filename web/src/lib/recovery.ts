@@ -8,6 +8,7 @@
 // is met here only by dropping every reference to it.
 
 import { evaluate } from '../vendor/den-core/index.js';
+import { ensureRecoveryPolicy, recoveryPolicy } from './recoveryCore';
 import { hex } from './crypto';
 import { readDevices } from '../settings/values';
 import { deviceLabel as browserDeviceLabel } from './edge';
@@ -217,12 +218,15 @@ export function derive(data: string, options: DeriveOptions = { op: 'redeem' }):
       ? undefined
       : () => new Worker(new URL('./recoveryWorker.ts', import.meta.url), { type: 'module' }));
   if (!makeWorker) {
-    try {
-      const derived = policy<{ locator: string; wrapKey: string }>({ op: 'recovery_derive', data });
-      return Promise.resolve(answer('error' in derived ? derived : derived.ok));
-    } catch (error) {
-      return Promise.reject(error instanceof DeriveFailed ? error : new DeriveFailed('error'));
-    }
+    return ensureRecoveryPolicy()
+      .then(() =>
+        answer(
+          recoveryPolicy<{ locator: string; wrapKey: string }>({ op: 'recovery_derive', data }),
+        ),
+      )
+      .catch((error: unknown) => {
+        throw error instanceof DeriveFailed ? error : new DeriveFailed('error');
+      });
   }
   return new Promise((resolve, reject) => {
     const worker = makeWorker();

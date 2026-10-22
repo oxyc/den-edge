@@ -3,6 +3,7 @@ import fixtures from '../vendor/den-core/policy-v1.json';
 import profileFixtures from '../vendor/den-core/profiles-v1.json';
 import { inPolicySlices, syncPolicy } from './syncCore';
 import { assistantPolicy, ensureAssistantPolicy } from './assistantCore';
+import { ensureRecoveryPolicy, recoveryPolicy } from './recoveryCore';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import manifest from '../vendor/den-core/SOURCE.json';
@@ -72,8 +73,14 @@ describe('shared Rust WASM sync policy', () => {
     it(
       test.name,
       async () => {
-        const policy = assistantOp(test.request) ? assistantPolicy : syncPolicy;
+        const recoveryOp = kdfOps.has(String(test.request.op));
+        const policy = assistantOp(test.request)
+          ? assistantPolicy
+          : recoveryOp
+            ? recoveryPolicy
+            : syncPolicy;
         if (assistantOp(test.request)) await ensureAssistantPolicy();
+        if (recoveryOp) await ensureRecoveryPolicy();
         if ('error' in test) expect(() => policy(test.request)).toThrow(test.error);
         else expect(policy(test.request)).toEqual(test.ok);
       },
@@ -124,6 +131,12 @@ describe('shared Rust WASM sync policy', () => {
   it('the main module refuses an assistant op, naming the module that has it', () => {
     expect(() => syncPolicy({ op: 'assistant_grant_key', random: '00'.repeat(32) })).toThrow(
       'assistant_module',
+    );
+  });
+
+  it('the main module does not carry the memory-hard recovery operation', () => {
+    expect(() => syncPolicy({ op: 'recovery_derive', data: 'A'.repeat(22) })).toThrow(
+      'invalid_request',
     );
   });
 });
