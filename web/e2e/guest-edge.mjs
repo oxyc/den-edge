@@ -220,7 +220,12 @@ async function routeLibraries(page, edge, origin) {
         const below = rows
           .filter((entry) => entry.seq < Number(before))
           .sort((a, b) => b.seq - a.seq);
-        read = { entries: below.slice(0, limit), more: below.length > limit, order: 'desc' };
+        read = {
+          entries: below.slice(0, limit),
+          more: below.length > limit,
+          order: 'desc',
+          rows: library.rows.size,
+        };
       } else {
         const after = rows.filter((entry) => entry.seq > since).sort((a, b) => a.seq - b.seq);
         read = { entries: after.slice(0, limit), more: after.length > limit };
