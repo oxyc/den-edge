@@ -26,7 +26,7 @@
 }
 
 /* Ten-foot presentation. Imported by TV entry points only, so none of these selectors enter the web bundle. */
-:root.den-tv {
+:root {
   --gutter: clamp(54px, 5vw, 96px);
   --bar-space: 124px;
 

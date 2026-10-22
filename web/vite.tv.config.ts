@@ -3,6 +3,9 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import legacy from '@vitejs/plugin-legacy';
 import { transformAsync } from '@babel/core';
 import presetEnv from '@babel/preset-env';
+import postcssCustomProperties from 'postcss-custom-properties';
+import postcssGlobalData from '@csstools/postcss-global-data';
+import { Features as LightningCssFeatures } from 'lightningcss';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
@@ -16,6 +19,8 @@ const tizen3WorkerCompat = fileURLToPath(
   new URL('./src/tv/compat-tizen3-worker.ts', import.meta.url),
 );
 const tizen3PairCurve = fileURLToPath(new URL('./src/lib/pairCurve-tizen3.ts', import.meta.url));
+const appCss = fileURLToPath(new URL('./src/app.css', import.meta.url));
+const tvCss = fileURLToPath(new URL('./src/tv/tv.css', import.meta.url));
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
 const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
@@ -281,6 +286,17 @@ const legacyScopedCss = {
   },
 };
 
+// Run maintained CSS compatibility transforms before Svelte/Vite embeds component styles into the legacy chunks.
+// Global Data makes the fixed browser and TV tokens visible while each component stylesheet is processed, then
+// removes the injected rules again. This experiment deliberately does not invent fallbacks for scoped variables,
+// Grid or flex gap: the packaged-output report tells us how much genuinely non-mechanical work remains.
+const tizen3CssPlugins = tizen3
+  ? (() => {
+      const globalData = postcssGlobalData({ files: [appCss, tvCss], lateRemover: true }).plugins;
+      return [globalData[0], postcssCustomProperties({ preserve: false }), globalData[1]];
+    })()
+  : [];
+
 const samsungBridge: Plugin = {
   name: 'den-tv-samsung-bridge',
   transformIndexHtml: {
@@ -347,10 +363,24 @@ export default mergeConfig(
     worker: {
       plugins: () => [workerCompatibility(), legacyWorkerOutput(true), svelte()],
     },
-    css: { postcss: { plugins: [legacyScopedCss] } },
+    css: {
+      postcss: { plugins: [legacyScopedCss, ...tizen3CssPlugins] },
+      // Vite uses Lightning CSS as its production minifier. Supplying its own target (rather than relying only on
+      // esbuild's cssTarget) lets the maintained transformer add every fallback it can for the old engine.
+      ...(tizen3
+        ? {
+            lightningcss: {
+              targets: { chrome: 47 << 16 },
+              // clamp() -> min()/max() is not useful for this engine: both forms are unsupported.
+              exclude: LightningCssFeatures.ClampFunction,
+            },
+          }
+        : {}),
+    },
     build: {
       ...(!tizen3 ? { target: legacyTizen ? 'chrome69' : 'chrome85' } : {}),
       cssTarget: tizen3 ? 'chrome47' : legacyTizen ? 'chrome69' : 'chrome85',
+      ...(tizen3 ? { cssMinify: 'lightningcss' as const } : {}),
       outDir,
       manifest: true,
       ...(e2e ? { rolldownOptions: { input: ['index.html', 'test/player.html'] } } : {}),
