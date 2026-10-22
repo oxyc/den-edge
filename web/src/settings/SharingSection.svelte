@@ -633,7 +633,12 @@
                     class="field"
                     maxlength="60"
                     aria-label="New name for {grant.name}"
-                    bind:value={edit.name}
+                    value={edit.name}
+                    oninput={(event) =>
+                      (renaming = {
+                        ...edit,
+                        name: (event.currentTarget as HTMLInputElement).value,
+                      })}
                   />
                   <Button
                     type="submit"

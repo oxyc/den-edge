@@ -48,7 +48,8 @@ async function start() {
 
 void start().catch((error) => {
   const root = document.getElementById('app')!;
-  root.replaceChildren();
+  // Not `replaceChildren`: Chromium 69 (Tizen 5.5) predates it, and this screen is what an engine gap shows.
+  root.textContent = '';
   const heading = document.createElement('h1');
   heading.textContent = 'Den could not start';
   const message = document.createElement('p');

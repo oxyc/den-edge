@@ -213,8 +213,9 @@
     contain: layout style;
   }
 
-  .episode:hover,
-  .episode:focus-within {
+  /* An engine without `:has()` drops this rule; the TV stylesheet's focus-within fallback highlights the row there. */
+  .episode:has(.episode-play:hover),
+  .episode:has(.episode-play:focus-visible) {
     background: rgb(255 255 255 / 0.06);
   }
 

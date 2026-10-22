@@ -31,7 +31,9 @@ export function installTvCssCapabilities(): () => void {
   const focusWithin = supportsSelector(':focus-within');
   const customProperties = CSS.supports('--den-css-vars', '1');
   root.classList.toggle('tv-no-grid', !grid);
-  root.classList.toggle('tv-no-flex-gap', !flexGap);
+  // Only without Grid too: the flex-gap fallbacks target containers that are grids elsewhere, and an engine with Grid
+  // (Chromium 69 on Tizen 5.5) honours their grid `gap`, so a margin would add to it.
+  root.classList.toggle('tv-no-flex-gap', !flexGap && !grid);
   root.classList.toggle('tv-no-focus-within', !focusWithin);
   root.classList.toggle('tv-no-custom-properties', !customProperties);
 

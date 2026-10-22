@@ -969,7 +969,7 @@
   margin-left: 10px;
 }
 
-.den-tv.tv-no-flex-gap .den-button > .den-button-label {
+.den-tv.tv-no-flex-gap .den-button > * + .den-button-label {
   margin-left: 8px;
 }
 

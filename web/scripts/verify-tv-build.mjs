@@ -1,6 +1,38 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { transformAsync } from '@babel/core';
 import { verifyTvCore, verifyTizen3Core, sha256 } from './tv-core-artifacts.mjs';
+
+/**
+ * The first syntax in `code` that Chromium 47 cannot run, or null. Read from the syntax tree: the same characters in
+ * a string or a regular expression (core-js feature-tests `async function*` inside `Function("…")`) are not syntax.
+ */
+async function modernSyntax(code, fileName) {
+  let found = null;
+  const note = (what) => () => void (found ??= what);
+  await transformAsync(code, {
+    babelrc: false,
+    configFile: false,
+    filename: fileName,
+    code: false,
+    sourceType: 'script',
+    plugins: [
+      () => ({
+        visitor: {
+          ArrowFunctionExpression: note('an arrow function'),
+          BigIntLiteral: note('a BigInt literal'),
+          VariableDeclaration(path) {
+            if (path.node.kind !== 'var') found ??= path.node.kind;
+          },
+          Function(path) {
+            if (path.node.async) found ??= 'an async function';
+          },
+        },
+      }),
+    ],
+  });
+  return found;
+}
 
 const tvCore = verifyTvCore();
 
@@ -22,10 +54,14 @@ if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {
       throw new Error(`Module Worker option remains in the Tizen ${tizenVersion} build: ${file}`);
     if (
       tizen3 &&
-      /(?:diagnosticWorker|libraryServiceWorker|libraryWorker|recoveryWorker)-/.test(file) &&
-      /=>|\b(?:const|let)\b|\basync\s+(?:function|\()|\b\d+n\b/.test(code)
-    )
-      throw new Error(`Post-minify legacy syntax lowering failed for Tizen 3 Worker: ${file}`);
+      /(?:diagnosticWorker|libraryServiceWorker|libraryWorker|recoveryWorker)-/.test(file)
+    ) {
+      const found = await modernSyntax(code, file);
+      if (found)
+        throw new Error(
+          `Post-minify legacy syntax lowering left ${found} in Tizen 3 Worker: ${file}`,
+        );
+    }
   }
 }
 if (tizen3) {
@@ -35,13 +71,16 @@ if (tizen3) {
     throw new Error('Native module loading remains in the Tizen 3 build');
   if (!html.includes('id="vite-legacy-polyfill"') || !html.includes('id="vite-legacy-entry"'))
     throw new Error('Tizen 3 build is missing the SystemJS legacy loader');
-  const metadata = JSON.parse(await readFile(resolve(directory, 'den-tv-package.json'), 'utf8'));
-  if (
-    metadata.tizenVersion !== '3.0' ||
-    metadata.legacyNonModule !== true ||
-    metadata.policyCore !== 'javascript'
-  )
-    throw new Error('Tizen 3 package metadata is not marked as legacy non-module output');
+  // The package metadata is written only for a packaged build (`DEN_TV_PACKAGED=1`).
+  if (process.env.DEN_TV_PACKAGED === '1') {
+    const metadata = JSON.parse(await readFile(resolve(directory, 'den-tv-package.json'), 'utf8'));
+    if (
+      metadata.tizenVersion !== '3.0' ||
+      metadata.legacyNonModule !== true ||
+      metadata.policyCore !== 'javascript'
+    )
+      throw new Error('Tizen 3 package metadata is not marked as legacy non-module output');
+  }
   const pairFiles = assets.filter((file) => /^pair-legacy-.*\.js$/.test(file));
   if (pairFiles.length !== 1) throw new Error('Expected one Tizen 3 pairing chunk');
   const pair = await readFile(resolve(directory, 'assets', pairFiles[0]), 'utf8');
