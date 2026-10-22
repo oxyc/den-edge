@@ -158,17 +158,32 @@
 </div>
 
 <style>
-  /* stylelint-disable declaration-block-no-duplicate-custom-properties -- Static fallback precedes color-mix. */
   .split-button {
-    --split-expanded-edge: var(--fg);
-    --split-expanded-edge: color-mix(in srgb, var(--bg) 18%, var(--fg));
+    --split-expanded-edge: #bfbfc3;
+    --split-focus-bg: #eeeef0;
+    --split-divider-bg: rgb(11 11 15 / 0.16);
+    --split-active-bg: #c8c8cb;
+    --split-menu-bg: #dedee1;
+    --split-menu-active-bg: #bfbfc3;
+    --split-menu-hover-bg: #cdcdd0;
 
     position: relative;
     display: block;
     width: 100%;
     min-width: 0;
   }
-  /* stylelint-enable declaration-block-no-duplicate-custom-properties -- End progressive color fallback. */
+
+  @supports (color: color-mix(in srgb, white, black)) {
+    .split-button {
+      --split-expanded-edge: color-mix(in srgb, var(--bg) 18%, var(--fg));
+      --split-focus-bg: color-mix(in srgb, var(--fg) 72%, white);
+      --split-divider-bg: color-mix(in srgb, var(--bg) 16%, transparent);
+      --split-active-bg: color-mix(in srgb, var(--fg) 86%, var(--bg));
+      --split-menu-bg: color-mix(in srgb, var(--fg) 96%, var(--bg));
+      --split-menu-active-bg: color-mix(in srgb, var(--fg) 82%, var(--bg));
+      --split-menu-hover-bg: color-mix(in srgb, var(--fg) 88%, var(--bg));
+    }
+  }
 
   /* Open, the trigger and its destination are one stacked object. The shadow belongs to that complete
      silhouette—not separately to a light button and a dark floating card—and a local stacking level keeps the
@@ -231,8 +246,7 @@
   .split-button:not(.pointer-open) .split-surface :global(.den-button.split-region:focus-visible) {
     outline: 0;
     outline-offset: 0;
-    background: #e1e1e1;
-    background: color-mix(in srgb, var(--fg) 72%, white);
+    background: var(--split-focus-bg);
   }
 
   .split-surface :global(.den-button.split-region[aria-disabled='true']) {
@@ -256,8 +270,7 @@
     flex: 0 0 1px;
     align-self: stretch;
     margin-block: 10px;
-    background: rgb(0 0 0 / 0.16);
-    background: color-mix(in srgb, var(--bg) 16%, transparent);
+    background: var(--split-divider-bg);
     pointer-events: none;
   }
 
@@ -272,15 +285,13 @@
   @media (hover: hover) and (pointer: fine) {
     .split-surface :global(.den-button.split-main:hover:not([aria-disabled='true'])),
     .split-surface:not(.open) :global(.den-button.split-toggle:hover:not([aria-disabled='true'])) {
-      background: #e1e1e1;
-      background: color-mix(in srgb, var(--fg) 72%, white);
+      background: var(--split-focus-bg);
       border-color: transparent;
     }
   }
 
   .split-surface :global(.den-button.split-region:active:not([aria-disabled='true'])) {
-    background: #dadada;
-    background: color-mix(in srgb, var(--fg) 86%, var(--bg));
+    background: var(--split-active-bg);
     transform: none;
   }
 
@@ -304,8 +315,7 @@
     border: 1px solid var(--split-expanded-edge);
     border-top: 0;
     border-radius: 0 0 12px 12px;
-    background: #f5f5f5;
-    background: color-mix(in srgb, var(--fg) 96%, var(--bg));
+    background: var(--split-menu-bg);
     animation: reveal-destination 120ms ease-out;
   }
 
@@ -323,16 +333,14 @@
   }
 
   .split-menu :global(.den-button.split-alternate:active) {
-    background: #d1d1d1;
-    background: color-mix(in srgb, var(--fg) 82%, var(--bg));
+    background: var(--split-menu-active-bg);
     transform: none;
   }
 
   @media (hover: hover) and (pointer: fine) {
     .split-menu :global(.den-button.split-alternate:hover) {
       border-color: transparent;
-      background: #e0e0e0;
-      background: color-mix(in srgb, var(--fg) 88%, var(--bg));
+      background: var(--split-menu-hover-bg);
     }
   }
 

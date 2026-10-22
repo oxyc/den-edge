@@ -18,6 +18,25 @@
   --poster-meta-block-size: 47.2px;
   --poster-row-chrome-block-size: 127.2px;
   --danger: #ff6b6b;
+
+  /* Static values are the exact sRGB result for Den's default palette. Modern engines replace them below so
+     library/theme token overrides continue to participate in the same mixtures. Alpha-bearing tokens stay
+     translucent: artwork and glass beneath them must keep shining through. */
+  --accent-line-40: #3b4f82;
+  --accent-line-45: #3e548d;
+  --accent-line-70: #4b6dc1;
+  --accent-line-72: #4c6fc5;
+  --accent-surface: #1c1f2e;
+  --accent-wash-14: rgb(91 140 255 / 0.14);
+  --accent-outline-45: rgb(91 140 255 / 0.45);
+  --accent-outline-55: rgb(91 140 255 / 0.55);
+  --accent-outline-60: rgb(91 140 255 / 0.6);
+  --accent-fg-78: #c8d3ef;
+  --device-fg: #d1d8ed;
+  --danger-wash-12: rgb(255 107 107 / 0.12);
+  --danger-line-48: #8e474c;
+  --profile-kid-neutral: #68a49b;
+  --profile-visitor-neutral: #8f85a7;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
   --section-heading-size: 20px;
@@ -43,6 +62,26 @@
     'Segoe UI',
     Roboto,
     sans-serif;
+}
+
+@supports (color: color-mix(in srgb, white, black)) {
+  :root {
+    --accent-line-40: color-mix(in srgb, var(--accent) 40%, var(--line));
+    --accent-line-45: color-mix(in srgb, var(--accent) 45%, var(--line));
+    --accent-line-70: color-mix(in srgb, var(--accent) 70%, var(--line));
+    --accent-line-72: color-mix(in srgb, var(--accent) 72%, var(--line));
+    --accent-surface: color-mix(in srgb, var(--card) 92%, var(--accent));
+    --accent-wash-14: color-mix(in srgb, var(--accent) 14%, transparent);
+    --accent-outline-45: color-mix(in srgb, var(--accent) 45%, transparent);
+    --accent-outline-55: color-mix(in srgb, var(--accent) 55%, transparent);
+    --accent-outline-60: color-mix(in srgb, var(--accent) 60%, transparent);
+    --accent-fg-78: color-mix(in srgb, var(--fg) 78%, var(--accent));
+    --device-fg: color-mix(in srgb, var(--fg) 84%, var(--accent));
+    --danger-wash-12: color-mix(in srgb, var(--danger) 12%, transparent);
+    --danger-line-48: color-mix(in srgb, var(--danger) 48%, var(--line));
+    --profile-kid-neutral: color-mix(in srgb, #54a897 72%, var(--muted));
+    --profile-visitor-neutral: color-mix(in srgb, #8b7da8 72%, var(--muted));
+  }
 }
 
 * {
@@ -151,22 +190,17 @@ button[aria-disabled='true'] {
   --button-fg: var(--muted);
 }
 
-/* stylelint-disable declaration-block-no-duplicate-custom-properties -- Static fallback precedes color-mix. */
 .den-button-device {
   --button-bg: rgb(255 255 255 / 0.08);
   --button-border: rgb(255 255 255 / 0.14);
-  --button-fg: var(--fg);
-  --button-fg: color-mix(in srgb, var(--fg) 84%, var(--accent));
+  --button-fg: var(--device-fg);
 }
 
 .den-button-destructive {
-  --button-bg: rgb(255 107 107 / 0.12);
-  --button-bg: color-mix(in srgb, var(--danger) 12%, transparent);
-  --button-border: rgb(255 107 107 / 0.48);
-  --button-border: color-mix(in srgb, var(--danger) 48%, var(--line));
+  --button-bg: var(--danger-wash-12);
+  --button-border: var(--danger-line-48);
   --button-fg: #ff9a9a;
 }
-/* stylelint-enable declaration-block-no-duplicate-custom-properties -- End progressive color fallback. */
 
 .den-button-stateful[aria-pressed='true'] {
   --button-bg: var(--fg);
@@ -248,10 +282,15 @@ a[data-spatial-skip]:not(.slide-link):focus-visible {
 
 @media (hover: hover) and (pointer: fine) {
   .den-button:hover:not(:disabled, [aria-disabled='true']) {
-    border-color: var(--button-border);
-    border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
-    background-color: var(--button-bg);
-    background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+    border-color: var(--button-hover-border, var(--button-border));
+    background-color: var(--button-hover-bg, var(--button-bg));
+  }
+}
+
+@supports (color: color-mix(in srgb, white, black)) {
+  .den-button {
+    --button-hover-border: color-mix(in srgb, currentcolor 38%, var(--button-border));
+    --button-hover-bg: color-mix(in srgb, var(--button-bg) 84%, white 16%);
   }
 }
 

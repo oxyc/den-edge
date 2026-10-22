@@ -4855,10 +4855,8 @@
 
   @media (hover: hover) and (pointer: fine) {
     header :global(.trigger.player-source-switch:hover) {
-      border-color: var(--button-border);
-      border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
-      background-color: var(--button-bg);
-      background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+      border-color: var(--button-hover-border, var(--button-border));
+      background-color: var(--button-hover-bg, var(--button-bg));
     }
   }
 

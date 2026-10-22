@@ -544,19 +544,15 @@
       white-space: nowrap;
     }
 
-    /* stylelint-disable declaration-block-no-duplicate-custom-properties -- Static fallback precedes color-mix. */
     .detail-page .utilities > :global(.pill[aria-pressed='true']),
     .detail-page .utilities > .pick.on {
-      --button-bg: rgb(94 139 255 / 0.14);
-      --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
+      --button-bg: var(--accent-wash-14);
       --button-border: transparent;
-      --button-fg: var(--fg);
-      --button-fg: color-mix(in srgb, var(--fg) 78%, var(--accent));
+      --button-fg: var(--accent-fg-78);
 
       background: var(--button-bg);
       color: var(--button-fg);
     }
-    /* stylelint-enable declaration-block-no-duplicate-custom-properties -- End progressive color fallback. */
   }
 
   /* The focused element in the picker is the select inside, so its shell lights up with it. */

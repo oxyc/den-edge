@@ -404,14 +404,12 @@
 
   .profile-choice:hover,
   .profile-choice:focus-visible {
-    border-color: var(--accent);
-    border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+    border-color: var(--accent-line-70);
     background: rgb(255 255 255 / 0.075);
   }
 
   .profile-choice.current {
-    border-color: var(--line);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    border-color: var(--accent-line-45);
   }
 
   .choice-copy,

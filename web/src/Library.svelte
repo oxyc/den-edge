@@ -2179,11 +2179,9 @@
     z-index: 4;
     margin: 0 0 18px;
     padding: 12px 16px;
-    border: 1px solid var(--accent);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px solid var(--accent-outline-45);
     border-radius: 12px;
-    background: var(--card);
-    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    background: var(--accent-surface);
     color: var(--fg);
   }
 
@@ -2206,8 +2204,7 @@
     min-height: 44px;
     margin-top: 8px;
     padding: 8px 18px;
-    border: 1px solid var(--accent);
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1px solid var(--accent-outline-55);
     border-radius: 999px;
     background: var(--accent);
     color: var(--bg);

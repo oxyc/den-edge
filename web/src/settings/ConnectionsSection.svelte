@@ -1591,8 +1591,7 @@
   }
 
   .pair.scanned {
-    outline: 1px solid var(--accent);
-    outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    outline: 1px solid var(--accent-outline-60);
   }
 
   .tv-code {
