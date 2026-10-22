@@ -10,7 +10,10 @@ import { exclusive } from './exclusive';
 
 export const LIBRARY_OPERATION_JOURNAL = 'library-service-operations.v2';
 const LEGACY_JOURNAL = 'library-service-operations.v1';
-const ENTRY_LIMIT = 1_024;
+// Receipts answer a retry of the same operation, which comes seconds later, after a worker restart. The journal is
+// one sealed value rewritten twice per operation, so it holds only the recent ones. An operation whose receipt has
+// aged out runs again on a late retry, which is safe: domain writes have set/idempotent semantics.
+const ENTRY_LIMIT = 64;
 const BYTE_LIMIT = 256 * 1_024;
 const RESULT_BYTE_LIMIT = 32 * 1_024;
 const utf8 = new TextEncoder();
