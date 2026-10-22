@@ -9,6 +9,35 @@ const version = { instance: 'worker-1', generation: 'generation-3', revision: 14
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
+  it('keeps the playback device capability small and strictly bounded', () => {
+    expect(
+      decodeLibraryServiceClientMessage({
+        type: 'subscribe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'devices',
+        subscriptionId: 'devices',
+        selection: { kind: 'devices' },
+      }),
+    ).toMatchObject({ ok: true });
+    const update = (devices: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'devices',
+        version,
+        value: { kind: 'devices', devices },
+      });
+    expect(update([{ id: 'living-room', name: 'Living Room', kind: 'tv' }])).toMatchObject({
+      ok: true,
+    });
+    expect(
+      update([{ id: 'living-room', name: 'Living Room', kind: 'tv', memberToken: 'secret' }]),
+    ).toMatchObject({ ok: false });
+    expect(
+      update(Array.from({ length: 513 }, (_, id) => ({ id: String(id), name: 'TV', kind: 'tv' }))),
+    ).toMatchObject({ ok: false });
+  });
+
   it('exposes only bounded, non-secret profile migration control messages', () => {
     const attempt = '0123456789abcdef0123456789abcdef';
     const source = { generation: 7, head: 'a'.repeat(64) };

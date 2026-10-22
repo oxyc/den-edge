@@ -128,6 +128,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         return (await this.#promote('cache:runtime')).select(selection);
       return structuredClone(pieces.runtime!);
     }
+    if (selection.kind === 'devices') {
+      if (!(await this.#loadCapabilities(['devices'])))
+        return (await this.#promote('cache:devices')).select(selection);
+      return structuredClone(pieces.devices!);
+    }
     return (await this.#promote(`selection:${selection.kind}`)).select(selection);
   }
 

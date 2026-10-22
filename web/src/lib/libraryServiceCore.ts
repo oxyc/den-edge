@@ -29,6 +29,7 @@ export type LibrarySelectionScope =
   | { kind: 'continue' }
   | { kind: 'history' }
   | { kind: 'settings' }
+  | { kind: 'devices' }
   | { kind: 'connections' }
   | { kind: 'simkl' }
   | { kind: 'recovery' }
@@ -593,6 +594,7 @@ function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection)
     scope.kind === 'continue' ||
     scope.kind === 'history' ||
     scope.kind === 'settings' ||
+    scope.kind === 'devices' ||
     scope.kind === 'connections' ||
     scope.kind === 'simkl' ||
     scope.kind === 'recovery' ||

@@ -5,8 +5,8 @@
  * implementation that projects them are private to the service.
  */
 
-/** Version 7 adds Owner-authorized Kid title exceptions to tasks and the profile projection. */
-export const LIBRARY_SERVICE_PROTOCOL = 7 as const;
+/** Version 8 adds the small, independently subscribable device view used by playback surfaces. */
+export const LIBRARY_SERVICE_PROTOCOL = 8 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -315,6 +315,7 @@ export type LibrarySelection =
   | { kind: 'title'; title: TitleRef }
   | { kind: 'presence'; titles: TitleRef[] }
   | { kind: 'settings' }
+  | { kind: 'devices' }
   | { kind: 'connections' }
   | { kind: 'simkl' }
   | { kind: 'recovery' }
@@ -440,6 +441,12 @@ export interface LibraryDeviceView {
   kind: 'tv' | 'browser';
   lastSeenAt?: number;
   libraryFormat?: number;
+}
+
+/** Playback-facing devices, separate from Settings' credentials, plugins, servers and diagnostics. */
+export interface DevicesView {
+  kind: 'devices';
+  devices: LibraryDeviceView[];
 }
 
 export interface LibraryPluginView {
@@ -574,6 +581,7 @@ export type LibrarySelectionValue =
   | TitleView
   | PresenceView
   | SettingsView
+  | DevicesView
   | ConnectionsView
   | SimklView
   | RecoveryView

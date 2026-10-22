@@ -142,6 +142,7 @@ describe('LibraryLogAuthority', () => {
     await opened.select({ kind: 'continue' });
     await opened.select({ kind: 'settings' });
     await opened.select({ kind: 'runtime' });
+    await opened.select({ kind: 'devices' });
   };
 
   const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
@@ -1508,10 +1509,12 @@ describe('LibraryLogAuthority', () => {
       [{ kind: 'device.heartbeat', name: 'MacBook' }, 'heartbeat'],
     ] as const) {
       const affectsRuntime = command.kind === 'plugin.install';
+      const affectsDevices = command.kind === 'device.heartbeat';
       await expect(authority.command(command, operation)).resolves.toMatchObject({
         outcome: 'applied',
         delivery: 'local',
         affected: [
+          ...(affectsDevices ? ([{ kind: 'devices' }] as const) : []),
           { kind: 'connections' },
           ...(affectsRuntime ? ([{ kind: 'runtime' }] as const) : []),
         ],
@@ -1577,7 +1580,9 @@ describe('LibraryLogAuthority', () => {
 
     await expect(
       authority.command({ kind: 'device.remove', deviceId: tv }, 'remove-tv'),
-    ).resolves.toMatchObject({ affected: [{ kind: 'connections' }] });
+    ).resolves.toMatchObject({
+      affected: [{ kind: 'devices' }, { kind: 'connections' }],
+    });
     expect(log.settings(`handoff:simkl:${tv}`)?.values.token?.value).toBeNull();
     await expect(authority.select({ kind: 'connections' })).resolves.toMatchObject({
       devices: [{ id: '0123456789abcdef' }],

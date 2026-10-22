@@ -55,6 +55,7 @@ class FakeService {
     if (this.openFailure) throw new LibraryServiceError(this.openFailure);
     this.publish({ kind: 'overview' }, overviewValue(), 1);
     this.publish({ kind: 'continue' }, continueValue(), 2);
+    this.publish({ kind: 'devices' }, devicesValue(), 3);
     this.publish({ kind: 'settings' }, settingsValue(), 4);
     this.publish({ kind: 'runtime' }, runtimeValue(), 4);
     this.status({ kind: 'ready', version: version(4) });
@@ -263,6 +264,11 @@ const runtimeValue = (): LibrarySelectionValue => ({
   privateRemuxUrl: 'https://remux.tailnet.ts.net',
 });
 
+const devicesValue = (): LibrarySelectionValue => ({
+  kind: 'devices',
+  devices: [{ id: 'tv-1', name: 'Living Room', kind: 'tv' }],
+});
+
 const retainedServicesValue = () => ({
   routes: { remux: [{ url: 'https://remux.example' }] },
   scout: { install: 'https://plugins.example/scout', base: '/scout' },
@@ -278,6 +284,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   expect(service.subscriptionsSeenAtOpen).toEqual([
     { kind: 'overview' },
     { kind: 'continue' },
+    { kind: 'devices' },
     { kind: 'settings' },
     { kind: 'runtime' },
   ]);
@@ -291,6 +298,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
     version: version(1),
   });
   expect(model.continueWatching.value?.items[0]).toMatchObject({ fraction: 0.4 });
+  expect(model.devices.value?.devices[0]).toMatchObject({ id: 'tv-1', kind: 'tv' });
   expect(model.settings.value?.preferences.autoplayTrailers).toBe(true);
   expect(model.runtime.value).toMatchObject({
     pluginManifestUrls: ['https://plugins.example/scout/manifest.json'],

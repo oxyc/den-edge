@@ -582,6 +582,8 @@ export class LibraryLogAuthority {
             : undefined;
         return this.#rememberFinished('settings', await this.#settings(), revision);
       }
+      case 'devices':
+        return this.#rememberFinished('devices', this.#devices());
       case 'connections':
         return this.#connections();
       case 'simkl':
@@ -1711,6 +1713,26 @@ export class LibraryLogAuthority {
     };
   }
 
+  #devices(): Extract<LibrarySelectionValue, { kind: 'devices' }> {
+    return {
+      kind: 'devices',
+      devices: readDevices(this.#log.settings('devices'))
+        .filter(({ id }) => id.length > 0 && id.length <= 128)
+        .slice(0, 512)
+        .map(({ id, name, kind, seen, format }) => ({
+          id,
+          name: name.slice(0, 256),
+          kind,
+          ...(seen !== undefined && Number.isSafeInteger(seen) && seen >= 0
+            ? { lastSeenAt: seen }
+            : {}),
+          ...(format !== undefined && Number.isSafeInteger(format) && format >= 0
+            ? { libraryFormat: format }
+            : {}),
+        })),
+    };
+  }
+
   #downloads(): Extract<LibrarySelectionValue, { kind: 'downloads' }> {
     return {
       kind: 'downloads',
@@ -1889,7 +1911,7 @@ export class LibraryLogAuthority {
     return this.#projection;
   }
 
-  #rememberFinished<T extends 'overview' | 'continue' | 'settings' | 'runtime'>(
+  #rememberFinished<T extends 'overview' | 'continue' | 'settings' | 'runtime' | 'devices'>(
     kind: T,
     value: Extract<LibrarySelectionValue, { kind: T }>,
     computedRevision?: string,
@@ -1919,7 +1941,9 @@ export class LibraryLogAuthority {
       };
     } else if (kind === 'settings')
       this.#finishedPieces.settings = value as FinishedLibraryViewPieces['settings'];
-    else this.#finishedPieces.runtime = value as FinishedLibraryViewPieces['runtime'];
+    else if (kind === 'runtime')
+      this.#finishedPieces.runtime = value as FinishedLibraryViewPieces['runtime'];
+    else this.#finishedPieces.devices = value as FinishedLibraryViewPieces['devices'];
 
     const generation =
       this.#log.currentGeneration ?? (this.#options.mode === 'local' ? 'local' : undefined);
@@ -1929,7 +1953,8 @@ export class LibraryLogAuthority {
       this.#finishedPieces.continue &&
       this.#finishedPieces.recommendations &&
       this.#finishedPieces.settings &&
-      this.#finishedPieces.runtime
+      this.#finishedPieces.runtime &&
+      this.#finishedPieces.devices
     ) {
       const reconsiderAt = Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null;
       const pieces = structuredClone(this.#finishedPieces);
@@ -2461,7 +2486,7 @@ export class LibraryLogAuthority {
       Date.now(),
     );
     return changes
-      ? this.#patchSettings('devices', changes, [{ kind: 'connections' }])
+      ? this.#patchSettings('devices', changes, [{ kind: 'devices' }, { kind: 'connections' }])
       : this.#unchanged();
   }
 
@@ -2503,7 +2528,7 @@ export class LibraryLogAuthority {
     return {
       outcome: 'applied',
       delivery: this.#delivery(pending),
-      affected: this.#withPendingStatus(pending, [{ kind: 'connections' }]),
+      affected: this.#withPendingStatus(pending, [{ kind: 'devices' }, { kind: 'connections' }]),
     };
   }
 
