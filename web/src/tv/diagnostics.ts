@@ -65,6 +65,28 @@ async function workerProbe(): Promise<void> {
   }
 }
 
+function supportsSelector(selector: string): boolean {
+  try {
+    return CSS.supports(`selector(${selector})`);
+  } catch {
+    return false;
+  }
+}
+
+// Parsing `gap` is not enough: older Chromium accepts the property while ignoring it in flex layout.
+function supportsFlexGap(): boolean {
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:absolute;left:-9999px;display:flex;flex-direction:column;row-gap:1px';
+  const child = document.createElement('div');
+  child.style.height = '1px';
+  probe.append(child, child.cloneNode());
+  document.body.append(probe);
+  const supported = probe.scrollHeight === 3;
+  probe.remove();
+  return supported;
+}
+
 /** Opt-in on-device evidence, deliberately excludes pairing keys, URLs and library contents. */
 export function installDiagnostics(): void {
   if (document.getElementById('den-tv-diagnostics')) return;
@@ -88,7 +110,15 @@ export function installDiagnostics(): void {
       worker: typeof Worker !== 'undefined',
       indexedDB: typeof indexedDB !== 'undefined',
       wasm: typeof WebAssembly !== 'undefined',
-      cssHas: CSS.supports('selector(:has(*))'),
+      cssCustomProperties: CSS.supports('--den-probe', '1px'),
+      cssGrid: CSS.supports('display', 'grid'),
+      cssFlexGap: supportsFlexGap(),
+      cssClamp: CSS.supports('width', 'clamp(1px, 2vw, 3px)'),
+      cssMinMax: CSS.supports('width', 'min(1px, 2px)'),
+      cssFocusVisible: supportsSelector(':focus-visible'),
+      cssFocusWithin: supportsSelector(':focus-within'),
+      cssIs: supportsSelector(':is(div, span)'),
+      cssHas: supportsSelector(':has(*)'),
       cssColorMix: CSS.supports('color', 'color-mix(in srgb, white, black)'),
       serviceWorkerRequired: false,
     },
