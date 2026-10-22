@@ -256,15 +256,22 @@ it('cold-imports bounded pages and serves the main startup capabilities without 
     );
   });
   const openFull = vi.fn(async () => fullAuthority());
+  const commitBatch = vi.spyOn(LibraryFactStore.prototype, 'commitBatch');
+  const progress = vi.fn();
   const opened = await openFinishedLibraryViewAuthority(
     request,
     vault,
     openFull,
     content,
     fetchImpl,
+    progress,
   );
 
-  expect(pageSizes).toEqual([64, 64, 64]);
+  // One round trip for the whole history; each committed checkpoint stays bounded, and says how far it is.
+  expect(pageSizes).toEqual([1000]);
+  expect(commitBatch.mock.calls.map(([, , batch]) => batch.length)).toEqual([64, 64, 2]);
+  commitBatch.mockRestore();
+  expect(progress.mock.calls.map(([value]) => value)).toEqual([64 / 130, 128 / 130, 1]);
   await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 2 }]),
   });

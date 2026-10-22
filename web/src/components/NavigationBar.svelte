@@ -25,6 +25,7 @@
     rememberSearch,
   } from '../lib/recentSearches';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
+  import { libraryOpeningProgress } from '../lib/libraryOpening.svelte';
   let {
     route,
     query = '',
@@ -253,7 +254,60 @@
     { page: 'watchlist', label: 'Watchlist', icon: undefined },
     { page: 'settings', label: 'Settings', icon: 'sliders' },
   ] as const;
+  /** A library's first read from den-edge, drawn along the bar's lower edge while it runs. */
+  const opening = $derived(libraryOpeningProgress());
+  /** What the line draws: the read's progress, then full for a moment once it has finished, then nothing. */
+  let shown = $state<number | null>(null);
+  let finished = $state(false);
+  $effect(() => {
+    if (opening !== null) {
+      shown = opening;
+      finished = false;
+      return;
+    }
+    if (untrack(() => shown) === null) return;
+    shown = 1;
+    finished = true;
+    const done = setTimeout(() => (shown = null), 700);
+    return () => clearTimeout(done);
+  });
+  /** The bar's size, for the outline the progress traces: a pill whose ends are half its height. */
+  let barWidth = $state(0);
+  let barHeight = $state(0);
+  const outline = $derived(2 * Math.max(0, barWidth - barHeight) + Math.PI * barHeight);
 </script>
+
+{#snippet openingLine()}
+  {#if shown !== null}
+    <div
+      class="opening"
+      class:finished
+      role="progressbar"
+      aria-label="Loading your library"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(shown * 100)}
+      bind:clientWidth={barWidth}
+      bind:clientHeight={barHeight}
+    >
+      {#if barWidth && barHeight}
+        <svg width={barWidth} height={barHeight} aria-hidden="true">
+          <rect
+            x="1"
+            y="1"
+            width={barWidth - 2}
+            height={barHeight - 2}
+            rx={(barHeight - 2) / 2}
+            stroke-dasharray="{shown * outline} {outline}"
+          />
+        </svg>
+      {/if}
+    </div>
+    <p class="opening-label" class:finished aria-hidden="true">
+      {finished ? 'Library ready' : `Loading your library · ${Math.round(shown * 100)}%`}
+    </p>
+  {/if}
+{/snippet}
 
 <div class="bar-anchor">
   {#if __DEN_TV__}
@@ -282,6 +336,7 @@
       {#if profiles}<ProfileSwitcher {profiles} />{:else if profileHint}<ProfileHintTrigger
           choice={hintChoice(profileHint)}
         />{/if}
+      {@render openingLine()}
     </header>
   {:else}
     <header class="bar glass" class:searching={expanded} class:people={onPeople}>
@@ -426,6 +481,7 @@
           ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
         >
       </button>
+      {@render openingLine()}
     </header>
   {/if}
 </div>
@@ -448,6 +504,72 @@
     min-height: 46px;
     padding: 6px 12px;
     border-radius: 999px;
+  }
+
+  /* The whole pill: the read traces its outline, clockwise from the top left, round to where it began. */
+  .opening {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 80%, transparent));
+    animation: opening-in 0.3s ease-out;
+  }
+
+  .opening svg {
+    display: block;
+    overflow: visible;
+  }
+
+  .opening rect {
+    fill: none;
+    stroke: var(--accent);
+    stroke-linecap: round;
+    stroke-width: 2px;
+    transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* Read: the closed outline glows, then fades with its caption. */
+  .opening.finished,
+  .opening-label.finished {
+    animation: opening-out 0.7s ease-in forwards;
+  }
+
+  .opening.finished {
+    filter: drop-shadow(0 0 10px var(--accent));
+  }
+
+  @keyframes opening-in {
+    0% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes opening-out {
+    30% {
+      opacity: 1;
+    }
+
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .opening rect {
+      transition: none;
+    }
+  }
+
+  /* Under the bar, from where the line starts: what the line is for and how far it has come. */
+  .opening-label {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 24px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    white-space: nowrap;
+    pointer-events: none;
   }
 
   .bar > :global(.profile-trigger) {

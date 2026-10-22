@@ -70,6 +70,7 @@ export async function openLibraryServiceAuthority(
   providedVault: Vault | null | undefined,
   contentCredentials: LibraryContentCredentialSink | undefined,
   content: DownloadContent & Pick<ContentReader, 'title'>,
+  progress?: (progress: number) => void,
 ): Promise<LibraryServiceAuthority | null> {
   const vault = providedVault === undefined ? libraryVault : providedVault;
   if (!vault) return null;
@@ -140,7 +141,14 @@ export async function openLibraryServiceAuthority(
     });
   };
 
-  const cached = await openFinishedLibraryViewAuthority(request, vault, openFull, content);
+  const cached = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    undefined,
+    progress,
+  );
   if (!cached) return openFull();
   const releaseMembership = useLibraryRelayMembership(cached.membership);
   const releaseCredentials = contentCredentials?.bind({

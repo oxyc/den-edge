@@ -203,11 +203,18 @@ async function routeLibraries(page, edge, origin) {
     if (action === 'changes' && request.method() === 'GET') {
       if (!library || library.tokenHash !== sha(token ?? '')) return json(route, 404, {}, HEADERS);
       const since = Number(url.searchParams.get('since') ?? 0);
-      const entries = [...library.rows.values()].filter((entry) => entry.seq > since);
+      // Paged as den-edge pages it: a reader asking for few rows pays one round trip per page.
+      const limit = Number(url.searchParams.get('limit') ?? 1000) || 1000;
+      const after = [...library.rows.values()]
+        .filter((entry) => entry.seq > since)
+        .sort((a, b) => a.seq - b.seq);
+      const entries = after.slice(0, limit);
+      if (edge.changesLatencyMs)
+        await new Promise((resolve) => setTimeout(resolve, edge.changesLatencyMs));
       return json(
         route,
         200,
-        { generation: GENERATION, entries, head: library.head, more: false },
+        { generation: GENERATION, entries, head: library.head, more: after.length > limit },
         { ...HEADERS, 'x-den-wire-min': String(library.wireMin) },
       );
     }

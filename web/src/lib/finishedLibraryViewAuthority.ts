@@ -768,12 +768,15 @@ export interface FinishedLibraryViewAuthorityOpen {
   membership: { libraryId: string; memberToken: string };
 }
 
+const FACT_BATCH = 64;
+
 /** A first selected open: scan encrypted authority in bounded pages and retain no full-history plaintext graph. */
 async function importLibraryFacts(
   request: LibraryServiceHello,
   keys: LibraryKeys,
   vault: Vault,
   fetchImpl: typeof fetch,
+  progress?: (progress: number) => void,
 ): Promise<{
   store: LibraryFactStore;
   manifest: Awaited<ReturnType<LibraryFactStore['manifest']>>;
@@ -784,29 +787,36 @@ async function importLibraryFacts(
   if (manifest?.complete) return { store, manifest };
   let generation = manifest?.generation;
   let since = manifest?.head ?? 0;
+  // Nothing of this generation is kept yet, so no row has a previous local copy to merge with.
+  let fresh = !manifest;
   let registered = false;
   let decrypted = 0;
   const started = performance.now();
-  for (;;) {
-    let response: Response;
+  const ask = async (after: number, of: string | undefined) => {
     try {
-      response = await fetchImpl(`/lib/${keys.id}/changes?since=${since}&limit=64`, {
+      const response = await fetchImpl(`/lib/${keys.id}/changes?since=${after}&limit=1000`, {
         headers: {
           'x-den-library-token': keys.token,
           'x-den-wire': String(request.wire),
-          'x-den-generation': generation ?? '0',
+          'x-den-generation': of ?? '0',
         },
       });
+      if (!response.ok) return null;
+      return (await response.json().catch(() => null)) as {
+        generation?: unknown;
+        head?: unknown;
+        more?: unknown;
+        entries?: unknown;
+      } | null;
     } catch {
       return null;
     }
-    if (!response.ok) return null;
-    const page = (await response.json().catch(() => null)) as {
-      generation?: unknown;
-      head?: unknown;
-      more?: unknown;
-      entries?: unknown;
-    } | null;
+  };
+  // The page after the one being decrypted and committed, already on its way.
+  let next: ReturnType<typeof ask> | undefined;
+  for (;;) {
+    const page = await (next ?? ask(since, generation));
+    next = undefined;
     if (
       !page ||
       typeof page.generation !== 'string' ||
@@ -820,9 +830,12 @@ async function importLibraryFacts(
       generation = page.generation;
       since = 0;
       manifest = null;
+      fresh = true;
       continue;
     }
     generation = page.generation;
+    const lastSeq = (page.entries.at(-1) as { seq?: unknown } | undefined)?.seq;
+    if (page.more && Number.isSafeInteger(lastSeq)) next = ask(lastSeq as number, generation);
     if (!registered) {
       registered = true;
       void fetchImpl(`/lib/${keys.id}/member`, {
@@ -838,6 +851,7 @@ async function importLibraryFacts(
     const facts = [];
     if (page.entries.length) await ensureSyncPolicy();
     let profileTopology = manifest?.profileTopology ?? false;
+    const entries: Array<{ k: string; seq: number; v: string }> = [];
     for (const candidate of page.entries) {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
       const { k, seq, v } = candidate as { k?: unknown; seq?: unknown; v?: unknown };
@@ -849,20 +863,36 @@ async function importLibraryFacts(
         typeof v !== 'string'
       )
         return null;
-      const opened = await openEntry(keys, k, v);
+      entries.push({ k, seq: seq as number, v });
+    }
+    // WebCrypto works off the thread: a page's rows are decrypted at once, as many at a time as the browser runs.
+    const openedEntries = await Promise.all(entries.map(({ k, v }) => openEntry(keys, k, v)));
+    for (const [index, { k, seq, v }] of entries.entries()) {
+      const opened = openedEntries[index]!;
       let row: Row | null = null;
       if ('row' in opened) {
-        const previous = await store.document(generation, k);
+        const previous = fresh ? null : await store.document(generation, k);
         row = mergeFactRows(previous?.row ?? null, believe(opened.row));
       } else if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened)
         profileTopology = true;
       else if ('newerFraming' in opened) return null;
-      facts.push({ k, seq: seq as number, value: v, row });
+      facts.push({ k, seq, value: v, row });
       decrypted++;
     }
     const head = facts.at(-1)?.seq ?? (page.head as number);
     const complete = !page.more || facts.length === 0;
-    await store.commitBatch(generation, head, facts, complete, { profileTopology });
+    const reached = (seq: number) =>
+      progress?.(Math.min(1, seq / Math.max(1, page.head as number)));
+    // One request per thousand rows (each is a round trip), committed in bounded batches as resumable checkpoints.
+    for (let offset = 0; offset + FACT_BATCH < facts.length; offset += FACT_BATCH) {
+      const batch = facts.slice(offset, offset + FACT_BATCH);
+      await store.commitBatch(generation, batch.at(-1)!.seq, batch, false, { profileTopology });
+      reached(batch.at(-1)!.seq);
+    }
+    const last = facts.slice(Math.max(0, Math.ceil(facts.length / FACT_BATCH) - 1) * FACT_BATCH);
+    await store.commitBatch(generation, head, last, complete, { profileTopology });
+    if (complete) progress?.(1);
+    else reached(head);
     since = head;
     manifest = await store.manifest();
     if (complete) {
@@ -881,6 +911,7 @@ export async function openFinishedLibraryViewAuthority(
   openFull: () => Promise<LibraryServiceAuthority | null>,
   content: Pick<ContentReader, 'title'>,
   fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+  progress?: (progress: number) => void,
 ): Promise<FinishedLibraryViewAuthorityOpen | null> {
   if (request.mode !== 'online') return null;
   const raw = rawLibraryKey(request.libraryKey);
@@ -911,7 +942,7 @@ export async function openFinishedLibraryViewAuthority(
       factManifest.schema === LIBRARY_FACT_SCHEMA &&
       factManifest.generation.length > 0;
     if (!classic && !factsReady) {
-      const imported = await importLibraryFacts(request, keys, vault, fetchImpl);
+      const imported = await importLibraryFacts(request, keys, vault, fetchImpl, progress);
       factStore = imported?.store ?? factStore;
       factManifest = imported?.manifest ?? null;
       factsReady = !!factManifest?.complete;

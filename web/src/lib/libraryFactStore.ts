@@ -276,19 +276,18 @@ export class LibraryFactStore {
       this.profileTopology = false;
       this.fullAuthority = true;
     }
-    const changes: VaultChange[] = [];
+    // Every value of the batch is sealed at once: WebCrypto runs them off the thread, as many at a time as it can.
+    const pending: Array<Promise<VaultChange>> = [];
     for (const entry of entries) {
       const document = documentName(generation, entry.k);
-      changes.push({
-        kind: 'put',
-        key: `${this.libraryId}:${document}`,
-        value: await sealLibraryLocalValue(this.key, document, {
+      pending.push(
+        sealLibraryLocalValue(this.key, document, {
           schema: LIBRARY_FACT_SCHEMA,
           seq: entry.seq,
           value: entry.value,
           row: entry.row,
-        }),
-      });
+        }).then((value) => ({ kind: 'put', key: `${this.libraryId}:${document}`, value })),
+      );
       const selected = facts(entry.row);
       for (const capability of [
         'watchlist',
@@ -301,17 +300,18 @@ export class LibraryFactStore {
         const name = factName(generation, capability, entry.k);
         const key = `${this.libraryId}:${name}`;
         const value = selected[capability];
-        changes.push(
+        pending.push(
           value
-            ? {
+            ? sealLibraryLocalValue(this.key, name, value).then((sealed) => ({
                 kind: 'put',
                 key,
-                value: await sealLibraryLocalValue(this.key, name, value),
-              }
-            : { kind: 'delete', key },
+                value: sealed,
+              }))
+            : Promise.resolve({ kind: 'delete', key }),
         );
       }
     }
+    const changes = await Promise.all(pending);
     this.profileTopology ||= options.profileTopology === true;
     this.fullAuthority &&= entries.every((entry) => entry.value.length > 0);
     const manifest: LibraryFactManifest = {

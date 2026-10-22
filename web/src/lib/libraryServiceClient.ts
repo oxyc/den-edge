@@ -31,6 +31,8 @@ export type LibraryServiceOpenOptions = Pick<
   Partial<Pick<LibraryServiceHello, 'wire'>> & {
     /** Local supervisor authority to retry this legacy key as a wire-5 household after the guarded 426 path. */
     bootstrapProfileHousehold?: boolean;
+    /** How far a first read of the library from den-edge is, from 0 to 1, while the open waits for it. */
+    progress?: (progress: number) => void;
   };
 
 type Pending = {
@@ -38,6 +40,9 @@ type Pending = {
   resolve: (message: LibraryServiceServerMessage) => void;
   reject: (error: LibraryServiceError) => void;
   timer?: ReturnType<typeof setTimeout>;
+  /** Restart the timeout: the service said it is still working on this request. */
+  arm?: () => void;
+  progress?: (progress: number) => void;
 };
 
 type Subscription = {
@@ -98,6 +103,7 @@ export class LibraryServiceClient {
         ...(options.legacyClock ? { legacyClock: options.legacyClock } : {}),
       },
       this.startupTimeoutMs,
+      options.progress,
     );
     if (reply.type !== 'ready') throw this.#unexpected(reply, 'ready');
     this.#stopRelayMembership?.();
@@ -230,22 +236,28 @@ export class LibraryServiceClient {
   #request(
     message: LibraryServiceClientMessage,
     timeoutMs?: number,
+    progress?: (progress: number) => void,
   ): Promise<LibraryServiceServerMessage> {
     this.#assertOpen();
     return new Promise((resolve, reject) => {
-      const pending: Pending = { request: message, resolve, reject };
-      if (timeoutMs !== undefined)
-        pending.timer = setTimeout(() => {
-          if (this.#pending.get(message.requestId) !== pending) return;
-          this.#pending.delete(message.requestId);
-          reject(
-            new LibraryServiceError({
-              code: 'unavailable',
-              message: 'Library service startup timed out while opening browser storage',
-              retryable: true,
-            }),
-          );
-        }, timeoutMs);
+      const pending: Pending = { request: message, resolve, reject, progress };
+      if (timeoutMs !== undefined) {
+        pending.arm = () => {
+          clearTimeout(pending.timer);
+          pending.timer = setTimeout(() => {
+            if (this.#pending.get(message.requestId) !== pending) return;
+            this.#pending.delete(message.requestId);
+            reject(
+              new LibraryServiceError({
+                code: 'unavailable',
+                message: 'Library service startup timed out while opening browser storage',
+                retryable: true,
+              }),
+            );
+          }, timeoutMs);
+        };
+        pending.arm();
+      }
       this.#pending.set(message.requestId, pending);
       try {
         this.transport.send(message);
@@ -294,6 +306,17 @@ export class LibraryServiceClient {
         } catch (error) {
           console.error('den: a library status listener failed', error);
         }
+      return;
+    }
+    if (message.type === 'opening') {
+      const pending = this.#pending.get(message.requestId);
+      if (pending?.request.type !== 'hello') return;
+      pending.arm?.();
+      try {
+        pending.progress?.(message.progress);
+      } catch (error) {
+        console.error('den: a library opening listener failed', error);
+      }
       return;
     }
     if (message.type === 'error' && message.requestId) {

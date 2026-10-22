@@ -42,6 +42,7 @@ import type {
   TitleView,
 } from './libraryServiceProtocol';
 import type { LibraryRelayMembership } from './relayFetch';
+import { noteLibraryOpening } from './libraryOpening.svelte';
 import type {
   LibrarySelectionConnection,
   LibrarySelectionSnapshot,
@@ -162,15 +163,21 @@ export class LibraryModel {
       }),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
-    this.ready = service.open(options).catch((error: unknown) => {
-      const failure = failureFrom(error);
-      if (!this.#closed) {
-        this.#openFailure = failure;
-        this.#connection = 'failed';
-        this.#status = Object.freeze({ kind: 'failed', error: failure });
-      }
-      throw error;
-    });
+    const progress = (value: number) => {
+      if (!this.#closed) noteLibraryOpening(this, value);
+    };
+    this.ready = service
+      .open({ ...options, progress })
+      .finally(() => noteLibraryOpening(this, null))
+      .catch((error: unknown) => {
+        const failure = failureFrom(error);
+        if (!this.#closed) {
+          this.#openFailure = failure;
+          this.#connection = 'failed';
+          this.#status = Object.freeze({ kind: 'failed', error: failure });
+        }
+        throw error;
+      });
   }
 
   get overview(): LibraryModelSnapshot<LibraryOverviewView> {
@@ -1044,6 +1051,7 @@ export class LibraryModel {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    noteLibraryOpening(this, null);
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();

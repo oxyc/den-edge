@@ -80,6 +80,8 @@ export type LibraryAuthorityStatus =
 
 export type LibraryAuthorityOpener = (
   request: LibraryServiceHello,
+  /** How far a first read from den-edge is, from 0 to 1. */
+  progress?: (progress: number) => void,
 ) => Promise<LibraryServiceAuthority | null>;
 
 interface Subscription {
@@ -329,7 +331,17 @@ export class LibraryServiceCore {
     }
 
     try {
-      const authority = await this.openAuthority(request);
+      // Straight to the listeners: the actor's lane is held by this hello until it answers.
+      const authority = await this.openAuthority(request, (progress) =>
+        this.#publish([
+          {
+            type: 'opening',
+            protocol: LIBRARY_SERVICE_PROTOCOL,
+            requestId: request.requestId,
+            progress,
+          },
+        ]),
+      );
       if (!authority)
         return [
           errorReply(failure('not-found', 'library could not be opened', true), request.requestId),
@@ -533,15 +545,19 @@ export class LibraryServiceCore {
             return;
           }
         }
-        if (!messages.length) return;
-        for (const listener of this.#listeners)
-          try {
-            listener(messages);
-          } catch (error) {
-            console.error('den: a library service listener failed', error);
-          }
+        if (messages.length) this.#publish(messages);
       })
       .catch(() => undefined);
+  }
+
+  #publish(messages: LibraryServiceServerMessage[]): void {
+    if (this.#closed) return;
+    for (const listener of this.#listeners)
+      try {
+        listener(messages);
+      } catch (error) {
+        console.error('den: a library service listener failed', error);
+      }
   }
 
   #status(status: LibraryAuthorityStatus): LibrarySessionStatus {

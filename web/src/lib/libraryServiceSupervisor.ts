@@ -134,7 +134,12 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
           retryable: false,
         }),
       );
-    this.#openOptions = structuredClone({ ...options, wire: options.wire ?? 4 });
+    // A function can't be cloned: the progress listener is kept beside the cloned data.
+    const { progress, ...data } = options;
+    this.#openOptions = {
+      ...structuredClone({ ...data, wire: data.wire ?? 4 }),
+      ...(progress ? { progress } : {}),
+    };
     if (this.#phase === 'ready') return Promise.resolve(this.#version!);
     if (this.#connecting) return this.#connecting;
     if (this.#phase === 'failed') return Promise.reject(new LibraryServiceError(this.#failure!));
