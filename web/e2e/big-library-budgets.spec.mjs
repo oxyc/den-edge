@@ -29,6 +29,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
+  BIG_LIBRARY_SCALE,
   bigHousehold,
   forgetPublication,
   holdProjectionBuilds,
@@ -66,6 +67,14 @@ const MEMORY_MB = 48;
 const ALLOCATED_MB = 100;
 /** Rows a returning visit may read from den-edge: what changed since the last one, which here is nothing. */
 const ROWS_READ = 100;
+
+/**
+ * Documents a returning visit to one screen may fold, whatever the library's size: what it shows, not the whole
+ * library. A screen that opens the full log folds every document (3,079 here, three times as many at
+ * `BIG_LIBRARY_SCALE=3`), which an old TV or phone pays for in seconds and tens of MB. A count, not a time: Chromium
+ * slows a page's CPU but not its Workers', where the folding happens.
+ */
+const FOLDED_DOCUMENTS = 500;
 
 /**
  * MB WebKit's WebContent process may hold once a returning visit has settled (`pageFootprint`). What iOS ends a tab's
@@ -534,7 +543,7 @@ for (const [label, type, device, options] of ENGINES) {
       type === webkit && !process.env.CI && !existsSync(webkit.executablePath()),
       'needs WebKit: npx playwright install webkit',
     );
-    test.setTimeout(300_000);
+    test.setTimeout(300_000 * BIG_LIBRARY_SCALE);
     const footprint = type === webkit ? pageFootprint : undefined;
     const browser = await type.launch(
       type === chromium ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {},
@@ -591,6 +600,13 @@ for (const [label, type, device, options] of ENGINES) {
         // den-core's modules are streamed into instantiation, from WebKit's cache of their compiled code; a Worker that
         // compiles one itself pays the whole compile on every load, which on an iPhone held the shelves back.
         expect.soft(result.compiles, `${surface.name}: wasm compiled in a Worker`).toBe(0);
+        const folded = (result.libraryStartup ?? []).reduce(
+          (sum, startup) => sum + startup.documentsFolded,
+          0,
+        );
+        expect
+          .soft(folded, `${surface.name}: library documents folded`)
+          .toBeLessThan(FOLDED_DOCUMENTS);
         for (const startup of result.libraryStartup ?? []) {
           if (startup.viewSource !== 'cache') continue;
           expect
