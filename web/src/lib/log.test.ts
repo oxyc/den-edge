@@ -1333,8 +1333,14 @@ describe('LibraryLog', () => {
     const changed = await rowKey(keys, 'rec:movie:2');
     const library = written.filter((key) => !key.includes(':runtime:'));
     expect(library.filter((key) => key.includes(':library-facts.v1:'))).not.toEqual([]);
+    // The changed document, the finished-view marker, and the store's manifest, which takes its newest stamp in.
     for (const key of library)
-      expect(key.endsWith(':local-authority.v1') || key.endsWith(changed), key).toBe(true);
+      expect(
+        key.endsWith(':local-authority.v1') ||
+          key.endsWith(':library-facts.v1:manifest') ||
+          key.endsWith(changed),
+        key,
+      ).toBe(true);
     expect([...data.keys()].filter((key) => /:log\.v[14]$/.test(key))).toEqual([]);
     log.close();
 

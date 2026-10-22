@@ -9,6 +9,7 @@ import { noteLibraryFactCommit } from './libraryStartupMetrics';
 import { projectDocument } from './libraryV4';
 import type { Vault, VaultChange } from './localVault';
 import {
+  compareStamps,
   isDocument,
   mergeDocument,
   mergeEpisode,
@@ -18,6 +19,7 @@ import {
   newestSummary,
   type Row,
   type SettingsRow,
+  type Stamp,
   type TitleRow,
 } from './wire';
 
@@ -65,6 +67,12 @@ export interface LibraryFactManifest {
    * Absent for an oldest-first import, which resumes after `head`.
    */
   floor?: number;
+  /**
+   * The newest stamp in every row kept, as `LibraryLog.newestStamp` reads it, and when a future stamp among them first
+   * becomes believable: so an edit made without reading the whole library is still stamped after all of it. Absent
+   * in a manifest an earlier build kept.
+   */
+  newest?: { stamp: Stamp; reconsiderAt: number | null };
 }
 
 export interface LibraryFactEntry {
@@ -165,9 +173,43 @@ const validManifest = (value: unknown): value is LibraryFactManifest => {
     held.head! >= 0 &&
     typeof held.complete === 'boolean' &&
     typeof held.profileTopology === 'boolean' &&
-    (held.floor === undefined || (Number.isSafeInteger(held.floor) && held.floor >= 0))
+    (held.floor === undefined || (Number.isSafeInteger(held.floor) && held.floor >= 0)) &&
+    (held.newest === undefined || validNewest(held.newest))
   );
 };
+
+const validNewest = (value: unknown): value is LibraryFactManifest['newest'] => {
+  const held = value as LibraryFactManifest['newest'];
+  return (
+    !!held &&
+    Array.isArray(held.stamp) &&
+    held.stamp.length === 3 &&
+    Number.isFinite(held.stamp[0]) &&
+    Number.isFinite(held.stamp[1]) &&
+    typeof held.stamp[2] === 'string' &&
+    (held.reconsiderAt === null || Number.isFinite(held.reconsiderAt))
+  );
+};
+
+/**
+ * `newest` with `entries`' rows added. Kept in the same commit as the rows; two commits racing can leave it a stamp
+ * low, which only orders this browser's next edit among other titles, never against the document it writes.
+ */
+function withNewest(
+  newest: LibraryFactManifest['newest'] | undefined,
+  entries: readonly LibraryFactEntry[],
+  now = Date.now(),
+): NonNullable<LibraryFactManifest['newest']> {
+  let stamp: Stamp = newest?.stamp ?? [0, 0, ''];
+  let reconsiderAt = newest?.reconsiderAt ?? Infinity;
+  for (const { row } of entries) {
+    if (!row) continue;
+    const summary = newestSummary(row, now);
+    if (compareStamps(summary.stamp, stamp) > 0) stamp = summary.stamp;
+    reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
+  }
+  return { stamp, reconsiderAt: Number.isFinite(reconsiderAt) ? reconsiderAt : null };
+}
 
 export function mergeFactRows(previous: Row | null, replacement: Row | null): Row | null {
   if (!previous || !replacement) return replacement;
@@ -209,14 +251,19 @@ export class LibraryFactStore {
   }
 
   async manifest(): Promise<LibraryFactManifest | null> {
+    const opened = await this.readManifest();
+    if (!opened) return null;
+    this.profileTopology = opened.profileTopology;
+    this.generation = opened.generation;
+    return opened;
+  }
+
+  private async readManifest(): Promise<LibraryFactManifest | null> {
     const bytes = await this.vault.get(`${this.libraryId}:${manifestName}`);
     if (!bytes) return null;
     try {
       const opened = await openLibraryLocalValue(this.key, manifestName, bytes);
-      if (!validManifest(opened)) return null;
-      this.profileTopology = opened.profileTopology;
-      this.generation = opened.generation;
-      return opened;
+      return validManifest(opened) ? opened : null;
     } catch {
       return null;
     }
@@ -282,6 +329,7 @@ export class LibraryFactStore {
       this.generation = generation;
       this.profileTopology = false;
     }
+    const held = await this.readManifest();
     const changes = await this.changes(generation, entries);
     this.profileTopology ||= options.profileTopology === true;
     const manifest: LibraryFactManifest = {
@@ -291,6 +339,7 @@ export class LibraryFactStore {
       complete,
       profileTopology: this.profileTopology,
       ...(options.floor !== undefined && !complete ? { floor: options.floor } : {}),
+      newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
     };
     changes.push({
       kind: 'put',
@@ -317,7 +366,18 @@ export class LibraryFactStore {
   async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation || !entries.length) return;
-    await this.vault.commit(await this.changes(generation, entries));
+    const changes = await this.changes(generation, entries);
+    // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
+    const held = await this.readManifest();
+    if (held?.generation === generation) {
+      const manifest = { ...held, newest: withNewest(held.newest, entries) };
+      changes.push({
+        kind: 'put',
+        key: `${this.libraryId}:${manifestName}`,
+        value: await sealLibraryLocalValue(this.key, manifestName, manifest),
+      });
+    }
+    await this.vault.commit(changes);
     noteLibraryFactCommit(entries.length);
   }
 

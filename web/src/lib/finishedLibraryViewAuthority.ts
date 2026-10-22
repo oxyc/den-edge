@@ -31,6 +31,7 @@ import type {
 } from './libraryServiceProtocol';
 import {
   LibraryServiceAuthorityError,
+  type LibraryAuthorityCommandResult,
   type LibraryAuthorityEvent,
   type LibrarySelectionScope,
   type LibraryServiceAuthority,
@@ -40,7 +41,9 @@ import {
   noteFinishedViewPromotion,
   noteLibraryDecrypt,
   noteLibraryFold,
+  noteNarrowEdit,
 } from './libraryStartupMetrics';
+import type { DeferredDelivery } from './log';
 import { isRetainedServices } from './libraryServiceProtocolCodec';
 import { ensureSyncPolicy } from './syncLoader';
 import {
@@ -198,6 +201,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #filling = false;
   #refilling?: Promise<void>;
   #refillAgain = false;
+  /** A narrow edit's send, until it has come to an end: the whole log opens only after it (`#promote`). */
+  #narrowSending?: Promise<void>;
 
   constructor(
     private readonly request: LibraryServiceHello,
@@ -215,6 +220,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
      * its own documents (`#titleFromFacts`), so a store that moved on since the views were saved is only more current.
      */
     private readonly documents: LibraryFactStore | null = factStore,
+    private readonly openNarrow?: (names: readonly string[]) => Promise<NarrowEdit | null>,
   ) {
     this.#preferFacts = preferFacts;
     if (filling) {
@@ -364,9 +370,73 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           return { outcome: 'unchanged', delivery: 'synced', affected: [] };
         }
       }
+      const narrow = await this.#narrowCommand(command, operationId);
+      if (narrow) return narrow;
     }
     return (await this.#promote(`command:${command.kind}`)).command(command, operationId);
   };
+
+  /**
+   * An edit of one title or episode, made on a log of its own documents (`openNarrow`) rather than the whole library.
+   * It answers as the whole log would, before its send ends; once den-edge has it, the facts and views take it in
+   * through `#reconcile`. Kept on this device or refused instead, the whole log opens, which draws kept work. Null when it cannot be made
+   * so, before anything was written, or when it failed: the whole log then makes it, under the same operation id,
+   * whose receipt resumes it.
+   */
+  async #narrowCommand(
+    command: LibraryCommand,
+    operationId: string,
+  ): Promise<LibraryAuthorityCommandResult | null> {
+    const names = narrowEditNames(command);
+    if (!names || !this.openNarrow || !this.factStore || this.#narrowSending) return null;
+    const edit = await this.openNarrow(names).catch((error: unknown) => {
+      console.warn('den: a narrow edit could not be opened', error);
+      return null;
+    });
+    if (!edit) return null;
+    // What the page is told of the send (kept here, refused) comes from the edit's own authority.
+    const stopForwarding = edit.authority.listen?.((event) => {
+      if (event.kind === 'status') this.#emit(event);
+    });
+    const finish = async () => {
+      stopForwarding?.();
+      await edit.authority.close?.();
+    };
+    let result: LibraryAuthorityCommandResult;
+    try {
+      result = await edit.authority.command(command, operationId);
+    } catch (error) {
+      console.warn('den: a narrow edit failed; the whole log makes it', error);
+      await finish();
+      return null;
+    }
+    noteNarrowEdit();
+    // A hand edit answers `synced` while its send is still under way (`LibraryLogAuthority#editDelivery`), so the end
+    // of the send is waited for whatever `delivery` says. With nothing kept, the send has already ended — `settled`,
+    // resolved first, wins the race — or there was nothing to send.
+    const outcome = edit.sending()
+      ? edit.settled
+      : Promise.race([edit.settled, Promise.resolve(null)]);
+    const sending = outcome.then(async (ended) => {
+      await finish();
+      return ended;
+    });
+    this.#narrowSending = sending.then(() => undefined);
+    void sending
+      .then(async (ended) => {
+        this.#narrowSending = undefined;
+        if (ended === null) return;
+        if (ended !== 'sent') {
+          await this.#promote(`edit:${ended}`);
+          return;
+        }
+        // A check already under way may have read den-edge before this write landed: one more follows it.
+        await this.#checking?.catch(() => undefined);
+        await this.#reconcile();
+      })
+      .catch((error: unknown) => console.warn('den: a narrow edit could not be taken in', error));
+    return result;
+  }
   query: LibraryServiceAuthority['query'] = async (query) => {
     if (!this.#full && query.kind === 'relay.membership')
       return {
@@ -1047,30 +1117,33 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     startupMark('library promoted', reason);
     this.#cancelTimer();
     this.#cancelReconsider();
-    const opening = this.openFull().then(async (authority) => {
-      if (!authority)
-        throw new LibraryServiceAuthorityError({
-          code: 'not-found',
-          message: 'library could not be opened',
-          retryable: true,
-        });
-      if (this.#closed) {
-        await authority.close?.();
-        throw new LibraryServiceAuthorityError({
-          code: 'not-ready',
-          message: 'library service closed while opening',
-          retryable: true,
-        });
-      }
-      this.#full = authority;
-      this.#stopFull = authority.listen?.((event) => this.#emit(event));
-      if (this.#lifecycle) await authority.observe(this.#lifecycle);
-      if (this.#foregroundReady) await authority.observe({ kind: 'foreground-ready' });
-      for (const { observation } of this.#titleShapes.values())
-        await authority.observe(observation);
-      this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
-      return authority;
-    });
+    // A narrow edit still sending owns its kept work until it has come to an end; the whole log takes it from there.
+    const opening = (this.#narrowSending ?? Promise.resolve())
+      .then(() => this.openFull())
+      .then(async (authority) => {
+        if (!authority)
+          throw new LibraryServiceAuthorityError({
+            code: 'not-found',
+            message: 'library could not be opened',
+            retryable: true,
+          });
+        if (this.#closed) {
+          await authority.close?.();
+          throw new LibraryServiceAuthorityError({
+            code: 'not-ready',
+            message: 'library service closed while opening',
+            retryable: true,
+          });
+        }
+        this.#full = authority;
+        this.#stopFull = authority.listen?.((event) => this.#emit(event));
+        if (this.#lifecycle) await authority.observe(this.#lifecycle);
+        if (this.#foregroundReady) await authority.observe({ kind: 'foreground-ready' });
+        for (const { observation } of this.#titleShapes.values())
+          await authority.observe(observation);
+        this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
+        return authority;
+      });
     this.#opening = opening;
     void opening
       .catch(() => undefined)
@@ -1084,6 +1157,37 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
 export interface FinishedLibraryViewAuthorityOpen {
   authority: LibraryServiceAuthority;
   membership: { libraryId: string; memberToken: string };
+}
+
+/** One edit's authority on a log of its own documents, and how its send came to end (`LibraryLog.openNarrow`). */
+export interface NarrowEdit {
+  authority: LibraryServiceAuthority;
+  /** Resolves when a send the edit started comes to an end; never, for an edit that had nothing to send. */
+  settled: Promise<DeferredDelivery['outcome']>;
+  /** Whether the edit left work kept: a send under way, or one waiting for den-edge. `settled` then resolves. */
+  sending: () => boolean;
+}
+
+/**
+ * The documents an edit of one title or episode reads and writes, by name, as `titleRow` and `episodeRow` read them:
+ * null for any other edit, which the whole log makes. A whole series marked watched needs its shape and every episode.
+ */
+export function narrowEditNames(command: LibraryCommand): string[] | null {
+  const title = (ref: TitleRef) => [`title:${ref.type}:${ref.id}`, `rec:${ref.type}:${ref.id}`];
+  switch (command.kind) {
+    case 'watchlist.add':
+    case 'library.remove':
+    case 'reaction.set':
+      return title(command.title);
+    case 'watched.set':
+      return command.title.type === 'movie' ? title(command.title) : null;
+    case 'episode-watched.set': {
+      const { season, episode } = command.episode;
+      return [...title(command.episode), ...episodeRowNames(command.episode, season, episode)];
+    }
+    default:
+      return null;
+  }
 }
 
 const FACT_BATCH = 64;
@@ -1470,6 +1574,7 @@ export async function openFinishedLibraryViewAuthority(
   content: Pick<ContentReader, 'title'>,
   fetchImpl: typeof fetch = (input, init) => fetch(input, init),
   progress?: (progress: number) => void,
+  openNarrow?: (names: readonly string[]) => Promise<NarrowEdit | null>,
 ): Promise<FinishedLibraryViewAuthorityOpen | null> {
   if (request.mode !== 'online') return null;
   const raw = rawLibraryKey(request.libraryKey);
@@ -1545,6 +1650,7 @@ export async function openFinishedLibraryViewAuthority(
         !classic,
         filling,
         factsReady && factManifest!.generation === selected.identity.generation ? factStore! : null,
+        openNarrow,
       ),
       membership,
     };

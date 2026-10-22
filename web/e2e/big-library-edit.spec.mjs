@@ -47,21 +47,33 @@ function countWorkerWrites(page) {
         .catch(() => null),
     ),
   );
-  /** KB written of the library since the last call, and every name's bytes since the page opened. */
-  let before = 0;
+  /**
+   * KB written of the library since the last call, every name's bytes since the page opened, and since the last call
+   * the edits made on a log of their own documents (`narrow`) and the documents read to open the whole one (`folded`),
+   * from the library Worker's own metrics (`libraryStartupMetrics.ts`).
+   */
+  let before = { library: 0, narrow: 0, folded: 0 };
   return async () => {
     const written = {};
+    const now = { library: 0, narrow: 0, folded: 0 };
     for (const worker of await Promise.all(workers)) {
       const held = await worker?.evaluate(() => globalThis.__written).catch(() => null);
       for (const [name, bytes] of Object.entries(held ?? {}))
         written[name] = (written[name] ?? 0) + bytes;
+      const metrics = await worker
+        ?.evaluate(() => globalThis.__denLibraryStartupMetrics)
+        .catch(() => undefined);
+      now.narrow += metrics?.narrowEdits ?? 0;
+      now.folded += metrics?.documentsFolded ?? 0;
     }
-    const library = Object.entries(written)
+    now.library = Object.entries(written)
       .filter(([name]) => LIBRARY.has(name))
       .reduce((sum, [, bytes]) => sum + bytes, 0);
-    const kb = Math.round(((library - before) / 1024) * 10) / 10;
-    before = library;
-    return { kb, written };
+    const kb = Math.round(((now.library - before.library) / 1024) * 10) / 10;
+    const narrow = now.narrow - before.narrow;
+    const folded = now.folded - before.folded;
+    before = now;
+    return { kb, narrow, folded, written };
   };
 }
 
@@ -186,8 +198,11 @@ test('an edit to a big household writes only what it changed', async () => {
     await after.page.close();
     console.log([...edits, next].map((measured) => JSON.stringify(measured)).join('\n'));
 
-    for (const { action, shownMs, kb, written } of edits) {
+    for (const { action, shownMs, kb, narrow, folded, written } of edits) {
       expect.soft(shownMs, `${action}: ms until it shows`).toBeLessThan(SHOWN_MS);
+      // An edit reads its own documents, never the whole library (#743).
+      expect.soft(narrow, `${action}: made on a log of its own documents`).toBe(1);
+      expect.soft(folded, `${action}: library documents read to open the whole log`).toBe(0);
       expect
         .soft(kb, `${action}: KB written of the library ${JSON.stringify(written)}`)
         .toBeLessThan(LIBRARY_KB);
