@@ -155,6 +155,8 @@
   // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
   const profileActivity = untrack(() => session.profileActivity);
   const SHELF_TRANCHE = 8;
+  /** Series layouts the shelves wait for at once: two rows' worth of cards, most of them already finished series. */
+  const SHAPE_TRANCHE = 16;
   let shelvesReady = $state(model === null);
   /**
    * The shelves under the top one (`topShelf`) mount a task after it. The flush that readied the shelves
@@ -400,12 +402,40 @@
     const continued = continueView;
     if (!view || !continued) return undefined;
     return [
-      ...continued.needsShapes,
+      // Newest-watched first (`homeLibraryView.ts`), a tranche at a time: every series ever watched needs its layout
+      // before Continue Watching knows whether it has a next episode, and an empty TMDB cache asked 404 of them before
+      // a row of seven cards. As each tranche's layouts arrive they leave `needsShapes`, the set changes, and this pass
+      // runs again on the next, behind the shelves.
+      ...continued.needsShapes.slice(0, SHAPE_TRANCHE),
       ...continued.items.slice(0, continueNameLimit).map(({ title }) => title),
       ...view.watchlist.slice(0, watchlistNameLimit),
-      ...view.seeds.watched,
-      ...view.seeds.watchlisted,
     ];
+  });
+  /**
+   * The titles Home's ranking is seeded from, named in a pass of their own: the shelves don't show them, and an LG
+   * with no TMDB answers kept held its shelves seven seconds for 132 lookups that were mostly these.
+   */
+  const seedNamingRefs = $derived(
+    overview ? [...overview.seeds.watched, ...overview.seeds.watchlisted] : undefined,
+  );
+  const seedNamingSet = $derived(seedNamingRefs?.map(titleKey).sort().join(' '));
+  /** The ranking's seeds are named: what the billboard's one personalised ranking sends to atlas. */
+  let seedsNamed = $state(model === null);
+  $effect(() => {
+    if (!model || seedNamingSet === undefined || (session.kid && !atlasReady)) {
+      seedsNamed = model === null;
+      return;
+    }
+    // After the shelves' own pass, so the shelves' lookups don't queue behind these.
+    if (!shelvesReady) return;
+    let disposed = false;
+    const refs = untrack(() => seedNamingRefs!);
+    void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
+      if (!disposed) seedsNamed = true;
+    });
+    return () => {
+      disposed = true;
+    };
   });
   /**
    * The titles that pass names, as a set: it restarts only when they change. Every Continue Watching update is a new
@@ -1231,13 +1261,14 @@
     }));
   });
   /**
-   * The recent profile facts Home can rank rows against, drawn only from the bounded title tranche its personal
-   * shelves already named. Ranking never wakes dormant history metadata; absent names leave the old order intact.
+   * The recent profile facts Home can rank rows against, drawn only from the bounded title tranche Home already
+   * named (its shelves and its ranking's seeds). Ranking never wakes dormant history metadata; absent names leave the
+   * old order intact.
    */
   let homeTaste = $state.raw<HomeTasteTitle[]>([]);
   $effect(() => {
     const policyReady = atlasReady;
-    const shelvesNamed = shelvesReady;
+    const shelvesNamed = shelvesReady && seedsNamed;
     const entries = [...weighted]
       .filter(({ weight }) => Number.isFinite(weight) && weight !== 0)
       .sort((left, right) => right.at - left.at)
@@ -1559,7 +1590,8 @@
     )
       return;
     const here = atlas;
-    const named = shelvesReady;
+    // Its ranking sends the seeds' names, which are named after the shelves' own (`seedsNamed`).
+    const named = shelvesReady && seedsNamed;
     if (session.kid) {
       const ready = kidHomeReady;
       const available = rankedKidHome.length;

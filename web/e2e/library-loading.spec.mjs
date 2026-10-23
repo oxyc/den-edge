@@ -186,7 +186,8 @@ for (const [width, failed] of [
         ).observe({ type: 'layout-shift', buffered: true });
       });
       await page.goto(`${E2E_ORIGIN}/test/library.html?populated`);
-      await expect.poll(() => requested.size).toBe(4);
+      // The shelves wait for their own titles only; the ranking's seeds are named once the shelves are up.
+      await expect.poll(() => requested.size).toBe(2);
       const pending = page.locator('[data-pending-shelf]');
       await expect(pending).toHaveCount(2);
       await expect(pending.locator('.skeleton')).toHaveCount(12);
@@ -228,6 +229,8 @@ for (const [width, failed] of [
         // A failed earlier shelf is deliberately removed; the later shelf then closes that reserved gap.
         if (!failed) expect(settled.top).toBeCloseTo(pendingGeometry[label].top, 1);
       }
+      // And then the seeds, behind the shelves.
+      await expect.poll(() => requested.size).toBe(4);
       const positions = () =>
         page.locator('section.row').evaluateAll(
           (rows, labels) =>

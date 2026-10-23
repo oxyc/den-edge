@@ -8,6 +8,7 @@
 import { transactions } from './localVault';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
+import { startupCount } from './startupTiming';
 import { titleBrief } from './tmdb';
 
 const TMDB = 'https://api.themoviedb.org/3/';
@@ -438,13 +439,17 @@ export function cachingFetch(
         fetchedAt: entry.fetchedAt,
         freshMs: freshFor(url.pathname, entry.body, url.searchParams.get('append_to_response')),
       })
-      .catch(() => undefined);
+      .catch(() => startupCount('tmdb write failed'));
   };
   const keep = async (key: string, url: URL, entry: Entry, parsed?: object) => {
     // Publish synchronously before the first await: a settled flight is removed in this same microtask turn.
     remember(key, entry, parsed);
     keepBrief(key, url, entry, parsed);
-    await store?.put(key, entry);
+    await store?.put(key, entry).catch((error: unknown) => {
+      // Counted here: every caller drops it, and a store that never keeps anything asks again on every visit.
+      startupCount('tmdb write failed');
+      throw error;
+    });
     if (keptSince !== undefined && ++keptSince >= PRUNE_EVERY) prune();
   };
   /** An answer fetched now, as it is kept: checked, and dated as `fetchedAtOf` says. */
@@ -488,10 +493,14 @@ export function cachingFetch(
     if (keptSince === undefined) prune();
     const url = new URL(href);
     const key = keyOf(url);
-    const kept = await briefs.get(key).catch(() => undefined);
+    const kept = await briefs.get(key).catch(() => {
+      startupCount('tmdb read failed');
+      return undefined;
+    });
     if (!kept) return undefined;
     const age = now() - kept.fetchedAt;
     if (age >= RETENTION || age >= kept.freshMs + STALE_FOR) return undefined;
+    startupCount(age >= kept.freshMs ? 'tmdb brief stale' : 'tmdb brief fresh');
     if (age >= kept.freshMs) refresh(key, url);
     return kept.value;
   };
@@ -502,11 +511,19 @@ export function cachingFetch(
     const asked = proxied(url);
     // Local storage is optional; the same-origin relay is not. A private/restricted browser without IndexedDB must
     // still share den-edge's cache and must never send a household key directly to TMDB.
-    if (!store || (init?.method ?? 'GET') !== 'GET') return network(asked, init);
+    if (!store || (init?.method ?? 'GET') !== 'GET') {
+      if (!store) startupCount('tmdb no store');
+      return network(asked, init);
+    }
     if (keptSince === undefined) prune();
     const key = keyOf(url);
     const remembered = recall(key);
-    const stored = remembered?.entry ?? (await store.get(key).catch(() => undefined));
+    const stored =
+      remembered?.entry ??
+      (await store.get(key).catch(() => {
+        startupCount('tmdb read failed');
+        return undefined;
+      }));
     if (stored?.status === 404 && now() - stored.fetchedAt < ABSENT_FOR) return absent();
     // Anything unusable is treated as absent, which also heals what an earlier version kept. So is anything
     // past TMDB's six months, whatever happens next: not shown stale, and not shown when the network is down.
@@ -532,11 +549,17 @@ export function cachingFetch(
       }
       return answer(shown.body, parsed);
     };
-    if (kept && age < fresh) return keptAnswer(kept);
+    if (kept && age < fresh) {
+      startupCount('tmdb fresh');
+      return keptAnswer(kept);
+    }
     if (kept && age < fresh + STALE_FOR) {
+      startupCount('tmdb stale');
       refresh(key, url, init);
       return keptAnswer(kept);
     }
+    // Asked of the network while the caller waits: nothing kept, or kept too long ago to show.
+    startupCount(kept || stored ? 'tmdb too old' : 'tmdb missing');
     try {
       const res = await network(asked, init);
       if (!res.ok) {

@@ -101,4 +101,12 @@ describe('loadSettled', () => {
       ),
     ).toBe(true);
   });
+
+  it('waits on Home for its shelves, which can follow its first poster by seconds', () => {
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900 }), 'home')).toBe(false);
+    expect(
+      loadSettled(at({ [MILESTONES.posterMs]: 900, [MILESTONES.shelvesMs]: 13_000 }), 'home'),
+    ).toBe(true);
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900 }), 'title')).toBe(true);
+  });
 });

@@ -563,6 +563,14 @@ struct LoadReport {
     /// A first library read's start and end: on a slow device it is most of a first open.
     import_start_ms: Option<u32>,
     import_ms: Option<u32>,
+    /// The same Worker steps as the last library Worker reached them: the handover waits for both of two.
+    worker_script_last_ms: Option<u32>,
+    worker_core_ready_last_ms: Option<u32>,
+    worker_ready_last_ms: Option<u32>,
+    worker_log_opened_last_ms: Option<u32>,
+    /// What the TMDB cache did for this load, by outcome.
+    #[serde(default)]
+    tmdb_cache: std::collections::BTreeMap<TmdbCacheOutcome, u32>,
     workers: u32,
     /// The page started hidden (a background tab), which delays everything that waits for a frame.
     #[serde(default)]
@@ -589,6 +597,37 @@ enum NetKind {
     Atlas,
     Image,
     Other,
+}
+
+/// What the browser's TMDB cache did with one question (`loadReport.ts` `TMDB_CACHE`). A closed set.
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum TmdbCacheOutcome {
+    Fresh,
+    Stale,
+    BriefFresh,
+    BriefStale,
+    Missing,
+    TooOld,
+    ReadFailed,
+    WriteFailed,
+    NoStore,
+}
+
+impl TmdbCacheOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TmdbCacheOutcome::Fresh => "fresh",
+            TmdbCacheOutcome::Stale => "stale",
+            TmdbCacheOutcome::BriefFresh => "brief_fresh",
+            TmdbCacheOutcome::BriefStale => "brief_stale",
+            TmdbCacheOutcome::Missing => "missing",
+            TmdbCacheOutcome::TooOld => "too_old",
+            TmdbCacheOutcome::ReadFailed => "read_failed",
+            TmdbCacheOutcome::WriteFailed => "write_failed",
+            TmdbCacheOutcome::NoStore => "no_store",
+        }
+    }
 }
 
 impl NetKind {
@@ -636,6 +675,10 @@ impl LoadReport {
             ("episodes", self.episodes_ms),
             ("import_start", self.import_start_ms),
             ("import", self.import_ms),
+            ("w_script_last", self.worker_script_last_ms),
+            ("w_core_last", self.worker_core_ready_last_ms),
+            ("worker_last", self.worker_ready_last_ms),
+            ("w_log_last", self.worker_log_opened_last_ms),
         ] {
             if let Some(ms) = ms {
                 parts.push(format!("{name}:{}", ms.min(MAX_MS)));
@@ -651,6 +694,9 @@ impl LoadReport {
                     ms.min(&MAX_NET_MS)
                 ));
             }
+        }
+        for (outcome, count) in &self.tmdb_cache {
+            parts.push(format!("tmdb_{}:{}", outcome.as_str(), count.min(&MAX_REQUESTS)));
         }
         if let Some((count, ms, longest)) = self.long_tasks {
             parts.push(format!(
@@ -1217,14 +1263,19 @@ mod tests {
             "directoryMs": 5_000, "handoverMs": 5_300, "workers": 2,
             "net": { "atlas": [1, 86] }, "workerNet": { "lib": [3, 900], "meta": [5, 600] },
             "longTasks": [12, 3_400, 900],
+            "workerScriptLastMs": 2_700, "workerCoreReadyLastMs": 3_900, "workerReadyLastMs": 4_000,
+            "workerLogOpenedLastMs": 5_200,
+            "tmdbCache": { "missing": 132, "fresh": 3, "write_failed": 132 },
         }))
         .unwrap();
         assert_eq!(
             report.tag(),
             "route:home,device:tv,engine:blink,boot:120,app:130,app_eval:900,mounted:1100,w_started:140,\
              w_script:1600,session:1620,core_compile:1650,core_compiled:2100,w_core_req:1640,w_core:2300,worker:2400,\
-             capability:3000,bootstrap:3100,w_log_req:3200,w_log:4700,directory:5000,handover:5300,workers:2,\
-             net_atlas:1/86ms,wnet_lib:3/900ms,wnet_meta:5/600ms,long:12/3400ms/max900ms"
+             capability:3000,bootstrap:3100,w_log_req:3200,w_log:4700,directory:5000,handover:5300,\
+             w_script_last:2700,w_core_last:3900,worker_last:4000,w_log_last:5200,workers:2,\
+             net_atlas:1/86ms,wnet_lib:3/900ms,wnet_meta:5/600ms,tmdb_fresh:3,tmdb_missing:132,\
+             tmdb_write_failed:132,long:12/3400ms/max900ms"
         );
     }
 

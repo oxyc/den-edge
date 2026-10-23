@@ -81,6 +81,23 @@ it('selects the fixed Home view from rows once', () => {
   expect(worker).not.toHaveProperty('continue');
 });
 
+it('asks for the layouts of the series watched most recently first', () => {
+  const mark = (id: number, updatedAt: number) => ({
+    type: 'tv',
+    id,
+    season: 1,
+    episode: 1,
+    fraction: 1,
+    updatedAt,
+    title: '',
+    voteAverage: 0,
+  });
+  const library = foldFor([]);
+  // Stored oldest first, as a library written over years is; Home shows the newest.
+  library.marks = [mark(10, 100), mark(12, 300), mark(14, 200), mark(12, 50)];
+  expect(selectHomeLibraryView(library, []).requiredShapeRefs).toEqual(['tv:12', 'tv:14', 'tv:10']);
+});
+
 it('is materially smaller than the representative projection graph it describes', () => {
   const rows = Array.from({ length: 5_000 }, (_, id) =>
     titleRow(
