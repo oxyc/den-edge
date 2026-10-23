@@ -286,4 +286,46 @@ describe('indexedVault', () => {
     expect(await vault.entries('lib:pending:')).toEqual([]);
     expect(await vault.get('lib:meta')).toEqual(bytes(8));
   });
+
+  it('compares one value and applies every prepared change in the same transaction', async () => {
+    const idb = fakeIndexedDB();
+    vi.stubGlobal('IDBKeyRange', {
+      bound: (lower: IDBValidKey, upper: IDBValidKey, lowerOpen = false, upperOpen = false) => ({
+        lower,
+        upper,
+        lowerOpen,
+        upperOpen,
+      }),
+    });
+    const vault = indexedVault(idb.factory);
+    const bytes = (value: number) => new Uint8Array([value]);
+    await vault.put('manifest', bytes(1));
+    await vault.put('piece:old', bytes(2));
+
+    const beforeFailed = idb.transactions.length;
+    await expect(
+      vault.compareAndCommit?.('manifest', bytes(9), [
+        { kind: 'put', key: 'manifest', value: bytes(3) },
+        { kind: 'put', key: 'piece:new', value: bytes(4) },
+        { kind: 'delete', key: 'piece:old' },
+      ]),
+    ).resolves.toBe(false);
+    expect(idb.transactions).toHaveLength(beforeFailed + 1);
+    expect(await vault.get('manifest')).toEqual(bytes(1));
+    expect(await vault.get('piece:old')).toEqual(bytes(2));
+    expect(await vault.get('piece:new')).toBeUndefined();
+
+    const beforeCommitted = idb.transactions.length;
+    await expect(
+      vault.compareAndCommit?.('manifest', bytes(1), [
+        { kind: 'put', key: 'manifest', value: bytes(3) },
+        { kind: 'put', key: 'piece:new', value: bytes(4) },
+        { kind: 'delete', key: 'piece:old' },
+      ]),
+    ).resolves.toBe(true);
+    expect(idb.transactions).toHaveLength(beforeCommitted + 1);
+    expect(await vault.get('manifest')).toEqual(bytes(3));
+    expect(await vault.get('piece:old')).toBeUndefined();
+    expect(await vault.get('piece:new')).toEqual(bytes(4));
+  });
 });

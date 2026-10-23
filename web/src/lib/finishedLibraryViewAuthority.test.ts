@@ -39,6 +39,29 @@ class MemoryVault implements Vault {
   async remove(prefix: string) {
     for (const key of this.values.keys()) if (key.startsWith(prefix)) this.values.delete(key);
   }
+  async compareAndCommit(
+    key: string,
+    expected: Uint8Array | undefined,
+    changes: readonly VaultChange[],
+  ) {
+    const current = this.values.get(key);
+    if (!(
+      current === expected ||
+      (!!current &&
+        !!expected &&
+        current.byteLength === expected.byteLength &&
+        current.every((byte, index) => byte === expected[index]))
+    ))
+      return false;
+    const next = new Map(this.values);
+    for (const change of changes) {
+      if (change.kind === 'put') next.set(change.key, change.value.slice());
+      else next.delete(change.key);
+    }
+    this.values.clear();
+    for (const [name, value] of next) this.values.set(name, value);
+    return true;
+  }
 }
 
 class FactVault extends MemoryVault {

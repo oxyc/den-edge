@@ -14,7 +14,7 @@ import {
   libraryLocalAuthorityRevision,
   validLibraryLocalAuthorityIdentity,
 } from './libraryLocalAuthority';
-import { readEncryptedLibraryValue, writeEncryptedLibraryValue } from './libraryLocalValue';
+import { readEncryptedLibraryValue } from './libraryLocalValue';
 import type { Vault } from './localVault';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
@@ -277,13 +277,14 @@ export class FinishedLibraryViewWriter {
       },
     };
     if (this.#aborted) return;
-    if (!(await writeFinishedLibraryViews(this.libraryKey, this.vault, value))) return;
-    if (this.#aborted) return;
-    await writeEncryptedLibraryValue(this.libraryKey, this.vault, LIBRARY_LOCAL_AUTHORITY, {
-      generation: value.identity.generation,
-      head: value.identity.head,
-      authorityRevision: value.identity.authorityRevision,
-      rowsVersion: value.identity.rowsVersion,
-    });
+    if (
+      !(await writeFinishedLibraryViews(this.libraryKey, this.vault, value, {
+        generation: value.identity.generation,
+        head: value.identity.head,
+        authorityRevision: value.identity.authorityRevision,
+        rowsVersion: value.identity.rowsVersion,
+      }))
+    )
+      return;
   }
 }

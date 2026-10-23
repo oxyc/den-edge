@@ -9,6 +9,7 @@ import type { TitleRow } from './wire';
 
 class FactVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
+  readonly conditionalCommits: VaultChange[][] = [];
   async get(key: string) {
     return this.values.get(key)?.slice();
   }
@@ -39,6 +40,24 @@ class FactVault implements Vault {
     this.values.clear();
     for (const [key, value] of next) this.values.set(key, value);
   }
+  async compareAndCommit(
+    key: string,
+    expected: Uint8Array | undefined,
+    changes: readonly VaultChange[],
+  ) {
+    const current = this.values.get(key);
+    if (!(
+      current === expected ||
+      (!!current &&
+        !!expected &&
+        current.byteLength === expected.byteLength &&
+        current.every((byte, index) => byte === expected[index]))
+    ))
+      return false;
+    await this.commit(changes);
+    this.conditionalCommits.push([...changes]);
+    return true;
+  }
 }
 
 class BlockingVault implements Vault {
@@ -58,12 +77,19 @@ class BlockingVault implements Vault {
   page(prefix: string, after: string | undefined, limit: number) {
     return this.shared.page(prefix, after, limit);
   }
-  async put(key: string, value: Uint8Array) {
-    if (this.blockManifest && key.endsWith(':finished-views.v1')) {
+  put(key: string, value: Uint8Array) {
+    return this.shared.put(key, value);
+  }
+  async compareAndCommit(
+    key: string,
+    expected: Uint8Array | undefined,
+    changes: readonly VaultChange[],
+  ) {
+    if (this.blockManifest) {
       this.reachManifest();
       await this.manifestReleased;
     }
-    return this.shared.put(key, value);
+    return this.shared.compareAndCommit(key, expected, changes);
   }
   delete(key: string) {
     return this.shared.delete(key);
@@ -185,6 +211,13 @@ it('waits for an in-flight writer before transferring saved-view ownership', asy
   const newWriter = new FinishedLibraryViewWriter(libraryKey, newVault, newStore);
   newWriter.schedule(true);
   await newWriter.close();
+
+  expect(
+    shared.conditionalCommits
+      .at(-1)
+      ?.filter((change) => change.kind === 'put')
+      .map((change) => change.key.slice(change.key.indexOf(':') + 1)),
+  ).toEqual(expect.arrayContaining(['finished-views.v1', 'local-authority.v1']));
 
   await expect(readFinishedLibraryViews(libraryKey, shared, ['watchlist'])).resolves.toMatchObject({
     identity: { head: 11 },

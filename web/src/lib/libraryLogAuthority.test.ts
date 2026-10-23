@@ -8,7 +8,7 @@ import { LibraryLogAuthority } from './libraryLogAuthority';
 import { LibraryServiceAuthorityError } from './libraryServiceCore';
 import { LIBRARY_SERVICE_PROTOCOL, LIBRARY_SERVICE_WIRE_LIMITS } from './libraryServiceProtocol';
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
-import type { Vault } from './localVault';
+import type { Vault, VaultChange } from './localVault';
 import { LibraryLog } from './log';
 import type { ProfileDirectoryDocument } from './profileDirectory';
 import { validateKidTitleApprovals, type KidTitleApprovalsDocument } from './kidTitleApprovals';
@@ -40,6 +40,26 @@ function memoryVault(withFacts = false): Vault {
     delete: async (key) => void data.delete(key),
     remove: async (prefix) => {
       for (const key of data.keys()) if (key.startsWith(prefix)) data.delete(key);
+    },
+    compareAndCommit: async (
+      key: string,
+      expected: Uint8Array | undefined,
+      changes: readonly VaultChange[],
+    ) => {
+      const current = data.get(key);
+      if (!(
+        current === expected ||
+        (!!current &&
+          !!expected &&
+          current.byteLength === expected.byteLength &&
+          current.every((byte, index) => byte === expected[index]))
+      ))
+        return false;
+      for (const change of changes) {
+        if (change.kind === 'put') data.set(change.key, change.value.slice());
+        else data.delete(change.key);
+      }
+      return true;
     },
   };
   if (withFacts) {
