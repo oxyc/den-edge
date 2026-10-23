@@ -49,7 +49,8 @@ export function verifyTvCore() {
     tv.schema !== 1 ||
     tv.rust !== source.rust ||
     tv.sourceManifest !== '../den-core/SOURCE.json' ||
-    tv.rustflags !== '-C target-feature=-reference-types' ||
+    tv.rustflags !==
+      '-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types' ||
     JSON.stringify(tv.buildStd) !== JSON.stringify(['std', 'panic_abort']) ||
     tv.removeNameSection !== true ||
     tv.normalizedBuildPaths !== true
@@ -87,7 +88,8 @@ export function verifyTizen3Core() {
     legacy.sourceManifest !== '../den-core/SOURCE.json' ||
     legacy.rust !== source.rust ||
     legacy.binaryen !== 133 ||
-    legacy.rustflags !== '-C target-feature=-reference-types,-multivalue' ||
+    legacy.rustflags !==
+      '-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types,-multivalue' ||
     JSON.stringify(legacy.excludes) !== JSON.stringify(['assistant'])
   )
     throw new Error('Tizen 3 den-core recipe does not match the pinned JavaScript fallback');
