@@ -4,6 +4,33 @@ import { E2E_ORIGIN } from './base-url.mjs';
 const ID = '0123456789abcdef0123456789abcdef';
 const ORIGIN = E2E_ORIGIN;
 const CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
+const utf8 = new TextEncoder();
+
+/** The opaque library-v2 key den-edge sees for `name`. */
+async function rowKey(libraryKey, name) {
+  const raw = Uint8Array.from(atob(libraryKey), (character) => character.charCodeAt(0));
+  const material = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits']);
+  const macBytes = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: utf8.encode('den/library/v2'),
+      info: utf8.encode('mac'),
+    },
+    material,
+    256,
+  );
+  const mac = await crypto.subtle.importKey(
+    'raw',
+    macBytes,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', mac, utf8.encode(name))), (b) =>
+    b.toString(16).padStart(2, '0'),
+  ).join('');
+}
 
 /** A context that answers den-edge's consent routes and records what the page sent them. */
 async function consentContext(
@@ -230,7 +257,7 @@ async function linkingContexts(browser, { expired = false, write = false, read =
         rows.set(w.k, entry);
         applied.push({ k: w.k, seq: entry.seq });
       }
-      steps.push(`batch:${applied.length}`);
+      steps.push(applied.length ? `batch:${applied.map(({ k }) => k).join(',')}` : 'batch:0');
       return json(200, { applied, conflicts: [] });
     }
     if (url.pathname === '/pair/new') {
@@ -341,6 +368,10 @@ test('a member allows changes to the library, and the grant is in the library be
     await expect(allow).toBeVisible();
     await expect(allow).not.toBeChecked();
     await allow.check();
+    const libraryKey = await page.evaluate(
+      () => JSON.parse(localStorage.getItem('den.links') ?? '[]')[0]?.libraryKey,
+    );
+    expect(libraryKey).toMatch(/^[A-Za-z0-9+/]{43}=$/);
     steps.length = 0;
     await dialog.getByRole('button', { name: 'Allow' }).click();
     await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
@@ -348,15 +379,26 @@ test('a member allows changes to the library, and the grant is in the library be
     expect(approval?.member).toBe(true);
     expect(approval?.body?.write?.grant).toMatch(/^[0-9a-f]{32}$/);
     expect(approval?.body?.write?.key).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    // The drop-box key's row, then den-edge's copy of its public half, then the grant's row and its play record
-    // (§16), then the approval.
-    expect(stepsAtApproval.filter((s) => s !== 'batch:0')).toEqual([
-      'batch:1',
+    const [deviceRow, dropboxRow, grantsRow, playRow] = await Promise.all(
+      ['set:devices', 'set:assistant', 'set:assistant-grants', 'set:assistant-play'].map((name) =>
+        rowKey(libraryKey, name),
+      ),
+    );
+    const consent = [
+      `batch:${dropboxRow}`,
       'dropbox',
-      'batch:1',
-      'batch:1',
+      `batch:${grantsRow}`,
+      `batch:${playRow}`,
       'approve',
-    ]);
+    ];
+    const observed = stepsAtApproval.filter((step) => step !== 'batch:0');
+    const deviceBatch = `batch:${deviceRow}`;
+    const deviceBatches = observed.filter((step) => step === deviceBatch);
+    // The host and newly linked browser may each run their delayed device heartbeat while consent is published.
+    // Admit only those identified housekeeping writes; consent itself remains the exact drop-box row and public
+    // key, grant and play rows (§16), then approval, with no duplicate or unrelated write between those boundaries.
+    expect(deviceBatches.length).toBeLessThanOrEqual(2);
+    expect(observed.filter((step) => step !== deviceBatch)).toEqual(consent);
   } finally {
     await browser.close();
   }
