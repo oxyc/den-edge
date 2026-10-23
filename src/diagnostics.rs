@@ -436,6 +436,9 @@ pub async fn handle_page_error(state: &Arc<AppState>, req: Request) -> Response 
 const LOAD_BUCKET: &str = "load";
 /// A page starts a Worker per library session and one more on a restart; past this is a burst worth seeing as such.
 const MAX_WORKERS: u32 = 50;
+/// Caps on one kind's request tally: its count, and its milliseconds summed across requests that overlap.
+const MAX_REQUESTS: u32 = 10_000;
+const MAX_NET_MS: u32 = 36_000_000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -469,6 +472,7 @@ enum DeviceClass {
     Phone,
     Tablet,
     Desktop,
+    Tv,
 }
 
 impl DeviceClass {
@@ -477,6 +481,7 @@ impl DeviceClass {
             DeviceClass::Phone => "phone",
             DeviceClass::Tablet => "tablet",
             DeviceClass::Desktop => "desktop",
+            DeviceClass::Tv => "tv",
         }
     }
 }
@@ -538,12 +543,43 @@ struct LoadReport {
     shelves_ms: Option<u32>,
     poster_ms: Option<u32>,
     episodes_ms: Option<u32>,
+    /// A first library read's start and end: on a slow device it is most of a first open.
+    import_start_ms: Option<u32>,
+    import_ms: Option<u32>,
     workers: u32,
     /// The page started hidden (a background tab), which delays everything that waits for a frame.
     #[serde(default)]
     hidden: bool,
     entry: Option<LoadEntry>,
     release: Option<Release>,
+    /// The page's own requests by kind, each `[count, milliseconds summed]`.
+    #[serde(default)]
+    net: std::collections::BTreeMap<NetKind, (u32, u32)>,
+}
+
+/// What a page's request was for (`loadReport.ts` `netKindOf`). A closed set, so a report carries no path.
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum NetKind {
+    Lib,
+    Tmdb,
+    Meta,
+    Atlas,
+    Image,
+    Other,
+}
+
+impl NetKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            NetKind::Lib => "lib",
+            NetKind::Tmdb => "tmdb",
+            NetKind::Meta => "meta",
+            NetKind::Atlas => "atlas",
+            NetKind::Image => "image",
+            NetKind::Other => "other",
+        }
+    }
 }
 
 impl LoadReport {
@@ -561,12 +597,22 @@ impl LoadReport {
             ("shelves", self.shelves_ms),
             ("poster", self.poster_ms),
             ("episodes", self.episodes_ms),
+            ("import_start", self.import_start_ms),
+            ("import", self.import_ms),
         ] {
             if let Some(ms) = ms {
                 parts.push(format!("{name}:{}", ms.min(MAX_MS)));
             }
         }
         parts.push(format!("workers:{}", self.workers.min(MAX_WORKERS)));
+        for (kind, (count, ms)) in &self.net {
+            parts.push(format!(
+                "net_{}:{}/{}ms",
+                kind.as_str(),
+                count.min(&MAX_REQUESTS),
+                ms.min(&MAX_NET_MS)
+            ));
+        }
         if self.hidden {
             parts.push("hidden:1".to_owned());
         }
@@ -1091,6 +1137,34 @@ mod tests {
             "route:series,device:phone,engine:webkit,app:40,worker:300,handover:420,shelves:9800,workers:3,\
              release:deadbeef"
         );
+    }
+
+    #[test]
+    fn a_load_report_carries_the_first_import_and_the_page_requests_by_kind() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "importStartMs": 900, "importMs": 118_000,
+            "posterMs": 125_000, "workers": 2,
+            "net": { "tmdb": [40, 12_000], "lib": [3, 900], "image": [24, 30_000] },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,poster:125000,import_start:900,import:118000,workers:2,\
+             net_lib:3/900ms,net_tmdb:40/12000ms,net_image:24/30000ms"
+        );
+        let unknown = serde_json::from_value::<LoadReport>(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 1, "net": { "/tmdb/3/movie/550": [1, 1] },
+        }));
+        assert!(unknown.is_err(), "a request's path never reaches the log");
+    }
+
+    #[test]
+    fn a_load_report_names_a_tv() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "billboardDetailMs": 7113, "workers": 2,
+        }))
+        .unwrap();
+        assert_eq!(report.tag(), "route:home,device:tv,engine:blink,billboard:7113,workers:2");
     }
 
     #[test]
