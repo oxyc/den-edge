@@ -28,6 +28,7 @@
     watchPlaybackAttempt,
   } from '../lib/reel';
   import type { PlaybackStep } from '../lib/reel';
+  import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
   import type { Routes } from '../lib/routes';
@@ -431,6 +432,8 @@
   let ambientStep = $state<PlaybackStep | null>(null);
   /** Whether a bare element plays a playlist here, which decides what reel is worth offering. */
   const PLAYS_HLS = nativeHls();
+  /** LG's native HLS pipeline is the dependable trailer path; progressive MP4 remains its fallback. */
+  const PREFER_NATIVE_HLS = PLAYS_HLS && tvRuntimePlatform() === 'webos';
   /** This visible attempt will not play: advance the same ordered cursor. */
   async function ambientFailedOver() {
     playing = false;
@@ -571,6 +574,7 @@
           accepts: (source) =>
             (source.kind === 'mp4' || PLAYS_HLS) &&
             !(source.width && source.height && source.width < source.height),
+          prefer: PREFER_NATIVE_HLS ? (source) => source.kind === 'hls' : undefined,
         });
         const first = await request.cursor.first();
         if (ambientRequest !== request) return;

@@ -14,6 +14,7 @@
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
+  import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   let {
     type,
     tmdbId,
@@ -75,6 +76,8 @@
   const source = $derived(!canMountTrailer || asking ? null : playback?.url);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
+  /** LG's native HLS pipeline is the dependable trailer path; progressive MP4 remains its fallback. */
+  const preferNativeHls = playsHls && tvRuntimePlatform() === 'webos';
   /**
    * The source this page has to drive itself.
    *
@@ -400,6 +403,7 @@
         signal: controller.signal,
         // Chromium 47 has neither MSE nor a useful HLS stack. Skip straight to Reel's progressive MP4.
         accepts: __DEN_TV_LEGACY_JS_CORE__ ? (source) => source.kind === 'mp4' : undefined,
+        prefer: preferNativeHls ? (source) => source.kind === 'hls' : undefined,
       });
       owned = nextCursor;
       cursor = nextCursor;

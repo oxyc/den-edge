@@ -416,6 +416,37 @@ describe('PlaybackCursor', () => {
     expect(asked).toEqual([{ capability: CAPABILITY }]);
   });
 
+  it('can prefer a native master without discarding progressive fallbacks', async () => {
+    const cursor = new PlaybackCursor(
+      [
+        candidate(
+          plan(
+            external('https://video.example/first.mp4'),
+            { ...external('https://video.example/native.m3u8'), kind: 'hls' },
+            external('https://video.example/last.mp4'),
+          ),
+        ),
+      ],
+      { prefer: (source) => source.kind === 'hls' },
+    );
+
+    await expect(cursor.first()).resolves.toMatchObject({
+      source: 1,
+      kind: 'hls',
+      url: 'https://video.example/native.m3u8',
+    });
+    await expect(cursor.next()).resolves.toMatchObject({
+      source: 0,
+      kind: 'mp4',
+      url: 'https://video.example/first.mp4',
+    });
+    await expect(cursor.next()).resolves.toMatchObject({
+      source: 2,
+      kind: 'mp4',
+      url: 'https://video.example/last.mp4',
+    });
+  });
+
   it('offers no native master when the plan came from a direct origin', async () => {
     const master = `m/n/${'C'.repeat(40)}?s=${'d'.repeat(24)}`;
     const fetchImpl = vi.fn<typeof fetch>();

@@ -90,6 +90,8 @@ export interface PlaybackCursorOptions {
   lookupIpv4?: () => Promise<string | undefined>;
   /** A surface can reject a source it cannot mount, without inventing a different fallback order. */
   accepts?: (source: LogicalSource) => boolean;
+  /** Try matching sources first, while retaining every other source as an ordered fallback. */
+  prefer?: (source: LogicalSource) => boolean;
 }
 
 const CAPABILITY = /^m\/s\/[A-Za-z0-9_-]{40,2048}\?s=[0-9a-fA-F]{24}$/;
@@ -476,6 +478,7 @@ export class PlaybackCursor {
   readonly #fetch: typeof fetch;
   readonly #lookupIpv4: () => Promise<string | undefined>;
   readonly #accepts: (source: LogicalSource) => boolean;
+  readonly #prefer?: (source: LogicalSource) => boolean;
   readonly #controller = new AbortController();
   readonly #parent?: AbortSignal;
   #candidate = 0;
@@ -493,6 +496,7 @@ export class PlaybackCursor {
     this.#fetch = options.fetchImpl ?? relayFetch;
     this.#lookupIpv4 = options.lookupIpv4 ?? (() => ipv4Hint());
     this.#accepts = options.accepts ?? (() => true);
+    this.#prefer = options.prefer;
     this.#parent = options.signal;
     if (this.#parent?.aborted) this.close();
     else this.#parent?.addEventListener('abort', this.#abort, { once: true });
@@ -558,7 +562,7 @@ export class PlaybackCursor {
         this.#nextCandidate();
         continue;
       }
-      const source = plan.sources[this.#source];
+      const source = plan.sources[this.#sourceIndex(plan)];
       if (!source) {
         this.#nextCandidate();
         continue;
@@ -609,15 +613,27 @@ export class PlaybackCursor {
     this.#attempts = [];
   }
 
+  /** The plan's stable order, with a platform's known-good sources moved ahead of its fallbacks. */
+  #sourceIndex(plan: SourcePlan): number {
+    if (!this.#prefer) return this.#source;
+    const preferred: number[] = [];
+    const fallback: number[] = [];
+    plan.sources.forEach((source, index) =>
+      (this.#prefer?.(source) ? preferred : fallback).push(index),
+    );
+    return [...preferred, ...fallback][this.#source] ?? plan.sources.length;
+  }
+
   #publish(): PlaybackStep | null {
     const candidate = this.#candidates[this.#candidate];
-    const source = candidate?.plan?.sources[this.#source];
+    const sourceIndex = candidate?.plan ? this.#sourceIndex(candidate.plan) : this.#source;
+    const source = candidate?.plan?.sources[sourceIndex];
     const attempt = this.#attempts[this.#attempt];
     if (!candidate?.plan || !source || !attempt) return null;
     return (this.#current = {
-      key: `${this.#candidate}:${this.#source}:${this.#attempt}:${attempt.url}`,
+      key: `${this.#candidate}:${sourceIndex}:${this.#attempt}:${attempt.url}`,
       candidate: this.#candidate,
-      source: this.#source,
+      source: sourceIndex,
       attempt: this.#attempt,
       attemptType: attempt.type,
       // A packaged app's relative relay attempt is a media-element URL, so the fetch adapter never sees it.
