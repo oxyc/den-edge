@@ -1,4 +1,5 @@
 import { initialize } from '../vendor/den-core/index.js';
+import { startupMarkOnce } from './startupTiming';
 import { SYNC_POLICY_REQUEST } from './syncPolicyProtocol';
 
 let ready = false;
@@ -35,10 +36,12 @@ export function ensureSyncPolicy(idle = false): Promise<void> {
       cancel?.();
       startPending = undefined;
       requestOffered?.();
+      startupMarkOnce('den-core requested');
       void Promise.resolve()
         .then(async () => initialize((await offered) ?? undefined))
         .then(
           () => {
+            startupMarkOnce('den-core ready');
             ready = true;
             resolve();
           },

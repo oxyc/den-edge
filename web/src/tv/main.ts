@@ -6,7 +6,9 @@ import { installTVNavigation } from './navigation';
 import { registerSamsungKeys } from './platform';
 import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
 import { installTvCssCapabilities } from './cssCapabilities';
+import { startupMark } from '../lib/startupTiming';
 
+startupMark('page boot');
 document.documentElement.dataset.denTv = tvRuntimePlatform();
 const stopCssCapabilities = installTvCssCapabilities();
 
@@ -43,6 +45,7 @@ async function start() {
   // The application is a separate download. Keep hardware Back/exit available on the starting screen too;
   // waiting for that chunk left an early Back unhandled (also reproducible while holding its request).
   installRemote();
+  startupMark('app module requested');
   await import('../appMain');
 }
 

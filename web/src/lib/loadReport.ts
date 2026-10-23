@@ -5,7 +5,12 @@
 
 import { currentRelease, reportUrl } from './diagnosticsReport';
 import { parseRoute } from './route';
-import { startupMilestone, startupWorkers } from './startupTiming';
+import {
+  startupLongTasks,
+  startupMilestone,
+  startupWorkerResources,
+  startupWorkers,
+} from './startupTiming';
 
 /**
  * The latest a load reports: long enough for an old TV's first library read and first rows. A load reports as soon
@@ -18,10 +23,29 @@ export type LoadRoute = 'home' | 'movies' | 'series' | 'watchlist' | 'title' | '
 export type DeviceClass = 'phone' | 'tablet' | 'desktop' | 'tv';
 export type BrowserEngine = 'webkit' | 'blink' | 'gecko' | 'other';
 
-/** The milestones a report carries, by the `startupMark` event that sets each. */
+/**
+ * The milestones a report carries, by the `startupMark` event that sets each, in the order a load reaches them. A
+ * `worker …` event is the first library Worker's, relayed to the page (`startupTiming.ts`).
+ */
 export const MILESTONES = {
+  pageBootMs: 'page boot',
   appModuleMs: 'app module requested',
+  appEvaluatedMs: 'app module evaluated',
+  appMountedMs: 'app mounted',
+  workerStartedMs: 'library worker started',
+  workerScriptMs: 'worker script evaluated',
+  /** A session took a library Worker (`startupWorkerCreated`): one started at page boot, or a new one. */
+  sessionWorkerMs: 'worker created',
+  coreCompileStartMs: 'den-core compile started',
+  coreCompiledMs: 'den-core compiled',
+  workerCoreRequestedMs: 'worker den-core requested',
+  workerCoreReadyMs: 'worker den-core ready',
   workerReadyMs: 'worker ready',
+  capabilityMs: 'capability answered',
+  bootstrapMs: 'supervisor household bootstrap',
+  workerLogRequestedMs: 'worker log open requested',
+  workerLogOpenedMs: 'worker log opened',
+  directoryMs: 'profile directory lease value',
   handoverMs: 'handover',
   billboardDetailMs: 'billboard detail',
   shelvesMs: 'shelves ready',
@@ -32,9 +56,9 @@ export const MILESTONES = {
 } as const;
 
 /**
- * The page's own requests by what they are for, each as `[count, milliseconds summed]`, so a slow load says
- * whether it waited on the network and on what. The library Worker's requests are its own and not counted: the
- * import milestones cover them.
+ * Requests by what they are for, each as `[count, milliseconds summed]`, so a slow load says whether it waited on
+ * the network and on what: the page's own (`net`), and its Workers' (`workerNet`), which make the library's and most
+ * metadata requests.
  */
 export type NetKind = 'lib' | 'tmdb' | 'meta' | 'atlas' | 'image' | 'other';
 export type NetTally = Partial<Record<NetKind, [number, number]>>;
@@ -72,7 +96,16 @@ export type LoadEntry = 'navigate' | 'reload' | 'back_forward' | 'swap';
 
 export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: BrowserEngine } & {
   -readonly [K in keyof typeof MILESTONES]?: number;
-} & { workers: number; hidden?: true; entry?: LoadEntry; release?: string; net?: NetTally };
+} & {
+  workers: number;
+  hidden?: true;
+  entry?: LoadEntry;
+  release?: string;
+  net?: NetTally;
+  workerNet?: NetTally;
+  /** The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`. */
+  longTasks?: [number, number, number];
+};
 
 /**
  * Read from the navigation timing entry, whose `name` is the address as it was loaded: index.html's inline script
@@ -150,6 +183,10 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
     (performance.getEntriesByType?.('resource') ?? []) as PerformanceResourceTiming[],
   );
   if (Object.keys(net).length) report.net = net;
+  const workerNet = netTally(startupWorkerResources());
+  if (Object.keys(workerNet).length) report.workerNet = workerNet;
+  const longTasks = startupLongTasks();
+  if (longTasks[0]) report.longTasks = longTasks;
   return report;
 }
 

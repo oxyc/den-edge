@@ -23,11 +23,102 @@ function sinceNavigation(): number {
 export const startupWorkerName = (): string => String(performance.timeOrigin);
 
 let last: { event: string; at: number } | undefined;
-/** Each milestone's first time on this page, for its one load report (`loadReport.ts`). */
+/**
+ * Each milestone's first time on this page, for its one load report (`loadReport.ts`). A Worker keeps its own, and
+ * relays each one to the page (`relay`), where it is kept as `worker <event>`.
+ */
 const firsts = new Map<string, number>();
 let workers = 0;
 let stall: ReturnType<typeof setTimeout> | undefined;
 let handedOver = false;
+
+/** A finished request, as its resource timing entry has it. */
+export interface StartupResource {
+  name: string;
+  initiatorType: string;
+  duration: number;
+}
+
+/**
+ * Workers' milestones and finished requests reach the page on this channel: its load report is sent as the page
+ * hides, too late to ask them. Each message carries the page's time origin (a Worker's `name`), so a second tab's
+ * Workers are not counted here. An engine without `BroadcastChannel` (Tizen 3) reports the page's side only.
+ */
+const ORIGIN = inWorker
+  ? String((globalThis as { name?: unknown }).name ?? '')
+  : String(performance.timeOrigin);
+const channel = (() => {
+  if (inWorker && !(Number(ORIGIN) > 0)) return undefined;
+  try {
+    return typeof BroadcastChannel === 'function' ? new BroadcastChannel('den-startup') : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+type Relayed =
+  | { origin: string; kind: 'mark'; event: string; at: number }
+  | ({ origin: string; kind: 'resource' } & StartupResource);
+const relay = (message: Relayed) => {
+  try {
+    channel?.postMessage(message);
+  } catch {
+    // The page's own report still carries the page's side.
+  }
+};
+const workerResources: StartupResource[] = [];
+/** Requests a Worker made before its first `resource` entry was relayed, bounded like the page's own buffer. */
+const MAX_WORKER_RESOURCES = 2_000;
+/** The page's main thread blocked for 50 ms or more at a time (`longtask`): how often, how long in all, the longest. */
+const longTasks = { count: 0, ms: 0, longest: 0 };
+
+if (channel && !inWorker)
+  channel.onmessage = ({ data: message }: MessageEvent<Relayed>) => {
+    if (message?.origin !== ORIGIN) return;
+    if (message.kind === 'mark') {
+      const event = `worker ${message.event}`;
+      if (!firsts.has(event)) firsts.set(event, message.at);
+    } else if (workerResources.length < MAX_WORKER_RESOURCES)
+      workerResources.push({
+        name: message.name,
+        initiatorType: message.initiatorType,
+        duration: message.duration,
+      });
+  };
+
+const observe = (type: string, each: (entry: PerformanceEntry) => void) => {
+  try {
+    if (!PerformanceObserver.supportedEntryTypes?.includes(type)) return;
+    new PerformanceObserver((list) => list.getEntries().forEach(each)).observe({
+      type,
+      buffered: true,
+    });
+  } catch {
+    // An engine without this entry type reports without it.
+  }
+};
+if (typeof PerformanceObserver === 'function') {
+  if (channel && inWorker)
+    observe('resource', (entry) => {
+      const { name, initiatorType, duration } = entry as PerformanceResourceTiming;
+      relay({ origin: ORIGIN, kind: 'resource', name, initiatorType, duration });
+    });
+  if (!inWorker)
+    observe('longtask', ({ duration }) => {
+      longTasks.count++;
+      longTasks.ms += Math.round(duration);
+      longTasks.longest = Math.max(longTasks.longest, Math.round(duration));
+    });
+}
+
+/** The page's Workers' finished requests so far. */
+export const startupWorkerResources = (): readonly StartupResource[] => workerResources;
+
+/** The page's long tasks so far: `[count, milliseconds in all, longest]`. */
+export const startupLongTasks = (): [number, number, number] => [
+  longTasks.count,
+  longTasks.ms,
+  longTasks.longest,
+];
 
 /** A failure reduced to its code and a bounded message; never the request, url or payload behind it. */
 export function startupFailure(error: unknown): string {
@@ -50,6 +141,9 @@ export function startupMark(event: string, detail?: string): void {
   if (!inWorker) {
     last = { event, at };
     if (!firsts.has(event)) firsts.set(event, at);
+  } else if (!firsts.has(event)) {
+    firsts.set(event, at);
+    relay({ origin: ORIGIN, kind: 'mark', event, at });
   }
   console.info(
     `den: startup${inWorker ? ' [worker]' : ''} +${at}ms ${event}${detail ? ` (${detail})` : ''}`,

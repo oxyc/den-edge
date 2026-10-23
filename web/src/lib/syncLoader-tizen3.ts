@@ -1,4 +1,5 @@
 import { initialize } from '../vendor/den-core-tizen3/index.js';
+import { startupMarkOnce } from './startupTiming';
 
 let ready = false;
 let pending: Promise<void> | undefined;
@@ -21,8 +22,10 @@ export function ensureSyncPolicy(idle = false): Promise<void> {
     const start = () => {
       cancel?.();
       startPending = undefined;
+      startupMarkOnce('den-core requested');
       void initialize().then(
         () => {
+          startupMarkOnce('den-core ready');
           ready = true;
           resolve();
         },

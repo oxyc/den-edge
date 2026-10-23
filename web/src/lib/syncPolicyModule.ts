@@ -2,6 +2,7 @@
 // opens two libraries, one Worker each; each used to fetch the same 1.66 MB wasm and compile it again (WebKit
 // downloads both, Chromium shares the transfer but still compiles twice).
 
+import { startupMarkOnce } from './startupTiming';
 import { SYNC_POLICY_OFFER, SYNC_POLICY_REQUEST } from './syncPolicyProtocol';
 
 const WASM = new URL('../vendor/den-core/generated/den_core_bg.wasm', import.meta.url);
@@ -10,12 +11,16 @@ let compiling: Promise<WebAssembly.Module> | undefined;
 
 /** One compile per page; a failed one is tried again by the next Worker. */
 function syncPolicyModule(): Promise<WebAssembly.Module> {
-  compiling ??= WebAssembly.compileStreaming(
-    fetch(WASM, { signal: AbortSignal.timeout(15_000) }),
-  ).catch((error: unknown) => {
-    compiling = undefined;
-    throw error;
-  });
+  if (!compiling) startupMarkOnce('den-core compile started');
+  compiling ??= WebAssembly.compileStreaming(fetch(WASM, { signal: AbortSignal.timeout(15_000) }))
+    .then((module) => {
+      startupMarkOnce('den-core compiled');
+      return module;
+    })
+    .catch((error: unknown) => {
+      compiling = undefined;
+      throw error;
+    });
   return compiling;
 }
 
