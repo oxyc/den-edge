@@ -228,6 +228,7 @@ test('a touch preview opens Search and focuses its editor within the activating 
     });
     await setup(page);
     await browse(page);
+    expect(await page.evaluate(() => document.documentElement.clientWidth)).toBe(390);
     await page.getByRole('button', { name: 'Search', exact: true }).tap();
     await expect(page).toHaveURL(/\/search/);
     await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();

@@ -6,6 +6,7 @@ import { blankEpisode, blankTitle } from './actions';
 import { exclusive } from './exclusive';
 import { householdScoped } from './householdScope';
 import { resetAssistantRows } from './libraryAssistantAuthority';
+import { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
@@ -181,8 +182,7 @@ function profileLibraryWriteHeaders(
 /** The highest library format this build reads and writes. */
 export const WIRE = 4;
 
-export const PRE_V4_BACKUP_ERROR =
-  'This backup predates Library v4. Restore it with a build that can convert Library v3 first.';
+export { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 
 /** den-edge fenced this library against this older client (`426` plus a newer `x-den-wire-min`). */
 export class LibraryUpdateRequiredError extends Error {

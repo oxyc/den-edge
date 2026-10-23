@@ -45,6 +45,15 @@ const directory = resolve(
     (process.env.DEN_TV_PACKAGED === '1' ? 'dist-tv-tizen-package' : `dist-tv-${platform}`),
 );
 const assets = await readdir(resolve(directory, 'assets'));
+const entryHtml = await readFile(resolve(directory, 'index.html'), 'utf8');
+const expectedViewport =
+  process.env.DEN_TV_PACKAGED === '1'
+    ? 'width=1920, initial-scale=1'
+    : 'width=device-width, initial-scale=1';
+if (!entryHtml.includes(`<meta name="viewport" content="${expectedViewport}">`))
+  throw new Error(
+    `TV entry is missing its ${process.env.DEN_TV_PACKAGED === '1' ? 'packaged' : 'hosted'} viewport`,
+  );
 const tizenVersion = process.env.DEN_TIZEN_VERSION;
 const tizen3 = platform === 'tizen' && tizenVersion === '3.0';
 if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {
@@ -66,10 +75,12 @@ if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {
 }
 if (tizen3) {
   verifyTizen3Core();
-  const html = await readFile(resolve(directory, 'index.html'), 'utf8');
-  if (/type=["']module["']|rel=["']modulepreload["']/.test(html))
+  if (/type=["']module["']|rel=["']modulepreload["']/.test(entryHtml))
     throw new Error('Native module loading remains in the Tizen 3 build');
-  if (!html.includes('id="vite-legacy-polyfill"') || !html.includes('id="vite-legacy-entry"'))
+  if (
+    !entryHtml.includes('id="vite-legacy-polyfill"') ||
+    !entryHtml.includes('id="vite-legacy-entry"')
+  )
     throw new Error('Tizen 3 build is missing the SystemJS legacy loader');
   // The package metadata is written only for a packaged build (`DEN_TV_PACKAGED=1`).
   if (process.env.DEN_TV_PACKAGED === '1') {
