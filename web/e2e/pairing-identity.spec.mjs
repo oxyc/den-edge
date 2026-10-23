@@ -132,6 +132,9 @@ test('two browsers pair and join their stable identities through encrypted link 
     // host drains that same sealed inbox again even though the Shared record already has an id.
     await joinerPage.evaluate(() => localStorage.setItem('den.deviceName', 'Renamed Joiner'));
     await joinerPage.reload();
+    // `reload` settles at the document's load event, before the app's modules have run. The app resends the identity
+    // as it mounts, so wait for the mount like any other step before giving the resend its own expect window.
+    await joinerPage.getByRole('navigation', { name: 'Main navigation' }).waitFor();
     await expect
       .poll(() =>
         joinerPage.evaluate(
