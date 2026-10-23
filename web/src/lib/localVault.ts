@@ -26,6 +26,15 @@ export interface Vault {
   remove(prefix: string): Promise<void>;
   /** Apply prepared writes and exact deletions in one object-store transaction. */
   commit?(changes: readonly VaultChange[]): Promise<void>;
+  /**
+   * Apply prepared changes atomically only when `key` still contains exactly `expected`. The comparison and every
+   * change share one transaction; false means no write or deletion happened.
+   */
+  compareAndCommit?(
+    key: string,
+    expected: Uint8Array | undefined,
+    changes: readonly VaultChange[],
+  ): Promise<boolean>;
 }
 
 export type VaultChange =
@@ -190,6 +199,13 @@ export function transactions(
 const prefixRange = (prefix: string) =>
   IDBKeyRange.bound(prefix, prefix + String.fromCharCode(0xffff));
 
+const sameBytes = (left: Uint8Array | undefined, right: Uint8Array | undefined): boolean =>
+  left === right ||
+  (!!left &&
+    !!right &&
+    left.byteLength === right.byteLength &&
+    left.every((byte, index) => byte === right[index]));
+
 /** A vault on `factory`; injectable so its ordering and deletion contract can be exercised without a browser. */
 export function indexedVault(factory: IDBFactory): Vault {
   const run = transactions(
@@ -264,6 +280,22 @@ export function indexedVault(factory: IDBFactory): Vault {
           else kept.delete(change.key);
         }
       });
+    },
+    compareAndCommit: async (key, expected, changes) => {
+      const committed = await run('readwrite', (kept) => {
+        const read = kept.get(key) as IDBRequest<Uint8Array | undefined>;
+        let matches = false;
+        read.onsuccess = () => {
+          matches = sameBytes(read.result, expected);
+          if (!matches) return;
+          for (const change of changes) {
+            if (change.kind === 'put') kept.put(change.value, change.key);
+            else kept.delete(change.key);
+          }
+        };
+        return () => matches;
+      });
+      return committed ?? false;
     },
   };
 }

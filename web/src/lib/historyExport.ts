@@ -121,19 +121,16 @@ export function buildHistoryExport(
         (a, b) => (a.season ?? 0) - (b.season ?? 0),
       );
       for (const season of seasons) {
-        const keys = Object.keys((season.episodes as Record<string, unknown> | undefined) ?? {})
-          .filter((episode) => EPISODE_KEY.test(episode))
-          .sort((a, b) => Number(a) - Number(b));
+        const states = syncPolicy<Record<string, WatchState>>({
+          op: 'season_state_v4',
+          ...(document ? { title: document } : {}),
+          season,
+          now,
+        });
+        const keys = Object.keys(states).sort((a, b) => Number(a) - Number(b));
         for (const episode of keys) {
-          const watched = playsOf(
-            syncPolicy<WatchState>({
-              op: 'episode_state_v4',
-              ...(document ? { title: document } : {}),
-              season,
-              episode,
-              now,
-            }),
-          );
+          if (!EPISODE_KEY.test(episode)) continue;
+          const watched = playsOf(states[episode]!);
           if (watched.length)
             episodes.push({ season: season.season ?? 0, episode: Number(episode), plays: watched });
         }
