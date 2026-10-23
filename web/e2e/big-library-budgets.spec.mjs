@@ -25,7 +25,7 @@
 
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
@@ -556,6 +556,35 @@ const ENGINES = [
   ['Chromium phone, 4× CPU', chromium, devices['Pixel 7'], { cpu: 4 }],
 ];
 
+/**
+ * What each open page shows and every console line it and its Workers wrote, kept beside a failed run. These tests
+ * launch their own browsers, so Playwright's trace setting never reaches them, and a full trace would slow the very
+ * pages they time. A setup that never draws (Continue Watching absent on CI, never seen locally) needs this to read.
+ */
+function collectConsole(context) {
+  const lines = [];
+  const note = (where) => (message) => lines.push(`${where} ${message.type()} ${message.text()}`);
+  context.on('page', (page) => {
+    page.on('console', note(page.url()));
+    page.on('worker', (worker) => worker.on('console', note(worker.url())));
+  });
+  return lines;
+}
+
+async function keepEvidence(context, lines) {
+  const info = test.info();
+  writeFileSync(info.outputPath('console.txt'), lines.join('\n'));
+  for (const [index, page] of context.pages().entries()) {
+    try {
+      await page.screenshot({ path: info.outputPath(`page-${index}.png`), timeout: 5_000 });
+      const text = await page.evaluate(() => `${location.href}\n\n${document.body.innerText}`);
+      writeFileSync(info.outputPath(`page-${index}.txt`), text);
+    } catch {
+      // A page that has crashed or closed has nothing more to show.
+    }
+  }
+}
+
 for (const [label, type, device, options] of ENGINES) {
   test(`${label}: a big household's surfaces draw within their budgets`, async () => {
     test.skip(
@@ -567,9 +596,10 @@ for (const [label, type, device, options] of ENGINES) {
     const browser = await type.launch(
       type === chromium ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {},
     );
+    const { defaultBrowserType: _, ...phone } = device;
+    const context = await browser.newContext(phone);
+    const consoleLines = collectConsole(context);
     try {
-      const { defaultBrowserType: _, ...phone } = device;
-      const context = await browser.newContext(phone);
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
       await bigHousehold(context, edge);
@@ -678,6 +708,9 @@ for (const [label, type, device, options] of ENGINES) {
         )
         .toBe(true);
       console.log(`${label}\n${measured.map((m) => JSON.stringify(m)).join('\n')}`);
+    } catch (error) {
+      await keepEvidence(context, consoleLines);
+      throw error;
     } finally {
       await browser.close();
     }
