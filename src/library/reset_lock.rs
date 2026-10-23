@@ -9,9 +9,8 @@
 //! * `model` is the pure decision function the spec's `resetLockContract` vectors pin.
 //! * This module builds a world from what is stored, asks the model, and performs exactly the decided effect.
 //!
-//! Everything here is dormant behind `PROFILE_RESET_ENABLED` (which follows `PROFILE_MIGRATION_ENABLED` when
-//! unset): with it off none of these routes exist, and a `DELETE` carrying the exclusive headers is an ordinary
-//! `DELETE`.
+//! Everything here is dormant behind `PROFILE_RESET_ENABLED`: with it off none of these routes exist, and a
+//! `DELETE` carrying the exclusive headers is an ordinary `DELETE`.
 
 pub(crate) mod model;
 #[cfg(test)]
@@ -406,8 +405,11 @@ struct View {
 
 fn observed(id: &str, store: &dyn LibraryStore) -> Result<(Source, Fence), StoreError> {
     let snapshot = store.snapshot()?;
-    let (generation, head) = snapshot::source(id, &snapshot)
-        .map_err(|reason| StoreError::Invalid(format!("library source is unusable: {reason:?}")))?;
+    let (generation, head) = snapshot::source(id, &snapshot).map_err(|reason| match reason {
+        snapshot::SnapshotError::Corrupt => StoreError::Invalid("library source is corrupt".into()),
+        snapshot::SnapshotError::Invalid(reason) => StoreError::Invalid(reason.into()),
+        snapshot::SnapshotError::Storage(reason) => StoreError::Failed(reason.to_string()),
+    })?;
     let fence = Fence {
         generation: snapshot.protocol.migration_generation,
         base: snapshot.protocol.head,

@@ -51,8 +51,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-mod profile_migration;
-pub const PROFILE_MIGRATION_BODY_BYTES: usize = profile_migration::BODY_BYTES;
 pub(crate) mod reset_lock;
 mod snapshot;
 pub(crate) mod v3;
@@ -544,35 +542,6 @@ async fn protocol_for(state: &AppState, id: &str) -> Result<Option<v3::Protocol>
     .map_err(io::Error::other)?
 }
 
-/// Whether the migration route exists for this exact household. A legacy household needs explicit prepare
-/// enrollment; a household already at wire 5 keeps recovery transport even after enrollment is removed. The
-/// global switch remains an emergency transport kill. A storage error is left visible so the real handler can
-/// return 500 rather than disguising an unhealthy enrolled household as an absent route.
-pub(crate) async fn profile_migration_available(state: &AppState, path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/lib/") else { return false };
-    let Some((id, action)) = rest.split_once('/') else { return false };
-    if valid_hex_id(id) && (action == "exclusive-operation" || action.starts_with("exclusive-operation/")) {
-        // A key reset's lock surface is addressed per library: the handler decides by the library's own minimum
-        // (and a retired library still answers its lock's lookup), so only the reset's own switch applies here.
-        return state.profile_reset_enabled;
-    }
-    if !state.profile_migration_enabled {
-        return false;
-    }
-    if !valid_hex_id(id) || !(action == "profile-migration" || action.starts_with("profile-migration/")) {
-        return false;
-    }
-    match protocol_for(state, id).await {
-        Ok(Some(protocol)) => {
-            protocol.wire_min >= 5
-                || state.profile_prepare_households.contains(id)
-                || crate::grants::is_guest_library(state, id).await.unwrap_or(true)
-        }
-        Ok(None) => false,
-        Err(_) => true,
-    }
-}
-
 fn with_wire_headers(state: &AppState, mut response: Response, protocol: Option<&v3::Protocol>) -> Response {
     let wire_min = protocol.map_or(2, |value| value.wire_min);
     let generation =
@@ -634,12 +603,17 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             None,
         );
     }
-    let migration_action = action == "profile-migration" || action.starts_with("profile-migration/");
-    let capability_action = action == "profile-capability";
-    let exclusive_action = action == "exclusive-operation" || action.starts_with("exclusive-operation/");
-    if migration_action && !state.profile_migration_enabled
-        || exclusive_action && !state.profile_reset_enabled
+    // The one-time Owner-split transport is retired. Refuse every former shape before generation, wire or
+    // authentication handling so it is uniformly absent rather than accidentally inheriting a generic library
+    // route's error contract.
+    if action == "profile-capability"
+        || action == "profile-migration"
+        || action.starts_with("profile-migration/")
     {
+        return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
+    }
+    let exclusive_action = action == "exclusive-operation" || action.starts_with("exclusive-operation/");
+    if exclusive_action && !state.profile_reset_enabled {
         return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
     }
     // Households that owe a sweep of declared successors (an aborted key reset) are swept on their next access.
@@ -656,35 +630,6 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         && query_param(&req, "since").as_deref() == Some("0")
         && query_param(&req, "limit").as_deref() == Some("1");
     let minimum = protocol.as_ref().map_or(2, |value| value.wire_min);
-    let migration_prepare = if (migration_action || capability_action) && minimum < 5 {
-        if state.profile_prepare_households.contains(id) {
-            true
-        } else {
-            match crate::grants::is_guest_library(state, id).await {
-                Ok(guest) => guest,
-                Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
-            }
-        }
-    } else {
-        false
-    };
-    if (migration_action || capability_action) && minimum > 5 {
-        let response =
-            json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": minimum }));
-        return with_wire_headers(state, response, protocol.as_ref());
-    }
-    if migration_action && minimum < 5 && !migration_prepare {
-        return with_wire_headers(
-            state,
-            json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-            protocol.as_ref(),
-        );
-    }
-    if (migration_action || capability_action) && wire != Some(5) {
-        let response =
-            json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": 5 }));
-        return with_wire_headers(state, response, protocol.as_ref());
-    }
     // A key reset's lock surface exists for a household at minimum 5 (request wire 5) and for a profile library at
     // minimum 4 (request wire 4); no other library takes part in one. A retired library has no database but still
     // answers its lock's lookup, so it reaches the handler.
@@ -793,7 +738,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
         return with_wire_headers(state, response, latest.as_ref());
     }
-    if is_write && !migration_action && !exclusive_action && protocol.is_some() {
+    if is_write && !exclusive_action && protocol.is_some() {
         let manager = Arc::clone(&state.library_v3);
         let locked_id = id.to_owned();
         let opened =
@@ -825,7 +770,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
         }
     }
-    if is_write && wire.is_some() && !migration_action && !exclusive_action {
+    if is_write && wire.is_some() && !exclusive_action {
         let current = protocol
             .as_ref()
             .map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
@@ -840,7 +785,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             return with_wire_headers(state, response, protocol.as_ref());
         }
     }
-    if is_write && !action.starts_with("rewrite") && !migration_action && !exclusive_action {
+    if is_write && !action.starts_with("rewrite") && !exclusive_action {
         match load_rewrite(state, id).await {
             Ok(Some(_)) => {
                 let response = crate::handler::retry_after(
@@ -855,26 +800,6 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         }
     }
     let response = match (action, req.method().clone()) {
-        ("profile-capability", Method::GET | Method::HEAD) => match protocol.as_ref() {
-            Some(protocol) => json_reply(
-                StatusCode::OK,
-                &json!({
-                    "enrollment": if state.profile_migration_enabled && migration_prepare {
-                        "prepare"
-                    } else {
-                        "off"
-                    },
-                    "wireMin": protocol.wire_min,
-                    "migrationWire": 5,
-                    "runtimeHouseholdWire": 5,
-                    "runtimeProfileWire": 4,
-                }),
-            ),
-            None => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-        },
-        (action, _) if action == "profile-migration" || action.starts_with("profile-migration/") => {
-            profile_migration::handle(state, id, token_hash, action, req, migration_prepare).await
-        }
         (action, _) if exclusive_action => reset_lock::handle(state, id, token_hash, action, req).await,
         ("batch", Method::POST) => match write_budget(state, id) {
             Some(refused) => refused,
@@ -924,7 +849,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         (action, Method::DELETE) if action.starts_with("rewrite/") => {
             rewrite_abort(state, id, token_hash, action).await
         }
-        ("batch" | "changes" | "member" | "" | "rewrite" | "profile-capability", _) => method_not_allowed(),
+        ("batch" | "changes" | "member" | "" | "rewrite", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     };
     let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
@@ -1099,9 +1024,7 @@ async fn rewrite_commit(
         state.library_limits.stored_bytes
     };
     let write_store = Arc::clone(&store);
-    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap, None))
-        .await
-    {
+    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap)).await {
         Ok(Ok(protocol)) => {
             // Committed whatever the cleanup does: a held reader learns of the new rows and generation now.
             state.library_holds.wake(id);
@@ -3006,7 +2929,6 @@ mod tests {
                 &[super::v3::RewriteRow { key: K2.to_owned(), value: "after".to_owned() }],
                 3,
                 h.state.library_limits.stored_bytes,
-                None,
             )
             .unwrap();
         drop(store);
@@ -3033,7 +2955,7 @@ mod tests {
             restored.state.library_v3.existing_library(LIB, token_hash).unwrap().protocol().unwrap();
         assert!(
             restored_protocol.migration_generation > switched.migration_generation,
-            "a restored database cannot reuse an already observed profile-migration fence"
+            "a restored database cannot reuse an already observed exclusive-operation fence"
         );
     }
 
@@ -3218,7 +3140,7 @@ mod tests {
         let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
         let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let protocol = member_store.protocol().unwrap();
-        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes, None).unwrap();
+        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes).unwrap();
 
         let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "new" }] }).to_string();
         let member = format!("{LIB}:{TOKEN}");
@@ -3264,7 +3186,7 @@ mod tests {
         let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
         let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let protocol = member_store.protocol().unwrap();
-        member_store.rewrite(protocol.head, &[], 5, h.state.library_limits.stored_bytes, None).unwrap();
+        member_store.rewrite(protocol.head, &[], 5, h.state.library_limits.stored_bytes).unwrap();
 
         let member = format!("{LIB}:{TOKEN}");
         let started = h
@@ -3429,11 +3351,11 @@ mod tests {
         let cap = h.state.library_limits.stored_bytes;
         let rows = [super::v3::RewriteRow { key: K2.to_owned(), value: "a".repeat(super::MAX_VALUE_V4) }];
         let head = store.protocol().unwrap().head;
-        assert!(matches!(store.rewrite(head, &rows, 3, cap, None), Err(super::v3::StoreError::TooLarge)));
-        assert_eq!(store.rewrite(head, &rows, 4, cap, None).unwrap().wire_min, 4);
+        assert!(matches!(store.rewrite(head, &rows, 3, cap), Err(super::v3::StoreError::TooLarge)));
+        assert_eq!(store.rewrite(head, &rows, 4, cap).unwrap().wire_min, 4);
         // At 4 already, a commit naming a lower minimum keeps 4, and its cap.
         let head = store.protocol().unwrap().head;
-        assert_eq!(store.rewrite(head, &rows, 3, cap, None).unwrap().wire_min, 4);
+        assert_eq!(store.rewrite(head, &rows, 3, cap).unwrap().wire_min, 4);
     }
 
     async fn changes_at(h: &Harness, wire: &str, generation: &str) -> (StatusCode, Value) {
@@ -3855,7 +3777,7 @@ mod tests {
         h.state.store.replace_file(super::NS, LIB, super::FORMAT_EXT, super::FORMAT_V3).await.unwrap();
         let store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let kept = [super::v3::RewriteRow { key: K1.to_owned(), value: "kept".to_owned() }];
-        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes, None).unwrap();
+        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes).unwrap();
         let path = h.state.library_v3.path(LIB);
         let sparse = std::fs::metadata(&path).unwrap().len();
 

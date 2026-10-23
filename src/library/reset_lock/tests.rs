@@ -179,13 +179,6 @@ fn enabled(dir: std::path::PathBuf) -> Harness {
     Harness::in_dir_with(dir, |state| state.profile_reset_enabled = true)
 }
 
-fn both_enabled(dir: std::path::PathBuf) -> Harness {
-    Harness::in_dir_with(dir, |state| {
-        state.profile_reset_enabled = true;
-        state.profile_migration_enabled = true;
-    })
-}
-
 fn new_harness() -> Harness {
     enabled(crate::handler::tests::temp_dir())
 }
@@ -425,7 +418,7 @@ async fn assert_all_refuse_writes(h: &Harness) {
 // Dormancy, gates and the generic primitive
 
 #[tokio::test]
-async fn the_surface_does_not_exist_while_profile_migration_is_off() {
+async fn the_reset_surface_does_not_exist_while_its_gate_is_off() {
     let h = Harness::new();
     build_old_set(&h).await;
     let (status, body) =
@@ -1547,11 +1540,11 @@ async fn crash_after_the_proofless_rollback_keeps_it_final() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Exclusion with the §8.1 migration lock
+// Exclusion with another holder of the shared exclusive lock
 
 #[tokio::test]
-async fn a_key_reset_and_a_migration_lock_exclude_each_other_with_the_same_metadata_free_answer() {
-    let h = both_enabled(crate::handler::tests::temp_dir());
+async fn a_key_reset_and_another_exclusive_lock_exclude_each_other() {
+    let h = new_harness();
     build_old_set(&h).await;
     // A migration-style lock on the household blocks a key-reset acquisition, whatever the source.
     let protocol = store_of(&h, HOUSEHOLD).protocol().unwrap();
@@ -1564,8 +1557,7 @@ async fn a_key_reset_and_a_migration_lock_exclude_each_other_with_the_same_metad
     assert_eq!(lookup(&h, HOUSEHOLD, ATTEMPT).await.0, StatusCode::NOT_FOUND);
     store_of(&h, HOUSEHOLD).release_exclusive_operation_lock(OTHER).unwrap();
 
-    // And the reverse: a held key-reset lock refuses the primitive a migration acquires with, and the migration
-    // transport's own open.
+    // And the reverse: a held key-reset lock refuses the shared primitive to another exclusive operation.
     assert_eq!(acquire_household(&h, ATTEMPT).await.0, StatusCode::OK);
     let protocol = store_of(&h, HOUSEHOLD).protocol().unwrap();
     assert!(matches!(
@@ -1576,27 +1568,12 @@ async fn a_key_reset_and_a_migration_lock_exclude_each_other_with_the_same_metad
         ),
         Err(StoreError::Locked)
     ));
-    let (status, body) = call(
-        &h,
-        "POST",
-        &format!("/lib/{HOUSEHOLD}/profile-migration"),
-        HOUSEHOLD,
-        "5",
-        Some(json!({
-            "attempt": OTHER,
-            "purpose": "restore",
-            "expectedSource": source_of(&h, HOUSEHOLD).await,
-        })),
-        &[],
-    )
-    .await;
-    assert_eq!((status, body), (StatusCode::CONFLICT, json!({ "error": "migration_in_progress" })));
     // A library held by another operation is not retired by a reset that never locked it.
     let kid = store_of(&h, KID1).protocol().unwrap();
     store_of(&h, KID1).acquire_exclusive_operation_lock(OTHER, kid.migration_generation, kid.head).unwrap();
     assert_in_progress(&retire(&h, KID1, ATTEMPT, NEW_KID1).await);
     store_of(&h, KID1).release_exclusive_operation_lock(OTHER).unwrap();
-    // Once the reset aborted, the household is free for a migration again.
+    // Once the reset aborted, the household is free for another exclusive operation again.
     assert_eq!(abort(&h, ATTEMPT).await.0, StatusCode::OK);
     let protocol = store_of(&h, HOUSEHOLD).protocol().unwrap();
     store_of(&h, HOUSEHOLD)
@@ -1707,30 +1684,33 @@ fn the_routes_have_stable_labels_and_methods() {
 }
 
 #[tokio::test]
-async fn the_key_reset_and_the_migration_each_answer_only_to_their_own_switch() {
-    // Reset on, migration off: the reset's routes work and the migration's are absent.
+async fn the_retired_migration_surface_stays_absent_while_the_reset_keeps_its_own_switch() {
+    // Reset on: reset routes work and the retired migration routes remain absent.
     let h = new_harness();
     build_old_set(&h).await;
-    let migration_source = format!("/lib/{HOUSEHOLD}/profile-migration/source");
     let absent = (StatusCode::NOT_FOUND, json!({ "error": "not_found" }));
-    assert_eq!(call(&h, "GET", &migration_source, HOUSEHOLD, "5", None, &[]).await, absent);
+    let retired = [
+        ("GET", format!("/lib/{HOUSEHOLD}/profile-capability")),
+        ("POST", format!("/lib/{HOUSEHOLD}/profile-migration")),
+        ("GET", format!("/lib/{HOUSEHOLD}/profile-migration/source")),
+    ];
+    for (method, path) in &retired {
+        assert_eq!(call(&h, method, path, HOUSEHOLD, "5", None, &[]).await, absent);
+    }
     acquire_all(&h, ATTEMPT).await;
 
-    // Migration on, reset off: the migration's routes are back and the reset's are absent, including the
-    // retirement a `DELETE` with the exclusive headers would otherwise be.
-    let m = Harness::in_dir_with(h.dir.clone(), |state| state.profile_migration_enabled = true);
-    assert_eq!(call(&m, "GET", &migration_source, HOUSEHOLD, "5", None, &[]).await.0, StatusCode::OK);
+    // Reset off: both the retired migration surface and reset routes are absent, including the retirement a
+    // `DELETE` with the exclusive headers would otherwise be.
+    let m = Harness::in_dir_with(h.dir.clone(), |_| {});
+    for (method, path) in &retired {
+        assert_eq!(call(&m, method, path, HOUSEHOLD, "5", None, &[]).await, absent);
+    }
     let reset_source = format!("/lib/{HOUSEHOLD}/exclusive-operation/source");
     assert_eq!(call(&m, "GET", &reset_source, HOUSEHOLD, "5", None, &[]).await, absent);
     assert_eq!(lookup(&m, HOUSEHOLD, ATTEMPT).await, absent);
     // Switching the routes off never unlocks a library: the lock is in the store, not in the switch.
     assert_in_progress(&write(&m, KID1, "during").await);
     assert_in_progress(&retire(&m, KID1, ATTEMPT, NEW_KID1).await);
-
-    // Both off: neither family exists.
-    let off = Harness::in_dir_with(h.dir.clone(), |_| {});
-    assert_eq!(call(&off, "GET", &migration_source, HOUSEHOLD, "5", None, &[]).await, absent);
-    assert_eq!(call(&off, "GET", &reset_source, HOUSEHOLD, "5", None, &[]).await, absent);
 
     // And the reset resumes once its switch is back.
     let back = restart(&h);
