@@ -1731,6 +1731,78 @@ describe('a library kept only in this browser', () => {
     await expect(LibraryLog.openExistingLocal(LOCAL_KEY, vault)).resolves.toBeNull();
   });
 
+  it('silently drops a legacy local snapshot made only of untouched blank rows', async () => {
+    const { data, vault } = memoryVault();
+    const created = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+    const title = blankTitle({ type: 'movie', id: 1 }, 1_000);
+    const episode = blankEpisode({ type: 'tv', id: 2 }, 1, 1);
+    await created.keep('log.v1', {
+      head: 0,
+      wireMin: 3,
+      entries: [
+        [rowName(title), 0, title],
+        [rowName(episode), 0, episode],
+      ],
+    });
+    created.close();
+
+    const reopened = (await LibraryLog.openExistingLocal(LOCAL_KEY, vault))!;
+
+    expect(reopened.readOnly).toBe(false);
+    expect(reopened.wireMinimum).toBe(4);
+    expect(reopened.rows()).toEqual([]);
+    expect([...data.keys()].some((key) => key.endsWith(':log.v1'))).toBe(false);
+  });
+
+  it('keeps a zero-valued legacy edit recovery-blocked when its real stamp carries history', async () => {
+    const { vault } = memoryVault();
+    const created = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+    const title = blankTitle({ type: 'movie', id: 1 }, 1_000);
+    title.status = { value: 'none', at: at(2_000, 'phone') };
+    await created.keep('log.v1', {
+      head: 1,
+      wireMin: 3,
+      entries: [[rowName(title), 1, title]],
+    });
+    created.close();
+
+    const reopened = (await LibraryLog.openExistingLocal(LOCAL_KEY, vault))!;
+
+    expect(reopened.readOnly).toBe(true);
+    expect(reopened.readOnlyReason).toContain('predates Library v4');
+  });
+
+  it('removes untouched legacy rows without discarding compatible local settings beside them', async () => {
+    const { vault } = memoryVault();
+    const created = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+    const title = blankTitle({ type: 'movie', id: 1 }, 1_000);
+    const settings: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'prefs',
+      values: { language: { value: { string: 'fi' }, at: at(2_000, 'phone') } },
+    };
+    await created.keep('log.v1', {
+      head: 1,
+      wireMin: 3,
+      entries: [
+        [rowName(title), 0, title],
+        [rowName(settings), 1, settings],
+      ],
+    });
+    created.close();
+
+    const reopened = (await LibraryLog.openExistingLocal(LOCAL_KEY, vault))!;
+
+    expect(reopened.readOnly).toBe(false);
+    expect(reopened.title({ type: 'movie', id: 1 })).toBeUndefined();
+    expect(reopened.settings('prefs')).toEqual(settings);
+    reopened.close();
+    expect((await LibraryLog.openExistingLocal(LOCAL_KEY, vault))?.settings('prefs')).toEqual(
+      settings,
+    );
+  });
+
   it('prepares the newest maximum while projecting, so reads do not rescan the log', async () => {
     const { vault } = memoryVault();
     const log = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;

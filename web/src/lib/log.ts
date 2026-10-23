@@ -255,6 +255,23 @@ const preV4Row = (row: unknown): boolean => {
 };
 
 /**
+ * A legacy row that carries no edit at all. Old local builds could persist the blank row used to open a title or
+ * episode; it has no watchlist, history, progress, reaction or tombstone to convert. Comparing it with the exact
+ * blank through v4's operation builder is deliberately stricter than checking the visible values: a zero-valued
+ * field with a real stamp is an un-watch or removal that must not be discarded.
+ */
+const emptyPreV4Row = (row: Row): boolean => {
+  try {
+    if (row.kind === 'rec') return opsFor(blankTitle(row.title, row.addedAt), row).length === 0;
+    if (row.kind === 'ep')
+      return opsFor(blankEpisode(row.title, row.season, row.episode), row).length === 0;
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Filled in by a write: whether den-edge refused it for good (`failed`), rather than being out of reach, and whether
  * any of its rows were applied before that.
  */
@@ -887,7 +904,28 @@ export class LibraryLog {
     await log.initializeRuntime();
     log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     await ensureSyncPolicy();
-    const saved = await log.kept<Snapshot>(SNAPSHOT);
+    let saved = await log.kept<Snapshot>(SNAPSHOT);
+    const legacyEntries = saved?.entries.filter(([, , row]) => preV4Row(row)) ?? [];
+    const onlyBlankLegacyRows =
+      !!saved &&
+      legacyEntries.length > 0 &&
+      !saved.profileDirectory &&
+      !saved.kidTitleApprovals?.length &&
+      legacyEntries.every(([, , row]) => emptyPreV4Row(row));
+    if (saved && onlyBlankLegacyRows) {
+      // These rows cannot affect a v4 library. Remove them once so every later launch opens directly in v4 without
+      // asking the viewer to confirm data loss; compatible settings or documents beside them remain intact.
+      saved = {
+        ...saved,
+        wireMin: WIRE,
+        entries: saved.entries.filter(([, , row]) => !preV4Row(row)),
+      };
+      if (saved.entries.length) await log.keep(SNAPSHOT, saved);
+      else {
+        await vault.delete(`${keys.id}:${SNAPSHOT}`);
+        saved = undefined;
+      }
+    }
     if (!saved?.entries.length) log.wireMin = WIRE;
     else if ((saved.wireMin ?? 2) < WIRE) log.preV4Backup = true;
     log.takeForm(saved);
