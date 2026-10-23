@@ -177,6 +177,7 @@ export default defineConfig({
     __DEN_TV_LEGACY_JS_CORE__: 'false',
     __DEN_TV_API_ORIGIN__: JSON.stringify(''),
     __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(''),
+    __DEN_TV_WEB_ORIGIN__: JSON.stringify(''),
   },
   plugins: [
     {

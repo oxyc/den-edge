@@ -1030,7 +1030,7 @@
                   title: d.title.title,
                   // The title's own address, named: what the person sharing it means, and what a preview can
                   // describe. Built from the route rather than from wherever this page happens to be open.
-                  url: `${__DEN_TV_API_ORIGIN__ || location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
+                  url: `${__DEN_TV_WEB_ORIGIN__ || location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
                 }}
           />
         </div>

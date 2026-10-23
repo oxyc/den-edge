@@ -62,7 +62,7 @@
   let receiving = $state(false);
   let receiveController = new AbortController();
   const receiveAddress = $derived(
-    receiveCode ? tvLink(__DEN_TV_API_ORIGIN__ || location.origin, receiveCode) : null,
+    receiveCode ? tvLink(__DEN_TV_WEB_ORIGIN__ || location.origin, receiveCode) : null,
   );
   const receiveQR = $derived(receiveAddress ? qrCode(receiveAddress) : null);
 

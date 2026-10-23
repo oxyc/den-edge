@@ -601,18 +601,10 @@ async fn dispatch(
     if !face.serves(&path) {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
-    // Select the static TV face before API route/method validation. Otherwise a POST to an API-shaped path on
-    // this hostname receives the API router's 405 and makes the supposedly static origin distinguishable from a
-    // missing file. Hosted LG and packaged Samsung builds call API_HOSTS instead; this name serves GET/HEAD files
-    // and client-side routes only.
-    if face == Face::Tv {
-        return if matches!(*req.method(), Method::GET | Method::HEAD) {
-            let query = req.uri().query().map(str::to_owned);
-            crate::web::serve(state, &path, query.as_deref(), req.headers(), face).await
-        } else {
-            bare_json(StatusCode::NOT_FOUND, &error("not_found"))
-        };
-    }
+    // The hosted TV app calls its own origin, so this name answers every route a device or the web app may call,
+    // as the LAN and tailnet names do, and serves the TV bundle's files where no route matches. Every request
+    // the app made to another name was cross-origin and paid a CORS preflight per distinct URL — one per title on
+    // Home, about 200 ms each from a TV away from the box.
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A HEAD is a GET without the body, so it passes only where a GET does. Neither it nor an OPTIONS passes
@@ -776,7 +768,7 @@ async fn dispatch(
             resp
         }
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
-        p => match &state.web_dir {
+        p => match if face == Face::Tv { &state.tv_web_dir } else { &state.web_dir } {
             Some(_) if matches!(*req.method(), Method::GET | Method::HEAD) => {
                 let query = req.uri().query().map(str::to_owned);
                 crate::web::serve(state, p, query.as_deref(), req.headers(), face).await
@@ -889,7 +881,7 @@ impl Face {
             || crate::oauth::is_path(path);
         match (self, path) {
             (Face::Invalid, _) => false,
-            (Face::Web, "/capabilities/profiles") => true,
+            (Face::Web | Face::Tv, "/capabilities/profiles") => true,
             (_, "/capabilities/profiles") => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both | Face::Tv, _) => true,
             _ if tmdb => true,
@@ -930,7 +922,7 @@ fn request_host(req: &Request) -> Result<Option<String>, ()> {
 }
 
 fn profile_capability(state: &AppState, req: &Request, face: Face) -> Response {
-    let host = (face == Face::Web).then(|| request_host(req).ok().flatten()).flatten();
+    let host = matches!(face, Face::Web | Face::Tv).then(|| request_host(req).ok().flatten()).flatten();
     let allowed = |hosts: &[String]| {
         host.as_ref().is_some_and(|host| {
             hosts.iter().any(|allowed| allowed.trim_end_matches('.').eq_ignore_ascii_case(host))
