@@ -134,37 +134,6 @@ export interface SettingsRow {
   [unknown: string]: unknown;
 }
 
-export interface WatchRegister {
-  imported: boolean;
-  progress?: Progress;
-  plays: Record<string, number>;
-  cleared: [number, Stamp] | null;
-  [unknown: string]: unknown;
-}
-
-/** Thirty-two episode registers (or a film's register 0), `wat:<type>:<id>:<season>:<block>`. */
-export interface WatchRow {
-  kind: 'wat';
-  schema: 3;
-  title: { type: MediaType; id: number };
-  season: number;
-  block: number;
-  seasonReset: Stamp | null;
-  entries: Record<string, WatchRegister>;
-  [unknown: string]: unknown;
-}
-
-/** Provider settlement entries. Their tuple shape is interpreted only by den-core. */
-export interface ReceiptRow {
-  kind: 'snt';
-  schema: 3;
-  provider: string;
-  account: string;
-  target: string;
-  entries: Record<string, unknown>;
-  [unknown: string]: unknown;
-}
-
 /**
  * A library v4 document (den-spec wire/library-v4.md §3): a title, a season of a series, or one tracker account's
  * receipts for either. Read, merged, written and named only by den-core; the fields are its business.
@@ -179,7 +148,7 @@ export interface DocumentRow {
   [unknown: string]: unknown;
 }
 
-export type Row = TitleRow | EpisodeRow | SettingsRow | WatchRow | ReceiptRow | DocumentRow;
+export type Row = TitleRow | EpisodeRow | SettingsRow | DocumentRow;
 
 export const isDocument = (row: Row): row is DocumentRow =>
   row.kind === 'title' || row.kind === 'season' || row.kind === 'delivery';
@@ -199,16 +168,6 @@ export function rowName(row: Row): string {
     return name;
   }
   if (row.kind === 'set') return `set:${row.name}`;
-  if (row.kind === 'wat') return `wat:${row.title.type}:${row.title.id}:${row.season}:${row.block}`;
-  if (row.kind === 'snt') {
-    if (row.target.startsWith('wat:')) return `snt:${row.provider}:${row.account}:${row.target}`;
-    return syncPolicy<string>({
-      op: 'receipt_name',
-      provider: row.provider,
-      account: row.account,
-      target: row.target,
-    });
-  }
   const title = `${row.title.type}:${row.title.id}`;
   return row.kind === 'rec' ? `rec:${title}` : `ep:${title}:${row.season}:${row.episode}`;
 }
@@ -225,7 +184,7 @@ export function believe<T extends Row>(row: T, now = Date.now()): T {
   const fix = (stamp: Stamp): Stamp => (stamp[0] > now + FUTURE_TOLERANCE_MS ? ZERO_STAMP : stamp);
   const fixed = <V>(s: Stamped<V>): Stamped<V> => ({ ...s, at: fix(s.at) });
   // den-core reads a document's stamps the same way wherever it derives state from one (§5).
-  if (row.kind === 'wat' || row.kind === 'snt' || isDocument(row)) return row;
+  if (isDocument(row)) return row;
   if (row.kind === 'ep') return { ...row, progress: { ...row.progress, at: fix(row.progress.at) } };
   if (row.kind === 'set') {
     return {
@@ -329,7 +288,7 @@ export type MigrationOpenedRow =
   | { status: 'document'; name: string; document: DocumentRow; dropped: unknown[] }
   | { status: 'row'; name: string | null; legacy: boolean; row: Record<string, unknown> };
 
-const LEGACY_KINDS = new Set(['rec', 'ep', 'set', 'wat', 'snt']);
+const JSON_ROW_KINDS = new Set(['rec', 'ep', 'set']);
 
 /** Exact authenticated decoder evidence consumed by den-core's one-time profile row partition. */
 export async function openMigrationRow(
@@ -351,7 +310,9 @@ export async function openMigrationRow(
     } catch {
       return { status: 'unreadable', name: null };
     }
-    const known = typeof row.kind === 'string' && LEGACY_KINDS.has(row.kind);
+    if (row.kind === 'wat' || row.kind === 'snt')
+      return { status: 'row', name: null, legacy: true, row };
+    const known = typeof row.kind === 'string' && JSON_ROW_KINDS.has(row.kind);
     let name: string | null;
     try {
       name = known ? rowName(row as Row) : null;
@@ -422,7 +383,8 @@ export async function openEntry(keys: LibraryKeys, k: string, v: string): Promis
     } catch {
       return { unreadable: 'invalid_json' };
     }
-    if (typeof parsed.kind === 'string' && LEGACY_KINDS.has(parsed.kind)) {
+    if (parsed.kind === 'wat' || parsed.kind === 'snt') return { unknown: parsed };
+    if (typeof parsed.kind === 'string' && JSON_ROW_KINDS.has(parsed.kind)) {
       const row = parsed as Row;
       if (!(await named(rowName(row)))) return { unreadable: 'identity' };
       // Not read as state (den-core refuses an episode of a film), but its JSON is what the switch is given, as the
@@ -496,8 +458,6 @@ export interface NewestSummary {
 /** The newest stamp in a row, and when a future document stamp can change that answer without a write. */
 export function newestSummary(row: Row, now = Date.now()): NewestSummary {
   if (isDocument(row)) return documentNewest(row, now);
-  if (row.kind === 'wat' || row.kind === 'snt')
-    return { stamp: syncPolicy<Stamp>({ op: 'newest', row }) };
   const stamps =
     row.kind === 'ep'
       ? [row.progress.at]
@@ -563,10 +523,6 @@ export function mergeEpisode(a: EpisodeRow, b: EpisodeRow): EpisodeRow {
 /** Per setting, the later stamp; a setting only one version has is kept. */
 export function mergeSettings(a: SettingsRow, b: SettingsRow): SettingsRow {
   return syncPolicy<SettingsRow>({ op: 'merge', a, b });
-}
-
-export function mergeV3<T extends WatchRow | ReceiptRow>(a: T, b: T): T {
-  return syncPolicy<T>({ op: 'merge', a, b });
 }
 
 /** Two versions of one v4 document (§6, §9). */

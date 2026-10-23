@@ -124,7 +124,7 @@ it('settles only the destination named by the retired library', async () => {
 
 it('merges only a distinct registered browser-local source into an online target', async () => {
   const source = {
-    rows: vi.fn(() => [{ kind: 'set', schema: 2, name: 'prefs', values: {} }]),
+    storedRows: vi.fn(() => [{ kind: 'set', schema: 2, name: 'prefs', values: {} }]),
     forget: vi.fn(async () => true),
     close: vi.fn(),
   };
@@ -150,7 +150,7 @@ it('merges only a distinct registered browser-local source into an online target
     affected: expect.any(Array),
   });
   expect(existing).toHaveBeenCalledWith(DESTINATION, vault);
-  expect(log.writeRows).toHaveBeenCalledWith(source.rows());
+  expect(log.writeRows).toHaveBeenCalledWith(source.storedRows());
   expect(source.forget).toHaveBeenCalledOnce();
   expect(source.close).toHaveBeenCalledOnce();
 
@@ -170,20 +170,14 @@ it('merges only a distinct registered browser-local source into an online target
 
 it('keeps the source until den-edge, read back, holds everything moved', async () => {
   const watchlisted = {
-    kind: 'rec',
-    schema: 2,
+    kind: 'title',
+    format: 4,
     title: { type: 'movie', id: 1 },
     status: { value: 'watchlist', at: [1000, 0, 'aaaaaaaaaaaaaaaa'] },
-    resume: { value: 0, at: [0, 0, ''], viewing: 0 },
-    reaction: { value: null, at: [0, 0, ''] },
-    deleted: { value: false, at: [0, 0, ''] },
-    dismissed: { value: false, at: [0, 0, ''] },
-    episodesReset: null,
     addedAt: 1000,
-    watchedAt: null,
   };
   const source = {
-    rows: vi.fn(() => [watchlisted]),
+    storedRows: vi.fn(() => [watchlisted]),
     forget: vi.fn(async () => true),
     close: vi.fn(),
   };
@@ -223,7 +217,11 @@ it('stops writing a move in batches once den-edge asks it to wait, and says how 
     name: `extra-${id}`,
     values: {},
   }));
-  const source = { rows: vi.fn(() => rows), forget: vi.fn(async () => true), close: vi.fn() };
+  const source = {
+    storedRows: vi.fn(() => rows),
+    forget: vi.fn(async () => true),
+    close: vi.fn(),
+  };
   vi.spyOn(LibraryLog, 'openExistingLocal').mockResolvedValue(source as unknown as LibraryLog);
   const log = {
     // A refused edit is kept, so the batch still answers true; the wait is what tells.

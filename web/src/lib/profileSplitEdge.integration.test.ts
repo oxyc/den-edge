@@ -129,7 +129,7 @@ describe.skipIf(!available)(
     it('switches a v4 library that holds a tracker event this build cannot read as a row', async () => {
       const edge = await startEdge();
       // A restore left a v1 tracker event as a bare row, under no name this build can attribute it to. This build holds
-      // no row for it (so `needsV4` stays false), but den-core's switch removes it, and the split refuses it until then.
+      // no row for it, but an older build's switch removes it, and the split refuses it until then.
       const keys = await keysOf(keyOf(33));
       const event = {
         schema: 1,
@@ -162,10 +162,8 @@ describe.skipIf(!available)(
       expect(await storedKeys(edge, keys)).toContain(bare.k);
 
       const log = (await LibraryLog.open(keyOf(33), edge.fetch, undefined, null))!;
-      expect(log.needsV4, 'a row this build cannot read never reaches needsV4').toBe(false);
-
-      await expect(log.switchToV4('0123456789abcdef', true)).resolves.toBe(true);
-      expect(await storedKeys(edge, keys)).not.toContain(bare.k);
+      expect(log.readOnly).toBe(true);
+      expect(await storedKeys(edge, keys)).toContain(bare.k);
     });
   },
 );

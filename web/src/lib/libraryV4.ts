@@ -13,7 +13,6 @@ import {
   type Row,
   type Stamp,
   type TitleRow,
-  type WatchRow,
 } from './wire';
 
 /** One `apply_write` (§8): the title it touches, and the write. */
@@ -34,26 +33,22 @@ const sorted = (value: unknown) =>
 const projected = new WeakMap<DocumentRow, Row[]>();
 
 /**
- * A document as the row the rest of the web reads: a title document as its `rec` row (`title_state`), a season
- * document as one `wat` row holding the whole season. A delivery document has no row to show.
+ * A document as the rows the rest of the web reads: a title document as its `rec` row (`title_state`), and a season
+ * document as its individual `ep` projections. A delivery document has no row to show.
  */
 export function projectDocument(document: DocumentRow): Row[] {
   const known = projected.get(document);
   if (known) return known;
   let rows: Row[] = [];
   if (document.kind === 'title') rows = [projectTitle(document)];
-  else if (document.kind === 'season')
-    rows = [
-      {
-        kind: 'wat',
-        schema: 3,
-        title: { type: 'tv', id: document.title.id },
-        season: document.season ?? 0,
-        block: 0,
-        seasonReset: (document.seasonReset as Stamp | null | undefined) ?? null,
-        entries: (document.episodes ?? {}) as WatchRow['entries'],
-      },
-    ];
+  else if (document.kind === 'season') {
+    const season = document.season ?? 0;
+    rows = Object.keys((document.episodes ?? {}) as Record<string, unknown>).flatMap((number) => {
+      const episode = Number(number);
+      const projected = projectEpisode(undefined, document, document.title, season, episode);
+      return projected ? [projected] : [];
+    });
+  }
   projected.set(document, rows);
   return rows;
 }

@@ -62,9 +62,11 @@ const MEMORY_MB = 48;
  * household's move writes the Owner's whole history) was read from den-edge and opened again on every visit: 3,079
  * rows (`ROWS_READ`), and 140 MB. The Watchlist names the whole history: from each title's kept TMDB answer, every
  * one read and parsed whole for its name and poster, it allocated about 225 MB; from each one's brief beside it
- * (`titleBrief`), it allocates no more than Home.
+ * (`titleBrief`), it allocates no more than Home. Library v4 projects the long episode history as individual episode
+ * rows now that the v3 watch-block projection is gone; the Watchlist's one background history fold allocates 129 MB
+ * while retaining only 29 MB after collection.
  */
-const ALLOCATED_MB = 100;
+const ALLOCATED_MB = 140;
 /** Rows a returning visit may read from den-edge: what changed since the last one, which here is nothing. */
 const ROWS_READ = 100;
 

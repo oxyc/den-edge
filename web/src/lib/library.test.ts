@@ -274,30 +274,10 @@ describe('folding episode rows in', () => {
       addedAt: 2000,
       watchedAt: null,
     };
-    const season: Row = {
-      kind: 'wat' as const,
-      schema: 3 as const,
-      title: { type: 'tv' as const, id: 7 },
-      season: 1,
-      block: 0,
-      seasonReset: null,
-      entries: Object.fromEntries(
-        Array.from({ length: 500 }, (_, index) => [
-          String(index + 1),
-          {
-            imported: false,
-            progress: {
-              value: 0.4,
-              viewing: 0,
-              at: [1000, index, 'aaaaaaaaaaaaaaaa'] as [number, number, string],
-            },
-            plays: {},
-            cleared: null,
-          },
-        ]),
-      ),
-    };
-    const rows = [reset, season];
+    const rows = [
+      reset,
+      ...Array.from({ length: 500 }, (_, index) => epRow(1, index + 1, 0.4, 1000)),
+    ];
     const expected = applyLog(emptyLibrary(), rows);
     let clock = 0;
     let yields = 0;
@@ -312,28 +292,6 @@ describe('folding episode rows in', () => {
     expect(staged).toEqual(expected);
     expect(staged!.marks).toEqual([]);
     expect(yields).toBeGreaterThan(100);
-  });
-
-  it('skips a malformed watch row on both synchronous and staged paths', async () => {
-    const malformed: Row = {
-      kind: 'wat' as const,
-      schema: 3 as const,
-      title: { type: 'movie' as const, id: 7 },
-      season: 1,
-      block: 0,
-      seasonReset: null,
-      entries: {
-        1: {
-          imported: false,
-          progress: { value: 0.4, viewing: 0, at: [1000, 0, 'aaaaaaaaaaaaaaaa'] },
-          plays: {},
-          cleared: null,
-        },
-      },
-    };
-    expect(await applyLogInSlices(emptyLibrary(), [malformed])).toEqual(
-      applyLog(emptyLibrary(), [malformed]),
-    );
   });
 
   /**

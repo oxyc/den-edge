@@ -1521,16 +1521,9 @@ function connectionsView(value: unknown): value is ConnectionsView {
     list(devices, libraryDevice, 512) &&
     unique(devices, (device) => device.id) &&
     record(diagnostics) &&
-    exact(diagnostics, [
-      'libraryFormat',
-      'legacyRows',
-      'pendingChanges',
-      'selfDeviceId',
-      'profileTopology',
-    ]) &&
+    exact(diagnostics, ['libraryFormat', 'pendingChanges', 'selfDeviceId', 'profileTopology']) &&
     optional(diagnostics.profileTopology, bool) &&
     integer(diagnostics.libraryFormat) &&
-    integer(diagnostics.legacyRows) &&
     integer(diagnostics.pendingChanges) &&
     boundedText(diagnostics.selfDeviceId, 128)
   );

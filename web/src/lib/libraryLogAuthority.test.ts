@@ -1023,10 +1023,11 @@ describe('LibraryLogAuthority', () => {
     expect(view).toEqual({
       kind: 'simkl',
       connected: true,
+      account: '42',
       heldRemovals: [],
     });
     expect(JSON.stringify(view)).not.toContain('private-token');
-    expect(JSON.stringify(log.settings('keys'))).toContain('private-token');
+    expect(JSON.stringify(log.settings('trackers'))).toContain('private-token');
 
     await expect(
       service.command({ kind: 'simkl.disconnect' }, 'disconnect'),
@@ -1060,7 +1061,7 @@ describe('LibraryLogAuthority', () => {
         { kind: 'continue' },
       ],
     });
-    expect(log.settings('tracker-event:add-movie')).toBeDefined();
+    expect(log.settings('tracker-event:add-movie')).toBeUndefined();
     await expect(
       authority.command({ kind: 'watchlist.add', title: movie }, 'add-again'),
     ).resolves.toMatchObject({ outcome: 'unchanged', affected: [] });
@@ -1168,7 +1169,7 @@ describe('LibraryLogAuthority', () => {
       },
       'episode-one-seen',
     );
-    expect(log.settings('tracker-event:episode-one-seen')).toBeDefined();
+    expect(log.settings('tracker-event:episode-one-seen')).toBeUndefined();
     await expect(authority.query({ kind: 'playback.prepare', title: series })).resolves.toEqual({
       kind: 'playback.prepare',
       action: 'next',
@@ -1187,7 +1188,7 @@ describe('LibraryLogAuthority', () => {
       'season-seen',
     );
     expect(log.settings('tracker-event:season-seen:episode:1:1')).toBeUndefined();
-    expect(log.settings('tracker-event:season-seen:episode:1:2')).toBeDefined();
+    expect(log.settings('tracker-event:season-seen:episode:1:2')).toBeUndefined();
     await expect(authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
       listed: true,
       watched: true,
@@ -1208,7 +1209,7 @@ describe('LibraryLogAuthority', () => {
       { kind: 'watched.set', title: series, watched: false },
       'series-unseen',
     );
-    expect(log.settings('tracker-event:series-unseen')).toBeDefined();
+    expect(log.settings('tracker-event:series-unseen')).toBeUndefined();
     await expect(authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
       watched: false,
       episodes: [
@@ -1704,8 +1705,7 @@ describe('LibraryLogAuthority', () => {
         { id: tv, name: 'Apple TV', kind: 'tv', lastSeenAt: 900, libraryFormat: 3 },
       ],
       diagnostics: {
-        libraryFormat: 2,
-        legacyRows: 0,
+        libraryFormat: 4,
         pendingChanges: 0,
         selfDeviceId: '0123456789abcdef',
       },

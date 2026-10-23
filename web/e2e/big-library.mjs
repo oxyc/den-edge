@@ -613,7 +613,7 @@ export async function bigHousehold(context, edge, options = {}) {
     });
     step('accepted');
     // The move is done once den-edge holds a library with the whole history in it: as Library v4 documents, one per
-    // title and one per season, about 3,070 of them at scale 1.
+    // title, season and delivery document, about 5,100 of them at scale 1.
     await expect
       .poll(
         () => Math.max(0, ...[...edge.libraries.values()].map((library) => library.rows.size)),
@@ -622,7 +622,7 @@ export async function bigHousehold(context, edge, options = {}) {
           message: 'the Owner library holds the seeded rows',
         },
       )
-      .toBeGreaterThan(3_000 * BIG_LIBRARY_SCALE);
+      .toBeGreaterThan(5_000 * BIG_LIBRARY_SCALE);
     step('moved');
     // A first visit to Home and to the Watchlist (which names the whole history) fills this browser's TMDB cache, so
     // every later load is a returning visit's.

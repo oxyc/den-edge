@@ -13,7 +13,7 @@ import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys, seal, type Row, type SettingsRow, type Stamp, type TitleRow } from './wire';
+import { deriveKeys, seal, type SettingsRow, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
@@ -826,68 +826,6 @@ it('answers a drain that found nothing from the drop-box row, without opening th
   ).resolves.toEqual({
     result: { kind: 'assistant.apply', results: [], ack: null, dropbox: null },
     affected: [],
-  });
-  expect(openFull).not.toHaveBeenCalled();
-});
-
-/** Rows of an earlier format, held in the fact store as den-edge gave them. */
-async function earlierFacts(vault: Vault, rows: readonly Row[]): Promise<void> {
-  const keys = await deriveKeys(raw);
-  const entries = await Promise.all(
-    rows.map(async (row, index) => {
-      const sealed = await seal(keys, row as Parameters<typeof seal>[1]);
-      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
-    }),
-  );
-  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
-  await facts.commitBatch('generation-a', 12, entries, true);
-}
-
-it('reads a title held in an earlier format as the full log does, without opening the log', async () => {
-  await ensureSyncPolicy();
-  const vault = new FactVault();
-  await earlierFacts(vault, [factTitle('watched', 10)]);
-  const openFull = vi.fn(async () => fullAuthority());
-  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
-
-  await expect(
-    opened!.authority.select({ kind: 'title', title: { type: 'movie', id: 77 } }),
-  ).resolves.toMatchObject({ kind: 'title', listed: true, watched: true, standing: 'watched' });
-  expect(openFull).not.toHaveBeenCalled();
-});
-
-it('counts episodes a series holds only in an earlier watch block as watched', async () => {
-  await ensureSyncPolicy();
-  const vault = new FactVault();
-  const register = (value: number) => ({
-    imported: false,
-    progress: { value, at: [2000, 0, 'device'] as Stamp, viewing: 0 },
-    plays: value >= 1 ? { 0: 2000 } : {},
-    cleared: null,
-  });
-  // Season 1 watched before v4: a `wat:` block of watch marks and no season document.
-  await earlierFacts(vault, [
-    {
-      kind: 'wat',
-      schema: 3,
-      title: { type: 'tv', id: 55 },
-      season: 1,
-      block: 0,
-      seasonReset: null,
-      entries: { 1: register(1), 2: register(1), 3: register(0.5) },
-    } as Row,
-  ]);
-  const openFull = vi.fn(async () => fullAuthority());
-  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
-
-  await opened!.authority.observe(seriesShape);
-  const view = await opened!.authority.select({ kind: 'title', title: { type: 'tv', id: 55 } });
-  expect(view).toMatchObject({
-    episodes: [
-      { season: 1, episode: 1, watched: true },
-      { season: 1, episode: 2, watched: true },
-      { season: 1, episode: 3, watched: false, fraction: 0.5 },
-    ],
   });
   expect(openFull).not.toHaveBeenCalled();
 });

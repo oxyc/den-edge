@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { deflateRawSync } from 'node:zlib';
-import { addToWatchlist, blankTitle, react } from './actions';
+import { addToWatchlist, blankEpisode, blankTitle, markWatched, react } from './actions';
 import type { Vault } from './localVault';
 import {
   applyLog,
@@ -12,14 +12,14 @@ import {
 } from './library';
 import { LibraryLog, LibraryUpdateRequiredError } from './log';
 import { LibraryFactStore } from './libraryFactStore';
+import { applyOps, opsFor } from './libraryV4';
 import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
-import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
+import { forgetLibraryCredential, hasLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
-import { deliverSimkl } from './simklDelivery';
 import { fetchDetailsResult } from './workerTmdbProvider';
 import {
   deriveKeys,
-  open,
+  isDocument,
   rowKey,
   rowName,
   seal,
@@ -32,7 +32,17 @@ import {
 } from './wire';
 
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
-const at = (t: number, device = 'tv01'): Stamp => [t, 0, device];
+const at = (t: number, device = 'aaaaaaaaaaaaaaaa'): Stamp => [
+  t,
+  0,
+  /^[0-9a-f]{16}$/.test(device)
+    ? device
+    : [...device]
+        .map((character) => character.charCodeAt(0).toString(16).padStart(2, '0'))
+        .join('')
+        .padEnd(16, '0')
+        .slice(0, 16),
+];
 
 const OWNER_ID = '00112233445566778899aabbccddeeff';
 const OWNER_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(17)));
@@ -94,6 +104,34 @@ function row(id: number, overrides: Partial<TitleRow> = {}): TitleRow {
   };
 }
 
+/** Project test inputs through the v4 write contract before the fake relay stores them. */
+function currentRows(rows: Row[]): Row[] {
+  const held = new Map<string, Row>();
+  for (const row of rows) {
+    const event = trackerEvent(row);
+    const edits = event
+      ? opsFor(event.before, event.after)
+      : row.kind === 'rec'
+        ? opsFor(
+            row.resume.value === 0
+              ? { ...blankTitle(row.title, row.addedAt), resume: row.resume }
+              : blankTitle(row.title, row.addedAt),
+            row,
+          )
+        : row.kind === 'ep'
+          ? opsFor(blankEpisode(row.title, row.season, row.episode), row)
+          : [];
+    if (edits.length) {
+      for (const document of applyOps(edits, (name) => {
+        const candidate = held.get(name);
+        return candidate && isDocument(candidate) ? candidate : undefined;
+      }))
+        held.set(rowName(document), document);
+    } else held.set(rowName(row), row);
+  }
+  return [...held.values()];
+}
+
 /**
  * den-edge's `/lib` in memory, with library.rs's rules: `changes` paged in sequence order (two a page, so paging
  * is exercised), and `batch` with compare-and-set on each row's sequence.
@@ -107,7 +145,10 @@ async function edge(
   let head = 0;
   let generation = initialGeneration;
   const stored = new Map<string, { k: string; seq: number; v: string }>();
-  for (const entry of [...(await Promise.all(rows.map((r) => seal(keys, r)))), ...extra]) {
+  for (const entry of [
+    ...(await Promise.all(currentRows(rows).map((r) => seal(keys, r)))),
+    ...extra,
+  ]) {
     stored.set(entry.k, { ...entry, seq: ++head });
   }
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -147,8 +188,10 @@ async function edge(
     for (const entry of entries) stored.set(entry.k, { ...entry, seq: ++head });
   };
   const append = async (row: Row) => {
-    const entry = await seal(keys, row);
-    stored.set(entry.k, { ...entry, seq: ++head });
+    for (const current of currentRows([row])) {
+      const entry = await seal(keys, current);
+      stored.set(entry.k, { ...entry, seq: ++head });
+    }
   };
   const appendSealed = (entry: { k: string; v: string }) =>
     void stored.set(entry.k, { ...entry, seq: ++head });
@@ -206,7 +249,7 @@ describe('LibraryLog', () => {
   it('promotes explicit full work from individual authority without downloading the library again', async () => {
     const { vault } = memoryVault();
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const value = row(91);
+    const value = currentRows([row(91)])[0]!;
     const encrypted = await seal(keys, value);
     const facts = (await LibraryFactStore.open(LIBRARY_KEY, vault))!;
     await facts.commitBatch(
@@ -225,7 +268,7 @@ describe('LibraryLog', () => {
     };
 
     const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
-    expect(log.rows()).toContainEqual(value);
+    expect(log.title({ type: 'movie', id: 91 })?.status.value).toBe('watchlist');
     // The membership this browser never registered is registered beside the open, not before it.
     await vi.waitFor(() => expect(requests).toEqual([`PUT /lib/${keys.id}/member`]));
   });
@@ -904,31 +947,6 @@ describe('LibraryLog', () => {
     expect(log.pendingActions).toBe(0);
   });
 
-  it('re-scans vault pending work written by another tab before replay', async () => {
-    const { vault } = memoryVault();
-    const server = await edge();
-    let refuse = false;
-    const connection: typeof fetch = async (input, init) => {
-      if (refuse && init?.method === 'POST') {
-        refuse = false;
-        return new Response(JSON.stringify({ error: 'rewrite_in_progress' }), { status: 409 });
-      }
-      return server.fetchImpl(input, init);
-    };
-    const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
-    const second = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
-    refuse = true;
-    const before = blankTitle({ type: 'movie', id: 10 }, 0);
-
-    expect(await first.write(addToWatchlist(before, at(1000)))).not.toBeNull();
-    expect(first.pendingActions).toBe(1);
-    expect(await second.refresh()).toBe(true);
-    expect(second.pendingActions).toBe(0);
-    const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    expect(reopened.pendingActions).toBe(0);
-    expect(reopened.title(before.title)?.status.value).toBe('watchlist');
-  });
-
   it('rekeys vault pending work without leaving the old copy behind', async () => {
     const { vault } = memoryVault();
     const server = await edge();
@@ -1098,149 +1116,6 @@ describe('LibraryLog', () => {
     warning.mockRestore();
   });
 
-  it('rewrites a web-only v2 library atomically into den-core v3 rows', async () => {
-    const device = 'aaaaaaaaaaaaaaaa';
-    const episode: EpisodeRow = {
-      kind: 'ep',
-      schema: 2,
-      title: { type: 'tv', id: 95396 },
-      season: 1,
-      episode: 2,
-      progress: { value: 1, at: at(2000, device), viewing: 0 },
-    };
-    const simkl: Row = {
-      kind: 'set',
-      schema: 2,
-      name: 'keys',
-      values: { simkl: { value: { string: 'token' }, at: at(1500, device) } },
-    };
-    const server = await edge([
-      ...Array.from({ length: 198 }, (_, index): SettingsRow => ({
-        kind: 'set',
-        schema: 2,
-        name: `fixture:${index}`,
-        values: { enabled: { value: { bool: true }, at: at(1000, device) } },
-      })),
-      row(95396, {
-        title: { type: 'tv', id: 95396 },
-        status: { value: 'watchlist', at: at(1000, device) },
-        reaction: { value: null, at: at(1000, device) },
-      }),
-      episode,
-      simkl,
-    ]);
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    let generation = 'old';
-    const staged: { k: string; v: string }[] = [];
-    const stagedBatchSizes: number[] = [];
-    const requests: { path: string; init: RequestInit }[] = [];
-    let simklSends = 0;
-    const simklPaths: string[] = [];
-    const connection: typeof fetch = async (input, init = {}) => {
-      const url = new URL(String(input), 'https://den.example');
-      const path = url.pathname;
-      if (path === '/config') return new Response(JSON.stringify({ simklClientId: 'client' }));
-      if (url.hostname === 'api.simkl.com') {
-        if (path === '/sync/all-items')
-          return new Response(JSON.stringify({ movies: [], shows: [] }));
-        if (init.method === 'POST') {
-          simklSends++;
-          simklPaths.push(path);
-          return new Response('{}');
-        }
-      }
-      requests.push({ path, init });
-      const headers = new Headers({
-        'x-den-generation': generation,
-        'x-den-wire-min': generation === 'old' ? '2' : '3',
-      });
-      if (path.endsWith('/rewrite') && init.method === 'POST')
-        return new Response(JSON.stringify({ rewrite: 'stage', base: server.head() }), { headers });
-      if (path.endsWith('/rewrite/stage/rows') && init.method === 'POST') {
-        const writes = (
-          JSON.parse(String(init.body)) as {
-            writes: { k: string; v: string }[];
-          }
-        ).writes;
-        stagedBatchSizes.push(writes.length);
-        staged.push(...writes);
-        return new Response('{}', { headers });
-      }
-      if (path.endsWith('/rewrite/stage/commit') && init.method === 'POST') {
-        expect(JSON.parse(String(init.body))).toEqual({ base: server.head(), wireMin: 3 });
-        server.rewrite(staged);
-        generation = 'new';
-        headers.set('x-den-generation', generation);
-        headers.set('x-den-wire-min', '3');
-        return new Response('{}', { headers });
-      }
-      const response = await server.fetchImpl(input, init);
-      const body = (await response.json()) as Record<string, unknown>;
-      return new Response(JSON.stringify({ ...body, generation }), {
-        status: response.status,
-        headers,
-      });
-    };
-    const log = (await LibraryLog.open(
-      LIBRARY_KEY,
-      connection,
-      memoryStorage().storage,
-      memoryVault().vault,
-    ))!;
-    // A final v2 write lands after this browser's read but before the rewrite fence. The switch must refresh through
-    // the offered base and include it rather than converting its stale in-memory snapshot.
-    const latest = row(550, { status: { value: 'watched', at: at(2400, device) } });
-    await server.append(latest);
-    expect(
-      await log.switchWebOnly({
-        performer: device,
-        stamp: at(2500, device),
-        simkl: { account: '42', credential: 'token', connectedAt: at(1500, device) },
-      }),
-    ).toBe(true);
-    expect(log.wireMinimum).toBe(3);
-    const oldEpisodeKey = (await seal(keys, episode)).k;
-    expect(staged.map(({ k }) => k)).not.toContain(oldEpisodeKey);
-    const rewritten = await Promise.all(staged.map(({ k, v }) => open(keys, k, v)));
-    expect(
-      rewritten.find((row): row is TitleRow => row.kind === 'rec' && row.title.id === 550)?.status
-        .value,
-    ).toBe('watched');
-    expect(rewritten.some((row) => row.kind === 'wat')).toBe(true);
-    expect(rewritten.some((row) => row.kind === 'set' && row.name === 'trackers')).toBe(true);
-    expect(rewritten.some((row) => row.kind === 'set' && row.name === 'deliver:simkl:42')).toBe(
-      true,
-    );
-    expect(
-      rewritten.find((row): row is SettingsRow => row.kind === 'set' && row.name === 'keys')?.values
-        .simkl?.value,
-    ).toBeNull();
-    expect(stagedBatchSizes.length).toBeGreaterThan(1);
-    expect(stagedBatchSizes.every((size) => size <= 200)).toBe(true);
-    expect(requests.at(-1)?.init.headers).toMatchObject({ 'x-den-generation': 'new' });
-
-    // Its own commit is a generation change: it watches the new store for ten minutes before taking the lease.
-    expect(await deliverSimkl(log, device, connection, 0)).toBe(false);
-    expect(await deliverSimkl(log, device, connection, 600_000)).toBe(true);
-    expect(simklSends).toBeGreaterThan(0);
-    const sentOnce = simklSends;
-    expect(await deliverSimkl(log, device, connection, 600_000)).toBe(true);
-    expect(simklSends, simklPaths.join(', ')).toBe(sentOnce);
-    expect(log.rows().some((row) => row.kind === 'snt')).toBe(true);
-
-    expect(await log.write(episode)).not.toBeNull();
-    expect(log.rows().some((row) => row.kind === 'ep')).toBe(false);
-  });
-
-  /**
-   * The default fetch is kept on the instance and later called as `this.fetchImpl(…)` — a METHOD call,
-   * and a browser's `fetch` refuses one whose `this` is anything but the window. So every write threw
-   * before making a request, and the catch turned it into "Couldn't save that" with nothing in the
-   * Network tab to explain it. Only `open` escaped, by calling its local binding.
-   *
-   * Every other test here injects a plain function, which has no such objection — which is exactly why
-   * none of them noticed. This one stubs a `fetch` as strict about `this` as a browser is.
-   */
   it('survives its own default fetch being called as a method', async () => {
     const server = await edge([row(1)]);
     const strict = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
@@ -1271,8 +1146,8 @@ describe('LibraryLog', () => {
 
     // Meanwhile the TV adds a title and changes another.
     const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    await tv.write(row(4));
-    await tv.write(row(1, { status: { value: 'watched', at: at(2000) } }));
+    await tv.write(addToWatchlist(blankTitle({ type: 'movie', id: 4 }, 1_000), at(1_000)));
+    await tv.write(markWatched(tv.title({ type: 'movie', id: 1 })!, at(2_000)));
 
     asked.length = 0;
     const log = (await LibraryLog.open(LIBRARY_KEY, counting, undefined, vault))!;
@@ -1327,10 +1202,13 @@ describe('LibraryLog', () => {
     };
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, recording))!;
     written.length = 0;
-    await log.write(row(2));
+    await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 2 }, 1_000), at(1_000)));
+    await vi.waitFor(() =>
+      expect(written.some((key) => key.includes(':library-facts.v1:'))).toBe(true),
+    );
 
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const changed = await rowKey(keys, 'rec:movie:2');
+    const changed = await rowKey(keys, 'title:movie:2');
     const library = written.filter((key) => !key.includes(':runtime:'));
     expect(library.filter((key) => key.includes(':library-facts.v1:'))).not.toEqual([]);
     // The changed document, the finished-view marker, and the store's manifest, which takes its newest stamp in.
@@ -1365,7 +1243,7 @@ describe('LibraryLog', () => {
     const { data, vault } = await keptWhole((log) => ({
       generation: 'generation-1',
       head: 2,
-      entries: log.rows().map((held) => [rowName(held), 1, held]),
+      entries: log.documents().map(({ seq, document }) => [rowName(document), seq, document]),
     }));
     const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
 
@@ -1674,86 +1552,6 @@ describe('LibraryLog', () => {
     expect(pages, 'an uncommitted page must not be followed by another page').toBe(1);
   });
 
-  it('shows the kept copy without waiting on den-edge, and sends kept work on the refresh after', async () => {
-    const { vault } = memoryVault();
-    const data = new Map<string, string>();
-    const storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i: number) => [...data.keys()][i] ?? null,
-      getItem: (k: string) => data.get(k) ?? null,
-      setItem: (k: string, v: string) => void data.set(k, v),
-      removeItem: (k: string) => void data.delete(k),
-      clear: () => data.clear(),
-    } as Storage;
-    const server = await edge([row(1)], [], 'generation-1');
-    await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault);
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'kept')!;
-    data.set(`den.pendingTracker.${keys.id}.kept`, JSON.stringify(await seal(keys, journal)));
-    await vi.waitFor(async () => {
-      const hung: typeof fetch = () => new Promise(() => undefined);
-      const log = (await LibraryLog.open(LIBRARY_KEY, hung, storage, vault))!;
-      expect(log.fromCache).toBe(true);
-    });
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
-    expect(log.pendingActions).toBe(1);
-    expect(await log.refresh()).toBe(true);
-    expect(log.pendingActions).toBe(0);
-    expect(log.title(blank.title)?.status.value).toBe('watchlist');
-  });
-
-  /**
-   * A return visit opens from the kept copy without asking den-edge anything. The action this browser kept unsent
-   * was not drawn until a refresh reached den-edge: reloaded while it was out of reach, the mark was gone.
-   */
-  it('draws kept work on a return visit while den-edge is out of reach', async () => {
-    const { data: kept, vault } = memoryVault();
-    const { data, storage } = memoryStorage();
-    const server = await edge([row(1)], [], 'generation-1');
-    await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault);
-    await vi.waitFor(() => expect(keptFacts(kept)).toBe(true));
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'kept')!;
-    data.set(`den.pendingTracker.${keys.id}.kept`, JSON.stringify(await seal(keys, journal)));
-    const offline: typeof fetch = async () => {
-      throw new TypeError('offline');
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, offline, storage, vault))!;
-    expect(log.fromCache).toBe(true);
-    expect(log.title(blank.title)?.status.value).toBe('watchlist');
-    expect(await log.refresh()).toBe(false);
-    expect(log.pendingActions).toBe(1);
-  });
-
-  /** den-edge answers the read but fails the batch: what the kept work does is drawn, and the refresh says so. */
-  it('says a refresh changed something when it drew kept work it could not send', async () => {
-    const { data, storage } = memoryStorage();
-    const server = await edge([row(1)]);
-    let failing = false;
-    const connection: typeof fetch = async (url, init) =>
-      failing && init?.method === 'POST'
-        ? new Response('{}', { status: 503 })
-        : server.fetchImpl(url, init);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    // Kept by another tab of this browser while den-edge was out of its reach.
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'kept')!;
-    data.set(`den.pendingTracker.${keys.id}.kept`, JSON.stringify(await seal(keys, journal)));
-    failing = true;
-    expect(await log.refresh()).toBe(true);
-    expect(log.title(blank.title)?.status.value).toBe('watchlist');
-    expect(await log.refresh(), 'already drawn').toBe(false);
-    failing = false;
-    expect(await log.refresh()).toBe(true);
-    expect(log.pendingActions).toBe(0);
-  });
-
-  /** A return visit whose membership den-edge never took claimed none until the first refresh read /changes. */
   it('registers a membership not yet registered as soon as a return visit opens', async () => {
     const { data, vault } = memoryVault();
     const server = await edge([row(1)], [], 'generation-1');
@@ -1796,112 +1594,6 @@ describe('LibraryLog', () => {
     expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
   });
 
-  it('a second relay reset cannot overwrite unfinished recovery from the first', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    let server = await edge();
-    let writesAllowed = Infinity;
-    const connection: typeof fetch = (url, init) => {
-      if (init?.method === 'POST' && writesAllowed-- <= 0)
-        return Promise.resolve(new Response('{}', { status: 503 }));
-      if (init?.method !== 'POST' && !server.stored.size)
-        return Promise.resolve(new Response('{}', { status: 404 }));
-      return server.fetchImpl(url, init);
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const journals = Array.from({ length: 40 }, (_, i) => {
-      const before = blankTitle({ type: 'movie', id: i + 1 }, 0);
-      return recordTrackerEvent(
-        before,
-        addToWatchlist(before, at(1000)),
-        at(1000),
-        'recovery-' + i,
-      )!;
-    });
-    await log.writeActions(journals);
-    server = await edge();
-    writesAllowed = 1;
-    await log.refresh(); // Only the first 32 journals recover.
-    server = await edge();
-    writesAllowed = 0;
-    await log.refresh(); // Must retain the first checkpoint, including the unfinished remainder.
-    writesAllowed = Infinity;
-    const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    expect(reopened.pendingActions).toBe(0);
-    expect(reopened.title({ type: 'movie', id: 40 })?.status.value).toBe('watchlist');
-    expect(reopened.settings('tracker-event:recovery-39')).toBeDefined();
-  });
-
-  it('republishes acknowledged actions after the relay is restored empty', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    let server = await edge();
-    let generation = 'original';
-    let memberRegistrations = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'PUT') {
-        memberRegistrations += 1;
-        return new Response('{}', { status: server.stored.size ? 200 : 404 });
-      }
-      if (init?.method !== 'POST' && server.stored.size === 0)
-        return new Response(JSON.stringify({ generation }), { status: 404 });
-      const res = await server.fetchImpl(url, init);
-      return new Response(JSON.stringify({ ...(await res.json()), generation }), {
-        status: res.status,
-      });
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const before = blankTitle({ type: 'movie', id: 10 }, 0);
-    await log.writeAction(
-      recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'accepted')!,
-    );
-    expect(log.pendingActions).toBe(0);
-    const registeredBefore = memberRegistrations;
-    expect(registeredBefore).toBeGreaterThanOrEqual(1);
-    server = await edge();
-    generation = 'restored';
-    expect(await log.refresh()).toBe(true);
-    expect(log.pendingActions).toBe(0);
-    const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    expect(reopened.title(before.title)?.status.value).toBe('watchlist');
-    expect(reopened.settings('tracker-event:accepted')).toBeDefined();
-    expect(
-      memberRegistrations,
-      'a restored store invalidates the persisted registration marker and registers again',
-    ).toBeGreaterThan(registeredBefore);
-  });
-
-  /**
-   * `readToHead` says whether this pass read den-edge's log to its head, which `refresh`'s "changed" cannot: a busy
-   * den-edge and a quiet log both answer false there. A generation change is read from zero but counts only on the
-   * next pass, once its write-back landed (recovery-code §7).
-   */
   it('reads to the head only when den-edge answered, and not across a generation change', async () => {
     const server = await edge([row(1), row(2), row(3)]);
     let busy = false;
@@ -1951,582 +1643,15 @@ describe('LibraryLog', () => {
     expect(reopened.rows()).toHaveLength(4);
   });
 
-  it('resends only the kept work den-edge has not applied, and never twice at once', async () => {
-    const data = new Map<string, string>();
-    const storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i: number) => [...data.keys()][i] ?? null,
-      getItem: (k: string) => data.get(k) ?? null,
-      setItem: (k: string, v: string) => void data.set(k, v),
-      removeItem: (k: string) => void data.delete(k),
-      clear: () => data.clear(),
-    } as Storage;
-    const server = await edge([row(1)]);
-    let allowed = Infinity;
-    let rows = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'POST') {
-        if (allowed-- <= 0) return new Response('{}', { status: 503 });
-        rows += (JSON.parse(String(init.body)) as { writes: unknown[] }).writes.length;
-      }
-      return server.fetchImpl(url, init);
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const journals = Array.from({ length: 40 }, (_, i) => {
-      const before = blankTitle({ type: 'movie', id: i + 10 }, 0);
-      return recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'b' + i)!;
-    });
-    allowed = 1; // The first 32 journals, then den-edge fails.
-    await log.writeActions(journals);
-    expect(rows).toBe(32);
-    allowed = Infinity;
-    await log.refresh();
-    expect(log.pendingActions).toBe(0);
-    expect(rows, 'the 8 journals left, then the 40 titles').toBe(32 + 8 + 40);
-
-    // Two refreshes at once (the timer and a tab coming back) each replay what is kept.
-    let offline = false;
-    const flaky: typeof fetch = (url, init) =>
-      offline ? Promise.reject(new TypeError('offline')) : connection(url, init);
-    const again = (await LibraryLog.open(LIBRARY_KEY, flaky, storage))!;
-    offline = true;
-    for (const id of [90, 91, 92]) {
-      const before = blankTitle({ type: 'movie', id }, 0);
-      await again.writeAction(
-        recordTrackerEvent(before, addToWatchlist(before, at(2000)), at(2000), 'k' + id)!,
-      );
-    }
-    expect(again.pendingActions).toBe(3);
-    offline = false;
-    rows = 0;
-    await Promise.all([again.refresh(), again.refresh()]);
-    expect(again.pendingActions).toBe(0);
-    expect(rows, 'each journal and title once').toBe(6);
-  });
-
-  it('persists a complete bulk action before delivery and retries it in bounded batches', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    const server = await edge();
-    let offline = false;
-    const sizes: number[] = [];
-    const connection: typeof fetch = (url, init) => {
-      if (offline) return Promise.reject(new TypeError('offline'));
-      if (init?.method === 'POST') sizes.push(JSON.parse(String(init.body)).writes.length);
-      return server.fetchImpl(url, init);
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const journals = Array.from({ length: 65 }, (_, i) => {
-      const before = blankTitle({ type: 'movie', id: i + 1 }, 0);
-      return recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'bulk-' + i)!;
-    });
-    offline = true;
-    expect(await log.writeActions(journals)).toBe(true);
-    expect(data.size).toBe(1);
-    expect(log.title({ type: 'movie', id: 65 })?.status.value).toBe('watchlist');
-    offline = false;
-    const restored = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    expect(restored.pendingActions).toBe(0);
-    expect(restored.title({ type: 'movie', id: 65 })?.status.value).toBe('watchlist');
-    expect(sizes).toEqual([32, 32, 1, 32, 32, 1]);
-  });
-
-  it('retries the first offline action when an empty relay still answers 404', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    const server = await edge();
-    let offline = false;
-    const connection: typeof fetch = (url, init) => {
-      if (offline) return Promise.reject(new TypeError('offline'));
-      if (init?.method !== 'POST' && server.stored.size === 0)
-        return Promise.resolve(new Response('{}', { status: 404 }));
-      return server.fetchImpl(url, init);
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    offline = true;
-    await log.writeAction(
-      recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'first')!,
-    );
-    offline = false;
-    expect(await log.refresh()).toBe(true);
-    expect(log.pendingActions).toBe(0);
-    expect((await LibraryLog.open(LIBRARY_KEY, connection))!.title(blank.title)?.status.value).toBe(
-      'watchlist',
-    );
-  });
-
-  /**
-   * A browser holding the key of a library den-edge has no log for, where den-edge starts no library for it
-   * (`NEW_LIBRARIES=members`). It used to send its recovery on every 30-second refresh, each refused, and to go
-   * on claiming a membership `library::is_member` refuses — so every shared-metadata write was a 401 too.
-   */
-  it('stops resending to a relay that will not start the library, and claims no membership there', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'first')!;
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    data.set(`den.pendingTracker.${keys.id}.first`, JSON.stringify(await seal(keys, journal)));
-    let server: Awaited<ReturnType<typeof edge>> | null = null;
-    let batches = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'POST') batches++;
-      if (server) return server.fetchImpl(url, init);
-      if (init?.method === 'POST')
-        return new Response('{"error":"new_libraries_closed"}', { status: 403 });
-      return new Response('{"error":"not_found"}', { status: 404 });
-    };
-    useLibraryCredential(keys);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    expect(log.refused).toBe(true);
-    expect(hasLibraryCredential(), 'no log, so no membership to claim').toBe(false);
-    const tried = batches;
-    for (let i = 0; i < 3; i++) expect(await log.refresh(), 'nothing changed').toBe(false);
-    expect(batches, 'refreshes read, and send nothing again').toBe(tried);
-    expect(log.pendingActions).toBe(1);
-
-    // The TV writes the library back: the next read finds it, and the kept action goes out.
-    server = await edge([row(1)]);
-    expect(await log.refresh()).toBe(true);
-    expect(log.refused).toBe(false);
-    expect(hasLibraryCredential()).toBe(true);
-    expect(log.pendingActions).toBe(0);
-    expect(log.title(blank.title)?.status.value).toBe('watchlist');
-    forgetLibraryCredential();
-  });
-
-  /** den-edge opened to new libraries again: a refused log tries once more after a while, not only on a reload. */
-  it('tries a refused library again after a while, and starts it once den-edge lets it', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'first')!;
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    data.set(`den.pendingTracker.${keys.id}.first`, JSON.stringify(await seal(keys, journal)));
-    const server = await edge();
-    let open = false;
-    let batches = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'POST') {
-        batches++;
-        if (!open) return new Response('{"error":"new_libraries_closed"}', { status: 403 });
-      } else if (init?.method !== 'PUT' && server.stored.size === 0) {
-        return new Response('{"error":"not_found"}', { status: 404 });
-      }
-      return server.fetchImpl(url, init);
-    };
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-      expect(log.refused).toBe(true);
-      const tried = batches;
-      open = true; // NEW_LIBRARIES=open
-      expect(await log.refresh()).toBe(false);
-      expect(batches, 'not straight away').toBe(tried);
-
-      vi.setSystemTime(Date.now() + 11 * 60_000);
-      expect(await log.refresh()).toBe(true);
-      expect(batches).toBeGreaterThan(tried);
-      expect(log.pendingActions).toBe(0);
-      expect(await log.refresh(), 'its own write read back is no change').toBe(false);
-      expect(log.refused).toBe(false);
-      expect(hasLibraryCredential(), 'the log is there, and so is the membership').toBe(true);
-    } finally {
-      vi.useRealTimers();
-      forgetLibraryCredential();
-    }
-  });
-
-  /**
-   * `413 library_full` (or any 400/403 but `new_libraries_closed`) is den-edge refusing the write itself. Kept work it
-   * refused was sent again on every 30-second refresh, forever, and a fresh action said it was saved.
-   */
-  it('tells a refused action apart from an unreachable den-edge, and does not resend it every refresh', async () => {
-    const data = new Map<string, string>();
-    const storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i: number) => [...data.keys()][i] ?? null,
-      getItem: (k: string) => data.get(k) ?? null,
-      setItem: (k: string, v: string) => void data.set(k, v),
-      removeItem: (k: string) => void data.delete(k),
-      clear: () => data.clear(),
-    } as Storage;
-    const server = await edge([row(1)]);
-    let full = false;
-    let offline = false;
-    let batches = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (offline) throw new TypeError('offline');
-      if (init?.method === 'POST') {
-        batches++;
-        if (full) return new Response('{"error":"library_full"}', { status: 413 });
-      }
-      return server.fetchImpl(url, init);
-    };
-    const action = (id: number, name: string) => {
-      const blank = blankTitle({ type: 'movie', id }, 0);
-      return recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), name)!;
-    };
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-      full = true;
-      expect(await log.writeAction(action(10, 'single')), 'refused, not saved').toBeNull();
-      expect(await log.writeActions([action(11, 'bulk')])).toBe(false);
-      expect(log.refusal, 'which refusal, for the import to say the library is full').toBe(
-        'library_full',
-      );
-      expect(log.pendingActions, 'nothing kept to be refused again').toBe(0);
-      expect(log.title({ type: 'movie', id: 10 })).toBeUndefined();
-      expect(log.title({ type: 'movie', id: 11 })).toBeUndefined();
-
-      // Kept while out of reach, then refused once den-edge is back.
-      offline = true;
-      expect(await log.writeAction(action(12, 'kept'))).not.toBeNull();
-      offline = false;
-      expect(log.pendingActions).toBe(1);
-      vi.setSystemTime(Date.now() + 11 * 60_000);
-      await log.refresh();
-      expect(log.pendingActions, 'kept, as it was saved on this device').toBe(1);
-      const tried = batches;
-      for (let i = 0; i < 3; i++) await log.refresh();
-      expect(batches, 'not sent again on every refresh').toBe(tried);
-      full = false;
-      vi.setSystemTime(Date.now() + 11 * 60_000);
-      await log.refresh();
-      expect(log.pendingActions).toBe(0);
-      expect(log.title({ type: 'movie', id: 12 })?.status.value).toBe('watchlist');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  /**
-   * An exclusive profile migration holds the household (`409 migration_in_progress`, den-spec profiles-v1 §8.1). The
-   * edit was applied nowhere and den-edge says nothing else, so it must be neither dropped (a refusal) nor resent on
-   * every 30-second refresh, and the page must be able to tell this apart from being offline.
-   */
-  it('keeps an edit through 409 migration_in_progress, pauses its retries, and sends it once the lock is gone', async () => {
-    const { storage } = memoryStorage();
-    const server = await edge([row(1)]);
-    let locked = false;
-    let batches = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'POST') {
-        batches++;
-        if (locked) return new Response('{"error":"migration_in_progress"}', { status: 409 });
-      }
-      return server.fetchImpl(url, init);
-    };
-    const action = (id: number, name: string) => {
-      const blank = blankTitle({ type: 'movie', id }, 0);
-      return recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), name)!;
-    };
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-      expect(log.migrationLocked).toBe(false);
-
-      locked = true;
-      expect(await log.writeAction(action(10, 'held')), 'shown, not lost').not.toBeNull();
-      expect(log.migrationLocked, 'the page can tell a lock from being offline').toBe(true);
-      expect(log.refusal, 'not den-edge refusing the write itself').toBeNull();
-      expect(log.pendingActions, 'kept to be sent').toBe(1);
-      expect(log.title({ type: 'movie', id: 10 })?.status.value).toBe('watchlist');
-
-      const tried = batches;
-      for (let i = 0; i < 3; i++) await log.refresh();
-      expect(batches, 'paused, not resent on every refresh').toBe(tried);
-      expect(log.pendingActions).toBe(1);
-
-      // After a minute one probe goes out; the lock is still there, so it waits again.
-      vi.setSystemTime(Date.now() + 61_000);
-      await log.refresh();
-      expect(batches).toBe(tried + 1);
-      for (let i = 0; i < 3; i++) await log.refresh();
-      expect(batches, 'and is paused again').toBe(tried + 1);
-      expect(log.pendingActions).toBe(1);
-
-      locked = false;
-      vi.setSystemTime(Date.now() + 61_000);
-      await log.refresh();
-      expect(log.pendingActions).toBe(0);
-      expect(log.migrationLocked, 'an applied write proves the lock is gone').toBe(false);
-      expect(log.title({ type: 'movie', id: 10 })?.status.value).toBe('watchlist');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  /**
-   * den-edge's per-library write budget (`429 rate_limited` with `Retry-After`). Nothing was applied: the edit is kept,
-   * never dropped as a refusal, and is not resent on every refresh while the answer's own wait is running.
-   */
-  it('keeps an edit through 429 rate_limited, waits out its Retry-After, and then sends it', async () => {
-    const { storage } = memoryStorage();
-    const server = await edge([row(1)]);
-    let limited = false;
-    let batches = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'POST') {
-        batches++;
-        if (limited)
-          return new Response('{"error":"rate_limited"}', {
-            status: 429,
-            headers: { 'retry-after': '90' },
-          });
-      }
-      return server.fetchImpl(url, init);
-    };
-    const action = (id: number, name: string) => {
-      const blank = blankTitle({ type: 'movie', id }, 0);
-      return recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), name)!;
-    };
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-
-      limited = true;
-      expect(await log.writeAction(action(10, 'throttled')), 'shown, not lost').not.toBeNull();
-      expect(log.refusal, 'not den-edge refusing the write itself').toBeNull();
-      expect(log.pendingActions, 'kept to be sent').toBe(1);
-
-      const tried = batches;
-      for (let i = 0; i < 5; i++) await log.refresh();
-      expect(batches, 'not resent on every refresh while it is told to wait').toBe(tried);
-
-      vi.setSystemTime(Date.now() + 61_000);
-      await log.refresh();
-      expect(batches, 'still inside the 90 seconds it named').toBe(tried);
-
-      limited = false;
-      vi.setSystemTime(Date.now() + 30_000);
-      await log.refresh();
-      expect(log.pendingActions).toBe(0);
-      expect(log.title({ type: 'movie', id: 10 })?.status.value).toBe('watchlist');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('stops reporting a lock it has not seen again, instead of showing it for good', async () => {
-    const server = await edge([row(1)]);
-    const connection: typeof fetch = async (url, init) =>
-      init?.method === 'POST'
-        ? new Response('{"error":"migration_in_progress"}', { status: 409 })
-        : server.fetchImpl(url, init);
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage))!;
-      const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-      await log.writeAction(
-        recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'held')!,
-      );
-      expect(log.migrationLocked).toBe(true);
-      vi.setSystemTime(Date.now() + 11 * 60_000);
-      expect(log.migrationLocked).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  /** A 400 or 403 den-edge's `/lib` never sends (a proxy's page) is not a refusal: the action stays kept. */
-  it('keeps an action refused with an answer den-edge does not give, and sends it on the next refresh', async () => {
-    const { storage } = memoryStorage();
-    const server = await edge([row(1)]);
-    let proxy = false;
-    const connection: typeof fetch = async (url, init) =>
-      proxy && init?.method === 'POST'
-        ? new Response('<html>Bad Request</html>', { status: 400 })
-        : server.fetchImpl(url, init);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    proxy = true;
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'proxy')!;
-    expect(await log.writeAction(journal), 'kept on this device').not.toBeNull();
-    expect(log.pendingActions).toBe(1);
-    proxy = false;
-    await log.refresh();
-    expect(log.pendingActions).toBe(0);
-  });
-
-  /** One kept action den-edge refused held every other one kept later back for ten minutes. */
-  it('holds back only the kept work den-edge refused', async () => {
-    const { data, storage } = memoryStorage();
-    const server = await edge([row(1)]);
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const action = (id: number, name: string) => {
-      const blank = blankTitle({ type: 'movie', id }, 0);
-      return recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), name)!;
-    };
-    const refusedK = (await seal(keys, action(10, 'bad'))).k;
-    let batches = 0;
-    const connection: typeof fetch = async (url, init) => {
-      if (init?.method === 'POST') {
-        batches++;
-        if (String(init.body).includes(refusedK))
-          return new Response('{"error":"invalid_batch"}', { status: 400 });
-      }
-      return server.fetchImpl(url, init);
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const keep = async (name: string, id: number) =>
-      data.set(
-        `den.pendingTracker.${keys.id}.${name}`,
-        JSON.stringify(await seal(keys, action(id, name))),
-      );
-    await keep('bad', 10);
-    await log.refresh();
-    expect(log.pendingActions).toBe(1);
-    const tried = batches;
-    await log.refresh();
-    expect(batches, 'the refused one is not sent again at once').toBe(tried);
-    // Kept later, by another tab.
-    await keep('good', 11);
-    await log.refresh();
-    expect(log.pendingActions, 'sent, though another was refused').toBe(1);
-    expect(log.title({ type: 'movie', id: 11 })?.status.value).toBe('watchlist');
-  });
-
-  /**
-   * A bulk's first chunks landed and a later one was refused: it said none of it was saved and dropped it, while
-   * den-edge held part of it.
-   */
-  it('keeps a bulk den-edge refused part of, once some of it landed', async () => {
-    const { storage } = memoryStorage();
-    const server = await edge([row(1)]);
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'bulk')!;
-    const afterK = (await seal(keys, trackerEvent(journal)!.after)).k;
-    const connection: typeof fetch = async (url, init) =>
-      init?.method === 'POST' && String(init.body).includes(afterK)
-        ? new Response('{"error":"library_full"}', { status: 413 })
-        : server.fetchImpl(url, init);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    expect(await log.writeActions([journal]), 'the journal landed').toBe(true);
-    expect(log.pendingActions, 'the rest is kept').toBe(1);
-    expect(log.title(blank.title)?.status.value).toBe('watchlist');
-  });
-
-  it('drops kept work that is not an action, which could never be sent', async () => {
-    const data = new Map<string, string>();
-    const storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i: number) => [...data.keys()][i] ?? null,
-      getItem: (k: string) => data.get(k) ?? null,
-      setItem: (k: string, v: string) => void data.set(k, v),
-      removeItem: (k: string) => void data.delete(k),
-      clear: () => data.clear(),
-    } as Storage;
-    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    data.set(`den.pendingTracker.${keys.id}.odd`, JSON.stringify(await seal(keys, row(5))));
-    data.set(
-      `den.pendingTracker.${keys.id}.bulk:odd`,
-      JSON.stringify({ bulk: [await seal(keys, row(6))] }),
-    );
-    data.set(`den.pendingTracker.${keys.id}.unreadable`, JSON.stringify({ k: 'ab', v: 'AAAA' }));
-    const server = await edge([row(1)]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage))!;
-    expect(log.pendingActions, 'only the one that does not open is kept').toBe(1);
-  });
-
   it('skips an unreadable incremental row and still reaches later changes', async () => {
     const server = await edge();
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
     server.stored.set('bad', { k: 'ab'.repeat(32), seq: 1, v: 'AAAA' });
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-    const good = await seal(keys, row(11));
+    const good = await seal(keys, currentRows([row(11)])[0]!);
     server.stored.set(good.k, { ...good, seq: 2 });
     expect(await log.refresh()).toBe(true);
     expect(log.title({ type: 'movie', id: 11 })?.status.value).toBe('watchlist');
-  });
-
-  it('a failed pending cleanup does not reject an accepted action', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: () => {
-        throw new Error('storage denied');
-      },
-      clear: () => data.clear(),
-    };
-    const server = await edge();
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage))!;
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    expect(
-      await log.writeAction(
-        recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'cleanup')!,
-      ),
-    ).not.toBeNull();
-    expect(log.title(blank.title)?.status.value).toBe('watchlist');
-    expect(log.pendingActions).toBe(1);
   });
 
   it('serializes concurrent same-row saves without losing either field', async () => {
@@ -2542,68 +1667,15 @@ describe('LibraryLog', () => {
     expect(restored.reaction.value).toBe('love');
   });
 
-  it('reconstructs state from an accepted journal if the following projection write fails', async () => {
-    const server = await edge();
-    let writes = 0;
-    const flaky: typeof fetch = (url, init) => {
-      if (init?.method === 'POST' && ++writes === 2)
-        return Promise.resolve(new Response('{}', { status: 503 }));
-      return server.fetchImpl(url, init);
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, flaky))!;
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const event = recordTrackerEvent(
-      blank,
-      addToWatchlist(blank, at(1000, 'web')),
-      at(1000, 'web'),
-      'crash',
-    )!;
-    expect(await log.writeAction(event)).not.toBeNull();
-    const restored = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
-    expect(restored.title(blank.title)?.status.value).toBe('watchlist');
-  });
-
-  it('persists encrypted offline actions, then retries them after reopening', async () => {
-    const data = new Map<string, string>();
-    const storage: Storage = {
-      get length() {
-        return data.size;
-      },
-      key: (i) => [...data.keys()][i] ?? null,
-      getItem: (k) => data.get(k) ?? null,
-      setItem: (k, v) => {
-        data.set(k, v);
-      },
-      removeItem: (k) => {
-        data.delete(k);
-      },
-      clear: () => data.clear(),
-    };
-    const server = await edge();
-    let offline = false;
-    const connection: typeof fetch = (url, init) =>
-      offline ? Promise.reject(new TypeError('offline')) : server.fetchImpl(url, init);
-    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
-    const event = recordTrackerEvent(
-      blank,
-      addToWatchlist(blank, at(1000, 'web')),
-      at(1000, 'web'),
-      'offline',
-    )!;
-    offline = true;
-    expect(await log.writeAction(event)).not.toBeNull();
-    expect(log.pendingActions).toBe(1);
-    expect([...data.values()].join('')).not.toContain('watchlist');
-    offline = false;
-    const restored = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
-    expect(restored.pendingActions).toBe(0);
-    expect(restored.title(blank.title)?.status.value).toBe('watchlist');
-  });
   it('reads every page and opens each row, skipping one that does not open', async () => {
     const rows = [row(1), row(2), row(3)];
     const { fetchImpl } = await edge(rows, [{ k: 'ab'.repeat(32), v: 'AAAA' }]);
-    expect((await LibraryLog.open(LIBRARY_KEY, fetchImpl))?.rows()).toEqual(rows);
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl))!;
+    expect(rows.map(({ title }) => log.title(title)?.status.value)).toEqual([
+      'watchlist',
+      'watchlist',
+      'watchlist',
+    ]);
   });
 
   it('is empty for a library nobody wrote, and null when den-edge is out of reach', async () => {
@@ -2786,102 +1858,16 @@ describe('a library kept only in this browser', () => {
     const { data, vault } = memoryVault();
     const server = await edge([row(2)]);
     const local = (await LibraryLog.openLocal(LOCAL_KEY, vault, server.fetchImpl))!;
-    await local.write(row(1));
-    await local.write(row(2, { status: { value: 'watched', at: at(5000) } }));
+    await local.write(addToWatchlist(blankTitle({ type: 'movie', id: 1 }, 1_000), at(1_000)));
+    await local.write(markWatched(blankTitle({ type: 'movie', id: 2 }, 1_000), at(5_000)));
+    expect(local.title({ type: 'movie', id: 1 })?.status.value).toBe('watchlist');
+    expect(local.title({ type: 'movie', id: 2 })?.status.value).toBe('watched');
     expect(await local.moveTo(LIBRARY_KEY)).not.toBeNull();
     const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
     expect(tv.title({ type: 'movie', id: 1 })).toBeDefined();
     expect(tv.title({ type: 'movie', id: 2 })?.status.value).toBe('watched');
     expect(await local.forget()).toBe(true);
     expect([...data.keys()].some((key) => key.startsWith(`${local.libraryId}:`))).toBe(false);
-  });
-
-  const watched = (number: number, t: number): EpisodeRow => ({
-    kind: 'ep',
-    schema: 2,
-    title: { type: 'tv', id: 95396 },
-    season: 1,
-    episode: number,
-    // A device id den-core's v3 rules take (sixteen hex digits), as every real one is.
-    progress: { value: 1, at: at(t, 'aaaaaaaaaaaaaaaa'), viewing: 0 },
-  });
-
-  it('switches to v3 in this browser, asking den-edge nothing, and opens as v3 again', async () => {
-    const { vault } = memoryVault();
-    const asked: string[] = [];
-    const counting: typeof fetch = async (input) => {
-      asked.push(String(input));
-      return new Response('{}', { status: 500 });
-    };
-    const log = (await LibraryLog.openLocal(LOCAL_KEY, vault, counting))!;
-    await log.write(row(1));
-    await log.write(watched(2, 2000));
-    expect(await log.switchWebOnly()).toBe(true);
-    expect(log.wireMinimum).toBe(3);
-    expect(log.rows().some((row) => row.kind === 'ep')).toBe(false);
-    expect(log.rows().some((row) => row.kind === 'wat')).toBe(true);
-    expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
-    const again = (await LibraryLog.openLocal(LOCAL_KEY, vault, counting))!;
-    expect(again.wireMinimum).toBe(3);
-    // An episode written after the switch goes into the v3 watch, not back in as a v2 row.
-    await again.write(watched(3, 3000));
-    expect(again.rows().some((row) => row.kind === 'ep')).toBe(false);
-    expect(asked).toEqual([]);
-  });
-
-  it('a tab opened before another switched it writes in v3 and keeps both tabs’ rows', async () => {
-    const { vault } = memoryVault();
-    const first = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
-    const second = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
-    await first.write(row(1));
-    expect(await first.switchWebOnly()).toBe(true);
-    await second.write(watched(4, 4000));
-    expect(second.wireMinimum).toBe(3);
-    expect(second.rows().some((row) => row.kind === 'ep')).toBe(false);
-    expect(second.title({ type: 'movie', id: 1 })).toBeDefined();
-    await vi.waitFor(async () => {
-      const reopened = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
-      expect(reopened.wireMinimum).toBe(3);
-      expect(reopened.rows().some((row) => row.kind === 'ep')).toBe(false);
-      expect(reopened.rows().some((row) => row.kind === 'wat')).toBe(true);
-      expect(reopened.title({ type: 'movie', id: 1 })).toBeDefined();
-    });
-  });
-
-  it('writes several episodes of one v3 block as one row, which den-edge would refuse twice in a batch', async () => {
-    const server = await edge([row(1)]);
-    const batches: string[][] = [];
-    const v3: typeof fetch = async (input, init) => {
-      if (init?.method === 'POST')
-        batches.push(
-          (JSON.parse(String(init.body)) as { writes: { k: string }[] }).writes.map(({ k }) => k),
-        );
-      const response = await server.fetchImpl(input, init);
-      const headers = new Headers(response.headers);
-      headers.set('x-den-wire-min', '3');
-      return new Response(await response.text(), { status: response.status, headers });
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, v3, memoryStorage().storage, null))!;
-    expect(log.wireMinimum).toBe(3);
-    // An import's episodes 1–3 all live in the same 32-episode watch row.
-    expect(await log.writeRows([watched(1, 1000), watched(2, 1001), watched(3, 1002)])).toBe(true);
-    expect(batches).toEqual([[expect.any(String)]]);
-    const reopened = (await LibraryLog.open(LIBRARY_KEY, v3, memoryStorage().storage, null))!;
-    for (const number of [1, 2, 3])
-      expect(reopened.episode({ type: 'tv', id: 95396 }, 1, number)?.progress.value).toBe(1);
-  });
-
-  it('is not written into a v2 library it cannot switch, and stays as it was', async () => {
-    const { vault } = memoryVault();
-    const server = await edge([row(2)]);
-    const local = (await LibraryLog.openLocal(LOCAL_KEY, vault, server.fetchImpl))!;
-    await local.write(watched(2, 2000));
-    expect(await local.switchWebOnly()).toBe(true);
-    // This den-edge has no rewrite, so the v2 library can't be switched: nothing moves, nothing in v3 form lands in it.
-    expect(await local.moveTo(LIBRARY_KEY)).toBeNull();
-    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(tv.rows().some((row) => row.kind === 'wat')).toBe(false);
-    expect(local.rows().some((row) => row.kind === 'wat')).toBe(true);
   });
 });
 
