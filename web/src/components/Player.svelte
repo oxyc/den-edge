@@ -5059,11 +5059,13 @@
     margin-bottom: 0;
   }
 
-  /* A notice with nothing to dismiss still sits the same height as one with. */
+  /* A notice with nothing to dismiss still sits the same height as one with. A release name has no spaces to break
+     at, so it may break anywhere rather than run past the notice and off a phone's screen. */
   .notice-copy {
     flex: 1 1 auto;
     min-width: 0;
     padding: 6px 0;
+    overflow-wrap: anywhere;
   }
 
   .status-spinner {
