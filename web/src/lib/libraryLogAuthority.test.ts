@@ -197,6 +197,44 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
+  it('invalidates finished views before an administrative local-library merge answers', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const sourceKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(23)));
+      const sourceLog = (await LibraryLog.openLocal(sourceKey, vault))!;
+      const sourceClock = await openClockStore(vault, {
+        key: 'finished-view-merge-source-clock',
+        createDevice: () => 'fedcba9876543210',
+      });
+      const source = authority(sourceLog, sourceClock, 'local');
+      await source.command({ kind: 'watchlist.add', title: movie }, 'source-add-seven');
+      await source.close();
+
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-merge-target-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(async () => expect(await cachedWatchlist(vault)).not.toBeNull());
+
+      await expect(
+        opened.task({ kind: 'local-library.merge', sourceLibraryKey: sourceKey }, 'merge-local'),
+      ).resolves.toMatchObject({ result: { outcome: 'merged' } });
+      await opened.close();
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not write the finished views again when an unchanged library is opened again', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
