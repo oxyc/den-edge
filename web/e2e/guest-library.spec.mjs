@@ -47,6 +47,9 @@ async function laptopAcceptingAnInvite(open, edge) {
   const watchlist = laptop.getByRole('button', { name: 'Watchlist', exact: true });
   await watchlist.click();
   await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
+  // `aria-pressed` is optimistic. Wait for the save indicator to clear before the hard navigation below tears down
+  // this page and its Worker; otherwise the test can interrupt the IndexedDB write it expects the invite to move.
+  await expect(watchlist).not.toHaveAttribute('data-saving', 'true');
   expect(edge.libraries.size, 'nothing synced yet: it is the browser’s own').toBe(0);
 
   await laptop.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
