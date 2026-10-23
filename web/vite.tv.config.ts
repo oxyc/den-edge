@@ -40,11 +40,17 @@ const tizen3RecoveryCore = fileURLToPath(
 const appCss = fileURLToPath(new URL('./src/app.css', import.meta.url));
 const tvCss = fileURLToPath(new URL('./src/tv/tv.css', import.meta.url));
 const packagedRuntime = fileURLToPath(new URL('./src/tv/packaged.ts', import.meta.url));
+const oldEngineLimitsRuntime = fileURLToPath(
+  new URL('./src/tv/old-engine-limits.ts', import.meta.url),
+);
 const tvCore = fileURLToPath(new URL('./src/vendor/den-core-tv', import.meta.url));
 const e2e = process.env.DEN_TV_E2E === '1';
 const packaged = process.env.DEN_TV_PACKAGED === '1';
 const tizenVersion = getTizenVersion(process.env.DEN_TIZEN_VERSION);
 const tizen3 = platform === 'tizen' && tizenVersion === '3.0';
+const enforceOldEngineLimits = process.env.DEN_TV_OLD_ENGINE_LIMITS === '1';
+if (enforceOldEngineLimits && (!tizen3 || !e2e))
+  throw new Error('DEN_TV_OLD_ENGINE_LIMITS is only valid for a Tizen 3 E2E build');
 const legacyTizen = platform === 'tizen' && (tizen3 || tizenVersion === '5.5');
 const workerCompat = tizen3 ? tizen3WorkerCompat : legacyTizen ? legacyCompat : standardCompat;
 const tvCspValue = tvCsp(tizenVersion);
@@ -112,12 +118,15 @@ function workerCompatibility(): Plugin {
     name: 'den-tv-worker-compatibility',
     enforce: 'pre',
     transform(code, id) {
+      const oldLimits = enforceOldEngineLimits
+        ? `import ${JSON.stringify(oldEngineLimitsRuntime)};\n`
+        : '';
       if (legacyTizen && /\/src\/tv\/main\.ts$/.test(id)) {
         const ordinary = "import './compat';";
         if (!code.includes(ordinary))
           throw new Error('Tizen 5.5 compatibility entry no longer matches TV main');
         const replacement = tizen3 ? "import './compat-tizen3';" : "import './compat-legacy';";
-        return { code: code.replace(ordinary, replacement), map: null };
+        return { code: oldLimits + code.replace(ordinary, replacement), map: null };
       }
       if (/\/src\/lib\/syncPolicyModule\.ts$/.test(id)) {
         const original = '../vendor/den-core/generated/den_core_bg.wasm';
@@ -134,9 +143,13 @@ function workerCompatibility(): Plugin {
           throw new Error('TV recovery core seam no longer matches its loader');
         code = code.replace(original, '../vendor/den-core-tv/recovery.js');
       }
-      if (/\/src\/lib\/(?:libraryServiceWorker|libraryWorker|recoveryWorker)\.ts$/.test(id))
+      if (
+        /\/src\/(?:lib\/(?:assistantProjectionWorker|libraryServiceWorker|libraryWorker|recoveryWorker)|tv\/diagnosticWorker)\.ts$/.test(
+          id,
+        )
+      )
         return {
-          code: `import ${JSON.stringify(workerCompat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
+          code: `${oldLimits}import ${JSON.stringify(workerCompat)};\nimport ${JSON.stringify(packagedRuntime)};\n${code}`,
           map: null,
         };
     },

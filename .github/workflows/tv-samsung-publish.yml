@@ -10,7 +10,11 @@ concurrency:
 permissions: {}
 
 jobs:
+  tizen3:
+    uses: ./.github/workflows/tizen3.yml
+
   publish:
+    needs: tizen3
     runs-on: ubuntu-latest
     permissions:
       actions: read

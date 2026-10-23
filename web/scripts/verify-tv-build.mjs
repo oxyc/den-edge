@@ -88,6 +88,29 @@ if (tizen3) {
     throw new Error('Native BigInt remains in the Tizen 3 pairing path');
   if (!pair.includes('ristretto255'))
     throw new Error('Tizen 3 pairing did not select the typed-array Ristretto adapter');
+  if (process.env.DEN_TV_OLD_ENGINE_LIMITS === '1') {
+    const scripts = await Promise.all(
+      assets
+        .filter((file) => file.endsWith('.js'))
+        .map(async (file) => ({
+          file,
+          code: await readFile(resolve(directory, 'assets', file), 'utf8'),
+        })),
+    );
+    if (!scripts.some(({ code }) => code.includes('__denOldEngineLimits')))
+      throw new Error('Tizen 3 page did not install the enforced old-engine limits');
+    for (const worker of [
+      'assistantProjectionWorker',
+      'diagnosticWorker',
+      'libraryServiceWorker',
+      'libraryWorker',
+      'recoveryWorker',
+    ]) {
+      const output = scripts.find(({ file }) => file.startsWith(`${worker}-`));
+      if (output && !output.code.includes('__denOldEngineLimits'))
+        throw new Error(`${worker} did not install the enforced old-engine limits`);
+    }
+  }
 }
 if (tizen3 && assets.some((file) => file.endsWith('.wasm')))
   throw new Error('A Wasm asset leaked into the Tizen 3 JavaScript-core package');
