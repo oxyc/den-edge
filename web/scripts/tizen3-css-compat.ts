@@ -10,6 +10,7 @@ const FIXED_UNIT = /(-?(?:\d+\.?\d*|\.\d+))(dvw|svw|lvw|vw|dvh|svh|lvh|vh|vmin|v
 const SAFE_AREA = /env\(safe-area-inset-(?:top|right|bottom|left)(?:\s*,[^)]*)?\)/gi;
 const SCROLL_LOGICAL = /^scroll-(padding|margin)-(inline|block)$/;
 const FOCUS_HAS = /:has\([^)]*:focus(?:-visible)?[^)]*\)/g;
+const EXPENSIVE_EFFECT = /^(?:-webkit-)?backdrop-filter$|^transition(?:-.+)?$|^animation(?:-.+)?$/i;
 
 function pixels(value: number, unit: string): number {
   switch (unit.toLowerCase()) {
@@ -74,6 +75,24 @@ export function tizen3UnsupportedEnhancements(): Plugin {
     AtRule(atRule) {
       if (atRule.name.toLowerCase() === 'supports' && /\bcolor-mix\(/i.test(atRule.params))
         atRule.remove();
+    },
+  };
+}
+
+/**
+ * Chromium 47's viewer-only tier spends no paint or compositor budget on decorative effects. This runs at the
+ * target's CSS boundary, so component authors cannot accidentally make the old tier heavier and every other build
+ * retains the authored presentation.
+ */
+export function tizen3ViewerEffects(): Plugin {
+  return {
+    postcssPlugin: 'den:tizen3-viewer-effects',
+    AtRule(atRule) {
+      if (/^(?:-webkit-)?keyframes$/i.test(atRule.name)) atRule.remove();
+    },
+    Declaration(declaration: Declaration) {
+      if (EXPENSIVE_EFFECT.test(declaration.prop) || /\bblur\(/i.test(declaration.value))
+        declaration.remove();
     },
   };
 }

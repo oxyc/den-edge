@@ -521,6 +521,7 @@
     // No imdb id required any more: reel is asked by the tmdb id every title carries, and told the imdb
     // one only when this slide's details have arrived carrying it.
     if (
+      __DEN_TV_LEGACY_JS_CORE__ ||
       !active ||
       !title ||
       readyKey !== keyOf(title) ||
@@ -1029,7 +1030,7 @@
         />
       {/if}
     {/each}
-    {#if ambient}
+    {#if ambient && !__DEN_TV_LEGACY_JS_CORE__}
       <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it has
            started. The still picture stays underneath until it does, and stays if it never does. -->
       <video

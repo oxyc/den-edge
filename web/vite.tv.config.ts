@@ -16,6 +16,7 @@ import {
   tizen3FocusSelectors,
   tizen3ScrollLogical,
   tizen3UnsupportedEnhancements,
+  tizen3ViewerEffects,
 } from './scripts/tizen3-css-compat.ts';
 
 const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
@@ -28,6 +29,10 @@ const tizen3WorkerCompat = fileURLToPath(
 const tizen3PairCurve = fileURLToPath(new URL('./src/lib/pairCurve-tizen3.ts', import.meta.url));
 const tizen3Core = fileURLToPath(new URL('./src/vendor/den-core-tizen3/index.js', import.meta.url));
 const tizen3SyncLoader = fileURLToPath(new URL('./src/lib/syncLoader-tizen3.ts', import.meta.url));
+const tizen3HlsLoader = fileURLToPath(new URL('./src/lib/hlsLoader-tizen3.ts', import.meta.url));
+const tizen3UnsupportedMediaEngine = fileURLToPath(
+  new URL('./src/lib/unsupportedMediaEngine-tizen3.ts', import.meta.url),
+);
 const tizen3SyncPolicyModule = fileURLToPath(
   new URL('./src/lib/syncPolicyModule-tizen3.ts', import.meta.url),
 );
@@ -328,6 +333,7 @@ const tizen3CssPlugins = tizen3
       return [
         globalData[0],
         tizen3UnsupportedEnhancements(),
+        tizen3ViewerEffects(),
         postcssCustomProperties({ preserve: false }),
         tizen3FixedViewportMath(),
         tizen3FocusSelectors(),
@@ -379,8 +385,10 @@ export default mergeConfig(
       alias: [
         ...(tizen3
           ? [
+              { find: /^hls\.js$/, replacement: tizen3UnsupportedMediaEngine },
               { find: './pairCurve', replacement: tizen3PairCurve },
               { find: './syncLoader', replacement: tizen3SyncLoader },
+              { find: './hlsLoader', replacement: tizen3HlsLoader },
               { find: './syncPolicyModule', replacement: tizen3SyncPolicyModule },
               { find: './assistantCore', replacement: tizen3AssistantCore },
               { find: './recoveryCore', replacement: tizen3RecoveryCore },

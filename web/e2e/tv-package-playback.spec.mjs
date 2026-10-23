@@ -89,6 +89,10 @@ async function remoteKey(page, key, keyCode) {
 test('packaged Tizen plays cross-origin HLS, resumes and ends only through the API origin', async ({
   page,
 }) => {
+  test.skip(
+    process.env.DEN_TIZEN_VERSION === '3.0',
+    'the Tizen 3 viewer intentionally ships no HLS/MSE path',
+  );
   const packageApiRequests = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
@@ -128,6 +132,10 @@ test('packaged Tizen plays cross-origin HLS, resumes and ends only through the A
 test('packaged managed playback resolves a relative media capability against the API', async ({
   page,
 }) => {
+  test.skip(
+    process.env.DEN_TIZEN_VERSION === '3.0',
+    'the Tizen 3 viewer intentionally ships no HLS/MSE path',
+  );
   const misrouted = [];
   page.on('request', (request) => {
     const url = new URL(request.url());

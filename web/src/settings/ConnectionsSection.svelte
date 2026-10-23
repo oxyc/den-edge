@@ -84,6 +84,7 @@
     hasRecoveryCode = false,
     heldReset = false,
     onadoptheld,
+    viewerOnly = false,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -136,6 +137,8 @@
     heldReset?: boolean;
     /** Use the held reset's new key: the person says this browser made it. */
     onadoptheld?: () => Promise<void>;
+    /** Old-engine viewer tier: expose only pairing and linked-device controls. */
+    viewerOnly?: boolean;
   } = $props();
 
   const apiService = (name: KeyService['name']): LibraryApiKeyService =>
@@ -887,351 +890,362 @@
 {/snippet}
 
 <SettingsSection id="connections" title="Connections">
-  <SettingRow
-    id="servers"
-    label="Jellyfin / Plex servers"
-    value={servers.length ? `${servers.length} server${servers.length === 1 ? '' : 's'}` : 'None'}
-  >
-    {#if servers.length}
-      <ul class="list">
-        {#each servers as server (server.kind)}
-          <li class="line">
-            <span class="label"
-              >{server.kind === 'jellyfin' ? 'Jellyfin' : 'Plex'}<small>{hostOf(server.url)}</small
-              ></span
-            >
+  {#if !viewerOnly}
+    <SettingRow
+      id="servers"
+      label="Jellyfin / Plex servers"
+      value={servers.length ? `${servers.length} server${servers.length === 1 ? '' : 's'}` : 'None'}
+    >
+      {#if servers.length}
+        <ul class="list">
+          {#each servers as server (server.kind)}
+            <li class="line">
+              <span class="label"
+                >{server.kind === 'jellyfin' ? 'Jellyfin' : 'Plex'}<small
+                  >{hostOf(server.url)}</small
+                ></span
+              >
+              <Confirm
+                label="Remove"
+                question="Remove your {server.kind === 'jellyfin' ? 'Jellyfin' : 'Plex'} server?"
+                detail="Titles will stop playing from your own library, on every device."
+                {disabled}
+                onconfirm={() => void removeServer(server.kind)}
+              />
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <p class="foot">
+        Connect a server on your Apple TV, under Settings › Jellyfin / Plex servers: it signs in on
+        your home network, and the server then reaches your other devices through your library.
+        Matched titles play from your library first — instant, no rate limits.
+      </p>
+    </SettingRow>
+
+    <SettingRow id="trakt" label="Trakt" value="On each Apple TV">
+      <p class="foot">
+        Trakt syncs your watch history and records what you watch. Connect it on each Apple TV,
+        under Settings › Trakt: its sign-in renews itself with every use, so two devices can’t share
+        one.
+      </p>
+    </SettingRow>
+    <SettingRow
+      id="simkl"
+      label="SIMKL"
+      value={!simkl
+        ? 'Not connected'
+        : heldRemovals.length === 0
+          ? 'Connected'
+          : heldRemovals.length === 1
+            ? '1 removal held'
+            : `${heldRemovals.length} removals held`}
+    >
+      {#if simkl && heldRemovals.length && approveRemovals}
+        <div class="form">
+          <p>
+            Den held back these watchlist removals because there were so many at once:
+            {#each heldRemovals as title, i (`${title.type}:${title.id}`)}<a
+                href={routePath({ page: 'title', type: title.type, id: title.id })}
+                >{title.name ?? `${title.type === 'movie' ? 'Movie' : 'Series'} ${title.id}`}</a
+              >{i < heldRemovals.length - 1 ? ', ' : '.'}{/each}
+            Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
+          </p>
+          <Confirm
+            label={`Remove ${heldRemovals.length === 1 ? '1 title' : `${heldRemovals.length} titles`} from SIMKL`}
+            question={`Remove ${heldRemovals.length === 1 ? 'this title' : `these ${heldRemovals.length} titles`} from your SIMKL watchlist?`}
+            detail="This can't be undone."
+            {disabled}
+            onconfirm={() =>
+              void approveRemovals().then(
+                (approved) =>
+                  (removalsNote = approved
+                    ? null
+                    : 'The list changed while you were looking at it. Check it again before approving.'),
+              )}
+          />
+          {#if removalsNote}<p class="status bad" role="status">{removalsNote}</p>{/if}
+        </div>
+      {/if}
+      {#if simkl}
+        <div class="form">
+          <Confirm
+            label="Disconnect"
+            question="Disconnect SIMKL?"
+            detail="Den stops syncing your watch history with it, on every device."
+            {disabled}
+            onconfirm={() => void saveSimkl(null)}
+          />
+        </div>
+      {:else if simklPin}
+        {@const link = httpsOnly(simklPin.verificationUrl)}
+        <div class="pair">
+          <p>
+            Go to {#if link}<a href={link} target="_blank" rel="noreferrer noopener"
+                >{simklPin.verificationUrl.replace(/^https:\/\//, '')}</a
+              >{:else}{simklPin.verificationUrl}{/if} and enter this code:
+          </p>
+          <b class="code">{simklPin.userCode}</b>
+          <p class="status" role="status">Waiting for SIMKL…</p>
+          <Button variant="secondary" label="Cancel" onclick={cancelSimkl} />
+        </div>
+      {:else if simklClientId}
+        <div class="form">
+          <Button
+            variant="primary"
+            label="Connect SIMKL"
+            {disabled}
+            onclick={() => void connectSimkl()}
+          />
+        </div>
+      {/if}
+      {#if simklNote}<p class="status" class:bad={simklNote.bad} role="status">
+          {simklNote.text}
+        </p>{/if}
+      <p class="foot">
+        SIMKL (<a href="https://simkl.com" target="_blank" rel="noreferrer noopener">simkl.com</a>)
+        syncs your watch history and records what you watch. {simkl
+          ? 'The sign-in reaches your devices through your library.'
+          : simklClientId
+            ? 'Connect it here or on your Apple TV, and it reaches your other devices through your library.'
+            : 'Connect it on your Apple TV, under Settings › SIMKL, and it reaches your other devices through your library.'}
+      </p>
+    </SettingRow>
+
+    {#each KEY_SERVICES as service (service.name)}
+      {@const saved = !!apiKeys[apiService(service.name)]}
+      {@const note = notes[service.name]}
+      <SettingRow
+        id={service.name}
+        label={service.label}
+        detail={service.detail}
+        value={keyStatus(saved, checks.get(service.name))}
+      >
+        <form
+          class="form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveKey(service);
+          }}
+        >
+          <input
+            id="{service.name}-key"
+            class="field"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder={saved ? 'Saved — type to replace' : service.placeholder}
+            aria-label="{service.label} API key"
+            value={drafts[service.name]}
+            oninput={(event) =>
+              (drafts = {
+                ...drafts,
+                [service.name]: (event.currentTarget as HTMLInputElement).value,
+              })}
+          />
+          <Button
+            type="submit"
+            variant="primary"
+            label="Save & validate"
+            disabled={disabled ||
+              !drafts[service.name]?.trim() ||
+              checks.get(service.name) === 'checking'}
+          />
+          {#if saved}
             <Confirm
               label="Remove"
-              question="Remove your {server.kind === 'jellyfin' ? 'Jellyfin' : 'Plex'} server?"
-              detail="Titles will stop playing from your own library, on every device."
+              question="Remove your {serviceName[service.name]} key?"
+              detail={service.name === 'tmdb'
+                ? 'Search, posters and details stop on every device that has no key of its own, and cached TMDB data is cleared.'
+                : 'It’s removed from every device.'}
               {disabled}
-              onconfirm={() => void removeServer(server.kind)}
+              onconfirm={() => void removeKey(service)}
             />
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    <p class="foot">
-      Connect a server on your Apple TV, under Settings › Jellyfin / Plex servers: it signs in on
-      your home network, and the server then reaches your other devices through your library.
-      Matched titles play from your library first — instant, no rate limits.
-    </p>
-  </SettingRow>
-
-  <SettingRow id="trakt" label="Trakt" value="On each Apple TV">
-    <p class="foot">
-      Trakt syncs your watch history and records what you watch. Connect it on each Apple TV, under
-      Settings › Trakt: its sign-in renews itself with every use, so two devices can’t share one.
-    </p>
-  </SettingRow>
-
-  <SettingRow
-    id="simkl"
-    label="SIMKL"
-    value={!simkl
-      ? 'Not connected'
-      : heldRemovals.length === 0
-        ? 'Connected'
-        : heldRemovals.length === 1
-          ? '1 removal held'
-          : `${heldRemovals.length} removals held`}
-  >
-    {#if simkl && heldRemovals.length && approveRemovals}
-      <div class="form">
-        <p>
-          Den held back these watchlist removals because there were so many at once:
-          {#each heldRemovals as title, i (`${title.type}:${title.id}`)}<a
-              href={routePath({ page: 'title', type: title.type, id: title.id })}
-              >{title.name ?? `${title.type === 'movie' ? 'Movie' : 'Series'} ${title.id}`}</a
-            >{i < heldRemovals.length - 1 ? ', ' : '.'}{/each}
-          Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
+          {/if}
+        </form>
+        {#if note}<p class="status" class:bad={note.bad} role="status">{note.text}</p>{/if}
+        <p class="foot">
+          {service.about} It reaches your devices through your library, sealed: den-edge can’t read it.
         </p>
-        <Confirm
-          label={`Remove ${heldRemovals.length === 1 ? '1 title' : `${heldRemovals.length} titles`} from SIMKL`}
-          question={`Remove ${heldRemovals.length === 1 ? 'this title' : `these ${heldRemovals.length} titles`} from your SIMKL watchlist?`}
-          detail="This can't be undone."
-          {disabled}
-          onconfirm={() =>
-            void approveRemovals().then(
-              (approved) =>
-                (removalsNote = approved
-                  ? null
-                  : 'The list changed while you were looking at it. Check it again before approving.'),
+      </SettingRow>
+    {/each}
+
+    <SettingRow id="plugins" label="Plugins" value={plugins.length ? String(plugins.length) : ''}>
+      <h3>Your plugins</h3>
+      {#if plugins.length}
+        <ul class="list">
+          {#each plugins as plugin (plugin.manifestUrl)}
+            {@const url = plugin.manifestUrl}
+            {@const den = denAddonOf(url, routes)}
+            {@const configureURL = denConfigureURL(url, routes)}
+            {@const pinned = plugin.signingKey}
+            {@const waitingOn = plugin.pendingApprovalOn}
+            <li class="line addon-line">
+              <span class="label"
+                >{den?.label ?? hostOf(url)}<small
+                  >{den ? `${den.role} · ${hostOf(url)}` : 'Plugin'}</small
+                >{#if pinned}<small>Verified — Den checks this plugin’s signature</small
+                  >{/if}{#if waitingOn.length}<small
+                    >Waiting for approval on {waitingOn.map((d) => d.name).join(', ')}: approve it
+                    there under Settings › Plugins</small
+                  >{:else if added === url}<small
+                    >Approve it on your Apple TV under Settings › Plugins</small
+                  >{/if}</span
+              >
+              <span class="addon-menu">
+                <ActionMenu
+                  bind:this={
+                    () => pluginMenus[url],
+                    (menu) => (pluginMenus = { ...pluginMenus, [url]: menu })
+                  }
+                  items={() => pluginItems(url, configureURL, pinned)}
+                  label="More actions for {den?.label ?? hostOf(url)}"
+                  heading={den?.label ?? hostOf(url)}
+                  triggerClass="addon-trigger"
+                  onclose={() => {
+                    if (pluginConfirmNext?.url === url) pluginConfirm = pluginConfirmNext;
+                    pluginConfirmNext = null;
+                  }}
+                  glyph={more}
+                />
+              </span>
+              <Confirm
+                hideTrigger
+                bind:asking={
+                  () => pluginConfirm?.kind === 'unverify' && pluginConfirm.url === url,
+                  (asked) => (pluginConfirm = asked ? { kind: 'unverify', url } : null)
+                }
+                label="Stop verifying"
+                question="Stop verifying this add-on?"
+                detail="Den will accept its index without checking a signature, as before."
+                {disabled}
+                onclose={() => pluginMenus[url]?.focus()}
+                onconfirm={() => void setPluginTrust(url, null)}
+              />
+              <Confirm
+                hideTrigger
+                bind:asking={
+                  () => pluginConfirm?.kind === 'remove' && pluginConfirm.url === url,
+                  (asked) => (pluginConfirm = asked ? { kind: 'remove', url } : null)
+                }
+                label="Remove add-on"
+                question="Remove {den?.label ?? hostOf(url)}?"
+                detail="This removes the existing add-on from your library. You can add it back by its URL."
+                {disabled}
+                onclose={() => pluginMenus[url]?.focus()}
+                onconfirm={() => void removePlugin(url)}
+              />
+              {#if pinning === url}
+                <form
+                  class="form wide"
+                  onsubmit={(event) => {
+                    event.preventDefault();
+                    void pinKey(url);
+                  }}
+                >
+                  <input
+                    id="signing-key"
+                    class="field mono"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="ed25519:…"
+                    aria-label="Signing key for {den?.label ?? hostOf(url)}"
+                    bind:value={keyDraft}
+                  />
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    label="Pin key"
+                    disabled={disabled || !keyDraft.trim()}
+                  />
+                  <Button variant="secondary" label="Cancel" onclick={() => (pinning = null)} />
+                </form>
+                {#if keyInvalid}
+                  <p class="status bad wide" role="alert">
+                    That isn’t a valid key. Paste the ed25519:… public key the plugin publishes.
+                  </p>
+                {/if}
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {:else if !sharedAddons.length}
+        <p class="status">No plugins yet. Add a manifest URL below.</p>
+      {/if}
+      {#if sharedHosts.length}
+        <h3>Shared with you</h3>
+        <ul class="list">
+          {#each sharedHosts as grant (grant.gid)}
+            {@const hasOverride = Boolean(
+              grant.addons.den &&
+              grant.overrides?.includes('den') &&
+              hasSharedMediaSettings(grant.addons),
             )}
-        />
-        {#if removalsNote}<p class="status bad" role="status">{removalsNote}</p>{/if}
-      </div>
-    {/if}
-    {#if simkl}
-      <div class="form">
-        <Confirm
-          label="Disconnect"
-          question="Disconnect SIMKL?"
-          detail="Den stops syncing your watch history with it, on every device."
-          {disabled}
-          onconfirm={() => void saveSimkl(null)}
-        />
-      </div>
-    {:else if simklPin}
-      {@const link = httpsOnly(simklPin.verificationUrl)}
-      <div class="pair">
-        <p>
-          Go to {#if link}<a href={link} target="_blank" rel="noreferrer noopener"
-              >{simklPin.verificationUrl.replace(/^https:\/\//, '')}</a
-            >{:else}{simklPin.verificationUrl}{/if} and enter this code:
-        </p>
-        <b class="code">{simklPin.userCode}</b>
-        <p class="status" role="status">Waiting for SIMKL…</p>
-        <Button variant="secondary" label="Cancel" onclick={cancelSimkl} />
-      </div>
-    {:else if simklClientId}
-      <div class="form">
-        <Button
-          variant="primary"
-          label="Connect SIMKL"
-          {disabled}
-          onclick={() => void connectSimkl()}
-        />
-      </div>
-    {/if}
-    {#if simklNote}<p class="status" class:bad={simklNote.bad} role="status">
-        {simklNote.text}
-      </p>{/if}
-    <p class="foot">
-      SIMKL (<a href="https://simkl.com" target="_blank" rel="noreferrer noopener">simkl.com</a>)
-      syncs your watch history and records what you watch. {simkl
-        ? 'The sign-in reaches your devices through your library.'
-        : simklClientId
-          ? 'Connect it here or on your Apple TV, and it reaches your other devices through your library.'
-          : 'Connect it on your Apple TV, under Settings › SIMKL, and it reaches your other devices through your library.'}
-    </p>
-  </SettingRow>
-
-  {#each KEY_SERVICES as service (service.name)}
-    {@const saved = !!apiKeys[apiService(service.name)]}
-    {@const note = notes[service.name]}
-    <SettingRow
-      id={service.name}
-      label={service.label}
-      detail={service.detail}
-      value={keyStatus(saved, checks.get(service.name))}
-    >
+            <li class="line addon-line">
+              <span class="label"
+                >Den Hearth<small
+                  >{hasOverride ? 'Using your settings' : 'Using shared settings'}</small
+                ></span
+              >
+              <span class="addon-menu">
+                <ActionMenu
+                  bind:this={
+                    () => guestMenus[grant.gid],
+                    (menu) => (guestMenus = { ...guestMenus, [grant.gid]: menu })
+                  }
+                  items={() => guestItems(grant.gid, grant.secret, Boolean(hasOverride))}
+                  label="More actions for Den Hearth"
+                  heading="Den Hearth"
+                  triggerClass="addon-trigger"
+                  glyph={more}
+                />
+              </span>
+            </li>
+          {/each}
+          {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
+            <li class="line">
+              <span class="label"
+                >{sharedLabels[shared.addon]}<small>Shared access · read-only</small></span
+              >
+            </li>
+          {/each}
+        </ul>
+        {#if configureGuestProblem}<p class="status bad" role="alert">
+            {configureGuestProblem}
+          </p>{/if}
+      {/if}
+      <p class="foot">
+        Add-ons can see what you browse and choose what plays. An Apple TV may ask you to approve a
+        new one.
+      </p>
+      <h3>Add manually</h3>
       <form
         class="form"
         onsubmit={(event) => {
           event.preventDefault();
-          void saveKey(service);
+          void addPlugin();
         }}
       >
         <input
-          id="{service.name}-key"
+          id="plugin-url"
           class="field"
-          type="password"
+          type="url"
           autocomplete="off"
           spellcheck="false"
-          placeholder={saved ? 'Saved — type to replace' : service.placeholder}
-          aria-label="{service.label} API key"
-          value={drafts[service.name]}
-          oninput={(event) =>
-            (drafts = {
-              ...drafts,
-              [service.name]: (event.currentTarget as HTMLInputElement).value,
-            })}
+          placeholder="https://…/manifest.json (or http:// on your LAN)"
+          aria-label="Plugin manifest URL"
+          bind:value={addonDraft}
         />
         <Button
           type="submit"
           variant="primary"
-          label="Save & validate"
-          disabled={disabled ||
-            !drafts[service.name]?.trim() ||
-            checks.get(service.name) === 'checking'}
+          label="Add plugin"
+          disabled={disabled || !addonURL}
         />
-        {#if saved}
-          <Confirm
-            label="Remove"
-            question="Remove your {serviceName[service.name]} key?"
-            detail={service.name === 'tmdb'
-              ? 'Search, posters and details stop on every device that has no key of its own, and cached TMDB data is cleared.'
-              : 'It’s removed from every device.'}
-            {disabled}
-            onconfirm={() => void removeKey(service)}
-          />
-        {/if}
       </form>
-      {#if note}<p class="status" class:bad={note.bad} role="status">{note.text}</p>{/if}
-      <p class="foot">
-        {service.about} It reaches your devices through your library, sealed: den-edge can’t read it.
-      </p>
+      {#if addonProblem}<p class="status bad" role="alert">{addonProblem}</p>{/if}
     </SettingRow>
-  {/each}
-
-  <SettingRow id="plugins" label="Plugins" value={plugins.length ? String(plugins.length) : ''}>
-    <h3>Your plugins</h3>
-    {#if plugins.length}
-      <ul class="list">
-        {#each plugins as plugin (plugin.manifestUrl)}
-          {@const url = plugin.manifestUrl}
-          {@const den = denAddonOf(url, routes)}
-          {@const configureURL = denConfigureURL(url, routes)}
-          {@const pinned = plugin.signingKey}
-          {@const waitingOn = plugin.pendingApprovalOn}
-          <li class="line addon-line">
-            <span class="label"
-              >{den?.label ?? hostOf(url)}<small
-                >{den ? `${den.role} · ${hostOf(url)}` : 'Plugin'}</small
-              >{#if pinned}<small>Verified — Den checks this plugin’s signature</small
-                >{/if}{#if waitingOn.length}<small
-                  >Waiting for approval on {waitingOn.map((d) => d.name).join(', ')}: approve it
-                  there under Settings › Plugins</small
-                >{:else if added === url}<small
-                  >Approve it on your Apple TV under Settings › Plugins</small
-                >{/if}</span
-            >
-            <span class="addon-menu">
-              <ActionMenu
-                bind:this={
-                  () => pluginMenus[url], (menu) => (pluginMenus = { ...pluginMenus, [url]: menu })
-                }
-                items={() => pluginItems(url, configureURL, pinned)}
-                label="More actions for {den?.label ?? hostOf(url)}"
-                heading={den?.label ?? hostOf(url)}
-                triggerClass="addon-trigger"
-                onclose={() => {
-                  if (pluginConfirmNext?.url === url) pluginConfirm = pluginConfirmNext;
-                  pluginConfirmNext = null;
-                }}
-                glyph={more}
-              />
-            </span>
-            <Confirm
-              hideTrigger
-              bind:asking={
-                () => pluginConfirm?.kind === 'unverify' && pluginConfirm.url === url,
-                (asked) => (pluginConfirm = asked ? { kind: 'unverify', url } : null)
-              }
-              label="Stop verifying"
-              question="Stop verifying this add-on?"
-              detail="Den will accept its index without checking a signature, as before."
-              {disabled}
-              onclose={() => pluginMenus[url]?.focus()}
-              onconfirm={() => void setPluginTrust(url, null)}
-            />
-            <Confirm
-              hideTrigger
-              bind:asking={
-                () => pluginConfirm?.kind === 'remove' && pluginConfirm.url === url,
-                (asked) => (pluginConfirm = asked ? { kind: 'remove', url } : null)
-              }
-              label="Remove add-on"
-              question="Remove {den?.label ?? hostOf(url)}?"
-              detail="This removes the existing add-on from your library. You can add it back by its URL."
-              {disabled}
-              onclose={() => pluginMenus[url]?.focus()}
-              onconfirm={() => void removePlugin(url)}
-            />
-            {#if pinning === url}
-              <form
-                class="form wide"
-                onsubmit={(event) => {
-                  event.preventDefault();
-                  void pinKey(url);
-                }}
-              >
-                <input
-                  id="signing-key"
-                  class="field mono"
-                  autocomplete="off"
-                  spellcheck="false"
-                  placeholder="ed25519:…"
-                  aria-label="Signing key for {den?.label ?? hostOf(url)}"
-                  bind:value={keyDraft}
-                />
-                <Button
-                  type="submit"
-                  variant="primary"
-                  label="Pin key"
-                  disabled={disabled || !keyDraft.trim()}
-                />
-                <Button variant="secondary" label="Cancel" onclick={() => (pinning = null)} />
-              </form>
-              {#if keyInvalid}
-                <p class="status bad wide" role="alert">
-                  That isn’t a valid key. Paste the ed25519:… public key the plugin publishes.
-                </p>
-              {/if}
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {:else if !sharedAddons.length}
-      <p class="status">No plugins yet. Add a manifest URL below.</p>
-    {/if}
-    {#if sharedHosts.length}
-      <h3>Shared with you</h3>
-      <ul class="list">
-        {#each sharedHosts as grant (grant.gid)}
-          {@const hasOverride = Boolean(
-            grant.addons.den &&
-            grant.overrides?.includes('den') &&
-            hasSharedMediaSettings(grant.addons),
-          )}
-          <li class="line addon-line">
-            <span class="label"
-              >Den Hearth<small
-                >{hasOverride ? 'Using your settings' : 'Using shared settings'}</small
-              ></span
-            >
-            <span class="addon-menu">
-              <ActionMenu
-                bind:this={
-                  () => guestMenus[grant.gid],
-                  (menu) => (guestMenus = { ...guestMenus, [grant.gid]: menu })
-                }
-                items={() => guestItems(grant.gid, grant.secret, Boolean(hasOverride))}
-                label="More actions for Den Hearth"
-                heading="Den Hearth"
-                triggerClass="addon-trigger"
-                glyph={more}
-              />
-            </span>
-          </li>
-        {/each}
-        {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
-          <li class="line">
-            <span class="label"
-              >{sharedLabels[shared.addon]}<small>Shared access · read-only</small></span
-            >
-          </li>
-        {/each}
-      </ul>
-      {#if configureGuestProblem}<p class="status bad" role="alert">{configureGuestProblem}</p>{/if}
-    {/if}
-    <p class="foot">
-      Add-ons can see what you browse and choose what plays. An Apple TV may ask you to approve a
-      new one.
-    </p>
-    <h3>Add manually</h3>
-    <form
-      class="form"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void addPlugin();
-      }}
-    >
-      <input
-        id="plugin-url"
-        class="field"
-        type="url"
-        autocomplete="off"
-        spellcheck="false"
-        placeholder="https://…/manifest.json (or http:// on your LAN)"
-        aria-label="Plugin manifest URL"
-        bind:value={addonDraft}
-      />
-      <Button type="submit" variant="primary" label="Add plugin" disabled={disabled || !addonURL} />
-    </form>
-    {#if addonProblem}<p class="status bad" role="alert">{addonProblem}</p>{/if}
-  </SettingRow>
+  {/if}
 
   <SettingRow
     id="linked-devices"

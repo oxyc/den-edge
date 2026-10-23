@@ -111,6 +111,21 @@ if (tizen3) {
         throw new Error(`${worker} did not install the enforced old-engine limits`);
     }
   }
+  const css = (
+    await Promise.all(
+      assets
+        .filter((file) => file.endsWith('.css'))
+        .map((file) => readFile(resolve(directory, 'assets', file), 'utf8')),
+    )
+  ).join('\n');
+  if (
+    /(?:-webkit-)?backdrop-filter\s*:|\bblur\(|@(?:-webkit-)?keyframes\b|\b(?:animation|transition)(?:-[\w-]+)?\s*:/i.test(
+      css,
+    )
+  )
+    throw new Error('Tizen 3 CSS still contains a blur, animation or transition');
+  const hls = assets.filter((file) => /(?:^|[-.])hls(?:-legacy)?[-.]/i.test(file));
+  if (hls.length) throw new Error(`hls.js leaked into the Tizen 3 package: ${hls.join(', ')}`);
 }
 if (tizen3 && assets.some((file) => file.endsWith('.wasm')))
   throw new Error('A Wasm asset leaked into the Tizen 3 JavaScript-core package');
