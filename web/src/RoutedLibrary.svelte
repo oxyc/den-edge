@@ -3,9 +3,9 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import type LegacyBackupRecoveryComponent from './components/LegacyBackupRecovery.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
-  import ProfileSettings from './ProfileSettings.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import {
     activeProfileSession,
@@ -18,7 +18,6 @@
   import { untilServiceSettles } from './lib/serviceSettles';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
-  import { migrateGuestProfiles } from './lib/guestProfileMigration';
   import { legacyClockBootstrap } from './lib/legacyClockBootstrap';
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import {
@@ -43,7 +42,7 @@
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
-  import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
+  import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
@@ -137,7 +136,25 @@
   // Kept actions done, and on their way, in the library kept here: a move that copied it goes again if either changed.
   let keptActions = 0;
   let keptPending = 0;
+  let keptSettlers: Array<() => void> = [];
+  const changeKeptPending = (change: 1 | -1) => {
+    keptPending += change;
+    if (keptPending !== 0) return;
+    const settlers = keptSettlers;
+    keptSettlers = [];
+    for (const settle of settlers) settle();
+  };
+  const waitForKeptActions = async () => {
+    while (keptPending > 0) await new Promise<void>((resolve) => keptSettlers.push(resolve));
+  };
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
+
+  async function discardLocalLegacyBackup(): Promise<void> {
+    const key = libraryIdentity;
+    if (!key || !shown.local || !localLegacyBackup) return;
+    if (await dropLocalLibrary(key)) location.reload();
+    else shown.notify('Couldn’t discard this browser’s old library.');
+  }
 
   let confirmedProfileHousehold = $state<string | null>(
     untrack(() =>
@@ -192,7 +209,7 @@
               keptActions++;
               void startHousehold();
             },
-            (change) => (keptPending += change),
+            changeKeptPending,
           )
         : services.library;
     const model = new LibraryModel(library, {
@@ -217,7 +234,7 @@
   let profileCapability = $state<ProfilesCapability | 'checking'>(
     untrack(() => (!libraryIdentity || !usesProfileDirectory(session) ? 'disabled' : 'checking')),
   );
-  // The directory read answered "none": a household before its Owner split, or a browser-local library.
+  // The directory read answered "none": a non-profile household or a browser-local library.
   let profileDirectoryAbsent = $state(false);
   // Until a directory exists there is nothing to gate behind, so an absent one behaves as disabled.
   const activeCapability = $derived(
@@ -242,6 +259,11 @@
   let openingCommittedProfiles = false;
   let committedProfilesOpen = 0;
   const settingsRoute = $derived(profileSettingsRoute(session, profileCoordinator?.mode ?? null));
+  // Settings can turn personal while open (a Kid restored after the route was drawn), so the screen loads from here.
+  let settingsOpen = $state(false);
+  $effect(() => {
+    if (settingsOpen && settingsRoute === 'personal') void ProfileSettingsScreen.load();
+  });
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
@@ -357,6 +379,16 @@
             : profileCoordinator.restoring))),
   );
   const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  const localLegacyBackup = $derived(
+    shown.local && shown.alert?.startsWith('This backup predates Library v4.') ? shown.alert : null,
+  );
+  let LegacyBackupRecovery = $state<typeof LegacyBackupRecoveryComponent | null>(null);
+  $effect(() => {
+    if (!localLegacyBackup || LegacyBackupRecovery) return;
+    void import('./components/LegacyBackupRecovery.svelte').then(
+      ({ default: component }) => (LegacyBackupRecovery = component),
+    );
+  });
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
   let optimisticShown = false;
@@ -590,38 +622,6 @@
     }
   });
 
-  // Guests redeemed by older clients already own one ordinary wire-4 household. Upgrade that same authenticated
-  // household in place: every device keeps its key, while the inviter's household and profiles remain unreachable.
-  const GUEST_PROFILE_RETRY_MS = 30_000;
-  const GUEST_PROFILE_RETRIES = 5;
-  let guestProfileTries = $state(0);
-  let guestProfileMigrating = false;
-  $effect(() => {
-    void guestProfileTries;
-    const model = session.model;
-    if (
-      !link?.guest ||
-      session.local ||
-      profileCapability !== 'enabled' ||
-      !profileDirectoryAbsent ||
-      !model ||
-      guestProfileMigrating
-    )
-      return;
-    guestProfileMigrating = true;
-    void migrateGuestProfiles(model)
-      .then((outcome) => {
-        if (outcome === 'pending' && alive && guestProfileTries < GUEST_PROFILE_RETRIES)
-          setTimeout(() => alive && guestProfileTries++, GUEST_PROFILE_RETRY_MS);
-      })
-      .catch((error: unknown) => {
-        console.warn('den: the guest profile upgrade could not continue', error);
-        if (alive && guestProfileTries < GUEST_PROFILE_RETRIES)
-          setTimeout(() => alive && guestProfileTries++, GUEST_PROFILE_RETRY_MS);
-      })
-      .finally(() => (guestProfileMigrating = false));
-  });
-
   $effect(() => {
     const coordinator = profileCoordinator;
     if (!coordinator) return;
@@ -822,19 +822,39 @@
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
   async function joinLocalLibrary(key: string): Promise<boolean> {
     let sourceKey = libraryIdentity;
-    if (!session.local || !session.model || !sourceKey) return false;
+    const source = session.model;
+    if (!session.local || !source || !sourceKey) return false;
     const destination = open(key, false);
     try {
       await destination.model!.ready;
+      // A title edit made from finished views answers while its narrow document send is still settling. A query that
+      // needs the full authority waits for that send and folds it into the source log before anything can copy it.
+      await source.rawPreferences();
       // A first-tab winner can change again while a TV join is copying it. Follow that pointer until the exact source
       // just copied can be removed; every earlier source is already safe in the destination.
       for (let round = 0; round < 8; round++) {
-        const { result } = await destination.model!.mergeLocalLibrary(sourceKey);
-        if (
-          result.kind !== 'local-library.merge' ||
-          (result.outcome !== 'merged' && result.outcome !== 'absent') ||
-          !alive
-        ) {
+        let settled = false;
+        // Keep the source until no action that started before or during a pass remains. A Watchlist click is drawn
+        // optimistically before its local command has finished; forgetting the source on the first pass could
+        // otherwise publish an empty linked library while that command was still being kept.
+        for (let pass = 0; pass < 3 && !settled; pass++) {
+          await waitForKeptActions();
+          const seen = keptActions;
+          const { result } = await destination.model!.mergeLocalLibrary(sourceKey, undefined, {
+            keep: true,
+            verify: true,
+          });
+          if (
+            result.kind !== 'local-library.merge' ||
+            (result.outcome !== 'merged' && result.outcome !== 'absent') ||
+            !alive
+          ) {
+            destination.close();
+            return false;
+          }
+          settled = keptActions === seen && keptPending === 0;
+        }
+        if (!settled) {
           destination.close();
           return false;
         }
@@ -1597,10 +1617,18 @@
          a new session always mounts a new tree, even one with the same identity (a reopened Owner, whose old model is
          closed). The adopted first-frame session is the coordinator's own object, so that handover keeps the tree. -->
     {#key shown}
-      <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+      {#if localLegacyBackup && LegacyBackupRecovery}
+        <LegacyBackupRecovery
+          message={localLegacyBackup}
+          ondiscard={() => void discardLocalLegacyBackup()}
+        />
+      {:else}
+        <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+      {/if}
       <Router
         profile={profileSessionKey(shown.identity)}
         onchange={(route) => {
+          settingsOpen = route.page === 'settings';
           if (route.page === 'settings')
             void (session.identity.kind === 'visitor'
               ? Promise.resolve()
@@ -1614,7 +1642,11 @@
           {#if route.page === 'settings'}
             {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
             {#if settingsRoute === 'personal'}
-              <ProfileSettings {session} profiles={profileCoordinator} />
+              {#if ProfileSettingsScreen.current}
+                <ProfileSettingsScreen.current {session} profiles={profileCoordinator} />
+              {:else}
+                <ScreenLoading screen={ProfileSettingsScreen} />
+              {/if}
             {:else if settingsRoute === 'unavailable'}
               <section
                 class="profile-settings-unavailable"
@@ -1705,9 +1737,9 @@
     width: fit-content;
     margin: 0 auto 16px;
     padding: 6px 11px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+    border: 1px solid var(--accent-line-45);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    background: var(--accent-surface);
     color: var(--muted);
     font-size: 12px;
   }

@@ -7,9 +7,9 @@ import { browserCore, tvCore, verifyTvCore } from './tv-core-artifacts.mjs';
 
 verifyTvCore();
 for (const [name, maximum] of [
-  ['den_core_bg.wasm', 1_420_000],
-  ['den_core_assistant_bg.wasm', 570_000],
-  ['den_core_recovery_bg.wasm', 165_000],
+  ['den_core_bg.wasm', 1_000_000],
+  ['den_core_assistant_bg.wasm', 540_000],
+  ['den_core_recovery_bg.wasm', 140_000],
 ]) {
   const bytes = statSync(join(tvCore, 'generated', name)).size;
   assert.ok(bytes <= maximum, `${name} is ${bytes} bytes; expected at most ${maximum}`);
@@ -37,7 +37,7 @@ const cores = await Promise.all(
   }),
 );
 let count = 0;
-for (const file of ['policy-v1.json', 'policy-v3.json', 'profiles-v1.json']) {
+for (const file of ['policy-v1.json', 'profiles-v1.json']) {
   const fixture = JSON.parse(readFileSync(join(browserCore, file)));
   for (const vector of fixture.cases) {
     const actual = cores[1](vector.request);

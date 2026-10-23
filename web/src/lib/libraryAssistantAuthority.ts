@@ -209,6 +209,18 @@ function readRecords(value: AssistantRecords | null | undefined): AssistantRecor
   };
 }
 
+/** The drop-box key `row` (`DROPBOX_ROW`) holds, once the assistant module is loaded (`ensureAssistantPolicy`). */
+export const dropboxKey = (row: SettingsRow | null): DropboxKey | null =>
+  assistantPolicy<DropboxKey | null>({ op: 'assistant_dropbox', assistant: row });
+
+/**
+ * When this device's last publication must next be built, its inputs unchanged (`Publication.dueAt`); null when it
+ * has none. Before then, a page that has written nothing has nothing to publish: another device publishes its own
+ * changes, and this device's go through the library log, which publishes them.
+ */
+export const publicationDueAt = (records: AssistantRecords | null | undefined): number | null =>
+  readRecords(records).publication?.dueAt ?? null;
+
 function readPublication(value: unknown): value is Publication {
   if (!value || typeof value !== 'object') return false;
   const { key, dueAt, sent, layouts } = value as Partial<Publication>;
@@ -319,6 +331,7 @@ export class LibraryAssistantAuthority {
    * know this library as a member.
    */
   async lend(): Promise<AssistantConnection | null> {
+    if (__DEN_TV_LEGACY_JS_CORE__) return null;
     await this.port.refresh();
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
       await this.grants();
@@ -370,10 +383,7 @@ export class LibraryAssistantAuthority {
 
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
   dropbox(lent: AssistantConnection | null = null): DropboxKey | null {
-    return assistantPolicy<DropboxKey | null>({
-      op: 'assistant_dropbox',
-      assistant: this.#row(DROPBOX_ROW, lent),
-    });
+    return dropboxKey(this.#row(DROPBOX_ROW, lent));
   }
 
   #list(records: AssistantRecords, lent: AssistantConnection | null = null): AssistantGrantList {
@@ -548,6 +558,7 @@ export class LibraryAssistantAuthority {
    * publishes any more. A play record asks nothing of Den Web: only a TV plays.
    */
   async needs(): Promise<AssistantNeeds> {
+    if (__DEN_TV_LEGACY_JS_CORE__) return { write: false, read: false };
     const grants = this.#row(GRANTS_ROW);
     const read = this.#row(READ_ROW);
     if (!Object.keys(grants?.values ?? {}).length && !Object.keys(read?.values ?? {}).length)
@@ -652,8 +663,14 @@ export class LibraryAssistantAuthority {
     const prefs = this.#row(PREFS_ROW);
     const localRevoked = this.#revoked(records, lent);
     // The library as it stands now, written once: the inputs' digest and the build's request share it, and later
-    // changes to the rows cannot reach a build already on its way.
-    const documents = JSON.stringify(this.port.documents());
+    // changes to the rows cannot reach a build already on its way. In one order whatever order the log holds them in:
+    // a page that wrote or synced them holds them as they came, one that read them back from this device's store as
+    // the store keeps them, and the same library must be the same inputs on both, or every returning page rebuilds it.
+    const documents = `[${this.port
+      .documents()
+      .map((document) => JSON.stringify(document))
+      .sort()
+      .join(',')}]`;
     const known = JSON.stringify(layouts);
     // Not the log's head, which every write moves, nor the clock: what the lists are made of. Nor a grant's expiry,
     // which only its daily renewal moves: whether it is live is den-core's to decide when it is next built, and the

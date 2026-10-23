@@ -12,13 +12,15 @@ import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import type { ProfileDirectoryDocument } from './profileDirectory';
 import { validateKidTitleApprovals, type KidTitleApprovalsDocument } from './kidTitleApprovals';
-import { profilesApplyCreate } from './profileMigrationCore';
+import { profilesApplyCreate } from './profilesCore';
 import { ensureSyncPolicy } from './syncLoader';
 import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
 import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
-import { readFinishedLibraryViews } from './finishedLibraryViews';
+import { readFinishedLibraryViews, writeFinishedLibraryViews } from './finishedLibraryViews';
+import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
+import { writeEncryptedLibraryValue } from './libraryLocalValue';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -195,6 +197,306 @@ describe('LibraryLogAuthority', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('invalidates finished views before an administrative local-library merge answers', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const sourceKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(23)));
+      const sourceLog = (await LibraryLog.openLocal(sourceKey, vault))!;
+      const sourceClock = await openClockStore(vault, {
+        key: 'finished-view-merge-source-clock',
+        createDevice: () => 'fedcba9876543210',
+      });
+      const source = authority(sourceLog, sourceClock, 'local');
+      await source.command({ kind: 'watchlist.add', title: movie }, 'source-add-seven');
+      await source.close();
+
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-merge-target-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(async () => expect(await cachedWatchlist(vault)).not.toBeNull());
+
+      await expect(
+        opened.task({ kind: 'local-library.merge', sourceLibraryKey: sourceKey }, 'merge-local'),
+      ).resolves.toMatchObject({ result: { outcome: 'merged' } });
+      await opened.close();
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles an accepted local edit before the handoff source query answers', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'local-handoff-persistence-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const opened = authority(log, clock, 'local');
+    await opened.command({ kind: 'watchlist.add', title: movie }, 'add-before-handoff');
+
+    const put = vault.put;
+    let releaseSnapshot!: () => void;
+    const snapshotReleased = new Promise<void>((resolve) => (releaseSnapshot = resolve));
+    let snapshotStarted!: () => void;
+    const snapshotWriting = new Promise<void>((resolve) => (snapshotStarted = resolve));
+    vault.put = async (key, value) => {
+      if (key.endsWith(':log.v1')) {
+        snapshotStarted();
+        await snapshotReleased;
+      }
+      await put(key, value);
+    };
+    let answered = false;
+    const barrier = opened.query({ kind: 'preferences.raw' }).then((result) => {
+      answered = true;
+      return result;
+    });
+    await snapshotWriting;
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    releaseSnapshot();
+    await expect(barrier).resolves.toMatchObject({ kind: 'preferences.raw' });
+    const reopened = await LibraryLog.openExistingLocal(KEY, vault);
+    expect(reopened?.title(movie)?.status.value).toBe('watchlist');
+    reopened?.close();
+    await opened.close();
+  });
+
+  it('does not write the finished views again when an unchanged library is opened again', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const puts: string[] = [];
+      const put = vault.put;
+      vault.put = async (key, value) => {
+        if (key.includes(':finished-views.v1')) puts.push(key);
+        return put(key, value);
+      };
+      const all = [
+        'watchlist',
+        'continue',
+        'recommendations',
+        'settings',
+        'runtime',
+        'devices',
+      ] as const;
+      const visit = async (edit: boolean) => {
+        const log = (await LibraryLog.openLocal(KEY, vault))!;
+        const clock = await openClockStore(vault, {
+          key: 'finished-view-reopen-clock',
+          createDevice: () => '0123456789abcdef',
+        });
+        const opened = authority(log, clock, 'local', undefined, undefined, {
+          libraryKey: KEY,
+          vault,
+        });
+        if (edit) {
+          await opened.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
+          await opened.command({ kind: 'watchlist.add', title: series }, 'add-eleven');
+        }
+        await cacheSelections(opened);
+        await vi.advanceTimersByTimeAsync(250);
+        await opened.close();
+        return readFinishedLibraryViews(KEY, vault, [...all]);
+      };
+      const first = await visit(true);
+      expect(first).not.toBeNull();
+      puts.length = 0;
+      const second = await visit(false);
+      const kept = first!;
+      const differs = [
+        ...(Object.keys(kept.identity) as Array<keyof typeof kept.identity>).filter(
+          (field) =>
+            JSON.stringify(kept.identity[field]) !== JSON.stringify(second?.identity[field]),
+        ),
+        ...all.filter(
+          (piece) => JSON.stringify(kept.pieces[piece]) !== JSON.stringify(second?.pieces[piece]),
+        ),
+      ];
+      expect({ puts, differs }).toEqual({ puts: [], differs: [] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the finished views only once every series in Continue has its layout', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'finished-view-layouts-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local', undefined, undefined, {
+        libraryKey: KEY,
+        vault,
+      });
+      await opened.command(
+        {
+          kind: 'episode-watched.set',
+          episode: { ...series, season: 1, episode: 1 },
+          watched: true,
+        },
+        'watched-one',
+      );
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      // Its series' layout is not known yet: a Continue kept now would be partial.
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
+
+      await opened.observe({
+        kind: 'title-shape',
+        title: series,
+        seasons: [{ season: 1, episodes: 2 }],
+        lastAired: { season: 1, episode: 2 },
+      });
+      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
+        needsShapes: [],
+      });
+      await cacheSelections(opened);
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.waitFor(async () =>
+        expect(
+          (await readFinishedLibraryViews(KEY, vault, ['continue']))?.pieces.continue?.view,
+        ).toMatchObject({ needsShapes: [], items: [{ title: series }] }),
+      );
+      await opened.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the same Continue layouts whatever order a page learnt them in', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers();
+    try {
+      const other = { type: 'tv' as const, id: 12 };
+      const kept = async (order: (typeof series)[]) => {
+        const vault = memoryVault();
+        const log = (await LibraryLog.openLocal(KEY, vault))!;
+        const clock = await openClockStore(vault, {
+          key: 'finished-view-layout-order-clock',
+          createDevice: () => '0123456789abcdef',
+        });
+        const opened = authority(log, clock, 'local', undefined, undefined, {
+          libraryKey: KEY,
+          vault,
+        });
+        for (const title of [series, other])
+          await opened.command(
+            {
+              kind: 'episode-watched.set',
+              episode: { ...title, season: 1, episode: 1 },
+              watched: true,
+            },
+            `watched-${title.id}`,
+          );
+        for (const title of order)
+          await opened.observe({
+            kind: 'title-shape',
+            title,
+            seasons: [{ season: 1, episodes: 2 }],
+            lastAired: { season: 1, episode: 2 },
+          });
+        await cacheSelections(opened);
+        await vi.advanceTimersByTimeAsync(250);
+        await opened.close();
+        return JSON.stringify(
+          (await readFinishedLibraryViews(KEY, vault, ['continue']))?.pieces.continue?.layouts,
+        );
+      };
+      const forwards = await kept([series, other]);
+      expect(forwards).toContain('tv:11');
+      expect(await kept([other, series])).toBe(forwards);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves the views a visit read from facts at its head for the next one, until it edits', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    server.allowWrites();
+    const all = [
+      'watchlist',
+      'continue',
+      'recommendations',
+      'settings',
+      'runtime',
+      'devices',
+    ] as const;
+    const open = async () => {
+      const log = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'facts-views-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      return Object.assign(
+        authority(log, clock, 'online', undefined, undefined, { libraryKey: KEY, vault }),
+        { log },
+      );
+    };
+    const first = await open();
+    await first.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
+    await vi.waitFor(() => expect(first.log.pendingActions).toBe(0));
+    await first.close();
+    // A visit that has read the write back from den-edge draws Home, and keeps its views at that head.
+    const home = await open();
+    expect(home.log.logHead).toBeGreaterThan(0);
+    await cacheSelections(home);
+    const written = await vi.waitFor(async () => {
+      const views = await readFinishedLibraryViews(KEY, vault, [...all]);
+      expect(views?.identity.head).toBe(home.log.logHead);
+      return views!;
+    });
+    await home.close();
+    // The same views as a visit that drew Home from the fact store keeps them: named by the facts' head.
+    const identity = {
+      ...written.identity,
+      authorityRevision: `facts:${written.identity.head}`,
+      layoutVersion: 'facts',
+    };
+    await writeFinishedLibraryViews(KEY, vault, { ...written, identity });
+    await writeEncryptedLibraryValue(KEY, vault, LIBRARY_LOCAL_AUTHORITY, {
+      generation: identity.generation,
+      head: identity.head,
+      authorityRevision: identity.authorityRevision,
+      rowsVersion: identity.rowsVersion,
+    });
+
+    // The Watchlist reads the whole log for its history, and selects the overview but not Continue.
+    const watchlist = await open();
+    await watchlist.select({ kind: 'overview' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await watchlist.close();
+    await expect(readFinishedLibraryViews(KEY, vault, [...all])).resolves.toMatchObject({
+      identity: { authorityRevision: identity.authorityRevision },
+    });
+
+    const edits = await open();
+    await edits.select({ kind: 'overview' });
+    await edits.command({ kind: 'watchlist.add', title: series }, 'add-eleven');
+    await edits.close();
+    await expect(readFinishedLibraryViews(KEY, vault, [])).resolves.toBeNull();
   });
 
   it('keeps a projected PIN non-authoritative across reload until its exact row syncs', async () => {
@@ -402,43 +704,7 @@ describe('LibraryLogAuthority', () => {
     log.close();
   });
 
-  it('queries the authenticated profile capability without starting a migration', async () => {
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(async (input, init) => {
-        requests.push({ url: String(input), init });
-        return new Response(
-          JSON.stringify({
-            enrollment: 'prepare',
-            wireMin: 4,
-            migrationWire: 5,
-            runtimeHouseholdWire: 5,
-            runtimeProfileWire: 4,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
-      }),
-    );
-    try {
-      const { authority } = await localAuthority();
-      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
-        kind: 'profile-migration.status',
-        phase: 'available',
-      });
-      expect(requests).toHaveLength(1);
-      expect(requests[0]?.url).toMatch(/\/profile-capability$/);
-      expect(requests[0]?.init?.method).toBe('GET');
-      const headers = requests[0]?.init?.headers as Record<string, string>;
-      expect(headers['x-den-library-token']).toBeTruthy();
-      expect(headers['x-den-wire']).toBe('5');
-      expect(JSON.stringify(requests)).not.toContain(KEY);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('keeps the compound key reset behind the profile capability and a fresh Owner PIN', async () => {
+  it('keeps the compound key reset behind its source route and a fresh Owner PIN', async () => {
     let enrolled = false;
     const requests: string[] = [];
     vi.stubGlobal(
@@ -446,18 +712,13 @@ describe('LibraryLogAuthority', () => {
       vi.fn<typeof fetch>(async (input, init) => {
         const url = String(input);
         requests.push(`${init?.method ?? 'GET'} ${url}`);
-        if (!url.endsWith('/profile-capability')) throw new Error(`unexpected request ${url}`);
+        if (!url.endsWith('/exclusive-operation/source'))
+          throw new Error(`unexpected request ${url}`);
         if (!enrolled) return new Response('{"error":"not_found"}', { status: 404 });
-        return new Response(
-          JSON.stringify({
-            enrollment: 'prepare',
-            wireMin: 5,
-            migrationWire: 5,
-            runtimeHouseholdWire: 5,
-            runtimeProfileWire: 4,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(JSON.stringify({ source: { generation: 1, head: 'a'.repeat(64) } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }),
     );
     try {
@@ -483,12 +744,14 @@ describe('LibraryLogAuthority', () => {
         },
       ] as const;
 
-      // Profile migration off: every entry is unavailable, and the only request is the capability read.
+      // Profile reset off: every entry is unavailable, and the only request is the source read.
       for (const task of tasks)
         await expect(reset.task(task, `off-${task.kind}`)).resolves.toMatchObject({
           result: { kind: task.kind, outcome: 'unavailable' },
         });
-      expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
+      expect(requests.every((request) => request.endsWith('/exclusive-operation/source'))).toBe(
+        true,
+      );
 
       // Confirming asks nothing of den-edge and nothing of the gate: with no journal there is nothing to confirm.
       const confirm = {
@@ -523,74 +786,9 @@ describe('LibraryLogAuthority', () => {
           failure: expect.objectContaining({ code: 'invalid-request' }),
         }),
       );
-      expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('tells another device’s migration lock from nothing, offers Restore, and never retries the refused open', async () => {
-    await ensureSyncPolicy();
-    const source = { generation: 7, head: 'a'.repeat(64) };
-    const posts: string[] = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(async (input, init) => {
-        const url = String(input);
-        const json = (body: unknown, status = 200) =>
-          new Response(JSON.stringify(body), {
-            status,
-            headers: { 'content-type': 'application/json' },
-          });
-        if (url.endsWith('/profile-capability'))
-          return json({
-            enrollment: 'prepare',
-            wireMin: 4,
-            migrationWire: 5,
-            runtimeHouseholdWire: 5,
-            runtimeProfileWire: 4,
-          });
-        if (url.endsWith('/profile-migration/source')) return json({ source });
-        if (init?.method === 'POST' && url.endsWith('/profile-migration')) {
-          posts.push(String(init.body));
-          // Metadata-free by contract: no attempt, purpose, fence, backup or timing.
-          return json({ error: 'migration_in_progress' }, 409);
-        }
-        throw new Error(`unexpected request ${init?.method} ${url}`);
-      }),
-    );
-    try {
-      const { authority } = await localAuthority();
-      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
-        kind: 'profile-migration.status',
-        phase: 'available',
-      });
-      const observed = await authority.query({ kind: 'profile-migration.observe' });
-      if (observed.kind !== 'profile-migration.observe') throw new Error('wrong result');
-
-      const enabled = await authority.task(
-        { kind: 'profile-migration.enable', attempt: observed.attempt, source: observed.source },
-        'enable-while-locked',
+      expect(requests.every((request) => request.endsWith('/exclusive-operation/source'))).toBe(
+        true,
       );
-      expect(enabled.result).toEqual({
-        kind: 'profile-migration.enable',
-        outcome: 'setup-in-progress',
-      });
-      expect(posts, 'one definitive refusal, no retry').toHaveLength(1);
-      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
-        kind: 'profile-migration.status',
-        phase: 'setup-in-progress',
-      });
-      expect(posts).toHaveLength(1);
-
-      // The journal was cleared with nothing opened, so Restore is journal-less: it names no attempt.
-      await expect(
-        authority.query({ kind: 'profile-migration.observe-recovery', attempt: null }),
-      ).resolves.toMatchObject({
-        kind: 'profile-migration.observe-recovery',
-        attempt: null,
-        source,
-      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -869,10 +1067,11 @@ describe('LibraryLogAuthority', () => {
     expect(view).toEqual({
       kind: 'simkl',
       connected: true,
+      account: '42',
       heldRemovals: [],
     });
     expect(JSON.stringify(view)).not.toContain('private-token');
-    expect(JSON.stringify(log.settings('keys'))).toContain('private-token');
+    expect(JSON.stringify(log.settings('trackers'))).toContain('private-token');
 
     await expect(
       service.command({ kind: 'simkl.disconnect' }, 'disconnect'),
@@ -906,7 +1105,7 @@ describe('LibraryLogAuthority', () => {
         { kind: 'continue' },
       ],
     });
-    expect(log.settings('tracker-event:add-movie')).toBeDefined();
+    expect(log.settings('tracker-event:add-movie')).toBeUndefined();
     await expect(
       authority.command({ kind: 'watchlist.add', title: movie }, 'add-again'),
     ).resolves.toMatchObject({ outcome: 'unchanged', affected: [] });
@@ -1014,7 +1213,7 @@ describe('LibraryLogAuthority', () => {
       },
       'episode-one-seen',
     );
-    expect(log.settings('tracker-event:episode-one-seen')).toBeDefined();
+    expect(log.settings('tracker-event:episode-one-seen')).toBeUndefined();
     await expect(authority.query({ kind: 'playback.prepare', title: series })).resolves.toEqual({
       kind: 'playback.prepare',
       action: 'next',
@@ -1033,7 +1232,7 @@ describe('LibraryLogAuthority', () => {
       'season-seen',
     );
     expect(log.settings('tracker-event:season-seen:episode:1:1')).toBeUndefined();
-    expect(log.settings('tracker-event:season-seen:episode:1:2')).toBeDefined();
+    expect(log.settings('tracker-event:season-seen:episode:1:2')).toBeUndefined();
     await expect(authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
       listed: true,
       watched: true,
@@ -1054,7 +1253,7 @@ describe('LibraryLogAuthority', () => {
       { kind: 'watched.set', title: series, watched: false },
       'series-unseen',
     );
-    expect(log.settings('tracker-event:series-unseen')).toBeDefined();
+    expect(log.settings('tracker-event:series-unseen')).toBeUndefined();
     await expect(authority.select({ kind: 'title', title: series })).resolves.toMatchObject({
       watched: false,
       episodes: [
@@ -1550,7 +1749,7 @@ describe('LibraryLogAuthority', () => {
         { id: tv, name: 'Apple TV', kind: 'tv', lastSeenAt: 900, libraryFormat: 3 },
       ],
       diagnostics: {
-        libraryFormat: 2,
+        libraryFormat: 4,
         pendingChanges: 0,
         selfDeviceId: '0123456789abcdef',
       },

@@ -123,8 +123,8 @@ pub struct AppState {
     /// The device API's public names (env `API_HOSTS`). They bypass Access, so a request for one gets the
     /// device routes and never the web app — which would otherwise be handed out past Access.
     pub api_hosts: Vec<String>,
-    /// Public names which serve only the TV bundle (env `TV_WEB_HOSTS`). The bundle calls `API_HOSTS` for the
-    /// authenticated device API, so backend routes do not silently acquire a second public address.
+    /// Public names which serve the TV bundle (env `TV_WEB_HOSTS`), and every route the hosted bundle calls, so
+    /// its requests stay on its own origin and pay no CORS preflight.
     pub tv_web_hosts: Vec<String>,
     /// HTTPS device API origin compiled into the hosted TV build (env `TV_API_ORIGIN`). It is added to that
     /// shell's connect policy; requests are still authorized by the API's normal member/pairing proofs.
@@ -138,12 +138,8 @@ pub struct AppState {
     /// Web host names allowed to use only the synthetic, non-migrating profiles preview
     /// (env `PROFILES_PREVIEW_HOSTS`). Preview wins if a host is accidentally present in both lists.
     pub profiles_preview_hosts: Vec<String>,
-    /// Enables only the authenticated profiles-v1 migration transaction routes. It is deliberately independent
-    /// from profile discovery and defaults off (env `PROFILE_MIGRATION_ENABLED`).
-    pub profile_migration_enabled: bool,
-    /// Enables only the compound key reset's exclusive-operation routes (profiles-v1 §9.1), apart from the
-    /// migration's (env `PROFILE_RESET_ENABLED`). Unset, it follows `PROFILE_MIGRATION_ENABLED`, which used to gate
-    /// both, so a deployment that sets only the old flag keeps its reset.
+    /// Enables only the compound key reset's exclusive-operation routes (profiles-v1 §9.1)
+    /// (env `PROFILE_RESET_ENABLED`).
     pub profile_reset_enabled: bool,
     /// Batches one library may send in a burst, and how many a minute it earns back (env `LIBRARY_WRITE_BURST`,
     /// `LIBRARY_WRITE_PER_MINUTE`). A per-minute of 0 turns the budget off.
@@ -161,10 +157,6 @@ pub struct AppState {
     /// What `/config` tells the Apple TV about profiles (env `PROFILES_TV`): `Some(true)` enables them,
     /// `Some(false)` is the operator's explicit rollback, and `None` omits the key so the TV stays "unavailable".
     pub profiles_tv: Option<bool>,
-    /// Exact household library ids enrolled for profiles-v1 preparation (env `PROFILE_PREPARE_HOUSEHOLDS`).
-    /// This is transport authority, not runtime truth: committed runtime is derived by a client only after it
-    /// decrypts and validates the stored directory. An empty set keeps every legacy household off.
-    pub profile_prepare_households: HashSet<String>,
     /// Households whose aborted key reset still has declared successor libraries to delete
     /// (`library::reset_lock`): filled from the sweep hints at startup and when a reset ends, drained by the sweep.
     pub reset_sweeps: Mutex<HashSet<String>>,
@@ -399,7 +391,6 @@ impl AppState {
             tv_service_origin: None,
             profiles_hosts: Vec::new(),
             profiles_preview_hosts: Vec::new(),
-            profile_migration_enabled: false,
             profile_reset_enabled: false,
             library_write_burst: library::WRITE_BURST,
             library_write_per_minute: library::WRITE_PER_MINUTE,
@@ -409,7 +400,6 @@ impl AppState {
             visitor_library_max_rows: library::VISITOR_LIBRARY_MAX_ROWS,
             visitor_day: Mutex::new(library::VisitorDay::default()),
             profiles_tv: None,
-            profile_prepare_households: HashSet::new(),
             reset_sweeps: Mutex::new(HashSet::new()),
             relays: Vec::new(),
             relay_client: relay::client(),
@@ -567,8 +557,7 @@ async fn main() {
     state.profiles_preview_hosts = env_opt("PROFILES_PREVIEW_HOSTS")
         .map(|v| parse_hosts("PROFILES_PREVIEW_HOSTS", &v))
         .unwrap_or_default();
-    state.profile_migration_enabled = env_flag("PROFILE_MIGRATION_ENABLED", false);
-    state.profile_reset_enabled = env_flag("PROFILE_RESET_ENABLED", state.profile_migration_enabled);
+    state.profile_reset_enabled = env_flag("PROFILE_RESET_ENABLED", false);
     state.library_write_burst = env_number("LIBRARY_WRITE_BURST").unwrap_or(library::WRITE_BURST);
     state.library_write_per_minute =
         env_number("LIBRARY_WRITE_PER_MINUTE").unwrap_or(library::WRITE_PER_MINUTE);
@@ -586,14 +575,6 @@ async fn main() {
             std::process::exit(1);
         })
     });
-    state.profile_prepare_households = env_opt("PROFILE_PREPARE_HOUSEHOLDS")
-        .map(|value| {
-            parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", &value).unwrap_or_else(|reason| {
-                eprintln!("{reason}");
-                std::process::exit(1);
-            })
-        })
-        .unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));
@@ -826,20 +807,6 @@ fn parse_hosts(var: &str, value: &str) -> Vec<String> {
             ok
         })
         .collect()
-}
-
-/// A protected exact-household enrollment list. Unlike host discovery, a malformed id must stop startup: silently
-/// dropping one could leave the operator believing a household can recover while every migration route is hidden.
-fn parse_library_ids(var: &str, value: &str) -> Result<HashSet<String>, String> {
-    value.split(',').map(str::trim).filter(|id| !id.is_empty()).try_fold(HashSet::new(), |mut ids, id| {
-        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
-            return Err(format!("{var}: {id:?} is not an exact lowercase 32-hex library id"));
-        }
-        if !ids.insert(id.to_owned()) {
-            return Err(format!("{var}: duplicate household {id:?}"));
-        }
-        Ok(ids)
-    })
 }
 
 /// `ADDON_RELAY`: comma-separated `/<prefix>=<origin>` pairs — one path segment, a plain http(s) origin. A malformed
@@ -1258,23 +1225,6 @@ mod tests {
             drain.abort();
         }
         assert!(refused.is_empty(), "{} of 1000 refused, e.g. {:?}", refused.len(), refused.first());
-    }
-
-    #[test]
-    fn profile_prepare_enrollment_accepts_only_exact_unique_household_ids() {
-        let first = "0123456789abcdef0123456789abcdef";
-        let second = "fedcba9876543210fedcba9876543210";
-        let ids = parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", &format!(" {first}, {second} ")).unwrap();
-        assert_eq!(ids, HashSet::from([first.to_owned(), second.to_owned()]));
-        assert!(parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", "").unwrap().is_empty());
-        for invalid in [
-            "0123456789abcdef0123456789abcde",
-            "0123456789abcdef0123456789abcdeg",
-            "0123456789ABCDEF0123456789ABCDEF",
-            "0123456789abcdef0123456789abcdef,0123456789abcdef0123456789abcdef",
-        ] {
-            assert!(parse_library_ids("PROFILE_PREPARE_HOUSEHOLDS", invalid).is_err(), "{invalid}");
-        }
     }
 
     #[test]

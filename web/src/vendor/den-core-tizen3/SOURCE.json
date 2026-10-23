@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "sourceManifest": "../den-core/SOURCE.json",
+  "sourceDigest": "408ff137e722a7f33d68cfe022270980c644266a6179f379d71c8ed4c5f93883",
+  "rust": "1.95.0",
+  "binaryen": 133,
+  "rustflags": "-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types,-multivalue",
+  "excludes": [
+    "assistant"
+  ],
+  "artifacts": {
+    "generated/den_core.js": "a06944b8f8ec66127606dc8a5d6f5f7e84bded4de1ef37a2c1fef5ef6c7fd751",
+    "index.d.ts": "751d8b0b6bcb87ef3896968ce9c07998de92b6ad4e8a8050089a4716f7348db4",
+    "index.js": "8624ce2d9e03a9bb4fe588ce91f35fd6c0fe7d2d3bb3a42da5bd7ce0133a0ad5"
+  }
+}

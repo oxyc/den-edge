@@ -32,7 +32,7 @@
   let films = $state<FilmCredit[] | null | undefined>();
   let expanded = $state(false);
   let mediaType = $state<MediaType | null>(null);
-  let counts = $state<Record<string, number>>({});
+  let counts = $state.raw<Record<string, number>>({});
   let personRetry = $state(0),
     filmsRetry = $state(0);
   $effect(() => {

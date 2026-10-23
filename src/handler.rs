@@ -107,19 +107,14 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let library_request = path.starts_with("/lib/");
-    let migration_path = profile_migration_path(&path);
+    let reset_path = exclusive_operation_path(&path);
     let den_disabled = (den_playback_path(&path)
         || matches!(path.as_str(), "/grant/den-install" | "/grant/den-configure"))
         && !state.den_playback_enabled;
-    let gate_on = if exclusive_operation_path(&path) {
-        state.profile_reset_enabled
-    } else {
-        state.profile_migration_enabled
-    };
-    let globally_disabled = migration_path && !gate_on || den_disabled;
+    let route_disabled = reset_path && !state.profile_reset_enabled || den_disabled;
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
-    let route = if globally_disabled { "other" } else { route_label(&path) };
+    let route = if route_disabled { "other" } else { route_label(&path) };
     let origin = allowed_origin(&state, &req);
     let bulk = !is_control(route);
     let admission = admit(&state, bulk)
@@ -128,27 +123,19 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     if admission.is_err() {
         state.metrics.request_refused(bulk);
     }
-    // Per-household `off` is as absent as the global emergency kill. Resolve it inside admission, because reading
-    // opaque protocol metadata may open a library database; an unauthenticated request must not bypass resource
-    // bounds. This still precedes method, body, preflight, wire and authentication distinctions.
-    let migration_disabled = globally_disabled
-        || migration_path
-            && admission.is_ok()
-            && !crate::library::profile_migration_available(&state, &path).await;
-    let route = if migration_disabled { "other" } else { route };
     let mut resp = match admission.as_ref() {
         Err(()) => busy(),
         Ok(slot) => match &origin {
             Some(_)
                 if method == Method::OPTIONS
-                    && !migration_disabled
+                    && !route_disabled
                     && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
             {
                 preflight()
             }
             _ => {
                 req.extensions_mut().insert(slot.clone());
-                dispatch(&state, req, route, &rid, migration_disabled).await
+                dispatch(&state, req, route, &rid, route_disabled).await
             }
         },
     };
@@ -573,7 +560,7 @@ fn preflight() -> Response {
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
             "content-type, x-den-link, x-den-library-token, x-den-library-member, \
-             x-den-candidate-library-token, x-den-exclusive-attempt, x-den-successor-token, x-den-grant, \
+             x-den-exclusive-attempt, x-den-successor-token, x-den-grant, \
              x-den-wire, x-den-wire-min, x-den-generation, idempotency-key",
         ),
     );
@@ -589,11 +576,11 @@ async fn dispatch(
     req: Request,
     route: &'static str,
     rid: &str,
-    migration_disabled: bool,
+    route_disabled: bool,
 ) -> Response {
     // This precedes method validation and declared/body length checks so every shape of the dormant surface is
     // uniformly absent. `handle` also labels it as `other` and suppresses preflight before reaching here.
-    if migration_disabled {
+    if route_disabled {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
     let path = req.uri().path().to_owned();
@@ -601,18 +588,10 @@ async fn dispatch(
     if !face.serves(&path) {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
-    // Select the static TV face before API route/method validation. Otherwise a POST to an API-shaped path on
-    // this hostname receives the API router's 405 and makes the supposedly static origin distinguishable from a
-    // missing file. Hosted LG and packaged Samsung builds call API_HOSTS instead; this name serves GET/HEAD files
-    // and client-side routes only.
-    if face == Face::Tv {
-        return if matches!(*req.method(), Method::GET | Method::HEAD) {
-            let query = req.uri().query().map(str::to_owned);
-            crate::web::serve(state, &path, query.as_deref(), req.headers(), face).await
-        } else {
-            bare_json(StatusCode::NOT_FOUND, &error("not_found"))
-        };
-    }
+    // The hosted TV app calls its own origin, so this name answers every route a device or the web app may call,
+    // as the LAN and tailnet names do, and serves the TV bundle's files where no route matches. Every request
+    // the app made to another name was cross-origin and paid a CORS preflight per distinct URL — one per title on
+    // Home, about 200 ms each from a TV away from the box.
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A HEAD is a GET without the body, so it passes only where a GET does. Neither it nor an OPTIONS passes
@@ -776,7 +755,7 @@ async fn dispatch(
             resp
         }
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
-        p => match &state.web_dir {
+        p => match if face == Face::Tv { &state.tv_web_dir } else { &state.web_dir } {
             Some(_) if matches!(*req.method(), Method::GET | Method::HEAD) => {
                 let query = req.uri().query().map(str::to_owned);
                 crate::web::serve(state, p, query.as_deref(), req.headers(), face).await
@@ -784,19 +763,6 @@ async fn dispatch(
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
     }
-}
-
-fn profile_migration_path(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/lib/") else {
-        return false;
-    };
-    let Some((_, action)) = rest.split_once('/') else {
-        return false;
-    };
-    action == "profile-migration"
-        || action.starts_with("profile-migration/")
-        || action == "exclusive-operation"
-        || action.starts_with("exclusive-operation/")
 }
 
 /// A key reset's exclusive-operation route: behind `profile_reset_enabled`, not the migration's switch.
@@ -889,7 +855,7 @@ impl Face {
             || crate::oauth::is_path(path);
         match (self, path) {
             (Face::Invalid, _) => false,
-            (Face::Web, "/capabilities/profiles") => true,
+            (Face::Web | Face::Tv, "/capabilities/profiles") => true,
             (_, "/capabilities/profiles") => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both | Face::Tv, _) => true,
             _ if tmdb => true,
@@ -930,7 +896,7 @@ fn request_host(req: &Request) -> Result<Option<String>, ()> {
 }
 
 fn profile_capability(state: &AppState, req: &Request, face: Face) -> Response {
-    let host = (face == Face::Web).then(|| request_host(req).ok().flatten()).flatten();
+    let host = matches!(face, Face::Web | Face::Tv).then(|| request_host(req).ok().flatten()).flatten();
     let allowed = |hosts: &[String]| {
         host.as_ref().is_some_and(|host| {
             hosts.iter().any(|allowed| allowed.trim_end_matches('.').eq_ignore_ascii_case(host))
@@ -1046,32 +1012,6 @@ pub fn route_label(path: &str) -> &'static str {
         p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid/code",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
-        p if p.starts_with("/lib/") && p.ends_with("/profile-capability") => "/lib/:id/profile-capability",
-        p if p.starts_with("/lib/") && p.ends_with("/profile-migration") => "/lib/:id/profile-migration",
-        p if p.starts_with("/lib/") && p.ends_with("/profile-migration/source") => {
-            "/lib/:id/profile-migration/source"
-        }
-        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/backup") => {
-            "/lib/:id/profile-migration/:attempt/backup"
-        }
-        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/rows") => {
-            "/lib/:id/profile-migration/:attempt/rows"
-        }
-        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/commit") => {
-            "/lib/:id/profile-migration/:attempt/commit"
-        }
-        p if p.starts_with("/lib/") && p.contains("/profile-migration/") && p.ends_with("/restore") => {
-            "/lib/:id/profile-migration/:attempt/restore"
-        }
-        p if p.starts_with("/lib/")
-            && p.contains("/profile-migration/")
-            && p.ends_with("/retire-candidate") =>
-        {
-            "/lib/:id/profile-migration/:attempt/retire-candidate"
-        }
-        p if p.starts_with("/lib/") && p.contains("/profile-migration/") => {
-            "/lib/:id/profile-migration/:attempt"
-        }
         p if p.starts_with("/lib/") && p.ends_with("/exclusive-operation") => "/lib/:id/exclusive-operation",
         p if p.starts_with("/lib/") && p.ends_with("/exclusive-operation/source") => {
             "/lib/:id/exclusive-operation/source"
@@ -1143,10 +1083,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/recovery/open" | "/recovery/timing" => Some(POST),
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
-        "/lib/:id/profile-migration/:attempt" | "/lib/:id/exclusive-operation/:attempt" => {
-            Some(&[Method::GET, Method::DELETE])
-        }
-        "/lib/:id/profile-migration/:attempt/backup" => Some(GET_POST),
+        "/lib/:id/exclusive-operation/:attempt" => Some(&[Method::GET, Method::DELETE]),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
         "/lib/:id/grants/:gid/code" => Some(POST),
         "/grant/redeem"
@@ -1164,8 +1101,6 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/config"
         | "/capabilities/profiles"
         | "/metrics"
-        | "/lib/:id/profile-capability"
-        | "/lib/:id/profile-migration/source"
         | "/lib/:id/exclusive-operation/source"
         | "/lib/:id/changes"
         | "/tmdb" => Some(GET),
@@ -1179,13 +1114,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/rewrite"
         | "/lib/:id/rewrite/:rid/rows"
         | "/lib/:id/rewrite/:rid/commit"
-        | "/lib/:id/profile-migration"
         | "/lib/:id/exclusive-operation"
         | "/lib/:id/exclusive-operation/:attempt/successor"
-        | "/lib/:id/profile-migration/:attempt/rows"
-        | "/lib/:id/profile-migration/:attempt/commit"
-        | "/lib/:id/profile-migration/:attempt/restore"
-        | "/lib/:id/profile-migration/:attempt/retire-candidate"
         | "/pair/new"
         | "/pair/open" => Some(POST),
         "/metadata/title/query"
@@ -1210,15 +1140,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
 
 fn body_cap(route: &str) -> usize {
     match route {
-        "/lib/:id/batch" | "/lib/:id/rewrite/:rid/rows" | "/lib/:id/profile-migration/:attempt/rows" => {
-            crate::library::BATCH_MAX_BODY_BYTES
-        }
-        "/lib/:id/profile-migration"
-        | "/lib/:id/profile-migration/:attempt/commit"
-        | "/lib/:id/profile-migration/:attempt/restore"
-        | "/lib/:id/profile-migration/:attempt/retire-candidate" => {
-            crate::library::PROFILE_MIGRATION_BODY_BYTES
-        }
+        "/lib/:id/batch" | "/lib/:id/rewrite/:rid/rows" => crate::library::BATCH_MAX_BODY_BYTES,
         // The relay holds each atlas path to its own cap (`relay::is_recommend`); this only refuses what no atlas
         // path takes.
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
@@ -1498,50 +1420,6 @@ pub mod tests {
         assert!(Face::Web.serves("/capabilities/profiles"));
         for face in [Face::Api, Face::Both, Face::Invalid] {
             assert!(!face.serves("/capabilities/profiles"), "{face:?}");
-        }
-    }
-
-    #[test]
-    fn household_profile_capability_is_an_authenticated_get_route() {
-        let route = "/lib/0123456789abcdef0123456789abcdef/profile-capability";
-        assert_eq!(route_label(route), "/lib/:id/profile-capability");
-        assert_eq!(allowed_methods(route_label(route)), Some(&[Method::GET][..]));
-        assert!(!is_control(route_label(route)), "unknown household reads stay inside bulk admission");
-    }
-
-    #[test]
-    fn profile_migration_routes_have_fixed_labels_methods_and_body_caps() {
-        let base = "/lib/0123456789abcdef0123456789abcdef/profile-migration";
-        let attempt = "0123456789abcdef0123456789abcdef";
-        assert_eq!(route_label(base), "/lib/:id/profile-migration");
-        assert_eq!(allowed_methods(route_label(base)), Some(&[Method::POST][..]));
-        assert_eq!(body_cap(route_label(base)), crate::library::PROFILE_MIGRATION_BODY_BYTES);
-        let source = format!("{base}/source");
-        assert_eq!(route_label(&source), "/lib/:id/profile-migration/source");
-        assert_eq!(allowed_methods(route_label(&source)), Some(&[Method::GET][..]));
-
-        let cases = [
-            ("", "/lib/:id/profile-migration/:attempt", &[Method::GET, Method::DELETE][..]),
-            ("/backup", "/lib/:id/profile-migration/:attempt/backup", &[Method::GET, Method::POST][..]),
-            ("/rows", "/lib/:id/profile-migration/:attempt/rows", &[Method::POST][..]),
-            ("/commit", "/lib/:id/profile-migration/:attempt/commit", &[Method::POST][..]),
-            ("/restore", "/lib/:id/profile-migration/:attempt/restore", &[Method::POST][..]),
-            (
-                "/retire-candidate",
-                "/lib/:id/profile-migration/:attempt/retire-candidate",
-                &[Method::POST][..],
-            ),
-        ];
-        for (suffix, label, methods) in cases {
-            let route = route_label(&format!("{base}/{attempt}{suffix}"));
-            assert_eq!(route, label);
-            assert_eq!(allowed_methods(route), Some(methods));
-            let cap = body_cap(route);
-            if suffix == "/rows" {
-                assert_eq!(cap, crate::library::BATCH_MAX_BODY_BYTES);
-            } else if !suffix.is_empty() && suffix != "/backup" {
-                assert_eq!(cap, crate::library::PROFILE_MIGRATION_BODY_BYTES);
-            }
         }
     }
 

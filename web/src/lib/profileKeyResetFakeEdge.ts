@@ -3,7 +3,7 @@ import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from '.
 import type { ProfileResetLibrary, ProfileResetSnapshot } from './profileKeyResetBackend';
 import { sameDirectory } from './profileKeyResetExecutor';
 import { profileResetHeadersAllowed, profileResetRoute } from './profileKeyResetRoutes';
-import { profileMigrationDigest } from './profileMigrationCore';
+import { profilesSnapshotDigest } from './profilesCore';
 import { syncPolicy } from './syncCore';
 import { deriveKeys, rowName, toBase64url, type Row } from './wire';
 
@@ -190,7 +190,7 @@ export class FakeEdge {
     const rows = await this.rowsOf(lib);
     return {
       generation: lib.gen,
-      head: profileMigrationDigest('source', {
+      head: profilesSnapshotDigest('source', {
         libraryId: lib.id,
         generation: lib.gen,
         base: rows.length,

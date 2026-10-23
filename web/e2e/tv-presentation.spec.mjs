@@ -46,7 +46,10 @@ test('remote shelf focus keeps the entire white poster ring inside clipping boun
 
   const track = page.locator('[data-route-page][data-active="true"] .row .track').first();
   const first = track.locator('a.card').first();
-  await expect(first).toBeVisible();
+  // The shelf virtualizer may leave only proxy links while the first row sits just below the TV viewport. Bring the
+  // row into its placement window before asserting the rendered card geometry this test is about.
+  await track.scrollIntoViewIfNeeded();
+  await expect(first).toBeVisible({ timeout: 30_000 });
   const shelfGeometry = await track.evaluate((node) => {
     const card = node.querySelector('.card');
     if (!card) return null;

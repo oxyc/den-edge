@@ -202,9 +202,11 @@ Den installation and install again; removal can discard local app data.
 The 2020–2021 widget is compiled separately for Chromium 69, uses classic rather than module Workers, and carries
 TV-only runtime polyfills. It does not add legacy code to Den Web or the newer TV packages. It remains unqualified
 until its pairing, library persistence, navigation and AVPlay journeys pass on real 2020/2021 hardware. Den does not
-publish a widget for 2019 or older models: Samsung documents WebAssembly support only from Tizen 5.5, while Den's
-encrypted local library/database requires it. A reported working Tizen 3 installation is being investigated against
-its exact firmware and build rather than represented as supported prematurely.
+support 2018–2019 models. For 2017 models (Tizen 3), each Samsung release carries
+`den-tv-tizen3-experimental.wgt`: a non-module Chromium 47 build with a JavaScript policy core and old-engine CSS
+fallbacks, covered by packaged E2E but not yet tested on a real TV. Install it the same way as the other widgets; it
+is published so it can be tested on real hardware (#728), and is not supported until pairing, persistence,
+navigation and AVPlay pass there.
 
 ### Tizen Studio alternative
 

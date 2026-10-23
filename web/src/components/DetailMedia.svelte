@@ -14,6 +14,8 @@
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
+  import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+  import { nativeHlsFirst } from '../lib/detailTrailerSources';
   let {
     type,
     tmdbId,
@@ -75,6 +77,8 @@
   const source = $derived(!canMountTrailer || asking ? null : playback?.url);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
+  /** LG's native HLS pipeline is the dependable trailer path; progressive MP4 remains its fallback. */
+  const preferNativeHls = playsHls && tvRuntimePlatform() === 'webos';
   /**
    * The source this page has to drive itself.
    *
@@ -92,6 +96,8 @@
   let playing = $state(false);
   let ended = $state(false);
   let failed = $state(false);
+  /** Chromium 47 resolves no trailer until the viewer explicitly asks on the detail page. */
+  let legacyRequested = $state(false);
   /**
    * Set when the viewer asks for the trailer full-screen, and the only thing that lets it make a
    * sound. Autoplay with audio cannot be granted — every browser refuses it without a gesture, and
@@ -295,7 +301,12 @@
     (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData,
   );
   const allowed = $derived(
-    autoplay && active && visible && foreground && !reduced && !saving && !ended && !failed,
+    (__DEN_TV_LEGACY_JS_CORE__ ? legacyRequested : autoplay && !reduced && !saving) &&
+      active &&
+      visible &&
+      foreground &&
+      !ended &&
+      !failed,
   );
 
   onMount(() => {
@@ -339,6 +350,10 @@
    * this only holds the CURRENT one steady.
    */
   let lockedFor = '';
+  $effect(() => {
+    void `${type}:${tmdbId ?? imdbId ?? ''}`;
+    untrack(() => (legacyRequested = false));
+  });
   // One that had finished plays again from the start when its page is come back to, as a page opened afresh does.
   $effect(() => {
     if (active) untrack(() => (ended = false));
@@ -347,7 +362,10 @@
     const [ids, base, mediaType, table] = [{ tmdb: tmdbId, imdb: imdbId }, reel, type, routes];
     const identity = JSON.stringify([ids, mediaType]);
     const key = JSON.stringify([ids, base, mediaType]);
-    const wanted = autoplay && !reduced && !saving && !!(ids.tmdb || ids.imdb) && !!base;
+    const wanted =
+      (__DEN_TV_LEGACY_JS_CORE__ ? legacyRequested : autoplay && !reduced && !saving) &&
+      !!(ids.tmdb || ids.imdb) &&
+      !!base;
     // The page left and come back to: the same trailer, already found. Found again, it started over from
     // the backdrop; kept, it carries on from where it was left (`keepFrame`).
     if (wanted && key === foundFor) return;
@@ -382,8 +400,23 @@
       { signal: controller.signal },
     ).then(async (found) => {
       if (controller.signal.aborted) return;
-      const nextCursor = new PlaybackCursor(found, {
+      const candidates = preferNativeHls
+        ? found.map((candidate) =>
+            candidate.plan
+              ? {
+                  ...candidate,
+                  plan: {
+                    ...candidate.plan,
+                    sources: nativeHlsFirst(candidate.plan.sources),
+                  },
+                }
+              : candidate,
+          )
+        : found;
+      const nextCursor = new PlaybackCursor(candidates, {
         signal: controller.signal,
+        // Chromium 47 has neither MSE nor a useful HLS stack. Skip straight to Reel's progressive MP4.
+        accepts: __DEN_TV_LEGACY_JS_CORE__ ? (source) => source.kind === 'mp4' : undefined,
       });
       owned = nextCursor;
       cursor = nextCursor;
@@ -422,7 +455,7 @@
   $effect(() => {
     const player = video;
     const master = managed;
-    if (!player || !master) return;
+    if (__DEN_TV_LEGACY_JS_CORE__ || !player || !master) return;
     let live = true;
     let engine: Hls | undefined;
     const starting = loadHls().then(({ default: Hls }) => {
@@ -657,6 +690,18 @@
       onerror={() => (canMountTrailer = true)}
     />
   {/if}
+  {#if __DEN_TV_LEGACY_JS_CORE__ && !legacyRequested && reel}
+    <Button
+      variant="primary"
+      class="legacy-trailer"
+      icon="play"
+      label="Play trailer"
+      onclick={() => {
+        legacyRequested = true;
+        canMountTrailer = true;
+      }}
+    />
+  {/if}
   <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout.
 
        Playback is started by `play()` alone, never by an `autoplay` attribute. The attribute looked like
@@ -820,6 +865,13 @@
     cursor: pointer;
     opacity: 0;
     transition: opacity 0.2s ease;
+  }
+
+  .media :global(.legacy-trailer) {
+    position: absolute;
+    z-index: 1;
+    right: var(--gutter);
+    bottom: 12%;
   }
 
   .media :global(.expand) {

@@ -11,6 +11,9 @@
 //!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation } (gzip when accepted)
 //!                                                       (`&wait=S`: with nothing after `since`, held up to S ≤ 25
 //!                                                       seconds until a write to this library commits)
+//!                                                       (`&before=N` instead of `since`: the rows below N, newest
+//!                                                       first, marked `"order":"desc"`; `&keys=k1,k2…` (≤ 32): those
+//!                                                       rows' current values, marked `"selected":true`)
 //!   DELETE /lib/{id}                                   → { deleted: true }
 //!
 //! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
@@ -48,8 +51,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-mod profile_migration;
-pub const PROFILE_MIGRATION_BODY_BYTES: usize = profile_migration::BODY_BYTES;
 pub(crate) mod reset_lock;
 mod snapshot;
 pub(crate) mod v3;
@@ -113,6 +114,18 @@ const MAX_CONFLICT_BYTES: usize = if cfg!(test) { 1024 * 1024 } else { 2 * 1024 
 pub const BATCH_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_LIMIT: usize = 500;
 const MAX_LIMIT: usize = 1000;
+/// Rows one `/changes?keys=` read may name: a client's few fixed rows (its settings) read before the rest.
+const MAX_SELECTED_KEYS: usize = 32;
+
+/// What a `/changes` read returns.
+enum Read {
+    /// Every row after a sequence, oldest first: the read every client catches up with.
+    Since(u64),
+    /// The rows below a sequence, newest first (`before=`): a first read that wants recent rows soonest.
+    Before(u64),
+    /// The current rows of the named keys (`keys=`).
+    Keys(Vec<String>),
+}
 /// Rows a library may hold: a long-time viewer's titles and episodes fit many times over; a stranger using the
 /// relay as free storage hits it (issue #8, #5).
 const MAX_ROWS: usize = if cfg!(test) { 8 } else { 50_000 };
@@ -529,35 +542,6 @@ async fn protocol_for(state: &AppState, id: &str) -> Result<Option<v3::Protocol>
     .map_err(io::Error::other)?
 }
 
-/// Whether the migration route exists for this exact household. A legacy household needs explicit prepare
-/// enrollment; a household already at wire 5 keeps recovery transport even after enrollment is removed. The
-/// global switch remains an emergency transport kill. A storage error is left visible so the real handler can
-/// return 500 rather than disguising an unhealthy enrolled household as an absent route.
-pub(crate) async fn profile_migration_available(state: &AppState, path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/lib/") else { return false };
-    let Some((id, action)) = rest.split_once('/') else { return false };
-    if valid_hex_id(id) && (action == "exclusive-operation" || action.starts_with("exclusive-operation/")) {
-        // A key reset's lock surface is addressed per library: the handler decides by the library's own minimum
-        // (and a retired library still answers its lock's lookup), so only the reset's own switch applies here.
-        return state.profile_reset_enabled;
-    }
-    if !state.profile_migration_enabled {
-        return false;
-    }
-    if !valid_hex_id(id) || !(action == "profile-migration" || action.starts_with("profile-migration/")) {
-        return false;
-    }
-    match protocol_for(state, id).await {
-        Ok(Some(protocol)) => {
-            protocol.wire_min >= 5
-                || state.profile_prepare_households.contains(id)
-                || crate::grants::is_guest_library(state, id).await.unwrap_or(true)
-        }
-        Ok(None) => false,
-        Err(_) => true,
-    }
-}
-
 fn with_wire_headers(state: &AppState, mut response: Response, protocol: Option<&v3::Protocol>) -> Response {
     let wire_min = protocol.map_or(2, |value| value.wire_min);
     let generation =
@@ -619,12 +603,17 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             None,
         );
     }
-    let migration_action = action == "profile-migration" || action.starts_with("profile-migration/");
-    let capability_action = action == "profile-capability";
-    let exclusive_action = action == "exclusive-operation" || action.starts_with("exclusive-operation/");
-    if migration_action && !state.profile_migration_enabled
-        || exclusive_action && !state.profile_reset_enabled
+    // The one-time Owner-split transport is retired. Refuse every former shape before generation, wire or
+    // authentication handling so it is uniformly absent rather than accidentally inheriting a generic library
+    // route's error contract.
+    if action == "profile-capability"
+        || action == "profile-migration"
+        || action.starts_with("profile-migration/")
     {
+        return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
+    }
+    let exclusive_action = action == "exclusive-operation" || action.starts_with("exclusive-operation/");
+    if exclusive_action && !state.profile_reset_enabled {
         return with_wire_headers(state, json_reply(StatusCode::NOT_FOUND, &error("not_found")), None);
     }
     // Households that owe a sweep of declared successors (an aborted key reset) are swept on their next access.
@@ -641,35 +630,6 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         && query_param(&req, "since").as_deref() == Some("0")
         && query_param(&req, "limit").as_deref() == Some("1");
     let minimum = protocol.as_ref().map_or(2, |value| value.wire_min);
-    let migration_prepare = if (migration_action || capability_action) && minimum < 5 {
-        if state.profile_prepare_households.contains(id) {
-            true
-        } else {
-            match crate::grants::is_guest_library(state, id).await {
-                Ok(guest) => guest,
-                Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
-            }
-        }
-    } else {
-        false
-    };
-    if (migration_action || capability_action) && minimum > 5 {
-        let response =
-            json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": minimum }));
-        return with_wire_headers(state, response, protocol.as_ref());
-    }
-    if migration_action && minimum < 5 && !migration_prepare {
-        return with_wire_headers(
-            state,
-            json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-            protocol.as_ref(),
-        );
-    }
-    if (migration_action || capability_action) && wire != Some(5) {
-        let response =
-            json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": 5 }));
-        return with_wire_headers(state, response, protocol.as_ref());
-    }
     // A key reset's lock surface exists for a household at minimum 5 (request wire 5) and for a profile library at
     // minimum 4 (request wire 4); no other library takes part in one. A retired library has no database but still
     // answers its lock's lookup, so it reaches the handler.
@@ -778,7 +738,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
         return with_wire_headers(state, response, latest.as_ref());
     }
-    if is_write && !migration_action && !exclusive_action && protocol.is_some() {
+    if is_write && !exclusive_action && protocol.is_some() {
         let manager = Arc::clone(&state.library_v3);
         let locked_id = id.to_owned();
         let opened =
@@ -810,7 +770,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
         }
     }
-    if is_write && wire.is_some() && !migration_action && !exclusive_action {
+    if is_write && wire.is_some() && !exclusive_action {
         let current = protocol
             .as_ref()
             .map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
@@ -825,7 +785,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             return with_wire_headers(state, response, protocol.as_ref());
         }
     }
-    if is_write && !action.starts_with("rewrite") && !migration_action && !exclusive_action {
+    if is_write && !action.starts_with("rewrite") && !exclusive_action {
         match load_rewrite(state, id).await {
             Ok(Some(_)) => {
                 let response = crate::handler::retry_after(
@@ -840,26 +800,6 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         }
     }
     let response = match (action, req.method().clone()) {
-        ("profile-capability", Method::GET | Method::HEAD) => match protocol.as_ref() {
-            Some(protocol) => json_reply(
-                StatusCode::OK,
-                &json!({
-                    "enrollment": if state.profile_migration_enabled && migration_prepare {
-                        "prepare"
-                    } else {
-                        "off"
-                    },
-                    "wireMin": protocol.wire_min,
-                    "migrationWire": 5,
-                    "runtimeHouseholdWire": 5,
-                    "runtimeProfileWire": 4,
-                }),
-            ),
-            None => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-        },
-        (action, _) if action == "profile-migration" || action.starts_with("profile-migration/") => {
-            profile_migration::handle(state, id, token_hash, action, req, migration_prepare).await
-        }
         (action, _) if exclusive_action => reset_lock::handle(state, id, token_hash, action, req).await,
         ("batch", Method::POST) => match write_budget(state, id) {
             Some(refused) => refused,
@@ -872,15 +812,27 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .unwrap_or(DEFAULT_LIMIT)
                 .clamp(1, MAX_LIMIT);
             let (_, gzip, identity) = crate::web::encodings(req.headers());
-            // Only a GET is held: a HEAD asks about the answer, not for a wait.
+            let read = if let Some(keys) = query_param(&req, "keys") {
+                let keys: Vec<String> = keys.split(',').map(str::to_owned).collect();
+                if keys.len() > MAX_SELECTED_KEYS || keys.iter().any(|key| !valid_hex_id(key)) {
+                    return json_reply(StatusCode::BAD_REQUEST, &error("invalid_keys"));
+                }
+                Read::Keys(keys)
+            } else if let Some(before) = query_param(&req, "before").and_then(|s| s.parse().ok()) {
+                Read::Before(before)
+            } else {
+                Read::Since(since)
+            };
+            // Only a GET is held, and only a read of what follows `since`: a HEAD asks about the answer, not for a
+            // wait, and a newest-first or by-key read is answered at once.
             let hold = crate::hold::wait(query_param(&req, "wait"))
-                .filter(|_| req.method() == Method::GET)
+                .filter(|_| req.method() == Method::GET && matches!(read, Read::Since(_)))
                 .map(|wait| Hold {
                     wait,
                     generation: sent_generation.clone(),
                     admission: req.extensions().get::<crate::handler::AdmissionSlot>().cloned(),
                 });
-            changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity, hold).await
+            changes(state, id, token_hash, read, limit, gzip > 0 && gzip >= identity, hold).await
         }
         ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
         ("", Method::DELETE) => match reset_headers(req.headers()) {
@@ -897,7 +849,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         (action, Method::DELETE) if action.starts_with("rewrite/") => {
             rewrite_abort(state, id, token_hash, action).await
         }
-        ("batch" | "changes" | "member" | "" | "rewrite" | "profile-capability", _) => method_not_allowed(),
+        ("batch" | "changes" | "member" | "" | "rewrite", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     };
     let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
@@ -1072,9 +1024,7 @@ async fn rewrite_commit(
         state.library_limits.stored_bytes
     };
     let write_store = Arc::clone(&store);
-    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap, None))
-        .await
-    {
+    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap)).await {
         Ok(Ok(protocol)) => {
             // Committed whatever the cleanup does: a held reader learns of the new rows and generation now.
             state.library_holds.wake(id);
@@ -1855,7 +1805,8 @@ fn row_fragment(seq: u64, k: &str, v: &str) -> Arc<[u8]> {
     Arc::from(serde_json::to_vec(&ResponseRow { k, seq, v }).expect("a library row always serializes"))
 }
 
-fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str) -> Vec<u8> {
+/// `extra`: further members of the answer, each with its leading comma (`Read`'s marker), or empty.
+fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str, extra: &str) -> Vec<u8> {
     use std::io::Write as _;
 
     let entries_bytes: usize = entries.iter().map(|entry| entry.len()).sum();
@@ -1867,7 +1818,7 @@ fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str) 
         }
         body.extend_from_slice(entry);
     }
-    write!(body, r#"],"head":{head},"more":{more},"generation":"{generation}"}}"#)
+    write!(body, r#"],"head":{head},"more":{more},"generation":"{generation}"{extra}}}"#)
         .expect("writing JSON to memory cannot fail");
     body
 }
@@ -1942,11 +1893,15 @@ async fn changes(
     state: &AppState,
     id: &str,
     token_hash: [u8; 32],
-    since: u64,
+    read: Read,
     limit: usize,
     gzip: bool,
     hold: Option<Hold>,
 ) -> Response {
+    let since = match read {
+        Read::Since(since) => since,
+        _ => 0,
+    };
     // Registered before the head is read: a write that lands after the read must still wake the wait.
     let mut hold = hold.and_then(|hold| Some((state.library_holds.hold(id, &[id])?, hold)));
     let (store, generation) = loop {
@@ -2003,7 +1958,7 @@ async fn changes(
         .acquire_many_owned(PAGE_BYTES as u32)
         .await
         .expect("the library response budget is never closed");
-    if !gzip {
+    if !gzip && matches!(read, Read::Since(_)) {
         let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
             page
         } else {
@@ -2023,14 +1978,31 @@ async fn changes(
         );
         return response;
     }
-    let page = match tokio::task::spawn_blocking(move || store.range(since, limit)).await {
+    // Named in the answer, so a client can tell the read it asked for from an older den-edge's ignoring it.
+    let marker = match read {
+        Read::Since(_) => "",
+        Read::Before(_) => r#","order":"desc""#,
+        Read::Keys(_) => r#","selected":true"#,
+    };
+    let page = match tokio::task::spawn_blocking(move || match read {
+        Read::Since(since) => store.range(since, limit),
+        Read::Before(before) => store.range_before(before, limit),
+        Read::Keys(keys) => store.rows(&keys),
+    })
+    .await
+    {
         Ok(Ok(page)) => page,
         Ok(Err(reason)) => return internal("library read", v3_io(reason)),
         Err(reason) => return internal("library read task", io::Error::other(reason)),
     };
     let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
+    // A newest-first read also says how many rows the library holds, so a client counts its progress in rows.
+    let extra = match page.rows {
+        Some(rows) => format!(r#"{marker},"rows":{rows}"#),
+        None => marker.to_owned(),
+    };
 
-    let mut body = changes_body(&entries, page.head, page.more, &generation);
+    let mut body = changes_body(&entries, page.head, page.more, &generation, &extra);
     if gzip && body.len() >= 1024 {
         if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
             let job = state.metrics.compression_started();
@@ -2957,7 +2929,6 @@ mod tests {
                 &[super::v3::RewriteRow { key: K2.to_owned(), value: "after".to_owned() }],
                 3,
                 h.state.library_limits.stored_bytes,
-                None,
             )
             .unwrap();
         drop(store);
@@ -2984,7 +2955,7 @@ mod tests {
             restored.state.library_v3.existing_library(LIB, token_hash).unwrap().protocol().unwrap();
         assert!(
             restored_protocol.migration_generation > switched.migration_generation,
-            "a restored database cannot reuse an already observed profile-migration fence"
+            "a restored database cannot reuse an already observed exclusive-operation fence"
         );
     }
 
@@ -3169,7 +3140,7 @@ mod tests {
         let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
         let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let protocol = member_store.protocol().unwrap();
-        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes, None).unwrap();
+        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes).unwrap();
 
         let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "new" }] }).to_string();
         let member = format!("{LIB}:{TOKEN}");
@@ -3215,7 +3186,7 @@ mod tests {
         let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
         let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let protocol = member_store.protocol().unwrap();
-        member_store.rewrite(protocol.head, &[], 5, h.state.library_limits.stored_bytes, None).unwrap();
+        member_store.rewrite(protocol.head, &[], 5, h.state.library_limits.stored_bytes).unwrap();
 
         let member = format!("{LIB}:{TOKEN}");
         let started = h
@@ -3380,11 +3351,11 @@ mod tests {
         let cap = h.state.library_limits.stored_bytes;
         let rows = [super::v3::RewriteRow { key: K2.to_owned(), value: "a".repeat(super::MAX_VALUE_V4) }];
         let head = store.protocol().unwrap().head;
-        assert!(matches!(store.rewrite(head, &rows, 3, cap, None), Err(super::v3::StoreError::TooLarge)));
-        assert_eq!(store.rewrite(head, &rows, 4, cap, None).unwrap().wire_min, 4);
+        assert!(matches!(store.rewrite(head, &rows, 3, cap), Err(super::v3::StoreError::TooLarge)));
+        assert_eq!(store.rewrite(head, &rows, 4, cap).unwrap().wire_min, 4);
         // At 4 already, a commit naming a lower minimum keeps 4, and its cap.
         let head = store.protocol().unwrap().head;
-        assert_eq!(store.rewrite(head, &rows, 3, cap, None).unwrap().wire_min, 4);
+        assert_eq!(store.rewrite(head, &rows, 3, cap).unwrap().wire_min, 4);
     }
 
     async fn changes_at(h: &Harness, wire: &str, generation: &str) -> (StatusCode, Value) {
@@ -3478,6 +3449,64 @@ mod tests {
         assert_eq!((page["entries"].as_array().unwrap().len(), page["more"].clone()), (2, json!(true)));
         let (_, rest) = changes(&h, TOKEN, "?since=2&limit=10").await;
         assert_eq!((rest["entries"].as_array().unwrap().len(), rest["more"].clone()), (3, json!(false)));
+    }
+
+    #[tokio::test]
+    async fn changes_newest_first_count_live_rows_not_sequence_numbers() {
+        let h = Harness::new();
+        let writes: Vec<Value> =
+            (0..5).map(|i| json!({ "k": format!("{i:016x}"), "base": 0, "v": "v" })).collect();
+        batch(&h, TOKEN, json!(writes)).await;
+        // Two rows replaced: the history's head moves on, the library still holds five.
+        let rewrites: Vec<Value> =
+            (0..2).map(|i| json!({ "k": format!("{i:016x}"), "base": i + 1, "v": "w" })).collect();
+        batch(&h, TOKEN, json!(rewrites)).await;
+        let (_, page) = changes(&h, TOKEN, &format!("?before={}&limit=2", u64::MAX)).await;
+        assert_eq!((page["head"].clone(), page["rows"].clone()), (json!(7), json!(5)));
+        let (_, plain) = changes(&h, TOKEN, "?since=0&limit=1").await;
+        assert!(plain.get("rows").is_none(), "only a newest-first read counts the rows");
+    }
+
+    #[tokio::test]
+    async fn changes_read_newest_first_below_a_sequence() {
+        let h = Harness::new();
+        let writes: Vec<Value> =
+            (0..5).map(|i| json!({ "k": format!("{i:016x}"), "base": 0, "v": "v" })).collect();
+        batch(&h, TOKEN, json!(writes)).await;
+        let seqs = |page: &Value| -> Vec<u64> {
+            page["entries"].as_array().unwrap().iter().map(|entry| entry["seq"].as_u64().unwrap()).collect()
+        };
+        let (status, page) = changes(&h, TOKEN, "?before=6&limit=2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (seqs(&page), page["more"].clone(), page["head"].clone()),
+            (vec![5, 4], json!(true), json!(5))
+        );
+        assert_eq!(page["order"], json!("desc"), "marked, so a client can tell an older den-edge ignored it");
+        let (_, rest) = changes(&h, TOKEN, "?before=4&limit=10").await;
+        assert_eq!((seqs(&rest), rest["more"].clone()), (vec![3, 2, 1], json!(false)));
+        let (_, plain) = changes(&h, TOKEN, "?since=0&limit=1").await;
+        assert!(plain.get("order").is_none(), "an ordinary read is unmarked");
+    }
+
+    #[tokio::test]
+    async fn changes_read_named_keys() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "a" }, { "k": K2, "base": 0, "v": "b" }])).await;
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "c" }])).await;
+        let (status, page) = changes(&h, TOKEN, &format!("?keys={K1},{}", "f".repeat(64))).await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "a key nobody wrote is absent");
+        assert_eq!(
+            (entries[0]["k"].clone(), entries[0]["v"].clone()),
+            (json!(K1), json!("c")),
+            "the current value"
+        );
+        assert_eq!((page["selected"].clone(), page["more"].clone()), (json!(true), json!(false)));
+        assert_eq!(changes(&h, TOKEN, "?keys=not-hex").await.0, StatusCode::BAD_REQUEST);
+        let many = vec!["a".repeat(64); super::MAX_SELECTED_KEYS + 1].join(",");
+        assert_eq!(changes(&h, TOKEN, &format!("?keys={many}")).await.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -3748,7 +3777,7 @@ mod tests {
         h.state.store.replace_file(super::NS, LIB, super::FORMAT_EXT, super::FORMAT_V3).await.unwrap();
         let store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
         let kept = [super::v3::RewriteRow { key: K1.to_owned(), value: "kept".to_owned() }];
-        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes, None).unwrap();
+        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes).unwrap();
         let path = h.state.library_v3.path(LIB);
         let sparse = std::fs::metadata(&path).unwrap().len();
 

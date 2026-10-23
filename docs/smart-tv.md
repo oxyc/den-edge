@@ -139,6 +139,29 @@ maintenance build enables `build-std` on that pinned compiler with
 `RUSTC_BOOTSTRAP=1`, disables reference types in both the application and std, and
 omits the debug-name section. It does not alter shared policy source.
 
+Tizen 3 is the one separate policy runtime. Chromium 47 has no WebAssembly, so
+`DEN_TIZEN_VERSION=3.0` selects a checked-in Binaryen wasm2js build of the same
+`den-sync::evaluate_core` policy. It is a classic, hashed asset rather than part
+of the application or Worker bundles: old Samsung loads it once with
+`importScripts`, while browser, LG and newer Samsung builds continue to use the
+Wasm core and contain none of this fallback. Assistant management and recovery
+codes remain browser-only on this experimental tier.
+
+To regenerate that artifact, install the manifest's Rust target, Binaryen 133
+and the web dependencies, then run from `web/`:
+
+```sh
+WASM2JS=/path/to/binaryen-version_133/bin/wasm2js \
+  node scripts/build-tizen3-core.mjs /path/to/pinned/den-core
+node scripts/tizen3-core.integration.mjs
+```
+
+The generator verifies the policy source hashes and exact tool version before
+writing anything. It uses a pointer-only transport binding because wasm-bindgen's
+multi-value return ABI cannot be represented by wasm2js, and records hashes for
+the binding and every generated artifact. The integration check executes the
+JavaScript and Wasm policies over the same non-assistant, non-recovery vectors.
+
 The same actual-engine check found that Chromium 87 drops Svelte's generated
 `:where(.svelte-…)` selectors and ignores `aspect-ratio`. A TV-only PostCSS pass
 retains the scope classes without `:where`; TV geometry has explicit height

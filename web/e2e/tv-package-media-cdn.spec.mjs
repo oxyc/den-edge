@@ -11,6 +11,11 @@ const cors = {
   'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
 };
 
+test.skip(
+  process.env.DEN_TIZEN_VERSION === '3.0',
+  'the Tizen 3 viewer intentionally ships no HLS/MSE path',
+);
+
 test('packaged HLS can use a distinct media CDN without leaking library headers', async ({
   page,
 }) => {

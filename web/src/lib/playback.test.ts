@@ -269,6 +269,19 @@ describe('startPlayback', () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it('carries a replacement-pending retry delay to the player', async () => {
+    const fetchImpl = vi.fn(async () =>
+      json({ error: 'replacement_pending' }, 409, { 'retry-after': '3' }),
+    );
+    expect(await startPlayback('/den/config/playback', want, fetchImpl)).toEqual({
+      failure: 'starting',
+      code: 'replacement_pending',
+      httpStatus: 409,
+      retryMs: 3_000,
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it('treats a concealed rollout route as legacy but a named missing release as final', async () => {
     expect(
       await startPlayback('/den/config/playback', want, async () =>

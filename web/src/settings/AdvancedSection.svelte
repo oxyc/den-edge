@@ -23,6 +23,7 @@
     edgeVersion,
     libraryFormat = null,
     setRemoteAccess,
+    viewerOnly = false,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -41,6 +42,8 @@
     setRemoteAccess: (
       credentials: { clientId: string; clientSecret: string } | null,
     ) => Promise<boolean>;
+    /** Old-engine viewer tier: retain only unlinking. */
+    viewerOnly?: boolean;
   } = $props();
 
   /**
@@ -78,113 +81,117 @@
 </script>
 
 <SettingsSection id="advanced" title="Advanced">
-  <h3 class="group">On each Apple TV</h3>
-  <SettingRow id="oled" label="True black background (OLED)" value="Set on the TV" />
-  <SettingRow id="custom-server" label="Use a custom server" value="Set on the TV" />
-  <SettingRow id="seek-previews" label="Seek previews" value="Set on the TV" />
-  <p class="foot">
-    These change how an Apple TV draws and plays, so each TV keeps its own: Settings › Advanced on
-    the TV.
-  </p>
+  {#if !viewerOnly}
+    <h3 class="group">On each Apple TV</h3>
+    <SettingRow id="oled" label="True black background (OLED)" value="Set on the TV" />
+    <SettingRow id="custom-server" label="Use a custom server" value="Set on the TV" />
+    <SettingRow id="seek-previews" label="Seek previews" value="Set on the TV" />
+    <p class="foot">
+      These change how an Apple TV draws and plays, so each TV keeps its own: Settings › Advanced on
+      the TV.
+    </p>
 
-  <h3 class="group">Away from home</h3>
-  <SettingRow
-    id="away-from-home"
-    label="Cloudflare Access token"
-    value={hasAccess ? 'Saved' : 'Not set'}
-  >
-    <form
-      class="form"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void saveAccess();
-      }}
+    <h3 class="group">Away from home</h3>
+    <SettingRow
+      id="away-from-home"
+      label="Cloudflare Access token"
+      value={hasAccess ? 'Saved' : 'Not set'}
     >
-      <input
-        id="access-id"
-        class="field"
-        type="password"
-        autocomplete="off"
-        spellcheck="false"
-        placeholder={hasAccess ? 'Client ID saved — type to replace' : 'Client ID'}
-        aria-label="Access client ID"
-        bind:value={accessId}
-      />
-      <input
-        id="access-secret"
-        class="field"
-        type="password"
-        autocomplete="off"
-        spellcheck="false"
-        placeholder={hasAccess ? 'Client secret saved — type to replace' : 'Client secret'}
-        aria-label="Access client secret"
-        bind:value={accessSecret}
-      />
-      <Button
-        type="submit"
-        variant="primary"
-        label="Save"
-        disabled={disabled || !accessId.trim() || !accessSecret.trim()}
-      />
-      {#if hasAccess}
-        <Confirm
-          label="Remove"
-          question="Remove the away-from-home token?"
-          detail="Apple TVs in other homes stop reaching your plugins."
-          {disabled}
-          onconfirm={() => void saveAccess(true)}
+      <form
+        class="form"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void saveAccess();
+        }}
+      >
+        <input
+          id="access-id"
+          class="field"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={hasAccess ? 'Client ID saved — type to replace' : 'Client ID'}
+          aria-label="Access client ID"
+          bind:value={accessId}
         />
-      {/if}
-    </form>
-    <p class="foot">
-      The Cloudflare Access service token that lets an Apple TV in another home reach your plugins.
-      Enter it once; it syncs through your library.
-    </p>
-  </SettingRow>
+        <input
+          id="access-secret"
+          class="field"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={hasAccess ? 'Client secret saved — type to replace' : 'Client secret'}
+          aria-label="Access client secret"
+          bind:value={accessSecret}
+        />
+        <Button
+          type="submit"
+          variant="primary"
+          label="Save"
+          disabled={disabled || !accessId.trim() || !accessSecret.trim()}
+        />
+        {#if hasAccess}
+          <Confirm
+            label="Remove"
+            question="Remove the away-from-home token?"
+            detail="Apple TVs in other homes stop reaching your plugins."
+            {disabled}
+            onconfirm={() => void saveAccess(true)}
+          />
+        {/if}
+      </form>
+      <p class="foot">
+        The Cloudflare Access service token that lets an Apple TV in another home reach your
+        plugins. Enter it once; it syncs through your library.
+      </p>
+    </SettingRow>
 
-  <h3 class="group">Diagnostics</h3>
-  <SettingRow id="diagnostics" label="Diagnostics">
-    <dl class="facts">
-      <div>
-        <dt>Den</dt>
-        <dd>{edgeVersion ? `den-edge ${edgeVersion}` : 'Checking…'}</dd>
-      </div>
-      {#if libraryFormat !== null}
+    <h3 class="group">Diagnostics</h3>
+    <SettingRow id="diagnostics" label="Diagnostics">
+      <dl class="facts">
         <div>
-          <dt>Library format</dt>
-          <dd>v{libraryFormat}</dd>
+          <dt>Den</dt>
+          <dd>{edgeVersion ? `den-edge ${edgeVersion}` : 'Checking…'}</dd>
         </div>
-      {/if}
-      <div>
-        <dt>This browser</dt>
-        <dd class="mono">{selfId}</dd>
-      </div>
-      <div>
-        <dt>Waiting to sync</dt>
-        <dd>
-          {pendingActions
-            ? `${pendingActions} change${pendingActions === 1 ? '' : 's'}`
-            : 'Nothing'}
-        </dd>
-      </div>
-    </dl>
-    <p class="foot">
-      The Apple TV’s own diagnostics — plugin health, recent log events, a report to share — are on
-      the TV, under Settings › Advanced › Diagnostics.
-    </p>
-  </SettingRow>
+        {#if libraryFormat !== null}
+          <div>
+            <dt>Library format</dt>
+            <dd>v{libraryFormat}</dd>
+          </div>
+        {/if}
+        <div>
+          <dt>This browser</dt>
+          <dd class="mono">{selfId}</dd>
+        </div>
+        <div>
+          <dt>Waiting to sync</dt>
+          <dd>
+            {pendingActions
+              ? `${pendingActions} change${pendingActions === 1 ? '' : 's'}`
+              : 'Nothing'}
+          </dd>
+        </div>
+      </dl>
+      <p class="foot">
+        The Apple TV’s own diagnostics — plugin health, recent log events, a report to share — are
+        on the TV, under Settings › Advanced › Diagnostics.
+      </p>
+    </SettingRow>
 
-  <h3 class="group">This browser</h3>
-  <SettingRow id="recovery" label="Recovery code" detail="Make one, or open a library with one">
-    <h3>Open with a recovery code</h3>
-    <RecoveryRedeem
-      question={link
-        ? 'This browser switches to that library. Your current library stays saved on this browser.'
-        : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
-      onopen={openRecovered}
-    />
-    {@render recovery?.()}
-  </SettingRow>
+    {#if !__DEN_TV_LEGACY_JS_CORE__}
+      <h3 class="group">This browser</h3>
+      <SettingRow id="recovery" label="Recovery code" detail="Make one, or open a library with one">
+        <h3>Open with a recovery code</h3>
+        <RecoveryRedeem
+          question={link
+            ? 'This browser switches to that library. Your current library stays saved on this browser.'
+            : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
+          onopen={openRecovered}
+        />
+        {@render recovery?.()}
+      </SettingRow>
+    {/if}
+  {/if}
   {#if links.list.length}
     <SettingRow id="sign-out" label="Sign out" detail="Libraries saved on this browser">
       <h3>Your library</h3>

@@ -129,6 +129,7 @@
       dialog?.close();
       return;
     }
+    if (profiles.waitsForPin(choice.role)) return;
     if (profiles.setsPin(choice.role)) {
       flushSync(() => {
         pending = choice;
@@ -289,7 +290,7 @@
             class="profile-choice"
             class:current={choiceKey(choice) === choiceKey(active)}
             type="button"
-            disabled={switching}
+            disabled={switching || profiles.waitsForPin(choice.role)}
             aria-label={`Use ${choice.name}`}
             onclick={() => void choose(choice)}
           >
@@ -404,12 +405,12 @@
 
   .profile-choice:hover,
   .profile-choice:focus-visible {
-    border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+    border-color: var(--accent-line-70);
     background: rgb(255 255 255 / 0.075);
   }
 
   .profile-choice.current {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    border-color: var(--accent-line-45);
   }
 
   .choice-copy,

@@ -1,5 +1,5 @@
 import { flushSync } from 'svelte';
-import { routeKey as pageRouteKey } from '../lib/navigation';
+import { appPath, routeKey as pageRouteKey } from '../lib/navigation';
 import { parseRoute } from '../lib/route';
 import { currentAppPath } from '../lib/runtimeUrl';
 import { SearchScreen } from '../lib/screens.svelte';
@@ -21,6 +21,13 @@ const move = (
   direction: Parameters<typeof moveFocus>[0],
   include?: Parameters<typeof moveFocus>[1],
 ) => moveFocus(direction, include, 'auto');
+
+/* A title page is entered to act on the title. Its primary action is deliberately first in DOM order; when Play is
+   unavailable, the first remaining pill is the honest fallback. Scope this to the active retained route so a
+   previous title page cannot take focus while the new one is mounting. */
+const DETAIL_ENTRY =
+  '[data-route-page][data-active="true"] .hero-actions .main-action, ' +
+  '[data-route-page][data-active="true"] .hero-actions .pill';
 
 function focusIdentity(element: HTMLElement): string | undefined {
   if (element.id) return `#${CSS.escape(element.id)}`;
@@ -223,7 +230,29 @@ export function installTVNavigation(): () => void {
     if (!memory.has(locationKey) && isEditable(active)) {
       if (identity) rememberAt(locationKey, identity);
     }
-    restoreSoon(memory.get(locationKey));
+    const destination = parseRoute(nextKey);
+    const detailEntry =
+      destination.page === 'title' && !destination.play && !destination.trailer
+        ? DETAIL_ENTRY
+        : undefined;
+    restoreSoon(memory.get(locationKey) ?? detailEntry);
+  };
+  const prepareDetailEntry = (event: MouseEvent) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      return;
+    const anchor =
+      event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a') : null;
+    if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self'))
+      return;
+    const path = appPath(anchor.href, location.href);
+    if (path === null) return;
+    const destination = parseRoute(path);
+    if (destination.page !== 'title' || destination.play || destination.trailer) return;
+    // Router owns the click and starts its retained-page swap later in this same dispatch. Begin observing after
+    // every click listener has run, while the source card is still the active semantic control.
+    queueMicrotask(() =>
+      routeChanged(new CustomEvent<{ path: string }>('den:navigate', { detail: { path } })),
+    );
   };
   const onFocus = () => {
     document.documentElement.classList.add('tv-remote-active');
@@ -480,6 +509,7 @@ export function installTVNavigation(): () => void {
   window.addEventListener('keydown', onKey, true);
   window.addEventListener('popstate', routeChanged);
   document.addEventListener('den:navigate', routeChanged);
+  document.addEventListener('click', prepareDetailEntry, true);
   document.addEventListener('focusin', onFocus);
   document.addEventListener('focusin', prepareSearch);
   document.addEventListener('pointerdown', prepareSearch);
@@ -491,6 +521,7 @@ export function installTVNavigation(): () => void {
     window.removeEventListener('keydown', onKey, true);
     window.removeEventListener('popstate', routeChanged);
     document.removeEventListener('den:navigate', routeChanged);
+    document.removeEventListener('click', prepareDetailEntry, true);
     document.removeEventListener('focusin', onFocus);
     document.removeEventListener('focusin', prepareSearch);
     document.removeEventListener('pointerdown', prepareSearch);

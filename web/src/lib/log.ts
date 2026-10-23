@@ -3,14 +3,15 @@
 // in this browser (`localVault.ts`), so a return visit starts from it and asks only for what changed since.
 
 import { blankEpisode, blankTitle } from './actions';
-import { hex } from './crypto';
 import { exclusive } from './exclusive';
 import { householdScoped } from './householdScope';
 import { resetAssistantRows } from './libraryAssistantAuthority';
+import { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
 import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
+import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
 import { retryAfterMs } from './retryAfter';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
@@ -19,34 +20,19 @@ import {
   type KidTitleApprovalsDocument,
 } from './kidTitleApprovals';
 import {
-  profileMigrationAuthorizationFingerprint,
-  profileMigrationConstructDirectory,
-  profileMigrationDigest,
-  profileMigrationMaterialize,
-  profileMigrationPartition,
+  profilesConstructDirectory,
   profilesMaterialize,
   profilesMerge,
-  validMigrationSnapshot,
+  profilesSnapshotDigest,
   type ProfileCreateJournal,
-  type AuthenticatedMigrationRow,
-  type MigrationProjection,
-  type MigrationSealedRow,
-  type MigrationSnapshotRow,
-} from './profileMigrationCore';
+  type ProfilesSnapshotRow,
+} from './profilesCore';
 import type { ProfileDirectoryAuthority } from './profileKidCreateWorker';
-import type {
-  OwnerSplitAuthenticatedCopy,
-  OwnerSplitBackup,
-  OwnerSplitFence,
-  VerifiedOwnerSplitBackup,
-} from './profileOwnerSplitEngine';
-import type { ResolvedOwnerSplitCandidate } from './profileOwnerSplitWorkerStore';
 import { profileResetHeadersAllowed, profileResetRoute } from './profileKeyResetRoutes';
-import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
-import { noteLibraryDecrypt } from './libraryStartupMetrics';
+import { noteLibraryHydrate } from './libraryStartupMetrics';
 import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
 import {
   believe,
@@ -59,13 +45,12 @@ import {
   mergeEpisode,
   mergeSettings,
   mergeTitle,
-  mergeV3,
   newestSummary,
   open,
   openEntry,
-  openMigrationRow,
   openPlaintext,
   rowName,
+  rowKey,
   seal,
   sealPlaintext,
   toBase64url,
@@ -78,9 +63,9 @@ import {
   type SettingsRow,
   type Stamp,
   type TitleRow,
-  type WatchRow,
 } from './wire';
 import { trackerEvent } from './trackerEvents';
+import { episodeRow, titleRow } from './titleView';
 import { ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
@@ -129,7 +114,7 @@ interface Page {
   more: boolean;
 }
 
-const migrationEntry = (value: unknown): value is RawEntry =>
+const responseEntry = (value: unknown): value is RawEntry =>
   !!value &&
   typeof value === 'object' &&
   !Array.isArray(value) &&
@@ -139,17 +124,17 @@ const migrationEntry = (value: unknown): value is RawEntry =>
   (value as RawEntry).seq > 0 &&
   typeof (value as RawEntry).v === 'string';
 
-const migrationPage = (value: unknown): value is Page =>
+const responsePage = (value: unknown): value is Page =>
   !!value &&
   typeof value === 'object' &&
   !Array.isArray(value) &&
   Array.isArray((value as Page).entries) &&
-  (value as Page).entries.every(migrationEntry) &&
+  (value as Page).entries.every(responseEntry) &&
   Number.isSafeInteger((value as Page).head) &&
   (value as Page).head >= 0 &&
   typeof (value as Page).more === 'boolean';
 
-const migrationBatch = (value: unknown): value is Batch => {
+const responseBatch = (value: unknown): value is Batch => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const answer = value as Batch;
   return (
@@ -176,25 +161,28 @@ const migrationBatch = (value: unknown): value is Batch => {
   );
 };
 
-const migrationAAD = (name: string, binding: string): Uint8Array<ArrayBuffer> =>
+const boundAAD = (name: string, binding: string): Uint8Array<ArrayBuffer> =>
   utf8.encode(`${name}\u0000${binding}`);
 
-/** `v4_form`'s answer (§10): the documents of the switch, and the rows staged as they are stored. */
-interface V4Form {
-  documents: { name: string; plaintext: string }[];
-  keep: string[];
-}
-
-/** `v4_dry_run`'s answer (§10 step 2). */
-interface DryRun {
-  pass: boolean;
-  abort: { reason: string; title?: string; name?: string; field?: string; coordinate?: string }[];
-  pending_differences: { account: string; key: string }[];
-  counts: Record<string, unknown>;
+/** A household member authorizes the first write that creates one of its profile activity libraries. */
+function profileLibraryWriteHeaders(
+  household: { readonly id: string; readonly member: string },
+  profile: { readonly token: string },
+): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    'x-den-library-token': profile.token,
+    'x-den-library-member': `${household.id}:${household.member}`,
+    'x-den-wire': '4',
+    'x-den-wire-min': '4',
+    'x-den-generation': '0',
+  };
 }
 
 /** The highest library format this build reads and writes. */
 export const WIRE = 4;
+
+export { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 
 /** den-edge fenced this library against this older client (`426` plus a newer `x-den-wire-min`). */
 export class LibraryUpdateRequiredError extends Error {
@@ -250,19 +238,10 @@ function movedTo(moved: { successor?: string }, tag: string): MoveEnd {
 }
 
 /**
- * Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). Matched by
- * name as den-core's `doc_decode` does: a `tracker-event:` row whose event doesn't parse is still legacy, and the
- * profile split refuses it until the switch has removed it.
+ * An old-format row in a restored backup. These are recognized only to refuse the restore read-only; this build no
+ * longer projects or converts them.
  */
-const legacy = (row: Row): boolean =>
-  row.kind === 'rec' ||
-  row.kind === 'ep' ||
-  row.kind === 'wat' ||
-  row.kind === 'snt' ||
-  (row.kind === 'set' && row.name.startsWith('tracker-event:'));
-
-/** `legacy` for a raw opened row this build may not read as a `Row`: matched as den-core's switch matches (§10). */
-const rawLegacy = (row: unknown): boolean => {
+const preV4Row = (row: unknown): boolean => {
   if (!row || typeof row !== 'object') return false;
   const { kind, name, schema } = row as { kind?: unknown; name?: unknown; schema?: unknown };
   return (
@@ -273,6 +252,23 @@ const rawLegacy = (row: unknown): boolean => {
     (kind === 'set' && typeof name === 'string' && name.startsWith('tracker-event:')) ||
     (schema === 1 && 'after' in row)
   );
+};
+
+/**
+ * A legacy row that carries no edit at all. Old local builds could persist the blank row used to open a title or
+ * episode; it has no watchlist, history, progress, reaction or tombstone to convert. Comparing it with the exact
+ * blank through v4's operation builder is deliberately stricter than checking the visible values: a zero-valued
+ * field with a real stamp is an un-watch or removal that must not be discarded.
+ */
+const emptyPreV4Row = (row: Row): boolean => {
+  try {
+    if (row.kind === 'rec') return opsFor(blankTitle(row.title, row.addedAt), row).length === 0;
+    if (row.kind === 'ep')
+      return opsFor(blankEpisode(row.title, row.season, row.episode), row).length === 0;
+    return false;
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -318,15 +314,19 @@ interface Batch {
   conflicts: { k: string; seq: number; v: string | null; omitted?: boolean }[];
 }
 
-/** What a return visit starts from: the rows as den-edge last gave them, and where in its log that was. */
+/**
+ * A library kept whole, as rows and where in its log they were read to: one kept only here (`openLocal`), a first
+ * read's pages so far (`PARTIAL`), or a copy an earlier build kept of one on den-edge (`convertSnapshot`).
+ */
 interface Snapshot {
   generation?: string;
   head: number;
   entries: [name: string, seq: number, row: Row][];
+  /** Durable local revision; restoring the same rows must not look like a new authority revision. */
+  rowsVersion?: number;
   /** A null document records a newer, correctly named directory that failed validation (fail closed offline too). */
   profileDirectory?: [seq: number, document: ProfileDirectoryDocument | null];
   kidTitleApprovals?: [kid: string, seq: number, document: KidTitleApprovalsDocument][];
-  memberRegistered?: boolean;
   /**
    * The wire form of a library kept only here (`openLocal`), which has no den-edge to say it; absent means 2. One kept
    * on den-edge remembers den-edge's answer in the browser runtime vault instead.
@@ -336,13 +336,6 @@ interface Snapshot {
 
 interface InvalidProfileDirectory {
   readonly invalidProfileDirectory: true;
-}
-
-/** What the device switching a library to v3 says about itself (`switchWebOnly`), for den-core's `v3_form`. */
-interface SwitchContext {
-  performer: string;
-  stamp: Stamp;
-  simkl?: { account: string; credential: string; connectedAt: Stamp };
 }
 
 /**
@@ -360,16 +353,21 @@ interface KeptWork {
   generation?: string;
 }
 
-/** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
+/**
+ * Under what `LibraryLog.keep` holds a library kept only here; a new format takes a new name, so an old copy is never
+ * misread. Earlier builds kept a library on den-edge whole under it too, before v4.
+ */
 const SNAPSHOT = 'log.v1';
-/** The same for a library at v4, whose documents a build from before it would misread as rows. */
+/** Where earlier builds kept a library on den-edge at v4 whole; `convertSnapshot` moves it into the fact store. */
 const SNAPSHOT_V4 = 'log.v4';
+/** The generation this browser's membership was registered under (`putMember`). */
+const MEMBER = 'log-member.v1';
 /** Unsealed existence marker for a browser-local library. It contains no key or library data. */
 const LOCAL_LIBRARY = 'runtime:meta:local-library';
 
 /**
  * Under what a first read of the log keeps the pages it has read so far, so a read cut off on a slow link goes on
- * from there on the next visit instead of from the start. Never opened as the library: only `SNAPSHOT` is whole.
+ * from there on the next visit instead of from the start. Never opened as the library: it is not whole.
  */
 const PARTIAL = 'log-partial.v1';
 
@@ -422,6 +420,11 @@ export class LibraryLog {
    * edits: what the next visit starts from.
    */
   private readonly acknowledged = new Map<string, Entry>();
+  /**
+   * Names `acknowledged` took from this browser's own writes, with the generation they were written in, that the fact
+   * store has yet to keep (`keepAcknowledged`). A read of the log keeps its rows itself (`keepFacts`).
+   */
+  private readonly unkept = new Map<string, string | undefined>();
   /** How many times `project` changed a row: `replay` says it changed what this browser holds by it. */
   private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
@@ -456,10 +459,8 @@ export class LibraryLog {
   readonly newerFraming = new Set<string>();
   /** Documents of a newer `format`, by name: read, never written, their targets held. */
   private readonly newerDocuments = new Set<string>();
-  /** Why the switch to v4 last failed (§10 step 3); the library stays v3 and read-only meanwhile. */
-  switchFailure: string | null = null;
-  /** A backup from before Library v3, which this build does not convert and does not write (§10). */
-  predatesV3 = false;
+  /** A restored pre-v4 backup is left untouched and read-only. */
+  private preV4Backup = false;
   /** When `compact` last tried, so a refused one is not tried on every refresh. */
   private compactedAt = 0;
   /** Why den-core's compaction guard last refused to remove the unreadable rows (§4); delivery stays paused. */
@@ -469,6 +470,8 @@ export class LibraryLog {
   /** Vault-backed runtime work, mirrored so synchronous UI facts stay synchronous after async startup. */
   private readonly pending = new Map<string, string>();
   private runtimeVault: Vault | null;
+  /** Individually retained authority and small selected facts; absent on storage adapters without atomic batches. */
+  private factStore: LibraryFactStore | null = null;
   private runtimeFallback = false;
   private runtimeChannel?: BroadcastChannel;
   private recoveryRows?: Row[];
@@ -509,6 +512,11 @@ export class LibraryLog {
   private readonly rejected = new Map<string, number>();
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
+  /**
+   * A narrow log's (`openNarrow`): the newest stamp of the whole library it did not read. Its other rows are not here,
+   * so it never keeps the finished-view marker, which is built from them.
+   */
+  private narrowNewest: Stamp | null = null;
   /** How many generation changes (library v2 §2) `refresh` has read and written back: a recovery reconcile follows each. */
   generationChanges = 0;
   /**
@@ -560,20 +568,16 @@ export class LibraryLog {
     if (generation) void this.putMeta('observed', generation);
   }
 
-  /** Nothing is written: the library needs a newer build, a switch to v4 failed, or it predates v3. */
+  /** Nothing is written when the library needs a newer build or a pre-v4 backup was restored. */
   get readOnly(): boolean {
-    return this.upgradeRequired !== null || this.switchFailure !== null || this.predatesV3;
+    return this.upgradeRequired !== null || this.preV4Backup;
   }
 
-  /**
-   * The switch to v4 is this build's to run (§10): a v3 library on den-edge, or a v4 one in which v2 or v3 rows
-   * appear again (a restore, or an old build's write).
-   */
-  get needsV4(): boolean {
-    if (this.offline || this.moved || this.upgradeRequired !== null || this.predatesV3)
-      return false;
-    if (this.wireMin === 3) return true;
-    return this.wireMin === WIRE && [...this.acknowledged.values()].some(({ row }) => legacy(row));
+  get readOnlyReason(): string | null {
+    if (this.preV4Backup) return PRE_V4_BACKUP_ERROR;
+    if (this.upgradeRequired !== null)
+      return 'A newer version of Den is required to open this library.';
+    return null;
   }
 
   private constructor(
@@ -898,24 +902,50 @@ export class LibraryLog {
       wire,
     );
     await log.initializeRuntime();
+    log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     await ensureSyncPolicy();
-    const saved = await log.kept<Snapshot>(SNAPSHOT);
+    let saved = await log.kept<Snapshot>(SNAPSHOT);
+    const legacyEntries = saved?.entries.filter(([, , row]) => preV4Row(row)) ?? [];
+    const onlyBlankLegacyRows =
+      !!saved &&
+      legacyEntries.length > 0 &&
+      !saved.profileDirectory &&
+      !saved.kidTitleApprovals?.length &&
+      legacyEntries.every(([, , row]) => emptyPreV4Row(row));
+    if (saved && onlyBlankLegacyRows) {
+      // These rows cannot affect a v4 library. Remove them once so every later launch opens directly in v4 without
+      // asking the viewer to confirm data loss; compatible settings or documents beside them remain intact.
+      saved = {
+        ...saved,
+        wireMin: WIRE,
+        entries: saved.entries.filter(([, , row]) => !preV4Row(row)),
+      };
+      if (saved.entries.length) await log.keep(SNAPSHOT, saved);
+      else {
+        await vault.delete(`${keys.id}:${SNAPSHOT}`);
+        saved = undefined;
+      }
+    }
+    if (!saved?.entries.length) log.wireMin = WIRE;
+    else if ((saved.wireMin ?? 2) < WIRE) log.preV4Backup = true;
     log.takeForm(saved);
     await inPolicySlices(saved?.entries ?? [], ([name, seq, row]) => {
       if (!wellFormed(row)) return;
+      if (preV4Row(row)) {
+        log.preV4Backup = true;
+        return;
+      }
       log.acknowledged.set(name, { seq, row });
       log.entries.set(name, { seq, row });
     });
+    if (Number.isSafeInteger(saved?.rowsVersion) && saved!.rowsVersion! >= 0)
+      log.entriesVersion = saved!.rowsVersion!;
     log.restoreProfileDirectory(saved);
     log.restoreKidTitleApprovals(saved);
     return log;
   }
 
-  /**
-   * The wire form a library kept only here was saved in, where it is newer than this tab's: another tab switched it to
-   * v3 (`switchWebOnly`). This tab's rows are in the older form and are dropped for the saved ones, which `takeKept`
-   * then reads; merging them in would put v2 episode rows beside the v3 watches made from them. True when it changed.
-   */
+  /** Take a newer saved protocol form before reading its rows. */
   private takeForm(saved: Snapshot | undefined): boolean {
     const form = saved?.wireMin;
     if (!Number.isInteger(form) || form! <= this.wireMin) return false;
@@ -926,17 +956,17 @@ export class LibraryLog {
     return true;
   }
 
-  /**
-   * Before a library kept only here takes a write: when another tab has switched it to v3 since this one opened it,
-   * take that form first, so the write is made in it (`write` converts an episode row only in v3) and not dropped
-   * when it is saved (`takeKept`).
-   */
+  /** Before a browser-local write, take a newer form saved by another tab. */
   private async followKeptForm(): Promise<void> {
     if (!this.offline) return;
     const saved = await this.kept<Snapshot>(SNAPSHOT);
     if (!this.takeForm(saved)) return;
     for (const [name, , row] of saved?.entries ?? []) {
       if (!wellFormed(row)) continue;
+      if (preV4Row(row)) {
+        this.preV4Backup = true;
+        continue;
+      }
       this.entries.set(name, { seq: 0, row });
       this.acknowledged.set(name, { seq: 0, row });
     }
@@ -950,13 +980,11 @@ export class LibraryLog {
   async moveTo(libraryKey: string): Promise<LibraryLog | null> {
     await this.saving;
     const next = await LibraryLog.open(libraryKey, this.fetchImpl, this.storage, this.runtimeVault);
-    if (!next || next.moved) return null;
-    // v3 rows written into a v2 library would be rows its devices don't read: its watched episodes would go missing
-    // there. So that library is switched to v3 first; the TV reads the new form from den-edge's wire minimum. A v2
-    // library taking v2 rows, or a v3 one taking either, needs nothing (`writeRows` converts v2 episode rows).
-    if (this.wireMin >= 3 && next.wireMin < 3 && !(await next.switchWebOnly())) return null;
+    if (!next || next.moved || next.readOnly) return null;
     // A recovery code stays with the library it opens: none is copied into another (recovery-code §9).
-    const rows = this.rows().filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
+    const rows = [...this.entries.values()]
+      .map(({ row }) => row)
+      .filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
     return (await next.writeRows(rows)) ? next : null;
   }
 
@@ -964,259 +992,49 @@ export class LibraryLog {
   async writeRows(rows: Row[]): Promise<boolean> {
     await this.followKeptForm();
     if (this.readOnly) return false;
-    if (this.wireMin >= WIRE && !this.offline) {
-      // Title and episode rows (an import, or a library this browser kept) and actions are edits: den-core's writes.
-      // v3 watch and receipt rows go in as the documents its switch makes of them, merged with what is there. Edits are
-      // made against what den-edge holds (`storedBefore`): one already drawn from work kept here but never sent (a
-      // move cut off part way) would otherwise come out as no edit at all, and never reach den-edge.
-      const ops = rows.flatMap((row) => {
-        const event = trackerEvent(row);
-        if (event) return opsFor(event.before, event.after);
-        return row.kind === 'rec' || row.kind === 'ep' ? opsFor(this.storedBefore(row), row) : [];
-      });
-      let documents: DocumentRow[];
-      try {
-        documents = projectV3Documents(
-          rows.filter((row) => row.kind === 'wat' || row.kind === 'snt'),
-        );
-      } catch (error) {
-        console.warn('den: these rows could not be written into a Library v4 library', error);
-        return false;
-      }
-      const rest = rows.filter((row) => isDocument(row) || (row.kind === 'set' && !legacy(row)));
-      return (
-        (await this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [[...documents, ...rest]])) &&
-        this.writeOps(ops)
-      );
+    if (rows.some((row) => preV4Row(row) && row.kind === 'set')) {
+      this.preV4Backup = true;
+      return false;
     }
-    if (this.wireMin >= 3) {
-      rows = rows.flatMap((row): Row[] => {
-        const projected = trackerEvent(row)?.after ?? row;
-        if (projected.kind !== 'ep') return [projected];
-        const converted = this.v3EpisodeWrite(projected);
-        return converted ? [converted] : [];
-      });
-    }
+    const ops = rows.flatMap((row) =>
+      row.kind === 'rec' || row.kind === 'ep' ? opsFor(this.storedBefore(row), row) : [],
+    );
+    const rest = rows.filter((row) => isDocument(row) || row.kind === 'set');
     if (this.offline) {
       // Kept once for the whole batch: each keep reads and rewrites every row the library holds, so keeping after each
       // row made an import of n rows cost n². Measured on a 2,000-row local library: 54 s, at batches of 100.
-      for (const row of rows) this.keepLocally(row, false);
+      for (const row of [...applyOps(ops, (name) => this.document(name)), ...rest])
+        this.keepLocally(row, false);
       this.persist();
       // Kept once it is in this browser's store, which the next `openLocal` reads.
       await this.saving;
       return true;
     }
-    return this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [
-      rows.filter(trackerEvent),
-      rows.filter((row) => !trackerEvent(row)),
-    ]);
-  }
-
-  /** Atomically replace a web-only v2 library with den-core's v3 form. */
-  async switchWebOnly(context?: SwitchContext): Promise<boolean> {
-    if (this.moved || this.upgradeRequired) return false;
-    await ensureSyncPolicy();
-    if (this.offline) return this.switchLocal(context);
-    let rewrite: string | undefined;
-    try {
-      const opened = await this.send(`/lib/${this.keys.id}/rewrite`, {
-        method: 'POST',
-        headers: this.headers(),
-      });
-      if (!opened.ok) {
-        await this.failed(opened);
-        return false;
-      }
-      const offer = (await opened.json()) as { rewrite?: unknown; base?: unknown };
-      if (typeof offer.rewrite !== 'string' || typeof offer.base !== 'number') return false;
-      rewrite = offer.rewrite;
-      const offeredGeneration = opened.headers.get('x-den-generation');
-      // The fence fixes `base`; read through it before deriving the replacement. `entries` may also contain local,
-      // unacknowledged edits, which replay after the commit instead of being mistaken for state at `base`.
-      await this.refresh();
-      if (!offeredGeneration || this.generation !== offeredGeneration || this.head !== offer.base) {
-        await this.abortRewrite(rewrite);
-        return false;
-      }
-      const converted = this.v3Form(offer.base, context);
-      const sealed = await Promise.all(converted.map((row) => seal(this.keys, row)));
-      const chunks: (typeof sealed)[] = [];
-      let chunk: typeof sealed = [];
-      for (const write of sealed) {
-        const candidate = [...chunk, write];
-        if (
-          chunk.length &&
-          (candidate.length > REWRITE_BATCH_MAX ||
-            new TextEncoder().encode(JSON.stringify({ writes: candidate })).length >
-              REWRITE_BATCH_MAX_BYTES)
-        ) {
-          chunks.push(chunk);
-          chunk = [write];
-        } else chunk = candidate;
-      }
-      if (chunk.length) chunks.push(chunk);
-      for (const writes of chunks) {
-        const staged = await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}/rows`, {
-          method: 'POST',
-          headers: { ...this.headers(), 'content-type': 'application/json' },
-          body: JSON.stringify({ writes }),
-        });
-        if (!staged.ok) {
-          await this.failed(staged);
-          await this.abortRewrite(rewrite);
-          return false;
-        }
-      }
-      const committed = await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}/commit`, {
-        method: 'POST',
-        headers: { ...this.headers(), 'content-type': 'application/json' },
-        body: JSON.stringify({ base: offer.base, wireMin: 3 }),
-      });
-      if (!committed.ok) {
-        await this.failed(committed);
-        await this.abortRewrite(rewrite);
-        return false;
-      }
-      this.generation = committed.headers.get('x-den-generation') ?? undefined;
-      this.writeGeneration = undefined;
-      this.wireMin = Math.max(this.wireMin, 3);
-      this.head = 0;
-      this.entries.clear();
-      this.acknowledged.clear();
-      this.dirty = true;
-      this.unreported = true;
-      return await this.refresh();
-    } catch {
-      if (rewrite) await this.abortRewrite(rewrite);
-      return false;
-    }
-  }
-
-  /** den-core's v3 form of the rows this browser holds as acknowledged, at `base`. */
-  private v3Form(base: number, context?: SwitchContext): Row[] {
-    const now = Date.now();
-    return syncPolicy<Row[]>({
-      op: 'v3_form',
-      rows: [...this.acknowledged.values()].map(({ row }) => row),
-      now,
-      context: context && {
-        performer: context.performer,
-        stamp: context.stamp,
-        base,
-        seed_bound: now,
-        accounts: context.simkl
-          ? [
-              {
-                provider: 'simkl',
-                account: context.simkl.account,
-                credential: context.simkl.credential,
-                connected_at: context.simkl.connectedAt,
-              },
-            ]
-          : [],
-      },
-    });
-  }
-
-  /**
-   * `switchWebOnly` for a library kept only here: the same v3 form, replacing the copy in this browser rather than on
-   * den-edge, which has none. Under the library's lock, after taking up what another tab saved (`takeKept`), so no
-   * tab's rows are left out; the saved copy records the form, which every other tab then takes (`followKeptForm`).
-   */
-  private async switchLocal(context?: SwitchContext): Promise<boolean> {
+    const rowsWritten =
+      !rest.length || (await this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [rest]));
+    const written = rowsWritten && (await this.writeOps(ops));
+    // Bulk document writes are acknowledged directly by `flushRows`, unlike edits sent through `writeOps`. Keep
+    // those acknowledgements before answering: a local-library merge is followed immediately by navigation, and a
+    // return visit must not reopen the older fact-store cursor without the rows den-edge just accepted.
+    this.persist();
     await this.saving;
-    try {
-      return await exclusive(`den.library.${this.keys.id}`, async () => {
-        await this.takeKept();
-        if (this.wireMin >= 3) return true;
-        const converted = this.v3Form(this.head, context);
-        const entries = converted.map((row): [string, number, Row] => [rowName(row), 0, row]);
-        if (entries.length) await this.keep(SNAPSHOT, { ...this.snapshot(), entries, wireMin: 3 });
-        else await this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`);
-        this.entries.clear();
-        this.acknowledged.clear();
-        for (const [name, seq, row] of entries) {
-          this.entries.set(name, { seq, row });
-          this.acknowledged.set(name, { seq, row });
-        }
-        this.wireMin = 3;
-        return true;
-      });
-    } catch (error) {
-      console.warn('den: the library kept in this browser could not be switched', error);
-      return false;
-    }
+    return written;
   }
 
   /**
-   * Library v4 §10: convert this library to documents, checked before it is committed. Inside the fence the log is
-   * read through `base`; den-core's `v4_form` converts it and `v4_dry_run` checks the conversion against shipped v3.
-   * A difference in derived state aborts — nothing is written, the reason is kept (`switchFailure`) and the library
-   * stays read-only until a later try passes. A difference only in pending tracker commands is logged and the switch
-   * goes on. True when it committed.
+   * Wait until this instance's durable copy includes every write it has already accepted. A browser-local library
+   * is reopened from that copy when it is merged into a paired library, so the handoff must not race `persist`.
    */
-  async switchToV4(performer: string, stray = false): Promise<boolean> {
-    if (stray) {
-      if (this.offline || this.moved || this.upgradeRequired !== null || this.predatesV3)
-        return false;
-    } else if (!this.needsV4) return false;
-    await ensureSyncPolicy();
-    const switched = await this.fenced(async (base, raw) => {
-      const now = Date.now();
-      const rows = await Promise.all(
-        raw.map(async ({ k, seq, v }) => ({
-          k,
-          seq,
-          bytes: k.length + v.length,
-          row: await this.plainRow(k, v),
-        })),
-      );
-      // `stray`: a v4 library may hold a v2/v3 row this build cannot read as a row (a malformed tracker event), so it
-      // never reaches `needsV4`. den-core's switch removes such rows by name, so it runs whenever the raw log has one.
-      if (stray && !rows.some(({ row }) => rawLegacy(row))) return null;
-      let form: V4Form;
-      try {
-        form = syncPolicy<V4Form>({ op: 'v4_form', rows, base, performer, now });
-      } catch (error) {
-        const reason = (error as Error).message.replace(/^Sync policy rejected the action: /, '');
-        if (reason === 'pre_v3') {
-          this.predatesV3 = true;
-          console.warn('den: this library is a backup from before Library v3; it is left as it is');
-        } else {
-          this.switchFailure = reason;
-          console.error(`den: the switch to Library v4 could not convert the library (${reason})`);
-        }
-        return null;
-      }
-      const dry = syncPolicy<DryRun>({ op: 'v4_dry_run', rows, form, now });
-      console.info('den: Library v4 dry run', dry.counts);
-      if (dry.pending_differences.length)
-        console.warn(
-          `den: Library v4 decides ${dry.pending_differences.length} tracker commands differently from v3`,
-          dry.pending_differences,
-        );
-      if (!dry.pass) {
-        const reasons = [...new Set(dry.abort.map(({ reason }) => reason))];
-        this.switchFailure = reasons.join(', ');
-        console.error('den: the switch to Library v4 was aborted by its dry run', dry.abort);
-        return null;
-      }
-      const stored = new Map(raw.map((entry) => [entry.k, entry.v]));
-      const writes = [
-        ...(await Promise.all(
-          form.documents.map(({ name, plaintext }) =>
-            sealPlaintext(this.keys, name, fromBase64url(plaintext)),
-          ),
-        )),
-        ...form.keep.map((k) => ({ k, v: stored.get(k)! })),
-      ];
-      return { writes, wireMin: WIRE };
-    });
-    if (switched) {
-      this.switchFailure = null;
-      console.info('den: the library switched to Library v4');
-    }
-    return switched;
+  async settlePersistence(): Promise<void> {
+    await this.saving;
+    if (this.offline) this.dirty = true;
+    if (!this.dirty) return;
+    // Checkpoint the live local authority even when its earlier write was already kept. Another page authority can
+    // have finished an older snapshot after this one opened; `persist` merges that copy under the cross-tab lock and
+    // writes this authority's current rows back before the transfer reopens the source.
+    this.persist();
+    await this.saving;
+    if (this.dirty) throw new Error('The library could not be kept for transfer');
   }
 
   /**
@@ -1322,20 +1140,7 @@ export class LibraryLog {
   }
 
   /**
-   * `fenced` for a key holder's one-off repair (`scripts/repair-household.mjs`): `build` gets every stored row through
-   * the fence's base and answers the whole new log, or null to change nothing. The app never calls it.
-   */
-  rewriteStored(
-    build: (
-      base: number,
-      raw: RawEntry[],
-    ) => Promise<{ writes: { k: string; v: string }[]; wireMin: number } | null>,
-  ): Promise<boolean> {
-    return this.fenced(build);
-  }
-
-  /**
-   * One fenced rewrite (v3 §9): open it, read every row through its `base`, stage what `build` makes of them, and
+   * One fenced rewrite: open it, read every row through its `base`, stage what `build` makes of them, and
    * commit. `build` answering null aborts it, and nothing changes. On a commit this browser reads the new log from
    * the start; its kept work is sent again after.
    */
@@ -1352,8 +1157,7 @@ export class LibraryLog {
         headers: this.headers(),
       });
       if (!opened.ok) {
-        // Another device's switch or a restore since this browser read the log: it reads the new one instead, which
-        // may need no rewrite at all (`needsV4`).
+        // Another device's rewrite or a restore since this browser read the log: read the new generation instead.
         if ((await this.failed(opened)) === 'generation_changed') await this.refresh();
         return false;
       }
@@ -1424,19 +1228,6 @@ export class LibraryLog {
     }
   }
 
-  /**
-   * A stored row's plaintext as den-core's `v4_form` reads it, the same as the TV gives it: the parsed JSON of every
-   * row that opens under its own name (an episode row of a film included, which den-core then drops), and null for
-   * one that doesn't.
-   */
-  private async plainRow(k: string, v: string): Promise<unknown> {
-    const opened = await openEntry(this.keys, k, v);
-    if ('row' in opened) return opened.row;
-    if ('unknown' in opened) return opened.unknown;
-    if ('json' in opened) return opened.json;
-    return null;
-  }
-
   private async abortRewrite(rewrite: string): Promise<void> {
     try {
       await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}`, {
@@ -1499,42 +1290,8 @@ export class LibraryLog {
   }
 
   /**
-   * Worker-only profile migration transport. The page cannot call LibraryLog directly, and neither household nor
-   * candidate credentials are accepted in the URL or body. Wire 5 describes the transaction API, not row framing.
-   */
-  async profileMigrationRequest(input: {
-    readonly method: 'GET' | 'POST' | 'DELETE';
-    readonly path: string;
-    readonly body?: unknown;
-    readonly candidateToken?: string;
-  }): Promise<{ readonly status: number; readonly body: unknown }> {
-    const route = ownerSplitWorkerRoute(this.keys.id, input.method, input.path);
-    if (route === null) throw new Error('Profile migration method or path is not allowed');
-    if ((input.candidateToken !== undefined) !== (route.kind === 'retire-candidate'))
-      throw new Error('Candidate authority is valid only for exact retirement requests');
-    const response = await this.send(input.path, {
-      method: input.method,
-      headers: {
-        ...this.headers(),
-        'x-den-wire': '5',
-        ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...(input.candidateToken ? { 'x-den-candidate-library-token': input.candidateToken } : {}),
-      },
-      ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
-    });
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      if (response.ok) throw new Error('Profile migration response is not JSON');
-    }
-    return { status: response.status, body };
-  }
-
-  /**
-   * Worker-only compound key reset transport (profiles-v1 §9.1): exactly the reset routes of this library under its own
-   * token and wire. A retirement also carries the library's current generation, read here, because under a lock it
-   * cannot change and a mismatch must stop the reset rather than be papered over.
+   * Worker-only compound key reset transport (profiles-v1 §9.1): exactly the reset routes of this library under its
+   * own token and wire.
    */
   async resetRequest(input: {
     readonly method: 'GET' | 'POST' | 'DELETE';
@@ -1594,7 +1351,7 @@ export class LibraryLog {
     | {
         readonly base: number;
         readonly generation: string | null;
-        readonly rows: MigrationSnapshotRow[];
+        readonly rows: ProfilesSnapshotRow[];
         /** The names of every row this build reads. */
         readonly names: string[];
         readonly directory: ProfileDirectoryDocument | null;
@@ -1638,270 +1395,9 @@ export class LibraryLog {
     return { base: head, generation, rows, names, directory };
   }
 
-  async verifyMigrationBackup(input: {
-    readonly attempt: string;
-    readonly fence: OwnerSplitFence;
-    readonly created: Pick<OwnerSplitBackup, 'id' | 'digest'>;
-    readonly reread: OwnerSplitBackup;
-  }): Promise<void> {
-    const backup = input.reread;
-    if (
-      backup.attempt !== input.attempt ||
-      backup.householdId !== this.keys.id ||
-      canonical(backup.source) !== canonical(input.fence) ||
-      backup.id !== input.created.id ||
-      backup.digest !== input.created.digest ||
-      !validMigrationSnapshot({
-        libraryId: backup.householdId,
-        base: backup.source.base,
-        wireMin: backup.wireMin,
-        rows: backup.rows,
-      })
-    )
-      throw new Error('Migration backup is not bound to this source');
-    const authorization = profileMigrationAuthorizationFingerprint({
-      token: this.keys.token,
-      member: backup.authorization.memberHash === null ? null : this.keys.member,
-    });
-    if (canonical(authorization) !== canonical(backup.authorization))
-      throw new Error('Migration backup authorization does not match this household');
-    if (
-      profileMigrationDigest('source', {
-        libraryId: backup.householdId,
-        generation: backup.source.generation,
-        base: backup.source.base,
-        wireMin: backup.wireMin,
-        rows: backup.rows,
-      }) !== backup.source.head
-    )
-      throw new Error('Migration backup source digest does not match');
-    const { digest: _digest, ...manifest } = backup;
-    if (profileMigrationDigest('backup', manifest) !== backup.digest)
-      throw new Error('Migration backup digest does not match');
-    const opened = await Promise.all(
-      backup.rows.map(({ k, v }) => openMigrationRow(this.keys, k, v)),
-    );
-    if (opened.some(({ status }) => status === 'unreadable'))
-      throw new Error('Migration backup contains an unreadable row');
-  }
-
-  async copyAndAuthenticateMigrationOwner(input: {
-    readonly attempt: string;
-    readonly fence: OwnerSplitFence;
-    readonly backup: VerifiedOwnerSplitBackup;
-    readonly candidate: ResolvedOwnerSplitCandidate;
-  }): Promise<OwnerSplitAuthenticatedCopy> {
-    const backup = input.backup.manifest;
-    await this.verifyMigrationBackup({
-      attempt: input.attempt,
-      fence: input.fence,
-      created: backup,
-      reread: backup,
-    });
-    const rows: AuthenticatedMigrationRow[] = await Promise.all(
-      backup.rows.map(async (row) => ({
-        ...row,
-        opened: await openMigrationRow(this.keys, row.k, row.v),
-      })),
-    );
-    const newest = this.newestStamp();
-    const stamp: Stamp =
-      input.candidate.createdAt > newest[0]
-        ? [input.candidate.createdAt, 0, input.candidate.handle.profileId.slice(0, 16)]
-        : [newest[0], newest[1] + 1, input.candidate.handle.profileId.slice(0, 16)];
-    let partition: ReturnType<typeof profileMigrationPartition>;
-    try {
-      partition = profileMigrationPartition({
-        base: backup.source.base,
-        ownerPolicyAt: stamp,
-        rows,
-      });
-    } catch (error) {
-      // Name the rows den-core may hold against the split (names and kinds only, never contents), so a refusal says
-      // which rows instead of only a code.
-      const suspect = rows.flatMap(({ seq, opened }) => {
-        const row = opened as {
-          status: string;
-          name: string | null;
-          legacy?: boolean;
-          row?: { kind?: unknown };
-        };
-        const kind = row.row?.kind;
-        return row.status === 'row' &&
-          (row.legacy === true ||
-            ['rec', 'wat', 'snt', 'ep'].includes(String(kind)) ||
-            /^(rec|wat|snt|ep):|^set:tracker-event:/.test(row.name ?? ''))
-          ? [{ seq, name: row.name, kind: typeof kind === 'string' ? kind : undefined }]
-          : [];
-      });
-      console.error(
-        'den: profile split refused; rows den-core may hold against it',
-        suspect,
-        error,
-      );
-      throw error;
-    }
-    const candidateRaw = Uint8Array.from(atob(input.candidate.libraryKey), (character) =>
-      character.charCodeAt(0),
-    );
-    const candidateKeys = await deriveKeys(candidateRaw);
-    candidateRaw.fill(0);
-    if (candidateKeys.id !== input.candidate.handle.libraryId)
-      throw new Error('Candidate library identity changed');
-    const ownerWrites = await this.materializeMigration(partition.owner, candidateKeys);
-    // An Owner with no activity yet (a fresh guest) would write nothing, and den-edge starts a library only with its
-    // first write, so the readback would find no library at all. Start it with the empty `set:prefs` a born
-    // household's Owner library also begins with.
-    if (ownerWrites.length === 0)
-      ownerWrites.push(
-        await seal(candidateKeys, { kind: 'set', schema: 2, name: 'prefs', values: {} }),
-      );
-    await this.writeMigrationCandidate(candidateKeys, ownerWrites);
-    const ownerRows = await this.readMigrationCandidate(candidateKeys);
-    const expectedOwnerRows = new Map(ownerWrites.map((row) => [row.k, row]));
-    const actualOwnerKeys = new Set(ownerRows.map(({ k }) => k));
-    if (
-      ownerRows.length !== expectedOwnerRows.size ||
-      actualOwnerKeys.size !== expectedOwnerRows.size ||
-      ownerRows.some(({ k }) => !expectedOwnerRows.has(k))
-    )
-      throw new Error('Owner candidate readback does not exactly match the partition');
-    for (const actual of ownerRows) {
-      const expected = expectedOwnerRows.get(actual.k)!;
-      const [expectedPlaintext, actualPlaintext] = await Promise.all([
-        openPlaintext(candidateKeys, expected.k, expected.v),
-        openPlaintext(candidateKeys, actual.k, actual.v),
-      ]);
-      if (
-        expectedPlaintext === null ||
-        actualPlaintext === null ||
-        expectedPlaintext.length !== actualPlaintext.length ||
-        expectedPlaintext.some((byte, index) => actualPlaintext[index] !== byte)
-      )
-        throw new Error('Owner candidate readback content does not match the partition');
-    }
-    const ownerHead = profileMigrationDigest('owner', {
-      libraryId: candidateKeys.id,
-      base: ownerRows.at(-1)?.seq ?? 0,
-      wireMin: WIRE,
-      rows: ownerRows,
-    });
-    const householdWrites = await this.materializeMigration(partition.household, this.keys);
-    const directory = profileMigrationConstructDirectory({
-      attempt: input.attempt,
-      source: { generation: input.fence.generation, head: input.fence.head },
-      backup: { id: backup.id, digest: backup.digest },
-      owner: {
-        id: input.candidate.handle.profileId,
-        display: { value: { name: 'Owner' }, at: stamp },
-        libraryKey: input.candidate.libraryKey,
-        libraryAt: stamp,
-        policy: partition.ownerPolicy,
-        deletedAt: stamp,
-      },
-      ownerHead,
-    });
-    householdWrites.push(
-      await sealPlaintext(this.keys, 'profiles', fromBase64url(directory.plaintext)),
-    );
-    return { ownerHead, householdWrites };
-  }
-
-  async verifyMigrationOwner(input: {
-    readonly attempt: string;
-    readonly fence: OwnerSplitFence;
-    readonly backup: VerifiedOwnerSplitBackup;
-    readonly candidate: ResolvedOwnerSplitCandidate;
-    readonly expectedHead: string;
-  }): Promise<void> {
-    const raw = Uint8Array.from(atob(input.candidate.libraryKey), (character) =>
-      character.charCodeAt(0),
-    );
-    const keys = await deriveKeys(raw);
-    raw.fill(0);
-    const rows = await this.readMigrationCandidate(keys);
-    const actual = profileMigrationDigest('owner', {
-      libraryId: keys.id,
-      base: rows.at(-1)?.seq ?? 0,
-      wireMin: WIRE,
-      rows,
-    });
-    if (actual !== input.expectedHead) throw new Error('Owner candidate readback digest changed');
-  }
-
-  async adoptMigrationWinner(directory: unknown): Promise<void> {
-    validateStoredProfileDirectory(directory);
-  }
-
-  async readProfileMigrationHousehold(
-    migrationGeneration: number,
-  ): Promise<import('./profileOwnerSplitEngine').OwnerSplitHouseholdObservation> {
-    if (!Number.isSafeInteger(migrationGeneration) || migrationGeneration < 0)
-      throw new Error('Migration generation is not canonical');
-    // Wire 5 like every other migration request (`profileMigrationRequest`): once the split has committed the household
-    // is at minimum 5, and a resumed attempt that reads it at this instance's wire 4 is refused with 426.
-    const snapshot = await this.readAll(5);
-    if (!snapshot) throw new Error('Household could not be read to its current head');
-    const rows = [...snapshot.entries].sort((left, right) =>
-      left.k < right.k ? -1 : left.k > right.k ? 1 : 0,
-    );
-    let profiles:
-      | { directory: ProfileDirectoryDocument; row: RawEntry }
-      | { invalid: true; row: RawEntry }
-      | undefined;
-    for (const row of rows) {
-      const opened = await openEntry(this.keys, row.k, row.v);
-      if ('profileDirectory' in opened) profiles = { directory: opened.profileDirectory, row };
-      if ('invalidProfileDirectory' in opened) profiles = { invalid: true, row };
-    }
-    const currentGeneration = profiles ? migrationGeneration + 1 : migrationGeneration;
-    const head = profileMigrationDigest('source', {
-      libraryId: this.keys.id,
-      generation: currentGeneration,
-      base: snapshot.head,
-      wireMin: this.wireMin,
-      rows,
-    });
-    if (!profiles)
-      return { kind: 'legacy', generation: migrationGeneration, base: snapshot.head, head };
-    if ('invalid' in profiles)
-      return { kind: 'corrupt', generation: currentGeneration, base: snapshot.head, head };
-    const digest = hex(
-      new Uint8Array(await crypto.subtle.digest('SHA-256', utf8.encode(profiles.row.v))),
-    );
-    return {
-      kind: 'committed',
-      generation: currentGeneration,
-      base: snapshot.head,
-      head,
-      directory: profiles.directory,
-      profilesRow: { ...profiles.row, digest },
-    };
-  }
-
-  private async materializeMigration(
-    projections: readonly MigrationProjection[],
+  private async writeProfileLibrary(
     keys: LibraryKeys,
-  ): Promise<MigrationSealedRow[]> {
-    return Promise.all(
-      projections.map(async (projection) => {
-        if (projection.mode === 'preserve') {
-          if (keys !== this.keys)
-            throw new Error('den-core tried to preserve household ciphertext in Owner');
-          return { k: projection.k, v: projection.v };
-        }
-        const materialized = profileMigrationMaterialize({
-          name: projection.name,
-          row: projection.row,
-        });
-        return sealPlaintext(keys, projection.name, fromBase64url(materialized.plaintext));
-      }),
-    );
-  }
-
-  private async writeMigrationCandidate(
-    keys: LibraryKeys,
-    writes: readonly MigrationSealedRow[],
+    writes: readonly { readonly k: string; readonly v: string }[],
   ): Promise<void> {
     // The first chunk creates the library at generation 0; each later chunk carries the generation den-edge answered.
     // A retried attempt finds the library already created, and den-edge's 409 names its generation.
@@ -1914,7 +1410,7 @@ export class LibraryLog {
             method: 'POST',
             // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
             headers: {
-              ...ownerSplitCandidateWriteHeaders(this.keys, keys),
+              ...profileLibraryWriteHeaders(this.keys, keys),
               'x-den-generation': generation,
             },
             body: JSON.stringify({ writes: chunk }),
@@ -1929,19 +1425,19 @@ export class LibraryLog {
       }
       if (!response.ok)
         throw new Error(
-          `Owner candidate write was refused (${response.status} ${await response.text().catch(() => '')})`,
+          `Profile library write was refused (${response.status} ${await response.text().catch(() => '')})`,
         );
       generation = response.headers.get('x-den-generation') ?? generation;
       const value = (await response.json()) as unknown;
-      if (!migrationBatch(value))
-        throw new Error('Owner candidate write returned malformed evidence');
+      if (!responseBatch(value))
+        throw new Error('Profile library write returned malformed evidence');
       const answer = value;
       if (answer.applied.length + answer.conflicts.length !== chunk.length)
-        throw new Error('Owner candidate write was incomplete');
+        throw new Error('Profile library write was incomplete');
     }
   }
 
-  private async readMigrationCandidate(keys: LibraryKeys): Promise<RawEntry[]> {
+  private async readProfileLibrary(keys: LibraryKeys): Promise<RawEntry[]> {
     const rows: RawEntry[] = [];
     let since = 0;
     for (;;) {
@@ -1956,9 +1452,9 @@ export class LibraryLog {
         },
         false,
       );
-      if (!response.ok) throw new Error('Owner candidate readback failed');
+      if (!response.ok) throw new Error('Profile library readback failed');
       const value = (await response.json()) as unknown;
-      if (!migrationPage(value)) throw new Error('Owner candidate readback was malformed');
+      if (!responsePage(value)) throw new Error('Profile library readback was malformed');
       const page = value;
       rows.push(...page.entries);
       if (!page.more || page.entries.length === 0) return rows;
@@ -1980,7 +1476,7 @@ export class LibraryLog {
       if ('invalidProfileDirectory' in opened) throw new Error('Profile directory is corrupt');
       if ('profileDirectory' in opened) found = { row, directory: opened.profileDirectory };
     }
-    if (!found) throw new Error('Kid creation requires an active Owner split');
+    if (!found) throw new Error('Kid creation requires an active profile directory');
     this.acceptProfileDirectory(found.row, found.directory);
     return {
       directory: found.directory,
@@ -2007,7 +1503,7 @@ export class LibraryLog {
       if ('kidTitleApprovals' in opened && opened.kidTitleApprovals.kid === kid)
         approval = { seq: row.seq, document: opened.kidTitleApprovals };
     }
-    if (!directory) throw new Error('Kid approvals require an active Owner split');
+    if (!directory) throw new Error('Kid approvals require an active profile directory');
     const entry = directory.profiles[kid];
     if (!entry || entry.role !== 'kid' || entry.deleted.value)
       throw new Error('That is not a live Kid profile');
@@ -2031,8 +1527,8 @@ export class LibraryLog {
   private async createAndVerifyProfileLibrary(keys: LibraryKeys): Promise<void> {
     const initial: SettingsRow = { kind: 'set', schema: 2, name: 'prefs', values: {} };
     const expected = await seal(keys, initial);
-    await this.writeMigrationCandidate(keys, [expected]);
-    const rows = await this.readMigrationCandidate(keys);
+    await this.writeProfileLibrary(keys, [expected]);
+    const rows = await this.readProfileLibrary(keys);
     if (rows.length !== 1 || rows[0]!.k !== expected.k)
       throw new Error('Profile activity library contains unexpected rows');
     const [wanted, actual] = await Promise.all([
@@ -2052,7 +1548,7 @@ export class LibraryLog {
    * Make this library a household born profile-aware in this browser (den#295), opened through `destination` at wire
    * 5. In order: its first write (an empty `set:prefs`) starts it at wire minimum 5; this browser registers as its
    * member; the Owner library is started under that membership, as a Kid's is; then the `profiles` directory goes in
-   * by CAS. The directory is the one a committed Owner split stores (`profiles_migration_construct_directory`), its
+   * by CAS. The directory is the same committed shape as every profile household, and its
    * evidence what this household really was: `source` the household before the directory (generation 0, its one
    * row), `ownerHead` the Owner library as read back. A born household has no backup, so `backup` names none
    * (`born`) and carries the source digest, the whole of what one would hold; a restore that looks it up finds
@@ -2095,14 +1591,14 @@ export class LibraryLog {
     await this.registerMember();
     if (!this.memberRegistered) throw new Error('The household membership was not registered');
     await this.createAndVerifyProfileLibrary(owner);
-    const ownerRows = await this.readMigrationCandidate(owner);
-    const ownerHead = profileMigrationDigest('owner', {
+    const ownerRows = await this.readProfileLibrary(owner);
+    const ownerHead = profilesSnapshotDigest('owner', {
       libraryId: owner.id,
       base: ownerRows.at(-1)?.seq ?? 0,
       wireMin: WIRE,
       rows: ownerRows,
     });
-    const source = profileMigrationDigest('source', {
+    const source = profilesSnapshotDigest('source', {
       libraryId: this.keys.id,
       generation: 0,
       base: household.head,
@@ -2110,7 +1606,7 @@ export class LibraryLog {
       rows: household.entries,
     });
     const at: Stamp = [plan.createdAt, 0, plan.ownerProfile.slice(0, 16)];
-    const { directory } = profileMigrationConstructDirectory({
+    const { directory } = profilesConstructDirectory({
       attempt: plan.attempt,
       source: { generation: 0, head: source },
       backup: { id: 'born', digest: source },
@@ -2196,7 +1692,7 @@ export class LibraryLog {
     }
     try {
       const value = (await response.json()) as unknown;
-      if (!migrationBatch(value)) return 'unknown';
+      if (!responseBatch(value)) return 'unknown';
       const applied = value.applied.find(({ k }) => k === write.k);
       if (applied) {
         this.acceptProfileDirectory({ seq: applied.seq }, materialized.directory);
@@ -2216,14 +1712,10 @@ export class LibraryLog {
     directory: ProfileDirectoryDocument,
   ): Promise<'committed' | 'conflict' | 'unknown'> {
     const validated = validateKidTitleApprovals(document, directory);
-    const materialized = profileMigrationMaterialize({
-      name: kidApprovalName(validated.kid),
-      row: validated,
-    });
     const write = await sealPlaintext(
       this.keys,
       kidApprovalName(validated.kid),
-      fromBase64url(materialized.plaintext),
+      utf8.encode(canonical(validated)),
     );
     let response: Response;
     try {
@@ -2247,7 +1739,7 @@ export class LibraryLog {
     }
     try {
       const value = (await response.json()) as unknown;
-      if (!migrationBatch(value)) return 'unknown';
+      if (!responseBatch(value)) return 'unknown';
       const applied = value.applied.find(({ k }) => k === write.k);
       if (applied) {
         this.acceptKidTitleApprovals({ seq: applied.seq }, validated);
@@ -2288,7 +1780,7 @@ export class LibraryLog {
       if (standing.status === 404 || standing.status === 410) return true;
       if (!standing.ok) return false;
       const page = (await standing.json()) as unknown;
-      if (!migrationPage(page)) return false;
+      if (!responsePage(page)) return false;
       const generation = page.generation ?? standing.headers.get('x-den-generation');
       if (!generation) return false;
       const response = await this.send(`/lib/${keys.id}`, {
@@ -2341,7 +1833,7 @@ export class LibraryLog {
         const opened = await openEntry(this.keys, k, v);
         if ('unknown' in opened || 'newerFraming' in opened) return null;
         if (!('row' in opened)) continue;
-        if (opened.newer || legacy(opened.row)) return null;
+        if (opened.newer || preV4Row(opened.row)) return null;
         if (isDocument(opened.row)) documents.set(k, opened.row);
       }
       return { documents: [...documents.values()], head: read.head };
@@ -2428,7 +1920,7 @@ export class LibraryLog {
    * Library v4 §12: what a move of this library to another key carries, read from den-edge to its head. Every
    * document and settings row, decoded, to be sealed again under the destination's names; a document of a newer
    * `format` as its plaintext, unchanged. A row whose name this build can't rebuild — a newer framing, or a kind it
-   * doesn't know — refuses the move (`update_required`), and so do v2 or v3 rows the switch has yet to convert. An
+   * doesn't know — refuses the move (`update_required`), as does a restored pre-v4 backup. An
    * unreadable row is left behind: it can't be attributed to a name, and §4 removes it anyway. `set:recovery` stays
    * too: a recovery code wraps the old key, and a reset ends it (recovery-code §9). `set:devices` keeps only `device`
    * (the one moving it): every other device is cut off, and lists itself again once it pairs back in.
@@ -2442,11 +1934,7 @@ export class LibraryLog {
     options: { replaceProfileDirectory?: boolean } = {},
   ): Promise<Moving | { refused: MoveRefusal }> {
     if (this.offline || this.moved || this.wireMin < WIRE) return { refused: 'unavailable' };
-    if (
-      this.wireMin > Math.max(WIRE, this.instanceWire) ||
-      this.switchFailure !== null ||
-      this.predatesV3
-    )
+    if (this.wireMin > Math.max(WIRE, this.instanceWire) || this.preV4Backup)
       return { refused: 'update_required' };
     await ensureSyncPolicy();
     // Writes queued before the move land in the log it reads.
@@ -2489,7 +1977,7 @@ export class LibraryLog {
         continue;
       }
       const row = opened.row;
-      if (legacy(row)) return { refused: 'unavailable' };
+      if (preV4Row(row)) return { refused: 'unavailable' };
       if (row.kind === 'set' && row.name === 'recovery') continue;
       if (row.kind === 'set' && row.name === 'devices') {
         rows.push({
@@ -2546,10 +2034,9 @@ export class LibraryLog {
   }
 
   /**
-   * Every row den-edge holds for this library, read from the start to its head and opened: a title or season document
-   * as the row it stands for (as `rows`), a delivery document as itself. What is really there, apart from anything
-   * this browser holds or still has to send, with how many live rows den-edge holds (`entries`). Null when it could
-   * not be read whole.
+   * Every document and settings row den-edge holds for this library, read from the start to its head and opened.
+   * What is really there, apart from anything this browser holds or still has to send, with how many live rows
+   * den-edge holds (`entries`). Null when it could not be read whole.
    */
   async heldRows(): Promise<{ rows: Row[]; entries: number } | null> {
     if (this.offline) return null;
@@ -2567,8 +2054,7 @@ export class LibraryLog {
       entries++;
       const opened = await openEntry(this.keys, k, v);
       if (!('row' in opened)) continue;
-      const row = opened.row;
-      rows.push(...(isDocument(row) && row.kind !== 'delivery' ? projectDocument(row) : [row]));
+      rows.push(opened.row);
     }
     return { rows, entries };
   }
@@ -2735,6 +2221,7 @@ export class LibraryLog {
           )
             return false;
           this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
+          this.unkept.set(write.name, this.generation);
         }
       }
     }
@@ -2878,46 +2365,30 @@ export class LibraryLog {
       wire,
     );
     await log.initializeRuntime();
+    log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
     // never skip valid rows.
     const policy = ensureSyncPolicy();
     void policy.catch(() => undefined);
-    const decryptAt = performance.now();
-    const savedV4 = await log.kept<Snapshot>(SNAPSHOT_V4, true);
-    const saved = savedV4 ?? (await log.kept<Snapshot>(SNAPSHOT, true));
-    if (saved) noteLibraryDecrypt(saved.entries.length, performance.now() - decryptAt);
-    if (saved) {
+    await log.convertSnapshot();
+    const factManifest = await log.factStore?.manifest();
+    if (factManifest?.complete) {
       await policy;
-      log.memberRegistered = saved.memberRegistered ?? false;
-      log.generation = saved.generation;
-      log.head = saved.head;
-      let documents = false;
-      await inPolicySlices(saved.entries, ([name, seq, row]) => {
-        if (!wellFormed(row)) return;
-        log.noteFormat(row);
-        documents ||= isDocument(row);
-        log.acknowledged.set(name, { seq, row });
-        log.entries.set(name, { seq, row });
-      });
-      // A library kept as v4 is at minimum 4 even when this browser kept no minimum for it (one remembered only in
-      // page storage before the log moved into the Worker). Without this, an edit made before den-edge first answers
-      // goes out in the v2/v3 form: `set:tracker-event:*` and `ep`/`rec` rows a v4 library must never hold (§8).
-      if ((savedV4 || documents) && log.wireMin < WIRE) log.wireMin = WIRE;
-      log.restoreProfileDirectory(saved);
-      log.restoreKidTitleApprovals(saved);
-      // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
-      // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
-      // follows at once, sends the work kept here.
-      if (log.memberRegistered) useLibraryCredential(keys);
-      else
-        void log.registerMember().then(() => {
-          if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
-        });
-      log.fromCache = true;
-      log.projectJournal();
-      // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
-      await log.projectKept();
-      return log;
+      if (await log.restoreFacts(factManifest.generation, factManifest.head)) {
+        // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
+        // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
+        // follows at once, sends the work kept here.
+        if (log.memberRegistered) useLibraryCredential(keys);
+        else
+          void log.registerMember().then(() => {
+            if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
+          });
+        log.fromCache = true;
+        log.projectJournal();
+        // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
+        await log.projectKept();
+        return log;
+      }
     }
     // Registered once the first page names the generation (below): sent before it, the registration carries generation
     // 0 and den-edge refuses it for any library that exists.
@@ -2977,7 +2448,7 @@ export class LibraryLog {
         return null;
       }
       if (log.generation && page.generation && log.generation !== page.generation) {
-        if (log.splitCommitted) await log.adoptProfileSplit();
+        if (log.directoryCommitted) await log.adoptProfileDirectory();
         else if (!(await log.stageRecovery(page.generation))) return null;
         log.memberRegistered = false;
         // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -2987,8 +2458,6 @@ export class LibraryLog {
         for (const entry of log.entries.values()) entry.seq = 0;
         log.resetProfileDirectory();
         log.kidApprovalEntries.clear();
-        if (log.wireMin >= WIRE)
-          for (const [name, { row }] of log.entries) if (legacy(row)) log.entries.delete(name);
         log.acknowledged.clear();
         continue;
       }
@@ -3000,22 +2469,33 @@ export class LibraryLog {
         await log.registerMember();
         useLibraryCredential(keys);
       }
+      const factEntries: LibraryFactEntry[] = [];
+      let factProfileTopology = false;
       for (const entry of page.entries) {
         // Tampered with, sealed under another library's key, or newer than this build: not read as a row.
         const row = await log.readEntry(entry);
-        if (!row) continue;
+        if (!row) {
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
+          continue;
+        }
         if (log.isInvalidProfileDirectory(row)) {
+          factProfileTopology = true;
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
           log.invalidateProfileDirectory(entry);
           continue;
         }
         if (log.isProfileDirectory(row)) {
+          factProfileTopology = true;
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
           log.acceptProfileDirectory(entry, row);
           continue;
         }
         if (log.isKidTitleApprovals(row)) {
+          factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
           log.acceptKidTitleApprovals(entry, row);
           continue;
         }
+        factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row });
         const previous = log.entries.get(rowName(row));
         log.entries.set(rowName(row), {
           seq: entry.seq,
@@ -3023,8 +2503,11 @@ export class LibraryLog {
         });
         log.acknowledged.set(rowName(row), { seq: entry.seq, row });
       }
-      log.head = page.entries.at(-1)?.seq ?? page.head;
-      if (!page.more || page.entries.length === 0) {
+      const pageHead = page.entries.at(-1)?.seq ?? page.head;
+      const complete = !page.more || page.entries.length === 0;
+      await log.keepFacts(page.generation, pageHead, factEntries, complete, factProfileTopology);
+      log.head = pageHead;
+      if (complete) {
         log.dirty = true;
         log.persist();
         log.forgetPartial();
@@ -3046,6 +2529,11 @@ export class LibraryLog {
     );
     this.rowsCache = { version, rows };
     return rows;
+  }
+
+  /** The v4 documents and settings exactly as this log holds them, for moving without a lossy projection. */
+  storedRows(): Row[] {
+    return [...this.entries.values()].map(({ row }) => row);
   }
 
   /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
@@ -3123,10 +2611,10 @@ export class LibraryLog {
   /**
    * A browser that kept the household from before its split learns the committed wire minimum (its own, or from den-edge
    * answering 426) before it has read the household that holds the directory. No directory is then not evidence that
-   * there isn't one: it is read once a page of the committed generation has been (`adoptProfileSplit`).
+   * there isn't one: it is read once a page of the committed generation has been (`adoptProfileDirectory`).
    */
   get profileDirectoryPending(): boolean {
-    return this.splitCommitted && !this.readCurrentGeneration;
+    return this.directoryCommitted && !this.readCurrentGeneration;
   }
 
   private document(name: string): DocumentRow | undefined {
@@ -3148,6 +2636,11 @@ export class LibraryLog {
     this.unreadable.delete(entry.k);
     this.newerFraming.delete(entry.k);
     if ('unreadable' in opened) {
+      if (preV4Row(opened.json)) {
+        this.preV4Backup = true;
+        console.warn(`den: ${PRE_V4_BACKUP_ERROR}`);
+        return null;
+      }
       console.warn(`den: the library row ${entry.k} is unreadable (${opened.unreadable})`);
       this.unreadable.set(entry.k, opened.unreadable);
       return null;
@@ -3157,10 +2650,21 @@ export class LibraryLog {
       this.upgradeRequired ??= WIRE + 1;
       return null;
     }
-    if ('unknown' in opened) return null;
+    if ('unknown' in opened) {
+      if (preV4Row(opened.unknown)) {
+        this.preV4Backup = true;
+        console.warn(`den: ${PRE_V4_BACKUP_ERROR}`);
+      }
+      return null;
+    }
     if ('invalidProfileDirectory' in opened) return opened;
     if ('profileDirectory' in opened) return opened.profileDirectory;
     if ('kidTitleApprovals' in opened) return opened.kidTitleApprovals;
+    if (preV4Row(opened.row)) {
+      this.preV4Backup = true;
+      console.warn(`den: ${PRE_V4_BACKUP_ERROR}`);
+      return null;
+    }
     this.noteFormat(opened.row);
     return believe(opened.row);
   }
@@ -3284,7 +2788,7 @@ export class LibraryLog {
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (this.splitCommitted) await this.adoptProfileSplit();
+            if (this.directoryCommitted) await this.adoptProfileDirectory();
             else if (!(await this.stageRecovery(page.generation))) return null;
             this.memberRegistered = false;
             // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -3295,10 +2799,6 @@ export class LibraryLog {
             for (const entry of this.entries.values()) entry.seq = 0;
             this.resetProfileDirectory();
             this.kidApprovalEntries.clear();
-            // Switched to v4 meanwhile: what was read of the v3 log is not drawn beside its documents.
-            if (this.wireMin >= WIRE)
-              for (const [name, { row }] of this.entries)
-                if (legacy(row)) this.entries.delete(name);
             this.acknowledged.clear();
             this.dirty = true;
             this.unreported = true;
@@ -3311,27 +2811,40 @@ export class LibraryLog {
           if (this.profileDirectoryPending) this.unreported = true;
           this.readCurrentGeneration = true;
           this.writeGeneration = undefined;
+          const factEntries: LibraryFactEntry[] = [];
+          let factProfileTopology = false;
           for (const entry of page.entries) {
             // Unreadable rows are skipped individually, as on initial open.
             const row = await this.readEntry(entry);
-            if (!row) continue;
+            if (!row) {
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
+              continue;
+            }
             if (this.isInvalidProfileDirectory(row)) {
+              factProfileTopology = true;
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               if (this.invalidateProfileDirectory(entry)) this.unreported = true;
               continue;
             }
             if (this.isProfileDirectory(row)) {
+              factProfileTopology = true;
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               if (this.acceptProfileDirectory(entry, row)) this.unreported = true;
               continue;
             }
             if (this.isKidTitleApprovals(row)) {
+              factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               if (this.acceptKidTitleApprovals(entry, row)) this.unreported = true;
               continue;
             }
             const previous = this.entries.get(rowName(row));
+            const merged = previous ? merge(previous.row, row) : row;
+            // As den-edge holds it, like `acknowledged`: the next visit draws the work kept here over it again.
+            factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row });
             if (!previous || entry.seq > previous.seq) {
               this.entries.set(rowName(row), {
                 seq: entry.seq,
-                row: previous ? merge(previous.row, row) : row,
+                row: merged,
               });
               this.unreported = true;
             }
@@ -3342,8 +2855,15 @@ export class LibraryLog {
             }
           }
           const head = page.entries.at(-1)?.seq ?? page.head;
-          // Kept with the rows: a pass that reads back only this browser's own writes changes no row, and without this
-          // the kept head stayed behind them, so every later visit read and opened them all again.
+          await this.keepFacts(
+            page.generation,
+            head,
+            factEntries,
+            !page.more || page.entries.length === 0,
+            factProfileTopology,
+          );
+          // The finished views' marker names the head: a pass that reads back only this browser's own writes changes no
+          // row, and without this the marker stayed behind them.
           if (head !== this.head) this.dirty = true;
           this.head = head;
           if (!page.more || page.entries.length === 0) return 'head';
@@ -3381,7 +2901,7 @@ export class LibraryLog {
     if (!this.local) throw new Error('Encrypted library storage is unavailable');
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const sealed = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv, additionalData: migrationAAD(name, binding) },
+      { name: 'AES-GCM', iv, additionalData: boundAAD(name, binding) },
       this.local.key,
       utf8.encode(JSON.stringify(value)),
     );
@@ -3407,7 +2927,7 @@ export class LibraryLog {
         {
           name: 'AES-GCM',
           iv: bytes.slice(0, 12),
-          additionalData: migrationAAD(name, binding),
+          additionalData: boundAAD(name, binding),
         },
         this.local.key,
         bytes.slice(12),
@@ -3428,7 +2948,7 @@ export class LibraryLog {
         this.local.key,
         name,
         bytes,
-        name === SNAPSHOT || name === SNAPSHOT_V4,
+        name === SNAPSHOT,
         projectRows ? Date.now() : undefined,
       );
       if (opened !== undefined) return opened;
@@ -3449,49 +2969,26 @@ export class LibraryLog {
   }
 
   /**
-   * Keep den-edge's rows for the next visit, in the order they changed; a failure only costs that visit a full read.
-   * A library kept only here is saved whole by each tab that has it open, so what another tab saved is merged in
-   * first (`takeKept`), under one lock per library where the browser has `navigator.locks`.
+   * Keep what changed for the next visit; a failure only costs that visit a read of what changed since. Of a library on
+   * den-edge, the rows its writes acknowledged go into the fact store (`keepAcknowledged`): a read of the log keeps
+   * what it read itself, with its cursor (`keepFacts`). A library kept only here is saved whole by each tab that has
+   * it open, so what another tab saved is merged in first (`takeKept`), under one lock per library where the browser
+   * has `navigator.locks`.
    */
   private persist(): void {
     if (!this.dirty || !this.local) return;
     this.dirty = false;
-    const snapshot = this.offline ? undefined : this.snapshot();
-    // A library at v4 is kept under its own name, and the older copy goes, so neither is read for the other.
-    const [name, other] =
-      this.wireMin >= WIRE && !this.offline ? [SNAPSHOT_V4, SNAPSHOT] : [SNAPSHOT, SNAPSHOT_V4];
-    const save = async (kept: Snapshot) => {
-      await this.local?.vault.remove(`${this.keys.id}:${other}`);
-      await (kept.entries.length || kept.profileDirectory
-        ? this.keep(name, kept)
-        : this.local?.vault.remove(`${this.keys.id}:${name}`));
-      if (!this.offline && this.generation) {
-        try {
-          const summary = this.currentSummary();
-          await this.keep(LIBRARY_LOCAL_AUTHORITY, {
-            generation: this.generation,
-            head: this.head,
-            authorityRevision: libraryLocalAuthorityRevision(
-              this.head,
-              this.entriesVersion,
-              summary.stamp,
-            ),
-            rowsVersion: this.entriesVersion,
-          });
-        } catch (error) {
-          // The snapshot remains authoritative. A missing/older marker only makes the disposable view cache miss.
-          console.warn('den: the finished-view authority marker could not be kept', error);
-        }
-      }
-    };
     this.saving = this.saving
       .then(() =>
-        snapshot
-          ? save(snapshot)
-          : exclusive(`den.library.${this.keys.id}`, async () => {
+        this.offline
+          ? exclusive(`den.library.${this.keys.id}`, async () => {
               await this.takeKept();
-              await save(this.snapshot());
-            }),
+              const kept = this.snapshot();
+              await (kept.entries.length || kept.profileDirectory
+                ? this.keep(SNAPSHOT, kept)
+                : this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`));
+            })
+          : this.keepAcknowledged(),
       )
       .catch((error: unknown) => {
         this.dirty = true;
@@ -3499,11 +2996,64 @@ export class LibraryLog {
       });
   }
 
+  /**
+   * The rows acknowledged since the last keep (`unkept`), each as den-edge now holds it, read at their turn in
+   * `saving`: a page `keepFacts` kept meanwhile is never overwritten by an older copy. Then the marker the finished
+   * views are checked against.
+   */
+  private async keepAcknowledged(): Promise<void> {
+    const generation = this.generation;
+    if (!generation) return;
+    const names = [...this.unkept].flatMap(([name, at]) => (at === generation ? [name] : []));
+    this.unkept.clear();
+    try {
+      if (this.factStore && names.length)
+        await this.factStore.keepRows(
+          generation,
+          await Promise.all(
+            names.map(async (name) => {
+              const held = this.acknowledged.get(name);
+              return {
+                k: await rowKey(this.keys, name),
+                seq: held?.seq ?? 0,
+                value: '',
+                row: held?.row ?? null,
+              };
+            }),
+          ),
+        );
+    } catch (error) {
+      for (const name of names) this.unkept.set(name, generation);
+      throw error;
+    }
+    if (this.narrowNewest) return;
+    try {
+      const summary = this.currentSummary();
+      await this.keep(LIBRARY_LOCAL_AUTHORITY, {
+        generation,
+        head: this.head,
+        authorityRevision: libraryLocalAuthorityRevision(
+          this.head,
+          this.entriesVersion,
+          summary.stamp,
+        ),
+        rowsVersion: this.entriesVersion,
+      });
+    } catch (error) {
+      // A missing/older marker only makes the finished-view cache miss.
+      console.warn('den: the finished-view authority marker could not be kept', error);
+    }
+  }
+
   /** Every row another tab kept of this library kept only here, merged with this tab's the way a write is merged. */
   private async takeKept(): Promise<void> {
     const saved = await this.kept<Snapshot>(SNAPSHOT);
     this.takeForm(saved);
     for (const [name, , row] of saved?.entries ?? []) {
+      if (preV4Row(row)) {
+        this.preV4Backup = true;
+        continue;
+      }
       const ours = this.acknowledged.get(name)?.row;
       const merged = ours ? merge(row, ours) : row;
       this.entries.set(name, { seq: 0, row: merged });
@@ -3515,8 +3065,8 @@ export class LibraryLog {
     return {
       generation: this.generation,
       head: this.head,
-      memberRegistered: this.memberRegistered,
       entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
+      rowsVersion: this.entriesVersion,
       ...(this.profileDirectorySeq > 0
         ? {
             profileDirectory: [
@@ -3536,6 +3086,231 @@ export class LibraryLog {
         : {}),
       ...(this.offline && this.wireMin > 2 ? { wireMin: this.wireMin } : {}),
     };
+  }
+
+  /** Open the library from the fact store, this browser's one copy of it, without asking den-edge. */
+  private async restoreFacts(generation: string, head: number): Promise<boolean> {
+    if (!this.factStore) return false;
+    try {
+      this.generation = generation;
+      this.head = head;
+      this.memberRegistered = (await this.kept<string>(MEMBER)) === generation;
+      let documents = false;
+      for await (const { key, document } of this.factStore.documents(generation)) {
+        noteLibraryHydrate();
+        let value:
+          | Row
+          | ProfileDirectoryDocument
+          | KidTitleApprovalsDocument
+          | InvalidProfileDirectory
+          | null = document.row;
+        if (!value && document.value) value = await this.readEntry({ k: key, v: document.value });
+        if (!value) continue;
+        const entry = { seq: document.seq };
+        if (this.isInvalidProfileDirectory(value)) {
+          this.invalidateProfileDirectory(entry);
+          continue;
+        }
+        if (this.isProfileDirectory(value)) {
+          this.acceptProfileDirectory(entry, value);
+          continue;
+        }
+        if (this.isKidTitleApprovals(value)) {
+          this.acceptKidTitleApprovals(entry, value);
+          continue;
+        }
+        if (!wellFormed(value)) return false;
+        if (preV4Row(value)) {
+          this.preV4Backup = true;
+          continue;
+        }
+        this.noteFormat(value);
+        documents ||= isDocument(value);
+        const name = rowName(value);
+        this.entries.set(name, { seq: document.seq, row: value });
+        this.acknowledged.set(name, { seq: document.seq, row: value });
+      }
+      if (documents && this.wireMin < WIRE) this.wireMin = WIRE;
+      return true;
+    } catch (error) {
+      console.warn('den: individual library authority could not be opened', error);
+      this.entries.clear();
+      this.acknowledged.clear();
+      this.resetProfileDirectory();
+      this.kidApprovalEntries.clear();
+      this.head = 0;
+      this.generation = undefined;
+      this.memberRegistered = false;
+      return false;
+    }
+  }
+
+  /**
+   * A log of `names` alone, read from the fact store, for one edit of those documents rather than an open of the whole
+   * library: each row it writes is read here first, and it stamps after every row the store holds (its manifest's
+   * `newest`). Null wherever that is not enough, and the whole log is opened instead: no complete store, a profile
+   * directory, kept work, a library not known to be v4 or not yet registered here, a stamp still ahead of this clock,
+   * or a row of an earlier or newer format. It never reads the rest of the library or keeps the finished-view marker.
+   */
+  static async openNarrow(
+    libraryKey: string,
+    names: readonly string[],
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    vault: Vault | null = libraryVault,
+    wire: LibraryWire = WIRE,
+  ): Promise<LibraryLog | null> {
+    if (!vault) return null;
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    const log = new LibraryLog(
+      keys,
+      fetchImpl,
+      typeof localStorage === 'undefined' ? undefined : localStorage,
+      { vault, key: await libraryLocalKey(raw) },
+      false,
+      vault,
+      wire,
+    );
+    await log.initializeRuntime();
+    if (log.wireMin < WIRE || log.pending.size || log.readOnly) return null;
+    const store = await LibraryFactStore.open(libraryKey, vault);
+    const manifest = await store?.manifest();
+    if (!store || !manifest?.complete || manifest.profileTopology || !manifest.newest) return null;
+    const { stamp, reconsiderAt } = manifest.newest;
+    if (reconsiderAt !== null && Date.now() >= reconsiderAt) return null;
+    if ((await log.kept<string>(MEMBER)) !== manifest.generation) return null;
+    await ensureSyncPolicy();
+    for (const name of names) {
+      const k = await rowKey(keys, name);
+      const stored = await store.document(manifest.generation, k);
+      if (!stored) continue;
+      const value =
+        stored.row ?? (stored.value ? await log.readEntry({ k, v: stored.value }) : null);
+      if (
+        !value ||
+        log.isProfileDirectory(value) ||
+        log.isKidTitleApprovals(value) ||
+        log.isInvalidProfileDirectory(value)
+      )
+        return null;
+      const row = value;
+      if (!wellFormed(row) || !isDocument(row) || row.format > 4) return null;
+      log.entries.set(name, { seq: stored.seq, row });
+      log.acknowledged.set(name, { seq: stored.seq, row });
+    }
+    log.factStore = store;
+    log.generation = manifest.generation;
+    log.head = manifest.head;
+    log.memberRegistered = true;
+    log.fromCache = true;
+    log.narrowNewest = stamp;
+    useLibraryCredential(keys);
+    return log;
+  }
+
+  /**
+   * A library an earlier build kept whole (`SNAPSHOT_V4`, or `SNAPSHOT` before v4) moves into the fact store, once:
+   * the store starts over as that copy, one complete generation at its head, and the copy goes once the store's cursor
+   * says so. A copy holding the profile directory or a Kid's approvals cannot move: it kept them opened, where the
+   * store keeps den-edge's sealed rows. Then, and if the move fails, the store is emptied too, and this open reads
+   * den-edge from the start.
+   */
+  private async convertSnapshot(): Promise<void> {
+    const local = this.local;
+    if (!local) return;
+    const saved = (await this.kept<Snapshot>(SNAPSHOT_V4)) ?? (await this.kept<Snapshot>(SNAPSHOT));
+    // A copy with no generation is no copy of den-edge's: it is a library kept only here (`openLocal`), never removed.
+    if (!saved?.generation) return;
+    const store = this.factStore;
+    try {
+      const generation = saved.generation;
+      if (!store) return;
+      await store.clear();
+      if (saved.profileDirectory || saved.kidTitleApprovals?.length) return;
+      const rows = saved.entries.filter(([, , row]) => {
+        if (!wellFormed(row)) return false;
+        if (preV4Row(row)) {
+          this.preV4Backup = true;
+          return false;
+        }
+        return true;
+      });
+      const batchSize = 64;
+      for (let offset = 0; offset === 0 || offset < rows.length; offset += batchSize) {
+        const slice = rows.slice(offset, offset + batchSize);
+        const last = offset + batchSize >= rows.length;
+        const entries = await Promise.all(
+          slice.map(async ([name, seq, row]) => ({
+            k: await rowKey(this.keys, name),
+            seq,
+            value: '',
+            row,
+          })),
+        );
+        // Until the last batch the cursor stays at 0: a move cut off resumes as a first read, never above a row.
+        await store.commitBatch(generation, last ? saved.head : 0, entries, last);
+      }
+      const manifest = await store.manifest();
+      if (!manifest?.complete || manifest.generation !== generation || manifest.head !== saved.head)
+        throw new Error('the moved copy does not read back at its head');
+    } catch (error) {
+      console.warn('den: the library kept whole could not be moved into the fact store', error);
+      await store?.clear().catch(() => undefined);
+    } finally {
+      await Promise.all(
+        [SNAPSHOT, SNAPSHOT_V4].map((name) => local.vault.delete(`${this.keys.id}:${name}`)),
+      ).catch((error: unknown) =>
+        console.warn('den: the library kept whole could not be removed', error),
+      );
+    }
+  }
+
+  /**
+   * Keep one fetched page in bounded atomic batches, in turn with `persist`'s; failure only costs the next visit a
+   * read of what changed since the store's cursor.
+   */
+  private keepFacts(
+    generation: string | undefined,
+    head: number,
+    entries: readonly LibraryFactEntry[],
+    complete: boolean,
+    profileTopology = false,
+  ): Promise<void> {
+    this.saving = this.saving.then(() =>
+      this.commitFacts(generation, head, entries, complete, profileTopology),
+    );
+    return this.saving;
+  }
+
+  private async commitFacts(
+    generation: string | undefined,
+    head: number,
+    entries: readonly LibraryFactEntry[],
+    complete: boolean,
+    profileTopology: boolean,
+  ): Promise<void> {
+    if (!this.factStore || !generation) return;
+    try {
+      const batchSize = 64;
+      if (!entries.length) {
+        await this.factStore.commitBatch(generation, head, [], complete, { profileTopology });
+        return;
+      }
+      for (let offset = 0; offset < entries.length; offset += batchSize) {
+        const batch = entries.slice(offset, offset + batchSize);
+        const last = offset + batch.length === entries.length;
+        await this.factStore.commitBatch(
+          generation,
+          last ? head : batch.at(-1)!.seq,
+          batch,
+          complete && last,
+          { profileTopology },
+        );
+      }
+    } catch (error) {
+      console.warn('den: incremental library facts could not be kept', error);
+      this.factStore = null;
+    }
   }
 
   private restoreProfileDirectory(snapshot: Snapshot | undefined): void {
@@ -3593,10 +3368,7 @@ export class LibraryLog {
   }
 
   title(ref: { type: string; id: number }): TitleRow | undefined {
-    const document = this.document(`title:${ref.type}:${ref.id}`);
-    if (document) return projectDocument(document)[0] as TitleRow;
-    const row = this.entries.get(`rec:${ref.type}:${ref.id}`)?.row;
-    return row?.kind === 'rec' ? row : undefined;
+    return titleRow((name) => this.entries.get(name)?.row, ref);
   }
 
   episode(
@@ -3604,78 +3376,7 @@ export class LibraryLog {
     season: number,
     episode: number,
   ): EpisodeRow | undefined {
-    const document = ref.type === 'tv' && this.document(`season:tv:${ref.id}:${season}`);
-    if (document)
-      return projectEpisode(this.document(`title:tv:${ref.id}`), document, ref, season, episode);
-    const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
-    if (row?.kind === 'ep') return row;
-    if (ref.type !== 'tv') return undefined;
-    const block = Math.floor(episode / 32);
-    const watch = this.entries.get(`wat:tv:${ref.id}:${season}:${block}`)?.row;
-    if (watch?.kind !== 'wat') return undefined;
-    const register = watch.entries[String(episode)];
-    if (!register) return undefined;
-    const title = this.title(ref);
-    const resets = [watch.seasonReset, title?.episodesReset].filter(
-      (value): value is Stamp => value !== null && value !== undefined,
-    );
-    const state = syncPolicy<{
-      watched: boolean;
-      resume: EpisodeRow['progress'] | null;
-      viewing: number;
-      watched_at: number | null;
-    }>({ op: 'episode_state', register, resets, now: Date.now() });
-    const at: Stamp =
-      state.resume?.at ?? (state.watched_at ? [state.watched_at, 0, ''] : ZERO_STAMP);
-    return {
-      kind: 'ep',
-      schema: 2,
-      title: { type: 'tv', id: ref.id },
-      season,
-      episode,
-      progress: state.resume ?? { value: state.watched ? 1 : 0, viewing: state.viewing, at },
-    };
-  }
-
-  private v3EpisodeWrite(row: EpisodeRow): WatchRow | null {
-    const block = Math.floor(row.episode / 32);
-    const name = `wat:tv:${row.title.id}:${row.season}:${block}`;
-    const current = this.entries.get(name)?.row;
-    const watch: WatchRow =
-      current?.kind === 'wat'
-        ? current
-        : {
-            kind: 'wat',
-            schema: 3,
-            title: row.title,
-            season: row.season,
-            block,
-            seasonReset: null,
-            entries: {},
-          };
-    const previous = watch.entries[String(row.episode)] ?? null;
-    const kind =
-      row.progress.value >= 0.95
-        ? 'mark_watched'
-        : row.progress.value === 0
-          ? 'unwatch'
-          : 'progress';
-    const register = syncPolicy<WatchRow['entries'][string] | null>({
-      op: 'register_write',
-      action: {
-        kind,
-        value: row.progress.value,
-        viewing: row.progress.viewing,
-        seconds: row.progress.seconds,
-        watched_at: row.progress.at[0],
-        at: row.progress.at,
-      },
-      current: previous,
-      resets: [watch.seasonReset].filter((value): value is Stamp => value !== null),
-      now: Date.now(),
-    });
-    if (!register) return null;
-    return { ...watch, entries: { ...watch.entries, [String(row.episode)]: register } };
+    return episodeRow((name) => this.entries.get(name)?.row, ref, season, episode);
   }
 
   /** A group of settings: the TV's `prefs`, the user's API `keys`. */
@@ -3705,7 +3406,7 @@ export class LibraryLog {
       now < cached.reconsiderAt
     )
       return { stamp: cached.stamp, reconsiderAt: cached.reconsiderAt, at: cached.at };
-    let latest = ZERO_STAMP;
+    let latest = this.narrowNewest ?? ZERO_STAMP;
     let reconsiderAt = Infinity;
     for (const { row } of this.entries.values()) {
       const summary = newestSummary(row, now);
@@ -3724,14 +3425,17 @@ export class LibraryLog {
   async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
     await this.followKeptForm();
     if (this.readOnly) return null;
-    if (this.wireMin >= WIRE && !this.offline && local.kind !== 'set') {
+    if (local.kind !== 'set') {
       if (local.kind !== 'rec' && local.kind !== 'ep') return null;
+      if (this.offline) {
+        const before = this.before(local);
+        for (const document of applyOps(opsFor(before, local), (name) => this.document(name)))
+          this.keepLocally(document, false);
+        this.persist();
+        await this.saving;
+        return local;
+      }
       return this.writeEdit(this.before(local), local, outcome, durable);
-    }
-    if (this.wireMin >= 3 && local.kind === 'ep') {
-      const converted = this.v3EpisodeWrite(local);
-      if (!converted) return local;
-      local = converted;
     }
     let kept: string | undefined;
     if (durable && !this.offline && this.runtimeAvailable) {
@@ -3749,7 +3453,7 @@ export class LibraryLog {
       return null;
     }
     if (saved) {
-      // A return visit opens the acknowledged snapshot before it reaches den-edge. Keep the applied row there before
+      // A return visit opens the acknowledged copy before it reaches den-edge. Keep the applied row there before
       // dropping its recovery copy, or an immediate reload briefly restores the older row and an offline reload loses
       // the edit altogether.
       this.persist();
@@ -4022,6 +3726,7 @@ export class LibraryLog {
         if (conflict.v === null) {
           this.entries.delete(write.name);
           this.acknowledged.delete(write.name);
+          this.unkept.set(write.name, this.generation);
           continue;
         }
         const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
@@ -4034,6 +3739,7 @@ export class LibraryLog {
           return false;
         this.entries.set(write.name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
+        this.unkept.set(write.name, this.generation);
         this.dirty = true;
       }
     }
@@ -4110,6 +3816,7 @@ export class LibraryLog {
       ) {
         this.entries.set(name, { seq: conflict.seq, row: theirs });
         this.acknowledged.set(name, { seq: conflict.seq, row: theirs });
+        this.unkept.set(name, this.generation);
         this.dirty = true;
       }
       return false;
@@ -4151,9 +3858,6 @@ export class LibraryLog {
     const seen = this.entries.get(rowName(local))?.row;
     let target = seen ? merge(seen, local) : local;
     for (let round = 0; round < ROUNDS; round++) {
-      // The library went to v4 under this write (a generation change): a v2 or v3 row is never written into it.
-      // Its kept copy is sent again as the v4 writes it stands for (`v4Work`).
-      if (this.wireMin >= WIRE && !this.offline && legacy(target)) return null;
       const scoped = this.householdRows([target])[0];
       if (!scoped) {
         // Refused for good: kept, it would be refused again on every replay.
@@ -4194,6 +3898,7 @@ export class LibraryLog {
         // What this browser remembered belongs to a log that was reset.
         this.entries.delete(name);
         this.acknowledged.delete(name);
+        this.unkept.set(name, this.generation);
         continue;
       }
       const theirs = believe(await open(this.keys, k, conflict.v));
@@ -4320,11 +4025,6 @@ export class LibraryLog {
     if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return;
     this.wireMin = minimum;
     if (minimum > this.instanceWire) this.upgradeRequired = minimum;
-    // Another device switched it: what kept this browser from writing a v3 library no longer applies.
-    if (minimum >= WIRE) {
-      this.switchFailure = null;
-      this.predatesV3 = false;
-    }
     // The in-memory monotonic fence already stands for this visit; persistence is an optimization for the next.
     await this.putMeta('wireMin', String(minimum));
   }
@@ -4346,6 +4046,7 @@ export class LibraryLog {
         },
       });
     try {
+      let registered = this.writeGeneration ?? this.generation;
       let res = await put();
       // Registered under a generation this browser has not read yet (a cached open, or a change since): once more
       // under the one den-edge names. Only the registration takes it; reads and writes still find the change.
@@ -4354,13 +4055,18 @@ export class LibraryLog {
         res.status === 409 &&
         (await errorCode(res)) === 'generation_changed' &&
         current &&
-        current !== (this.writeGeneration ?? this.generation)
-      )
+        current !== registered
+      ) {
+        registered = current;
         res = await put(current);
+      }
       if (res.ok) {
         this.memberRegistered = true;
-        this.dirty = true;
-        this.persist();
+        // Remembered for the next visit, which opens without registering again; a failure only costs it that.
+        if (registered)
+          await this.keep(MEMBER, registered).catch((error: unknown) =>
+            console.warn("den: this browser's membership could not be remembered", error),
+          );
       } else
         console.warn(
           `den: den-edge did not register this browser's membership (${res.status} ${(await errorCode(res)) ?? ''})`,
@@ -4376,44 +4082,28 @@ export class LibraryLog {
     if (!journals.length) return true;
     if (journals.some((row) => !trackerEvent(row))) return false;
     if (this.readOnly) return false;
-    // v4 writes no history rows (§8): each action is the writes it makes, kept as one piece of work.
-    if (this.wireMin >= WIRE && !this.offline)
-      return this.writeOps(
-        journals.flatMap((row) => {
-          const event = trackerEvent(row)!;
-          return opsFor(event.before, event.after);
-        }),
-        undefined,
-        true,
-        undefined,
-        true,
-      );
     if (this.offline) {
       await this.followKeptForm();
-      for (const row of journals) {
-        this.keepLocally(row);
-        this.keepLocally(trackerEvent(row)!.after);
-      }
+      const ops = journals.flatMap((row) => {
+        const event = trackerEvent(row)!;
+        return opsFor(event.before, event.after);
+      });
+      for (const document of applyOps(ops, (name) => this.document(name)))
+        this.keepLocally(document, false);
+      this.persist();
+      await this.saving;
       return true;
     }
-    if (!this.runtimeAvailable) return false;
-    const key = this.pendingPrefix + 'bulk:' + crypto.randomUUID();
-    try {
-      const sealed = await Promise.all(journals.map((row) => seal(this.keys, row)));
-      if (!(await this.keepPending(key, JSON.stringify({ bulk: sealed })))) return false;
-    } catch {
-      return false;
-    }
-    const outcome: Outcome = { refused: false };
-    await this.flushRows(key, [journals, journals.map((row) => trackerEvent(row)!.after)], outcome);
-    // Refused for good before any of it landed, it is not kept to be refused again: the viewer is told it wasn't
-    // saved. Refused after some of it landed, the rest stays kept, as work kept from before does.
-    if (outcome.refused && !outcome.applied) {
-      await this.discard(key);
-      return false;
-    }
-    for (const row of journals) this.project(trackerEvent(row)!.after);
-    return true; // Either on the relay or the complete intent is still durable locally.
+    return this.writeOps(
+      journals.flatMap((row) => {
+        const event = trackerEvent(row)!;
+        return opsFor(event.before, event.after);
+      }),
+      undefined,
+      true,
+      undefined,
+      true,
+    );
   }
 
   /**
@@ -4425,11 +4115,11 @@ export class LibraryLog {
   }
 
   /**
-   * A generation change that is the household's profile split committing (profiles-v1 §8.2): den-edge now answers at
+   * A generation change that committed the household's profile directory (profiles-v1 §8.2): den-edge now answers at
    * wire minimum 5, and what this browser holds was read before any `profiles` directory. Evaluated before the new
    * log is read, so the held directory is still the old household's.
    */
-  private get splitCommitted(): boolean {
+  private get directoryCommitted(): boolean {
     return this.wireMin >= 5 && this.profileDirectorySeq === 0;
   }
 
@@ -4451,15 +4141,15 @@ export class LibraryLog {
   }
 
   /**
-   * Adopt a committed profile split (profiles-v1 §8.2) instead of restoring into it: everything held from the old
+   * Adopt a committed profile directory (profiles-v1 §8.2) instead of restoring into it: everything held from the old
    * household — rows, the kept copies of the log, and work kept to send — is discarded, and the new log is read from
    * 0. Writing any of it back would put the Owner's rows (titles, trackers, delivery state, the Owner half of
    * preferences and keys) into the household, which every profile reads. Kept edits are not routed to a profile
    * library from here: this log has none, so they are dropped and named.
    */
-  private async adoptProfileSplit(): Promise<void> {
+  private async adoptProfileDirectory(): Promise<void> {
     console.warn(
-      `den: the household was split into profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
+      `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
     );
     this.entries.clear();
     this.acknowledged.clear();
@@ -4468,11 +4158,12 @@ export class LibraryLog {
     if (local)
       this.saving = this.saving
         .then(() =>
-          Promise.all(
-            [SNAPSHOT, SNAPSHOT_V4, PARTIAL].map((name) =>
+          Promise.all([
+            ...[SNAPSHOT, SNAPSHOT_V4, PARTIAL].map((name) =>
               local.vault.delete(`${this.keys.id}:${name}`),
             ),
-          ),
+            this.factStore?.clear(),
+          ]),
         )
         .then(() => undefined)
         .catch((error: unknown) =>
@@ -4498,11 +4189,8 @@ export class LibraryLog {
   }
 
   private async stageRecovery(generation?: string): Promise<boolean> {
-    // A library now at v4 takes no v2 or v3 row back (`v4Work`): the switch already converted what this browser read
-    // of the old log. Staging them anyway can overflow browser storage for a large library, and then the new log is
-    // never read: every write goes on carrying the old generation.
     const rows = [...this.entries.values()]
-      .filter((entry) => entry.seq > 0 && !(this.wireMin >= WIRE && legacy(entry.row)))
+      .filter((entry) => entry.seq > 0)
       .map((entry) => entry.row);
     if (!rows.length) return true;
     try {
@@ -4557,6 +4245,7 @@ export class LibraryLog {
     this.throttledUntil = 0;
     this.entries.set(name, { seq, row });
     this.acknowledged.set(name, { seq, row });
+    this.unkept.set(name, this.generation);
     this.dirty = true;
   }
 
@@ -4663,42 +4352,8 @@ export class LibraryLog {
     const event = trackerEvent(journal);
     if (!event) return null;
     if (this.readOnly) return null;
-    if (this.wireMin >= WIRE && !this.offline) return this.writeEdit(event.before, event.after);
-    if (this.offline) {
-      await this.followKeptForm();
-      this.keepLocally(journal);
-      return this.keepLocally(event.after);
-    }
-    const storageKey = this.pendingPrefix + event.id;
-    // Persist ciphertext before starting the network operation. Quota/privacy errors fail visibly.
-    const canKeep = this.runtimeAvailable;
-    const retained = canKeep
-      ? await this.keepPending(storageKey, JSON.stringify(await seal(this.keys, journal)))
-      : false;
-    if (canKeep && !retained) return null;
-    const outcome = { refused: false };
-    this.flushing.add(storageKey);
-    const accepted = await this.write(journal, outcome, false).finally(() =>
-      this.flushing.delete(storageKey),
-    );
-    if (!accepted && outcome.refused) {
-      if (fresh) {
-        await this.discard(storageKey);
-        return null;
-      }
-      this.rejected.set(storageKey, Date.now());
-    }
-    if (!accepted && !retained) return null;
-    if (accepted) {
-      this.rejected.delete(storageKey);
-      if (retained) await this.discard(storageKey);
-    }
-    if (!accepted) return this.project(event.after);
-    // The accepted immutable event is the durable source of this projection; keeping a second generic row would
-    // send it twice when local pending cleanup itself failed.
-    const saved = await this.write(event.after, undefined, false);
-    if (saved) return saved;
-    return this.project(event.after);
+    if (this.offline) return this.write(event.after);
+    return this.writeEdit(event.before, event.after, undefined, fresh);
   }
 
   private project(after: Row): Row {
@@ -4762,55 +4417,29 @@ export class LibraryLog {
   }
 
   private projectWork(work: KeptWork): void {
-    if (this.wireMin >= WIRE && !this.offline) {
-      let converted: { restore: Row[]; ops: Op[] };
-      try {
-        converted = this.v4Work(work);
-      } catch (error) {
-        // Kept, and sent once it converts (`replay` keeps it too); only its drawing is missing meanwhile.
-        console.warn('den: kept library work could not be read as Library v4', error);
-        return;
-      }
-      for (const row of converted.restore) this.project(row);
-      this.projectOps(converted.ops);
-      for (const row of work.riders ?? []) this.project(row);
+    let converted: { restore: Row[]; ops: Op[] };
+    try {
+      converted = this.v4Work(work);
+    } catch (error) {
+      console.warn('den: kept library work was refused', error);
       return;
     }
-    const { rows, kind } = work;
-    for (const row of rows) {
-      if (kind === 'restore') this.project(row);
-      else if (row.kind === 'set' && trackerEvent(row)) this.project(trackerEvent(row)!.after);
-    }
+    for (const row of converted.restore) this.project(row);
+    this.projectOps(converted.ops);
+    for (const row of work.riders ?? []) this.project(row);
   }
 
-  /**
-   * Kept work as a v4 library takes it (§11): rows written back as they are — documents, and settings less a
-   * delivery row's `lease` and switch-only facts — and edits as den-core writes. An edit this build kept before the
-   * switch is turned into those writes: an action or a title or episode row as ops, and episode progress kept on v3
-   * (a `wat` row, which `write` makes of it) as the season document den-core's switch makes of it, merged when sent.
-   * A recovery copy of the v3 log itself, and receipts, are discarded: the switch already converted that log.
-   */
+  /** Kept v4 documents, settings and ops. Pre-v4 work makes the restored backup read-only. */
   private v4Work(work: KeptWork): { restore: Row[]; ops: Op[] } {
     if (work.kind === 'ops') return { restore: [], ops: work.ops ?? [] };
-    const restore: Row[] = [];
-    const ops: Op[] = [];
-    if (work.kind !== 'restore')
-      restore.push(...projectV3Documents(work.rows.filter((row) => row.kind === 'wat')));
-    for (const row of work.rows) {
-      const event = trackerEvent(row);
-      if (event) {
-        if (work.kind !== 'restore') ops.push(...opsFor(event.before, event.after));
-      } else if (isDocument(row)) restore.push(row);
-      else if (row.kind === 'set')
-        restore.push(
-          row.name.startsWith('deliver:')
-            ? { ...row, values: row.values.since ? { since: row.values.since } : {} }
-            : row,
-        );
-      else if ((row.kind === 'rec' || row.kind === 'ep') && work.kind !== 'restore')
-        ops.push(...opsFor(this.storedBefore(row), row));
+    if (work.rows.some(preV4Row)) {
+      this.preV4Backup = true;
+      throw new Error(PRE_V4_BACKUP_ERROR);
     }
-    return { restore, ops };
+    return {
+      restore: work.rows.filter((row) => isDocument(row) || row.kind === 'set'),
+      ops: [],
+    };
   }
 
   get pendingActions(): number {
@@ -4861,7 +4490,7 @@ export class LibraryLog {
       (a, b) => Number(a.kind === 'restore') - Number(b.kind === 'restore'),
     );
     for (const work of kept) {
-      const { key, rows, kind } = work;
+      const { key, kind } = work;
       // Sent by a send that ended since it was read.
       if (this.flushing.has(key) || !this.pending.has(key)) continue;
       if (Date.now() - (this.rejected.get(key) ?? 0) < RECHECK_MS) {
@@ -4890,48 +4519,17 @@ export class LibraryLog {
       }
       this.flushing.add(key);
       try {
-        if (this.wireMin >= WIRE && !this.offline) {
-          const { restore, ops } = this.v4Work(work);
-          const riders = work.riders ?? [];
-          for (const row of [...restore, ...riders]) this.project(row);
-          if (
-            (ops.length || riders.length) &&
-            !(await this.writeOps(ops, undefined, false, key, false, riders))
-          )
-            continue;
-          if (!restore.length) await this.discard(key);
-          else if ((await this.flushRows(key, [restore])) && kind === 'restore')
-            this.recoveryRows = undefined;
-          continue;
-        }
-        if (kind === 'restore') {
-          for (const row of rows) this.project(row);
-          if (
-            await this.flushRows(key, [
-              rows.filter(trackerEvent),
-              rows.filter((row) => !trackerEvent(row)),
-            ])
-          )
-            this.recoveryRows = undefined;
-          continue;
-        }
-        if (kind === 'rows') {
-          for (const row of rows) this.project(row);
-          await this.flushRows(key, [rows]);
-          continue;
-        }
-        // Only `writeAction` and `writeActions` keep work other than recovery, and only actions: anything else can
-        // never be sent, and would be counted as waiting (`pendingActions`) for good.
+        const { restore, ops } = this.v4Work(work);
+        const riders = work.riders ?? [];
+        for (const row of [...restore, ...riders]) this.project(row);
         if (
-          !rows.every((row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null)
-        ) {
-          await this.discard(key);
+          (ops.length || riders.length) &&
+          !(await this.writeOps(ops, undefined, false, key, false, riders))
+        )
           continue;
-        }
-        if (kind === 'bulk') {
-          for (const row of rows) this.project(trackerEvent(row)!.after);
-          await this.flushRows(key, [rows, rows.map((row) => trackerEvent(row)!.after)]);
-        } else await this.act(rows[0]!, false);
+        if (!restore.length) await this.discard(key);
+        else if ((await this.flushRows(key, [restore])) && kind === 'restore')
+          this.recoveryRows = undefined;
       } catch (error) {
         // Keep unsent work; never acknowledge or delete it.
         console.warn(`den: kept ${kind} work could not be sent; it stays kept`, error);
@@ -4946,10 +4544,7 @@ export class LibraryLog {
       Date.now() - (this.rejected.get(this.pendingPrefix + 'recovery') ?? 0) >= RECHECK_MS
     ) {
       const rows = this.recoveryRows;
-      const groups =
-        this.wireMin >= WIRE
-          ? [this.v4Work({ key: '', rows, kind: 'restore' }).restore]
-          : [rows.filter(trackerEvent), rows.filter((row) => !trackerEvent(row))];
+      const groups = [this.v4Work({ key: '', rows, kind: 'restore' }).restore];
       if (await this.flushRows(this.pendingPrefix + 'recovery', groups)) {
         delivered = true;
         this.recoveryRows = undefined;
@@ -5034,11 +4629,7 @@ function canonical(value: unknown): string {
 /** `work` under the lock `name` in every tab of this browser; with no `navigator.locks`, just `work`. */
 export { exclusive } from './exclusive';
 
-/**
- * One row per name, the rows that share it merged. Under v3 every episode of a 32-episode block is a write of the
- * same `wat` row, so an import marking several of them would otherwise send that row twice in one batch, which
- * den-edge refuses whole (`invalid_batch`).
- */
+/** One row per name, with duplicate settings or documents merged before a batch reaches den-edge. */
 function coalesce(rows: Row[]): Row[] {
   const byName = new Map<string, Row>();
   for (const row of rows) {
@@ -5047,21 +4638,6 @@ function coalesce(rows: Row[]): Row[] {
     byName.set(name, held ? merge(held, row) : row);
   }
   return [...byName.values()];
-}
-
-/**
- * v3 `wat` and `snt` rows as the documents den-core's switch makes of them (`v4_form`), to be merged with what a v4
- * log holds. Throws when den-core refuses them, so they are kept rather than lost.
- */
-export function projectV3Documents(rows: Row[]): DocumentRow[] {
-  if (!rows.length) return [];
-  return syncPolicy<{ documents: { document: DocumentRow }[] }>({
-    op: 'v4_form',
-    rows: rows.map((row, index) => ({ k: '', seq: index + 1, bytes: 0, row })),
-    base: rows.length,
-    performer: '',
-    now: Date.now(),
-  }).documents.map(({ document }) => document);
 }
 
 /** Writes in batches den-edge takes: at most `REWRITE_BATCH_MAX` of them, and `REWRITE_BATCH_MAX_BYTES` of body. */
@@ -5096,7 +4672,5 @@ function merge(theirs: Row, ours: Row): Row {
   if (theirs.kind === 'rec' && ours.kind === 'rec') return mergeTitle(theirs, ours);
   if (theirs.kind === 'ep' && ours.kind === 'ep') return mergeEpisode(theirs, ours);
   if (theirs.kind === 'set' && ours.kind === 'set') return mergeSettings(theirs, ours);
-  if (theirs.kind === 'wat' && ours.kind === 'wat') return mergeV3(theirs, ours);
-  if (theirs.kind === 'snt' && ours.kind === 'snt') return mergeV3(theirs, ours);
   return theirs;
 }

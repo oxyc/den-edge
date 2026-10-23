@@ -4,7 +4,6 @@ import type { ConnectionsView } from './libraryServiceProtocol';
 import type { TitleRef } from './libraryServiceProtocol';
 import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfilePolicy } from './profilePolicy';
-import type { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
 import { SessionServices } from './sessionServices.svelte';
 
 export type HouseholdIdentity =
@@ -37,8 +36,6 @@ export class HouseholdSession {
     model: LibraryModel | null,
     readonly content: ContentServiceClientPort,
     private readonly closeWorkerServices: () => void = () => {},
-    /** Default-off initial-split participant. No production path supplies one or starts an attempt yet. */
-    readonly profileMigration: DormantOwnerSplitEffectExecutor | null = null,
   ) {
     this.#identity = identity;
     this.#model = model;

@@ -25,10 +25,11 @@
 
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
+  BIG_LIBRARY_SCALE,
   bigHousehold,
   forgetPublication,
   holdProjectionBuilds,
@@ -61,11 +62,21 @@ const MEMORY_MB = 48;
  * household's move writes the Owner's whole history) was read from den-edge and opened again on every visit: 3,079
  * rows (`ROWS_READ`), and 140 MB. The Watchlist names the whole history: from each title's kept TMDB answer, every
  * one read and parsed whole for its name and poster, it allocated about 225 MB; from each one's brief beside it
- * (`titleBrief`), it allocates no more than Home.
+ * (`titleBrief`), it allocates no more than Home. Library v4 projects the long episode history as individual episode
+ * rows now that the v3 watch-block projection is gone; the Watchlist's one background history fold allocates 129 MB
+ * while retaining only 29 MB after collection.
  */
-const ALLOCATED_MB = 100;
+const ALLOCATED_MB = 140;
 /** Rows a returning visit may read from den-edge: what changed since the last one, which here is nothing. */
 const ROWS_READ = 100;
+
+/**
+ * Documents a returning visit to one screen may fold, whatever the library's size: what it shows, not the whole
+ * library. A screen that opens the full log folds every document (3,079 here, three times as many at
+ * `BIG_LIBRARY_SCALE=3`), which an old TV or phone pays for in seconds and tens of MB. A count, not a time: Chromium
+ * slows a page's CPU but not its Workers', where the folding happens.
+ */
+const FOLDED_DOCUMENTS = 500;
 
 /**
  * MB WebKit's WebContent process may hold once a returning visit has settled (`pageFootprint`). What iOS ends a tab's
@@ -82,12 +93,20 @@ const DURING_REBUILD_MS = 1_000;
 
 /**
  * `content`: what `markReady` must have seen drawn; the surface's time is the latest of them. `shelves`: the surface
- * names its library rows, and has its `shelves ready` milestone budgeted too.
+ * names its library rows, and has its `shelves ready` milestone budgeted too. `background`: library promotions the
+ * surface makes only once it has drawn, left out of `FOLDED_DOCUMENTS`.
  */
 const SURFACES = [
   { name: 'Home', path: '/', content: ['billboardText', 'continuePoster'], shelves: true },
   { name: 'Series', path: '/series', content: ['rowPoster'], shelves: true },
-  { name: 'Watchlist', path: '/watchlist', content: ['billboardText'], shelves: true },
+  // Its watched history is the whole library's: asked for once the screen has drawn (`historyAsked`, Library.svelte).
+  {
+    name: 'Watchlist',
+    path: '/watchlist',
+    content: ['billboardText'],
+    shelves: true,
+    background: ['selection:history'],
+  },
   { name: 'Series detail', path: `/tv/${WATCHED_SERIES}`, content: ['episodes'] },
   { name: 'Settings', path: '/settings', content: ['settings'] },
   // After the switch below: the household's Kid, whose billboard is age-checked title by title.
@@ -406,12 +425,22 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
   );
   page.on('console', (message) => {
     if (isBuild(message)) built.page++;
-    const match =
-      /^den: startup \+(\d+)ms (app module requested|worker ready|handover|shelves ready|billboard detail|first poster|episodes shown)/.exec(
-        message.text(),
-      );
+    // Every page milestone, named without its detail; a Worker's own lines (`[worker] …`) are left to its metrics.
+    const match = /^den: startup \+(\d+)ms ([^[(][^(]*?)(?: \((.*)\))?$/.exec(message.text());
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
+    // Which selections the supervisor waited on before ready, and when each first answered.
+    if (match?.[2] === 'supervisor ready' && marks.bound === undefined) marks.bound = match[3];
   });
+  // When each library promotion was heard, in ms from just before navigation: a `background` one must come after the
+  // surface's content (which is timed from navigation start, so never later than this clock for the same moment).
+  const started = Date.now();
+  const promoted = {};
+  const hearPromotion = (message) => {
+    const reason = /library promoted \((.+)\)$/.exec(message.text())?.[1];
+    if (reason && promoted[reason] === undefined) promoted[reason] = Date.now() - started;
+  };
+  page.on('console', hearPromotion);
+  page.on('worker', (worker) => worker.on?.('console', hearPromotion));
   const projectionsBefore = edge.assistant?.projections.length ?? 0;
   // Rows den-edge sent the library Workers, from every changes page.
   const reads = [];
@@ -458,6 +487,7 @@ async function visit(context, edge, surface, { cpu = 1, footprint } = {}) {
     ...processes,
     drawnAt,
     marks,
+    promoted,
   };
   await page.close();
   return result;
@@ -528,20 +558,50 @@ const ENGINES = [
   ['Chromium phone, 4× CPU', chromium, devices['Pixel 7'], { cpu: 4 }],
 ];
 
+/**
+ * What each open page shows and every console line it and its Workers wrote, kept beside a failed run. These tests
+ * launch their own browsers, so Playwright's trace setting never reaches them, and a full trace would slow the very
+ * pages they time. A setup that never draws (Continue Watching absent on CI, never seen locally) needs this to read.
+ */
+function collectConsole(context) {
+  const lines = [];
+  const note = (where) => (message) => lines.push(`${where} ${message.type()} ${message.text()}`);
+  context.on('page', (page) => {
+    page.on('console', note(page.url()));
+    page.on('worker', (worker) => worker.on('console', note(worker.url())));
+  });
+  return lines;
+}
+
+async function keepEvidence(context, lines) {
+  const info = test.info();
+  writeFileSync(info.outputPath('console.txt'), lines.join('\n'));
+  for (const [index, page] of context.pages().entries()) {
+    try {
+      await page.screenshot({ path: info.outputPath(`page-${index}.png`), timeout: 5_000 });
+      const text = await page.evaluate(() => `${location.href}\n\n${document.body.innerText}`);
+      writeFileSync(info.outputPath(`page-${index}.txt`), text);
+    } catch {
+      // A page that has crashed or closed has nothing more to show.
+    }
+  }
+}
+
 for (const [label, type, device, options] of ENGINES) {
   test(`${label}: a big household's surfaces draw within their budgets`, async () => {
     test.skip(
       type === webkit && !process.env.CI && !existsSync(webkit.executablePath()),
       'needs WebKit: npx playwright install webkit',
     );
-    test.setTimeout(300_000);
+    test.setTimeout(300_000 * BIG_LIBRARY_SCALE);
     const footprint = type === webkit ? pageFootprint : undefined;
     const browser = await type.launch(
       type === chromium ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {},
     );
+    const { defaultBrowserType: _, ...phone } = device;
+    const context = await browser.newContext(phone);
+    const consoleLines = collectConsole(context);
     try {
-      const { defaultBrowserType: _, ...phone } = device;
-      const context = await browser.newContext(phone);
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
       await bigHousehold(context, edge);
@@ -591,6 +651,17 @@ for (const [label, type, device, options] of ENGINES) {
         // den-core's modules are streamed into instantiation, from WebKit's cache of their compiled code; a Worker that
         // compiles one itself pays the whole compile on every load, which on an iPhone held the shelves back.
         expect.soft(result.compiles, `${surface.name}: wasm compiled in a Worker`).toBe(0);
+        const folded = (result.libraryStartup ?? [])
+          .filter(({ promotion }) => !surface.background?.includes(promotion))
+          .reduce((sum, startup) => sum + startup.documentsFolded, 0);
+        expect
+          .soft(folded, `${surface.name}: library documents folded`)
+          .toBeLessThan(FOLDED_DOCUMENTS);
+        for (const reason of surface.background ?? [])
+          if (result.promoted[reason] !== undefined)
+            expect
+              .soft(result.promoted[reason], `${surface.name}: ms to ${reason}, after its content`)
+              .toBeGreaterThanOrEqual(result.contentMs);
         for (const startup of result.libraryStartup ?? []) {
           if (startup.viewSource !== 'cache') continue;
           expect
@@ -639,6 +710,9 @@ for (const [label, type, device, options] of ENGINES) {
         )
         .toBe(true);
       console.log(`${label}\n${measured.map((m) => JSON.stringify(m)).join('\n')}`);
+    } catch (error) {
+      await keepEvidence(context, consoleLines);
+      throw error;
     } finally {
       await browser.close();
     }

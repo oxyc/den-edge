@@ -3,14 +3,7 @@ import type { ClockStore } from './clockStore';
 import { exclusive } from './exclusive';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
-import {
-  rowName,
-  type DocumentRow,
-  type ReceiptRow,
-  type Row,
-  type SettingsRow,
-  type Stamp,
-} from './wire';
+import { rowName, type DocumentRow, type SettingsRow, type Stamp } from './wire';
 
 const pageStartedAt = Date.now();
 const pageStartedMono = globalThis.performance?.now() ?? 0;
@@ -105,81 +98,6 @@ function addedAt(value: unknown): number | null {
 
 const identity = (media: string, id: number, season?: number, episode?: number) =>
   season === undefined ? `${media}:${id}` : `${media}:${id}:${season}:${episode}`;
-
-function targets(rows: Row[], now: number): Target[] {
-  const out: Target[] = [];
-  for (const row of rows) {
-    if (row.kind === 'rec') {
-      const target = rowName(row);
-      const common = { media: row.title.type, id: row.title.id } as const;
-      if (row.title.type === 'movie') {
-        out.push({
-          ...common,
-          key: `${target}#watch`,
-          receipt_target: target,
-          receipt_key: 'watch',
-          kind: 'film',
-          value: row.status.value === 'watched' ? 'watched' : 'unwatched',
-          stamp: row.status.at,
-          p: row.resume.viewing,
-          watched_at: row.watchedAt,
-        });
-      }
-      out.push({
-        ...common,
-        key: `${target}#list`,
-        receipt_target: target,
-        receipt_key: 'list',
-        kind: 'list',
-        value: row.status.value === 'watchlist' ? 'in' : 'gone',
-        stamp: row.status.at,
-      });
-      out.push({
-        ...common,
-        key: `${target}#rating`,
-        receipt_target: target,
-        receipt_key: 'rating',
-        kind: 'rating',
-        value: row.reaction.value ?? 'none',
-        stamp: row.reaction.at,
-      });
-    } else if (row.kind === 'wat' && row.title.type === 'tv') {
-      for (const [episode, register] of Object.entries(row.entries)) {
-        const state = syncPolicy<{ watched: boolean; viewing: number; watched_at: number | null }>({
-          op: 'episode_state',
-          register,
-          resets: [row.seasonReset].filter(Boolean),
-          now,
-        });
-        const stamp = register.progress?.at ?? ([0, 0, ''] as Stamp);
-        out.push({
-          key: `${rowName(row)}#${episode}`,
-          receipt_target: rowName(row),
-          receipt_key: episode,
-          kind: 'episode',
-          value: state.watched ? 'watched' : 'unwatched',
-          stamp,
-          p: state.viewing,
-          watched_at: state.watched_at,
-          media: 'tv',
-          id: row.title.id,
-          season: row.season,
-          episode_number: Number(episode),
-        });
-      }
-    }
-  }
-  return out;
-}
-
-function receipts(rows: Row[], provider: string, account: string): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const row of rows) {
-    if (row.kind !== 'snt' || row.provider !== provider || row.account !== account) continue;
-    for (const [key, value] of Object.entries(row.entries)) out[`${row.target}#${key}`] = value;
-  }
-  return out;
-}
 
 function collectSnapshot(body: unknown): Snapshot {
   const snapshot: Snapshot = { watched: new Set(), listed: new Map(), ratings: new Map() };
@@ -801,18 +719,15 @@ async function deliverAccount(
   const since = (jsonSetting(base, 'since') as Stamp | undefined) ?? at;
   const safety = await deliverySafety(log, account);
   // On v4 the pass is decided before the take, which needs the greatest settle epoch any receipt holds.
-  const held = log.wireMinimum >= 4 ? log.documents() : [];
-  const pendingV4 =
-    log.wireMinimum >= 4
-      ? syncPolicy<V4Pending>({
-          op: 'pending_targets_v4',
-          documents: held.map(({ document }) => document),
-          // The removals latch and its approval, the epochs whose receipts are unverified, and this page's recent
-          // removal sends (v4 §9).
-          deliver: deliverFacts(base, account, since, safety.removalsSent()),
-          now: Date.now(),
-        })
-      : null;
+  const held = log.documents();
+  const pendingV4 = syncPolicy<V4Pending>({
+    op: 'pending_targets_v4',
+    documents: held.map(({ document }) => document),
+    // The removals latch and its approval, the epochs whose receipts are unverified, and this page's recent
+    // removal sends (v4 §9).
+    deliver: deliverFacts(base, account, since, safety.removalsSent()),
+    now: Date.now(),
+  });
   const kept = heldLeases.get(log);
   const locallyHeld = lease[0] === device && holding(log, account);
   // A take exceeds the row's epoch, every settle epoch read, and every epoch this browser held (v3 §6).
@@ -834,7 +749,7 @@ async function deliverAccount(
     if (fresh) log.observedGeneration = log.currentGeneration;
   }
   if (!current()) return false;
-  if (pendingV4) await writeAccountState(log, name, pendingV4, clock);
+  await writeAccountState(log, name, pendingV4, clock);
   if (!current()) return false;
   const orders = (count: number) => safety.orders(epoch, count);
 
@@ -849,80 +764,21 @@ async function deliverAccount(
   if (!snapshotResponse.ok || !current()) return false;
   const snapshot = collectSnapshot(await snapshotResponse.json());
   if (!current()) return false;
-  if (pendingV4) {
-    const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
-    await deliverV4(log, {
-      token,
-      clientId,
-      snapshot,
-      pending: pendingV4,
-      stored,
-      account,
-      epoch,
-      device,
-      orders,
-      reserveRemoval: () => safety.reserveRemoval(),
-      fetchImpl,
-      current,
-    });
-    return true;
-  }
-  const rows = log.rows();
-  const allTargets = targets(rows, Date.now());
-  const pending = syncPolicy<Record<string, unknown>[]>({
-    op: 'pending_targets',
-    targets: allTargets,
-    receipts: receipts(rows, 'simkl', account),
-    since,
-    now: Date.now(),
+  const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
+  await deliverV4(log, {
+    token,
+    clientId,
+    snapshot,
+    pending: pendingV4,
+    stored,
+    account,
+    epoch,
+    device,
+    orders,
+    reserveRemoval: () => safety.reserveRemoval(),
+    fetchImpl,
+    current,
   });
-  const commands = pending.slice(0, 100);
-  const reserved = await orders(commands.length);
-  for (const [index, command] of commands.entries()) {
-    if (!current()) break;
-    const target = command.built_from as Target;
-    const id = identity(target.media, target.id, target.season, target.episode_number);
-    const title = identity(target.media, target.id);
-    const outcome = syncPolicy<{ action: string }>({
-      op: 'decide',
-      command,
-      remote: remoteFacts(snapshot, id, title),
-    });
-    if (outcome.action === 'hold' || outcome.action === 'superseded') continue;
-    if (outcome.action === 'send' && !holding(log, account)) break;
-    if (outcome.action === 'send' && !(await send(command, target, clientId, token, fetchImpl)))
-      continue;
-    if (!current()) break;
-    const settled = syncPolicy<unknown>({
-      op: 'settle',
-      outcome,
-      built_from: target,
-      order: [epoch, reserved[index]!, device],
-    });
-    if (settled === null) continue;
-    const name = syncPolicy<string>({
-      op: 'receipt_name',
-      provider: 'simkl',
-      account,
-      target: target.receipt_target,
-    });
-    const currentReceipt = log
-      .rows()
-      .find((row): row is ReceiptRow => row.kind === 'snt' && rowName(row) === name);
-    const receipt: ReceiptRow = currentReceipt ?? {
-      kind: 'snt',
-      schema: 3,
-      provider: 'simkl',
-      account,
-      target: target.receipt_target,
-      entries: {},
-    };
-    await log.write(
-      { ...receipt, entries: { ...receipt.entries, [target.receipt_key]: settled } },
-      undefined,
-      false,
-    );
-  }
   return true;
 }
 

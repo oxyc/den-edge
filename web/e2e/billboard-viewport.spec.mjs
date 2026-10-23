@@ -17,6 +17,12 @@ for (const touch of [true, false])
       const hero = page.locator('.billboard');
       await expect(hero).toBeVisible();
       const before = await hero.boundingBox();
+      expect(before).toMatchObject({ x: 0, width: 390 });
+      expect(
+        await page.evaluate(() =>
+          getComputedStyle(document.documentElement).getPropertyValue('--page-max').trim(),
+        ),
+      ).toBe('100%');
       const following = await page
         .locator('[data-following-content]')
         .evaluate((el) => el.getBoundingClientRect().top + scrollY);
@@ -44,7 +50,27 @@ for (const touch of [true, false])
       } else expect(after.height).toBeGreaterThan(before.height);
       await page.setViewportSize({ width: 844, height: 600 });
       await expect.poll(async () => (await hero.boundingBox()).height).toBe(456);
+      expect(await hero.boundingBox()).toMatchObject({ x: 0, width: 844 });
     } finally {
       await browser.close();
     }
   });
+
+test('an ultrawide window keeps the billboard on the centred 1920×1080 canvas', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 2560, height: 1200 } });
+  await guardNetwork(page);
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html`);
+
+  const hero = page.locator('.billboard');
+  await expect(hero).toBeVisible();
+  expect(await hero.boundingBox()).toMatchObject({ x: 320, width: 1920, height: 1080 });
+  expect(
+    await page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue('--page-max').trim(),
+    ),
+  ).toBe('1920px');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(2560);
+  await page.close();
+});

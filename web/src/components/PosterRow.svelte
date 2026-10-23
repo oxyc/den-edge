@@ -40,29 +40,38 @@
    * Whether the row is within `AHEAD` of the active screen. Far and retained-hidden rows release their images;
    * one shared observer replaces a separate browser lazy-image watch for every poster.
    */
-  const row = $state({ near: false, ahead: false });
+  let rowNear = $state(false);
+  let rowAhead = $state(false);
+  const row = {
+    get near() {
+      return rowNear;
+    },
+    get ahead() {
+      return rowAhead;
+    },
+  };
   setContext(ROW_NEAR, row);
   const page = pageVisibility();
   let section: HTMLElement;
   $effect(() => {
     if (!page.active) {
-      row.near = false;
+      rowNear = false;
       return;
     }
     if (active !== undefined) {
-      row.near = active;
+      rowNear = active;
       return;
     }
-    return observeNearViewport(section, (near) => (row.near = near), `${AHEAD}px 0px`);
+    return observeNearViewport(section, (near) => (rowNear = near), `${AHEAD}px 0px`);
   });
   // A windowing row tells each card whether it is on screen (`PosterCard`'s `onscreen`), so the cards' vertical
   // availability lookahead is this one track's rather than an observer target per card.
   $effect(() => {
     if (!page.active || !active || !track) {
-      row.ahead = false;
+      rowAhead = false;
       return;
     }
-    return observeNearViewport(track, (near) => (row.ahead = near), `${AVAILABILITY_AHEAD}px 0px`);
+    return observeNearViewport(track, (near) => (rowAhead = near), `${AVAILABILITY_AHEAD}px 0px`);
   });
 </script>
 
@@ -95,10 +104,10 @@
 
     /* A TV-only stylesheet can enlarge the shared shelf without adding TV selectors or code to the web build. */
     --card-w: var(--poster-card-w, clamp(140px, 38vw, 190px));
-    --page-inset: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
+    --page-inset: var(--gutter);
 
-    width: 100vw;
-    margin: 0 calc(50% - 50vw) 32px;
+    width: var(--presentation-width);
+    margin: 0 calc(50% - var(--presentation-edge)) 32px;
   }
 
   .head {

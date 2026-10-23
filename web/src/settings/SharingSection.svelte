@@ -90,7 +90,7 @@
 
   // The host's side.
   const installs = $derived(hostedInstalls(plugins, routes));
-  let grants = $state<Grant[] | null>(null);
+  let grants = $state.raw<Grant[] | null>(null);
   let problem = $state<string | null>(null);
   let working = $state(false);
   let name = $state('');
@@ -99,7 +99,9 @@
   let redeemBy = $state(DEFAULT_REDEEM_DAYS);
   let devices = $state<number | null>(1);
   /** The invite just made, or a guest's new link: `title` heads the panel, `notes` say what changed. */
-  let created = $state<{ name: string; code: string; title: string; notes: string[] } | null>(null);
+  let created = $state.raw<{ name: string; code: string; title: string; notes: string[] } | null>(
+    null,
+  );
   let madePanel = $state<HTMLDivElement>();
   let copied = $state<string | null>(null);
   /** Set once a copy fell back all the way to "select it yourself": the field is already selected for it. */
@@ -107,16 +109,16 @@
   let manualCode = $state(false);
   let linkField = $state<HTMLInputElement>();
   let codeField = $state<HTMLInputElement>();
-  let renaming = $state<{ gid: string; name: string } | null>(null);
+  let renaming = $state.raw<{ gid: string; name: string } | null>(null);
   /** The guest whose revoke is being asked about; the question opens from their menu. */
   let revoking = $state<string | null>(null);
   /** Chosen in a guest's menu, asked about as soon as that menu has closed. */
   let revokeNext: string | null = null;
-  let menus = $state<Record<string, ActionMenu | undefined>>({});
+  let menus = $state.raw<Record<string, ActionMenu | undefined>>({});
   /** A native picker shows its choice immediately. Keep that optimistic value explicit so a refused edit rolls back. */
-  let deviceLimits = $state<Record<string, number | null>>({});
+  let deviceLimits = $state.raw<Record<string, number | null>>({});
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
-  let codes = $state<Record<string, string>>({});
+  let codes = $state.raw<Record<string, string>>({});
 
   // Combined Hearth replaces its legacy Scout, Reel and Subtitles installs; Atlas remains separate discovery. Edge
   // never opens an opaque segment, and legacy first-party installs are shared only where Hearth is absent.
@@ -347,7 +349,7 @@
     const items: MenuItem[] = [];
     const code = grant.status === 'invited' ? codes[grant.gid] : undefined;
     if (code) {
-      const address = inviteLink(__DEN_TV_API_ORIGIN__ || location.origin, code);
+      const address = inviteLink(__DEN_TV_WEB_ORIGIN__ || location.origin, code);
       items.push({
         kind: 'item',
         label: copied === address ? 'Copied' : 'Copy invite link',
@@ -412,7 +414,7 @@
   // The guest's side.
   let pasted = $state('');
   let redeeming = $state(false);
-  let redeemNote = $state<{ text: string; bad: boolean } | null>(null);
+  let redeemNote = $state.raw<{ text: string; bad: boolean } | null>(null);
   const redeemFailures: Record<RedeemFailure, string> = {
     malformed: 'That isn’t an invite. Paste the code, or the whole link you were sent.',
     invalid:
@@ -457,7 +459,7 @@
       </p>
     {:else}
       {#if created}
-        {@const address = inviteLink(__DEN_TV_API_ORIGIN__ || location.origin, created.code)}
+        {@const address = inviteLink(__DEN_TV_WEB_ORIGIN__ || location.origin, created.code)}
         {@const code = created.code}
         <div class="made" role="status" bind:this={madePanel}>
           <p>
@@ -592,7 +594,9 @@
                      where they stand. Revoke is still asked about, in place, below the row. -->
                 <div class="guest-menu">
                   <ActionMenu
-                    bind:this={menus[grant.gid]}
+                    bind:this={
+                      () => menus[grant.gid], (menu) => (menus = { ...menus, [grant.gid]: menu })
+                    }
                     items={() => guestItems(grant)}
                     label="More actions for {grant.name}"
                     heading={grant.name}
@@ -629,7 +633,12 @@
                     class="field"
                     maxlength="60"
                     aria-label="New name for {grant.name}"
-                    bind:value={edit.name}
+                    value={edit.name}
+                    oninput={(event) =>
+                      (renaming = {
+                        ...edit,
+                        name: (event.currentTarget as HTMLInputElement).value,
+                      })}
                   />
                   <Button
                     type="submit"

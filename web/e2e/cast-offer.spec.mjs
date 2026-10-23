@@ -242,7 +242,7 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     );
     expect(asked.relay).toEqual([]);
 
-    await castButton.click();
+    await clickCast(page);
     await expect.poll(() => asked.managed.length).toBeGreaterThanOrEqual(2);
     expect(asked.managed[1].player).toBe('cast');
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
@@ -280,7 +280,7 @@ test('a signed LAN HTTP session stays on Hearth and is handed directly to Chrome
   const { browser, page, asked } = await open('playing', { lanHttp: true });
   try {
     await playingPast(page, 3);
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await clickCast(page);
     await expect.poll(() => asked.direct.length).toBe(2);
     expect(asked.direct[1]).toMatchObject({ player: 'cast' });
     expect(asked.relay, 'LAN HTTP media does not need Edge public-media ingress').toEqual([]);
@@ -305,7 +305,7 @@ test('a selected subtitle never disqualifies TorBox before Cast', async () => {
   });
   try {
     await playingPast(page, 3);
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await clickCast(page);
     await expect.poll(() => asked.managed.length).toBe(2);
     expect(asked.managed[1]).toMatchObject({ player: 'cast' });
     expect(asked.managed[1]).not.toHaveProperty('directFailed');
@@ -337,6 +337,22 @@ async function playingPast(page, seconds) {
   });
 }
 
+/**
+ * Reveal the auto-hiding transport the way a viewer does. It hides 3.5 s into playback; a viewer brings it back by
+ * moving toward the controls, while Playwright otherwise teleports its synthetic click to a control that correctly no
+ * longer receives pointer input underneath the video.
+ */
+async function revealControls(page) {
+  await page.mouse.move(20, 20);
+  await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+}
+
+/** Press Cast, an output action in the auto-hiding transport. */
+async function clickCast(page) {
+  await revealControls(page);
+  await page.getByRole('button', { name: 'Cast to a TV' }).click();
+}
+
 async function playerGeometry(page) {
   return page.locator('.player').evaluate((player) => {
     const box = (selector) => {
@@ -344,6 +360,34 @@ async function playerGeometry(page) {
       return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
     };
     return { stage: box('.stage'), video: box('video') };
+  });
+}
+
+/**
+ * Record each Cast status the page renders (`window.castStatuses`), measured as the DOM changes. "Looking" lasts only
+ * the fixture's discovery window, which a busy machine can spend before a test's next call reaches the page; read
+ * from the test, that state is missed or measured as it is replaced.
+ */
+async function recordCastStatus(page) {
+  await page.locator('.player').evaluate((player) => {
+    const box = (element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    window.castStatuses = [];
+    new MutationObserver(() => {
+      const notice = player.querySelector('.cast-status .notice');
+      const text = notice?.querySelector('.notice-copy')?.textContent ?? null;
+      if (text === null || text === window.castStatuses.at(-1)?.text) return;
+      window.castStatuses.push({
+        text,
+        notice: box(notice),
+        geometry: {
+          stage: box(player.querySelector('.stage')),
+          video: box(player.querySelector('video')),
+        },
+      });
+    }).observe(player, { subtree: true, childList: true, characterData: true });
   });
 }
 
@@ -359,15 +403,25 @@ for (const viewport of [
     try {
       await playingPast(page, 1);
       const idle = await playerGeometry(page);
+      await recordCastStatus(page);
 
-      await page.getByRole('button', { name: 'Cast to a TV' }).click();
-      await expect(page.getByText('Looking for a Chromecast…')).toBeVisible();
-      expect(await playerGeometry(page)).toEqual(idle);
-      const searchingStatus = await page.locator('.cast-status .notice').boundingBox();
-
+      await clickCast(page);
       await expect(page.getByText('No Chromecast found.')).toBeVisible();
-      expect(await playerGeometry(page)).toEqual(idle);
-      expect(await page.locator('.cast-status .notice').boundingBox()).toEqual(searchingStatus);
+      const statuses = await page.evaluate(() => window.castStatuses);
+      expect(statuses.map((status) => status.text)).toEqual([
+        'Looking for a Chromecast…',
+        'No Chromecast found. Check that it is awake and on the same network as this device.',
+      ]);
+      const [searching, none] = statuses;
+      expect(searching.geometry).toEqual(idle);
+      expect(none.geometry).toEqual(idle);
+      expect(none.notice).toEqual(searching.notice);
+    } catch (error) {
+      await page
+        .context()
+        .tracing.stop({ path: test.info().outputPath('page-trace.zip') })
+        .catch(() => undefined);
+      throw error;
     } finally {
       await browser.close();
     }
@@ -378,7 +432,7 @@ test('Cast with no Chromecast on the network leaves the video playing', async ()
   const { browser, page, asked } = await open('none');
   try {
     const before = await playingPast(page, 3);
-    await page.getByRole('button', { name: 'Cast to a TV' }).click();
+    await clickCast(page);
     await expect(page.getByText('No Chromecast found.')).toBeVisible({ timeout: 15_000 });
     // The same element, never replaced, and still going: nothing was restarted or moved.
     const video = page.locator('.player video[data-before="cast"]');
@@ -410,6 +464,7 @@ test('a release picked mid-film names the session it replaces, which the page en
   try {
     await playingPast(page, 3);
     expect(asked.direct[0]).not.toHaveProperty('replaces');
+    await revealControls(page);
     await page.getByRole('button', { name: /^Stream: / }).click();
     await page.getByRole('menuitemradio').filter({ hasText: 'other.mkv' }).click();
     await expect.poll(() => asked.direct.length).toBe(2);
@@ -433,13 +488,7 @@ for (const [mode, what] of [
     const { browser, page, asked } = await open(mode);
     try {
       const before = await playingPast(page, 7);
-      // The integrated output action lives in the auto-hiding transport. A viewer reveals it by moving toward the
-      // controls; Playwright otherwise teleports its synthetic click to a control that correctly no longer receives
-      // pointer input underneath the video.
-      await page.mouse.move(20, 20);
-      const castButton = page.getByRole('button', { name: 'Cast to a TV' });
-      await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
-      await castButton.click();
+      await clickCast(page);
       // A receiver was seen, so playback moved to the relay, starting where the video was.
       await expect.poll(() => asked.relay.length).toBe(1);
       expect(asked.relay[0].startAt).toBeGreaterThanOrEqual(Math.floor(before));

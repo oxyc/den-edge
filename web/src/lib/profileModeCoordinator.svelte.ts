@@ -119,7 +119,7 @@ export type ProfileDirectoryState =
 /**
  * What the directory read says. `pending` is not yet answered (including a kept household that predates a committed
  * split and has yet to read it); `absent` is answered with no directory (a household
- * before its Owner split, or a browser-local library); `invalid` is a directory that exists but cannot be opened.
+ * without profiles, or a browser-local library); `invalid` is a directory that exists but cannot be opened.
  */
 export function profileDirectoryState(
   view: ProfileDirectoryView | undefined,
@@ -455,6 +455,20 @@ export class ProfileModeCoordinator {
       !this.#preview &&
       this.mode === 'owner' &&
       this.parentalPinConfigured === false
+    );
+  }
+
+  /**
+   * Whether choosing `target` must wait until the Owner PIN's state is known: that state decides whether the choice
+   * first sets the PIN (`setsPin`), and choosing Kid before it is known would switch with none to bring the Owner back.
+   */
+  waitsForPin(target: ActiveProfileMode): boolean {
+    return (
+      !this.#startsKid &&
+      target === 'kid' &&
+      !this.#preview &&
+      this.mode === 'owner' &&
+      this.parentalPinConfigured === undefined
     );
   }
 

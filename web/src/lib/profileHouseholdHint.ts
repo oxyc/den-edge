@@ -7,12 +7,17 @@ const MAX_HINTS = 16;
  * so the 64 bits kept say nothing usable about it. Prefixed so it matches no other use of the same key.
  */
 function householdTag(libraryKey: string): string {
-  let hash = 0xcbf29ce484222325n;
+  // FNV-1a's 64-bit offset basis, kept as two uint32 words so Chromium 47 does not need BigInt. Multiplication by
+  // the prime 0x100000001b3 is `hash * 0x1b3 + hash * 2^40`; every intermediate below stays below 2^53.
+  let high = 0xcbf29ce4;
+  let low = 0x84222325;
   for (const byte of new TextEncoder().encode(`den.household.wire5:${libraryKey}`)) {
-    hash ^= BigInt(byte);
-    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+    low = (low ^ byte) >>> 0;
+    const lowProduct = low * 0x1b3;
+    high = (high * 0x1b3 + Math.floor(lowProduct / 0x1_0000_0000) + low * 0x100) >>> 0;
+    low = lowProduct >>> 0;
   }
-  return hash.toString(16).padStart(16, '0');
+  return high.toString(16).padStart(8, '0') + low.toString(16).padStart(8, '0');
 }
 
 function readTags(storage: Storage): string[] {
@@ -21,8 +26,8 @@ function readTags(storage: Storage): string[] {
 }
 
 /**
- * Whether this browser has seen `libraryKey` bootstrapped from wire 4 to wire 5. The Owner split is one-way, so a
- * household once seen needing wire 5 always will. Blocked or damaged storage answers false, which opens on wire 4 and
+ * Whether this browser has seen `libraryKey` require wire 5. Profile mode is permanent, so a household once seen
+ * needing wire 5 always will. Blocked or damaged storage answers false, which opens on wire 4 and
  * bootstraps as before.
  */
 export function knownProfileHousehold(

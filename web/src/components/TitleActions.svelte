@@ -348,6 +348,7 @@
         <div
           class="den-button den-button-secondary den-button-regular pick"
           class:on={reaction !== null}
+          class:disabled={mutationBlocked()}
           aria-busy={pressed.saving('reaction') || undefined}
           data-saving={pressed.saving('reaction') || undefined}
         >
@@ -484,6 +485,19 @@
     color: var(--bg);
   }
 
+  /* A saved utility is state, not the page's primary action. Keep it visibly on without giving it Play's solid
+     white treatment; this is shared by the browser detail page and the TV presentation. */
+  .detail-page .utilities > :global(.pill[aria-pressed='true']),
+  .detail-page .pick.on {
+    --button-bg: var(--accent-wash-14);
+    --button-border: var(--accent-outline-45);
+    --button-fg: var(--accent-fg-78);
+
+    border-color: var(--button-border);
+    background: var(--button-bg);
+    color: var(--button-fg);
+  }
+
   .desktop-reactions {
     display: none;
   }
@@ -542,16 +556,6 @@
       clip-path: inset(50%);
       white-space: nowrap;
     }
-
-    .detail-page .utilities > :global(.pill[aria-pressed='true']),
-    .detail-page .utilities > .pick.on {
-      --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
-      --button-border: transparent;
-      --button-fg: color-mix(in srgb, var(--fg) 78%, var(--accent));
-
-      background: var(--button-bg);
-      color: var(--button-fg);
-    }
   }
 
   /* The focused element in the picker is the select inside, so its shell lights up with it. */
@@ -561,7 +565,7 @@
   }
 
   /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */
-  .pick:has(select:disabled) {
+  .pick.disabled {
     opacity: 0.45;
     cursor: progress;
   }
@@ -569,7 +573,7 @@
   /* A local save changes only its initiating state glyph. The shared command channel temporarily disables the
      other mutations, but dimming the whole row made one Watchlist press look like a full action-bar rerender. */
   .actions.saving :global(.den-button[aria-disabled='true']),
-  .actions.saving .pick:has(select:disabled) {
+  .actions.saving .pick.disabled {
     opacity: 1;
   }
 

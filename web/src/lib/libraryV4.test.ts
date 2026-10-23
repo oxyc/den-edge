@@ -6,12 +6,10 @@ import {
   markEpisode,
   markWatched,
   react,
-  updateEpisodeProgress,
 } from './actions';
-import { libraryAlert, switchLibraryToV4 } from './libraryUpgrade';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
-import { LibraryLog } from './log';
+import { LibraryLog, PRE_V4_BACKUP_ERROR } from './log';
 import { approveSimklRemovals, deliverSimkl, heldSimklRemovals } from './simklDelivery';
 import { recordTrackerEvent } from './trackerEvents';
 import {
@@ -26,28 +24,17 @@ import {
   type SettingsRow,
   type Stamp,
   type TitleRow,
-  type WatchRow,
 } from './wire';
 
-// The dry run is den-core's, and on a well-formed log it passes; this lets one test make it fail.
-const dryRun = vi.hoisted(() => ({ fail: false }));
-vi.mock('./syncCore', async (original) => {
-  const real = await original<typeof import('./syncCore')>();
-  return {
-    ...real,
-    syncPolicy: <T>(request: Record<string, unknown>): T =>
-      request.op === 'v4_dry_run' && dryRun.fail
-        ? ({
-            pass: false,
-            abort: [{ reason: 'derived', title: 'title:tv:1399', field: 'status' }],
-            pending_differences: [],
-            counts: {},
-          } as T)
-        : real.syncPolicy<T>(request),
-  };
-});
-
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
+
+const libraryAlert = (log: LibraryLog): string | null => {
+  if (log.upgradeRequired !== null) return 'Library update required';
+  if (log.compactionRefused && log.unreadable.size)
+    return 'Delivery paused: library rows can’t be read';
+  return log.readOnlyReason;
+};
+
 const DEVICE = 'aaaaaaaaaaaaaaaa';
 const at = (t: number): Stamp => [t, 0, DEVICE];
 
@@ -56,23 +43,6 @@ const rec = (type: 'movie' | 'tv', id: number, overrides: Partial<TitleRow> = {}
   status: { value: 'watchlist', at: at(1000) },
   ...overrides,
 });
-
-const watch: WatchRow = {
-  kind: 'wat',
-  schema: 3,
-  title: { type: 'tv', id: 1399 },
-  season: 1,
-  block: 0,
-  seasonReset: null,
-  entries: {
-    2: {
-      imported: false,
-      progress: { value: 1, at: at(2000), viewing: 0 },
-      plays: { 0: 2000 },
-      cleared: null,
-    },
-  },
-};
 
 const prefs: SettingsRow = {
   kind: 'set',
@@ -238,7 +208,7 @@ describe('Library v4 documents', () => {
         .rows()
         .map((row) => row.kind)
         .sort(),
-    ).toEqual(['rec', 'set', 'wat']);
+    ).toEqual(['ep', 'rec', 'set']);
   });
 
   it('writes an edit as den-core writes it, compressed, and only the document it touches', async () => {
@@ -297,7 +267,9 @@ describe('Library v4 documents', () => {
     const server = await edge([filmDocument(1)]);
     const { vault, data } = memoryVault();
     const first = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    await vi.waitFor(() => expect(data.has(`${first.libraryId}:log.v4`)).toBe(true));
+    await vi.waitFor(() =>
+      expect(data.has(`${first.libraryId}:library-facts.v1:manifest`)).toBe(true),
+    );
     // The minimum was remembered only in page storage, which the Worker that opens the log cannot read.
     first.close();
     data.delete(`${first.libraryId}:runtime:meta:wireMin`);
@@ -338,7 +310,7 @@ describe('Library v4 documents', () => {
     });
   });
 
-  it('takes an import as edits, and v3 rows of a library moving in as their documents', async () => {
+  it('takes imported title and episode projections as v4 edits', async () => {
     const server = await edge([filmDocument(1)]);
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
     const ref = { type: 'tv' as const, id: 95396 };
@@ -346,14 +318,12 @@ describe('Library v4 documents', () => {
       await log.writeRows([
         markEpisode(blankEpisode(ref, 2, 4), true, at(3000)),
         markWatched(blankTitle({ type: 'movie', id: 600 }, 3000), at(3100)),
-        watch,
       ]),
     ).toBe(true);
     const stored = await server.opened();
     expect(stored.some((row) => ['rec', 'ep', 'wat'].includes(row.kind))).toBe(false);
     expect(log.episode(ref, 2, 4)?.progress.value).toBe(1);
     expect(log.title({ type: 'movie', id: 600 })?.status.value).toBe('watched');
-    expect(log.episode({ type: 'tv', id: 1399 }, 1, 2)?.progress.value).toBe(1);
   });
 
   it('a kept write sent late never sets a field back past a newer one', () => {
@@ -449,183 +419,15 @@ describe('Library v4 documents', () => {
   });
 });
 
-describe('the switch to Library v4', () => {
-  const v3 = () => [
-    rec('tv', 1399),
-    watch,
-    prefs,
-    rec('movie', 550, { reaction: { value: 'love', at: at(1500) } }),
-  ];
-
-  it('converts a v3 library, checked, and commits it at minimum 4', async () => {
-    const server = await edge(v3(), { wireMin: 3 });
+describe('pre-v4 backups', () => {
+  it('refuses an old-format restore read-only with the recorded error', async () => {
+    const server = await edge([rec('movie', 550)], { wireMin: 3 });
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(log.needsV4).toBe(true);
-    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
 
-    expect(server.log.commits).toEqual([{ base: 4, wireMin: 4 }]);
-    expect(log.wireMinimum).toBe(4);
-    const stored = await server.opened();
-    expect(stored.map((row) => row.kind).sort()).toEqual(['season', 'set', 'title', 'title']);
-    expect(log.title({ type: 'movie', id: 550 })?.reaction.value).toBe('love');
-    expect(log.episode({ type: 'tv', id: 1399 }, 1, 2)?.progress.value).toBe(1);
-    // Settings are staged as they were stored.
-    expect(log.settings('prefs')).toEqual(prefs);
-    expect(log.needsV4).toBe(false);
-    expect(libraryAlert(log)).toBeNull();
-  });
-
-  it('aborts on a derived-state difference: writes nothing, says why, and stays read-only', async () => {
-    const server = await edge(v3(), { wireMin: 3 });
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    dryRun.fail = true;
-    try {
-      expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(false);
-    } finally {
-      dryRun.fail = false;
-    }
-    expect(error).toHaveBeenCalledWith(
-      'den: the switch to Library v4 was aborted by its dry run',
-      expect.arrayContaining([expect.objectContaining({ title: 'title:tv:1399' })]),
-    );
-    error.mockRestore();
-    expect(server.log.commits).toEqual([]);
-    expect(server.log.aborted).toBe(1);
-    expect(server.wireMin()).toBe(3);
-    expect(log.wireMinimum).toBe(3);
-    expect(libraryAlert(log)).toBe('Library update failed: derived');
     expect(log.readOnly).toBe(true);
-    expect(
-      await log.write(react(log.title({ type: 'movie', id: 550 })!, 'like', at(9000))),
-    ).toBeNull();
-    // Tried again only after an hour, and then it goes through.
-    expect(await switchLibraryToV4(log, Date.now() + 60_000, server.fetchImpl)).toBe(false);
-    expect(await switchLibraryToV4(log, Date.now() + 3_600_000, server.fetchImpl)).toBe(true);
-    expect(log.readOnly).toBe(false);
-  });
-
-  it('on another device that switched it, writes back no v3 row and keeps its own edit', async () => {
-    const server = await edge(v3(), { wireMin: 3 });
-    const storage = memoryStorage();
-    const other = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, null))!;
-    const switcher = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(await switchLibraryToV4(switcher, Date.now(), server.fetchImpl)).toBe(true);
-
-    // An edit made before this browser learns of the switch is refused by the fence's successor, and kept.
-    const before = other.title({ type: 'movie', id: 550 })!;
-    expect(
-      await other.write({ ...before, dismissed: { value: true, at: at(9000) } }),
-    ).not.toBeNull();
-    await other.refresh();
-    await other.refresh();
-
-    expect(other.wireMinimum).toBe(4);
-    const stored = await server.opened();
-    expect(stored.filter((row) => ['rec', 'wat', 'snt', 'ep'].includes(row.kind))).toEqual([]);
-    expect(document(stored, 'title:movie:550')).toMatchObject({
-      reaction: { value: 'love' },
-      dismissed: { value: true, at: at(9000) },
-    });
-    expect(other.pendingActions).toBe(0);
-  });
-
-  it('keeps episode progress written on v3 while the fence is held, through the commit', async () => {
-    const server = await edge(v3(), { wireMin: 3 });
-    const player = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
-    const switcher = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    // What a write gets while another device holds the switch's fence: refused for now, and kept (as a `wat` row).
-    server.log.refuseNext = 'rewrite_in_progress';
-    const ref = { type: 'tv' as const, id: 1399 };
-    const before = player.episode(ref, 1, 5) ?? blankEpisode(ref, 1, 5);
-    expect(await player.write(updateEpisodeProgress(before, 0.4, 500, at(9000)))).not.toBeNull();
-    expect(player.pendingActions).toBe(1);
-    expect(await switchLibraryToV4(switcher, Date.now(), server.fetchImpl)).toBe(true);
-
-    await player.refresh();
-    await player.refresh();
-    const season = document(await server.opened(), 'season:tv:1399:1')!;
-    const episodes = season.episodes as Record<string, { progress?: unknown }>;
-    expect(episodes['5']?.progress).toMatchObject({ value: 0.4, seconds: 500 });
-    expect(episodes['2']?.progress).toMatchObject({ value: 1 });
-    expect(player.episode(ref, 1, 5)?.progress).toMatchObject({ value: 0.4, seconds: 500 });
-    expect(player.pendingActions).toBe(0);
-  });
-
-  it('lifts a failed switch here once another device commits it', async () => {
-    const server = await edge(v3(), { wireMin: 3 });
-    const failing = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    dryRun.fail = true;
-    try {
-      expect(await switchLibraryToV4(failing, Date.now(), server.fetchImpl)).toBe(false);
-    } finally {
-      dryRun.fail = false;
-      error.mockRestore();
-    }
-    expect(failing.readOnly).toBe(true);
-    const switcher = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(await switchLibraryToV4(switcher, Date.now(), server.fetchImpl)).toBe(true);
-
-    await failing.refresh();
-    expect(failing.readOnly).toBe(false);
-    expect(libraryAlert(failing)).toBeNull();
-    const film = failing.title({ type: 'movie', id: 550 })!;
-    expect(await failing.write(react(film, 'like', at(9500)))).not.toBeNull();
-    expect(document(await server.opened(), 'title:movie:550')?.reaction).toEqual({
-      value: 'like',
-      at: at(9500),
-    });
-  });
-
-  it('gives den-core an episode row of a film as the TV does, so it is not staged into the v4 log', async () => {
-    const stray = markEpisode(blankEpisode({ type: 'movie', id: 550 }, 1, 1), true, at(1200));
-    const server = await edge([...v3(), stray], { wireMin: 3 });
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
-    // Two titles, a season and the settings row: the stray row is dropped, not kept for a second switch.
-    expect(server.stored.size).toBe(4);
-    expect(log.needsV4).toBe(false);
-  });
-
-  it('switches a v4 library holding a stray tracker event again, folding its watch into the season', async () => {
-    const before = blankEpisode({ type: 'tv', id: 1399 }, 1, 4);
-    const stray = recordTrackerEvent(before, markEpisode(before, true, at(7000)), at(7000))!;
-    const server = await edge([filmDocument(550), prefs, stray]);
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(log.needsV4).toBe(true);
-    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
-
-    const stored = await server.opened();
-    expect(stored.filter((row) => row.kind === 'set').map((row) => row.name)).toEqual(['prefs']);
-    expect(log.episode({ type: 'tv', id: 1399 }, 1, 4)?.progress.value).toBe(1);
-    expect(log.predatesV3).toBe(false);
-    expect(log.needsV4).toBe(false);
-  });
-
-  it('waits for a den-edge that takes minimum 4', async () => {
-    const server = await edge(v3(), { wireMin: 3, version: '0.242.0' });
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(false);
+    expect(log.readOnlyReason).toBe(PRE_V4_BACKUP_ERROR);
+    expect(await log.write(blankTitle({ type: 'movie', id: 7 }, 1_000))).toBeNull();
     expect(server.log.commits).toEqual([]);
-  });
-
-  it('leaves a backup from before v3 as it is, and writes nothing to it', async () => {
-    const episode = { ...markEpisode(blankEpisode({ type: 'tv', id: 1 }, 1, 1), true, at(1000)) };
-    const server = await edge([episode], { wireMin: 3 });
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(false);
-    expect(log.predatesV3).toBe(true);
-    expect(libraryAlert(log)).toBe('Library backup predates v3');
-    expect(server.log.commits).toEqual([]);
-  });
-
-  it('refuses rows of a newer format than this build: a minimum above 4', async () => {
-    const server = await edge([filmDocument(550)], { wireMin: 5 });
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect(log.upgradeRequired).toBe(5);
-    expect(log.needsV4).toBe(false);
-    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(false);
   });
 });
 
@@ -761,73 +563,6 @@ describe('SIMKL delivery on Library v4', () => {
     expect((receipts.entries as Record<string, unknown[]>).list?.[0]).toBe('in');
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
     expect(sent.count).toBe(1);
-  });
-
-  it('a browser kept at v3 and an old generation takes the switch another device made', async () => {
-    // A library larger than this browser's storage has room for twice over: every title, and SIMKL connected.
-    const titles = Array.from({ length: 40 }, (_, i) => rec('movie', 1000 + i));
-    const { server, connection } = await simkl(
-      [rec('movie', 550), ...titles, watch, prefs, trackers, deliver(['', '1'])],
-      { wireMin: 3 },
-    );
-    const vault = memoryVault();
-    const storage = memoryStorage(8_000);
-
-    // A visit while the library was v3: it is kept here, and an edit den-edge refused for now is kept with it.
-    const visit = (await LibraryLog.open(LIBRARY_KEY, connection, storage, vault.vault))!;
-    await vi.waitFor(() => expect(vault.data.has(`${visit.libraryId}:log.v1`)).toBe(true));
-    server.log.refuseNext = 'rewrite_in_progress';
-    const film = visit.title({ type: 'movie', id: 550 })!;
-    expect(await visit.write({ ...film, dismissed: { value: true, at: at(9000) } })).not.toBeNull();
-    expect(visit.pendingActions).toBe(1);
-
-    // The TV switches it to v4: minimum 4, a new generation.
-    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, deliveryVault))!;
-    // Its dry run lists the rating commands v4 no longer sends for titles nobody rated.
-    const quiet = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(await switchLibraryToV4(tv, Date.now(), server.fetchImpl)).toBe(true);
-    quiet.mockRestore();
-    const generations = server.log.commits.length;
-
-    // The next load, as `LibrarySession.refresh` runs it.
-    const asked: { method: string; action: string; status: number }[] = [];
-    const recording: typeof fetch = async (input, init) => {
-      const res = await connection(input, init);
-      const action = new URL(String(input), 'https://den.example').pathname.split('/')[3] ?? '';
-      if (String(input).startsWith('/lib/'))
-        asked.push({ method: init?.method ?? 'GET', action, status: res.status });
-      return res;
-    };
-    const log = (await LibraryLog.open(LIBRARY_KEY, recording, storage, vault.vault))!;
-    expect(log.fromCache).toBe(true);
-    await log.refresh();
-    await switchLibraryToV4(log, Date.now(), recording);
-    await watched(log, recording);
-
-    expect(asked.filter(({ action }) => action === 'rewrite')).toEqual([]);
-    expect(server.log.commits).toHaveLength(generations);
-    // At most one refusal, by which it learns the new generation.
-    expect(asked.filter(({ status }) => status === 409).slice(1)).toEqual([]);
-    const writes = asked.filter(({ action }) => action === 'batch');
-    expect(writes.length).toBeGreaterThan(0);
-    expect(writes.at(-1)?.status).toBe(200);
-    expect(log.wireMinimum).toBe(4);
-    expect(log.needsV4).toBe(false);
-    expect(libraryAlert(log)).toBeNull();
-    // The kept edit, written back as v4 writes; the lease taken under the current generation.
-    const stored = await server.opened();
-    expect(document(stored, 'title:movie:550')?.dismissed).toEqual({ value: true, at: at(9000) });
-    expect(stored.filter((row) => ['rec', 'wat', 'ep'].includes(row.kind))).toEqual([]);
-    const lease = stored.find(
-      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
-    )!.values.lease?.value;
-    expect(lease).toEqual({ strings: [DEVICE, expect.any(String)] });
-    expect(log.pendingActions).toBe(0);
-
-    // Written back once: the next refresh sends nothing.
-    asked.length = 0;
-    await log.refresh();
-    expect(asked.filter(({ method }) => method !== 'GET')).toEqual([]);
   });
 
   it('a lease refused by a generation change reads the new log, and a later pass takes it', async () => {
@@ -1466,6 +1201,66 @@ describe('a settings row riding with an edit (assistant v1 §6)', () => {
   });
 });
 
+describe('an edit made on a log of its own documents (LibraryLog.openNarrow)', () => {
+  const ref = { type: 'movie' as const, id: 550 };
+  const names = ['title:movie:550', 'rec:movie:550'];
+  const sent = (log: LibraryLog) => vi.waitFor(() => expect(log.pendingActions).toBe(0));
+
+  /** A library this browser has opened whole, so its fact store is complete and its membership kept. */
+  async function openedHere(fetchWrap?: (inner: typeof fetch) => typeof fetch) {
+    const server = await edge([filmDocument(1), filmDocument(2), filmDocument(550)]);
+    const fetchImpl = fetchWrap ? fetchWrap(server.fetchImpl) : server.fetchImpl;
+    const { vault } = memoryVault();
+    const full = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    expect(full.title(ref)?.status.value).toBe('watchlist');
+    full.close();
+    return { server, fetchImpl, vault };
+  }
+
+  it('reads only the documents it names, and its edit reaches den-edge whole', async () => {
+    const { server, fetchImpl, vault } = await openedHere();
+    const narrow = await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, vault);
+    expect(narrow, 'opened narrow').not.toBeNull();
+    expect(narrow!.title(ref)?.status.value).toBe('watchlist');
+    expect(
+      narrow!.title({ type: 'movie', id: 1 }),
+      'the other titles are not read',
+    ).toBeUndefined();
+
+    await narrow!.write(react(narrow!.title(ref)!, 'love', at(4000)));
+    await sent(narrow!);
+    narrow!.close();
+
+    const stored = document(await server.opened(), 'title:movie:550');
+    expect(stored?.reaction).toEqual({ value: 'love', at: at(4000) });
+    expect(stored?.status, 'the rest of the document kept').toEqual({
+      value: 'watchlist',
+      at: at(1000),
+    });
+  });
+
+  it('declines a browser with no fact store', async () => {
+    const { fetchImpl } = await openedHere();
+    expect(
+      await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, memoryVault().vault),
+    ).toBeNull();
+  });
+
+  it('declines while work is kept on this device', async () => {
+    let unreachable = false;
+    const { fetchImpl, vault } = await openedHere((inner) => async (input, init) => {
+      if (unreachable && init?.method === 'POST') throw new TypeError('network down');
+      return inner(input, init);
+    });
+    const full = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, vault))!;
+    unreachable = true;
+    await full.write(react(full.title(ref)!, 'like', at(4000)));
+    await vi.waitFor(() => expect(full.queuedActions, 'kept, not sent').toBe(1));
+    full.close();
+    expect(await LibraryLog.openNarrow(LIBRARY_KEY, names, fetchImpl, vault)).toBeNull();
+  });
+});
+
 function memoryVault() {
   const data = new Map<string, Uint8Array>();
   const vault: Vault = {
@@ -1475,6 +1270,17 @@ function memoryVault() {
     delete: async (key) => void data.delete(key),
     remove: async (prefix) => {
       for (const k of [...data.keys()]) if (k.startsWith(prefix)) data.delete(k);
+    },
+    page: async (prefix, after, limit) =>
+      [...data]
+        .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, limit),
+    commit: async (changes) => {
+      for (const change of changes) {
+        if (change.kind === 'put') data.set(change.key, change.value.slice());
+        else data.delete(change.key);
+      }
     },
   };
   return { data, vault };

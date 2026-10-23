@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { deviceOf, entryOf, loadRouteOf } from './loadReport';
+import {
+  deviceOf,
+  entryOf,
+  fileTally,
+  loadRouteOf,
+  loadSettled,
+  MILESTONES,
+  netTally,
+} from './loadReport';
 
 const IPHONE_SAFARI =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
@@ -11,6 +19,10 @@ const MAC_CHROME =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 const ANDROID_CHROME =
   'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36';
+const LG_WEBOS =
+  'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36 WebAppManager';
+const ANDROID_TV_SHELL =
+  'Mozilla/5.0 (Linux; Android 12; BRAVIA 4K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 DenAndroidTV/1.4';
 
 describe('deviceOf', () => {
   it('names every iPhone browser a WebKit phone, whatever it calls itself', () => {
@@ -26,6 +38,11 @@ describe('deviceOf', () => {
   it('names Chrome on a desktop and on Android', () => {
     expect(deviceOf(MAC_CHROME)).toEqual({ device: 'desktop', engine: 'blink' });
     expect(deviceOf(ANDROID_CHROME)).toEqual({ device: 'phone', engine: 'blink' });
+  });
+
+  it('names a TV a TV, not the desktop or tablet its browser otherwise reads as', () => {
+    expect(deviceOf(LG_WEBOS)).toEqual({ device: 'tv', engine: 'blink' });
+    expect(deviceOf(ANDROID_TV_SHELL)).toEqual({ device: 'tv', engine: 'blink' });
   });
 });
 
@@ -52,5 +69,111 @@ describe('entryOf', () => {
   it('sends nothing it does not know', () => {
     expect(entryOf(undefined)).toBeUndefined();
     expect(entryOf({ type: 'prerender', name: page })).toBeUndefined();
+  });
+});
+
+describe('netTally', () => {
+  it('counts and sums the page’s requests by kind, never naming one', () => {
+    const tally = netTally([
+      { name: 'https://den-tv.oxy.fi/tmdb/3/movie/550', initiatorType: 'fetch', duration: 210.4 },
+      { name: 'https://den-tv.oxy.fi/tmdb/3/tv/1399', initiatorType: 'fetch', duration: 190.2 },
+      { name: 'https://den-tv.oxy.fi/lib/abc/changes', initiatorType: 'fetch', duration: 80 },
+      {
+        name: 'https://den-tv.oxy.fi/ratings/movie/tt1',
+        initiatorType: 'xmlhttprequest',
+        duration: 40,
+      },
+      { name: 'https://image.tmdb.org/t/p/w342/x.jpg', initiatorType: 'img', duration: 300 },
+      { name: 'https://den-tv.oxy.fi/assets/index.js', initiatorType: 'script', duration: 500 },
+    ]);
+    expect(tally).toEqual({ tmdb: [2, 400], lib: [1, 80], meta: [1, 40], image: [1, 300] });
+  });
+
+  it('names den-edge’s startup endpoints and source plugins instead of lumping them as other', () => {
+    const tally = netTally([
+      { name: 'https://den-tv.oxy.fi/routes', initiatorType: 'fetch', duration: 900 },
+      { name: 'https://den-tv.oxy.fi/config', initiatorType: 'fetch', duration: 120 },
+      { name: 'http://192.0.2.1:8094/health', initiatorType: 'fetch', duration: 2000 },
+      { name: 'https://den-tv.oxy.fi/capabilities/profiles', initiatorType: 'fetch', duration: 60 },
+      {
+        name: 'https://den-tv.oxy.fi/scout/abc/manifest.json',
+        initiatorType: 'fetch',
+        duration: 30,
+      },
+      { name: 'https://addon.example/xyz/manifest.json', initiatorType: 'fetch', duration: 40 },
+      { name: 'https://den-tv.oxy.fi/unknown-thing', initiatorType: 'fetch', duration: 5 },
+    ]);
+    expect(tally).toEqual({
+      routes: [1, 900],
+      config: [1, 120],
+      health: [1, 2000],
+      capabilities: [1, 60],
+      plugins: [2, 70],
+      other: [1, 5],
+    });
+  });
+});
+
+describe('fileTally', () => {
+  const origin = 'https://den-tv.oxy.fi';
+  it('counts script and Wasm files by where they came from, and nothing else', () => {
+    const tally = fileTally([
+      // The HTTP cache: nothing transferred, a body all the same.
+      { name: `${origin}/assets/index-a1.js`, transferSize: 0, encodedBodySize: 9_000 },
+      { name: `${origin}/assets/den_core_bg-b2.wasm`, transferSize: 0, decodedBodySize: 40_000 },
+      { name: `${origin}/assets/worker-c3.js`, transferSize: 300, deliveryType: 'cache' },
+      // The network, a revalidation included.
+      { name: `${origin}/assets/chunk-d4.js`, transferSize: 9_300, encodedBodySize: 9_000 },
+      { name: `${origin}/assets/chunk-e5.mjs`, transferSize: 280, encodedBodySize: 5_000 },
+      // A service worker answered.
+      {
+        name: `${origin}/assets/chunk-f6.js`,
+        transferSize: 0,
+        encodedBodySize: 1,
+        workerStart: 12,
+      },
+      // The engine says nothing: no sizes at all, or zeros (a cross-origin file without timing access).
+      { name: `${origin}/assets/old-tv.js` },
+      { name: 'https://cdn.example/x.js', transferSize: 0, encodedBodySize: 0 },
+      // Not a script or Wasm file.
+      { name: `${origin}/assets/index.css`, transferSize: 0, encodedBodySize: 2_000 },
+      { name: `${origin}/lib/abc/changes`, transferSize: 900 },
+      { name: `${origin}/js/notes`, transferSize: 900 },
+    ]);
+    expect(tally).toEqual({ cache: 3, serviceWorker: 1, network: 2, unknown: 2 });
+  });
+
+  it('is absent when no script or Wasm file loaded', () => {
+    expect(fileTally([])).toBeUndefined();
+    expect(fileTally([{ name: `${origin}/tmdb/3/movie/550`, transferSize: 0 }])).toBeUndefined();
+  });
+});
+
+describe('loadSettled', () => {
+  const at = (events: Record<string, number>) => (event: string) => events[event];
+
+  it('waits for content, and for a first library read that has started', () => {
+    expect(loadSettled(at({}))).toBe(false);
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900 }))).toBe(true);
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900, [MILESTONES.importStartMs]: 100 }))).toBe(
+      false,
+    );
+    expect(
+      loadSettled(
+        at({
+          [MILESTONES.posterMs]: 900,
+          [MILESTONES.importStartMs]: 100,
+          [MILESTONES.importMs]: 118_000,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('waits on Home for its shelves, which can follow its first poster by seconds', () => {
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900 }), 'home')).toBe(false);
+    expect(
+      loadSettled(at({ [MILESTONES.posterMs]: 900, [MILESTONES.shelvesMs]: 13_000 }), 'home'),
+    ).toBe(true);
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900 }), 'title')).toBe(true);
   });
 });

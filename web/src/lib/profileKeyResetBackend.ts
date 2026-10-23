@@ -20,7 +20,7 @@ import {
   type VerifiedProfileMove,
 } from './profileKeyResetExecutor';
 import type { ProfileDirectoryDocument } from './profileDirectory';
-import { profileMigrationDigest, profilesMaterialize } from './profileMigrationCore';
+import { profilesMaterialize, profilesSnapshotDigest } from './profilesCore';
 import { ensureSyncPolicy } from './syncLoader';
 import { fromBase64url, rowName } from './wire';
 
@@ -154,7 +154,7 @@ export async function observeResetSource(
     const source = reply.status === 200 ? parsedSourceAnswer(reply.body) : null;
     if (source === null)
       throw new ProfileResetUnavailableError(`unexpected source answer ${reply.status}`);
-    const digest = profileMigrationDigest('source', {
+    const digest = profilesSnapshotDigest('source', {
       libraryId: library.libraryId,
       generation: source.generation,
       base: snapshot.base,
@@ -232,7 +232,7 @@ export function resetHead(
   snapshot: ProfileResetSnapshot,
   wire: ResetWire,
 ): string {
-  return profileMigrationDigest('owner', {
+  return profilesSnapshotDigest('owner', {
     libraryId,
     base: snapshot.base,
     wireMin: wire,

@@ -44,7 +44,7 @@
   let rowNear = $state(false);
   // False from a retained page's reactivation until the first observer delivery after it. See `.windowed`.
   let placed = $state(true);
-  let materialized = $state<number[]>([]);
+  let materialized = $state.raw<number[]>([]);
   /** The cards on screen (`cardsOnScreen`), which `PosterCard` would otherwise each observe for themselves. */
   let onscreen = $state.raw({ start: 0, end: 0 });
   let focusedKey = $state<string | null>(null);
@@ -338,8 +338,8 @@
   }
 
   .windowed {
-    width: 100vw;
-    margin-inline: calc(50% - 50vw);
+    width: var(--presentation-width);
+    margin-inline: calc(50% - var(--presentation-edge));
     contain-intrinsic-block-size: auto
       calc(
         var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.5 + var(--poster-row-chrome-block-size)

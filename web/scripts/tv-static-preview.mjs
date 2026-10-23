@@ -3,12 +3,13 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
-import { TV_CSP } from './tv-csp.mjs';
+import { getTizenVersion, tvCsp } from './tv-csp.mjs';
 
 const directory = process.env.DEN_TV_OUT_DIR;
 if (!/^dist-tv-tizen-package(?:-e2e-\d+)?$/.test(directory ?? ''))
   throw new Error('Expected an isolated Tizen package output directory');
 const root = resolve(import.meta.dirname, '..', directory);
+const csp = tvCsp(getTizenVersion(process.env.DEN_TIZEN_VERSION));
 const types = {
   '.html': 'text/html',
   '.js': 'text/javascript',
@@ -40,7 +41,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(200, {
       'content-type': types[extname(file)] ?? 'application/octet-stream',
       'cache-control': 'no-store',
-      'content-security-policy': TV_CSP,
+      'content-security-policy': csp,
     });
     response.end(request.method === 'HEAD' ? undefined : body);
   } catch {

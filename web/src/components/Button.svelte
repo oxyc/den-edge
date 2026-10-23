@@ -14,10 +14,7 @@
     | 'player';
   export type ButtonSize = 'large' | 'regular' | 'compact' | 'icon';
 
-  export interface ButtonProps extends Omit<
-    HTMLButtonAttributes,
-    'children' | 'class' | 'disabled' | 'onclick' | 'type'
-  > {
+  export interface ButtonProps {
     children?: Snippet;
     label?: string;
     icon?: ButtonIconName;
@@ -39,6 +36,23 @@
     href?: string;
     element?: HTMLButtonElement;
     onclick?: (event: MouseEvent) => void;
+    onkeydown?: (event: KeyboardEvent) => void;
+    onpointerdown?: (event: PointerEvent) => void;
+    id?: string;
+    title?: string;
+    role?: HTMLButtonAttributes['role'];
+    tabindex?: number;
+    'aria-label'?: string;
+    'aria-describedby'?: string;
+    'aria-busy'?: boolean | 'true' | 'false';
+    'aria-disabled'?: boolean | 'true' | 'false';
+    'aria-pressed'?: boolean | 'true' | 'false' | 'mixed';
+    'aria-checked'?: boolean | 'true' | 'false' | 'mixed';
+    'aria-controls'?: string;
+    'aria-expanded'?: boolean | 'true' | 'false';
+    'aria-haspopup'?: HTMLButtonAttributes['aria-haspopup'];
+    'data-pair-answer'?: string | boolean;
+    'data-pair-start'?: string | boolean;
   }
 </script>
 
@@ -62,7 +76,23 @@
     href,
     element = $bindable(),
     onclick,
-    ...attributes
+    onkeydown,
+    onpointerdown,
+    id,
+    title,
+    role,
+    tabindex,
+    'aria-label': ariaLabelAttribute,
+    'aria-describedby': ariaDescribedby,
+    'aria-busy': ariaBusy,
+    'aria-disabled': ariaDisabled,
+    'aria-pressed': ariaPressed,
+    'aria-checked': ariaChecked,
+    'aria-controls': ariaControls,
+    'aria-expanded': ariaExpanded,
+    'aria-haspopup': ariaHaspopup,
+    'data-pair-answer': pairAnswer,
+    'data-pair-start': pairStart,
   }: ButtonProps = $props();
 
   function activate(event: MouseEvent) {
@@ -81,12 +111,7 @@
    * behaviour used while a save is in flight.
    */
   function unavailable() {
-    return (
-      busy ||
-      disabled ||
-      attributes['aria-disabled'] === true ||
-      attributes['aria-disabled'] === 'true'
-    );
+    return busy || disabled || ariaDisabled === true || ariaDisabled === 'true';
   }
 </script>
 
@@ -99,28 +124,48 @@
 {#if href !== undefined}
   <a
     href={unavailable() ? undefined : href}
-    role={attributes.role ?? 'link'}
-    tabindex={attributes.tabindex ?? (unavailable() ? 0 : undefined)}
-    id={attributes.id}
-    title={attributes.title}
+    role={role ?? 'link'}
+    tabindex={tabindex ?? (unavailable() ? 0 : undefined)}
+    {id}
+    {title}
     class="den-button den-button-{variant} den-button-{size} {className}"
-    aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
-    aria-describedby={attributes['aria-describedby']}
-    aria-busy={busy || attributes['aria-busy'] || undefined}
+    aria-label={ariaLabel ?? ariaLabelAttribute ?? label}
+    aria-describedby={ariaDescribedby}
+    aria-busy={busy || ariaBusy || undefined}
     aria-disabled={unavailable() || undefined}
+    aria-checked={ariaChecked}
+    aria-controls={ariaControls}
+    aria-expanded={ariaExpanded}
+    aria-haspopup={ariaHaspopup}
+    data-pair-answer={pairAnswer}
+    data-pair-start={pairStart}
+    {onkeydown}
+    {onpointerdown}
     onclick={activate}>{@render contents()}</a
   >
 {:else}
   <button
     bind:this={element}
-    {...attributes}
     {type}
+    {id}
+    {title}
+    {role}
+    {tabindex}
     class="den-button den-button-{variant} den-button-{size} {className}"
-    aria-label={ariaLabel ?? attributes['aria-label'] ?? label}
-    aria-pressed={pressed ?? attributes['aria-pressed']}
-    aria-busy={busy || attributes['aria-busy'] || undefined}
+    aria-label={ariaLabel ?? ariaLabelAttribute ?? label}
+    aria-describedby={ariaDescribedby}
+    aria-pressed={pressed ?? ariaPressed}
+    aria-checked={ariaChecked}
+    aria-controls={ariaControls}
+    aria-expanded={ariaExpanded}
+    aria-haspopup={ariaHaspopup}
+    aria-busy={busy || ariaBusy || undefined}
     data-saving={saving || undefined}
-    aria-disabled={busy || attributes['aria-disabled'] || undefined}
+    aria-disabled={busy || ariaDisabled || undefined}
+    data-pair-answer={pairAnswer}
+    data-pair-start={pairStart}
+    {onkeydown}
+    {onpointerdown}
     {disabled}
     onclick={activate}>{@render contents()}</button
   >

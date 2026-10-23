@@ -57,9 +57,19 @@
      * made after a page has settled, by the page itself or anything else, are left alone.
      */
     let releaseScroll = () => {};
-    /** When the document last moved: a page left mid-glide moved within the last frame or two. */
-    let scrolledAt = -Infinity;
-    const scrolled = () => (scrolledAt = performance.now());
+    /**
+     * Whether the document moved within the last frame or two, as a page left mid-glide did. Counted in frames,
+     * not milliseconds: a slow device's frames can each outlast any fixed time, and its glide would read as settled.
+     */
+    let moving = false;
+    let settle = 0;
+    const scrolled = () => {
+      moving = true;
+      cancelAnimationFrame(settle);
+      settle = requestAnimationFrame(
+        () => (settle = requestAnimationFrame(() => (moving = false))),
+      );
+    };
     window.addEventListener('scroll', scrolled, { passive: true });
     const holdScroll = (x: number, y: number, gliding: boolean) => {
       releaseScroll();
@@ -207,6 +217,12 @@
       clearTimeout(unwritten?.timer);
       unwritten = undefined;
     };
+    function scrollToTop() {
+      window.scrollTo({
+        top: 0,
+        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+      });
+    }
     async function follow(path: string, push: boolean, replace = false, native = false) {
       if (push && appPath(path, location.href) === null) return;
       // A newer release is kept: the page opened next is loaded whole, onto it, rather than drawn in place
@@ -257,10 +273,16 @@
           key !== 'people' &&
           key !== 'watchlist' &&
           !key.startsWith('title/')
-        )
+        ) {
+          // Choosing the page already open, from its tab or the logo, goes back to its top.
+          if (push) scrollToTop();
           return;
+        }
         if (push) {
-          if (address() === path) return;
+          if (address() === path) {
+            scrollToTop();
+            return;
+          }
           position++;
           for (const at of entries.keys()) if (at >= position) entries.delete(at);
           entries.set(position, { routeKey: key, pageKey: requestedPageKey });
@@ -303,7 +325,7 @@
       }
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;
-      const gliding = performance.now() - scrolledAt < 100;
+      const gliding = moving;
       const ticket = ++revision;
       // No animation of Den's own where the browser has just animated the page itself: its swipe back on iOS
       // (`hasUAVisualTransition`), or Den's own swipe, whose preview already moved it.

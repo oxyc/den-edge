@@ -62,7 +62,7 @@
   let receiving = $state(false);
   let receiveController = new AbortController();
   const receiveAddress = $derived(
-    receiveCode ? tvLink(__DEN_TV_API_ORIGIN__ || location.origin, receiveCode) : null,
+    receiveCode ? tvLink(__DEN_TV_WEB_ORIGIN__ || location.origin, receiveCode) : null,
   );
   const receiveQR = $derived(receiveAddress ? qrCode(receiveAddress) : null);
 
@@ -167,7 +167,7 @@
       The library linked through {links.moved} got a new key, so this device needs to link again.
     </p>
   {/if}
-  {#if !embedded}
+  {#if !embedded && !__DEN_TV_LEGACY_JS_CORE__}
     <p class="sub">
       {#if __DEN_TV__}
         Scan this code with your phone’s camera, then confirm which Den this TV should open.

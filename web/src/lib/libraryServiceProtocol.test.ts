@@ -9,6 +9,45 @@ const version = { instance: 'worker-1', generation: 'generation-3', revision: 14
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
+  it('carries Watchlist and recommendation inputs as independent bounded selections', () => {
+    for (const kind of ['watchlist', 'recommendations'])
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'subscribe',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: kind,
+          subscriptionId: kind,
+          selection: { kind },
+        }),
+      ).toMatchObject({ ok: true });
+
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'watchlist',
+        version,
+        value: { kind: 'watchlist', titles: [{ type: 'movie', id: 7 }] },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'update',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        subscriptionId: 'recommendations',
+        version,
+        value: {
+          kind: 'recommendations',
+          owned: [{ type: 'movie', id: 7 }],
+          watched: [],
+          standings: [],
+          weighted: [],
+          seeds: { watched: [], watchlisted: [{ type: 'movie', id: 7 }] },
+        },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('keeps the playback device capability small and strictly bounded', () => {
     expect(
       decodeLibraryServiceClientMessage({
@@ -36,171 +75,6 @@ describe('library service client protocol', () => {
     expect(
       update(Array.from({ length: 513 }, (_, id) => ({ id: String(id), name: 'TV', kind: 'tv' }))),
     ).toMatchObject({ ok: false });
-  });
-
-  it('exposes only bounded, non-secret profile migration control messages', () => {
-    const attempt = '0123456789abcdef0123456789abcdef';
-    const source = { generation: 7, head: 'a'.repeat(64) };
-    expect(
-      decodeLibraryServiceClientMessage({
-        type: 'query',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-status',
-        query: { kind: 'profile-migration.status' },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceServerMessage({
-        type: 'query-result',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-status',
-        version,
-        result: {
-          kind: 'profile-migration.status',
-          phase: 'ready',
-          attempt: '0123456789abcdef0123456789abcdef',
-        },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceServerMessage({
-        type: 'query-result',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-status',
-        version,
-        result: {
-          kind: 'profile-migration.status',
-          phase: 'ready',
-          attempt: '0123456789abcdef0123456789abcdef',
-          libraryKey,
-        },
-      }),
-    ).toMatchObject({ ok: false });
-    expect(
-      decodeLibraryServiceClientMessage({
-        type: 'query',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-recovery-observe',
-        query: { kind: 'profile-migration.observe-recovery', attempt },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceClientMessage({
-        type: 'task',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-recover',
-        operationId: 'profile-recover',
-        task: {
-          kind: 'profile-migration.recover',
-          attempt,
-          recoveryAttempt: 'f'.repeat(32),
-          source,
-        },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceClientMessage({
-        type: 'query',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-observe',
-        query: { kind: 'profile-migration.observe' },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceServerMessage({
-        type: 'query-result',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-observe',
-        version,
-        result: { kind: 'profile-migration.observe', attempt, source },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceClientMessage({
-        type: 'task',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-enable',
-        operationId: 'profile-enable',
-        task: { kind: 'profile-migration.enable', attempt, source },
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      decodeLibraryServiceClientMessage({
-        type: 'task',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-secret',
-        operationId: 'profile-secret',
-        task: { kind: 'profile-migration.enable', attempt, source, candidateKey: libraryKey },
-      }),
-    ).toMatchObject({ ok: false });
-  });
-
-  it('carries the journal-less Owner Restore and the foreign-lock outcome, and nothing secret', () => {
-    const source = { generation: 7, head: 'a'.repeat(64) };
-    const recovery = 'f'.repeat(32);
-    const observe = (attempt: unknown) =>
-      decodeLibraryServiceClientMessage({
-        type: 'query',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-recovery-observe',
-        query: { kind: 'profile-migration.observe-recovery', attempt },
-      });
-    const recover = (attempt: unknown, extra: Record<string, unknown> = {}) =>
-      decodeLibraryServiceClientMessage({
-        type: 'task',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-recover',
-        operationId: 'profile-recover',
-        task: {
-          kind: 'profile-migration.recover',
-          attempt,
-          recoveryAttempt: recovery,
-          source,
-          ...extra,
-        },
-      });
-    // No split journal on this device: recovery names no attempt, only its own fresh one.
-    expect(observe(null)).toMatchObject({ ok: true });
-    expect(recover(null)).toMatchObject({ ok: true });
-    expect(observe(undefined)).toMatchObject({ ok: false });
-    expect(observe('not-an-attempt')).toMatchObject({ ok: false });
-    expect(recover(null, { candidateKey: libraryKey })).toMatchObject({ ok: false });
-
-    const result = (body: Record<string, unknown>) =>
-      decodeLibraryServiceServerMessage({
-        type: 'query-result',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-status',
-        version,
-        result: body,
-      });
-    expect(result({ kind: 'profile-migration.status', phase: 'setup-in-progress' })).toMatchObject({
-      ok: true,
-    });
-    expect(result({ kind: 'profile-migration.status', phase: 'locked' })).toMatchObject({
-      ok: false,
-    });
-    expect(
-      result({
-        kind: 'profile-migration.observe-recovery',
-        attempt: null,
-        recoveryAttempt: recovery,
-        source,
-      }),
-    ).toMatchObject({ ok: true });
-
-    const task = (outcome: string) =>
-      decodeLibraryServiceServerMessage({
-        type: 'task-result',
-        protocol: LIBRARY_SERVICE_PROTOCOL,
-        requestId: 'profile-recover',
-        operationId: 'profile-recover',
-        version,
-        result: { kind: 'profile-migration.recover', outcome },
-      });
-    expect(task('setup-in-progress')).toMatchObject({ ok: true });
-    expect(task('source-refused')).toMatchObject({ ok: true });
-    expect(task('locked-by-someone')).toMatchObject({ ok: false });
   });
 
   it('accepts a handshake and semantic, idempotent commands', () => {

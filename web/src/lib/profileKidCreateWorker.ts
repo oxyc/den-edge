@@ -5,7 +5,7 @@ import {
   profilesCreateNext,
   profilesMaterialize,
   type ProfileCreateJournal,
-} from './profileMigrationCore';
+} from './profilesCore';
 import type { Stamp } from './wire';
 
 export type ProfileCreateState =
@@ -248,7 +248,7 @@ export class ProfileKidCreateCoordinator {
       // This is the authenticated directory already projected by the household Worker. Persist the explicit
       // intent before any network I/O; the fresh directory read that supplies CAS authority happens afterwards.
       if (!this.io.hasActiveOwner())
-        throw new Error('Profile creation requires an active Owner split');
+        throw new Error('Profile creation requires an active profile directory');
       const started = await this.store.create(operationId, name, maximumAge, stamps);
       if (started.kind === 'receipt') {
         await this.io.proveProfileResult(started.value.result);

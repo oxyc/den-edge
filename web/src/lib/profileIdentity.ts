@@ -38,7 +38,7 @@ export type ProfileIdentity =
       readonly kind: 'owner';
       readonly id: ProfileId;
       readonly libraryKey: string;
-      /** Keep today's cache/storage namespace until the explicit profile split supplies a profile library key. */
+      /** Keep today's cache/storage namespace until the profile directory supplies a profile library key. */
       readonly retainedScope: string;
     }
   | {

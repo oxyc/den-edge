@@ -2,12 +2,14 @@
 // application has loaded and mounted: a Worker takes as long to boot as the app module takes to evaluate, and the two
 // ran one after the other. Kept tiny, since the entry imports it.
 
-import { startupWorkerName } from './startupTiming';
+import { startupMarkOnce, startupWorkerName } from './startupTiming';
 
 let early: Worker[] = [];
 
 /** A new library Worker, its den-core still to be offered (`offerSyncPolicy`). */
 export function newLibraryWorker(): Worker {
+  // Created here, which may be well before a session takes it (`worker created`).
+  startupMarkOnce('library worker started');
   return new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), {
     type: 'module',
     name: startupWorkerName(),

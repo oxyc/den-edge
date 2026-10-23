@@ -23,7 +23,7 @@
 
   type State =
     { step: 'idle' } | { step: 'naming'; done: number; total: number } | { step: 'failed' };
-  let state = $state<State>({ step: 'idle' });
+  let progress = $state.raw<State>({ step: 'idle' });
 
   /** Every title's TMDB name and IMDb id, normalized in bounded batches by the content Worker. */
   async function names(refs: { type: 'movie' | 'tv'; id: number }[]): Promise<Map<string, Title>> {
@@ -31,13 +31,13 @@
     const found = new Map<string, Title>();
     const total = refs.length;
     let done = 0;
-    state = { step: 'naming', done, total };
+    progress = { step: 'naming', done, total };
     for (let at = 0; at < refs.length; at += 128) {
       const batch = refs.slice(at, at + 128);
       const answer = await content.query({ kind: 'titles', titles: batch });
       for (const title of answer.titles) found.set(titleKey(title), title);
       done += batch.length;
-      state = { step: 'naming', done, total };
+      progress = { step: 'naming', done, total };
     }
     return found;
   }
@@ -88,10 +88,10 @@
           'application/json',
           `${JSON.stringify(history, null, 2)}\n`,
         );
-      state = { step: 'idle' };
+      progress = { step: 'idle' };
     } catch (error) {
       console.warn('den: history export failed', error);
-      state = { step: 'failed' };
+      progress = { step: 'failed' };
     }
   }
 </script>
@@ -111,27 +111,27 @@
     <Button
       variant="primary"
       label="Download CSV"
-      disabled={!ready || state.step === 'naming'}
+      disabled={!ready || progress.step === 'naming'}
       onclick={() => void download('csv')}
     />
     <Button
       variant="secondary"
       label="Download JSON"
-      disabled={!ready || state.step === 'naming'}
+      disabled={!ready || progress.step === 'naming'}
       onclick={() => void download('json')}
     />
     <Button
       variant="secondary"
       label="Letterboxd (films)"
-      disabled={!ready || state.step === 'naming'}
+      disabled={!ready || progress.step === 'naming'}
       onclick={() => void download('letterboxd')}
     />
   </div>
-  {#if state.step === 'naming'}
+  {#if progress.step === 'naming'}
     <p class="status" role="status">
-      Naming your titles{state.total ? ` — ${state.done} of ${state.total}` : '…'}
+      Naming your titles{progress.total ? ` — ${progress.done} of ${progress.total}` : '…'}
     </p>
-  {:else if state.step === 'failed'}
+  {:else if progress.step === 'failed'}
     <p class="status bad" role="alert">Couldn’t make the file. Please try again.</p>
   {/if}
 </SettingRow>

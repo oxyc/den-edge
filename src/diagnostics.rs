@@ -436,6 +436,9 @@ pub async fn handle_page_error(state: &Arc<AppState>, req: Request) -> Response 
 const LOAD_BUCKET: &str = "load";
 /// A page starts a Worker per library session and one more on a restart; past this is a burst worth seeing as such.
 const MAX_WORKERS: u32 = 50;
+/// Caps on one kind's request tally: its count, and its milliseconds summed across requests that overlap.
+const MAX_REQUESTS: u32 = 10_000;
+const MAX_NET_MS: u32 = 36_000_000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -469,6 +472,7 @@ enum DeviceClass {
     Phone,
     Tablet,
     Desktop,
+    Tv,
 }
 
 impl DeviceClass {
@@ -477,6 +481,7 @@ impl DeviceClass {
             DeviceClass::Phone => "phone",
             DeviceClass::Tablet => "tablet",
             DeviceClass::Desktop => "desktop",
+            DeviceClass::Tv => "tv",
         }
     }
 }
@@ -530,20 +535,291 @@ struct LoadReport {
     route: LoadRoute,
     device: DeviceClass,
     engine: BrowserEngine,
-    /// Milliseconds since navigation start; each absent when this load never reached it.
+    /// Milliseconds since navigation start; each absent when this load never reached it. A `worker_…` one is the
+    /// first library Worker's own, on the page's clock.
+    page_boot_ms: Option<u32>,
     app_module_ms: Option<u32>,
+    app_evaluated_ms: Option<u32>,
+    app_mounted_ms: Option<u32>,
+    worker_started_ms: Option<u32>,
+    worker_script_ms: Option<u32>,
+    /// A session took a library Worker: one started at page boot, or a new one.
+    session_worker_ms: Option<u32>,
+    core_compile_start_ms: Option<u32>,
+    core_compiled_ms: Option<u32>,
+    worker_core_requested_ms: Option<u32>,
+    worker_core_ready_ms: Option<u32>,
     worker_ready_ms: Option<u32>,
+    capability_ms: Option<u32>,
+    bootstrap_ms: Option<u32>,
+    worker_log_requested_ms: Option<u32>,
+    worker_log_opened_ms: Option<u32>,
+    directory_ms: Option<u32>,
     handover_ms: Option<u32>,
     billboard_detail_ms: Option<u32>,
     shelves_ms: Option<u32>,
     poster_ms: Option<u32>,
     episodes_ms: Option<u32>,
+    /// A first library read's start and end: on a slow device it is most of a first open.
+    import_start_ms: Option<u32>,
+    import_ms: Option<u32>,
+    /// The same Worker steps as the last library Worker reached them: the handover waits for both of two.
+    worker_script_last_ms: Option<u32>,
+    worker_core_ready_last_ms: Option<u32>,
+    worker_ready_last_ms: Option<u32>,
+    worker_log_opened_last_ms: Option<u32>,
+    /// What the TMDB cache did for this load, by outcome.
+    #[serde(default)]
+    tmdb_cache: std::collections::BTreeMap<TmdbCacheOutcome, u32>,
     workers: u32,
     /// The page started hidden (a background tab), which delays everything that waits for a frame.
     #[serde(default)]
     hidden: bool,
     entry: Option<LoadEntry>,
     release: Option<Release>,
+    /// The page's own requests by kind, each `[count, milliseconds summed]`.
+    #[serde(default)]
+    net: std::collections::BTreeMap<NetKind, (u32, u32)>,
+    /// Its Workers' requests by kind, the same way.
+    #[serde(default)]
+    worker_net: std::collections::BTreeMap<NetKind, (u32, u32)>,
+    /// The page's script and Wasm files by where they came from, and its Workers'.
+    files: Option<FileSources>,
+    worker_files: Option<FileSources>,
+    /// The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`.
+    long_tasks: Option<(u32, u32, u32)>,
+    /// What each library Worker's open did, by the library it serves.
+    #[serde(default)]
+    library_workers: LibraryWorkers,
+}
+
+/// A load's library Workers by the library each serves (`startupTiming.ts` `LibraryWorkerRole`): a profile
+/// household's own, and a library's (a profile's, or a household's without profiles).
+#[derive(Deserialize, Default)]
+struct LibraryWorkers {
+    household: Option<LibraryWorker>,
+    profile: Option<LibraryWorker>,
+}
+
+/// What one library Worker's open did (`LibraryWorkerStartup`). Closed sets and a time only.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryWorker {
+    views: Option<LibraryViews>,
+    promoted: Option<LibraryPromotion>,
+    selection: Option<LibrarySelectionKind>,
+    core_requested_ms: Option<u32>,
+}
+
+/// Saved views, the fact store without them, or the whole log.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LibraryViews {
+    Saved,
+    Facts,
+    Miss,
+}
+
+/// Why a Worker opened its whole library after all: the kind of reason.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LibraryPromotion {
+    Cache,
+    Selection,
+    Command,
+    Edit,
+    Query,
+    Task,
+    Observation,
+    Import,
+    Continue,
+    Reconcile,
+    Content,
+    Layout,
+}
+
+/// The selection a `selection` promotion was for.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LibrarySelectionKind {
+    Overview,
+    Watchlist,
+    Recommendations,
+    Continue,
+    History,
+    Title,
+    Presence,
+    Settings,
+    Devices,
+    Connections,
+    Simkl,
+    Recovery,
+    Runtime,
+    Profiles,
+    Downloads,
+}
+
+impl LibraryViews {
+    fn as_str(self) -> &'static str {
+        match self {
+            LibraryViews::Saved => "saved",
+            LibraryViews::Facts => "facts",
+            LibraryViews::Miss => "miss",
+        }
+    }
+}
+
+impl LibraryPromotion {
+    fn as_str(self) -> &'static str {
+        match self {
+            LibraryPromotion::Cache => "cache",
+            LibraryPromotion::Selection => "selection",
+            LibraryPromotion::Command => "command",
+            LibraryPromotion::Edit => "edit",
+            LibraryPromotion::Query => "query",
+            LibraryPromotion::Task => "task",
+            LibraryPromotion::Observation => "observation",
+            LibraryPromotion::Import => "import",
+            LibraryPromotion::Continue => "continue",
+            LibraryPromotion::Reconcile => "reconcile",
+            LibraryPromotion::Content => "content",
+            LibraryPromotion::Layout => "layout",
+        }
+    }
+}
+
+impl LibrarySelectionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            LibrarySelectionKind::Overview => "overview",
+            LibrarySelectionKind::Watchlist => "watchlist",
+            LibrarySelectionKind::Recommendations => "recommendations",
+            LibrarySelectionKind::Continue => "continue",
+            LibrarySelectionKind::History => "history",
+            LibrarySelectionKind::Title => "title",
+            LibrarySelectionKind::Presence => "presence",
+            LibrarySelectionKind::Settings => "settings",
+            LibrarySelectionKind::Devices => "devices",
+            LibrarySelectionKind::Connections => "connections",
+            LibrarySelectionKind::Simkl => "simkl",
+            LibrarySelectionKind::Recovery => "recovery",
+            LibrarySelectionKind::Runtime => "runtime",
+            LibrarySelectionKind::Profiles => "profiles",
+            LibrarySelectionKind::Downloads => "downloads",
+        }
+    }
+}
+
+impl LibraryWorker {
+    /// `<prefix>_views:saved,<prefix>_promoted:selection/profiles,<prefix>_core_req:2061`, each part it has.
+    fn tag(&self, prefix: &str, parts: &mut Vec<String>) {
+        if let Some(views) = self.views {
+            parts.push(format!("{prefix}_views:{}", views.as_str()));
+        }
+        if let Some(promoted) = self.promoted {
+            let selection = self.selection.filter(|_| matches!(promoted, LibraryPromotion::Selection));
+            parts.push(match selection {
+                Some(kind) => format!("{prefix}_promoted:{}/{}", promoted.as_str(), kind.as_str()),
+                None => format!("{prefix}_promoted:{}", promoted.as_str()),
+            });
+        }
+        if let Some(ms) = self.core_requested_ms {
+            parts.push(format!("{prefix}_core_req:{}", ms.min(MAX_MS)));
+        }
+    }
+}
+
+/// Script and Wasm files counted by where each came from (`loadReport.ts` `fileTally`): the HTTP cache, a service
+/// worker, the network, or an engine that doesn't say. Counts only, never a file's name.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct FileSources {
+    cache: u32,
+    service_worker: u32,
+    network: u32,
+    unknown: u32,
+}
+
+/// What a page's request was for (`loadReport.ts` `netKindOf`). A closed set, so a report carries no path.
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum NetKind {
+    Lib,
+    Tmdb,
+    Meta,
+    Atlas,
+    Image,
+    Routes,
+    Config,
+    Health,
+    Version,
+    Capabilities,
+    Plugins,
+    Reel,
+    Oauth,
+    Grant,
+    Assistant,
+    Remux,
+    Subtitles,
+    Pair,
+    Other,
+}
+
+/// What the browser's TMDB cache did with one question (`loadReport.ts` `TMDB_CACHE`). A closed set.
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum TmdbCacheOutcome {
+    Fresh,
+    Stale,
+    BriefFresh,
+    BriefStale,
+    Missing,
+    TooOld,
+    ReadFailed,
+    WriteFailed,
+    NoStore,
+}
+
+impl TmdbCacheOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TmdbCacheOutcome::Fresh => "fresh",
+            TmdbCacheOutcome::Stale => "stale",
+            TmdbCacheOutcome::BriefFresh => "brief_fresh",
+            TmdbCacheOutcome::BriefStale => "brief_stale",
+            TmdbCacheOutcome::Missing => "missing",
+            TmdbCacheOutcome::TooOld => "too_old",
+            TmdbCacheOutcome::ReadFailed => "read_failed",
+            TmdbCacheOutcome::WriteFailed => "write_failed",
+            TmdbCacheOutcome::NoStore => "no_store",
+        }
+    }
+}
+
+impl NetKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            NetKind::Lib => "lib",
+            NetKind::Tmdb => "tmdb",
+            NetKind::Meta => "meta",
+            NetKind::Atlas => "atlas",
+            NetKind::Image => "image",
+            NetKind::Routes => "routes",
+            NetKind::Config => "config",
+            NetKind::Health => "health",
+            NetKind::Version => "version",
+            NetKind::Capabilities => "capabilities",
+            NetKind::Plugins => "plugins",
+            NetKind::Reel => "reel",
+            NetKind::Oauth => "oauth",
+            NetKind::Grant => "grant",
+            NetKind::Assistant => "assistant",
+            NetKind::Remux => "remux",
+            NetKind::Subtitles => "subtitles",
+            NetKind::Pair => "pair",
+            NetKind::Other => "other",
+        }
+    }
 }
 
 impl LoadReport {
@@ -554,19 +830,79 @@ impl LoadReport {
             format!("engine:{}", self.engine.as_str()),
         ];
         for (name, ms) in [
+            ("boot", self.page_boot_ms),
             ("app", self.app_module_ms),
+            ("app_eval", self.app_evaluated_ms),
+            ("mounted", self.app_mounted_ms),
+            ("w_started", self.worker_started_ms),
+            ("w_script", self.worker_script_ms),
+            ("session", self.session_worker_ms),
+            ("core_compile", self.core_compile_start_ms),
+            ("core_compiled", self.core_compiled_ms),
+            ("w_core_req", self.worker_core_requested_ms),
+            ("w_core", self.worker_core_ready_ms),
             ("worker", self.worker_ready_ms),
+            ("capability", self.capability_ms),
+            ("bootstrap", self.bootstrap_ms),
+            ("w_log_req", self.worker_log_requested_ms),
+            ("w_log", self.worker_log_opened_ms),
+            ("directory", self.directory_ms),
             ("handover", self.handover_ms),
             ("billboard", self.billboard_detail_ms),
             ("shelves", self.shelves_ms),
             ("poster", self.poster_ms),
             ("episodes", self.episodes_ms),
+            ("import_start", self.import_start_ms),
+            ("import", self.import_ms),
+            ("w_script_last", self.worker_script_last_ms),
+            ("w_core_last", self.worker_core_ready_last_ms),
+            ("worker_last", self.worker_ready_last_ms),
+            ("w_log_last", self.worker_log_opened_last_ms),
         ] {
             if let Some(ms) = ms {
                 parts.push(format!("{name}:{}", ms.min(MAX_MS)));
             }
         }
         parts.push(format!("workers:{}", self.workers.min(MAX_WORKERS)));
+        for (prefix, worker) in
+            [("hh", &self.library_workers.household), ("pf", &self.library_workers.profile)]
+        {
+            if let Some(worker) = worker {
+                worker.tag(prefix, &mut parts);
+            }
+        }
+        for (prefix, tally) in [("net", &self.net), ("wnet", &self.worker_net)] {
+            for (kind, (count, ms)) in tally {
+                parts.push(format!(
+                    "{prefix}_{}:{}/{}ms",
+                    kind.as_str(),
+                    count.min(&MAX_REQUESTS),
+                    ms.min(&MAX_NET_MS)
+                ));
+            }
+        }
+        for (prefix, files) in [("files", &self.files), ("wfiles", &self.worker_files)] {
+            if let Some(f) = files {
+                parts.push(format!(
+                    "{prefix}:cache{}/net{}/sw{}/unknown{}",
+                    f.cache.min(MAX_REQUESTS),
+                    f.network.min(MAX_REQUESTS),
+                    f.service_worker.min(MAX_REQUESTS),
+                    f.unknown.min(MAX_REQUESTS)
+                ));
+            }
+        }
+        for (outcome, count) in &self.tmdb_cache {
+            parts.push(format!("tmdb_{}:{}", outcome.as_str(), count.min(&MAX_REQUESTS)));
+        }
+        if let Some((count, ms, longest)) = self.long_tasks {
+            parts.push(format!(
+                "long:{}/{}ms/max{}ms",
+                count.min(MAX_REQUESTS),
+                ms.min(MAX_NET_MS),
+                longest.min(MAX_MS)
+            ));
+        }
         if self.hidden {
             parts.push("hidden:1".to_owned());
         }
@@ -1091,6 +1427,133 @@ mod tests {
             "route:series,device:phone,engine:webkit,app:40,worker:300,handover:420,shelves:9800,workers:3,\
              release:deadbeef"
         );
+    }
+
+    #[test]
+    fn a_load_report_carries_the_first_import_and_the_page_requests_by_kind() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "importStartMs": 900, "importMs": 118_000,
+            "posterMs": 125_000, "workers": 2,
+            "net": { "tmdb": [40, 12_000], "lib": [3, 900], "image": [24, 30_000] },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,poster:125000,import_start:900,import:118000,workers:2,\
+             net_lib:3/900ms,net_tmdb:40/12000ms,net_image:24/30000ms"
+        );
+        let unknown = serde_json::from_value::<LoadReport>(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 1, "net": { "/tmdb/3/movie/550": [1, 1] },
+        }));
+        assert!(unknown.is_err(), "a request's path never reaches the log");
+    }
+
+    #[test]
+    fn a_load_report_names_the_startup_endpoints_a_load_waited_on() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+            "net": { "routes": [1, 900], "health": [3, 2_400], "config": [1, 120], "plugins": [2, 70], "other": [1, 5] },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,workers:2,\
+             net_routes:1/900ms,net_config:1/120ms,net_health:3/2400ms,net_plugins:2/70ms,net_other:1/5ms"
+        );
+    }
+
+    #[test]
+    fn a_load_report_carries_the_startup_chain_the_workers_requests_and_the_long_tasks() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink",
+            "pageBootMs": 120, "appModuleMs": 130, "appEvaluatedMs": 900, "appMountedMs": 1_100,
+            "workerStartedMs": 140, "workerScriptMs": 1_600, "sessionWorkerMs": 1_620,
+            "coreCompileStartMs": 1_650, "coreCompiledMs": 2_100,
+            "workerCoreRequestedMs": 1_640, "workerCoreReadyMs": 2_300, "workerReadyMs": 2_400,
+            "capabilityMs": 3_000, "bootstrapMs": 3_100, "workerLogRequestedMs": 3_200, "workerLogOpenedMs": 4_700,
+            "directoryMs": 5_000, "handoverMs": 5_300, "workers": 2,
+            "net": { "atlas": [1, 86] }, "workerNet": { "lib": [3, 900], "meta": [5, 600] },
+            "longTasks": [12, 3_400, 900],
+            "workerScriptLastMs": 2_700, "workerCoreReadyLastMs": 3_900, "workerReadyLastMs": 4_000,
+            "workerLogOpenedLastMs": 5_200,
+            "tmdbCache": { "missing": 132, "fresh": 3, "write_failed": 132 },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,boot:120,app:130,app_eval:900,mounted:1100,w_started:140,\
+             w_script:1600,session:1620,core_compile:1650,core_compiled:2100,w_core_req:1640,w_core:2300,worker:2400,\
+             capability:3000,bootstrap:3100,w_log_req:3200,w_log:4700,directory:5000,handover:5300,\
+             w_script_last:2700,w_core_last:3900,worker_last:4000,w_log_last:5200,workers:2,\
+             net_atlas:1/86ms,wnet_lib:3/900ms,wnet_meta:5/600ms,tmdb_fresh:3,tmdb_missing:132,\
+             tmdb_write_failed:132,long:12/3400ms/max900ms"
+        );
+    }
+
+    #[test]
+    fn a_load_report_says_where_the_page_and_worker_files_came_from() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 1,
+            "files": { "cache": 14, "serviceWorker": 0, "network": 2, "unknown": 0 },
+            "workerFiles": { "cache": 1, "network": 3, "unknown": 2, "names": ["/assets/x.js"] },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,workers:1,\
+             files:cache14/net2/sw0/unknown0,wfiles:cache1/net3/sw0/unknown2"
+        );
+        let capped: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 1,
+            "files": { "cache": u32::MAX, "serviceWorker": 0, "network": 0, "unknown": 0 },
+        }))
+        .unwrap();
+        assert!(capped.tag().ends_with(&format!("files:cache{MAX_REQUESTS}/net0/sw0/unknown0")));
+    }
+
+    #[test]
+    fn a_load_report_names_a_tv() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "billboardDetailMs": 7113, "workers": 2,
+        }))
+        .unwrap();
+        assert_eq!(report.tag(), "route:home,device:tv,engine:blink,billboard:7113,workers:2");
+    }
+
+    #[test]
+    fn a_load_report_says_what_each_library_worker_opened_from_and_why_it_asked_for_den_core() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+            "libraryWorkers": {
+                "household": { "views": "saved", "promoted": "selection", "selection": "downloads", "coreRequestedMs": 2061 },
+                "profile": { "views": "facts", "promoted": "layout", "selection": "continue", "coreRequestedMs": u32::MAX },
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            format!(
+                "route:home,device:tv,engine:blink,workers:2,hh_views:saved,hh_promoted:selection/downloads,\
+                 hh_core_req:2061,pf_views:facts,pf_promoted:layout,pf_core_req:{MAX_MS}"
+            )
+        );
+        let saved_only: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+            "libraryWorkers": { "profile": { "views": "saved" } },
+        }))
+        .unwrap();
+        assert_eq!(saved_only.tag(), "route:home,device:tv,engine:blink,workers:2,pf_views:saved");
+        for worker in [
+            serde_json::json!({ "views": "/lib/abc" }),
+            serde_json::json!({ "promoted": "selection:profiles" }),
+            serde_json::json!({ "promoted": "selection", "selection": "title:550" }),
+        ] {
+            let unknown = serde_json::json!({
+                "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+                "libraryWorkers": { "household": worker },
+            });
+            assert!(serde_json::from_value::<LoadReport>(unknown).is_err());
+        }
     }
 
     #[test]

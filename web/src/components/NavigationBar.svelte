@@ -25,6 +25,7 @@
     rememberSearch,
   } from '../lib/recentSearches';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
+  import { libraryOpeningProgress } from '../lib/libraryOpening.svelte';
   let {
     route,
     query = '',
@@ -62,7 +63,7 @@
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
   let toggle = $state<HTMLButtonElement>();
-  let recent = $state<string[]>([]);
+  let recent = $state.raw<string[]>([]);
   let searchFocused = $state(false);
   /** Escape closed the recent searches; they come back the next time the field is focused. */
   let recentDismissed = $state(false);
@@ -253,7 +254,84 @@
     { page: 'watchlist', label: 'Watchlist', icon: undefined },
     { page: 'settings', label: 'Settings', icon: 'sliders' },
   ] as const;
+  /** A library's first read from den-edge, drawn along the bar's lower edge while it runs. */
+  const opening = $derived(libraryOpeningProgress());
+  /** What the line draws: the read's progress, then full for a moment once it has finished, then nothing. */
+  let shown = $state<number | null>(null);
+  let finished = $state(false);
+  /**
+   * A line that stands still reads as stuck. Between the read's reports it keeps easing from where it is toward
+   * `AHEAD` of what is left, slowing the longer nothing comes but never reaching the end; each report starts it again
+   * from there. The caption keeps the read's own figure, and the line never moves back.
+   */
+  const AHEAD = 0.25;
+  $effect(() => {
+    if (opening !== null) {
+      const from = Math.max(opening, untrack(() => shown) ?? 0);
+      shown = from;
+      finished = false;
+      const began = performance.now();
+      const tick = setInterval(() => {
+        const eased = (1 - from) * AHEAD * (1 - Math.exp(-(performance.now() - began) / 4000));
+        shown = Math.max(from + eased, untrack(() => shown) ?? 0);
+      }, 300);
+      return () => clearInterval(tick);
+    }
+    if (untrack(() => shown) === null) return;
+    shown = 1;
+    finished = true;
+    const done = setTimeout(() => (shown = null), 700);
+    return () => clearTimeout(done);
+  });
+  /** The bar's size, for the outline the progress traces: a pill whose ends are half its height. */
+  let barWidth = $state(0);
+  let barHeight = $state(0);
+  const outline = $derived(2 * Math.max(0, barWidth - barHeight) + Math.PI * barHeight);
 </script>
+
+{#snippet openingLine()}
+  {#if shown !== null}
+    <div
+      class="opening"
+      class:finished
+      role="progressbar"
+      aria-label="Loading your library"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={finished ? 100 : Math.round((opening ?? 0) * 100)}
+      bind:clientWidth={barWidth}
+      bind:clientHeight={barHeight}
+    >
+      {#if barWidth && barHeight}
+        <!-- From the lower left: right along the bottom, up around the right end, back along the top, down the left. -->
+        {@const r = (barHeight - 2) / 2}
+        {@const d = `M ${1 + r} ${barHeight - 1} H ${barWidth - 1 - r} A ${r} ${r} 0 0 0 ${barWidth - 1 - r} 1 H ${1 + r} A ${r} ${r} 0 0 0 ${1 + r} ${barHeight - 1}`}
+        <svg width={barWidth} height={barHeight} aria-hidden="true">
+          <!-- The whole outline, faint: the pill's shape shows even where it is as dark as the page behind it. -->
+          <path class="opening-track" {d} />
+          <path {d} stroke-dasharray="{shown * outline} {outline}" />
+        </svg>
+        <!-- The line's head, breathing while the read runs: rides the same outline, in step with the line. -->
+        {#if !finished}
+          <span
+            class="opening-head"
+            aria-hidden="true"
+            style:offset-path="path('{d}')"
+            style:offset-distance="{shown * 100}%"
+          ></span>
+        {/if}
+      {/if}
+    </div>
+    <p class="opening-label" class:finished aria-hidden="true">
+      <!-- Only the read's own figure: none until it has kept something, never the creep before it. -->
+      {finished
+        ? 'Library ready'
+        : opening
+          ? `Loading your library · ${Math.round(opening * 100)}%`
+          : 'Loading your library'}
+    </p>
+  {/if}
+{/snippet}
 
 <div class="bar-anchor">
   {#if __DEN_TV__}
@@ -278,6 +356,8 @@
             {tab.label}
           </a>
         {/each}
+        <!-- On a TV the visible pill is the nav, not the full-width header around it. -->
+        {@render openingLine()}
       </nav>
       {#if profiles}<ProfileSwitcher {profiles} />{:else if profileHint}<ProfileHintTrigger
           choice={hintChoice(profileHint)}
@@ -426,6 +506,7 @@
           ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
         >
       </button>
+      {@render openingLine()}
     </header>
   {/if}
 </div>
@@ -448,6 +529,117 @@
     min-height: 46px;
     padding: 6px 12px;
     border-radius: 999px;
+  }
+
+  /* The bar lives outside the page column, so it cannot inherit that column's ultrawide cap. Keep its chrome on
+     the same centred canvas while leaving the ordinary phone/laptop rule above entirely viewport-relative. */
+  @media (width >= 1921px) {
+    .bar {
+      right: calc((100vw - 1920px) / 2 + var(--gutter));
+      left: calc((100vw - 1920px) / 2 + var(--gutter));
+    }
+  }
+
+  /* The whole pill: the read traces its outline from the lower left, round to where it began. */
+  .opening {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 80%, transparent));
+    animation: opening-in 0.3s ease-out;
+  }
+
+  .opening svg {
+    display: block;
+    overflow: visible;
+  }
+
+  .opening path {
+    fill: none;
+    stroke: var(--accent);
+    stroke-linecap: round;
+    stroke-width: 2px;
+    transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .opening path.opening-track {
+    stroke: rgb(255 255 255 / 0.18);
+    transition: none;
+  }
+
+  /* The line's head: a dot on the outline that breathes, so a slow read never looks stopped. */
+  .opening-head {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px 2px var(--accent);
+    offset-rotate: 0deg;
+    transition: offset-distance 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: opening-pulse 1.2s ease-in-out infinite;
+  }
+
+  /* Without motion paths (older TV browsers) the dot has nowhere to ride; the line alone shows the read. */
+  @supports not (offset-path: path('M 0 0')) {
+    .opening-head {
+      display: none;
+    }
+  }
+
+  @keyframes opening-pulse {
+    50% {
+      opacity: 0.45;
+      transform: scale(0.6);
+    }
+  }
+
+  /* Read: the closed outline glows, then fades with its caption. */
+  .opening.finished,
+  .opening-label.finished {
+    animation: opening-out 0.7s ease-in forwards;
+  }
+
+  .opening.finished {
+    filter: drop-shadow(0 0 10px var(--accent));
+  }
+
+  @keyframes opening-in {
+    0% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes opening-out {
+    30% {
+      opacity: 1;
+    }
+
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .opening path,
+    .opening-head {
+      transition: none;
+      animation: none;
+    }
+  }
+
+  /* Under the bar, from where the line starts: what the line is for and how far it has come. */
+  .opening-label {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 24px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    white-space: nowrap;
+    pointer-events: none;
   }
 
   .bar > :global(.profile-trigger) {

@@ -31,6 +31,8 @@ export type LibraryServiceOpenOptions = Pick<
   Partial<Pick<LibraryServiceHello, 'wire'>> & {
     /** Local supervisor authority to retry this legacy key as a wire-5 household after the guarded 426 path. */
     bootstrapProfileHousehold?: boolean;
+    /** How far a first read of the library from den-edge is, from 0 to 1, while the open waits for it. */
+    progress?: (progress: number) => void;
   };
 
 type Pending = {
@@ -38,6 +40,8 @@ type Pending = {
   resolve: (message: LibraryServiceServerMessage) => void;
   reject: (error: LibraryServiceError) => void;
   timer?: ReturnType<typeof setTimeout>;
+  /** Restart the timeout: the service said it is still working on this request. */
+  arm?: () => void;
 };
 
 type Subscription = {
@@ -63,6 +67,7 @@ export class LibraryServiceClient {
   #nextSubscription = 0;
   #instance?: string;
   #stopRelayMembership?: () => void;
+  #progress?: (progress: number) => void;
   #closed = false;
 
   constructor(
@@ -85,6 +90,7 @@ export class LibraryServiceClient {
   }
 
   async #open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+    this.#progress = options.progress;
     const requestId = this.#requestId();
     const reply = await this.#request(
       {
@@ -234,18 +240,23 @@ export class LibraryServiceClient {
     this.#assertOpen();
     return new Promise((resolve, reject) => {
       const pending: Pending = { request: message, resolve, reject };
-      if (timeoutMs !== undefined)
-        pending.timer = setTimeout(() => {
-          if (this.#pending.get(message.requestId) !== pending) return;
-          this.#pending.delete(message.requestId);
-          reject(
-            new LibraryServiceError({
-              code: 'unavailable',
-              message: 'Library service startup timed out while opening browser storage',
-              retryable: true,
-            }),
-          );
-        }, timeoutMs);
+      if (timeoutMs !== undefined) {
+        pending.arm = () => {
+          clearTimeout(pending.timer);
+          pending.timer = setTimeout(() => {
+            if (this.#pending.get(message.requestId) !== pending) return;
+            this.#pending.delete(message.requestId);
+            reject(
+              new LibraryServiceError({
+                code: 'unavailable',
+                message: 'Library service startup timed out while opening browser storage',
+                retryable: true,
+              }),
+            );
+          }, timeoutMs);
+        };
+        pending.arm();
+      }
       this.#pending.set(message.requestId, pending);
       try {
         this.transport.send(message);
@@ -294,6 +305,17 @@ export class LibraryServiceClient {
         } catch (error) {
           console.error('den: a library status listener failed', error);
         }
+      return;
+    }
+    if (message.type === 'opening') {
+      // Before the hello answers it keeps the open alive; after it, the rest of a first read is still reported.
+      const pending = this.#pending.get(message.requestId);
+      if (pending?.request.type === 'hello') pending.arm?.();
+      try {
+        this.#progress?.(message.progress);
+      } catch (error) {
+        console.error('den: a library opening listener failed', error);
+      }
       return;
     }
     if (message.type === 'error' && message.requestId) {
@@ -373,6 +395,8 @@ function newer(candidate: LibraryVersion, current: LibraryVersion | undefined): 
 
 function selectionMatches(selection: LibrarySelection, value: LibrarySelectionValue): boolean {
   if (selection.kind === 'overview') return value.kind === 'overview';
+  if (selection.kind === 'watchlist') return value.kind === 'watchlist';
+  if (selection.kind === 'recommendations') return value.kind === 'recommendations';
   if (selection.kind === 'continue') return value.kind === 'continue';
   if (selection.kind === 'history') return value.kind === 'history';
   if (selection.kind === 'settings') return value.kind === 'settings';

@@ -120,7 +120,7 @@
    * The names of the titles a "Like" or a "Fans of" is for, by facet id: set as one is picked, and looked up for one
    * the address brought, its pill saying "Like…" or "Fans of…" until then.
    */
-  let likeNames = $state<Record<string, string>>({});
+  let likeNames = $state.raw<Record<string, string>>({});
   const like = $derived(selection.find((id) => likeOf(id)));
   const fans = $derived(selection.find((id) => fansOf(id)));
   $effect(() => {
@@ -130,7 +130,7 @@
       if (!id || !ref || untrack(() => likeNames[id])) continue;
       title(ref)
         .then((title) => {
-          if (current && title) likeNames[id] = title.title;
+          if (current && title) likeNames = { ...likeNames, [id]: title.title };
         })
         .catch((error: unknown) => console.warn('search: no name for', id, error));
     }
@@ -147,13 +147,13 @@
    * atlas's last counts, and the type and selection they were counted for (the effect further down): one answer, or
    * under All without atlas's `all` route, each type's (`sides`), which only judge an option together.
    */
-  let filterAnswer = $state<{
+  let filterAnswer = $state.raw<{
     key: string;
     answers: FilterCounts[];
     sides?: { type: MediaType; counts: FilterCounts | null }[];
   } | null>(null);
   /** People and characters picked from the search field, by facet id: their names, for their pills. */
-  let named = $state<Record<string, Chip>>({});
+  let named = $state.raw<Record<string, Chip>>({});
   /**
    * The rail's chips for the type, with those only atlas's filter knows from its last counts; and every chip a pill
    * can be for — a picked "Like", a typeahead's pick, and a pick of atlas's not yet named ("Person…").
@@ -254,7 +254,7 @@
     if (untrack(() => active)) window.scrollTo({ top: 0, behavior: 'instant' });
   });
 
-  let hits = $state<Hit[] | null>(null);
+  let hits = $state.raw<Hit[] | null>(null);
   let failed = $state(false);
   let pending = $state(false);
 
@@ -450,7 +450,7 @@
    * last ask dropped when the next begins; none where atlas has no such route. Under All, where atlas has no `all`
    * route, each type's answers together.
    */
-  let found = $state<Chip[]>([]);
+  let found = $state.raw<Chip[]>([]);
   $effect(() => {
     const text = query.trim();
     const here = atlas;
@@ -519,7 +519,8 @@
 
   /** A typeahead's pick, followed: its name is kept, for its pill, as a "Like"'s is. */
   function pickFound(chip: Chip) {
-    if (chip.group === 'people' || chip.group === 'character') named[chip.id] = chip;
+    if (chip.group === 'people' || chip.group === 'character')
+      named = { ...named, [chip.id]: chip };
     status = picking(chip.id, false).note;
   }
   /**

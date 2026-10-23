@@ -33,14 +33,20 @@ import {
   type DownloadRelease,
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
-import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { titleCoordinates, titleView } from './titleView';
+import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
-import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
+import {
+  libraryMetadataShape,
+  libraryMetadataShapeDigest,
+  libraryMetadataTitle,
+} from './libraryMetadata';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
-  removeFinishedLibraryViews,
+  readFinishedLibraryViews,
+  staleFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViewPieces,
   type FinishedLibraryViews,
@@ -71,7 +77,6 @@ import {
   type LibraryQuery,
   type LibraryQueryResult,
   type LibraryTask,
-  type RatingSource,
   type LibrarySelection,
   type LibrarySelectionValue,
   type LibraryServiceErrorCode,
@@ -95,21 +100,16 @@ import {
   randomHex,
   type AssistantRecords,
 } from './libraryAssistantAuthority';
+import {
+  selectedDevicesView,
+  selectedRuntimeView,
+  selectedSettingsView,
+} from './librarySelectedSettings';
 import type { Vault } from './localVault';
 import { keptSomething } from './localLibraryMove';
 import type { ContentReader } from './contentAuthority';
-import {
-  workerStatusControl,
-  type OwnerSplitWorkerController,
-} from './profileOwnerSplitWorkerController';
-import { OwnerSplitWorkerSecureAdapter } from './profileOwnerSplitWorkerSecure';
-import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
-import { OwnerSplitWorkerTransport } from './profileOwnerSplitWorkerTransport';
-import { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
-import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
-import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
-import { profilesApplyPolicy } from './profileMigrationCore';
+import { profilesApplyPolicy } from './profilesCore';
 import { exclusive } from './exclusive';
 import { joinHousehold, joinHouseholdOf, type JoinState } from './householdJoin';
 import { validateStoredProfileDirectory } from './profileDirectory';
@@ -146,7 +146,6 @@ import {
   pinMatches,
   readDevices,
   readServers,
-  readSyncedPrefs,
   readTrust,
   selfEntry,
   type PrefChanges,
@@ -206,12 +205,6 @@ const sameTitle = (a: TitleRef, b: TitleRef): boolean => a.type === b.type && a.
 const sameConfig = (a: ConfigValue | null, b: ConfigValue | null): boolean =>
   JSON.stringify(a) === JSON.stringify(b);
 
-const isRatingSource = (value: string): value is RatingSource =>
-  value === 'imdb' || value === 'tmdb' || value === 'rottenTomatoes' || value === 'metacritic';
-
-const uniqueSorted = <T>(values: Iterable<T>, compare?: (a: T, b: T) => number): T[] =>
-  [...new Set(values)].sort(compare);
-
 const webUrl = (value: string): boolean => {
   try {
     const url = new URL(value);
@@ -232,17 +225,6 @@ const refFromKey = (key: string): TitleRef => {
   if (!Number.isSafeInteger(parsed) || parsed <= 0)
     throw authorityError('internal', 'library projection produced an invalid title reference');
   return { type, id: parsed };
-};
-
-const effectiveStanding = (
-  row: TitleRow | undefined,
-  episodes: readonly TitleView['episodes'][number][],
-): Standing | null => {
-  if (!row || row.deleted.value || row.status.value === 'none')
-    return episodes.some(({ fraction }) => fraction > 0) ? 'in-progress' : null;
-  if (row.status.value === 'watchlist' && episodes.some(({ fraction }) => fraction > 0))
-    return 'in-progress';
-  return row.status.value === 'inProgress' ? 'in-progress' : row.status.value;
 };
 
 const publicRelease = (
@@ -393,7 +375,6 @@ export class LibraryLogAuthority {
   #finishedSaving: Promise<void> = Promise.resolve();
   #finishedPending?: FinishedLibraryViews;
   #finishedTimer?: ReturnType<typeof setTimeout>;
-  #ownerSplit?: OwnerSplitWorkerController;
   #kidCreate?: ProfileKidCreateCoordinator;
   #keyReset?: ProfileKeyResetService;
 
@@ -567,6 +548,14 @@ export class LibraryLogAuthority {
     switch (selection.kind) {
       case 'overview':
         return this.#rememberFinished('overview', this.#overview());
+      case 'watchlist': {
+        const overview = this.#overview();
+        return { kind: 'watchlist', titles: overview.watchlist };
+      }
+      case 'recommendations': {
+        const { kind: _kind, watchlist: _watchlist, ...recommendations } = this.#overview();
+        return { kind: 'recommendations', ...recommendations };
+      }
       case 'continue':
         return this.#rememberFinished('continue', this.#continue());
       case 'history':
@@ -704,28 +693,6 @@ export class LibraryLogAuthority {
             (await pinMatches(stored, query.pin)),
         };
       }
-      case 'profile-migration.status': {
-        const status = await this.#profileMigration().status();
-        return { kind: 'profile-migration.status', ...status };
-      }
-      case 'profile-migration.observe': {
-        // profiles-v1 §6.1: the split takes only a converted library. v2/v3 rows in it (a stray tracker event, say)
-        // are folded into its documents by the library-v4 switch first, before the source is observed.
-        const needed = this.#log.needsV4;
-        const switched = await this.#log.switchToV4(this.#clock.device, !needed);
-        if ((needed && !switched) || this.#log.switchFailure)
-          throw authorityError(
-            'unavailable',
-            `the library must finish its Library v4 update first${this.#log.switchFailure ? ` (${this.#log.switchFailure})` : ''}`,
-            true,
-          );
-        const observation = await this.#profileMigration().observe();
-        return { kind: 'profile-migration.observe', ...observation };
-      }
-      case 'profile-migration.observe-recovery': {
-        const observation = await this.#profileMigration().observeRecovery(query.attempt);
-        return { kind: 'profile-migration.observe-recovery', ...observation };
-      }
       case 'profile-create.status': {
         const result = await this.#profileKidCreate().resume();
         return result
@@ -795,6 +762,9 @@ export class LibraryLogAuthority {
           stillPath: (await this.#options.downloadArtwork?.(query.target)) ?? null,
         };
       case 'preferences.raw':
+        // Profile seeding only needs the values, but a local-library handoff also uses this full-authority query as
+        // its source barrier. Make the snapshot another authority will reopen include every accepted local edit.
+        if (this.#options.mode === 'local') await this.#log.settlePersistence();
         return { kind: 'preferences.raw', values: this.#log.settings('prefs')?.values ?? {} };
       case 'retained.services.get': {
         const value = await this.#log.kept<unknown>(RETAINED_SERVICES);
@@ -829,32 +799,6 @@ export class LibraryLogAuthority {
     }
   }
 
-  /** Built only for an explicit worker query. Merely opening or syncing a library never resumes a migration. */
-  #profileMigration(): OwnerSplitWorkerController {
-    if (this.#ownerSplit) return this.#ownerSplit;
-    const store = new OwnerSplitWorkerStore(this.#log);
-    const transport = new OwnerSplitWorkerTransport(this.#log, store);
-    const secure = new OwnerSplitWorkerSecureAdapter(this.#log, store);
-    const effects = new DormantOwnerSplitEffectExecutor({
-      provider: new HttpOwnerSplitProvider(this.#log.libraryId, transport),
-      secureWorker: secure,
-      enabled: true,
-    });
-    const coordinator = new DormantOwnerSplitCoordinator(effects, store, this.#log.libraryId);
-    this.#ownerSplit = workerStatusControl(
-      {
-        capability: () => transport.capability(),
-        loadJournal: () => store.load(),
-        loadHandoff: () => store.loadHandoff(),
-        migrationLocked: () => this.#log.migrationLocked,
-        migrationReleased: () => this.#log.noteMigrationReleased(),
-      },
-      coordinator,
-      secure,
-    );
-    return this.#ownerSplit;
-  }
-
   #profileKidCreate(): ProfileKidCreateCoordinator {
     if (this.#kidCreate) return this.#kidCreate;
     const store = new ProfileKidCreateStore(this.#log);
@@ -876,18 +820,11 @@ export class LibraryLogAuthority {
     return this.#kidCreate;
   }
 
-  /**
-   * Built only for an explicit worker task. It is dormant twice over: the page offers no control for it, and every
-   * entry first asks den-edge's profile capability (the same gate the Owner split uses) before it reads or sends.
-   */
+  /** Built only for an explicit worker task; the reset source route is its own deployment gate. */
   #profileKeyReset(): ProfileKeyResetService {
     if (this.#keyReset) return this.#keyReset;
     const { libraryKey, vault } = this.#options;
     if (!libraryKey) throw authorityError('invalid-request', 'the household key is not available');
-    const capability = new OwnerSplitWorkerTransport(
-      this.#log,
-      new OwnerSplitWorkerStore(this.#log),
-    );
     this.#keyReset = new ProfileKeyResetService({
       vault: this.#log,
       householdKey: libraryKey,
@@ -898,11 +835,14 @@ export class LibraryLogAuthority {
       ),
       gate: async () => {
         try {
-          const answer = await capability.capability();
-          return answer !== null && answer.wireMin >= answer.runtimeHouseholdWire;
+          const answer = await this.#log.resetRequest({
+            method: 'GET',
+            path: `/lib/${this.#log.libraryId}/exclusive-operation/source`,
+          });
+          return answer.status === 200;
         } catch (error) {
-          // A refused or unreachable capability read keeps the reset closed; it is not an answer to guess past.
-          console.warn('den: the profile capability could not be read', error);
+          // A refused or unreachable source read keeps the reset closed; it is not an answer to guess past.
+          console.warn('den: the profile reset gate could not be read', error);
           return false;
         }
       },
@@ -956,12 +896,6 @@ export class LibraryLogAuthority {
       task.kind === 'profile-key-reset.recover'
     )
       return this.#profileKeyResetTask(task);
-    if (
-      task.kind === 'profile-migration.enable' ||
-      task.kind === 'profile-migration.cancel' ||
-      task.kind === 'profile-migration.recover'
-    )
-      return this.#profileMigrationTask(task);
     if (task.kind === 'household.create') return this.#createHousehold(task);
     if (task.kind === 'profile.create-default') return this.#createDefaultKid();
     if (task.kind === 'household.join') return this.#joinHousehold(task);
@@ -983,47 +917,15 @@ export class LibraryLogAuthority {
       (task.kind === 'local-library.merge' && task.sourceLibraryKey === this.#options.libraryKey)
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
-    return this.#administration().task(task, operationId);
-  }
-
-  async #profileMigrationTask(
-    task: Extract<LibraryTask, { kind: `profile-migration.${string}` }>,
-  ): Promise<LibraryAuthorityTaskResult> {
-    const control = this.#profileMigration();
-    const result =
-      task.kind === 'profile-migration.enable'
-        ? await control.enable(task.attempt, task.source)
-        : task.kind === 'profile-migration.cancel'
-          ? await control.cancel(task.attempt)
-          : await control.recover(task.attempt, task.recoveryAttempt, task.source);
-    if (result.kind === 'setup-in-progress') this.#log.noteMigrationLocked();
-    if (result.kind === 'released' || result.kind === 'refused') this.#log.noteMigrationReleased();
-    const outcome =
-      result.kind === 'active' || result.kind === 'restored'
-        ? 'enabled'
-        : result.kind === 'released'
-          ? 'cancelled'
-          : result.kind === 'recovery-blocked'
-            ? 'recovery-required'
-            : result.kind === 'setup-in-progress'
-              ? 'setup-in-progress'
-              : result.kind === 'restart-required'
-                ? 'source-changed'
-                : result.kind === 'cancelled'
-                  ? 'cancelled'
-                  : result.kind === 'commit-unknown'
-                    ? 'reconciling'
-                    : result.kind === 'refused'
-                      ? 'source-refused'
-                      : 'preparing';
-    return {
-      result: {
-        kind: task.kind,
-        outcome,
-        ...('attempt' in result ? { attempt: result.attempt } : {}),
-      },
-      affected: [],
-    };
+    const result = await this.#administration().task(task, operationId);
+    // Administrative work writes through LibraryAdminAuthority, outside the command helpers below that invalidate
+    // finished views. Make the invalidation durable before the task answer lets the page navigate: otherwise a
+    // local-library merge can reopen an empty pre-merge Watchlist at the post-merge head.
+    if (result.affected.length) {
+      this.#changeFinishedRevision();
+      await this.#finishedSaving;
+    }
+    return result;
   }
 
   /** The Owner PIN, only once it is delivered to every device: a queued PIN is not yet the household's. */
@@ -1359,12 +1261,7 @@ export class LibraryLogAuthority {
         throw authorityError('invalid-request', 'title shape contains a duplicate season');
       counts.set(season, episodes);
     }
-    const digest = JSON.stringify({
-      seasons: [...counts]
-        .sort(([a], [b]) => a - b)
-        .map(([season, episodes]) => ({ season, episodes })),
-      lastAired: observation.lastAired ?? null,
-    });
+    const digest = libraryMetadataShapeDigest(observation);
     const key = titleKey(observation.title);
     if (this.#shapes.get(key)?.digest === digest) return { outcome: 'unchanged', affected: [] };
     this.#shapes.set(key, {
@@ -1463,40 +1360,12 @@ export class LibraryLogAuthority {
   }
 
   #title(ref: TitleRef): TitleView {
-    const row = this.#log.title(ref);
-    const coordinates = this.#coordinates(ref);
-    const episodes = coordinates.map(({ season, episode }) => {
-      const held = this.#log.episode(ref, season, episode);
-      const fraction = episodeProgress(held, row);
-      return {
-        season,
-        episode,
-        watched: fraction >= WATCHED,
-        fraction,
-        ...(held?.progress.seconds !== undefined ? { seconds: held.progress.seconds } : {}),
-        ...(held?.progress.at[0] ? { updatedAt: held.progress.at[0] } : {}),
-      };
-    });
-    const visible = !!row && !row.deleted.value;
-    const shapedWatched = coordinates.length > 0 && episodes.every(({ watched }) => watched);
-    return {
-      kind: 'title',
-      title: ref,
-      listed:
-        (visible && row.status.value !== 'none') || episodes.some(({ fraction }) => fraction > 0),
-      watched: coordinates.length ? shapedWatched : visible && row.status.value === 'watched',
-      reaction: visible ? row.reaction.value : null,
-      standing: effectiveStanding(row, episodes),
-      progress:
-        visible && row.resume.value > 0
-          ? {
-              fraction: Math.max(0, Math.min(1, row.resume.value)),
-              ...(row.resume.seconds !== undefined ? { seconds: row.resume.seconds } : {}),
-              ...(row.resume.at[0] ? { updatedAt: row.resume.at[0] } : {}),
-            }
-          : null,
-      episodes,
-    };
+    return titleView(
+      ref,
+      this.#log.title(ref),
+      (season, episode) => this.#log.episode(ref, season, episode),
+      this.#shapes.get(titleKey(ref))?.shape,
+    );
   }
 
   #overview(): Extract<LibrarySelectionValue, { kind: 'overview' }> {
@@ -1525,25 +1394,13 @@ export class LibraryLogAuthority {
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
     const { home } = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
-    const library = { ...home.continueLibrary, shapes };
-    const devices = this.#log.settings('devices');
     return {
       kind: 'continue',
-      items: this.#continueProjector
-        .project(library)
-        .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
-          const device = by && deviceName(devices, by)?.slice(0, 256);
-          return {
-            title: { type: ref.type, id: ref.id },
-            fraction,
-            ...(episode ? { episode } : {}),
-            ...(seconds !== undefined ? { seconds } : {}),
-            ...(at !== undefined ? { updatedAt: at } : {}),
-            ...(liveEpisode ? { liveEpisode } : {}),
-            ...(liveFraction !== undefined ? { liveFraction } : {}),
-            ...(device ? { device } : {}),
-          };
-        }),
+      items: continueItems(
+        this.#continueProjector,
+        { ...home.continueLibrary, shapes },
+        this.#log.settings('devices'),
+      ),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
     };
   }
@@ -1589,57 +1446,9 @@ export class LibraryLogAuthority {
     // A profile-aware household holds no preferences (profiles-v1 §6): any `set:prefs` an older one still carries is a
     // stale seed, never drawn, so no frame is painted from it while the profile's own library opens.
     const profileAware = this.#log.wireMinimum >= 5 || this.#log.profileDirectory() !== null;
-    const stored = readSyncedPrefs(profileAware ? undefined : this.#log.settings('prefs'));
-    const validLanguage = (value: string | undefined): value is string =>
-      value !== undefined && /^[a-z]{2}$/.test(value);
-    const services = [
-      ...new Map(
-        stored.services
-          .filter(
-            ({ id, country }) => Number.isSafeInteger(id) && id > 0 && /^[A-Z]{2}$/.test(country),
-          )
-          .map((service) => [`${service.id}@${service.country}`, service] as const),
-      ).values(),
-    ]
-      .sort((a, b) => a.country.localeCompare(b.country) || a.id - b.id)
-      .slice(0, 256);
-    return {
-      kind: 'settings',
-      preferences: {
-        ...stored,
-        excludedGenres: uniqueSorted(
-          stored.excludedGenres.filter((id) => Number.isSafeInteger(id) && id > 0),
-          (a, b) => a - b,
-        ).slice(0, 256),
-        excludedLanguages: uniqueSorted(stored.excludedLanguages.filter(validLanguage)).slice(
-          0,
-          256,
-        ),
-        minReleaseYear:
-          stored.minReleaseYear !== undefined &&
-          stored.minReleaseYear >= 1800 &&
-          stored.minReleaseYear <= 3000
-            ? stored.minReleaseYear
-            : undefined,
-        audioLanguage: validLanguage(stored.audioLanguage) ? stored.audioLanguage : undefined,
-        subtitleLanguage: validLanguage(stored.subtitleLanguage)
-          ? stored.subtitleLanguage
-          : undefined,
-        shownSubtitleLanguages: uniqueSorted(
-          stored.shownSubtitleLanguages.filter(validLanguage),
-        ).slice(0, 256),
-        subtitlesPerLanguage:
-          Number.isSafeInteger(stored.subtitlesPerLanguage) && stored.subtitlesPerLanguage >= 0
-            ? stored.subtitlesPerLanguage
-            : 3,
-        ratingSources: [...new Set(stored.ratingSources.filter(isRatingSource))],
-        shownWarnings: uniqueSorted(
-          stored.shownWarnings.filter((warning) => warning.length > 0 && warning.length <= 4_096),
-        ).slice(0, 256),
-        services,
-      },
-      assistant: await this.#assistant.needs(),
-    };
+    const prefs = this.#log.settings('prefs');
+    const selected = selectedSettingsView(prefs ? [prefs] : [], profileAware)!;
+    return { ...selected, assistant: await this.#assistant.needs() };
   }
 
   #connections(): Extract<LibrarySelectionValue, { kind: 'connections' }> {
@@ -1714,23 +1523,8 @@ export class LibraryLogAuthority {
   }
 
   #devices(): Extract<LibrarySelectionValue, { kind: 'devices' }> {
-    return {
-      kind: 'devices',
-      devices: readDevices(this.#log.settings('devices'))
-        .filter(({ id }) => id.length > 0 && id.length <= 128)
-        .slice(0, 512)
-        .map(({ id, name, kind, seen, format }) => ({
-          id,
-          name: name.slice(0, 256),
-          kind,
-          ...(seen !== undefined && Number.isSafeInteger(seen) && seen >= 0
-            ? { lastSeenAt: seen }
-            : {}),
-          ...(format !== undefined && Number.isSafeInteger(format) && format >= 0
-            ? { libraryFormat: format }
-            : {}),
-        })),
-    };
+    const row = this.#log.settings('devices');
+    return selectedDevicesView(row ? [row] : []);
   }
 
   #downloads(): Extract<LibrarySelectionValue, { kind: 'downloads' }> {
@@ -1803,14 +1597,8 @@ export class LibraryLogAuthority {
   }
 
   #runtime(): Extract<LibrarySelectionValue, { kind: 'runtime' }> {
-    const remux = readPrivateAddresses(this.#log.settings(ADDRESSES)).remux;
-    return {
-      kind: 'runtime',
-      pluginManifestUrls: readPlugins(this.#log.settings('plugins'))
-        .filter((url) => url.length <= 4_096 && acceptsAddonURL(url))
-        .slice(0, 10_000),
-      privateRemuxUrl: remux ?? null,
-    };
+    const rows = ['plugins', ADDRESSES].flatMap((name) => this.#log.settings(name) ?? []);
+    return selectedRuntimeView(rows);
   }
 
   #profiles(): Extract<LibrarySelectionValue, { kind: 'profiles' }> {
@@ -1930,12 +1718,22 @@ export class LibraryLogAuthority {
       this.#finishedPieces.recommendations = recommendations;
     } else if (kind === 'continue') {
       const view = value as Extract<LibrarySelectionValue, { kind: 'continue' }>;
+      // Continue is finished once every series in it has its layout: kept before then, it holds whichever layouts this
+      // page had learnt so far, which differ from one visit to the next, so the next visit opens the log to learn them
+      // again and keeps another partial Continue in its place.
+      if (view.needsShapes.length) {
+        delete this.#finishedPieces.continue;
+        this.#finishedPending = undefined;
+        return value;
+      }
       const required = new Set(this.#projected().home.requiredShapeRefs);
       this.#finishedPieces.continue = {
         view,
+        // In key order, not the order this page learnt them in: the same layouts keep the same views.
         layouts: Object.fromEntries(
           [...this.#shapes]
             .filter(([key]) => required.has(key))
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
             .map(([key, stored]) => [key, stored.digest]),
         ),
       };
@@ -1986,10 +1784,26 @@ export class LibraryLogAuthority {
     return libraryLocalAuthorityRevision(this.#log.logHead, this.#log.rowsVersion, summary.stamp);
   }
 
+  /**
+   * A new revision is assembled from pieces selected at it. The views kept of the last one are marked stale meanwhile,
+   * so no visit opens them; their pieces stay, and each that says the same at the new revision is named again rather
+   * than written again (`writeFinishedLibraryViews`).
+   */
   #changeFinishedRevision(revision?: string): void {
     if (!this.#options.libraryKey || !this.#options.vault) return;
+    // A read (`#rememberFinished`) names the revision it read at; an edit leaves it to be worked out here.
+    const read = revision !== undefined;
     revision ??= this.#finishedAuthorityRevision();
     if (this.#finishedRevision === revision) return;
+    const first = this.#finishedRevision === undefined;
+    // Views a visit read from the fact store (`FinishedLibraryViewAuthority#flushFactViews`) name its head, not this
+    // log's revision. At this log's generation and head, with no work of its own kept, they say what it does: a surface
+    // that reads the whole log but not every view (the Watchlist's history) leaves them for the next Home to draw.
+    const generation = this.#log.currentGeneration;
+    const facts =
+      read && first && generation && this.#log.pendingActions === 0
+        ? { generation, revision: `facts:${this.#log.logHead}` }
+        : undefined;
     this.#finishedRevision = revision;
     this.#finishedPieces = {};
     this.#finishedPending = undefined;
@@ -1997,10 +1811,25 @@ export class LibraryLogAuthority {
     this.#finishedTimer = undefined;
     this.#finishedSaving = this.#finishedSaving
       .then(async () => {
-        await removeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
+        // This authority's first revision: views kept by an earlier visit at the same revision still describe it.
+        if (first) {
+          const kept = await readFinishedLibraryViews(
+            this.#options.libraryKey!,
+            this.#options.vault!,
+            [],
+          );
+          if (kept?.identity.authorityRevision === revision) return;
+          if (
+            facts &&
+            kept?.identity.generation === facts.generation &&
+            kept.identity.authorityRevision === facts.revision
+          )
+            return;
+        }
+        await staleFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
       })
       .catch((error: unknown) =>
-        console.warn('den: stale finished library views could not be discarded', error),
+        console.warn('den: stale finished library views could not be marked', error),
       );
   }
 
@@ -2024,16 +1853,7 @@ export class LibraryLogAuthority {
   }
 
   #coordinates(ref: TitleRef): Array<{ season: number; episode: number }> {
-    if (ref.type !== 'tv') return [];
-    const shape = this.#shapes.get(titleKey(ref))?.shape;
-    if (!shape) return [];
-    return [...shape.counts]
-      .filter(([season]) => season > 0)
-      .sort(([a], [b]) => a - b)
-      .flatMap(([season, count]) =>
-        Array.from({ length: count }, (_, index) => ({ season, episode: index + 1 })),
-      )
-      .filter((episode) => isAired(episode, shape.lastAired));
+    return titleCoordinates(ref, this.#shapes.get(titleKey(ref))?.shape);
   }
 
   async #titleAction(

@@ -31,3 +31,19 @@ test('service directories are admitted only as their rail approaches the viewpor
   await row.scrollIntoViewIfNeeded();
   await expect(requests).toHaveText('1');
 });
+
+test('the Services rail uses the phone viewport, not the desktop presentation maximum', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html`);
+
+  const row = page.getByRole('region', { name: 'Services' });
+  await row.scrollIntoViewIfNeeded();
+  await expect(row).toBeVisible();
+  const box = await row.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.right ?? box.x + box.width).toBeLessThanOrEqual(390);
+  expect(box.width).toBeLessThanOrEqual(390);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});

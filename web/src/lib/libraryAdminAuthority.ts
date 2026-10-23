@@ -8,14 +8,16 @@ import {
 import type { ClockStore } from './clockStore';
 import { buildHistoryExport } from './historyExport';
 import { householdScoped, profileScoped } from './householdScope';
+import { linkKeys } from './inbox';
 import { unaccounted } from './localLibraryMove';
 import { ASSISTANT_RECORDS } from './libraryAssistantAuthority';
 import type { LibraryQueryResult, KeyResetOutcome, LibraryTask } from './libraryServiceProtocol';
 import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
-import { LibraryLog, projectV3Documents, successorTag } from './log';
+import { LibraryLog, successorTag } from './log';
 import type { Vault } from './localVault';
-import { linkKeys, sealHandover } from './pair';
+import { sealHandover } from './pairHandover';
 import { completeDurableTaskOperation } from './libraryOperationAuthority';
+import { startupMark } from './startupTiming';
 import {
   abandon,
   begin,
@@ -28,7 +30,7 @@ import {
   type Prepared,
   type RecoveryContext,
 } from './recovery';
-import { fromBase64url, toBase64url } from './wire';
+import { fromBase64url, isDocument, toBase64url } from './wire';
 import type { Row, Stamp } from './wire';
 
 const RESET_ROUNDS = 3;
@@ -159,16 +161,7 @@ export class LibraryAdminAuthority {
       .documents()
       .map(({ document }) => document)
       .filter((document) => document.kind !== 'delivery');
-    const documents = heldDocuments.length
-      ? heldDocuments
-      : projectV3Documents(
-          this.log
-            .rows()
-            .filter(
-              (row) =>
-                row.kind === 'rec' || row.kind === 'ep' || row.kind === 'wat' || row.kind === 'snt',
-            ),
-        ).filter((document) => document.kind !== 'delivery');
+    const documents = heldDocuments;
     const exported = buildHistoryExport(documents, new Map());
     return {
       kind: 'history.export',
@@ -524,7 +517,9 @@ export class LibraryAdminAuthority {
         )
       : false;
     const source = await LibraryLog.openExistingLocal(sourceLibraryKey, this.options.vault);
-    if (!source)
+    // What a move did, by count only: one that succeeds having moved nothing looks like any other success.
+    if (!source) {
+      startupMark('local library merge', wasWritten ? 'already written' : 'no library kept here');
       return {
         result: {
           kind: 'local-library.merge',
@@ -532,8 +527,9 @@ export class LibraryAdminAuthority {
         },
         affected: [],
       };
+    }
     try {
-      const rows = source.rows().flatMap((row): Row[] => {
+      const rows = source.storedRows().flatMap((row): Row[] => {
         if (row.kind === 'set' && row.name === 'recovery') return [];
         if (!part.scope) return [row];
         const scoped =
@@ -569,24 +565,28 @@ export class LibraryAdminAuthority {
       let verified: number | undefined;
       if (part.verify) {
         // Read back from den-edge, not from what this browser holds: the source is retired only once den-edge has it.
-        const held = await this.log.heldRows();
-        const missing = held ? unaccounted(rows, held.rows) : null;
-        verified = held?.entries;
-        if (!missing || missing.length) {
-          console.warn(
-            missing
-              ? `den: ${missing.length} of ${rows.length} rows moved from this browser are not on den-edge yet (${missing.slice(0, 5).join(', ')})`
-              : 'den: the library could not be read back from den-edge to check the move',
-          );
-          const retryAfterMs = Math.round(this.log.retryAfterMs);
-          return {
-            result: {
-              kind: 'local-library.merge',
-              outcome: 'unverified',
-              ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
-            },
-            affected: affectedLibrary,
-          };
+        // An empty source has nothing to read back, and the reserved destination may not exist until its first write.
+        if (!rows.length) verified = 0;
+        else {
+          const held = await this.log.heldRows();
+          const missing = held ? unaccounted(rows, held.rows) : null;
+          verified = held?.entries;
+          if (!missing || missing.length) {
+            console.warn(
+              missing
+                ? `den: ${missing.length} of ${rows.length} rows moved from this browser are not on den-edge yet (${missing.slice(0, 5).join(', ')})`
+                : 'den: the library could not be read back from den-edge to check the move',
+            );
+            const retryAfterMs = Math.round(this.log.retryAfterMs);
+            return {
+              result: {
+                kind: 'local-library.merge',
+                outcome: 'unverified',
+                ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
+              },
+              affected: affectedLibrary,
+            };
+          }
         }
       }
       if (!part.keep && !(await source.forget()))
@@ -594,6 +594,11 @@ export class LibraryAdminAuthority {
           result: { kind: 'local-library.merge', outcome: 'unavailable' },
           affected: affectedLibrary,
         };
+      const documents = rows.filter(isDocument).length;
+      startupMark(
+        'local library merge',
+        `${documents} documents, ${rows.length - documents} settings${wasWritten ? ', already written' : ''}`,
+      );
       return {
         result: {
           kind: 'local-library.merge',

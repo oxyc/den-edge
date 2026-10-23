@@ -19,7 +19,7 @@ import {
 } from './profileKeyResetExecutor';
 import { ProfileKeyResetRecovery } from './profileKeyResetRecovery';
 import { ProfileKeyResetService, VaultResetAdoption } from './profileKeyResetService';
-import { profilesMaterialize } from './profileMigrationCore';
+import { profilesMaterialize } from './profilesCore';
 import type { ProfileKidCreateVault } from './profileKidCreateWorker';
 import { deriveKeys, fromBase64url, seal, sealPlaintext, type Row } from './wire';
 
@@ -28,11 +28,13 @@ import { deriveKeys, fromBase64url, seal, sealPlaintext, type Row } from './wire
  * profile migration's off, and the real LibraryLog primitives over HTTP. Nothing in den-edge is faked, so every response shape the adapter
  * relies on, the source digest, the generation on a retirement and the new-library guards are the production ones.
  *
- * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one.
+ * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one, unless
+ * DEN_EDGE_REQUIRED=1 (CI), where a missing binary fails the suite.
  */
 
 const BINARY = process.env.DEN_EDGE_BIN ?? resolve(__dirname, '../../../target/debug/den-edge');
 const available = existsSync(BINARY);
+const required = process.env.DEN_EDGE_REQUIRED === '1';
 
 const OWNER = '00112233445566778899aabbccddeeff';
 const MINA = '11112222333344445555666677778888';
@@ -58,7 +60,6 @@ async function startEdge(extra: Record<string, string> = {}): Promise<Edge> {
       PORT: '0',
       DATA_DIR: data,
       PROFILE_RESET_ENABLED: '1',
-      PROFILE_MIGRATION_ENABLED: '0',
       ...extra,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -351,23 +352,23 @@ describe.skipIf(!available)(
       expect(await status(w.edge, keyOf(9), 5)).toBe(200);
     });
 
-    it('follows PROFILE_MIGRATION_ENABLED when PROFILE_RESET_ENABLED is unset', async () => {
+    it('is open only under PROFILE_RESET_ENABLED, not the retired PROFILE_MIGRATION_ENABLED', async () => {
       const observe = async (env: Record<string, string>) => {
         const edge = await startEdge(env);
         await seed(edge, keyOf(10), 5, [preferences('household')], directory());
         const household = await LibraryLog.forReset(keyOf(10), 5, edge.fetch, undefined, null);
         return observeResetSource(household, 5);
       };
+      await expect(observe({ PROFILE_RESET_ENABLED: '1' })).resolves.not.toBeNull();
       await expect(
         observe({ PROFILE_RESET_ENABLED: '', PROFILE_MIGRATION_ENABLED: '1' }),
-      ).resolves.not.toBeNull();
-      await expect(
-        observe({ PROFILE_RESET_ENABLED: '', PROFILE_MIGRATION_ENABLED: '0' }),
       ).rejects.toMatchObject({ reason: 'library-unavailable' });
     });
   },
 );
 
 describe.skipIf(available)('the compound key reset against the real den-edge (skipped)', () => {
-  it.skip('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {});
+  it.skipIf(!required)('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {
+    throw new Error(`DEN_EDGE_REQUIRED is set but there is no den-edge binary at ${BINARY}`);
+  });
 });

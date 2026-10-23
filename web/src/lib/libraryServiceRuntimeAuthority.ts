@@ -10,12 +10,12 @@ import {
   type LibraryServiceAuthority,
 } from './libraryServiceCore';
 import { libraryVault, type Vault } from './localVault';
-import { LibraryLog, LibraryUpdateRequiredError } from './log';
+import { LibraryLog, LibraryUpdateRequiredError, type DeferredDelivery } from './log';
 import { readApiKey } from './prefs';
 import { useLibraryRelayMembership } from './relayFetch';
-import { startupMark } from './startupTiming';
+import { startupLibraryWorker, startupMark } from './startupTiming';
 import { resetLibraryStartupMetrics } from './libraryStartupMetrics';
-import { openFinishedLibraryViewAuthority } from './finishedLibraryViewAuthority';
+import { openFinishedLibraryViewAuthority, type NarrowEdit } from './finishedLibraryViewAuthority';
 import {
   libraryLogMaintenance,
   librarySimklDelivery,
@@ -70,6 +70,7 @@ export async function openLibraryServiceAuthority(
   providedVault: Vault | null | undefined,
   contentCredentials: LibraryContentCredentialSink | undefined,
   content: DownloadContent & Pick<ContentReader, 'title'>,
+  progress?: (progress: number) => void,
 ): Promise<LibraryServiceAuthority | null> {
   const vault = providedVault === undefined ? libraryVault : providedVault;
   if (!vault) return null;
@@ -99,7 +100,7 @@ export async function openLibraryServiceAuthority(
     }
     startupMark(
       'log opened',
-      `${!log ? 'unavailable' : request.mode === 'local' ? 'local' : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
+      `${!log ? 'unavailable' : request.mode === 'local' ? `local, ${log.storedRows().length} rows` : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
     );
     if (!log) return null;
     // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership
@@ -121,9 +122,9 @@ export async function openLibraryServiceAuthority(
     });
     const authority = new ScheduledLibraryServiceAuthority(
       new DurableOperationAuthority(logAuthority, log),
-      libraryLogMaintenance(log, clock, request.mode),
+      libraryLogMaintenance(log, request.mode),
       { background: downloads },
-      librarySimklDelivery(log, clock),
+      __DEN_TV_LEGACY_JS_CORE__ ? undefined : librarySimklDelivery(log, clock),
     );
     let releaseCredentials = () => {};
     if (contentCredentials)
@@ -140,7 +141,51 @@ export async function openLibraryServiceAuthority(
     });
   };
 
-  const cached = await openFinishedLibraryViewAuthority(request, vault, openFull, content);
+  // One edit of `names`, on a log of those documents alone (`LibraryLog.openNarrow`): the same authority, receipts and
+  // sending as the whole log's, without reading the rest of the library.
+  const openNarrow = async (names: readonly string[]): Promise<NarrowEdit | null> => {
+    if (request.mode !== 'online') return null;
+    const log = await LibraryLog.openNarrow(
+      request.libraryKey,
+      names,
+      undefined,
+      vault,
+      request.wire,
+    );
+    if (!log) return null;
+    const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
+    const logAuthority = new LibraryLogAuthority(log, clock, {
+      mode: request.mode,
+      downloads: downloads.coordinator,
+      content,
+      libraryKey: request.libraryKey,
+      vault,
+    });
+    let settle!: (outcome: DeferredDelivery['outcome']) => void;
+    const settled = new Promise<DeferredDelivery['outcome']>((resolve) => (settle = resolve));
+    const announce = log.onDeferred;
+    log.onDeferred = (delivery) => {
+      announce?.(delivery);
+      settle(delivery.outcome);
+    };
+    return {
+      authority: new DurableOperationAuthority(logAuthority, log),
+      settled,
+      // A narrow log opens with no kept work (`openNarrow`), so whatever is kept now is this edit's.
+      sending: () => log.pendingActions > 0,
+    };
+  };
+
+  const cached = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    undefined,
+    progress,
+    openNarrow,
+  );
+  startupLibraryWorker(request.wire === 5 ? 'household' : 'profile', cached?.views ?? 'miss');
   if (!cached) return openFull();
   const releaseMembership = useLibraryRelayMembership(cached.membership);
   const releaseCredentials = contentCredentials?.bind({

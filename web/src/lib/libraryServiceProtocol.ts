@@ -310,6 +310,8 @@ export interface ServiceRef {
 
 export type LibrarySelection =
   | { kind: 'overview' }
+  | { kind: 'watchlist' }
+  | { kind: 'recommendations' }
   | { kind: 'continue' }
   | { kind: 'history' }
   | { kind: 'title'; title: TitleRef }
@@ -351,6 +353,22 @@ export interface LibraryOverviewView {
   owned: TitleRef[];
   watched: TitleRef[];
   watchlist: TitleRef[];
+  standings: Array<{ title: TitleRef; standing: Standing }>;
+  weighted: Array<{ title: TitleRef; weight: number; updatedAt: number }>;
+  seeds: { watched: TitleRef[]; watchlisted: TitleRef[] };
+}
+
+/** Small independent shelf selection for clients that do not need watched recommendation inputs. */
+export interface WatchlistView {
+  kind: 'watchlist';
+  titles: TitleRef[];
+}
+
+/** Recommendation inputs without the Watchlist shelf payload. */
+export interface RecommendationInputsView {
+  kind: 'recommendations';
+  owned: TitleRef[];
+  watched: TitleRef[];
   standings: Array<{ title: TitleRef; standing: Standing }>;
   weighted: Array<{ title: TitleRef; weight: number; updatedAt: number }>;
   seeds: { watched: TitleRef[]; watchlisted: TitleRef[] };
@@ -576,6 +594,8 @@ export interface RecoveryView {
 
 export type LibrarySelectionValue =
   | LibraryOverviewView
+  | WatchlistView
+  | RecommendationInputsView
   | ContinueView
   | HistoryView
   | TitleView
@@ -618,7 +638,7 @@ export type LibraryTask =
     }
   /**
    * Start, or finish, the household `householdKey` that a browser with no TV makes on its first kept action (den#295):
-   * born at wire minimum 5 with an Owner library and the directory a committed Owner split stores. Idempotent on its
+   * born at wire minimum 5 with an Owner library and a committed profile directory. Idempotent on its
    * inputs, which the page keeps before it asks. `ifKept` starts nothing (`empty`) while the library kept here holds
    * nothing a person kept: a browser that kept a library before households is moved on load, one that only browsed is not.
    */
@@ -662,19 +682,6 @@ export type LibraryTask =
       kind: 'assistant.apply';
       messages: Array<{ seq: number; sealed: string }>;
       connection?: AssistantConnection;
-    }
-  | {
-      kind: 'profile-migration.enable';
-      attempt: string;
-      source: { generation: number; head: string };
-    }
-  | { kind: 'profile-migration.cancel'; attempt: string }
-  | {
-      kind: 'profile-migration.recover';
-      /** The restore-required split journal on this device, or null for the journal-less Owner Restore. */
-      attempt: string | null;
-      recoveryAttempt: string;
-      source: { generation: number; head: string };
     }
   | { kind: 'profile.create'; name: string; maximumAge: number; pin: string }
   | { kind: 'profile.create.ack'; receipt: string }
@@ -811,21 +818,6 @@ export type LibraryTaskResult =
       dropbox: { kid: string; public: string } | null;
     }
   | {
-      kind: 'profile-migration.enable' | 'profile-migration.cancel' | 'profile-migration.recover';
-      outcome:
-        | 'preparing'
-        | 'reconciling'
-        | 'enabled'
-        | 'recovery-required'
-        | 'source-changed'
-        /** den-core refused the source before anything was staged; the attempt was aborted and the lock released. */
-        | 'source-refused'
-        /** `409 migration_in_progress`: another attempt holds the household lock; nothing was changed. */
-        | 'setup-in-progress'
-        | 'cancelled';
-      attempt?: string;
-    }
-  | {
       kind: 'profile.create';
       outcome: 'created';
       profile: string;
@@ -899,9 +891,6 @@ export type LibraryQuery =
   | { kind: 'assistant.grants' }
   /** The household's assistant connection, to lend Owner's library on a household split into profiles. */
   | { kind: 'assistant.connection' }
-  | { kind: 'profile-migration.status' }
-  | { kind: 'profile-migration.observe' }
-  | { kind: 'profile-migration.observe-recovery'; attempt: string | null }
   | { kind: 'profile-create.status' };
 
 export type LibraryQueryResult =
@@ -921,30 +910,6 @@ export type LibraryQueryResult =
       retryAfterMs?: number;
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
-  | {
-      kind: 'profile-migration.status';
-      phase:
-        | 'off'
-        | 'available'
-        | 'preparing'
-        | 'ready'
-        | 'reconciling'
-        | 'enabled'
-        | 'recovery-required'
-        | 'setup-in-progress';
-      attempt?: string;
-    }
-  | {
-      kind: 'profile-migration.observe';
-      attempt: string;
-      source: { generation: number; head: string };
-    }
-  | {
-      kind: 'profile-migration.observe-recovery';
-      attempt: string | null;
-      recoveryAttempt: string;
-      source: { generation: number; head: string };
-    }
   | {
       kind: 'profile-create.status';
       phase: 'idle' | 'created';
@@ -1178,6 +1143,16 @@ export interface LibraryServiceStatus extends ServerMessage {
   status: LibrarySessionStatus;
 }
 
+/**
+ * Sent while a hello is still open and the library is being read from den-edge for the first time: how far through
+ * den-edge's history the read is, from 0 to 1. It also shows the open is alive, however long a big library takes.
+ */
+export interface LibraryServiceOpening extends ServerMessage {
+  type: 'opening';
+  requestId: string;
+  progress: number;
+}
+
 /** Replacements are intentional: one immutable assignment is one UI invalidation. */
 export interface LibraryServiceUpdate extends ServerMessage {
   type: 'update';
@@ -1202,5 +1177,6 @@ export type LibraryServiceServerMessage =
   | LibraryServiceUnsubscribed
   | LibraryServiceObserved
   | LibraryServiceStatus
+  | LibraryServiceOpening
   | LibraryServiceUpdate
   | LibraryServiceError;

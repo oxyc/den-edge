@@ -1338,6 +1338,7 @@ async fn claimant(state: &AppState, id: &str) -> io::Result<Option<Record>> {
 
 /// Whether `id` is a household a guest grant created. The durable marker is written after its authenticated store is
 /// created but before its first commit; the still-present reservation recognizes libraries created before it existed.
+#[cfg(test)]
 pub async fn is_guest_library(state: &AppState, id: &str) -> io::Result<bool> {
     if !crate::library::valid_hex_id(id) {
         return Ok(false);
@@ -4493,8 +4494,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_guest_starts_one_library_and_a_stranger_cannot() {
-        let mut h = harness().await;
-        Arc::get_mut(&mut h.state).unwrap().profile_migration_enabled = true;
+        let h = harness().await;
         let (_, header) = redeemed(&h, json!({})).await;
         let closed = (StatusCode::FORBIDDEN, json!({ "error": "new_libraries_closed" }));
 
@@ -4516,21 +4516,6 @@ mod tests {
         assert_eq!(first_write(&h, GLIB, GTOKEN).await.0, StatusCode::OK);
         assert!(is_guest_library(&h.state, GLIB).await.unwrap());
         assert_eq!(read_changes(&h, GLIB, GTOKEN).await, StatusCode::OK);
-        assert_eq!(
-            body_json(
-                h.send(
-                    "GET",
-                    &format!("/lib/{GLIB}/profile-capability"),
-                    None,
-                    &[("x-den-wire", "5"), ("x-den-library-token", GTOKEN)],
-                )
-                .await,
-            )
-            .await["enrollment"],
-            "prepare",
-            "a legacy guest household may perform its own in-place Owner split"
-        );
-
         assert_eq!(reserve(&h, &header, GLIB2, GTOKEN).await, closed, "one library per grant");
         assert_eq!(first_write(&h, GLIB2, GTOKEN).await, closed);
         assert_eq!(

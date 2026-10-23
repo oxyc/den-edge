@@ -17,7 +17,11 @@ if (
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'big-library-budgets.spec.mjs',
+  testMatch: [
+    'big-library-budgets.spec.mjs',
+    'big-library-first-open.spec.mjs',
+    'big-library-edit.spec.mjs',
+  ],
   timeout: 300_000,
   // A budget is time on this machine: nothing else runs beside it.
   workers: 1,

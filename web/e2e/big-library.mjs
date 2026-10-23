@@ -34,11 +34,17 @@ export const WATCHED_SERIES = 200_000;
 /** Its last season, downloading: two episodes have a release, the rest are still searched for. */
 const SEASON_DOWNLOAD = { season: 4, episodes: 10, released: 2 };
 
+/**
+ * How many times the long history the household holds: `BIG_LIBRARY_SCALE=3` makes one of about 9,200 documents, to
+ * check that what a screen or a tap does stays the same as the library grows.
+ */
+export const BIG_LIBRARY_SCALE = Number(process.env.BIG_LIBRARY_SCALE ?? 1);
+
 /** What the fixture holds, for assertions and for budgets that scale with it. */
 export const BIG_LIBRARY = {
-  films: 1_510,
-  series: 380,
-  watching: 30,
+  films: 1_500 * BIG_LIBRARY_SCALE + 10,
+  series: 375 * BIG_LIBRARY_SCALE + 5,
+  watching: 25 * BIG_LIBRARY_SCALE + 5,
   downloads: 6 + SEASON_DOWNLOAD.episodes,
 };
 
@@ -46,7 +52,7 @@ const setting = (name, values) => ({ kind: 'set', schema: 2, name, values });
 const text = (value, at) => ({ value: { string: value }, at });
 
 export function bigLibraryRows(now = fixtureNow()) {
-  const rows = syntheticRows(now, { large: true });
+  const rows = syntheticRows(now, { large: true, scale: BIG_LIBRARY_SCALE });
   const at = [now - DAY, 0, 'aaaaaaaaaaaaaaaa'];
   // Five more downloads beside the synthetic household's one: films queued over the last days.
   for (let i = 1; i <= 5; i += 1) {
@@ -508,13 +514,17 @@ export async function routeBigHousehold(
  * says (`LibraryAssistantAuthority.publish`): `built` (and recorded) or `current`.
  */
 export async function firstPublish(page, path, options = {}) {
-  const outcome = new Promise((resolve) =>
-    page.on('console', (message) => {
+  const outcome = new Promise((resolve) => {
+    const hear = (message) => {
       const text = message.text();
       if (text.startsWith('den: assistant projection built')) resolve('built');
       else if (text === 'den: assistant projection up to date') resolve('current');
-    }),
-  );
+    };
+    // Chromium forwards a Worker's console through its page; WebKit can expose it only on the Worker. Observe both
+    // rather than timing out a settled projection because the engine chose the other console surface this run.
+    page.on('console', hear);
+    page.on('worker', (worker) => worker.on?.('console', hear));
+  });
   await page.goto(`${E2E_ORIGIN}${path}`);
   return Promise.race([
     outcome,
@@ -549,6 +559,40 @@ export async function forgetPublication(context, edge) {
       }),
   );
   await forget.close();
+}
+
+/**
+ * The assistant publishes `page`'s library Worker is asked for (`publishWhileOpen`, one every 30 s), by when each was
+ * asked. `answeredSince(at)`: whether one asked at `at` or later has been answered — built and recorded, or found up
+ * to date, from everything the library had learnt by `at`.
+ */
+async function watchPublishes(page) {
+  // On the page's side of the Worker: the Worker can answer a request before its own listeners hear it.
+  await page.addInitScript(() => {
+    const asked = new Map();
+    const answered = (globalThis.__publishesAnswered = []);
+    const listening = new WeakSet();
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...rest) {
+      if (!listening.has(this)) {
+        listening.add(this);
+        this.addEventListener('message', ({ data }) => {
+          for (const reply of Array.isArray(data) ? data : [])
+            if (asked.has(reply?.requestId)) {
+              answered.push(asked.get(reply.requestId));
+              asked.delete(reply.requestId);
+            }
+        });
+      }
+      if (message?.type === 'task' && message.task?.kind === 'assistant.publish')
+        asked.set(message.requestId, Date.now());
+      return post.call(this, message, ...rest);
+    };
+  });
+  return {
+    answeredSince: (at) =>
+      page.evaluate((since) => globalThis.__publishesAnswered.some((asked) => asked >= since), at),
+  };
 }
 
 /** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */
@@ -603,16 +647,16 @@ export async function bigHousehold(context, edge, options = {}) {
     });
     step('accepted');
     // The move is done once den-edge holds a library with the whole history in it: as Library v4 documents, one per
-    // title and one per season, about 3,070 of them.
+    // title, season and delivery document, about 5,100 of them at scale 1.
     await expect
       .poll(
         () => Math.max(0, ...[...edge.libraries.values()].map((library) => library.rows.size)),
         {
-          timeout: 180_000,
+          timeout: 180_000 * BIG_LIBRARY_SCALE,
           message: 'the Owner library holds the seeded rows',
         },
       )
-      .toBeGreaterThan(3_000);
+      .toBeGreaterThan(5_000 * BIG_LIBRARY_SCALE);
     step('moved');
     // A first visit to Home and to the Watchlist (which names the whole history) fills this browser's TMDB cache, so
     // every later load is a returning visit's.
@@ -620,6 +664,7 @@ export async function bigHousehold(context, edge, options = {}) {
     page.on('request', (request) => {
       if (new URL(request.url()).pathname.startsWith('/tmdb/')) lastTmdb = Date.now();
     });
+    const publishes = await watchPublishes(page);
     for (const path of ['/', '/watchlist']) {
       await page.goto(`${E2E_ORIGIN}${path}`);
       await expect(page.locator('main').getByText('Continue Watching').first()).toBeVisible({
@@ -632,6 +677,17 @@ export async function bigHousehold(context, edge, options = {}) {
         })
         .toBeGreaterThan(3_000);
     }
+    // And published what it named: a projection is built from the series layouts the page has learnt as well as the
+    // library, and kept with them (`LibraryAssistantAuthority`). The Watchlist's first publish comes some seconds in,
+    // often after its names are in: a page closed once they are leaves this browser with nothing published, and each
+    // settling visit below then builds from as much as it had learnt by its own first publish.
+    const named = Date.now();
+    await expect
+      .poll(() => publishes.answeredSince(named), {
+        timeout: 90_000,
+        message: '/watchlist published what it named',
+      })
+      .toBe(true);
     step('primed');
   } finally {
     await page.close();

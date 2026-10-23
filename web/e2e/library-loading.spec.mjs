@@ -54,8 +54,10 @@ test('the inactive Owner profile seam opens only the existing wire-4 library and
   await routeLibraryEdge(page, edge);
 
   await page.goto(`${FIXTURE}?online`);
-  await expect(page.getByText('Loading your library', { exact: true })).toHaveCount(0);
-  await expect.poll(() => edge.libraryRequests.length).toBeGreaterThan(0);
+  // Opened once membership is registered, which follows the first read: until then the requests are incomplete.
+  await expect
+    .poll(() => edge.libraryRequests.some(({ path }) => path.endsWith('/member')))
+    .toBe(true);
 
   const libraryIds = new Set(edge.libraryRequests.map(({ path }) => path.split('/')[2]));
   expect(libraryIds.size).toBe(1);
@@ -184,7 +186,8 @@ for (const [width, failed] of [
         ).observe({ type: 'layout-shift', buffered: true });
       });
       await page.goto(`${E2E_ORIGIN}/test/library.html?populated`);
-      await expect.poll(() => requested.size).toBe(4);
+      // The shelves wait for their own titles only; the ranking's seeds are named once the shelves are up.
+      await expect.poll(() => requested.size).toBe(2);
       const pending = page.locator('[data-pending-shelf]');
       await expect(pending).toHaveCount(2);
       await expect(pending.locator('.skeleton')).toHaveCount(12);
@@ -226,6 +229,8 @@ for (const [width, failed] of [
         // A failed earlier shelf is deliberately removed; the later shelf then closes that reserved gap.
         if (!failed) expect(settled.top).toBeCloseTo(pendingGeometry[label].top, 1);
       }
+      // And then the seeds, behind the shelves.
+      await expect.poll(() => requested.size).toBe(4);
       const positions = () =>
         page.locator('section.row').evaluateAll(
           (rows, labels) =>

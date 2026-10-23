@@ -42,6 +42,7 @@ import type {
   TitleView,
 } from './libraryServiceProtocol';
 import type { LibraryRelayMembership } from './relayFetch';
+import { noteLibraryOpening } from './libraryOpening.svelte';
 import type {
   LibrarySelectionConnection,
   LibrarySelectionSnapshot,
@@ -162,7 +163,13 @@ export class LibraryModel {
       }),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
-    this.ready = service.open(options).catch((error: unknown) => {
+    const progress = (value: number) => {
+      if (!this.#closed) noteLibraryOpening(this, value);
+    };
+    // Ready can come before the read is complete (the rest of the history follows the first page): the progress ends
+    // at 1, or with a failed open or a closed model.
+    this.ready = service.open({ ...options, progress }).catch((error: unknown) => {
+      noteLibraryOpening(this, null);
       const failure = failureFrom(error);
       if (!this.#closed) {
         this.#openFailure = failure;
@@ -457,71 +464,6 @@ export class LibraryModel {
         retryable: true,
       });
     return result.matches;
-  }
-
-  async profileMigrationStatus() {
-    this.#assertOpen();
-    const { result } = await this.service.query({ kind: 'profile-migration.status' });
-    if (result.kind !== 'profile-migration.status')
-      throw wrongQueryResult('profile migration status');
-    return result;
-  }
-
-  async observeProfileMigration() {
-    this.#assertOpen();
-    const { result } = await this.service.query({ kind: 'profile-migration.observe' });
-    if (result.kind !== 'profile-migration.observe')
-      throw wrongQueryResult('profile migration observation');
-    return result;
-  }
-
-  /** `attempt` is the restore-required split journal on this device, or null for the journal-less Owner Restore. */
-  async observeProfileRecovery(attempt: string | null) {
-    this.#assertOpen();
-    const { result } = await this.service.query({
-      kind: 'profile-migration.observe-recovery',
-      attempt,
-    });
-    if (result.kind !== 'profile-migration.observe-recovery')
-      throw wrongQueryResult('profile migration recovery observation');
-    return result;
-  }
-
-  enableProfiles(
-    attempt: string,
-    source: { generation: number; head: string },
-    operationId?: string,
-  ) {
-    // A caller's `$state` proxy can't be structured-cloned into the Worker; send a plain copy.
-    return this.task(
-      {
-        kind: 'profile-migration.enable',
-        attempt,
-        source: { generation: source.generation, head: source.head },
-      },
-      operationId,
-    );
-  }
-
-  cancelProfileMigration(attempt: string, operationId?: string) {
-    return this.task({ kind: 'profile-migration.cancel', attempt }, operationId);
-  }
-
-  recoverProfileMigration(
-    attempt: string | null,
-    recoveryAttempt: string,
-    source: { generation: number; head: string },
-    operationId?: string,
-  ) {
-    return this.task(
-      {
-        kind: 'profile-migration.recover',
-        attempt,
-        recoveryAttempt,
-        source: { generation: source.generation, head: source.head },
-      },
-      operationId,
-    );
   }
 
   async profileCreateStatus() {
@@ -1044,6 +986,7 @@ export class LibraryModel {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    noteLibraryOpening(this, null);
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();

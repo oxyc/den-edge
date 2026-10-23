@@ -6,7 +6,6 @@ import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './librarySer
 import { openLibraryServiceAuthority } from './libraryServiceRuntimeAuthority';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
-import { upgradeLibrary } from './libraryUpgrade';
 import { openHandover } from './pair';
 import { unseal } from './recovery';
 import { toBase64url } from './wire';
@@ -85,8 +84,7 @@ describe('openLibraryServiceAuthority', () => {
     const seed = await LibraryLog.openLocal(KEY, vault);
     expect(seed).not.toBeNull();
     const seedClock = await openClockStore(vault, { legacy: { device: '0123456789abcdef' } });
-    await upgradeLibrary(seed!, true, 1_000, seedClock);
-    expect(seed!.wireMinimum).toBe(3);
+    expect(seed!.wireMinimum).toBe(4);
     await seedClock.issue(1_000_000);
     seed!.close();
     const authority = await openLibraryServiceAuthority(
@@ -156,7 +154,7 @@ describe('openLibraryServiceAuthority', () => {
           type: 'movie',
           tmdbId: 77,
           status: 'watched',
-          plays: [{ watchedAt: new Date(20_000).toISOString(), source: 'import' }],
+          plays: [{ watchedAt: new Date(20_000).toISOString(), source: 'den' }],
         },
       ],
     });

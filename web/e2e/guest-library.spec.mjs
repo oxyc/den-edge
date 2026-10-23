@@ -11,13 +11,24 @@ async function browserOf(edge, use) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
+  // This browser is launched here rather than by the runner: the runner traces its pages but keeps none of them in
+  // the test's trace. A failure saves each page's own, since the failure these tests have had only on CI is a page's
+  // state.
+  const contexts = [];
   try {
     await use(browser, async () => {
       const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+      contexts.push(context);
       const page = await context.newPage();
       await routeGuestEdge(page, edge);
       return page;
     });
+  } catch (error) {
+    for (const [n, context] of contexts.entries())
+      await context.tracing
+        .stop({ path: test.info().outputPath(`page-${n + 1}-trace.zip`) })
+        .catch(() => undefined);
+    throw error;
   } finally {
     await browser.close();
   }
@@ -36,6 +47,9 @@ async function laptopAcceptingAnInvite(open, edge) {
   const watchlist = laptop.getByRole('button', { name: 'Watchlist', exact: true });
   await watchlist.click();
   await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
+  // `aria-pressed` is optimistic. Wait for the save indicator to clear before the hard navigation below tears down
+  // this page and its Worker; otherwise the test can interrupt the IndexedDB write it expects the invite to move.
+  await expect(watchlist).not.toHaveAttribute('data-saving', 'true');
   expect(edge.libraries.size, 'nothing synced yet: it is the browser’s own').toBe(0);
 
   await laptop.goto(`${E2E_ORIGIN}/#invite=${CODE}`);

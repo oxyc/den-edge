@@ -180,12 +180,16 @@
   const linkHost = params.get('link-host');
   const hostDevice = 'cccc000000000003';
   const at = [1, 0, 'test'];
+  // Whole settings rows, as the log's own `settings` returns them: the selected views find them by `name`.
   const devices =
     linkHost === 'tv' ||
     linkHost === 'browser' ||
     linkHost === 'legacy-tv' ||
     linkHost === 'legacy-browser'
       ? {
+          kind: 'set',
+          schema: 2,
+          name: 'devices',
           values: {
             [`${hostDevice}.name`]: {
               value: { string: linkHost.includes('browser') ? 'Mac · Chrome' : 'Living Room TV' },
@@ -207,11 +211,21 @@
     currentGeneration: undefined,
     settings: (group: string) =>
       group === 'keys'
-        ? { values: { tmdb: { value: { string: 'fixture-key' }, at } } }
+        ? {
+            kind: 'set',
+            schema: 2,
+            name: 'keys',
+            values: { tmdb: { value: { string: 'fixture-key' }, at } },
+          }
         : group === 'devices'
           ? devices
           : group === 'plugins' && plugin
-            ? { values: { [plugin]: { value: { bool: true }, at } } }
+            ? {
+                kind: 'set',
+                schema: 2,
+                name: 'plugins',
+                values: { [plugin]: { value: { bool: true }, at } },
+              }
             : undefined,
     refresh: async () => false,
     rows: () => stored,

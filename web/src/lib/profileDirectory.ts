@@ -8,7 +8,7 @@ export interface ProfileDirectoryDocument {
   readonly kind: 'profiles';
   readonly schema: 1;
   readonly owner: string;
-  /** Immutable proof that this directory was committed by the initial Owner split. */
+  /** Immutable proof that this directory was committed with its initial Owner profile. */
   readonly migration: {
     readonly version: 1;
     readonly attempt: string;

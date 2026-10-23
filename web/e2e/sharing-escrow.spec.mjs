@@ -175,7 +175,7 @@ test('opening Sharing rewrites each stale invite once, and a current one never',
     ),
   };
   await routeEdge(page, edge);
-  await page.goto(`${FIXTURE}?seed&sharing`);
+  await page.goto(`${FIXTURE}?seed&online&sharing`);
   await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
     timeout: 15_000,
   });

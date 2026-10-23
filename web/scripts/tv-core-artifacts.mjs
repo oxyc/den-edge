@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 export const browserCore = resolve(import.meta.dirname, '../src/vendor/den-core');
 export const tvCore = resolve(import.meta.dirname, '../src/vendor/den-core-tv');
+export const tizen3Core = resolve(import.meta.dirname, '../src/vendor/den-core-tizen3');
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 export const coreManifest = () => JSON.parse(readFileSync(resolve(browserCore, 'SOURCE.json')));
 export const tvCoreArtifacts = [
@@ -48,7 +49,8 @@ export function verifyTvCore() {
     tv.schema !== 1 ||
     tv.rust !== source.rust ||
     tv.sourceManifest !== '../den-core/SOURCE.json' ||
-    tv.rustflags !== '-C target-feature=-reference-types' ||
+    tv.rustflags !==
+      '-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types' ||
     JSON.stringify(tv.buildStd) !== JSON.stringify(['std', 'panic_abort']) ||
     tv.removeNameSection !== true ||
     tv.normalizedBuildPaths !== true
@@ -73,4 +75,35 @@ export function verifyTvCore() {
       throw new Error(`TV den-core artifact hash mismatch: ${name}`);
   }
   return tv;
+}
+
+/** The JavaScript fallback is an explicit third artifact set, never an alias for either Wasm build. */
+export function verifyTizen3Core() {
+  const source = coreManifest();
+  const legacy = JSON.parse(readFileSync(resolve(tizen3Core, 'SOURCE.json')));
+  const expectedArtifacts = ['generated/den_core.js', 'index.d.ts', 'index.js'];
+  if (
+    legacy.schema !== 1 ||
+    legacy.sourceDigest !== source.sourceDigest ||
+    legacy.sourceManifest !== '../den-core/SOURCE.json' ||
+    legacy.rust !== source.rust ||
+    legacy.binaryen !== 133 ||
+    legacy.rustflags !==
+      '-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types,-multivalue' ||
+    JSON.stringify(legacy.excludes) !== JSON.stringify(['assistant'])
+  )
+    throw new Error('Tizen 3 den-core recipe does not match the pinned JavaScript fallback');
+  if (JSON.stringify(Object.keys(legacy.artifacts).sort()) !== JSON.stringify(expectedArtifacts))
+    throw new Error('Tizen 3 den-core manifest has an incomplete artifact list');
+  const inventory = readdirSync(tizen3Core, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => resolve(entry.parentPath, entry.name).slice(tizen3Core.length + 1))
+    .sort();
+  if (JSON.stringify(inventory) !== JSON.stringify([...expectedArtifacts, 'SOURCE.json'].sort()))
+    throw new Error('Tizen 3 den-core contains an unrecorded artifact');
+  for (const [name, expected] of Object.entries(legacy.artifacts)) {
+    if (sha256(readFileSync(resolve(tizen3Core, name))) !== expected)
+      throw new Error(`Tizen 3 den-core artifact hash mismatch: ${name}`);
+  }
+  return legacy;
 }

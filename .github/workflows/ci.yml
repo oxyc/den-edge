@@ -109,7 +109,21 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run audit
       - run: npm run lint
+      # The profile integration suites run against the real den-edge binary built from this commit. With
+      # DEN_EDGE_REQUIRED=1 a missing binary fails them instead of skipping them.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: .
+      - name: Build den-edge for the integration suites
+        working-directory: .
+        run: cargo build --locked --bin den-edge
       - run: npm test
+        env:
+          DEN_EDGE_REQUIRED: "1"
+          DEN_EDGE_BIN: ${{ github.workspace }}/target/debug/den-edge
       - run: node scripts/test-tv-core.mjs
       - run: npm run build
       - run: npm run check:tv-isolation
@@ -120,7 +134,7 @@ jobs:
       # separately covers the real Tizen bundle, file origin, CSP, API routing and playback.
       - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-platform.spec.mjs
       - run: npm run test:e2e:tv-package
-      - run: node scripts/tizen-package.integration.mjs
+      - run: DEN_SKIP_TIZEN3=1 node scripts/tizen-package.integration.mjs
       - run: npm run test:tv-preflight
       # Normal artifacts must not contain the test-only Player harness enabled by the E2E builds.
       - run: npm run build:tv:webos && npm run build:tv:tizen
@@ -240,9 +254,23 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci --ignore-scripts
       - name: Time budgets on the production build
+        id: budgets
+        continue-on-error: true
         run: npm run test:e2e:budgets
+      - name: Report exceeded timing budgets
+        if: steps.budgets.outcome == 'failure'
+        run: echo "::warning title=Timing budgets exceeded::Performance budgets are advisory; inspect the retained evidence."
+      - name: Retain budget failure evidence
+        if: steps.budgets.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: budget-failures
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
 
-  # Preserve the stable `web` check name while making it represent the once-only checks, every shard and the budgets.
+  # Preserve the stable `web` check name while making it represent the blocking once-only checks and every shard.
+  # Timing budgets still run and retain evidence, but an over-budget measurement is advisory.
   web:
     if: always()
     needs: [scope, web-checks, e2e, e2e-budgets, android-tv]

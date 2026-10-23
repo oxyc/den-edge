@@ -203,11 +203,39 @@ async function routeLibraries(page, edge, origin) {
     if (action === 'changes' && request.method() === 'GET') {
       if (!library || library.tokenHash !== sha(token ?? '')) return json(route, 404, {}, HEADERS);
       const since = Number(url.searchParams.get('since') ?? 0);
-      const entries = [...library.rows.values()].filter((entry) => entry.seq > since);
+      const before = url.searchParams.get('before');
+      const keys = url.searchParams.get('keys');
+      // Paged as den-edge pages it: a reader asking for few rows pays one round trip per page.
+      const limit = Number(url.searchParams.get('limit') ?? 1000) || 1000;
+      const rows = [...library.rows.values()];
+      let read;
+      if (keys !== null) {
+        const named = new Set(keys.split(','));
+        read = {
+          entries: rows.filter((entry) => named.has(entry.k)).sort((a, b) => a.seq - b.seq),
+          more: false,
+          selected: true,
+        };
+      } else if (before !== null) {
+        const below = rows
+          .filter((entry) => entry.seq < Number(before))
+          .sort((a, b) => b.seq - a.seq);
+        read = {
+          entries: below.slice(0, limit),
+          more: below.length > limit,
+          order: 'desc',
+          rows: library.rows.size,
+        };
+      } else {
+        const after = rows.filter((entry) => entry.seq > since).sort((a, b) => a.seq - b.seq);
+        read = { entries: after.slice(0, limit), more: after.length > limit };
+      }
+      if (edge.changesLatencyMs)
+        await new Promise((resolve) => setTimeout(resolve, edge.changesLatencyMs));
       return json(
         route,
         200,
-        { generation: GENERATION, entries, head: library.head, more: false },
+        { generation: GENERATION, head: library.head, ...read },
         { ...HEADERS, 'x-den-wire-min': String(library.wireMin) },
       );
     }

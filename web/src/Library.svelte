@@ -155,6 +155,8 @@
   // of the writes below can reach the household log, trackers, assistants, companion, or recommendation authority.
   const profileActivity = untrack(() => session.profileActivity);
   const SHELF_TRANCHE = 8;
+  /** Series layouts the shelves wait for at once: two rows' worth of cards, most of them already finished series. */
+  const SHAPE_TRANCHE = 16;
   let shelvesReady = $state(model === null);
   /**
    * The shelves under the top one (`topShelf`) mount a task after it. The flush that readied the shelves
@@ -306,7 +308,6 @@
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
-  let connectionsLease = $state.raw<ReturnType<NonNullable<typeof model>['connections']>>();
   let downloadsLease = $state.raw<ReturnType<NonNullable<typeof model>['downloads']>>();
 
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
@@ -320,22 +321,26 @@
       if (titleLease === lease) titleLease = undefined;
     };
   });
+  // Watched history is the whole library's, which the library Worker reads in full: it is asked for once the Watchlist's
+  // billboard has painted its first details (`watchlistLead`, below), which come from the same Worker, or there is no
+  // billboard, so the screen never waits on it (an old TV spends seconds on that read). Then kept asked for.
+  let historyAsked = $state(false);
   $effect(() => {
-    if (!model || route.page !== 'watchlist') return;
+    if (route.page !== 'watchlist' || !overview || historyAsked) return;
+    if (!watchlistLead && !(watchlistNamed && !untrack(() => savedTitles.length))) return;
+    // The frame that draws them, then the next: asked for only once they are on screen.
+    let frame = requestAnimationFrame(
+      () => (frame = requestAnimationFrame(() => (historyAsked = true))),
+    );
+    return () => cancelAnimationFrame(frame);
+  });
+  $effect(() => {
+    if (!model || route.page !== 'watchlist' || !historyAsked) return;
     const lease = model.history();
     historyLease = lease;
     return () => {
       lease.release();
       if (historyLease === lease) historyLease = undefined;
-    };
-  });
-  $effect(() => {
-    if (!model || route.page !== 'title') return;
-    const lease = model.connections();
-    connectionsLease = lease;
-    return () => {
-      lease.release();
-      if (connectionsLease === lease) connectionsLease = undefined;
     };
   });
   // The household's device list, which says whether the device this browser linked through is a TV (`linkedTv`).
@@ -397,12 +402,40 @@
     const continued = continueView;
     if (!view || !continued) return undefined;
     return [
-      ...continued.needsShapes,
+      // Newest-watched first (`homeLibraryView.ts`), a tranche at a time: every series ever watched needs its layout
+      // before Continue Watching knows whether it has a next episode, and an empty TMDB cache asked 404 of them before
+      // a row of seven cards. As each tranche's layouts arrive they leave `needsShapes`, the set changes, and this pass
+      // runs again on the next, behind the shelves.
+      ...continued.needsShapes.slice(0, SHAPE_TRANCHE),
       ...continued.items.slice(0, continueNameLimit).map(({ title }) => title),
       ...view.watchlist.slice(0, watchlistNameLimit),
-      ...view.seeds.watched,
-      ...view.seeds.watchlisted,
     ];
+  });
+  /**
+   * The titles Home's ranking is seeded from, named in a pass of their own: the shelves don't show them, and an LG
+   * with no TMDB answers kept held its shelves seven seconds for 132 lookups that were mostly these.
+   */
+  const seedNamingRefs = $derived(
+    overview ? [...overview.seeds.watched, ...overview.seeds.watchlisted] : undefined,
+  );
+  const seedNamingSet = $derived(seedNamingRefs?.map(titleKey).sort().join(' '));
+  /** The ranking's seeds are named: what the billboard's one personalised ranking sends to atlas. */
+  let seedsNamed = $state(model === null);
+  $effect(() => {
+    if (!model || seedNamingSet === undefined || (session.kid && !atlasReady)) {
+      seedsNamed = model === null;
+      return;
+    }
+    // After the shelves' own pass, so the shelves' lookups don't queue behind these.
+    if (!shelvesReady) return;
+    let disposed = false;
+    const refs = untrack(() => seedNamingRefs!);
+    void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
+      if (!disposed) seedsNamed = true;
+    });
+    return () => {
+      disposed = true;
+    };
   });
   /**
    * The titles that pass names, as a set: it restarts only when they change. Every Continue Watching update is a new
@@ -582,7 +615,9 @@
   $effect(() => {
     session.live = playingAnywhere || playOnTv.active;
     if (!playingAnywhere || !foreground) return;
-    const timer = setInterval(() => (now = Date.now()), 1000);
+    // Four times a second, not once: the clock's seconds don't line up with this timer's, so a one-second tick that
+    // lands a little late skips a second and the next shows it twice.
+    const timer = setInterval(() => (now = Date.now()), 250);
     return () => clearInterval(timer);
   });
   // Fed to the "Play on TV" tracker on every pull, so it can notice a fresh position without a poll of its own.
@@ -1226,13 +1261,14 @@
     }));
   });
   /**
-   * The recent profile facts Home can rank rows against, drawn only from the bounded title tranche its personal
-   * shelves already named. Ranking never wakes dormant history metadata; absent names leave the old order intact.
+   * The recent profile facts Home can rank rows against, drawn only from the bounded title tranche Home already
+   * named (its shelves and its ranking's seeds). Ranking never wakes dormant history metadata; absent names leave the
+   * old order intact.
    */
   let homeTaste = $state.raw<HomeTasteTitle[]>([]);
   $effect(() => {
     const policyReady = atlasReady;
-    const shelvesNamed = shelvesReady;
+    const shelvesNamed = shelvesReady && seedsNamed;
     const entries = [...weighted]
       .filter(({ weight }) => Number.isFinite(weight) && weight !== 0)
       .sort((left, right) => right.at - left.at)
@@ -1266,7 +1302,7 @@
    * Which services have a "new" or a "coming" chart is atlas's to say and changes with its releases, so the rows
    * are only ever as broad as the manifest — and where it lists none, there are no rows rather than empty ones.
    */
-  let serviceCatalogs = $state<AtlasCatalog[]>([]);
+  let serviceCatalogs = $state.raw<AtlasCatalog[]>([]);
   $effect(() => {
     const here = atlas;
     if (!here) return;
@@ -1366,7 +1402,7 @@
   let serviceDirectoriesAdmitted = $state(false);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
-  let directories = $state<Record<string, Service[]>>({});
+  let directories = $state.raw<Record<string, Service[]>>({});
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
@@ -1413,7 +1449,7 @@
    * what is new or still to come, and what has just landed on this household's own services, away from anything the
    * library already holds.
    */
-  let featured = $state<RecommendedTitle[]>([]);
+  let featured = $state.raw<RecommendedTitle[]>([]);
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );
@@ -1554,7 +1590,8 @@
     )
       return;
     const here = atlas;
-    const named = shelvesReady;
+    // Its ranking sends the seeds' names, which are named after the shelves' own (`seedsNamed`).
+    const named = shelvesReady && seedsNamed;
     if (session.kid) {
       const ready = kidHomeReady;
       const available = rankedKidHome.length;
@@ -1860,7 +1897,9 @@
     </p>
   </section>
 {:else if link && model && !overview && !serviceFailed}
-  <Loading label="Loading your library" page />
+  <!-- No spinner: a first read from den-edge draws its progress on the navigation bar, and any other open is too
+       short to show one. The marker still holds the Router's scroll restore until the library is drawn. -->
+  <div data-route-loading></div>
 {:else if serviceFailed}
   <section class="library-failure" role="alert">
     <h1>Couldn’t open your library</h1>
@@ -2179,9 +2218,9 @@
     z-index: 4;
     margin: 0 0 18px;
     padding: 12px 16px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px solid var(--accent-outline-45);
     border-radius: 12px;
-    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    background: var(--accent-surface);
     color: var(--fg);
   }
 
@@ -2204,7 +2243,7 @@
     min-height: 44px;
     margin-top: 8px;
     padding: 8px 18px;
-    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1px solid var(--accent-outline-55);
     border-radius: 999px;
     background: var(--accent);
     color: var(--bg);

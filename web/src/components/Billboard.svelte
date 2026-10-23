@@ -211,10 +211,13 @@
    * Two layers that take turns. The one coming in fades up over the one going out, which is a dissolve without
    * asking the framework for a transition — a plain CSS opacity change the compositor can run on its own.
    */
-  let layers = $state([
+  let layers = $state.raw([
     { id: 0, url: '', path: '', adopted: false },
     { id: 1, url: '', path: '', adopted: false },
   ]);
+  function replaceLayer(index: number, layer: (typeof layers)[number]) {
+    layers = layers.map((current, at) => (at === index ? layer : current));
+  }
   let lit = $state(0);
 
   /**
@@ -243,7 +246,7 @@
         image.remove();
         earlyBackdrop = null;
         earlyLoaded = false;
-        layers[0] = { id: 0, url: '', path: '', adopted: false };
+        replaceLayer(0, { id: 0, url: '', path: '', adopted: false });
       };
       image.addEventListener('load', loaded);
       image.addEventListener('error', failed, { once: true });
@@ -256,12 +259,12 @@
         node.parentElement?.append(copy);
       }
       shell?.remove();
-      layers[0] = {
+      replaceLayer(0, {
         id: 0,
         url: billboardBackdropURL(path),
         path,
         adopted: true,
-      };
+      });
       lit = 0;
       stopEarly = () => {
         image.removeEventListener('load', loaded);
@@ -375,7 +378,7 @@
         // The slide may have moved on while this loaded, and a slow picture must not overwrite a later one.
         if (wanted !== url) return;
         const next = layers[0]?.url === url ? 0 : 1;
-        layers[next] = { id: next, url, path: imagePath, adopted: false };
+        replaceLayer(next, { id: next, url, path: imagePath, adopted: false });
         lit = next;
         readyKey = titleKey;
         onready?.();
@@ -518,6 +521,7 @@
     // No imdb id required any more: reel is asked by the tmdb id every title carries, and told the imdb
     // one only when this slide's details have arrived carrying it.
     if (
+      __DEN_TV_LEGACY_JS_CORE__ ||
       !active ||
       !title ||
       readyKey !== keyOf(title) ||
@@ -1026,7 +1030,7 @@
         />
       {/if}
     {/each}
-    {#if ambient}
+    {#if ambient && !__DEN_TV_LEGACY_JS_CORE__}
       <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it has
            started. The still picture stays underneath until it does, and stays if it never does. -->
       <video
@@ -1189,7 +1193,7 @@
      billboard ends. */
   .billboard {
     position: relative;
-    width: 100vw;
+    width: var(--presentation-width);
 
     /* Lets the picture, which is not inside the scroller, be animated by the scroller's own progress. */
     timeline-scope: --rail;
@@ -1197,7 +1201,7 @@
     /* Use the large viewport initially, then preserve the measured size through touch-browser
        toolbar changes. Width changes and desktop window resizing refresh the measurement. */
     min-height: var(--stable-hero-height, clamp(420px, 76vh, 860px));
-    margin-inline: calc(50% - 50vw);
+    margin-inline: calc(50% - var(--presentation-edge));
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 28px;
     overflow: hidden;
@@ -1219,12 +1223,18 @@
      than 16:9 without being a big screen, so an ungated floor would override the measurement there. */
   @media (width >= 1000px) {
     .billboard {
-      min-height: max(var(--stable-hero-height, clamp(420px, 76vh, 860px)), min(56.25vw, 94vh));
+      min-height: max(
+        var(--stable-hero-height, clamp(420px, 76vh, 860px)),
+        min(56.25vw, 1080px, 94vh)
+      );
     }
 
     @supports (height: 1lvh) {
       .billboard {
-        min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+        min-height: max(
+          var(--stable-hero-height, clamp(420px, 76lvh, 860px)),
+          min(56.25vw, 1080px, 94lvh)
+        );
       }
     }
   }

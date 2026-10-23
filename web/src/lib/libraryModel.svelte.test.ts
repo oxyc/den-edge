@@ -223,7 +223,11 @@ const connectionsValue = (): LibrarySelectionValue => ({
   plugins: [],
   servers: [],
   devices: [],
-  diagnostics: { libraryFormat: 4, pendingChanges: 0, selfDeviceId: '0123456789abcdef' },
+  diagnostics: {
+    libraryFormat: 4,
+    pendingChanges: 0,
+    selfDeviceId: '0123456789abcdef',
+  },
 });
 
 const downloadsValue = (): LibrarySelectionValue => ({
@@ -482,30 +486,6 @@ it('deep-copies a retained Home billboard onto the service wire', async () => {
   expect(retained.value.titles[0]).not.toBe(title);
   expect(retained.value.titles[0]?.genreIds).not.toBe(title.genreIds);
   expect(() => structuredClone(retained)).not.toThrow();
-  model.close();
-});
-
-it('sends a profile migration source the Worker can clone, even from a proxied caller value', async () => {
-  const sent: LibraryTask[] = [];
-  class RecordingService extends FakeService {
-    override async task(task: LibraryTask) {
-      sent.push(task);
-      return {
-        result: { kind: 'profile-migration.enable' } as LibraryTaskResult,
-        version: version(8),
-      };
-    }
-  }
-  const model = new LibraryModel(new RecordingService(), options);
-  await model.ready;
-  // Settings keeps the observed source in `$state`, which hands the model a Proxy.
-  const source = new Proxy({ generation: 3, head: 'a'.repeat(64) }, {});
-
-  await model.enableProfiles('b'.repeat(32), source);
-  await model.recoverProfileMigration(null, 'c'.repeat(32), source);
-
-  expect(sent).toHaveLength(2);
-  for (const task of sent) expect(() => structuredClone(task)).not.toThrow();
   model.close();
 });
 

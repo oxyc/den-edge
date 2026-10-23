@@ -386,7 +386,7 @@
    * Where den-remux is asked, which starts as the page's own route and moves to the relay when the viewer asks to
    * cast from a direct (tailnet or home-network) one: those play in a plain video element that has no Cast button.
    */
-  let route = $state(untrack(() => remux));
+  let route = $state.raw(untrack(() => remux));
   let routeBeforeCast = untrack(() => remux);
   /** Where a press of Cast stands (`castLook`): playback moves to the relay only once a receiver was seen. */
   let castOffer = $state<CastOffer>('idle');
@@ -438,7 +438,7 @@
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
   /** On `none`: the containers of the releases that were ready but that the browser player can't open (`.ts`, …). */
-  let skippedFormats = $state<string[]>([]);
+  let skippedFormats = $state.raw<string[]>([]);
   /**
    * The playing session's connection as its segments see it (`resumingLoader`): down while they fail for want of one,
    * which is waited out rather than acted on. One per hls.js instance.
@@ -477,7 +477,7 @@
   /** What this browser decodes, found once: den-remux converts only what won't play here. */
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
-  let releases = $state<Release[]>([]);
+  let releases = $state.raw<Release[]>([]);
   /**
    * Discovery is separate from session creation. The session itself is a valid first choice, but presenting that
    * one row as a finished list while Scout is still collecting releases makes a slow answer look like "one stream".
@@ -578,12 +578,11 @@
   let transitionNoticeId = 0;
   let transitionNotice = $state<string | null>(null);
   /**
-   * A replacement reuses the same `<video>`. Its `autoplay` attribute started the element when it was first mounted,
-   * but browsers need not run autoplay again after hls.js swaps the MediaSource. Remember that the outgoing stream
-   * was actually playing and explicitly resume only that replacement; a viewer who switched while paused stays
-   * paused.
+   * Later sessions reuse the same `<video>`. Its one-shot `autoplay` starts the first, but browsers need not run it
+   * again after hls.js swaps the MediaSource. Explicitly start a next episode; for an in-place replacement, remember
+   * whether the outgoing stream was actually playing so a viewer who switched while paused stays paused.
    */
-  let resumeReplacement: Session | null = null;
+  let playWhenMounted: Session | null = null;
 
   function showTransition(label: string): number {
     transitionNotice = label;
@@ -1132,6 +1131,20 @@
           console.warn(
             `den-remux refused a mid-film change (${result.failure}); the playing session carries on.`,
           );
+        if (
+          result.failure === 'busy' ||
+          result.failure === 'starting' ||
+          result.failure === 'transcode' ||
+          result.failure === 'timedOut' ||
+          result.failure === 'temporarilyUnavailable' ||
+          cause === 'torbox_rate_limited'
+        ) {
+          const retryMessage = automaticRetryNotice(result.failure, cause);
+          retry = setTimeout(
+            () => void begin(pick, extra, replacing, delivery, retryMessage),
+            result.retryMs ?? RETRY_MS,
+          );
+        }
         return result.failure;
       }
       managedCause = cause;
@@ -1183,6 +1196,10 @@
     )
       result = { ...result, castOrigin: directCastOrigin };
     const replacingWasPlaying = replacing ? !!video && !video.paused : false;
+    // After the first play `playing()` retires the one-shot autoplay flag. A new episode can reuse this component
+    // and element without being a `replacing` session, so it too needs an explicit start. A true replacement follows
+    // the outgoing element's actual state, preserving a deliberate pause.
+    const shouldPlayWhenMounted = replacing ? replacingWasPlaying : video?.autoplay === false;
     if (replacing) {
       // The new session is in hand: only now is the one playing let go.
       watcher?.stop();
@@ -1220,7 +1237,7 @@
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
     session = result;
-    resumeReplacement = replacingWasPlaying ? session : null;
+    playWhenMounted = shouldPlayWhenMounted ? session : null;
     directAttempt = result.external
       ? delivery === 'ordinary' || delivery === 'direct'
         ? 'initial'
@@ -1557,8 +1574,8 @@
     const [current, element] = [session, video];
     if (!current || current.castOrigin || !element) return;
     const resumeIfReplaced = () => {
-      if (resumeReplacement !== current) return;
-      resumeReplacement = null;
+      if (playWhenMounted !== current) return;
+      playWhenMounted = null;
       // A held start has its own readiness boundary and resumes there.
       if (hold || !element.paused) return;
       void element
@@ -2342,7 +2359,7 @@
   }
 
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
-  const castable = canOfferCast();
+  const castable = !__DEN_TV_LEGACY_JS_CORE__ && canOfferCast();
 
   type AirPlayVideo = HTMLVideoElement & {
     webkitCurrentPlaybackTargetIsWireless?: boolean;
@@ -2765,6 +2782,13 @@
   }
 
   function playing() {
+    // Autoplay is only the initial-start request. Some TV engines reconsider a persistent autoplay flag after a
+    // later readiness/buffering transition and can undo a deliberate pause. Once playback has begun, every future
+    // start is either a viewer action or an explicitly state-preserving source replacement.
+    if (video?.autoplay) {
+      video.autoplay = false;
+      video.removeAttribute('autoplay');
+    }
     if (customTransport) tvPaused = false;
     if (tv) setTvPlaybackActive(true);
     scheduleWebControls();
@@ -3193,7 +3217,7 @@
   }
 
   /** SkipDB's segments for what is playing, and the one under the playhead right now. */
-  let segments = $state<SkipSegment[]>([]);
+  let segments = $state.raw<SkipSegment[]>([]);
   let active = $state<SkipSegment | null>(null);
   /**
    * Kinds already skipped in this session, so a viewer who scrubs back into the credits is not yanked out of
@@ -4845,8 +4869,8 @@
 
   @media (hover: hover) and (pointer: fine) {
     header :global(.trigger.player-source-switch:hover) {
-      border-color: color-mix(in srgb, currentcolor 38%, var(--button-border));
-      background-color: color-mix(in srgb, var(--button-bg) 84%, white 16%);
+      border-color: var(--button-hover-border, var(--button-border));
+      background-color: var(--button-hover-bg, var(--button-bg));
     }
   }
 
@@ -5049,11 +5073,13 @@
     margin-bottom: 0;
   }
 
-  /* A notice with nothing to dismiss still sits the same height as one with. */
+  /* A notice with nothing to dismiss still sits the same height as one with. A release name has no spaces to break
+     at, so it may break anywhere rather than run past the notice and off a phone's screen. */
   .notice-copy {
     flex: 1 1 auto;
     min-width: 0;
     padding: 6px 0;
+    overflow-wrap: anywhere;
   }
 
   .status-spinner {

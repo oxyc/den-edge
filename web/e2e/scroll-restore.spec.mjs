@@ -195,6 +195,33 @@ async function browseRestores(browser, start = '/') {
   await page.close();
 }
 
+test('choosing Home while on Home goes back to its top', async ({ browser }) => {
+  const page = await scenario(browser);
+  await setup(page, '/');
+  await page.goto(`${E2E_ORIGIN}/test/title-scroll.html`);
+  const rows = active(page).locator('section.row');
+  await expect(async () => {
+    await page.evaluate(() =>
+      scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' }),
+    );
+    await expect(rows.nth(4)).toBeAttached({ timeout: 1000 });
+  }).toPass();
+  await rows.nth(4).evaluate((row) => row.scrollIntoView({ block: 'center', behavior: 'instant' }));
+  expect(await page.evaluate(() => scrollY)).toBeGreaterThan(200);
+  // The logo and the Home tab are both a link to `/`, which the router handles.
+  await page.evaluate(() => {
+    const home = document.createElement('a');
+    home.href = '/';
+    home.textContent = 'Home';
+    home.style.cssText = 'position:fixed;top:0;left:0;z-index:9999';
+    document.body.append(home);
+  });
+  await page.getByRole('link', { name: 'Home', exact: true }).tap();
+  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(0);
+  expect(new URL(page.url()).pathname).toBe('/');
+  await page.close();
+});
+
 test('Back to a title restores the page and its More like this row', async ({ browser }) => {
   await detailRestores(browser);
 });

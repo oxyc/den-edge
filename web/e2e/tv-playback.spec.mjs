@@ -296,6 +296,7 @@ test('TV remote plays HLS, pauses, seeks, flushes progress and closes through Ba
   await expect
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(12);
+  await expect.poll(() => video.evaluate((element) => element.autoplay)).toBe(false);
   // Desktop preview uses hls.js, while an LG uses its native engine. The platform remains explicit in either case.
   expect(opening).toMatchObject({ player: 'hls.js', platform: 'webos' });
 
