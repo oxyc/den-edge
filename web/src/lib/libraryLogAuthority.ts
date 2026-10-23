@@ -1804,9 +1804,19 @@ export class LibraryLogAuthority {
    */
   #changeFinishedRevision(revision?: string): void {
     if (!this.#options.libraryKey || !this.#options.vault) return;
+    // A read (`#rememberFinished`) names the revision it read at; an edit leaves it to be worked out here.
+    const read = revision !== undefined;
     revision ??= this.#finishedAuthorityRevision();
     if (this.#finishedRevision === revision) return;
     const first = this.#finishedRevision === undefined;
+    // Views a visit read from the fact store (`FinishedLibraryViewAuthority#flushFactViews`) name its head, not this
+    // log's revision. At this log's generation and head, with no work of its own kept, they say what it does: a surface
+    // that reads the whole log but not every view (the Watchlist's history) leaves them for the next Home to draw.
+    const generation = this.#log.currentGeneration;
+    const facts =
+      read && first && generation && this.#log.pendingActions === 0
+        ? { generation, revision: `facts:${this.#log.logHead}` }
+        : undefined;
     this.#finishedRevision = revision;
     this.#finishedPieces = {};
     this.#finishedPending = undefined;
@@ -1822,6 +1832,12 @@ export class LibraryLogAuthority {
             [],
           );
           if (kept?.identity.authorityRevision === revision) return;
+          if (
+            facts &&
+            kept?.identity.generation === facts.generation &&
+            kept.identity.authorityRevision === facts.revision
+          )
+            return;
         }
         await staleFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
       })

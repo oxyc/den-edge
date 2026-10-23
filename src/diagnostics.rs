@@ -588,6 +588,145 @@ struct LoadReport {
     worker_files: Option<FileSources>,
     /// The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`.
     long_tasks: Option<(u32, u32, u32)>,
+    /// What each library Worker's open did, by the library it serves.
+    #[serde(default)]
+    library_workers: LibraryWorkers,
+}
+
+/// A load's library Workers by the library each serves (`startupTiming.ts` `LibraryWorkerRole`): a profile
+/// household's own, and a library's (a profile's, or a household's without profiles).
+#[derive(Deserialize, Default)]
+struct LibraryWorkers {
+    household: Option<LibraryWorker>,
+    profile: Option<LibraryWorker>,
+}
+
+/// What one library Worker's open did (`LibraryWorkerStartup`). Closed sets and a time only.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryWorker {
+    views: Option<LibraryViews>,
+    promoted: Option<LibraryPromotion>,
+    selection: Option<LibrarySelectionKind>,
+    core_requested_ms: Option<u32>,
+}
+
+/// Saved views, the fact store without them, or the whole log.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LibraryViews {
+    Saved,
+    Facts,
+    Miss,
+}
+
+/// Why a Worker opened its whole library after all: the kind of reason.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LibraryPromotion {
+    Cache,
+    Selection,
+    Command,
+    Edit,
+    Query,
+    Task,
+    Observation,
+    Import,
+    Continue,
+    Reconcile,
+    Content,
+    Layout,
+}
+
+/// The selection a `selection` promotion was for.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LibrarySelectionKind {
+    Overview,
+    Watchlist,
+    Recommendations,
+    Continue,
+    History,
+    Title,
+    Presence,
+    Settings,
+    Devices,
+    Connections,
+    Simkl,
+    Recovery,
+    Runtime,
+    Profiles,
+    Downloads,
+}
+
+impl LibraryViews {
+    fn as_str(self) -> &'static str {
+        match self {
+            LibraryViews::Saved => "saved",
+            LibraryViews::Facts => "facts",
+            LibraryViews::Miss => "miss",
+        }
+    }
+}
+
+impl LibraryPromotion {
+    fn as_str(self) -> &'static str {
+        match self {
+            LibraryPromotion::Cache => "cache",
+            LibraryPromotion::Selection => "selection",
+            LibraryPromotion::Command => "command",
+            LibraryPromotion::Edit => "edit",
+            LibraryPromotion::Query => "query",
+            LibraryPromotion::Task => "task",
+            LibraryPromotion::Observation => "observation",
+            LibraryPromotion::Import => "import",
+            LibraryPromotion::Continue => "continue",
+            LibraryPromotion::Reconcile => "reconcile",
+            LibraryPromotion::Content => "content",
+            LibraryPromotion::Layout => "layout",
+        }
+    }
+}
+
+impl LibrarySelectionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            LibrarySelectionKind::Overview => "overview",
+            LibrarySelectionKind::Watchlist => "watchlist",
+            LibrarySelectionKind::Recommendations => "recommendations",
+            LibrarySelectionKind::Continue => "continue",
+            LibrarySelectionKind::History => "history",
+            LibrarySelectionKind::Title => "title",
+            LibrarySelectionKind::Presence => "presence",
+            LibrarySelectionKind::Settings => "settings",
+            LibrarySelectionKind::Devices => "devices",
+            LibrarySelectionKind::Connections => "connections",
+            LibrarySelectionKind::Simkl => "simkl",
+            LibrarySelectionKind::Recovery => "recovery",
+            LibrarySelectionKind::Runtime => "runtime",
+            LibrarySelectionKind::Profiles => "profiles",
+            LibrarySelectionKind::Downloads => "downloads",
+        }
+    }
+}
+
+impl LibraryWorker {
+    /// `<prefix>_views:saved,<prefix>_promoted:selection/profiles,<prefix>_core_req:2061`, each part it has.
+    fn tag(&self, prefix: &str, parts: &mut Vec<String>) {
+        if let Some(views) = self.views {
+            parts.push(format!("{prefix}_views:{}", views.as_str()));
+        }
+        if let Some(promoted) = self.promoted {
+            let selection = self.selection.filter(|_| matches!(promoted, LibraryPromotion::Selection));
+            parts.push(match selection {
+                Some(kind) => format!("{prefix}_promoted:{}/{}", promoted.as_str(), kind.as_str()),
+                None => format!("{prefix}_promoted:{}", promoted.as_str()),
+            });
+        }
+        if let Some(ms) = self.core_requested_ms {
+            parts.push(format!("{prefix}_core_req:{}", ms.min(MAX_MS)));
+        }
+    }
 }
 
 /// Script and Wasm files counted by where each came from (`loadReport.ts` `fileTally`): the HTTP cache, a service
@@ -725,6 +864,13 @@ impl LoadReport {
             }
         }
         parts.push(format!("workers:{}", self.workers.min(MAX_WORKERS)));
+        for (prefix, worker) in
+            [("hh", &self.library_workers.household), ("pf", &self.library_workers.profile)]
+        {
+            if let Some(worker) = worker {
+                worker.tag(prefix, &mut parts);
+            }
+        }
         for (prefix, tally) in [("net", &self.net), ("wnet", &self.worker_net)] {
             for (kind, (count, ms)) in tally {
                 parts.push(format!(
@@ -1372,6 +1518,42 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(report.tag(), "route:home,device:tv,engine:blink,billboard:7113,workers:2");
+    }
+
+    #[test]
+    fn a_load_report_says_what_each_library_worker_opened_from_and_why_it_asked_for_den_core() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+            "libraryWorkers": {
+                "household": { "views": "saved", "promoted": "selection", "selection": "downloads", "coreRequestedMs": 2061 },
+                "profile": { "views": "facts", "promoted": "layout", "selection": "continue", "coreRequestedMs": u32::MAX },
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            format!(
+                "route:home,device:tv,engine:blink,workers:2,hh_views:saved,hh_promoted:selection/downloads,\
+                 hh_core_req:2061,pf_views:facts,pf_promoted:layout,pf_core_req:{MAX_MS}"
+            )
+        );
+        let saved_only: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+            "libraryWorkers": { "profile": { "views": "saved" } },
+        }))
+        .unwrap();
+        assert_eq!(saved_only.tag(), "route:home,device:tv,engine:blink,workers:2,pf_views:saved");
+        for worker in [
+            serde_json::json!({ "views": "/lib/abc" }),
+            serde_json::json!({ "promoted": "selection:profiles" }),
+            serde_json::json!({ "promoted": "selection", "selection": "title:550" }),
+        ] {
+            let unknown = serde_json::json!({
+                "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+                "libraryWorkers": { "household": worker },
+            });
+            assert!(serde_json::from_value::<LoadReport>(unknown).is_err());
+        }
     }
 
     #[test]
