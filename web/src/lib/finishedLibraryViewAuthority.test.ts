@@ -491,6 +491,55 @@ it('draws a first open from its newest page and its settings by key, then reads 
   expect(openFull).not.toHaveBeenCalled();
 });
 
+it('waits for a newest-first import before reading a title from the completed facts', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(1_100);
+  const edge = changesEdge(entries, 'generation-title-during-fill');
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    const before = new URL(String(input), 'https://den.test').searchParams.get('before');
+    if (before !== null && Number(before) < Number.MAX_SAFE_INTEGER) await released;
+    return edge.fetchImpl(input, init);
+  });
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    fetchImpl,
+  );
+
+  // This title is in the older page that is still being imported. Opening it must join that read rather than start
+  // a second, oldest-first read of the whole library.
+  let selected = false;
+  const selection = opened!.authority.select({
+    kind: 'title',
+    title: { type: 'movie', id: 1 },
+  });
+  void selection.then(
+    () => (selected = true),
+    () => (selected = true),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(selected).toBe(false);
+  expect(openFull).not.toHaveBeenCalled();
+
+  release();
+  await expect(selection).resolves.toMatchObject({
+    kind: 'title',
+    title: { type: 'movie', id: 1 },
+  });
+  await expect((await LibraryFactStore.open(libraryKey, vault))!.manifest()).resolves.toMatchObject(
+    {
+      complete: true,
+    },
+  );
+  expect(openFull).not.toHaveBeenCalled();
+});
+
 it('counts a first open’s progress in rows, and asks for the second page as the first arrives', async () => {
   await ensureSyncPolicy();
   // Older rows replaced over the years: below the newest 1,000, the history's sequence numbers are ten apart.
