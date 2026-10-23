@@ -67,6 +67,7 @@
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
   import { scopeRecentSearches } from './lib/recentSearches';
+  import { PRE_V4_BACKUP_ERROR } from './lib/libraryErrors';
   import {
     startupFailure,
     startupHandedOver,
@@ -148,6 +149,13 @@
     while (keptPending > 0) await new Promise<void>((resolve) => keptSettlers.push(resolve));
   };
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
+
+  async function discardLocalLegacyBackup(): Promise<void> {
+    const key = libraryIdentity;
+    if (!key || !shown.local || shown.alert !== PRE_V4_BACKUP_ERROR) return;
+    if (await dropLocalLibrary(key)) location.reload();
+    else shown.notify('Couldn’t discard this browser’s old library.');
+  }
 
   let confirmedProfileHousehold = $state<string | null>(
     untrack(() =>
@@ -1595,7 +1603,21 @@
          a new session always mounts a new tree, even one with the same identity (a reopened Owner, whose old model is
          closed). The adopted first-frame session is the coordinator's own object, so that handover keeps the tree. -->
     {#key shown}
-      <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+      <LibraryStatus
+        toast={shown.toast}
+        alert={shown.alert}
+        undo={shown.undo}
+        recovery={shown.local && shown.alert === PRE_V4_BACKUP_ERROR
+          ? {
+              label: 'Start with an empty library…',
+              question: 'Discard this old backup?',
+              detail:
+                'This removes the old library kept only in this browser. Use it only when there is no watchlist, watched history, progress, or settings you want to keep.',
+              confirmLabel: 'Start empty',
+              run: () => void discardLocalLegacyBackup(),
+            }
+          : null}
+      />
       <Router
         profile={profileSessionKey(shown.identity)}
         onchange={(route) => {

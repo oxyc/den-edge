@@ -279,9 +279,16 @@ const tvEntry: Plugin = {
             .replace('/test/player.ts', '/src/tv/test-entry.ts');
         return html;
       }
+      // A packaged TV owns a 1920 x 1080 surface even where its embedded engine reports a different layout
+      // viewport. The hosted build is also our browser/device preview: desktop browsers ignore a numeric mobile
+      // viewport, but iOS obeys it and used to shrink a 1920px page onto the phone. Keep the fixed canvas only in
+      // the package and let the hosted preview use the device it is actually opened on.
+      const viewport = packaged
+        ? 'width=1920, initial-scale=1'
+        : 'width=device-width, initial-scale=1';
       return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 ${packaged ? `<meta http-equiv="Content-Security-Policy" content="${tvCspValue}">` : ''}
-<meta name="viewport" content="width=1920, initial-scale=1"><meta name="theme-color" content="#0b0b0f">
+<meta name="viewport" content="${viewport}"><meta name="theme-color" content="#0b0b0f">
 <title>Den TV</title></head><body><div id="app"><p>Starting Den…</p></div>
 <script type="module" src="/src/tv/main.ts"></script></body></html>`;
     },
