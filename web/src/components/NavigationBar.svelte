@@ -531,6 +531,15 @@
     border-radius: 999px;
   }
 
+  /* The bar lives outside the page column, so it cannot inherit that column's ultrawide cap. Keep its chrome on
+     the same centred canvas while leaving the ordinary phone/laptop rule above entirely viewport-relative. */
+  @media (width >= 1921px) {
+    .bar {
+      right: calc((100vw - 1920px) / 2 + var(--gutter));
+      left: calc((100vw - 1920px) / 2 + var(--gutter));
+    }
+  }
+
   /* The whole pill: the read traces its outline from the lower left, round to where it began. */
   .opening {
     position: absolute;
