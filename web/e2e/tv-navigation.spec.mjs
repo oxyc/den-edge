@@ -241,7 +241,10 @@ test('a touch preview opens Search and focuses its editor within the activating 
 });
 
 test('an iPhone preview scales one complete 1920px TV canvas', async ({ browser, browserName }) => {
-  test.skip(browserName !== 'webkit', 'The fixed-width iPhone preview is a WebKit viewport contract');
+  test.skip(
+    browserName !== 'webkit',
+    'The fixed-width iPhone preview is a WebKit viewport contract',
+  );
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
     hasTouch: true,
