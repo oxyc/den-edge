@@ -19,6 +19,10 @@ import {
 import { legacyPath } from './lib/route';
 import { currentAppPath } from './lib/runtimeUrl';
 import { isOptionalImportFailure } from './lib/keyboardNavigation';
+import { startupMark } from './lib/startupTiming';
+
+// From `app module requested` to here: the application's download, parse and evaluation.
+startupMark('app module evaluated');
 
 // Read once, now, rather than lazily when the first error report needs it: a page open across a deploy must
 // report the release it actually loaded, not one den-edge has since moved on to (`diagnosticsReport.ts`).
@@ -110,6 +114,7 @@ if (!target) throw new Error('index.html has no #app element');
 // The built page arrives with the navigation bar already drawn (`shell.ts`); the app's own replaces it.
 target.replaceChildren();
 mount(App, { target });
+startupMark('app mounted');
 
 // A tab open since before a release can ask for a chunk den-edge no longer has (its image only ever carries the
 // current build's `/web`), so a newer release is waiting; this reloads onto it at once, whole page or not, when

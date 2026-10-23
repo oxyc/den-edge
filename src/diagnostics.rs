@@ -535,9 +535,26 @@ struct LoadReport {
     route: LoadRoute,
     device: DeviceClass,
     engine: BrowserEngine,
-    /// Milliseconds since navigation start; each absent when this load never reached it.
+    /// Milliseconds since navigation start; each absent when this load never reached it. A `worker_…` one is the
+    /// first library Worker's own, on the page's clock.
+    page_boot_ms: Option<u32>,
     app_module_ms: Option<u32>,
+    app_evaluated_ms: Option<u32>,
+    app_mounted_ms: Option<u32>,
+    worker_started_ms: Option<u32>,
+    worker_script_ms: Option<u32>,
+    /// A session took a library Worker: one started at page boot, or a new one.
+    session_worker_ms: Option<u32>,
+    core_compile_start_ms: Option<u32>,
+    core_compiled_ms: Option<u32>,
+    worker_core_requested_ms: Option<u32>,
+    worker_core_ready_ms: Option<u32>,
     worker_ready_ms: Option<u32>,
+    capability_ms: Option<u32>,
+    bootstrap_ms: Option<u32>,
+    worker_log_requested_ms: Option<u32>,
+    worker_log_opened_ms: Option<u32>,
+    directory_ms: Option<u32>,
     handover_ms: Option<u32>,
     billboard_detail_ms: Option<u32>,
     shelves_ms: Option<u32>,
@@ -555,6 +572,11 @@ struct LoadReport {
     /// The page's own requests by kind, each `[count, milliseconds summed]`.
     #[serde(default)]
     net: std::collections::BTreeMap<NetKind, (u32, u32)>,
+    /// Its Workers' requests by kind, the same way.
+    #[serde(default)]
+    worker_net: std::collections::BTreeMap<NetKind, (u32, u32)>,
+    /// The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`.
+    long_tasks: Option<(u32, u32, u32)>,
 }
 
 /// What a page's request was for (`loadReport.ts` `netKindOf`). A closed set, so a report carries no path.
@@ -590,8 +612,23 @@ impl LoadReport {
             format!("engine:{}", self.engine.as_str()),
         ];
         for (name, ms) in [
+            ("boot", self.page_boot_ms),
             ("app", self.app_module_ms),
+            ("app_eval", self.app_evaluated_ms),
+            ("mounted", self.app_mounted_ms),
+            ("w_started", self.worker_started_ms),
+            ("w_script", self.worker_script_ms),
+            ("session", self.session_worker_ms),
+            ("core_compile", self.core_compile_start_ms),
+            ("core_compiled", self.core_compiled_ms),
+            ("w_core_req", self.worker_core_requested_ms),
+            ("w_core", self.worker_core_ready_ms),
             ("worker", self.worker_ready_ms),
+            ("capability", self.capability_ms),
+            ("bootstrap", self.bootstrap_ms),
+            ("w_log_req", self.worker_log_requested_ms),
+            ("w_log", self.worker_log_opened_ms),
+            ("directory", self.directory_ms),
             ("handover", self.handover_ms),
             ("billboard", self.billboard_detail_ms),
             ("shelves", self.shelves_ms),
@@ -605,12 +642,22 @@ impl LoadReport {
             }
         }
         parts.push(format!("workers:{}", self.workers.min(MAX_WORKERS)));
-        for (kind, (count, ms)) in &self.net {
+        for (prefix, tally) in [("net", &self.net), ("wnet", &self.worker_net)] {
+            for (kind, (count, ms)) in tally {
+                parts.push(format!(
+                    "{prefix}_{}:{}/{}ms",
+                    kind.as_str(),
+                    count.min(&MAX_REQUESTS),
+                    ms.min(&MAX_NET_MS)
+                ));
+            }
+        }
+        if let Some((count, ms, longest)) = self.long_tasks {
             parts.push(format!(
-                "net_{}:{}/{}ms",
-                kind.as_str(),
-                count.min(&MAX_REQUESTS),
-                ms.min(&MAX_NET_MS)
+                "long:{}/{}ms/max{}ms",
+                count.min(MAX_REQUESTS),
+                ms.min(MAX_NET_MS),
+                longest.min(MAX_MS)
             ));
         }
         if self.hidden {
@@ -1156,6 +1203,29 @@ mod tests {
             "route": "home", "device": "tv", "engine": "blink", "workers": 1, "net": { "/tmdb/3/movie/550": [1, 1] },
         }));
         assert!(unknown.is_err(), "a request's path never reaches the log");
+    }
+
+    #[test]
+    fn a_load_report_carries_the_startup_chain_the_workers_requests_and_the_long_tasks() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink",
+            "pageBootMs": 120, "appModuleMs": 130, "appEvaluatedMs": 900, "appMountedMs": 1_100,
+            "workerStartedMs": 140, "workerScriptMs": 1_600, "sessionWorkerMs": 1_620,
+            "coreCompileStartMs": 1_650, "coreCompiledMs": 2_100,
+            "workerCoreRequestedMs": 1_640, "workerCoreReadyMs": 2_300, "workerReadyMs": 2_400,
+            "capabilityMs": 3_000, "bootstrapMs": 3_100, "workerLogRequestedMs": 3_200, "workerLogOpenedMs": 4_700,
+            "directoryMs": 5_000, "handoverMs": 5_300, "workers": 2,
+            "net": { "atlas": [1, 86] }, "workerNet": { "lib": [3, 900], "meta": [5, 600] },
+            "longTasks": [12, 3_400, 900],
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,boot:120,app:130,app_eval:900,mounted:1100,w_started:140,\
+             w_script:1600,session:1620,core_compile:1650,core_compiled:2100,w_core_req:1640,w_core:2300,worker:2400,\
+             capability:3000,bootstrap:3100,w_log_req:3200,w_log:4700,directory:5000,handover:5300,workers:2,\
+             net_atlas:1/86ms,wnet_lib:3/900ms,wnet_meta:5/600ms,long:12/3400ms/max900ms"
+        );
     }
 
     #[test]
