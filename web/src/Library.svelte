@@ -626,7 +626,11 @@
   const downloading = $derived.by(() => {
     const items = downloadsLease?.snapshot.value?.items ?? [];
     return [
-      ...items.filter(({ status }) => status.state === 'starting' || status.state === 'fetching'),
+      ...items.filter(
+        ({ status }) =>
+          status.phase !== 'trouble' &&
+          (status.state === 'starting' || status.state === 'fetching'),
+      ),
       ...items.filter(({ status }) => status.state === 'ready'),
     ];
   });

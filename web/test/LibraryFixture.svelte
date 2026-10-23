@@ -79,16 +79,17 @@
     Date.now(),
   );
   const homeDownloadRows = homeDownloads
-    ? ['Active download', 'Ready download', 'Unavailable download'].map((title, index) =>
-        startRow(
-          undefined,
-          {
-            release: { identity: title, label: title, url: `/scout/p/home-${index}` },
-            title: { mediaType: 'movie', mediaId: 9100 + index, title },
-          },
-          () => fixtureClock.issue(),
-          Date.now() + index,
-        ),
+    ? ['Active download', 'Ready download', 'Unavailable download', 'Failed download'].map(
+        (title, index) =>
+          startRow(
+            undefined,
+            {
+              release: { identity: title, label: title, url: `/scout/p/home-${index}` },
+              title: { mediaType: 'movie', mediaId: 9100 + index, title },
+            },
+            () => fixtureClock.issue(),
+            Date.now() + index,
+          ),
       )
     : [];
   let route = $state<Route>(
@@ -309,6 +310,11 @@
     });
     library.coordinator.answers.set(homeDownloadRows[1].name, { state: 'ready' });
     library.coordinator.answers.set(homeDownloadRows[2].name, { state: 'refused' });
+    library.coordinator.answers.set(homeDownloadRows[3].name, {
+      state: 'preparing',
+      progress: 0.5,
+      fetch: { state: 'failed' },
+    });
     // Provider completion republishes the same DownloadsView as a real queue refresh.
     (window as unknown as { denTestFinishDownload: () => void }).denTestFinishDownload = () => {
       library.coordinator.answers.set(homeDownloadRows[0].name, { state: 'ready' });

@@ -446,6 +446,7 @@ test('Home downloads survive completion, order active first, and omit unavailabl
   await expect(downloading).toContainText('Downloading 25%');
   await expect(downloading).toContainText('Ready to play');
   await expect(downloading).not.toContainText('Unavailable download');
+  await expect(downloading).not.toContainText('Failed download');
 
   await page.evaluate(() => window.denTestFinishDownload());
   const ready = page.getByRole('region', { name: 'Downloads', exact: true });
