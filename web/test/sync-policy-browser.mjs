@@ -29,6 +29,12 @@ const protocol = ts.transpile(
   await readFile(new URL('../src/lib/syncPolicyProtocol.ts', import.meta.url), 'utf8'),
   { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 );
+const timing = ts.transpile(
+  await readFile(new URL('../src/lib/startupTiming.ts', import.meta.url), 'utf8'),
+  { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+);
+/** The loader's own imports, each served by its specifier resolved against `/loader.js`. */
+const modules = { '/loader.js': loader, '/syncPolicyProtocol': protocol, '/startupTiming': timing };
 const harness = `import { evaluate } from '/core/index.js';
 import { ensureSyncPolicy, preloadSyncPolicy } from '/loader.js';
 window.preloadSync = preloadSyncPolicy;
@@ -52,11 +58,9 @@ const server = createServer(async (request, response) => {
           path === '/blocked' ? csp.replace(" 'wasm-unsafe-eval'", '') : csp,
       });
       response.end(html);
-    } else if (path === '/harness.js' || path === '/loader.js' || path === '/syncPolicyProtocol') {
+    } else if (path === '/harness.js' || path in modules) {
       response.writeHead(200, { 'content-type': 'text/javascript' });
-      response.end(
-        path === '/loader.js' ? loader : path === '/syncPolicyProtocol' ? protocol : harness,
-      );
+      response.end(path === '/harness.js' ? harness : modules[path]);
     } else if (/^\/core\/(index\.js|generated\/den_core(?:\.js|_bg\.wasm))$/.test(path)) {
       const wasm = path.endsWith('.wasm');
       if (wasm) downloads++;
