@@ -962,6 +962,26 @@ it('does not save false assistant flags and promotes Settings for live grant/rea
   });
   expect(openFull).toHaveBeenCalledOnce();
   await opened!.authority.close?.();
+
+  // A later visit must still use the partial Home cache without treating its absent Settings as disabled flags.
+  openFull.mockClear();
+  const returning = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    vi.fn(),
+  );
+  await expect(returning!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    kind: 'overview',
+    watchlist: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await expect(returning!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    assistant: { read: true, write: true },
+  });
+  expect(openFull).toHaveBeenCalledOnce();
+  await returning!.authority.close?.();
 });
 
 it('keeps the views a facts visit read, once Continue has its layouts, and the next visit draws them without den-core', async () => {
