@@ -338,13 +338,18 @@ async function playingPast(page, seconds) {
 }
 
 /**
- * Press Cast the way a viewer does. The output action lives in the auto-hiding transport, which hides 3.5 s into
- * playback; a viewer reveals it by moving toward the controls, while Playwright otherwise teleports its synthetic
- * click to a control that correctly no longer receives pointer input underneath the video.
+ * Reveal the auto-hiding transport the way a viewer does. It hides 3.5 s into playback; a viewer brings it back by
+ * moving toward the controls, while Playwright otherwise teleports its synthetic click to a control that correctly no
+ * longer receives pointer input underneath the video.
  */
-async function clickCast(page) {
+async function revealControls(page) {
   await page.mouse.move(20, 20);
   await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+}
+
+/** Press Cast, an output action in the auto-hiding transport. */
+async function clickCast(page) {
+  await revealControls(page);
   await page.getByRole('button', { name: 'Cast to a TV' }).click();
 }
 
@@ -421,6 +426,7 @@ test('a release picked mid-film names the session it replaces, which the page en
   try {
     await playingPast(page, 3);
     expect(asked.direct[0]).not.toHaveProperty('replaces');
+    await revealControls(page);
     await page.getByRole('button', { name: /^Stream: / }).click();
     await page.getByRole('menuitemradio').filter({ hasText: 'other.mkv' }).click();
     await expect.poll(() => asked.direct.length).toBe(2);
