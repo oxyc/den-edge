@@ -984,6 +984,22 @@ export class LibraryLog {
   }
 
   /**
+   * Wait until this instance's durable copy includes every write it has already accepted. A browser-local library
+   * is reopened from that copy when it is merged into a paired library, so the handoff must not race `persist`.
+   */
+  async settlePersistence(): Promise<void> {
+    await this.saving;
+    if (this.offline) this.dirty = true;
+    if (!this.dirty) return;
+    // Checkpoint the live local authority even when its earlier write was already kept. Another page authority can
+    // have finished an older snapshot after this one opened; `persist` merges that copy under the cross-tab lock and
+    // writes this authority's current rows back before the transfer reopens the source.
+    this.persist();
+    await this.saving;
+    if (this.dirty) throw new Error('The library could not be kept for transfer');
+  }
+
+  /**
    * Every `k` this browser has removed by compaction, kept with the library: none is removed twice (§4). Null when
    * storage is blocked or absent (a private window): a new page there couldn't know what an earlier one removed.
    */
