@@ -6,7 +6,6 @@
   import type LegacyBackupRecoveryComponent from './components/LegacyBackupRecovery.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
-  import ProfileSettings from './ProfileSettings.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import {
     activeProfileSession,
@@ -43,7 +42,7 @@
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
-  import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
+  import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
@@ -260,6 +259,11 @@
   let openingCommittedProfiles = false;
   let committedProfilesOpen = 0;
   const settingsRoute = $derived(profileSettingsRoute(session, profileCoordinator?.mode ?? null));
+  // Settings can turn personal while open (a Kid restored after the route was drawn), so the screen loads from here.
+  let settingsOpen = $state(false);
+  $effect(() => {
+    if (settingsOpen && settingsRoute === 'personal') void ProfileSettingsScreen.load();
+  });
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
@@ -1624,6 +1628,7 @@
       <Router
         profile={profileSessionKey(shown.identity)}
         onchange={(route) => {
+          settingsOpen = route.page === 'settings';
           if (route.page === 'settings')
             void (session.identity.kind === 'visitor'
               ? Promise.resolve()
@@ -1637,7 +1642,11 @@
           {#if route.page === 'settings'}
             {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
             {#if settingsRoute === 'personal'}
-              <ProfileSettings {session} profiles={profileCoordinator} />
+              {#if ProfileSettingsScreen.current}
+                <ProfileSettingsScreen.current {session} profiles={profileCoordinator} />
+              {:else}
+                <ScreenLoading screen={ProfileSettingsScreen} />
+              {/if}
             {:else if settingsRoute === 'unavailable'}
               <section
                 class="profile-settings-unavailable"
