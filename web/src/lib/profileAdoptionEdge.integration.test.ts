@@ -105,6 +105,21 @@ function memoryVault(): { data: Map<string, Uint8Array>; vault: Vault } {
       remove: async (prefix) => {
         for (const key of [...data.keys()]) if (key.startsWith(prefix)) data.delete(key);
       },
+      // The fact store, the one copy of a library kept between visits, needs both; without them nothing is kept.
+      page: async (prefix, after, limit) =>
+        [...data]
+          .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+          .sort(([left], [right]) => left.localeCompare(right))
+          .slice(0, limit),
+      commit: async (changes) => {
+        const next = new Map(data);
+        for (const change of changes) {
+          if (change.kind === 'put') next.set(change.key, change.value.slice());
+          else next.delete(change.key);
+        }
+        data.clear();
+        for (const [key, value] of next) data.set(key, value);
+      },
     },
   };
 }
