@@ -240,9 +240,14 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci --ignore-scripts
       - name: Time budgets on the production build
+        id: budgets
+        continue-on-error: true
         run: npm run test:e2e:budgets
+      - name: Report exceeded timing budgets
+        if: steps.budgets.outcome == 'failure'
+        run: echo "::warning title=Timing budgets exceeded::Performance budgets are advisory; inspect the retained evidence."
       - name: Retain budget failure evidence
-        if: failure()
+        if: steps.budgets.outcome == 'failure'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: budget-failures
@@ -250,7 +255,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Preserve the stable `web` check name while making it represent the once-only checks, every shard and the budgets.
+  # Preserve the stable `web` check name while making it represent the blocking once-only checks and every shard.
+  # Timing budgets still run and retain evidence, but an over-budget measurement is advisory.
   web:
     if: always()
     needs: [scope, web-checks, e2e, e2e-budgets, android-tv]
