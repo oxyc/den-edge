@@ -56,7 +56,7 @@ import {
 } from './libraryAssistantAuthority';
 import { ensureAssistantPolicy } from './assistantCore';
 import { syncPolicy } from './syncCore';
-import { startupMark } from './startupTiming';
+import { startupLibraryPromoted, startupMark, type LibraryPromotion } from './startupTiming';
 import {
   RETAINED_HOME_SHELVES,
   RETAINED_PREFERENCE_SEED,
@@ -1224,7 +1224,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       );
   }
 
-  #promote(reason: string): Promise<LibraryServiceAuthority> {
+  #promote(reason: `${LibraryPromotion}:${string}`): Promise<LibraryServiceAuthority> {
     if (this.#full) return Promise.resolve(this.#full);
     if (this.#opening) return this.#opening;
     if (this.#closed)
@@ -1238,6 +1238,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     noteFinishedViewPromotion(reason);
     // A promotion reads the whole log again: worth seeing in a startup's milestones when it happens.
     startupMark('library promoted', reason);
+    startupLibraryPromoted(reason);
     this.#cancelTimer();
     this.#cancelReconsider();
     // The whole log keeps its own views from here.
@@ -1283,6 +1284,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
 export interface FinishedLibraryViewAuthorityOpen {
   authority: LibraryServiceAuthority;
   membership: { libraryId: string; memberToken: string };
+  /** Opened from the views a visit saved, or from the fact store without them. */
+  views: 'saved' | 'facts';
 }
 
 /** One edit's authority on a log of its own documents, and how its send came to end (`LibraryLog.openNarrow`). */
@@ -1779,6 +1782,7 @@ export async function openFinishedLibraryViewAuthority(
         openNarrow,
       ),
       membership,
+      views: classic ? 'saved' : 'facts',
     };
   } finally {
     raw.fill(0);
