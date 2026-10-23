@@ -93,6 +93,7 @@
     routesLoaded = true;
   });
   let edgeVersion = $state<string | null>(null);
+  const viewerSections = ['connections', 'advanced'] as const;
   void fetch('/version')
     .then((res) => (res.ok ? (res.json() as Promise<{ version?: unknown }>) : null))
     .then((body) => {
@@ -296,15 +297,15 @@
 
   // den-edge's assistant connections are asked about as `model`'s member. On a household split into profiles that is
   // the household, whose connections they are (profiles-v1 §6.1), while the page's own credential may be Owner's.
-  const assistantConnectionFetch = untrack(() =>
-    model.ready.then(() => model.relayMembership()),
-  ).then(
-    (membership) => (membership ? householdAssistantFetch(membership) : undefined),
-    (error: unknown) => {
-      console.error('den: the library’s assistant membership could not be read', error);
-      return undefined;
-    },
-  );
+  const assistantConnectionFetch = __DEN_TV_LEGACY_JS_CORE__
+    ? Promise.resolve(undefined)
+    : untrack(() => model.ready.then(() => model.relayMembership())).then(
+        (membership) => (membership ? householdAssistantFetch(membership) : undefined),
+        (error: unknown) => {
+          console.error('den: the library’s assistant membership could not be read', error);
+          return undefined;
+        },
+      );
 
   const hasRecoveryCode = $derived(!!recoveryView?.live);
   const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
@@ -347,13 +348,13 @@
 </script>
 
 <div class="settings">
-  <SettingsNav variant="rail" />
+  <SettingsNav variant="rail" sections={__DEN_TV_LEGACY_JS_CORE__ ? viewerSections : undefined} />
   <div class="page">
     <div class="title">
       <h1>Settings</h1>
       <ExpandAll label="Settings" />
     </div>
-    <SettingsNav variant="bar" />
+    <SettingsNav variant="bar" sections={__DEN_TV_LEGACY_JS_CORE__ ? viewerSections : undefined} />
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
     {#if !ready}
       <div
@@ -373,17 +374,19 @@
         {/if}
       </div>
     {:else}
-      <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
-      <ContentSection
-        prefs={prefs!}
-        {content}
-        pinConfigured={connections?.parentalPinConfigured ?? false}
-        {disabled}
-        save={savePrefs}
-        savePin={(pin) => run(() => model.setParentalPin(pin))}
-        verifyPin={(pin) => model.verifyParentalPin(pin)}
-        pinRemovable={!profileTopology}
-      />
+      {#if !__DEN_TV_LEGACY_JS_CORE__}
+        <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
+        <ContentSection
+          prefs={prefs!}
+          {content}
+          pinConfigured={connections?.parentalPinConfigured ?? false}
+          {disabled}
+          save={savePrefs}
+          savePin={(pin) => run(() => model.setParentalPin(pin))}
+          verifyPin={(pin) => model.verifyParentalPin(pin)}
+          pinRemovable={!profileTopology}
+        />
+      {/if}
       <ConnectionsSection
         {link}
         {content}
@@ -413,6 +416,7 @@
         removeServer={(server) => run(() => model.patchServer(server, null))}
         {sealHandover}
         removeDevice={removeLibraryDevice}
+        viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
       {#snippet recovery()}
         <RecoveryCode
@@ -428,29 +432,29 @@
           disable={async () => run(() => model.disableRecovery())}
         />
       {/snippet}
-      <SharingSection
-        {link}
-        {model}
-        plugins={pluginUrls}
-        {routes}
-        ready={ready && routesLoaded}
-        {sealHandover}
-        {selfId}
-      />
       {#if !__DEN_TV_LEGACY_JS_CORE__}
+        <SharingSection
+          {link}
+          {model}
+          plugins={pluginUrls}
+          {routes}
+          ready={ready && routesLoaded}
+          {sealHandover}
+          {selfId}
+        />
         <AssistantsSection
           connectionFetch={assistantConnectionFetch}
           revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
           listGrants={link && !local ? () => model.assistantGrants() : undefined}
         />
+        <ImportSection
+          {ready}
+          {content}
+          watched={model.overview.value?.watched ?? []}
+          {importHistory}
+          {exportHistory}
+        />
       {/if}
-      <ImportSection
-        {ready}
-        {content}
-        watched={model.overview.value?.watched ?? []}
-        {importHistory}
-        {exportHistory}
-      />
       <AdvancedSection
         {link}
         onjoin={local && onjoin
@@ -464,9 +468,10 @@
         {edgeVersion}
         {libraryFormat}
         setRemoteAccess={(credentials) => run(() => model.setRemoteAccess(credentials))}
+        viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
     {/if}
-    <AboutSection credits={mergeCredits(addonCredits)} />
+    {#if !__DEN_TV_LEGACY_JS_CORE__}<AboutSection credits={mergeCredits(addonCredits)} />{/if}
   </div>
 </div>
 

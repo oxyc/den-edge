@@ -6,12 +6,14 @@ import {
   tizen3FocusSelectors,
   tizen3ScrollLogical,
   tizen3UnsupportedEnhancements,
+  tizen3ViewerEffects,
 } from './tizen3-css-compat';
 
 async function transform(css: string): Promise<string> {
   return (
     await postcss([
       tizen3UnsupportedEnhancements(),
+      tizen3ViewerEffects(),
       tizen3FixedViewportMath(),
       tizen3FocusSelectors(),
       tizen3ScrollLogical(),
@@ -93,5 +95,22 @@ describe('Tizen 3 CSS compatibility', () => {
     expect(css).toContain('.field.tv-focus-within');
     expect(css).toContain('.pick.tv-focus-within');
     expect(css).not.toMatch(/:focus-visible|:focus-within|:has\(/);
+  });
+
+  it('removes paint-heavy effects from only the Tizen 3 output', async () => {
+    const css = await transform(`
+      @keyframes pulse { from { opacity: 0 } to { opacity: 1 } }
+      .glass {
+        filter: blur(8px);
+        -webkit-backdrop-filter: blur(12px);
+        backdrop-filter: blur(12px);
+        animation: pulse 1s infinite;
+        transition: opacity 120ms ease;
+        color: white;
+      }
+    `);
+
+    expect(css).toContain('color: white;');
+    expect(css).not.toMatch(/blur\(|backdrop-filter|@keyframes|animation|transition/);
   });
 });

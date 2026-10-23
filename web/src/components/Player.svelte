@@ -2345,7 +2345,7 @@
   }
 
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
-  const castable = canOfferCast();
+  const castable = !__DEN_TV_LEGACY_JS_CORE__ && canOfferCast();
 
   type AirPlayVideo = HTMLVideoElement & {
     webkitCurrentPlaybackTargetIsWireless?: boolean;
