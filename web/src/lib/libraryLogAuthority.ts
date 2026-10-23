@@ -373,27 +373,28 @@ export class LibraryLogAuthority {
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
     log.onDeferred = (delivery) => this.#deferred(delivery);
-    const facts = options.libraryKey && options.vault ? log.libraryFacts() : null;
     if (
       options.mode === 'online' &&
       options.savedViews !== false &&
       options.libraryKey &&
-      options.vault &&
-      facts
+      options.vault
     ) {
-      this.#viewWriter = new FinishedLibraryViewWriter(
-        options.libraryKey,
-        options.vault,
-        facts,
-        () => ({
-          generation: this.#log.currentGeneration ?? null,
-          head: this.#log.logHead,
-          // The durable facts derive Home. The live log can be ahead of them with pending work, but title shapes are
-          // independent metadata and safe to lend for Continue's layout projection.
-          shapes: new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape])),
-        }),
-      );
-      this.#viewWriter.schedule();
+      const facts = log.libraryFacts();
+      if (facts) {
+        this.#viewWriter = new FinishedLibraryViewWriter(
+          options.libraryKey,
+          options.vault,
+          facts,
+          () => ({
+            generation: this.#log.currentGeneration ?? null,
+            head: this.#log.logHead,
+            // The durable facts derive Home. The live log can be ahead of them with pending work, but title shapes are
+            // independent metadata and safe to lend for Continue's layout projection.
+            shapes: new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape])),
+          }),
+        );
+        this.#viewWriter.schedule();
+      }
     }
     if (options.libraryKey && options.vault)
       this.#admin = new LibraryAdminAuthority(log, clock, {
