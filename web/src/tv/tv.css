@@ -200,6 +200,8 @@
 }
 
 :root.den-tv .tv-bar nav {
+  /* The library-opening outline is drawn over this pill. */
+  position: relative;
   gap: 28px;
   padding: 8px 18px;
   border-radius: 999px;
