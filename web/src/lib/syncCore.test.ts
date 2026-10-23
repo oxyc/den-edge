@@ -69,7 +69,11 @@ describe('shared Rust WASM sync policy', () => {
   // 0.3 s on an idle machine and memory-bandwidth bound, so it slows far more than the rest when runners share a
   // machine. It gets a budget sized for that instead of the 5 s default.
   const kdfOps = new Set(['recovery_derive']);
-  for (const test of [...fixtures.cases, ...profileFixtures.cases]) {
+  const persistentProfileCases = profileFixtures.cases.filter(
+    ({ request }) =>
+      !String(request.op).startsWith('profiles_migration_') && request.op !== 'profiles_capability',
+  );
+  for (const test of [...fixtures.cases, ...persistentProfileCases]) {
     it(
       test.name,
       async () => {
@@ -87,46 +91,6 @@ describe('shared Rust WASM sync policy', () => {
       kdfOps.has(String(test.request.op)) ? 30_000 : undefined,
     );
   }
-
-  it('fails closed when profile migration planner evidence is missing or malformed', () => {
-    const fence = { generation: 7, head: 'a'.repeat(64) };
-    const authorization = profileFixtures.migrationAuthorization.prepared;
-    const authorized = {
-      attempt: authorization.intent.attempt,
-      householdId: authorization.intent.householdId,
-      source: authorization.intent.source,
-      splitAuthorization: authorization,
-    };
-    const cases: Array<[Record<string, unknown>, string]> = [
-      [{ state: 'fenced', observed: 'legacy', fence }, 'migration_authorization_required'],
-      [
-        {
-          ...authorized,
-          state: 'fenced',
-          observed: 'legacy',
-          fence,
-          observedFence: { generation: -1, head: 'a'.repeat(64) },
-        },
-        'invalid_migration_fence',
-      ],
-      [{ state: 'adopting', observed: 'committed' }, 'committed_directory_missing'],
-      [
-        {
-          ...authorized,
-          state: 'owner-copied',
-          observed: 'legacy',
-          fence,
-          observedFence: fence,
-          backupVerified: true,
-          candidateKey: 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=',
-          ownerVerified: true,
-        },
-        'invalid_copy_head',
-      ],
-    ];
-    for (const [input, error] of cases)
-      expect(() => syncPolicy({ op: 'profiles_migration_next', input })).toThrow(error);
-  });
 
   it('the main module refuses an assistant op, naming the module that has it', () => {
     expect(() => syncPolicy({ op: 'assistant_grant_key', random: '00'.repeat(32) })).toThrow(

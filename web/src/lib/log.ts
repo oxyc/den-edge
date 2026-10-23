@@ -3,7 +3,6 @@
 // in this browser (`localVault.ts`), so a return visit starts from it and asks only for what changed since.
 
 import { blankEpisode, blankTitle } from './actions';
-import { hex } from './crypto';
 import { exclusive } from './exclusive';
 import { householdScoped } from './householdScope';
 import { resetAssistantRows } from './libraryAssistantAuthority';
@@ -20,30 +19,15 @@ import {
   type KidTitleApprovalsDocument,
 } from './kidTitleApprovals';
 import {
-  profileMigrationAuthorizationFingerprint,
-  profileMigrationConstructDirectory,
-  profileMigrationDigest,
-  profileMigrationMaterialize,
-  profileMigrationPartition,
+  profilesConstructDirectory,
   profilesMaterialize,
   profilesMerge,
-  validMigrationSnapshot,
+  profilesSnapshotDigest,
   type ProfileCreateJournal,
-  type AuthenticatedMigrationRow,
-  type MigrationProjection,
-  type MigrationSealedRow,
-  type MigrationSnapshotRow,
-} from './profileMigrationCore';
+  type ProfilesSnapshotRow,
+} from './profilesCore';
 import type { ProfileDirectoryAuthority } from './profileKidCreateWorker';
-import type {
-  OwnerSplitAuthenticatedCopy,
-  OwnerSplitBackup,
-  OwnerSplitFence,
-  VerifiedOwnerSplitBackup,
-} from './profileOwnerSplitEngine';
-import type { ResolvedOwnerSplitCandidate } from './profileOwnerSplitWorkerStore';
 import { profileResetHeadersAllowed, profileResetRoute } from './profileKeyResetRoutes';
-import { ownerSplitCandidateWriteHeaders, ownerSplitWorkerRoute } from './profileOwnerSplitRoutes';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
@@ -63,7 +47,6 @@ import {
   newestSummary,
   open,
   openEntry,
-  openMigrationRow,
   openPlaintext,
   rowName,
   rowKey,
@@ -130,7 +113,7 @@ interface Page {
   more: boolean;
 }
 
-const migrationEntry = (value: unknown): value is RawEntry =>
+const responseEntry = (value: unknown): value is RawEntry =>
   !!value &&
   typeof value === 'object' &&
   !Array.isArray(value) &&
@@ -140,17 +123,17 @@ const migrationEntry = (value: unknown): value is RawEntry =>
   (value as RawEntry).seq > 0 &&
   typeof (value as RawEntry).v === 'string';
 
-const migrationPage = (value: unknown): value is Page =>
+const responsePage = (value: unknown): value is Page =>
   !!value &&
   typeof value === 'object' &&
   !Array.isArray(value) &&
   Array.isArray((value as Page).entries) &&
-  (value as Page).entries.every(migrationEntry) &&
+  (value as Page).entries.every(responseEntry) &&
   Number.isSafeInteger((value as Page).head) &&
   (value as Page).head >= 0 &&
   typeof (value as Page).more === 'boolean';
 
-const migrationBatch = (value: unknown): value is Batch => {
+const responseBatch = (value: unknown): value is Batch => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const answer = value as Batch;
   return (
@@ -177,8 +160,23 @@ const migrationBatch = (value: unknown): value is Batch => {
   );
 };
 
-const migrationAAD = (name: string, binding: string): Uint8Array<ArrayBuffer> =>
+const boundAAD = (name: string, binding: string): Uint8Array<ArrayBuffer> =>
   utf8.encode(`${name}\u0000${binding}`);
+
+/** A household member authorizes the first write that creates one of its profile activity libraries. */
+function profileLibraryWriteHeaders(
+  household: { readonly id: string; readonly member: string },
+  profile: { readonly token: string },
+): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    'x-den-library-token': profile.token,
+    'x-den-library-member': `${household.id}:${household.member}`,
+    'x-den-wire': '4',
+    'x-den-wire-min': '4',
+    'x-den-generation': '0',
+  };
+}
 
 /** The highest library format this build reads and writes. */
 export const WIRE = 4;
@@ -1082,19 +1080,6 @@ export class LibraryLog {
   }
 
   /**
-   * `fenced` for a key holder's one-off repair (`scripts/repair-household.mjs`): `build` gets every stored row through
-   * the fence's base and answers the whole new log, or null to change nothing. The app never calls it.
-   */
-  rewriteStored(
-    build: (
-      base: number,
-      raw: RawEntry[],
-    ) => Promise<{ writes: { k: string; v: string }[]; wireMin: number } | null>,
-  ): Promise<boolean> {
-    return this.fenced(build);
-  }
-
-  /**
    * One fenced rewrite: open it, read every row through its `base`, stage what `build` makes of them, and
    * commit. `build` answering null aborts it, and nothing changes. On a commit this browser reads the new log from
    * the start; its kept work is sent again after.
@@ -1245,42 +1230,8 @@ export class LibraryLog {
   }
 
   /**
-   * Worker-only profile migration transport. The page cannot call LibraryLog directly, and neither household nor
-   * candidate credentials are accepted in the URL or body. Wire 5 describes the transaction API, not row framing.
-   */
-  async profileMigrationRequest(input: {
-    readonly method: 'GET' | 'POST' | 'DELETE';
-    readonly path: string;
-    readonly body?: unknown;
-    readonly candidateToken?: string;
-  }): Promise<{ readonly status: number; readonly body: unknown }> {
-    const route = ownerSplitWorkerRoute(this.keys.id, input.method, input.path);
-    if (route === null) throw new Error('Profile migration method or path is not allowed');
-    if ((input.candidateToken !== undefined) !== (route.kind === 'retire-candidate'))
-      throw new Error('Candidate authority is valid only for exact retirement requests');
-    const response = await this.send(input.path, {
-      method: input.method,
-      headers: {
-        ...this.headers(),
-        'x-den-wire': '5',
-        ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...(input.candidateToken ? { 'x-den-candidate-library-token': input.candidateToken } : {}),
-      },
-      ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
-    });
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      if (response.ok) throw new Error('Profile migration response is not JSON');
-    }
-    return { status: response.status, body };
-  }
-
-  /**
-   * Worker-only compound key reset transport (profiles-v1 §9.1): exactly the reset routes of this library under its own
-   * token and wire. A retirement also carries the library's current generation, read here, because under a lock it
-   * cannot change and a mismatch must stop the reset rather than be papered over.
+   * Worker-only compound key reset transport (profiles-v1 §9.1): exactly the reset routes of this library under its
+   * own token and wire.
    */
   async resetRequest(input: {
     readonly method: 'GET' | 'POST' | 'DELETE';
@@ -1340,7 +1291,7 @@ export class LibraryLog {
     | {
         readonly base: number;
         readonly generation: string | null;
-        readonly rows: MigrationSnapshotRow[];
+        readonly rows: ProfilesSnapshotRow[];
         /** The names of every row this build reads. */
         readonly names: string[];
         readonly directory: ProfileDirectoryDocument | null;
@@ -1384,270 +1335,9 @@ export class LibraryLog {
     return { base: head, generation, rows, names, directory };
   }
 
-  async verifyMigrationBackup(input: {
-    readonly attempt: string;
-    readonly fence: OwnerSplitFence;
-    readonly created: Pick<OwnerSplitBackup, 'id' | 'digest'>;
-    readonly reread: OwnerSplitBackup;
-  }): Promise<void> {
-    const backup = input.reread;
-    if (
-      backup.attempt !== input.attempt ||
-      backup.householdId !== this.keys.id ||
-      canonical(backup.source) !== canonical(input.fence) ||
-      backup.id !== input.created.id ||
-      backup.digest !== input.created.digest ||
-      !validMigrationSnapshot({
-        libraryId: backup.householdId,
-        base: backup.source.base,
-        wireMin: backup.wireMin,
-        rows: backup.rows,
-      })
-    )
-      throw new Error('Migration backup is not bound to this source');
-    const authorization = profileMigrationAuthorizationFingerprint({
-      token: this.keys.token,
-      member: backup.authorization.memberHash === null ? null : this.keys.member,
-    });
-    if (canonical(authorization) !== canonical(backup.authorization))
-      throw new Error('Migration backup authorization does not match this household');
-    if (
-      profileMigrationDigest('source', {
-        libraryId: backup.householdId,
-        generation: backup.source.generation,
-        base: backup.source.base,
-        wireMin: backup.wireMin,
-        rows: backup.rows,
-      }) !== backup.source.head
-    )
-      throw new Error('Migration backup source digest does not match');
-    const { digest: _digest, ...manifest } = backup;
-    if (profileMigrationDigest('backup', manifest) !== backup.digest)
-      throw new Error('Migration backup digest does not match');
-    const opened = await Promise.all(
-      backup.rows.map(({ k, v }) => openMigrationRow(this.keys, k, v)),
-    );
-    if (opened.some(({ status }) => status === 'unreadable'))
-      throw new Error('Migration backup contains an unreadable row');
-  }
-
-  async copyAndAuthenticateMigrationOwner(input: {
-    readonly attempt: string;
-    readonly fence: OwnerSplitFence;
-    readonly backup: VerifiedOwnerSplitBackup;
-    readonly candidate: ResolvedOwnerSplitCandidate;
-  }): Promise<OwnerSplitAuthenticatedCopy> {
-    const backup = input.backup.manifest;
-    await this.verifyMigrationBackup({
-      attempt: input.attempt,
-      fence: input.fence,
-      created: backup,
-      reread: backup,
-    });
-    const rows: AuthenticatedMigrationRow[] = await Promise.all(
-      backup.rows.map(async (row) => ({
-        ...row,
-        opened: await openMigrationRow(this.keys, row.k, row.v),
-      })),
-    );
-    const newest = this.newestStamp();
-    const stamp: Stamp =
-      input.candidate.createdAt > newest[0]
-        ? [input.candidate.createdAt, 0, input.candidate.handle.profileId.slice(0, 16)]
-        : [newest[0], newest[1] + 1, input.candidate.handle.profileId.slice(0, 16)];
-    let partition: ReturnType<typeof profileMigrationPartition>;
-    try {
-      partition = profileMigrationPartition({
-        base: backup.source.base,
-        ownerPolicyAt: stamp,
-        rows,
-      });
-    } catch (error) {
-      // Name the rows den-core may hold against the split (names and kinds only, never contents), so a refusal says
-      // which rows instead of only a code.
-      const suspect = rows.flatMap(({ seq, opened }) => {
-        const row = opened as {
-          status: string;
-          name: string | null;
-          legacy?: boolean;
-          row?: { kind?: unknown };
-        };
-        const kind = row.row?.kind;
-        return row.status === 'row' &&
-          (row.legacy === true ||
-            ['rec', 'wat', 'snt', 'ep'].includes(String(kind)) ||
-            /^(rec|wat|snt|ep):|^set:tracker-event:/.test(row.name ?? ''))
-          ? [{ seq, name: row.name, kind: typeof kind === 'string' ? kind : undefined }]
-          : [];
-      });
-      console.error(
-        'den: profile split refused; rows den-core may hold against it',
-        suspect,
-        error,
-      );
-      throw error;
-    }
-    const candidateRaw = Uint8Array.from(atob(input.candidate.libraryKey), (character) =>
-      character.charCodeAt(0),
-    );
-    const candidateKeys = await deriveKeys(candidateRaw);
-    candidateRaw.fill(0);
-    if (candidateKeys.id !== input.candidate.handle.libraryId)
-      throw new Error('Candidate library identity changed');
-    const ownerWrites = await this.materializeMigration(partition.owner, candidateKeys);
-    // An Owner with no activity yet (a fresh guest) would write nothing, and den-edge starts a library only with its
-    // first write, so the readback would find no library at all. Start it with the empty `set:prefs` a born
-    // household's Owner library also begins with.
-    if (ownerWrites.length === 0)
-      ownerWrites.push(
-        await seal(candidateKeys, { kind: 'set', schema: 2, name: 'prefs', values: {} }),
-      );
-    await this.writeMigrationCandidate(candidateKeys, ownerWrites);
-    const ownerRows = await this.readMigrationCandidate(candidateKeys);
-    const expectedOwnerRows = new Map(ownerWrites.map((row) => [row.k, row]));
-    const actualOwnerKeys = new Set(ownerRows.map(({ k }) => k));
-    if (
-      ownerRows.length !== expectedOwnerRows.size ||
-      actualOwnerKeys.size !== expectedOwnerRows.size ||
-      ownerRows.some(({ k }) => !expectedOwnerRows.has(k))
-    )
-      throw new Error('Owner candidate readback does not exactly match the partition');
-    for (const actual of ownerRows) {
-      const expected = expectedOwnerRows.get(actual.k)!;
-      const [expectedPlaintext, actualPlaintext] = await Promise.all([
-        openPlaintext(candidateKeys, expected.k, expected.v),
-        openPlaintext(candidateKeys, actual.k, actual.v),
-      ]);
-      if (
-        expectedPlaintext === null ||
-        actualPlaintext === null ||
-        expectedPlaintext.length !== actualPlaintext.length ||
-        expectedPlaintext.some((byte, index) => actualPlaintext[index] !== byte)
-      )
-        throw new Error('Owner candidate readback content does not match the partition');
-    }
-    const ownerHead = profileMigrationDigest('owner', {
-      libraryId: candidateKeys.id,
-      base: ownerRows.at(-1)?.seq ?? 0,
-      wireMin: WIRE,
-      rows: ownerRows,
-    });
-    const householdWrites = await this.materializeMigration(partition.household, this.keys);
-    const directory = profileMigrationConstructDirectory({
-      attempt: input.attempt,
-      source: { generation: input.fence.generation, head: input.fence.head },
-      backup: { id: backup.id, digest: backup.digest },
-      owner: {
-        id: input.candidate.handle.profileId,
-        display: { value: { name: 'Owner' }, at: stamp },
-        libraryKey: input.candidate.libraryKey,
-        libraryAt: stamp,
-        policy: partition.ownerPolicy,
-        deletedAt: stamp,
-      },
-      ownerHead,
-    });
-    householdWrites.push(
-      await sealPlaintext(this.keys, 'profiles', fromBase64url(directory.plaintext)),
-    );
-    return { ownerHead, householdWrites };
-  }
-
-  async verifyMigrationOwner(input: {
-    readonly attempt: string;
-    readonly fence: OwnerSplitFence;
-    readonly backup: VerifiedOwnerSplitBackup;
-    readonly candidate: ResolvedOwnerSplitCandidate;
-    readonly expectedHead: string;
-  }): Promise<void> {
-    const raw = Uint8Array.from(atob(input.candidate.libraryKey), (character) =>
-      character.charCodeAt(0),
-    );
-    const keys = await deriveKeys(raw);
-    raw.fill(0);
-    const rows = await this.readMigrationCandidate(keys);
-    const actual = profileMigrationDigest('owner', {
-      libraryId: keys.id,
-      base: rows.at(-1)?.seq ?? 0,
-      wireMin: WIRE,
-      rows,
-    });
-    if (actual !== input.expectedHead) throw new Error('Owner candidate readback digest changed');
-  }
-
-  async adoptMigrationWinner(directory: unknown): Promise<void> {
-    validateStoredProfileDirectory(directory);
-  }
-
-  async readProfileMigrationHousehold(
-    migrationGeneration: number,
-  ): Promise<import('./profileOwnerSplitEngine').OwnerSplitHouseholdObservation> {
-    if (!Number.isSafeInteger(migrationGeneration) || migrationGeneration < 0)
-      throw new Error('Migration generation is not canonical');
-    // Wire 5 like every other migration request (`profileMigrationRequest`): once the split has committed the household
-    // is at minimum 5, and a resumed attempt that reads it at this instance's wire 4 is refused with 426.
-    const snapshot = await this.readAll(5);
-    if (!snapshot) throw new Error('Household could not be read to its current head');
-    const rows = [...snapshot.entries].sort((left, right) =>
-      left.k < right.k ? -1 : left.k > right.k ? 1 : 0,
-    );
-    let profiles:
-      | { directory: ProfileDirectoryDocument; row: RawEntry }
-      | { invalid: true; row: RawEntry }
-      | undefined;
-    for (const row of rows) {
-      const opened = await openEntry(this.keys, row.k, row.v);
-      if ('profileDirectory' in opened) profiles = { directory: opened.profileDirectory, row };
-      if ('invalidProfileDirectory' in opened) profiles = { invalid: true, row };
-    }
-    const currentGeneration = profiles ? migrationGeneration + 1 : migrationGeneration;
-    const head = profileMigrationDigest('source', {
-      libraryId: this.keys.id,
-      generation: currentGeneration,
-      base: snapshot.head,
-      wireMin: this.wireMin,
-      rows,
-    });
-    if (!profiles)
-      return { kind: 'legacy', generation: migrationGeneration, base: snapshot.head, head };
-    if ('invalid' in profiles)
-      return { kind: 'corrupt', generation: currentGeneration, base: snapshot.head, head };
-    const digest = hex(
-      new Uint8Array(await crypto.subtle.digest('SHA-256', utf8.encode(profiles.row.v))),
-    );
-    return {
-      kind: 'committed',
-      generation: currentGeneration,
-      base: snapshot.head,
-      head,
-      directory: profiles.directory,
-      profilesRow: { ...profiles.row, digest },
-    };
-  }
-
-  private async materializeMigration(
-    projections: readonly MigrationProjection[],
+  private async writeProfileLibrary(
     keys: LibraryKeys,
-  ): Promise<MigrationSealedRow[]> {
-    return Promise.all(
-      projections.map(async (projection) => {
-        if (projection.mode === 'preserve') {
-          if (keys !== this.keys)
-            throw new Error('den-core tried to preserve household ciphertext in Owner');
-          return { k: projection.k, v: projection.v };
-        }
-        const materialized = profileMigrationMaterialize({
-          name: projection.name,
-          row: projection.row,
-        });
-        return sealPlaintext(keys, projection.name, fromBase64url(materialized.plaintext));
-      }),
-    );
-  }
-
-  private async writeMigrationCandidate(
-    keys: LibraryKeys,
-    writes: readonly MigrationSealedRow[],
+    writes: readonly { readonly k: string; readonly v: string }[],
   ): Promise<void> {
     // The first chunk creates the library at generation 0; each later chunk carries the generation den-edge answered.
     // A retried attempt finds the library already created, and den-edge's 409 names its generation.
@@ -1660,7 +1350,7 @@ export class LibraryLog {
             method: 'POST',
             // NEW_LIBRARIES=members accepts an existing household member as the authority creating this library.
             headers: {
-              ...ownerSplitCandidateWriteHeaders(this.keys, keys),
+              ...profileLibraryWriteHeaders(this.keys, keys),
               'x-den-generation': generation,
             },
             body: JSON.stringify({ writes: chunk }),
@@ -1675,19 +1365,19 @@ export class LibraryLog {
       }
       if (!response.ok)
         throw new Error(
-          `Owner candidate write was refused (${response.status} ${await response.text().catch(() => '')})`,
+          `Profile library write was refused (${response.status} ${await response.text().catch(() => '')})`,
         );
       generation = response.headers.get('x-den-generation') ?? generation;
       const value = (await response.json()) as unknown;
-      if (!migrationBatch(value))
-        throw new Error('Owner candidate write returned malformed evidence');
+      if (!responseBatch(value))
+        throw new Error('Profile library write returned malformed evidence');
       const answer = value;
       if (answer.applied.length + answer.conflicts.length !== chunk.length)
-        throw new Error('Owner candidate write was incomplete');
+        throw new Error('Profile library write was incomplete');
     }
   }
 
-  private async readMigrationCandidate(keys: LibraryKeys): Promise<RawEntry[]> {
+  private async readProfileLibrary(keys: LibraryKeys): Promise<RawEntry[]> {
     const rows: RawEntry[] = [];
     let since = 0;
     for (;;) {
@@ -1702,9 +1392,9 @@ export class LibraryLog {
         },
         false,
       );
-      if (!response.ok) throw new Error('Owner candidate readback failed');
+      if (!response.ok) throw new Error('Profile library readback failed');
       const value = (await response.json()) as unknown;
-      if (!migrationPage(value)) throw new Error('Owner candidate readback was malformed');
+      if (!responsePage(value)) throw new Error('Profile library readback was malformed');
       const page = value;
       rows.push(...page.entries);
       if (!page.more || page.entries.length === 0) return rows;
@@ -1726,7 +1416,7 @@ export class LibraryLog {
       if ('invalidProfileDirectory' in opened) throw new Error('Profile directory is corrupt');
       if ('profileDirectory' in opened) found = { row, directory: opened.profileDirectory };
     }
-    if (!found) throw new Error('Kid creation requires an active Owner split');
+    if (!found) throw new Error('Kid creation requires an active profile directory');
     this.acceptProfileDirectory(found.row, found.directory);
     return {
       directory: found.directory,
@@ -1753,7 +1443,7 @@ export class LibraryLog {
       if ('kidTitleApprovals' in opened && opened.kidTitleApprovals.kid === kid)
         approval = { seq: row.seq, document: opened.kidTitleApprovals };
     }
-    if (!directory) throw new Error('Kid approvals require an active Owner split');
+    if (!directory) throw new Error('Kid approvals require an active profile directory');
     const entry = directory.profiles[kid];
     if (!entry || entry.role !== 'kid' || entry.deleted.value)
       throw new Error('That is not a live Kid profile');
@@ -1777,8 +1467,8 @@ export class LibraryLog {
   private async createAndVerifyProfileLibrary(keys: LibraryKeys): Promise<void> {
     const initial: SettingsRow = { kind: 'set', schema: 2, name: 'prefs', values: {} };
     const expected = await seal(keys, initial);
-    await this.writeMigrationCandidate(keys, [expected]);
-    const rows = await this.readMigrationCandidate(keys);
+    await this.writeProfileLibrary(keys, [expected]);
+    const rows = await this.readProfileLibrary(keys);
     if (rows.length !== 1 || rows[0]!.k !== expected.k)
       throw new Error('Profile activity library contains unexpected rows');
     const [wanted, actual] = await Promise.all([
@@ -1798,7 +1488,7 @@ export class LibraryLog {
    * Make this library a household born profile-aware in this browser (den#295), opened through `destination` at wire
    * 5. In order: its first write (an empty `set:prefs`) starts it at wire minimum 5; this browser registers as its
    * member; the Owner library is started under that membership, as a Kid's is; then the `profiles` directory goes in
-   * by CAS. The directory is the one a committed Owner split stores (`profiles_migration_construct_directory`), its
+   * by CAS. The directory is the same committed shape as every profile household, and its
    * evidence what this household really was: `source` the household before the directory (generation 0, its one
    * row), `ownerHead` the Owner library as read back. A born household has no backup, so `backup` names none
    * (`born`) and carries the source digest, the whole of what one would hold; a restore that looks it up finds
@@ -1841,14 +1531,14 @@ export class LibraryLog {
     await this.registerMember();
     if (!this.memberRegistered) throw new Error('The household membership was not registered');
     await this.createAndVerifyProfileLibrary(owner);
-    const ownerRows = await this.readMigrationCandidate(owner);
-    const ownerHead = profileMigrationDigest('owner', {
+    const ownerRows = await this.readProfileLibrary(owner);
+    const ownerHead = profilesSnapshotDigest('owner', {
       libraryId: owner.id,
       base: ownerRows.at(-1)?.seq ?? 0,
       wireMin: WIRE,
       rows: ownerRows,
     });
-    const source = profileMigrationDigest('source', {
+    const source = profilesSnapshotDigest('source', {
       libraryId: this.keys.id,
       generation: 0,
       base: household.head,
@@ -1856,7 +1546,7 @@ export class LibraryLog {
       rows: household.entries,
     });
     const at: Stamp = [plan.createdAt, 0, plan.ownerProfile.slice(0, 16)];
-    const { directory } = profileMigrationConstructDirectory({
+    const { directory } = profilesConstructDirectory({
       attempt: plan.attempt,
       source: { generation: 0, head: source },
       backup: { id: 'born', digest: source },
@@ -1942,7 +1632,7 @@ export class LibraryLog {
     }
     try {
       const value = (await response.json()) as unknown;
-      if (!migrationBatch(value)) return 'unknown';
+      if (!responseBatch(value)) return 'unknown';
       const applied = value.applied.find(({ k }) => k === write.k);
       if (applied) {
         this.acceptProfileDirectory({ seq: applied.seq }, materialized.directory);
@@ -1962,14 +1652,10 @@ export class LibraryLog {
     directory: ProfileDirectoryDocument,
   ): Promise<'committed' | 'conflict' | 'unknown'> {
     const validated = validateKidTitleApprovals(document, directory);
-    const materialized = profileMigrationMaterialize({
-      name: kidApprovalName(validated.kid),
-      row: validated,
-    });
     const write = await sealPlaintext(
       this.keys,
       kidApprovalName(validated.kid),
-      fromBase64url(materialized.plaintext),
+      utf8.encode(canonical(validated)),
     );
     let response: Response;
     try {
@@ -1993,7 +1679,7 @@ export class LibraryLog {
     }
     try {
       const value = (await response.json()) as unknown;
-      if (!migrationBatch(value)) return 'unknown';
+      if (!responseBatch(value)) return 'unknown';
       const applied = value.applied.find(({ k }) => k === write.k);
       if (applied) {
         this.acceptKidTitleApprovals({ seq: applied.seq }, validated);
@@ -2034,7 +1720,7 @@ export class LibraryLog {
       if (standing.status === 404 || standing.status === 410) return true;
       if (!standing.ok) return false;
       const page = (await standing.json()) as unknown;
-      if (!migrationPage(page)) return false;
+      if (!responsePage(page)) return false;
       const generation = page.generation ?? standing.headers.get('x-den-generation');
       if (!generation) return false;
       const response = await this.send(`/lib/${keys.id}`, {
@@ -2702,7 +2388,7 @@ export class LibraryLog {
         return null;
       }
       if (log.generation && page.generation && log.generation !== page.generation) {
-        if (log.splitCommitted) await log.adoptProfileSplit();
+        if (log.directoryCommitted) await log.adoptProfileDirectory();
         else if (!(await log.stageRecovery(page.generation))) return null;
         log.memberRegistered = false;
         // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -2865,10 +2551,10 @@ export class LibraryLog {
   /**
    * A browser that kept the household from before its split learns the committed wire minimum (its own, or from den-edge
    * answering 426) before it has read the household that holds the directory. No directory is then not evidence that
-   * there isn't one: it is read once a page of the committed generation has been (`adoptProfileSplit`).
+   * there isn't one: it is read once a page of the committed generation has been (`adoptProfileDirectory`).
    */
   get profileDirectoryPending(): boolean {
-    return this.splitCommitted && !this.readCurrentGeneration;
+    return this.directoryCommitted && !this.readCurrentGeneration;
   }
 
   private document(name: string): DocumentRow | undefined {
@@ -3042,7 +2728,7 @@ export class LibraryLog {
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (this.splitCommitted) await this.adoptProfileSplit();
+            if (this.directoryCommitted) await this.adoptProfileDirectory();
             else if (!(await this.stageRecovery(page.generation))) return null;
             this.memberRegistered = false;
             // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -3155,7 +2841,7 @@ export class LibraryLog {
     if (!this.local) throw new Error('Encrypted library storage is unavailable');
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const sealed = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv, additionalData: migrationAAD(name, binding) },
+      { name: 'AES-GCM', iv, additionalData: boundAAD(name, binding) },
       this.local.key,
       utf8.encode(JSON.stringify(value)),
     );
@@ -3181,7 +2867,7 @@ export class LibraryLog {
         {
           name: 'AES-GCM',
           iv: bytes.slice(0, 12),
-          additionalData: migrationAAD(name, binding),
+          additionalData: boundAAD(name, binding),
         },
         this.local.key,
         bytes.slice(12),
@@ -4369,11 +4055,11 @@ export class LibraryLog {
   }
 
   /**
-   * A generation change that is the household's profile split committing (profiles-v1 §8.2): den-edge now answers at
+   * A generation change that committed the household's profile directory (profiles-v1 §8.2): den-edge now answers at
    * wire minimum 5, and what this browser holds was read before any `profiles` directory. Evaluated before the new
    * log is read, so the held directory is still the old household's.
    */
-  private get splitCommitted(): boolean {
+  private get directoryCommitted(): boolean {
     return this.wireMin >= 5 && this.profileDirectorySeq === 0;
   }
 
@@ -4395,15 +4081,15 @@ export class LibraryLog {
   }
 
   /**
-   * Adopt a committed profile split (profiles-v1 §8.2) instead of restoring into it: everything held from the old
+   * Adopt a committed profile directory (profiles-v1 §8.2) instead of restoring into it: everything held from the old
    * household — rows, the kept copies of the log, and work kept to send — is discarded, and the new log is read from
    * 0. Writing any of it back would put the Owner's rows (titles, trackers, delivery state, the Owner half of
    * preferences and keys) into the household, which every profile reads. Kept edits are not routed to a profile
    * library from here: this log has none, so they are dropped and named.
    */
-  private async adoptProfileSplit(): Promise<void> {
+  private async adoptProfileDirectory(): Promise<void> {
     console.warn(
-      `den: the household was split into profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
+      `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
     );
     this.entries.clear();
     this.acknowledged.clear();

@@ -9,7 +9,6 @@ import {
   mergeTitle,
   newestSummary,
   open,
-  openMigrationRow,
   seal,
   ZERO_STAMP,
   type Row,
@@ -118,27 +117,5 @@ describe('library wire v2 matches den-spec', () => {
     };
     expect(mergeTitle(older, newer).future).toBe('new');
     expect(mergeTitle(newer, older).future).toBe('new');
-  });
-});
-
-describe('openMigrationRow legacy evidence', () => {
-  const settings = (name: string): SettingsRow => ({ kind: 'set', schema: 2, name, values: {} });
-
-  it('reads a sealed settings row as current, and a tracker event as legacy, as den-core does', async () => {
-    const keys = await deriveKeys(fromHex(library.libraryKey));
-    const opened = async (row: Row) => {
-      const sealed = await seal(keys, row);
-      return openMigrationRow(keys, sealed.k, sealed.v);
-    };
-    expect(await opened(settings('prefs'))).toMatchObject({
-      status: 'row',
-      name: 'set:prefs',
-      legacy: false,
-    });
-    expect(await opened(settings('tracker-event:x'))).toMatchObject({
-      status: 'row',
-      name: 'set:tracker-event:x',
-      legacy: true,
-    });
   });
 });

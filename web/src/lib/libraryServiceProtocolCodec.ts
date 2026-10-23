@@ -784,11 +784,7 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'history.export') return exact(value, ['kind']);
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
   if (value.kind === 'assistant.connection') return exact(value, ['kind']);
-  if (value.kind === 'profile-migration.status') return exact(value, ['kind']);
   if (value.kind === 'profile-create.status') return exact(value, ['kind']);
-  if (value.kind === 'profile-migration.observe') return exact(value, ['kind']);
-  if (value.kind === 'profile-migration.observe-recovery')
-    return exact(value, ['kind', 'attempt']) && nullable(value.attempt, hexId);
   if (value.kind === 'recovery.seal')
     return (
       exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
@@ -973,21 +969,6 @@ function task(value: unknown): value is LibraryTask {
             boundedText(message.sealed, 4_096),
           ASSISTANT_DRAIN_MAX,
         )
-      );
-    case 'profile-migration.enable':
-      return (
-        exact(value, ['kind', 'attempt', 'source']) &&
-        hexId(value.attempt) &&
-        migrationSource(value.source)
-      );
-    case 'profile-migration.cancel':
-      return exact(value, ['kind', 'attempt']) && hexId(value.attempt);
-    case 'profile-migration.recover':
-      return (
-        exact(value, ['kind', 'attempt', 'recoveryAttempt', 'source']) &&
-        nullable(value.attempt, hexId) &&
-        hexId(value.recoveryAttempt) &&
-        migrationSource(value.source)
       );
     case 'profile.create':
       return (
@@ -1818,23 +1799,6 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   if (!record(value) || !text(value.kind)) return false;
   if (value.kind === 'parental-pin.verify')
     return exact(value, ['kind', 'matches']) && bool(value.matches);
-  if (value.kind === 'profile-migration.status')
-    return (
-      exact(value, ['kind', 'phase', 'attempt']) &&
-      (value.phase === 'off' ||
-        value.phase === 'available' ||
-        value.phase === 'preparing' ||
-        value.phase === 'ready' ||
-        value.phase === 'reconciling' ||
-        value.phase === 'enabled' ||
-        value.phase === 'recovery-required' ||
-        value.phase === 'setup-in-progress') &&
-      optional(
-        value.attempt,
-        (attempt): attempt is string =>
-          typeof attempt === 'string' && /^[0-9a-f]{32}$/.test(attempt),
-      )
-    );
   if (value.kind === 'profile-create.status') {
     if (!exact(value, ['kind', 'phase', 'profile', 'name', 'maximumAge', 'receipt'])) return false;
     if (value.phase === 'idle')
@@ -1854,19 +1818,6 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       boundedText(value.receipt, 256)
     );
   }
-  if (value.kind === 'profile-migration.observe')
-    return (
-      exact(value, ['kind', 'attempt', 'source']) &&
-      hexId(value.attempt) &&
-      migrationSource(value.source)
-    );
-  if (value.kind === 'profile-migration.observe-recovery')
-    return (
-      exact(value, ['kind', 'attempt', 'recoveryAttempt', 'source']) &&
-      nullable(value.attempt, hexId) &&
-      hexId(value.recoveryAttempt) &&
-      migrationSource(value.source)
-    );
   if (value.kind === 'assistant.grants')
     return (
       exact(value, ['kind', 'grants', 'reads', 'plays']) &&
@@ -2260,21 +2211,6 @@ function taskResult(value: unknown): value is LibraryTaskResult {
             boundedText(key.public, 2_048),
         )
       );
-    case 'profile-migration.enable':
-    case 'profile-migration.cancel':
-    case 'profile-migration.recover':
-      return (
-        exact(value, ['kind', 'outcome', 'attempt']) &&
-        (value.outcome === 'preparing' ||
-          value.outcome === 'reconciling' ||
-          value.outcome === 'enabled' ||
-          value.outcome === 'recovery-required' ||
-          value.outcome === 'source-changed' ||
-          value.outcome === 'source-refused' ||
-          value.outcome === 'setup-in-progress' ||
-          value.outcome === 'cancelled') &&
-        optional(value.attempt, hexId)
-      );
     case 'profile.create':
       return (
         exact(value, ['kind', 'outcome', 'profile', 'name', 'maximumAge', 'receipt']) &&
@@ -2312,17 +2248,6 @@ function taskResult(value: unknown): value is LibraryTaskResult {
     default:
       return false;
   }
-}
-
-function migrationSource(value: unknown): value is { generation: number; head: string } {
-  return (
-    record(value) &&
-    exact(value, ['generation', 'head']) &&
-    integer(value.generation) &&
-    value.generation >= 0 &&
-    typeof value.head === 'string' &&
-    /^[0-9a-f]{64}$/.test(value.head)
-  );
 }
 
 function failure(value: unknown): value is LibraryServiceFailure {

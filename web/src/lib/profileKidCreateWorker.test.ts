@@ -193,12 +193,12 @@ describe('persistent Kid profile Worker lifecycle', () => {
     expect(h.io.createAndVerifyProfileLibrary).not.toHaveBeenCalled();
   });
 
-  it('does no storage or network I/O without an active Owner split', async () => {
+  it('does no storage or network I/O without an active profile directory', async () => {
     const h = harness();
     vi.mocked(h.io.hasActiveOwner).mockReturnValue(false);
 
     await expect(h.coordinator.begin('create-no-owner', 'Sam', 8, stamps)).rejects.toThrow(
-      /active Owner split/,
+      /active profile directory/,
     );
 
     expect(h.vault.values.size).toBe(0);

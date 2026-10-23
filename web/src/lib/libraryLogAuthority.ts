@@ -104,18 +104,8 @@ import {
 import type { Vault } from './localVault';
 import { keptSomething } from './localLibraryMove';
 import type { ContentReader } from './contentAuthority';
-import {
-  workerStatusControl,
-  type OwnerSplitWorkerController,
-} from './profileOwnerSplitWorkerController';
-import { OwnerSplitWorkerSecureAdapter } from './profileOwnerSplitWorkerSecure';
-import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
-import { OwnerSplitWorkerTransport } from './profileOwnerSplitWorkerTransport';
-import { DormantOwnerSplitEffectExecutor } from './profileOwnerSplitEngine';
-import { HttpOwnerSplitProvider } from './profileOwnerSplitProvider';
-import { DormantOwnerSplitCoordinator } from './profileOwnerSplitCoordinator';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
-import { profilesApplyPolicy } from './profileMigrationCore';
+import { profilesApplyPolicy } from './profilesCore';
 import { exclusive } from './exclusive';
 import { joinHousehold, joinHouseholdOf, type JoinState } from './householdJoin';
 import { validateStoredProfileDirectory } from './profileDirectory';
@@ -381,7 +371,6 @@ export class LibraryLogAuthority {
   #finishedSaving: Promise<void> = Promise.resolve();
   #finishedPending?: FinishedLibraryViews;
   #finishedTimer?: ReturnType<typeof setTimeout>;
-  #ownerSplit?: OwnerSplitWorkerController;
   #kidCreate?: ProfileKidCreateCoordinator;
   #keyReset?: ProfileKeyResetService;
 
@@ -700,24 +689,6 @@ export class LibraryLogAuthority {
             (await pinMatches(stored, query.pin)),
         };
       }
-      case 'profile-migration.status': {
-        const status = await this.#profileMigration().status();
-        return { kind: 'profile-migration.status', ...status };
-      }
-      case 'profile-migration.observe': {
-        if (this.#log.readOnly)
-          throw authorityError(
-            'unavailable',
-            this.#log.readOnlyReason ?? 'the library is read-only',
-            true,
-          );
-        const observation = await this.#profileMigration().observe();
-        return { kind: 'profile-migration.observe', ...observation };
-      }
-      case 'profile-migration.observe-recovery': {
-        const observation = await this.#profileMigration().observeRecovery(query.attempt);
-        return { kind: 'profile-migration.observe-recovery', ...observation };
-      }
       case 'profile-create.status': {
         const result = await this.#profileKidCreate().resume();
         return result
@@ -821,32 +792,6 @@ export class LibraryLogAuthority {
     }
   }
 
-  /** Built only for an explicit worker query. Merely opening or syncing a library never resumes a migration. */
-  #profileMigration(): OwnerSplitWorkerController {
-    if (this.#ownerSplit) return this.#ownerSplit;
-    const store = new OwnerSplitWorkerStore(this.#log);
-    const transport = new OwnerSplitWorkerTransport(this.#log, store);
-    const secure = new OwnerSplitWorkerSecureAdapter(this.#log, store);
-    const effects = new DormantOwnerSplitEffectExecutor({
-      provider: new HttpOwnerSplitProvider(this.#log.libraryId, transport),
-      secureWorker: secure,
-      enabled: true,
-    });
-    const coordinator = new DormantOwnerSplitCoordinator(effects, store, this.#log.libraryId);
-    this.#ownerSplit = workerStatusControl(
-      {
-        capability: () => transport.capability(),
-        loadJournal: () => store.load(),
-        loadHandoff: () => store.loadHandoff(),
-        migrationLocked: () => this.#log.migrationLocked,
-        migrationReleased: () => this.#log.noteMigrationReleased(),
-      },
-      coordinator,
-      secure,
-    );
-    return this.#ownerSplit;
-  }
-
   #profileKidCreate(): ProfileKidCreateCoordinator {
     if (this.#kidCreate) return this.#kidCreate;
     const store = new ProfileKidCreateStore(this.#log);
@@ -868,18 +813,11 @@ export class LibraryLogAuthority {
     return this.#kidCreate;
   }
 
-  /**
-   * Built only for an explicit worker task. It is dormant twice over: the page offers no control for it, and every
-   * entry first asks den-edge's profile capability (the same gate the Owner split uses) before it reads or sends.
-   */
+  /** Built only for an explicit worker task; the reset source route is its own deployment gate. */
   #profileKeyReset(): ProfileKeyResetService {
     if (this.#keyReset) return this.#keyReset;
     const { libraryKey, vault } = this.#options;
     if (!libraryKey) throw authorityError('invalid-request', 'the household key is not available');
-    const capability = new OwnerSplitWorkerTransport(
-      this.#log,
-      new OwnerSplitWorkerStore(this.#log),
-    );
     this.#keyReset = new ProfileKeyResetService({
       vault: this.#log,
       householdKey: libraryKey,
@@ -890,11 +828,14 @@ export class LibraryLogAuthority {
       ),
       gate: async () => {
         try {
-          const answer = await capability.capability();
-          return answer !== null && answer.wireMin >= answer.runtimeHouseholdWire;
+          const answer = await this.#log.resetRequest({
+            method: 'GET',
+            path: `/lib/${this.#log.libraryId}/exclusive-operation/source`,
+          });
+          return answer.status === 200;
         } catch (error) {
-          // A refused or unreachable capability read keeps the reset closed; it is not an answer to guess past.
-          console.warn('den: the profile capability could not be read', error);
+          // A refused or unreachable source read keeps the reset closed; it is not an answer to guess past.
+          console.warn('den: the profile reset gate could not be read', error);
           return false;
         }
       },
@@ -948,12 +889,6 @@ export class LibraryLogAuthority {
       task.kind === 'profile-key-reset.recover'
     )
       return this.#profileKeyResetTask(task);
-    if (
-      task.kind === 'profile-migration.enable' ||
-      task.kind === 'profile-migration.cancel' ||
-      task.kind === 'profile-migration.recover'
-    )
-      return this.#profileMigrationTask(task);
     if (task.kind === 'household.create') return this.#createHousehold(task);
     if (task.kind === 'profile.create-default') return this.#createDefaultKid();
     if (task.kind === 'household.join') return this.#joinHousehold(task);
@@ -976,46 +911,6 @@ export class LibraryLogAuthority {
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
     return this.#administration().task(task, operationId);
-  }
-
-  async #profileMigrationTask(
-    task: Extract<LibraryTask, { kind: `profile-migration.${string}` }>,
-  ): Promise<LibraryAuthorityTaskResult> {
-    const control = this.#profileMigration();
-    const result =
-      task.kind === 'profile-migration.enable'
-        ? await control.enable(task.attempt, task.source)
-        : task.kind === 'profile-migration.cancel'
-          ? await control.cancel(task.attempt)
-          : await control.recover(task.attempt, task.recoveryAttempt, task.source);
-    if (result.kind === 'setup-in-progress') this.#log.noteMigrationLocked();
-    if (result.kind === 'released' || result.kind === 'refused') this.#log.noteMigrationReleased();
-    const outcome =
-      result.kind === 'active' || result.kind === 'restored'
-        ? 'enabled'
-        : result.kind === 'released'
-          ? 'cancelled'
-          : result.kind === 'recovery-blocked'
-            ? 'recovery-required'
-            : result.kind === 'setup-in-progress'
-              ? 'setup-in-progress'
-              : result.kind === 'restart-required'
-                ? 'source-changed'
-                : result.kind === 'cancelled'
-                  ? 'cancelled'
-                  : result.kind === 'commit-unknown'
-                    ? 'reconciling'
-                    : result.kind === 'refused'
-                      ? 'source-refused'
-                      : 'preparing';
-    return {
-      result: {
-        kind: task.kind,
-        outcome,
-        ...('attempt' in result ? { attempt: result.attempt } : {}),
-      },
-      affected: [],
-    };
   }
 
   /** The Owner PIN, only once it is delivered to every device: a queued PIN is not yet the household's. */
