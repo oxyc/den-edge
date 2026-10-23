@@ -800,10 +800,14 @@
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
   async function joinLocalLibrary(key: string): Promise<boolean> {
     let sourceKey = libraryIdentity;
-    if (!session.local || !session.model || !sourceKey) return false;
+    const source = session.model;
+    if (!session.local || !source || !sourceKey) return false;
     const destination = open(key, false);
     try {
       await destination.model!.ready;
+      // A title edit made from finished views answers while its narrow document send is still settling. A query that
+      // needs the full authority waits for that send and folds it into the source log before anything can copy it.
+      await source.rawPreferences();
       // A first-tab winner can change again while a TV join is copying it. Follow that pointer until the exact source
       // just copied can be removed; every earlier source is already safe in the destination.
       for (let round = 0; round < 8; round++) {
