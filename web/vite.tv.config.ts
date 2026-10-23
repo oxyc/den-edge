@@ -100,6 +100,14 @@ if (serviceOriginText) {
     );
   serviceOrigin = parsed.origin;
 }
+// Links a phone opens must name the web app, which the device API and the TV's own host do not serve.
+let webOrigin = serviceOrigin;
+if (process.env.DEN_TV_WEB_ORIGIN) {
+  const parsed = new URL(process.env.DEN_TV_WEB_ORIGIN);
+  if (parsed.protocol !== 'https:' || parsed.pathname !== '/' || parsed.search || parsed.hash)
+    throw new Error('DEN_TV_WEB_ORIGIN must be an exact HTTPS origin');
+  webOrigin = parsed.origin;
+}
 if (packaged && platform !== 'tizen')
   throw new Error('DEN_TV_PACKAGED=1 is only supported for Tizen');
 const outDir =
@@ -371,6 +379,7 @@ export default mergeConfig(
       __DEN_TV_LEGACY_JS_CORE__: tizen3 ? 'true' : 'false',
       __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
       __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(serviceOrigin),
+      __DEN_TV_WEB_ORIGIN__: JSON.stringify(webOrigin),
     },
     // The TV artifact is built without Wasm reference types for one-table engines such as Chromium 87. Keep the
     // browser's vendored den-core untouched; this config and its Worker builds alone resolve the JS entry points

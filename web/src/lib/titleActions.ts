@@ -162,7 +162,7 @@ export function titleMenuItems(
     onselect: () =>
       void shareOrCopy({
         title: title.title,
-        url: `${__DEN_TV_API_ORIGIN__ || location.origin}${href}`,
+        url: `${__DEN_TV_WEB_ORIGIN__ || location.origin}${href}`,
       }).then((result) => {
         if (result === 'copied') notify?.('Link copied');
       }),

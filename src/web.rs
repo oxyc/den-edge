@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tv_hostname_serves_only_the_separate_tv_build_and_keeps_its_api_same_origin() {
+    async fn tv_hostname_serves_the_separate_tv_build_and_its_api_on_one_origin() {
         let mut h = with_app();
         let tv = h.dir.join("tv-web");
         std::fs::create_dir_all(tv.join("assets")).unwrap();
@@ -1251,10 +1251,28 @@ mod tests {
 
         let api = h.send("GET", "/", None, &[("host", "d-api.oxy.fi")]).await;
         assert_eq!(api.status(), StatusCode::NOT_FOUND, "the API hostname must not serve either shell");
+        // The hosted app calls its own origin: a route answers as a route, never as the TV shell, so no request
+        // the app makes is cross-origin.
         let api_path = h.send("GET", "/version", None, &[("host", "den-tv.oxy.fi")]).await;
-        assert!(body_text(api_path).await.contains("<title>Den TV</title>"), "TV host is static-only");
-        let api_post = h.send("POST", "/pair/start", None, &[("host", "den-tv.oxy.fi")]).await;
-        assert_eq!(api_post.status(), StatusCode::NOT_FOUND, "TV host must not expose API method routing");
+        assert!(body_text(api_path).await.contains("\"version\""), "TV host answers API routes");
+        let unknown = h.send("POST", "/no-such-route", None, &[("host", "den-tv.oxy.fi")]).await;
+        assert_eq!(
+            unknown.status(),
+            StatusCode::NOT_FOUND,
+            "only a GET of a file or app route gets the shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn tv_hostname_answers_the_profiles_capability_from_the_same_host_list() {
+        let mut h = with_app();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.oxy.fi,other-tv.oxy.fi");
+        state.profiles_hosts = crate::parse_hosts("PROFILES_HOSTS", "den-tv.oxy.fi");
+        let listed = h.send("GET", "/capabilities/profiles", None, &[("host", "den-tv.oxy.fi")]).await;
+        assert_eq!(body_text(listed).await, r#"{"enabled":true}"#);
+        let unlisted = h.send("GET", "/capabilities/profiles", None, &[("host", "other-tv.oxy.fi")]).await;
+        assert_eq!(unlisted.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -123,8 +123,8 @@ pub struct AppState {
     /// The device API's public names (env `API_HOSTS`). They bypass Access, so a request for one gets the
     /// device routes and never the web app — which would otherwise be handed out past Access.
     pub api_hosts: Vec<String>,
-    /// Public names which serve only the TV bundle (env `TV_WEB_HOSTS`). The bundle calls `API_HOSTS` for the
-    /// authenticated device API, so backend routes do not silently acquire a second public address.
+    /// Public names which serve the TV bundle (env `TV_WEB_HOSTS`), and every route the hosted bundle calls, so
+    /// its requests stay on its own origin and pay no CORS preflight.
     pub tv_web_hosts: Vec<String>,
     /// HTTPS device API origin compiled into the hosted TV build (env `TV_API_ORIGIN`). It is added to that
     /// shell's connect policy; requests are still authorized by the API's normal member/pairing proofs.
