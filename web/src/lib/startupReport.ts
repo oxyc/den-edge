@@ -4,7 +4,7 @@
 // bucket, the codec, whether it was transcoded, the player engine, which kind of address was used, and — gated
 // by den-edge's own `LOG_IDENTITY` switch, never asked here — the identity fields (`diagnosticsReport.ts`).
 
-import type { IdentityFields } from './diagnosticsReport';
+import { reportUrl, type IdentityFields } from './diagnosticsReport';
 
 export interface ServerTiming {
   resolveMs?: number;
@@ -77,7 +77,7 @@ export interface StartupReport extends ServerTiming, IdentityFields {
 
 /** Fire-and-forget: the next session's report carries whatever this one didn't need retrying for. */
 export function sendStartupReport(report: StartupReport, fetchImpl: typeof fetch = fetch): void {
-  void fetchImpl('/playback/startup', {
+  void fetchImpl(reportUrl('/playback/startup'), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(report),
