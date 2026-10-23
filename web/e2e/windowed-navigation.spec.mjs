@@ -48,7 +48,26 @@ async function controlWindowedRows(page, startFar = false) {
       }
     };
     window.denForceWindowedRowsFar = () => rowObservers.forEach((observer) => observer.denFar());
+    // Times on the page's clock how long after this call the last card is released. A loaded runner polls the page
+    // late, so a wall-clock expect cannot tell a release that came on time from one that did not.
+    window.denStartReleaseClock = () => {
+      const start = performance.now();
+      window.denReleasedAfter = new Promise((resolve) => {
+        const observer = new MutationObserver(() => {
+          if (document.querySelector('.card')) return;
+          observer.disconnect();
+          resolve(performance.now() - start);
+        });
+        if (!document.querySelector('.card')) return resolve(0);
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+    };
   }, startFar);
+}
+
+async function expectReleasedWithin(page, ms) {
+  await expect(page.locator('.card')).toHaveCount(0);
+  expect(await page.evaluate(() => window.denReleasedAfter)).toBeLessThan(ms);
 }
 
 async function mockPosterImages(page) {
@@ -110,9 +129,12 @@ test('a genuinely distant windowed shelf still releases its card trees after the
   await page.goto(`${E2E_ORIGIN}/test/windowed-navigation.html`);
   await expect(page.locator('.card')).not.toHaveCount(0);
 
-  await page.evaluate(() => window.denForceWindowedRowsFar());
+  await page.evaluate(() => {
+    window.denStartReleaseClock();
+    window.denForceWindowedRowsFar();
+  });
 
-  await expect(page.locator('.card')).toHaveCount(0, { timeout: 1_000 });
+  await expectReleasedWithin(page, 1_000);
   await expect(page.locator('.proxy')).toHaveCount(8);
 });
 
@@ -123,10 +145,12 @@ test('a pointer released outside the shelf clears its interaction pin', async ({
   await page.goto(`${E2E_ORIGIN}/test/windowed-navigation.html`);
   const card = page.getByRole('link', { name: 'Continuing series 1' });
   await expect(card).toBeVisible();
-  await card.evaluate((element) => {
-    element.draggable = false;
-    element.querySelectorAll('img').forEach((image) => (image.draggable = false));
-  });
+  // Moving the pressed pointer off the card would drag it, which ends the press with pointercancel and no release.
+  // Cancel the drag at the document: the card's artwork can be replaced after it paints, so marking the elements
+  // there now undraggable can miss the one that is pressed.
+  await page.evaluate(() =>
+    document.addEventListener('dragstart', (event) => event.preventDefault()),
+  );
   const point = await card.evaluate((element) => {
     const box = element.getBoundingClientRect();
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
@@ -140,12 +164,20 @@ test('a pointer released outside the shelf clears its interaction pin', async ({
   await expect(card).toBeVisible();
 
   await page.mouse.move(5, 5);
-  await page.mouse.up();
+  // Focus leaves with the release, in the same task, so the clock covers only the shelf's own retirement.
   await page.evaluate(() =>
-    document.activeElement instanceof HTMLElement ? document.activeElement.blur() : null,
+    window.addEventListener(
+      'pointerup',
+      () => {
+        window.denStartReleaseClock();
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      },
+      { once: true },
+    ),
   );
+  await page.mouse.up();
 
-  await expect(page.locator('.card')).toHaveCount(0, { timeout: 1_000 });
+  await expectReleasedWithin(page, 1_000);
   await expect(page.locator('.proxy')).toHaveCount(8);
 });
 
