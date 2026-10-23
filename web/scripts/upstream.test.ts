@@ -9,6 +9,10 @@ async function proxy(): Promise<Proxy> {
 
 afterEach(() => vi.unstubAllEnvs());
 
+// The first import transpiles and evaluates the whole of vite.config.ts, which a busy machine stretches past
+// vitest's five seconds. An import that never settles still fails, at this bound.
+vi.setConfig({ testTimeout: 30_000 });
+
 // A spec that does not route a request (WebKit's sendBeacon skips Playwright's routing entirely) falls through
 // to these proxies. Under e2e that must never be a real service: a fixture's playback outcome was recorded by the
 // production den-edge this way.

@@ -2566,6 +2566,8 @@ mod tests {
 
     /// The one builder and the response pool are process-wide, so tests that hold them take turns: filling the pool
     /// (32 slow responses through the one builder) kept it from a test waiting 2 s for it, when both ran at once.
+    /// Every test that drives the builder or the pool itself takes a turn, not only those with a timeout of their
+    /// own: a test queueing dozens of builds ahead of a waiting one is the same starvation.
     static SHARED_BUILDER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// A missing title was never remembered, so asking for one cost a budget unit EVERY time.
@@ -3326,6 +3328,7 @@ mod tests {
 
     #[tokio::test]
     async fn derived_byte_metrics_follow_the_response_owner() {
+        let _turn = SHARED_BUILDER.lock().await;
         let metrics = Arc::new(crate::metrics::Metrics::default());
         let charge = derived_response_charge(Some(&metrics)).await.unwrap();
         let body = charged_derived(Bytes::from_static(b"{}"), charge);
@@ -3338,6 +3341,7 @@ mod tests {
 
     #[tokio::test]
     async fn slow_exact_hits_keep_open_files_not_body_sized_buffers() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let detail =
             Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
@@ -3404,6 +3408,11 @@ mod tests {
         );
     }
 
+    /// How long one of the 48 responses may take to be built or to give its charge back. Each is a multi-megabyte
+    /// parse in a debug build, one at a time, so on a busy machine this is CPU time and not waiting: the bound is
+    /// only there to fail a build that never finishes.
+    const BUILD_BOUND: Duration = Duration::from_secs(60);
+
     async fn assert_slow_derived_responses_are_bounded(detail: Arc<Detail>, source_path: PathBuf) {
         let capacity = DERIVED_RESPONSE_BUDGET_BYTES / MAX_ANSWER_BYTES;
         assert_eq!(capacity, 32, "keep this test's expected response ceiling explicit");
@@ -3421,7 +3430,7 @@ mod tests {
         let mut held = Vec::new();
         let mmaps = crate::mmap::Cache::new(Arc::new(crate::metrics::Metrics::default()));
         for _ in 0..capacity {
-            let (prepared, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+            let (prepared, _) = tokio::time::timeout(BUILD_BOUND, requests.join_next())
                 .await
                 .expect("a derived response never acquired its bounded charge")
                 .expect("a derived response task vanished")
@@ -3445,7 +3454,7 @@ mod tests {
         // The charge follows the response body: releasing one unread response lets exactly one waiting builder
         // finish. The remaining waiters are request-owned and cancellation removes them from the build queue.
         drop(held.pop());
-        let (next, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+        let (next, _) = tokio::time::timeout(BUILD_BOUND, requests.join_next())
             .await
             .expect("dropping a response did not release its charge")
             .expect("the next derived response task vanished")
@@ -3459,7 +3468,7 @@ mod tests {
         // An owner detached between taking the build permit and observing cancellation may finish once the held
         // responses leave. Reacquiring the whole budget proves it did not leak either its task or its charge.
         let all = tokio::time::timeout(
-            Duration::from_secs(5),
+            BUILD_BOUND,
             Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_BUDGET_BYTES as u32),
         )
         .await
@@ -3516,6 +3525,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_late_old_generation_build_cannot_publish_for_a_new_source() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
         let source_path = detail.whole().1;
@@ -3553,6 +3563,7 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_detail_replacements_keep_only_one_bounded_generation() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
         let source_path = detail.whole().1;
@@ -3708,7 +3719,7 @@ mod tests {
         let owner_started = watch_variant_owner(&source_path);
         let build = tokio::spawn(async move { detail.prepared_variant(&source_path, source).await });
         drop(held);
-        tokio::time::timeout(Duration::from_secs(2), owner_started)
+        tokio::time::timeout(BUILD_BOUND, owner_started)
             .await
             .expect("the owner task never took its build permit")
             .expect("the owner task dropped its start signal");
@@ -3720,11 +3731,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(variant.exists(), "the requester owned and cancelled parse/publication");
-        let permit =
-            tokio::time::timeout(Duration::from_secs(2), Arc::clone(detail_builds()).acquire_owned())
-                .await
-                .expect("the build owner retained its permit forever")
-                .unwrap();
+        let permit = tokio::time::timeout(BUILD_BOUND, Arc::clone(detail_builds()).acquire_owned())
+            .await
+            .expect("the build owner retained its permit forever")
+            .unwrap();
         drop(permit);
     }
 
@@ -3759,17 +3769,17 @@ mod tests {
         }
         drop(held);
 
-        let permit =
-            tokio::time::timeout(Duration::from_secs(2), Arc::clone(detail_builds()).acquire_owned())
-                .await
-                .expect("cancelled waiters left detached owners queued")
-                .unwrap();
+        let permit = tokio::time::timeout(BUILD_BOUND, Arc::clone(detail_builds()).acquire_owned())
+            .await
+            .expect("cancelled waiters left detached owners queued")
+            .unwrap();
         assert!(!variant.exists(), "a cancelled waiter published after its request ended");
         drop(permit);
     }
 
     #[tokio::test]
     async fn arbitrary_append_subset_churn_does_not_create_derived_files() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let whole = Detail::of("/3/movie/550", None, Some(&dir)).unwrap();
         let source_path = whole.whole().1;
@@ -3800,6 +3810,7 @@ mod tests {
 
     #[tokio::test]
     async fn checked_in_appends_with_arbitrary_rest_do_not_create_derived_files() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let body = Bytes::from_static(
             br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
