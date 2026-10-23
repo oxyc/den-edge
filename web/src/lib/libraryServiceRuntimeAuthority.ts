@@ -100,7 +100,7 @@ export async function openLibraryServiceAuthority(
     }
     startupMark(
       'log opened',
-      `${!log ? 'unavailable' : request.mode === 'local' ? 'local' : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
+      `${!log ? 'unavailable' : request.mode === 'local' ? `local, ${log.storedRows().length} rows` : log.fromCache ? 'from kept copy' : 'from den-edge'} in ${Math.round(performance.now() - openingAt)}ms`,
     );
     if (!log) return null;
     // Every Worker-owned relay client uses relayFetch, not only ContentAuthority. Install the bounded membership

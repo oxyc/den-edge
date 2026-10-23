@@ -17,6 +17,7 @@ import { LibraryLog, successorTag } from './log';
 import type { Vault } from './localVault';
 import { sealHandover } from './pairHandover';
 import { completeDurableTaskOperation } from './libraryOperationAuthority';
+import { startupMark } from './startupTiming';
 import {
   abandon,
   begin,
@@ -29,7 +30,7 @@ import {
   type Prepared,
   type RecoveryContext,
 } from './recovery';
-import { fromBase64url, toBase64url } from './wire';
+import { fromBase64url, isDocument, toBase64url } from './wire';
 import type { Row, Stamp } from './wire';
 
 const RESET_ROUNDS = 3;
@@ -516,7 +517,9 @@ export class LibraryAdminAuthority {
         )
       : false;
     const source = await LibraryLog.openExistingLocal(sourceLibraryKey, this.options.vault);
-    if (!source)
+    // What a move did, by count only: one that succeeds having moved nothing looks like any other success.
+    if (!source) {
+      startupMark('local library merge', wasWritten ? 'already written' : 'no library kept here');
       return {
         result: {
           kind: 'local-library.merge',
@@ -524,6 +527,7 @@ export class LibraryAdminAuthority {
         },
         affected: [],
       };
+    }
     try {
       const rows = source.storedRows().flatMap((row): Row[] => {
         if (row.kind === 'set' && row.name === 'recovery') return [];
@@ -590,6 +594,11 @@ export class LibraryAdminAuthority {
           result: { kind: 'local-library.merge', outcome: 'unavailable' },
           affected: affectedLibrary,
         };
+      const documents = rows.filter(isDocument).length;
+      startupMark(
+        'local library merge',
+        `${documents} documents, ${rows.length - documents} settings${wasWritten ? ', already written' : ''}`,
+      );
       return {
         result: {
           kind: 'local-library.merge',
