@@ -80,6 +80,30 @@ describe('netTally', () => {
     ]);
     expect(tally).toEqual({ tmdb: [2, 400], lib: [1, 80], meta: [1, 40], image: [1, 300] });
   });
+
+  it('names den-edge’s startup endpoints and source plugins instead of lumping them as other', () => {
+    const tally = netTally([
+      { name: 'https://den-tv.oxy.fi/routes', initiatorType: 'fetch', duration: 900 },
+      { name: 'https://den-tv.oxy.fi/config', initiatorType: 'fetch', duration: 120 },
+      { name: 'http://192.0.2.1:8094/health', initiatorType: 'fetch', duration: 2000 },
+      { name: 'https://den-tv.oxy.fi/capabilities/profiles', initiatorType: 'fetch', duration: 60 },
+      {
+        name: 'https://den-tv.oxy.fi/scout/abc/manifest.json',
+        initiatorType: 'fetch',
+        duration: 30,
+      },
+      { name: 'https://addon.example/xyz/manifest.json', initiatorType: 'fetch', duration: 40 },
+      { name: 'https://den-tv.oxy.fi/unknown-thing', initiatorType: 'fetch', duration: 5 },
+    ]);
+    expect(tally).toEqual({
+      routes: [1, 900],
+      config: [1, 120],
+      health: [1, 2000],
+      capabilities: [1, 60],
+      plugins: [2, 70],
+      other: [1, 5],
+    });
+  });
 });
 
 describe('loadSettled', () => {
