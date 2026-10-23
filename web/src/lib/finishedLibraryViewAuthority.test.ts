@@ -3,6 +3,7 @@ import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
+  readFinishedLibraryViews,
   writeFinishedLibraryViews,
   type FinishedLibraryViews,
 } from './finishedLibraryViews';
@@ -17,6 +18,7 @@ import { deriveKeys, seal, type SettingsRow, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
+import { ContinueProjector } from './library';
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
@@ -816,6 +818,206 @@ it('counts a served series’ episodes once naming finds its shape, and keeps ot
     expect.objectContaining({ kind: 'title-shape', title: series }),
   ]);
   expect(openFull).toHaveBeenCalledOnce();
+});
+
+/** Every root view a LibraryModel selects (`libraryModel.svelte.ts`). */
+const roots = ['overview', 'continue', 'settings', 'runtime', 'devices'] as const;
+
+it('keeps the views a facts visit read, once Continue has its layouts, and the next visit draws them without den-core', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault);
+  const series = { type: 'tv' as const, id: 55 };
+  const named = {
+    title: vi.fn(async () => ({
+      kind: 'found' as const,
+      value: {
+        title: { type: 'tv' as const, id: 55, title: 'Fifty-five' },
+        shape: { counts: new Map([[1, 3]]) },
+      },
+    })),
+  };
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    named,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  // Continue still lacks the series' layout: nothing is kept that the next visit would draw differently.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toBeNull();
+  await first!.authority.query({ kind: 'library.metadata', titles: [series] });
+  const drawn = await first!.authority.select({ kind: 'continue' });
+  expect(drawn).toMatchObject({ items: [{ title: series }], needsShapes: [] });
+  await vi.waitFor(() =>
+    expect(readFinishedLibraryViews(libraryKey, vault, ['continue'])).resolves.toMatchObject({
+      pieces: { continue: { view: drawn } },
+    }),
+  );
+  await first!.authority.close?.();
+
+  const project = vi.spyOn(ContinueProjector.prototype, 'project');
+  try {
+    const openFull = vi.fn(async () => fullAuthority());
+    const second = await openFinishedLibraryViewAuthority(request, vault, openFull, named, vi.fn());
+    await expect(second!.authority.select({ kind: 'continue' })).resolves.toEqual(drawn);
+    for (const kind of roots) await second!.authority.select({ kind });
+    // The kept layout matches the series' shape: still drawn without the log.
+    await second!.authority.query({ kind: 'library.metadata', titles: [series] });
+    expect(project).not.toHaveBeenCalled();
+    expect(openFull).not.toHaveBeenCalled();
+    await second!.authority.close?.();
+  } finally {
+    project.mockRestore();
+  }
+});
+
+it('keeps no views while the history is still read, and keeps them once it is whole', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const edge = changesEdge(await settledLongAgo(1_100), 'generation-kept-after-fill');
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    const before = new URL(String(input), 'https://den.test').searchParams.get('before');
+    if (before !== null && Number(before) < Number.MAX_SAFE_INTEGER) await released;
+    return edge.fetchImpl(input, init);
+  });
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    fetchImpl,
+  );
+  for (const kind of roots) await opened!.authority.select({ kind });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toBeNull();
+  release();
+  await vi.waitFor(() =>
+    expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+      identity: { generation: 'generation-kept-after-fill', head: 1_101 },
+      pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
+    }),
+  );
+  await opened!.authority.close?.();
+});
+
+it('catches kept views up from facts when den-edge moved on, and keeps the new ones', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const old = factTitle('watchlist', 10);
+  const before = await seal(keys, old);
+  const after = await seal(keys, factTitle('watched', 20));
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    12,
+    [{ k: before.k, seq: 12, value: before.v, row: old }],
+    true,
+  );
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.close?.();
+  await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toMatchObject({
+    identity: { head: 12 },
+  });
+
+  const fetchImpl = vi.fn<typeof fetch>().mockImplementation(
+    async () =>
+      new Response(
+        JSON.stringify({
+          generation: 'generation-a',
+          head: 13,
+          more: false,
+          entries: [{ k: after.k, seq: 13, v: after.v }],
+        }),
+        { status: 200 },
+      ),
+  );
+  const project = vi.spyOn(ContinueProjector.prototype, 'project');
+  try {
+    const openFull = vi.fn(async () => fullAuthority());
+    const second = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    for (const kind of roots) await second!.authority.select({ kind });
+    await expect(second!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      watchlist: [{ type: 'movie', id: 77 }],
+    });
+    // Drawn from the kept views: den-core has not projected Continue.
+    expect(project).not.toHaveBeenCalled();
+    const changed = vi.fn();
+    second!.authority.listen?.(changed);
+    await second!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await vi.waitFor(() =>
+      expect(changed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'changed',
+          affected: expect.arrayContaining([{ kind: 'continue' }, { kind: 'overview' }]),
+        }),
+      ),
+    );
+    expect(project).toHaveBeenCalled();
+    await expect(second!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      watchlist: [],
+      watched: [{ type: 'movie', id: 77 }],
+    });
+    await vi.waitFor(() =>
+      expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+        identity: { head: 13 },
+        pieces: { watchlist: { titles: [] } },
+      }),
+    );
+    expect(openFull).not.toHaveBeenCalled();
+    await second!.authority.close?.();
+  } finally {
+    project.mockRestore();
+  }
+});
+
+it('reads Continue again from facts at the same head when the kept one is past its reconsider time', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const value = await cached(vault);
+  value.identity.reconsiderAt = Date.now() - 1;
+  await writeFinishedLibraryViews(libraryKey, vault, value);
+  const keys = await deriveKeys(raw);
+  const row = factTitle('watchlist', 10);
+  const encrypted = await seal(keys, row);
+  await (await LibraryFactStore.open(libraryKey, vault))!.commitBatch(
+    'generation-a',
+    12,
+    [{ k: encrypted.k, seq: 12, value: encrypted.v, row }],
+    true,
+  );
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+  await expect(opened!.authority.select({ kind: 'continue' })).resolves.toEqual({
+    kind: 'continue',
+    items: [],
+    needsShapes: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await opened!.authority.close?.();
 });
 
 it('tells the log the shapes it was given when a write opens it', async () => {
