@@ -199,6 +199,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #preferFacts: boolean;
   /** The import is still reading the history behind a first page (`importNewestFirst`). */
   #filling = false;
+  /** The import title selections join, so they do not start a second full-history read alongside it. */
+  #fillingDone?: Promise<boolean>;
   #refilling?: Promise<void>;
   #refillAgain = false;
   /** A narrow edit's send, until it has come to an end: the whole log opens only after it (`#promote`). */
@@ -225,6 +227,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     this.#preferFacts = preferFacts;
     if (filling) {
       this.#filling = true;
+      this.#fillingDone = filling.done;
       filling.page.committed = () => this.#refill();
       void filling.done.then((complete) => this.#filled(complete));
     }
@@ -278,8 +281,22 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       return structuredClone(pieces.devices!);
     }
     if (selection.kind === 'title') {
+      // A first open answers after its newest page while the rest is still arriving. A title cannot be projected from
+      // an incomplete store, but promoting here would read the entire history a second time alongside that import.
+      // Join the import, then retry its now-complete documents; a stopped import still falls through to promotion.
+      const filling = this.#fillingDone;
       const view = await this.#titleFromFacts(selection.title);
       if (view) return view;
+      if (filling) {
+        const complete = await filling;
+        // `#filled` may have promoted while this request waited.
+        const full = this.#full as LibraryServiceAuthority | undefined;
+        if (full) return full.select(selection);
+        if (complete) {
+          const filled = await this.#titleFromFacts(selection.title);
+          if (filled) return filled;
+        }
+      }
     }
     return (await this.#promote(`selection:${selection.kind}`)).select(selection);
   }
