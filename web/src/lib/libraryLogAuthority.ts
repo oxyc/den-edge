@@ -734,6 +734,7 @@ export class LibraryLogAuthority {
           refreshed: (await this.#options.refreshDownloads?.(query.target)) ?? false,
         };
       case 'download.sources': {
+        await ensureDeferredSyncPolicy();
         const title = internalDownloadTitle(query.title);
         const snapshot = await this.#downloadsCoordinator.sourcesForTitle(title, query.refresh);
         const sources = Array.isArray(snapshot.sources)
