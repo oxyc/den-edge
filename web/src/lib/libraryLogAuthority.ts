@@ -758,6 +758,9 @@ export class LibraryLogAuthority {
           stillPath: (await this.#options.downloadArtwork?.(query.target)) ?? null,
         };
       case 'preferences.raw':
+        // Profile seeding only needs the values, but a local-library handoff also uses this full-authority query as
+        // its source barrier. Make the snapshot another authority will reopen include every accepted local edit.
+        if (this.#options.mode === 'local') await this.#log.settlePersistence();
         return { kind: 'preferences.raw', values: this.#log.settings('prefs')?.values ?? {} };
       case 'retained.services.get': {
         const value = await this.#log.kept<unknown>(RETAINED_SERVICES);

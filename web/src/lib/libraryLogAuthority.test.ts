@@ -235,6 +235,46 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
+  it('settles an accepted local edit before the handoff source query answers', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'local-handoff-persistence-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const opened = authority(log, clock, 'local');
+    await opened.command({ kind: 'watchlist.add', title: movie }, 'add-before-handoff');
+
+    const put = vault.put;
+    let releaseSnapshot!: () => void;
+    const snapshotReleased = new Promise<void>((resolve) => (releaseSnapshot = resolve));
+    let snapshotStarted!: () => void;
+    const snapshotWriting = new Promise<void>((resolve) => (snapshotStarted = resolve));
+    vault.put = async (key, value) => {
+      if (key.endsWith(':log.v1')) {
+        snapshotStarted();
+        await snapshotReleased;
+      }
+      await put(key, value);
+    };
+    let answered = false;
+    const barrier = opened.query({ kind: 'preferences.raw' }).then((result) => {
+      answered = true;
+      return result;
+    });
+    await snapshotWriting;
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    releaseSnapshot();
+    await expect(barrier).resolves.toMatchObject({ kind: 'preferences.raw' });
+    const reopened = await LibraryLog.openExistingLocal(KEY, vault);
+    expect(reopened?.title(movie)?.status.value).toBe('watchlist');
+    reopened?.close();
+    await opened.close();
+  });
+
   it('does not write the finished views again when an unchanged library is opened again', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
