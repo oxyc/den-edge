@@ -464,8 +464,11 @@ describe.skipIf(!available)(
 describe.skipIf(available)(
   'a cached household meeting its committed profile directory (skipped)',
   () => {
-    it.skipIf(!required)('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {
-      throw new Error(`DEN_EDGE_REQUIRED is set but there is no den-edge binary at ${BINARY}`);
-    });
+    it.skipIf(!required)(
+      'needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN',
+      () => {
+        throw new Error(`DEN_EDGE_REQUIRED is set but there is no den-edge binary at ${BINARY}`);
+      },
+    );
   },
 );
