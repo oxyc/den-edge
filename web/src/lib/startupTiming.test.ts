@@ -64,6 +64,35 @@ describe('startup timing', () => {
     expect(String(info.mock.calls.at(-1)?.[0])).toMatch(/handover \(owner session\)$/);
   });
 
+  it('keeps what each library Worker’s open did by the library it serves, the first of each', async () => {
+    vi.useRealTimers();
+    const page = await load();
+    // A Worker's copy: no document, and the page's time origin as its name.
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    vi.stubGlobal('name', String(performance.timeOrigin));
+    const profile = await import('./startupTiming');
+    profile.startupMark('den-core requested');
+    profile.startupLibraryWorker('profile', 'facts');
+    profile.startupLibraryPromoted('selection:continue');
+    profile.startupLibraryPromoted('import:stopped');
+    vi.resetModules();
+    const household = await import('./startupTiming');
+    household.startupLibraryWorker('household', 'saved');
+    household.startupLibraryPromoted('task:assistant.publish');
+    household.startupMark('den-core requested');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(page.startupLibraryWorkers()).toEqual({
+      profile: {
+        views: 'facts',
+        coreRequestedMs: expect.any(Number),
+        promoted: 'selection',
+        selection: 'continue',
+      },
+      household: { views: 'saved', promoted: 'task', coreRequestedMs: expect.any(Number) },
+    });
+  });
+
   it('reduces a failure to its code and message', async () => {
     const { startupFailure } = await load();
     expect(

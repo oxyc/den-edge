@@ -65,10 +65,10 @@ it('selects the fixed Home view from rows once', () => {
     watched: ['movie:1'],
     watchlist: ['tv:2'],
     standings: [
-      ['tv:8', 'inProgress'],
       ['movie:1', 'watched'],
-      ['tv:2', 'watchlist'],
       ['movie:3', 'inProgress'],
+      ['tv:2', 'watchlist'],
+      ['tv:8', 'inProgress'],
     ],
     weighted: [
       ['movie:1', 2, 10],
@@ -96,6 +96,27 @@ it('asks for the layouts of the series watched most recently first', () => {
   // Stored oldest first, as a library written over years is; Home shows the newest.
   library.marks = [mark(10, 100), mark(12, 300), mark(14, 200), mark(12, 50)];
   expect(selectHomeLibraryView(library, []).requiredShapeRefs).toEqual(['tv:12', 'tv:14', 'tv:10']);
+});
+
+it('says the same standings when an episode mark moves a series already in progress', () => {
+  const mark = (id: number, episode: number, updatedAt: number) => ({
+    type: 'tv',
+    id,
+    season: 1,
+    episode,
+    fraction: 1,
+    updatedAt,
+    title: '',
+    voteAverage: 0,
+  });
+  const before = foldFor([]);
+  before.marks = [mark(10, 1, 100), mark(12, 1, 200)];
+  const after = foldFor([]);
+  // Series 10's next episode, marked last: its marks now come after series 12's.
+  after.marks = [mark(12, 1, 200), mark(10, 1, 100), mark(10, 2, 300)];
+  expect(selectHomeLibraryView(after, []).standings).toEqual(
+    selectHomeLibraryView(before, []).standings,
+  );
 });
 
 it('is materially smaller than the representative projection graph it describes', () => {

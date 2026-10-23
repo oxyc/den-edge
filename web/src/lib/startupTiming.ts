@@ -2,6 +2,8 @@
 // navigation start, so a slow start shows where it waited. Milestones only: never a key, token, library id, title
 // or row, and nothing per row. Both the page and the library Worker log here.
 
+import type { LibrarySelection } from './libraryServiceProtocol';
+
 const STALL_MS = 15_000;
 
 const inWorker = typeof document === 'undefined';
@@ -81,10 +83,60 @@ const channel = (() => {
     return undefined;
   }
 })();
+/**
+ * Which library a library Worker serves, by its wire: a profile household's own (wire 5), whose profile directory the
+ * handover waits on, or a library's (wire 4): a profile's, or that of a household without profiles.
+ */
+export type LibraryWorkerRole = 'household' | 'profile';
+/** How a Worker opened its library: from the views it saved, from its fact store without them, or as the whole log. */
+export type LibraryWorkerViews = 'saved' | 'facts' | 'miss';
+/** The kinds of reason a Worker opens its whole library after all (`FinishedLibraryViewAuthority#promote`). */
+export type LibraryPromotion =
+  | 'cache'
+  | 'selection'
+  | 'command'
+  | 'edit'
+  | 'query'
+  | 'task'
+  | 'observation'
+  | 'import'
+  | 'continue'
+  | 'reconcile'
+  | 'content'
+  | 'layout';
+/** Every selection kind, so a promotion's names one only from this set. */
+const SELECTION_KINDS: Record<LibrarySelection['kind'], true> = {
+  overview: true,
+  watchlist: true,
+  recommendations: true,
+  continue: true,
+  history: true,
+  title: true,
+  presence: true,
+  settings: true,
+  devices: true,
+  connections: true,
+  simkl: true,
+  recovery: true,
+  runtime: true,
+  profiles: true,
+  downloads: true,
+};
+/** What one library Worker's open did, for the load report: each the first this page heard for its role. */
+export interface LibraryWorkerStartup {
+  views?: LibraryWorkerViews;
+  promoted?: LibraryPromotion;
+  /** The selection a `selection` promotion was for. */
+  selection?: LibrarySelection['kind'];
+  coreRequestedMs?: number;
+}
+const CORE_REQUESTED = 'den-core requested';
+
 type Relayed =
   | { origin: string; kind: 'mark'; event: string; at: number }
   | { origin: string; kind: 'count'; name: string }
-  | ({ origin: string; kind: 'resource' } & StartupResource);
+  | ({ origin: string; kind: 'resource' } & StartupResource)
+  | ({ origin: string; kind: 'library'; role: LibraryWorkerRole } & LibraryWorkerStartup);
 const relay = (message: Relayed) => {
   try {
     channel?.postMessage(message);
@@ -95,6 +147,22 @@ const relay = (message: Relayed) => {
 const workerResources: StartupResource[] = [];
 /** Requests a Worker made before its first `resource` entry was relayed, bounded like the page's own buffer. */
 const MAX_WORKER_RESOURCES = 2_000;
+/** What each library Worker's open did (`LibraryWorkerStartup`), by the role it serves; on the page only. */
+const libraryWorkers: Partial<Record<LibraryWorkerRole, LibraryWorkerStartup>> = {};
+/** The library this Worker serves, once its library is opened (`startupLibraryWorker`); in a Worker only. */
+let libraryRole: LibraryWorkerRole | undefined;
+
+function keepLibraryNote(role: LibraryWorkerRole, note: LibraryWorkerStartup): void {
+  const held = (libraryWorkers[role] ??= {});
+  for (const [field, value] of Object.entries(note) as [keyof LibraryWorkerStartup, never][])
+    if (value !== undefined && held[field] === undefined) held[field] = value;
+}
+
+/** Tell the page what this Worker's library open did. */
+function noteLibrary(note: LibraryWorkerStartup): void {
+  if (inWorker && libraryRole)
+    relay({ origin: ORIGIN, kind: 'library', role: libraryRole, ...note });
+}
 /** The page's main thread blocked for 50 ms or more at a time (`longtask`): how often, how long in all, the longest. */
 const longTasks = { count: 0, ms: 0, longest: 0 };
 
@@ -107,7 +175,10 @@ if (channel && !inWorker)
       lasts.set(event, Math.max(lasts.get(event) ?? 0, message.at));
     } else if (message.kind === 'count')
       counts.set(message.name, (counts.get(message.name) ?? 0) + 1);
-    else if (workerResources.length < MAX_WORKER_RESOURCES)
+    else if (message.kind === 'library') {
+      const { origin: _origin, kind: _kind, role, ...note } = message;
+      keepLibraryNote(role, note);
+    } else if (workerResources.length < MAX_WORKER_RESOURCES)
       workerResources.push(resourceOf(message));
   };
 
@@ -186,6 +257,7 @@ export function startupMark(event: string, detail?: string): void {
   } else if (!firsts.has(event)) {
     firsts.set(event, at);
     relay({ origin: ORIGIN, kind: 'mark', event, at });
+    if (event === CORE_REQUESTED) noteLibrary({ coreRequestedMs: at });
   }
   console.info(
     `den: startup${inWorker ? ' [worker]' : ''} +${at}ms ${event}${detail ? ` (${detail})` : ''}`,
@@ -202,6 +274,32 @@ export const startupWorkers = (): number => workers;
 export function startupMarkOnce(event: string, detail?: string): void {
   if (!firsts.has(event)) startupMark(event, detail);
 }
+
+/**
+ * This Worker opens a library serving `role` and found `views` for it. A den-core it requested before is that
+ * library's too: the open is the Worker's first work.
+ */
+export function startupLibraryWorker(role: LibraryWorkerRole, views: LibraryWorkerViews): void {
+  libraryRole = role;
+  noteLibrary({ views, coreRequestedMs: firsts.get(CORE_REQUESTED) });
+}
+
+/** This Worker's library opened the whole log after all, for `reason` (`FinishedLibraryViewAuthority#promote`). */
+export function startupLibraryPromoted(reason: `${LibraryPromotion}:${string}`): void {
+  const split = reason.indexOf(':');
+  const promoted = reason.slice(0, split) as LibraryPromotion;
+  const kind = reason.slice(split + 1);
+  noteLibrary({
+    promoted,
+    ...(promoted === 'selection' && Object.hasOwn(SELECTION_KINDS, kind)
+      ? { selection: kind as LibrarySelection['kind'] }
+      : {}),
+  });
+}
+
+/** What each library Worker's open did, by the library it serves, as this page heard it. */
+export const startupLibraryWorkers = (): Partial<Record<LibraryWorkerRole, LibraryWorkerStartup>> =>
+  libraryWorkers;
 
 /** One line per Worker the page starts, numbered across the whole page so a burst of them is visible. */
 export function startupWorkerCreated(reason: string): void {

@@ -34,9 +34,13 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
-import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
-import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
+import {
+  libraryMetadataShape,
+  libraryMetadataShapeDigest,
+  libraryMetadataTitle,
+} from './libraryMetadata';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
@@ -1257,12 +1261,7 @@ export class LibraryLogAuthority {
         throw authorityError('invalid-request', 'title shape contains a duplicate season');
       counts.set(season, episodes);
     }
-    const digest = JSON.stringify({
-      seasons: [...counts]
-        .sort(([a], [b]) => a - b)
-        .map(([season, episodes]) => ({ season, episodes })),
-      lastAired: observation.lastAired ?? null,
-    });
+    const digest = libraryMetadataShapeDigest(observation);
     const key = titleKey(observation.title);
     if (this.#shapes.get(key)?.digest === digest) return { outcome: 'unchanged', affected: [] };
     this.#shapes.set(key, {
@@ -1395,25 +1394,13 @@ export class LibraryLogAuthority {
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
     const { home } = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
-    const library = { ...home.continueLibrary, shapes };
-    const devices = this.#log.settings('devices');
     return {
       kind: 'continue',
-      items: this.#continueProjector
-        .project(library)
-        .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
-          const device = by && deviceName(devices, by)?.slice(0, 256);
-          return {
-            title: { type: ref.type, id: ref.id },
-            fraction,
-            ...(episode ? { episode } : {}),
-            ...(seconds !== undefined ? { seconds } : {}),
-            ...(at !== undefined ? { updatedAt: at } : {}),
-            ...(liveEpisode ? { liveEpisode } : {}),
-            ...(liveFraction !== undefined ? { liveFraction } : {}),
-            ...(device ? { device } : {}),
-          };
-        }),
+      items: continueItems(
+        this.#continueProjector,
+        { ...home.continueLibrary, shapes },
+        this.#log.settings('devices'),
+      ),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
     };
   }
@@ -1804,9 +1791,19 @@ export class LibraryLogAuthority {
    */
   #changeFinishedRevision(revision?: string): void {
     if (!this.#options.libraryKey || !this.#options.vault) return;
+    // A read (`#rememberFinished`) names the revision it read at; an edit leaves it to be worked out here.
+    const read = revision !== undefined;
     revision ??= this.#finishedAuthorityRevision();
     if (this.#finishedRevision === revision) return;
     const first = this.#finishedRevision === undefined;
+    // Views a visit read from the fact store (`FinishedLibraryViewAuthority#flushFactViews`) name its head, not this
+    // log's revision. At this log's generation and head, with no work of its own kept, they say what it does: a surface
+    // that reads the whole log but not every view (the Watchlist's history) leaves them for the next Home to draw.
+    const generation = this.#log.currentGeneration;
+    const facts =
+      read && first && generation && this.#log.pendingActions === 0
+        ? { generation, revision: `facts:${this.#log.logHead}` }
+        : undefined;
     this.#finishedRevision = revision;
     this.#finishedPieces = {};
     this.#finishedPending = undefined;
@@ -1822,6 +1819,12 @@ export class LibraryLogAuthority {
             [],
           );
           if (kept?.identity.authorityRevision === revision) return;
+          if (
+            facts &&
+            kept?.identity.generation === facts.generation &&
+            kept.identity.authorityRevision === facts.revision
+          )
+            return;
         }
         await staleFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
       })

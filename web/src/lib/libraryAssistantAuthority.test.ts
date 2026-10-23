@@ -627,6 +627,32 @@ test('a grant’s daily renewal is no change of the projection: the page after b
   expect(builds).toBe(1);
 });
 
+test('a page that holds the library’s documents in another order builds nothing', async () => {
+  const shared = library();
+  let builds = 0;
+  const { authority, later, reopen } = device(shared, [seed('other'), seed('limited')], {
+    random: () => (builds++, randomHex()),
+  });
+  const { grant } = await authority.consent('Reader', READ_ONLY);
+  const title = (id: number) => ({
+    format: 4,
+    kind: 'title',
+    title: { type: 'movie', id },
+    status: { value: 'watchlist', at: [fixed.now, 0, DEVICE] },
+    addedAt: fixed.now,
+  });
+  shared.documents = [title(550), title(551), title(552)];
+  builds = 0;
+  expect(await authority.publish()).toEqual([grant]);
+  expect(builds).toBe(1);
+  // The next page read the same library back from this device's store, which keeps it in another order than the
+  // page that synced it.
+  later(60_000);
+  shared.documents = [title(552), title(550), title(551)];
+  expect(await reopen().publish()).toEqual([]);
+  expect(builds).toBe(1);
+});
+
 test('a change to the household’s hide rules is a change of the projection, sent once it has settled', async () => {
   const shared = library();
   let builds = 0;

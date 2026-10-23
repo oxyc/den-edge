@@ -268,6 +268,10 @@ test('an iPhone preview scales one complete 1920px TV canvas', async ({ browser,
         const box = document.querySelector('main')?.getBoundingClientRect();
         return box && { left: box.left, right: box.right, width: box.width };
       })(),
+      billboard: (() => {
+        const box = document.querySelector('.billboard')?.getBoundingClientRect();
+        return box && { left: box.left, right: box.right, width: box.width };
+      })(),
       services: (() => {
         const box = document.querySelector('[aria-label="Services"]')?.getBoundingClientRect();
         return box && { left: box.left, right: box.right, width: box.width };
@@ -285,6 +289,9 @@ test('an iPhone preview scales one complete 1920px TV canvas', async ({ browser,
     expect(layout.main?.left).toBeCloseTo(0);
     expect(layout.main?.right).toBeCloseTo(1920);
     expect(layout.main?.width).toBeCloseTo(1920);
+    expect(layout.billboard?.left).toBeCloseTo(0);
+    expect(layout.billboard?.right).toBeCloseTo(1920);
+    expect(layout.billboard?.width).toBeCloseTo(1920);
     expect(layout.services?.left).toBeCloseTo(96);
     expect(layout.services?.right).toBeCloseTo(1824);
     expect(layout.services?.width).toBeCloseTo(1728);
