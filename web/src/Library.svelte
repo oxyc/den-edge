@@ -585,7 +585,9 @@
   $effect(() => {
     session.live = playingAnywhere || playOnTv.active;
     if (!playingAnywhere || !foreground) return;
-    const timer = setInterval(() => (now = Date.now()), 1000);
+    // Four times a second, not once: the clock's seconds don't line up with this timer's, so a one-second tick that
+    // lands a little late skips a second and the next shows it twice.
+    const timer = setInterval(() => (now = Date.now()), 250);
     return () => clearInterval(timer);
   });
   // Fed to the "Play on TV" tracker on every pull, so it can notice a fresh position without a poll of its own.
