@@ -49,11 +49,15 @@ for (const [file, bytes] of verifiedSources) {
   mkdirSync(dirname(destination), { recursive: true });
   writeFileSync(destination, bytes);
 }
-const rustflags = '-C target-feature=-reference-types';
+const rustflags = '-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types';
 const sysroot = execFileSync('rustc', ['--print', 'sysroot'], { encoding: 'utf8' }).trim();
 // Panic locations survive removing debug names. Normalize build-machine paths for reproducibility and avoid
 // publishing developer directory names in the binary. Encoded flags also handle source paths containing spaces.
 const encodedFlags = [
+  '-Z',
+  'unstable-options',
+  '-C',
+  'panic=immediate-abort',
   '-C',
   'target-feature=-reference-types',
   `--remap-path-prefix=${sourceRoot}=/den-core`,
