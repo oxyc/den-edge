@@ -164,7 +164,9 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+          # setup-java's own Gradle cache: setup-gradle v6 moved its caching into a proprietary component.
+          cache: gradle
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
       - name: Test, build and lint the Android TV shell
         run: ./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug --no-daemon
 
