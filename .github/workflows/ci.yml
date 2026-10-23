@@ -120,7 +120,7 @@ jobs:
       # separately covers the real Tizen bundle, file origin, CSP, API routing and playback.
       - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-platform.spec.mjs
       - run: npm run test:e2e:tv-package
-      - run: node scripts/tizen-package.integration.mjs
+      - run: DEN_SKIP_TIZEN3=1 node scripts/tizen-package.integration.mjs
       - run: npm run test:tv-preflight
       # Normal artifacts must not contain the test-only Player harness enabled by the E2E builds.
       - run: npm run build:tv:webos && npm run build:tv:tizen

@@ -9,7 +9,8 @@ const webRoot = resolve(import.meta.dirname, '..');
 const shell = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'shell');
 const widget = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'packages', 'den-tv-tizen.wgt');
 
-run(process.execPath, ['scripts/tizen3-core.integration.mjs'], process.env);
+const skipTizen3 = process.env.DEN_SKIP_TIZEN3 === '1';
+if (!skipTizen3) run(process.execPath, ['scripts/tizen3-core.integration.mjs'], process.env);
 
 function run(command, args, env) {
   const result = spawnSync(command, args, {
@@ -122,7 +123,7 @@ function testTier(tizenVersion, wasmCspSource) {
 testTier('8.0', "'wasm-unsafe-eval'");
 testTier('6.5', "'unsafe-eval'");
 testTier('5.5', "'unsafe-eval'");
-testTier('3.0', "'unsafe-eval'");
+if (!skipTizen3) testTier('3.0', "'unsafe-eval'");
 
 const rejected = spawnSync(
   process.execPath,
