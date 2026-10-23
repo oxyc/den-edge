@@ -1,21 +1,16 @@
 {
   "schema": 1,
   "sourceManifest": "../den-core/SOURCE.json",
-  "sourceDigest": "c88f66591f8ac87201c88c5c95e6426546a9cbe348dc2adf7f3981b9bbf05b70",
+  "sourceDigest": "cef52ef27db9d041142157166019f32b590dda876115725c0ae8774ce7274ef7",
   "rust": "1.95.0",
   "binaryen": 133,
   "rustflags": "-C target-feature=-reference-types,-multivalue",
-  "rawBindingSha256": "e86db63cb1242632782d05571b79bdb4743c97be79508941c5caf10bb92493be",
   "excludes": [
-    "assistant",
-    "recovery"
-  ],
-  "omittedSources": [
-    "crates/den-sync/src/recovery.rs"
+    "assistant"
   ],
   "artifacts": {
-    "generated/den_core.js": "fa8a870ea7e73feb161d2434a9bea6949e24a85119124f8aadad5bc773b12654",
-    "index.js": "c86e57284233e4501c2f7ab5589141dbbb7b4bec535a62e2e0d13e207b586c12",
-    "index.d.ts": "751d8b0b6bcb87ef3896968ce9c07998de92b6ad4e8a8050089a4716f7348db4"
+    "generated/den_core.js": "a35c567d08d721160c2d650a171eee2c99f6eeafb91719bff1b747aab432c26c",
+    "index.d.ts": "751d8b0b6bcb87ef3896968ce9c07998de92b6ad4e8a8050089a4716f7348db4",
+    "index.js": "8624ce2d9e03a9bb4fe588ce91f35fd6c0fe7d2d3bb3a42da5bd7ce0133a0ad5"
   }
 }

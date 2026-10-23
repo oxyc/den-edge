@@ -26,12 +26,36 @@ await wasmCore.initialize(
 await javascriptCore.initialize();
 
 let compared = 0;
+let compiledOut = 0;
+const trackerDelivery = new Set([
+  'commands',
+  'decide',
+  'delivery_write',
+  'pending_targets_v4',
+  'settle_v4',
+]);
+const profileAdmin = new Set([
+  'profiles_create_next',
+  'profiles_materialize',
+  'profiles_merge',
+  'profiles_reset_next',
+]);
 for (const fixture of [...policy.cases, ...profiles.cases]) {
   const operation = String(fixture.request.op);
   if (operation.startsWith('assistant_') || operation.startsWith('recovery_')) continue;
   const request = JSON.stringify(fixture.request);
   const expected = wasmCore.evaluate(request);
   const actual = javascriptCore.evaluate(request);
+  if (
+    trackerDelivery.has(operation) ||
+    profileAdmin.has(operation) ||
+    operation.startsWith('profiles_migration_')
+  ) {
+    if (actual !== JSON.stringify({ error: 'invalid_request', version: 1 }))
+      throw new Error(`Tizen 3 unexpectedly includes ${fixture.name}: ${actual}`);
+    compiledOut++;
+    continue;
+  }
   if (actual !== expected)
     throw new Error(
       `Tizen 3 JavaScript policy differs for ${fixture.name}: ${actual} != ${expected}`,
@@ -39,6 +63,8 @@ for (const fixture of [...policy.cases, ...profiles.cases]) {
   compared++;
 }
 if (compared < 100) throw new Error(`Tizen 3 policy parity covered only ${compared} fixtures`);
+if (compiledOut < 10)
+  throw new Error(`Tizen 3 exercised only ${compiledOut} compiled-out fixtures`);
 console.log(
-  `Tizen 3 JavaScript policy matched Wasm for ${compared} non-recovery, non-assistant fixtures.`,
+  `Tizen 3 JavaScript policy matched Wasm for ${compared} viewer fixtures and refused ${compiledOut} admin/delivery fixtures.`,
 );

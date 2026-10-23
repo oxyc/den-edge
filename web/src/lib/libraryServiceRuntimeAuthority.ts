@@ -124,7 +124,7 @@ export async function openLibraryServiceAuthority(
       new DurableOperationAuthority(logAuthority, log),
       libraryLogMaintenance(log, clock, request.mode),
       { background: downloads },
-      librarySimklDelivery(log, clock),
+      __DEN_TV_LEGACY_JS_CORE__ ? undefined : librarySimklDelivery(log, clock),
     );
     let releaseCredentials = () => {};
     if (contentCredentials)
