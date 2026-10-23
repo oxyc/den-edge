@@ -91,6 +91,8 @@ async function open(
     lanHttp = false,
     viewport = { width: 1280, height: 800 },
     castDiscoveryDelay = 0,
+    configDelay = 0,
+    discoveryMs = mode === 'none' ? TEST_CAST_DISCOVERY_MS : undefined,
   } = {},
 ) {
   const browser = await chromium.launch({
@@ -106,7 +108,10 @@ async function open(
   const asked = { direct: [], managed: [], relay: [], ended: [] };
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
-  await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
+  await page.route(`${ORIGIN}/config`, async (r) => {
+    if (configDelay) await new Promise((resolve) => setTimeout(resolve, configDelay));
+    return r.fulfill({ json: { castOrigin: CAST } });
+  });
   await page.route(`${ORIGIN}/direct/session`, (r) => {
     asked.direct.push(r.request().postDataJSON());
     return r.fulfill({
@@ -209,10 +214,11 @@ async function open(
   await page.route(`${CAST}/**`, (r) =>
     r.fulfill({ contentType: 'text/html', body: castPage(mode, castDiscoveryDelay) }),
   );
-  const query = new URLSearchParams({
-    castDiscoveryMs: String(TEST_CAST_DISCOVERY_MS),
-    castPlayMs: String(TEST_CAST_PLAY_MS),
-  });
+  const query = new URLSearchParams({ castPlayMs: String(TEST_CAST_PLAY_MS) });
+  // The discovery window only ends a look that found nothing. A cast page with a receiver answers at once, so only
+  // the `none` page is shortened to keep its test brief; a short window for the others only races a loaded machine
+  // loading the page.
+  if (discoveryMs) query.set('castDiscoveryMs', String(discoveryMs));
   if (managed) {
     // The complete app always reaches Hearth through the ordinary `/remux` face. A managed answer may still be a
     // direct TorBox capability, which must retain Chromecast even though an old Remux-only gate sees this route.
@@ -271,6 +277,9 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
       .toBe(`${MEDIA}/remux/s/cast/sig/master.m3u8`);
     expect(asked.direct, 'managed playback never posts to the legacy direct facade').toEqual([]);
     expect(asked.relay, 'Hearth, not Web, chooses the Remux implementation').toEqual([]);
+  } catch (error) {
+    await savePageTrace(page);
+    throw error;
   } finally {
     await browser.close();
   }
@@ -322,6 +331,17 @@ test('a selected subtitle never disqualifies TorBox before Cast', async () => {
     await browser.close();
   }
 });
+
+/**
+ * Keep the page's own trace of a failure. `open()` launches its browser itself, so the runner's trace holds none of
+ * the page's actions.
+ */
+async function savePageTrace(page) {
+  await page
+    .context()
+    .tracing.stop({ path: test.info().outputPath('page-trace.zip') })
+    .catch(() => undefined);
+}
 
 /** Wait for the in-page video to be past `seconds`, mark it, and say where it is. */
 async function playingPast(page, seconds) {
@@ -417,16 +437,33 @@ for (const viewport of [
       expect(none.geometry).toEqual(idle);
       expect(none.notice).toEqual(searching.notice);
     } catch (error) {
-      await page
-        .context()
-        .tracing.stop({ path: test.info().outputPath('page-trace.zip') })
-        .catch(() => undefined);
+      await savePageTrace(page);
       throw error;
     } finally {
       await browser.close();
     }
   });
 }
+
+// The discovery window is the cast page's time to answer, not the time the player spends getting to it.
+test('a slow /config read does not spend the discovery window', async () => {
+  const { browser, page, asked } = await open('receiver', {
+    configDelay: 3 * TEST_CAST_DISCOVERY_MS,
+    discoveryMs: TEST_CAST_DISCOVERY_MS,
+  });
+  try {
+    await playingPast(page, 3);
+    await clickCast(page);
+    // The receiver answers as soon as the page is asked, though that is after the window's length has passed.
+    await expect.poll(() => asked.relay.length).toBe(1);
+    await expect(page.getByText('No Chromecast found.')).toHaveCount(0);
+  } catch (error) {
+    await savePageTrace(page);
+    throw error;
+  } finally {
+    await browser.close();
+  }
+});
 
 test('Cast with no Chromecast on the network leaves the video playing', async () => {
   const { browser, page, asked } = await open('none');
@@ -513,6 +550,9 @@ for (const [mode, what] of [
         )
         .toBeGreaterThanOrEqual(Math.floor(before));
       expect(asked.relay, 'the relay session was not retried').toHaveLength(1);
+    } catch (error) {
+      await savePageTrace(page);
+      throw error;
     } finally {
       await browser.close();
     }
