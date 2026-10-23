@@ -217,6 +217,12 @@
       clearTimeout(unwritten?.timer);
       unwritten = undefined;
     };
+    function scrollToTop() {
+      window.scrollTo({
+        top: 0,
+        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+      });
+    }
     async function follow(path: string, push: boolean, replace = false, native = false) {
       if (push && appPath(path, location.href) === null) return;
       // A newer release is kept: the page opened next is loaded whole, onto it, rather than drawn in place
@@ -267,10 +273,16 @@
           key !== 'people' &&
           key !== 'watchlist' &&
           !key.startsWith('title/')
-        )
+        ) {
+          // Choosing the page already open, from its tab or the logo, goes back to its top.
+          if (push) scrollToTop();
           return;
+        }
         if (push) {
-          if (address() === path) return;
+          if (address() === path) {
+            scrollToTop();
+            return;
+          }
           position++;
           for (const at of entries.keys()) if (at >= position) entries.delete(at);
           entries.set(position, { routeKey: key, pageKey: requestedPageKey });
