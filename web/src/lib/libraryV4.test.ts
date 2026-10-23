@@ -462,6 +462,7 @@ describe('the switch to Library v4', () => {
   it('converts a v3 library, checked, and commits it at minimum 4', async () => {
     const server = await edge(v3(), { wireMin: 3 });
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(log.legacyRowCount).toBe(3);
     expect(log.needsV4).toBe(true);
     expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
 
@@ -473,6 +474,7 @@ describe('the switch to Library v4', () => {
     expect(log.episode({ type: 'tv', id: 1399 }, 1, 2)?.progress.value).toBe(1);
     // Settings are staged as they were stored.
     expect(log.settings('prefs')).toEqual(prefs);
+    expect(log.legacyRowCount).toBe(0);
     expect(log.needsV4).toBe(false);
     expect(libraryAlert(log)).toBeNull();
   });

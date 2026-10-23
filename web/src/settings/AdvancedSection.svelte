@@ -22,6 +22,7 @@
     pendingActions,
     edgeVersion,
     libraryFormat = null,
+    legacyRows = null,
     setRemoteAccess,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
@@ -38,6 +39,8 @@
     edgeVersion: string | null;
     /** The library format reported by the service, when one is open. */
     libraryFormat?: number | null;
+    /** Temporary library-v3 removal gate. */
+    legacyRows?: number | null;
     setRemoteAccess: (
       credentials: { clientId: string; clientSecret: string } | null,
     ) => Promise<boolean>;
@@ -153,6 +156,12 @@
         <div>
           <dt>Library format</dt>
           <dd>v{libraryFormat}</dd>
+        </div>
+      {/if}
+      {#if legacyRows !== null}
+        <div>
+          <dt>Old-format rows</dt>
+          <dd>{legacyRows}</dd>
         </div>
       {/if}
       <div>

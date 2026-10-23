@@ -486,6 +486,8 @@ export interface ConnectionsView {
   devices: LibraryDeviceView[];
   diagnostics: {
     libraryFormat: number;
+    /** Temporary library-v3 removal gate; remove after every household has reported zero. */
+    legacyRows: number;
     pendingChanges: number;
     selfDeviceId: string;
     /** A valid or invalid `set:profiles` row exists, so only the compound profile reset may rotate keys. */
