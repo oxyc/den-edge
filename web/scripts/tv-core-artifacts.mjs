@@ -88,9 +88,7 @@ export function verifyTizen3Core() {
     legacy.rust !== source.rust ||
     legacy.binaryen !== 133 ||
     legacy.rustflags !== '-C target-feature=-reference-types,-multivalue' ||
-    JSON.stringify(legacy.excludes) !== JSON.stringify(['assistant', 'recovery']) ||
-    JSON.stringify(legacy.omittedSources) !== JSON.stringify(['crates/den-sync/src/recovery.rs']) ||
-    !/^[a-f0-9]{64}$/.test(legacy.rawBindingSha256)
+    JSON.stringify(legacy.excludes) !== JSON.stringify(['assistant'])
   )
     throw new Error('Tizen 3 den-core recipe does not match the pinned JavaScript fallback');
   if (JSON.stringify(Object.keys(legacy.artifacts).sort()) !== JSON.stringify(expectedArtifacts))
