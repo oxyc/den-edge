@@ -3,7 +3,7 @@
 // (`startupTiming.ts`) in milliseconds since navigation start, the kind of page, and the kind of device and engine:
 // never a title, an id, a URL or anything a person typed.
 
-import { currentRelease } from './diagnosticsReport';
+import { currentRelease, reportUrl } from './diagnosticsReport';
 import { parseRoute } from './route';
 import { startupMilestone, startupWorkers } from './startupTiming';
 
@@ -111,8 +111,9 @@ export function watchLoadReport(): void {
     if (sent) return;
     sent = true;
     const body = JSON.stringify(buildLoadReport(route, hidden));
-    if (navigator.sendBeacon?.('/playback/load', body)) return;
-    void fetch('/playback/load', {
+    const url = reportUrl('/playback/load');
+    if (navigator.sendBeacon?.(url, body)) return;
+    void fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body,

@@ -5,6 +5,7 @@
 // capped numbers only, so a malformed or hostile body is a 400, never a line in the log.
 
 import { parseRoute, type Route } from './route';
+import { apiUrl } from './runtimeUrl';
 
 // ---- The release this page is running (den-edge's `x-den-release` on the shell, `web.rs`'s `release()`) ----
 
@@ -50,8 +51,16 @@ export function currentRelease(): string | undefined {
 
 // ---- Shared transport ----
 
+/**
+ * Where a report goes. A hosted TV's page is on a static TV host and its den-edge is the API origin, so a relative
+ * report would land on the static host and be lost; the browser build serves both from one origin.
+ */
+export function reportUrl(path: string): string {
+  return __DEN_TV_API_ORIGIN__ ? apiUrl(path) : path;
+}
+
 function post(url: string, body: unknown, fetchImpl: typeof fetch): void {
-  void fetchImpl(url, {
+  void fetchImpl(reportUrl(url), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -67,7 +76,7 @@ function post(url: string, body: unknown, fetchImpl: typeof fetch): void {
  */
 function beacon(url: string, body: unknown, fetchImpl: typeof fetch): void {
   const text = JSON.stringify(body);
-  if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(url, text)) return;
+  if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(reportUrl(url), text)) return;
   post(url, body, fetchImpl);
 }
 

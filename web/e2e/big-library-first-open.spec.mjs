@@ -124,7 +124,8 @@ test('a first open shows its progress before den-edge has answered', async () =>
     await expect(page.getByText('Loading your library', { exact: true })).toBeVisible();
     await expect(line).toHaveAttribute('aria-valuenow', '0');
     // It creeps, without a read to show for it.
-    const drawn = () => page.locator('.opening path').getAttribute('stroke-dasharray');
+    const drawn = () =>
+      page.locator('.opening path:not(.opening-track)').getAttribute('stroke-dasharray');
     const before = await drawn();
     await expect.poll(drawn, { timeout: 5_000 }).not.toBe(before);
     // Its head is drawn on the outline while the read runs.
