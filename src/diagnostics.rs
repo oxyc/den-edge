@@ -469,6 +469,7 @@ enum DeviceClass {
     Phone,
     Tablet,
     Desktop,
+    Tv,
 }
 
 impl DeviceClass {
@@ -477,6 +478,7 @@ impl DeviceClass {
             DeviceClass::Phone => "phone",
             DeviceClass::Tablet => "tablet",
             DeviceClass::Desktop => "desktop",
+            DeviceClass::Tv => "tv",
         }
     }
 }
@@ -1091,6 +1093,15 @@ mod tests {
             "route:series,device:phone,engine:webkit,app:40,worker:300,handover:420,shelves:9800,workers:3,\
              release:deadbeef"
         );
+    }
+
+    #[test]
+    fn a_load_report_names_a_tv() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "billboardDetailMs": 7113, "workers": 2,
+        }))
+        .unwrap();
+        assert_eq!(report.tag(), "route:home,device:tv,engine:blink,billboard:7113,workers:2");
     }
 
     #[test]

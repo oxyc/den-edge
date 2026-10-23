@@ -11,6 +11,10 @@ const MAC_CHROME =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 const ANDROID_CHROME =
   'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36';
+const LG_WEBOS =
+  'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36 WebAppManager';
+const ANDROID_TV_SHELL =
+  'Mozilla/5.0 (Linux; Android 12; BRAVIA 4K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 DenAndroidTV/1.4';
 
 describe('deviceOf', () => {
   it('names every iPhone browser a WebKit phone, whatever it calls itself', () => {
@@ -26,6 +30,11 @@ describe('deviceOf', () => {
   it('names Chrome on a desktop and on Android', () => {
     expect(deviceOf(MAC_CHROME)).toEqual({ device: 'desktop', engine: 'blink' });
     expect(deviceOf(ANDROID_CHROME)).toEqual({ device: 'phone', engine: 'blink' });
+  });
+
+  it('names a TV a TV, not the desktop or tablet its browser otherwise reads as', () => {
+    expect(deviceOf(LG_WEBOS)).toEqual({ device: 'tv', engine: 'blink' });
+    expect(deviceOf(ANDROID_TV_SHELL)).toEqual({ device: 'tv', engine: 'blink' });
   });
 });
 

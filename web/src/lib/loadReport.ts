@@ -11,7 +11,7 @@ import { startupMilestone, startupWorkers } from './startupTiming';
 export const REPORT_AFTER_MS = 30_000;
 
 export type LoadRoute = 'home' | 'movies' | 'series' | 'watchlist' | 'title' | 'settings' | 'other';
-export type DeviceClass = 'phone' | 'tablet' | 'desktop';
+export type DeviceClass = 'phone' | 'tablet' | 'desktop' | 'tv';
 export type BrowserEngine = 'webkit' | 'blink' | 'gecko' | 'other';
 
 /** The milestones a report carries, by the `startupMark` event that sets each. */
@@ -59,18 +59,23 @@ export function loadRouteOf(path: string): LoadRoute {
   return 'other';
 }
 
-/** Every browser on iOS and iPadOS is WebKit, whatever it calls itself. */
+/**
+ * Every browser on iOS and iPadOS is WebKit, whatever it calls itself. A TV says so in its user agent (an LG's
+ * Web0S, a Samsung's Tizen, Den's Android TV shell); without that an LG's Chromium reads as a desktop.
+ */
 export function deviceOf(
   userAgent: string,
   touchPoints = 0,
 ): { device: DeviceClass; engine: BrowserEngine } {
   const apple =
     /iPhone|iPad|iPod/.test(userAgent) || (/Macintosh/.test(userAgent) && touchPoints > 1);
-  const device = /iPhone|iPod|Android.+Mobile|Mobile.+Firefox/.test(userAgent)
-    ? 'phone'
-    : /iPad|Android|Tablet/.test(userAgent) || apple
-      ? 'tablet'
-      : 'desktop';
+  const device = /Web0S|webOS|Tizen|SMART-TV|SmartTV|DenAndroidTV\//.test(userAgent)
+    ? 'tv'
+    : /iPhone|iPod|Android.+Mobile|Mobile.+Firefox/.test(userAgent)
+      ? 'phone'
+      : /iPad|Android|Tablet/.test(userAgent) || apple
+        ? 'tablet'
+        : 'desktop';
   const engine =
     apple || (/AppleWebKit/.test(userAgent) && !/Chrome|Chromium|Edg\//.test(userAgent))
       ? 'webkit'
