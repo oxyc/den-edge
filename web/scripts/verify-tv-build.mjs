@@ -1,6 +1,38 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { verifyTvCore, sha256 } from './tv-core-artifacts.mjs';
+import { transformAsync } from '@babel/core';
+import { verifyTvCore, verifyTizen3Core, sha256 } from './tv-core-artifacts.mjs';
+
+/**
+ * The first syntax in `code` that Chromium 47 cannot run, or null. Read from the syntax tree: the same characters in
+ * a string or a regular expression (core-js feature-tests `async function*` inside `Function("…")`) are not syntax.
+ */
+async function modernSyntax(code, fileName) {
+  let found = null;
+  const note = (what) => () => void (found ??= what);
+  await transformAsync(code, {
+    babelrc: false,
+    configFile: false,
+    filename: fileName,
+    code: false,
+    sourceType: 'script',
+    plugins: [
+      () => ({
+        visitor: {
+          ArrowFunctionExpression: note('an arrow function'),
+          BigIntLiteral: note('a BigInt literal'),
+          VariableDeclaration(path) {
+            if (path.node.kind !== 'var') found ??= path.node.kind;
+          },
+          Function(path) {
+            if (path.node.async) found ??= 'an async function';
+          },
+        },
+      }),
+    ],
+  });
+  return found;
+}
 
 const tvCore = verifyTvCore();
 
@@ -13,15 +45,55 @@ const directory = resolve(
     (process.env.DEN_TV_PACKAGED === '1' ? 'dist-tv-tizen-package' : `dist-tv-${platform}`),
 );
 const assets = await readdir(resolve(directory, 'assets'));
-if (platform === 'tizen' && process.env.DEN_TIZEN_VERSION === '5.5') {
+const tizenVersion = process.env.DEN_TIZEN_VERSION;
+const tizen3 = platform === 'tizen' && tizenVersion === '3.0';
+if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {
   for (const file of assets.filter((name) => name.endsWith('.js'))) {
     const code = await readFile(resolve(directory, 'assets', file), 'utf8');
     if (/type:[`'"]module[`'"]/.test(code))
-      throw new Error(`Module Worker option remains in the Tizen 5.5 build: ${file}`);
+      throw new Error(`Module Worker option remains in the Tizen ${tizenVersion} build: ${file}`);
+    if (
+      tizen3 &&
+      /(?:diagnosticWorker|libraryServiceWorker|libraryWorker|recoveryWorker)-/.test(file)
+    ) {
+      const found = await modernSyntax(code, file);
+      if (found)
+        throw new Error(
+          `Post-minify legacy syntax lowering left ${found} in Tizen 3 Worker: ${file}`,
+        );
+    }
   }
 }
+if (tizen3) {
+  verifyTizen3Core();
+  const html = await readFile(resolve(directory, 'index.html'), 'utf8');
+  if (/type=["']module["']|rel=["']modulepreload["']/.test(html))
+    throw new Error('Native module loading remains in the Tizen 3 build');
+  if (!html.includes('id="vite-legacy-polyfill"') || !html.includes('id="vite-legacy-entry"'))
+    throw new Error('Tizen 3 build is missing the SystemJS legacy loader');
+  // The package metadata is written only for a packaged build (`DEN_TV_PACKAGED=1`).
+  if (process.env.DEN_TV_PACKAGED === '1') {
+    const metadata = JSON.parse(await readFile(resolve(directory, 'den-tv-package.json'), 'utf8'));
+    if (
+      metadata.tizenVersion !== '3.0' ||
+      metadata.legacyNonModule !== true ||
+      metadata.policyCore !== 'javascript'
+    )
+      throw new Error('Tizen 3 package metadata is not marked as legacy non-module output');
+  }
+  const pairFiles = assets.filter((file) => /^pair-legacy-.*\.js$/.test(file));
+  if (pairFiles.length !== 1) throw new Error('Expected one Tizen 3 pairing chunk');
+  const pair = await readFile(resolve(directory, 'assets', pairFiles[0]), 'utf8');
+  if (/\bBigInt\s*\(|\b\d+n\b/.test(pair))
+    throw new Error('Native BigInt remains in the Tizen 3 pairing path');
+  if (!pair.includes('ristretto255'))
+    throw new Error('Tizen 3 pairing did not select the typed-array Ristretto adapter');
+}
+if (tizen3 && assets.some((file) => file.endsWith('.wasm')))
+  throw new Error('A Wasm asset leaked into the Tizen 3 JavaScript-core package');
 for (const name of ['den_core', 'den_core_assistant', 'den_core_recovery']) {
   const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
+  if (tizen3) continue;
   if (matches.length !== 1) throw new Error(`Expected only the compatible TV ${name} WASM asset`);
   const bytes = await readFile(resolve(directory, 'assets', matches[0]));
   if (sha256(bytes) !== tvCore.artifacts[`generated/${name}_bg.wasm`])

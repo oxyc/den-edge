@@ -211,10 +211,13 @@
    * Two layers that take turns. The one coming in fades up over the one going out, which is a dissolve without
    * asking the framework for a transition — a plain CSS opacity change the compositor can run on its own.
    */
-  let layers = $state([
+  let layers = $state.raw([
     { id: 0, url: '', path: '', adopted: false },
     { id: 1, url: '', path: '', adopted: false },
   ]);
+  function replaceLayer(index: number, layer: (typeof layers)[number]) {
+    layers = layers.map((current, at) => (at === index ? layer : current));
+  }
   let lit = $state(0);
 
   /**
@@ -243,7 +246,7 @@
         image.remove();
         earlyBackdrop = null;
         earlyLoaded = false;
-        layers[0] = { id: 0, url: '', path: '', adopted: false };
+        replaceLayer(0, { id: 0, url: '', path: '', adopted: false });
       };
       image.addEventListener('load', loaded);
       image.addEventListener('error', failed, { once: true });
@@ -256,12 +259,12 @@
         node.parentElement?.append(copy);
       }
       shell?.remove();
-      layers[0] = {
+      replaceLayer(0, {
         id: 0,
         url: billboardBackdropURL(path),
         path,
         adopted: true,
-      };
+      });
       lit = 0;
       stopEarly = () => {
         image.removeEventListener('load', loaded);
@@ -375,7 +378,7 @@
         // The slide may have moved on while this loaded, and a slow picture must not overwrite a later one.
         if (wanted !== url) return;
         const next = layers[0]?.url === url ? 0 : 1;
-        layers[next] = { id: next, url, path: imagePath, adopted: false };
+        replaceLayer(next, { id: next, url, path: imagePath, adopted: false });
         lit = next;
         readyKey = titleKey;
         onready?.();

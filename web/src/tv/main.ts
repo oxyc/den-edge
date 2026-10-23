@@ -5,8 +5,10 @@ import './tv.css';
 import { installTVNavigation } from './navigation';
 import { registerSamsungKeys } from './platform';
 import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+import { installTvCssCapabilities } from './cssCapabilities';
 
 document.documentElement.dataset.denTv = tvRuntimePlatform();
+const stopCssCapabilities = installTvCssCapabilities();
 
 let remoteInstalled = false;
 function installRemote() {
@@ -18,6 +20,7 @@ function installRemote() {
     if (!event.persisted) {
       stop();
       stopKeys();
+      stopCssCapabilities();
     }
   });
 }
@@ -28,8 +31,14 @@ async function start() {
       'Den needs a trusted HTTPS address for pairing and encrypted library storage. HTTP on a TV LAN address is not secure.',
     );
   }
-  if (!globalThis.Worker || !globalThis.indexedDB || !globalThis.WebAssembly) {
-    throw new Error('This TV is missing Worker, IndexedDB or WebAssembly support required by Den.');
+  if (
+    !globalThis.Worker ||
+    !globalThis.indexedDB ||
+    (!__DEN_TV_LEGACY_JS_CORE__ && !globalThis.WebAssembly)
+  ) {
+    throw new Error(
+      `This TV is missing Worker, IndexedDB${__DEN_TV_LEGACY_JS_CORE__ ? '' : ' or WebAssembly'} support required by Den.`,
+    );
   }
   // The application is a separate download. Keep hardware Back/exit available on the starting screen too;
   // waiting for that chunk left an early Back unhandled (also reproducible while holding its request).
@@ -39,7 +48,8 @@ async function start() {
 
 void start().catch((error) => {
   const root = document.getElementById('app')!;
-  root.replaceChildren();
+  // Not `replaceChildren`: Chromium 69 (Tizen 5.5) predates it, and this screen is what an engine gap shows.
+  root.textContent = '';
   const heading = document.createElement('h1');
   heading.textContent = 'Den could not start';
   const message = document.createElement('p');

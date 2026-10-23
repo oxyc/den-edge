@@ -1269,7 +1269,7 @@
    * Which services have a "new" or a "coming" chart is atlas's to say and changes with its releases, so the rows
    * are only ever as broad as the manifest — and where it lists none, there are no rows rather than empty ones.
    */
-  let serviceCatalogs = $state<AtlasCatalog[]>([]);
+  let serviceCatalogs = $state.raw<AtlasCatalog[]>([]);
   $effect(() => {
     const here = atlas;
     if (!here) return;
@@ -1369,7 +1369,7 @@
   let serviceDirectoriesAdmitted = $state(false);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
-  let directories = $state<Record<string, Service[]>>({});
+  let directories = $state.raw<Record<string, Service[]>>({});
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
@@ -1416,7 +1416,7 @@
    * what is new or still to come, and what has just landed on this household's own services, away from anything the
    * library already holds.
    */
-  let featured = $state<RecommendedTitle[]>([]);
+  let featured = $state.raw<RecommendedTitle[]>([]);
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );
@@ -2184,9 +2184,9 @@
     z-index: 4;
     margin: 0 0 18px;
     padding: 12px 16px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px solid var(--accent-outline-45);
     border-radius: 12px;
-    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    background: var(--accent-surface);
     color: var(--fg);
   }
 
@@ -2209,7 +2209,7 @@
     min-height: 44px;
     margin-top: 8px;
     padding: 8px 18px;
-    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1px solid var(--accent-outline-55);
     border-radius: 999px;
     background: var(--accent);
     color: var(--bg);

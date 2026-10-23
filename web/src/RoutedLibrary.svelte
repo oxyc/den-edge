@@ -1705,9 +1705,9 @@
     width: fit-content;
     margin: 0 auto 16px;
     padding: 6px 11px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+    border: 1px solid var(--accent-line-45);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    background: var(--accent-surface);
     color: var(--muted);
     font-size: 12px;
   }

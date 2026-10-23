@@ -57,7 +57,7 @@
 </script>
 
 {#if services.length || pending || empty}
-  <section class="row" aria-label={heading} bind:this={section}>
+  <section class="row services-row" aria-label={heading} bind:this={section}>
     <h2>{heading}</h2>
     <div class="track">
       {#each services as { pick, service } (`${service.id}@${pick.country}`)}

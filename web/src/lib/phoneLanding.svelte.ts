@@ -69,7 +69,7 @@ export type Joiner = typeof pairJoin;
 
 export class PhoneLanding {
   /** The link this page opened, until it has been answered. Kept, so a reload shows its answer. */
-  request = $state<PhoneLink | null>(kept());
+  request = $state.raw<PhoneLink | null>(kept());
   phase = $state<'idle' | 'working' | 'done' | 'failed'>('idle');
   /** Why `phase` is `failed`, and whether another try can help. */
   problem = $state<string | null>(null);

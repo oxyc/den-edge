@@ -82,7 +82,7 @@
   let tab = $state<MediaType | null>(null);
   const both = $derived(!!service?.movies && !!service.series);
   const only = $derived(tab ?? undefined);
-  let rows = $state<RowDef[]>([]);
+  let rows = $state.raw<RowDef[]>([]);
   /** Which build `rows` are: a rebuilt row keeps its id, and must still start its own loader afresh (`Browse`). */
   let build = $state(0);
   /**
@@ -90,7 +90,7 @@
    * the head of this page's leading row (`serviceHero`). It is asked for beside the rows, not after them, so it
    * paints as soon as its own chart answers.
    */
-  let featured = $state<Title[]>([]);
+  let featured = $state.raw<Title[]>([]);
   /** Until the hero has answered, its place shows that something is coming rather than a dark, empty frame. */
   let heroLoading = $state(true);
   /**

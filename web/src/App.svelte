@@ -108,7 +108,7 @@
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
 
-  let route = $state(
+  let route = $state.raw(
     parseRoute(__DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search),
   );
   // The address holds the search, so a result page can be linked, reloaded or shared and still be the same
@@ -117,7 +117,7 @@
   // scrolled to. The field keeps what was typed until another search replaces it.
   let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
   // What Explore is browsing travels the same way, for the same reason.
-  let explore = $state<Explore>(
+  let explore = $state.raw<Explore>(
     untrack(() => (route.page === 'search' ? { type: route.type, chips: route.chips } : {})),
   );
   $effect(() => {
@@ -130,7 +130,7 @@
     r.page === 'people'
       ? { query: r.query, type: r.type, chips: r.chips, traits: r.traits, order: r.order }
       : {};
-  let people = $state<PeopleView>(untrack(() => peopleOf(route)));
+  let people = $state.raw<PeopleView>(untrack(() => peopleOf(route)));
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
   });

@@ -94,11 +94,11 @@
   }
 
   .avatar.neutral.kid {
-    color: color-mix(in srgb, #54a897 72%, var(--muted));
+    color: var(--profile-kid-neutral);
   }
 
   .avatar.neutral.visitor {
-    color: color-mix(in srgb, #8b7da8 72%, var(--muted));
+    color: var(--profile-visitor-neutral);
   }
 
   @media (prefers-reduced-motion: reduce) {

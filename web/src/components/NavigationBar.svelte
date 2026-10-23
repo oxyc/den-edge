@@ -63,7 +63,7 @@
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
   let toggle = $state<HTMLButtonElement>();
-  let recent = $state<string[]>([]);
+  let recent = $state.raw<string[]>([]);
   let searchFocused = $state(false);
   /** Escape closed the recent searches; they come back the next time the field is focused. */
   let recentDismissed = $state(false);

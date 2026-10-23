@@ -183,17 +183,19 @@
     </p>
   </SettingRow>
 
-  <h3 class="group">This browser</h3>
-  <SettingRow id="recovery" label="Recovery code" detail="Make one, or open a library with one">
-    <h3>Open with a recovery code</h3>
-    <RecoveryRedeem
-      question={link
-        ? 'This browser switches to that library. Your current library stays saved on this browser.'
-        : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
-      onopen={openRecovered}
-    />
-    {@render recovery?.()}
-  </SettingRow>
+  {#if !__DEN_TV_LEGACY_JS_CORE__}
+    <h3 class="group">This browser</h3>
+    <SettingRow id="recovery" label="Recovery code" detail="Make one, or open a library with one">
+      <h3>Open with a recovery code</h3>
+      <RecoveryRedeem
+        question={link
+          ? 'This browser switches to that library. Your current library stays saved on this browser.'
+          : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
+        onopen={openRecovered}
+      />
+      {@render recovery?.()}
+    </SettingRow>
+  {/if}
   {#if links.list.length}
     <SettingRow id="sign-out" label="Sign out" detail="Libraries saved on this browser">
       <h3>Your library</h3>

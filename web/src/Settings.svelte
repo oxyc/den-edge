@@ -66,7 +66,7 @@
 
   let connectionsLease = $state.raw(untrack(() => model.connections()));
   const simklLease = untrack(() => model.simkl());
-  const recoveryLease = untrack(() => model.recovery());
+  const recoveryLease = untrack(() => (__DEN_TV_LEGACY_JS_CORE__ ? undefined : model.recovery()));
   onDestroy(() => {
     connectionsLease?.release();
     simklLease?.release();
@@ -85,7 +85,7 @@
   let failure = $state<string | null>(null);
   let saving = $state(false);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
-  let routes = $state<Routes>({});
+  let routes = $state.raw<Routes>({});
   /** Whether /routes has answered (or failed): until then an install on another of the deployment's names is unplaced. */
   let routesLoaded = $state(false);
   void fetchRoutes().then((fetched) => {
@@ -186,7 +186,7 @@
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
   // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
   // its rows and the billboard show that data regardless.
-  let addonCredits = $state<Credit[][]>([[...ATLAS_FALLBACK]]);
+  let addonCredits = $state.raw<Credit[][]>([[...ATLAS_FALLBACK]]);
   $effect(() => {
     if (!ready) return;
     const installed = pluginUrls;
@@ -438,11 +438,13 @@
         {sealHandover}
         {selfId}
       />
-      <AssistantsSection
-        connectionFetch={assistantConnectionFetch}
-        revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
-        listGrants={link && !local ? () => model.assistantGrants() : undefined}
-      />
+      {#if !__DEN_TV_LEGACY_JS_CORE__}
+        <AssistantsSection
+          connectionFetch={assistantConnectionFetch}
+          revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
+          listGrants={link && !local ? () => model.assistantGrants() : undefined}
+        />
+      {/if}
       <ImportSection
         {ready}
         {content}
