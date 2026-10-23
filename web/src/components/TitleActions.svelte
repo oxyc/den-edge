@@ -348,6 +348,7 @@
         <div
           class="den-button den-button-secondary den-button-regular pick"
           class:on={reaction !== null}
+          class:disabled={mutationBlocked()}
           aria-busy={pressed.saving('reaction') || undefined}
           data-saving={pressed.saving('reaction') || undefined}
         >
@@ -545,9 +546,9 @@
 
     .detail-page .utilities > :global(.pill[aria-pressed='true']),
     .detail-page .utilities > .pick.on {
-      --button-bg: color-mix(in srgb, var(--accent) 14%, transparent);
+      --button-bg: var(--accent-wash-14);
       --button-border: transparent;
-      --button-fg: color-mix(in srgb, var(--fg) 78%, var(--accent));
+      --button-fg: var(--accent-fg-78);
 
       background: var(--button-bg);
       color: var(--button-fg);
@@ -561,7 +562,7 @@
   }
 
   /* The select stays a real `disabled`; ordinary buttons use focus-preserving `aria-disabled` in Button. */
-  .pick:has(select:disabled) {
+  .pick.disabled {
     opacity: 0.45;
     cursor: progress;
   }
@@ -569,7 +570,7 @@
   /* A local save changes only its initiating state glyph. The shared command channel temporarily disables the
      other mutations, but dimming the whole row made one Watchlist press look like a full action-bar rerender. */
   .actions.saving :global(.den-button[aria-disabled='true']),
-  .actions.saving .pick:has(select:disabled) {
+  .actions.saving .pick.disabled {
     opacity: 1;
   }
 

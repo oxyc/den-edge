@@ -331,6 +331,7 @@ export class LibraryAssistantAuthority {
    * know this library as a member.
    */
   async lend(): Promise<AssistantConnection | null> {
+    if (__DEN_TV_LEGACY_JS_CORE__) return null;
     await this.port.refresh();
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
       await this.grants();
@@ -557,6 +558,7 @@ export class LibraryAssistantAuthority {
    * publishes any more. A play record asks nothing of Den Web: only a TV plays.
    */
   async needs(): Promise<AssistantNeeds> {
+    if (__DEN_TV_LEGACY_JS_CORE__) return { write: false, read: false };
     const grants = this.#row(GRANTS_ROW);
     const read = this.#row(READ_ROW);
     if (!Object.keys(grants?.values ?? {}).length && !Object.keys(read?.values ?? {}).length)

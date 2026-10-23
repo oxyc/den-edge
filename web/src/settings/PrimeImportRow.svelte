@@ -17,7 +17,7 @@
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
 
-  let state = $state<State>({ step: 'idle' });
+  let state = $state.raw<State>({ step: 'idle' });
   const excluded = new SvelteSet<string>();
 </script>
 

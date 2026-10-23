@@ -5,7 +5,9 @@
 
 import type { LibraryModel } from './libraryModel.svelte';
 
-export const assistantLibrary = $state<{ model: LibraryModel | null; fetch: typeof fetch | null }>({
-  model: null,
-  fetch: null,
-});
+class AssistantLibrary {
+  model = $state.raw<LibraryModel | null>(null);
+  fetch = $state.raw<typeof fetch | null>(null);
+}
+
+export const assistantLibrary = new AssistantLibrary();

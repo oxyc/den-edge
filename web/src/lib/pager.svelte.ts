@@ -11,7 +11,7 @@ const MAX_BURST = 3;
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
-  titles = $state<Title[]>([]);
+  titles = $state.raw<Title[]>([]);
   /** The source has run out, failed, or been given up on. */
   done = $state(false);
   /** The source ran out: every title there is has been loaded, not merely as many as it was worth asking for. */

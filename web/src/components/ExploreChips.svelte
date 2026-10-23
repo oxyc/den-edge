@@ -105,7 +105,7 @@
       : []),
     ...sections,
   ]);
-  let expanded = $state<Partial<Record<ChipGroup, boolean>>>({});
+  let expanded = $state.raw<Partial<Record<ChipGroup, boolean>>>({});
   const first = (group: ChipGroup) => limits[group] ?? COMPACT_FIRST[group] ?? LIST_FIRST;
   /** Each section unfiltered: its first few, or all of them once "Show all" is picked. */
   const listed = () =>
@@ -117,7 +117,7 @@
 
   let sheet = $state<HTMLDialogElement>();
   /** The sheet's sections opened out of their one sideways row into a wrapped grid, by "All ›". */
-  let spread = $state<Partial<Record<ChipGroup, boolean>>>({});
+  let spread = $state.raw<Partial<Record<ChipGroup, boolean>>>({});
   /**
    * The sheet holds a history entry of its own while open, so Back closes it as it would any sheet on a phone. It
    * copies the entry under it, which is what the Router reads, so the Router sees the same page either side of it.
@@ -250,7 +250,7 @@
           type="button"
           class="toggle"
           aria-expanded={!!expanded[section.group]}
-          onclick={() => (expanded[section.group] = !expanded[section.group])}
+          onclick={() => (expanded = { ...expanded, [section.group]: !expanded[section.group] })}
           >{expanded[section.group] ? 'Show fewer' : `Show all ${section.chips.length} ›`}</button
         >
       {/if}
@@ -292,7 +292,7 @@
               type="button"
               class="chip all"
               aria-label="All {section.heading}"
-              onclick={() => (spread[section.group] = true)}>All ›</button
+              onclick={() => (spread = { ...spread, [section.group]: true })}>All ›</button
             >
           {/if}
         </div>

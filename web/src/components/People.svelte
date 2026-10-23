@@ -101,7 +101,7 @@
       ? contentFilterPeople(content, type, titleItems(chips, type), traitItems(traits), order)
       : null,
   );
-  let people = $state<FilterPerson[]>([]);
+  let people = $state.raw<FilterPerson[]>([]);
   let total = $state<number | null>(null);
   let done = $state(false);
   let failed = $state(false);
@@ -162,15 +162,15 @@
   });
 
   // Each person's photo, from TMDB as a person's page and search draw them.
-  let photos = $state<Record<number, string | null>>({});
+  let photos = $state.raw<Record<number, string | null>>({});
   function loadPhoto(id: number) {
     if (id in photos) return;
-    photos[id] = null;
+    photos = { ...photos, [id]: null };
     content
       .query({ kind: 'person', id })
       .then((answer) => {
         if (answer.person.state === 'ready' && answer.person.value.profilePath)
-          photos[id] = answer.person.value.profilePath;
+          photos = { ...photos, [id]: answer.person.value.profilePath };
       })
       .catch((error: unknown) => console.warn('people: no photo for', id, error));
   }
@@ -201,7 +201,7 @@
    * (which title facets have titles). They judge what would leave nothing only beside the selection they were
    * counted for; the options they list stay from the last answer until the next.
    */
-  let counts = $state<{
+  let counts = $state.raw<{
     key: string;
     people: PeopleCounts | null;
     titles: FilterCounts | null;
@@ -240,7 +240,7 @@
     ),
   );
   /** Nationalities and occupations picked from the find field, by id: their names, for their pills. */
-  let named = $state<Record<string, Chip>>({});
+  let named = $state.raw<Record<string, Chip>>({});
   const known = $derived.by(() => {
     const all = [...listed, ...Object.values(named)];
     for (const id of [...traits, ...chips]) {
@@ -362,8 +362,8 @@
    * name, past the rail's strongest few, and the people credited there by that name. Under All, where atlas may have
    * no `all` route for names, each type's answers together.
    */
-  let found = $state<Chip[]>([]);
-  let byName = $state<FilterValue[]>([]);
+  let found = $state.raw<Chip[]>([]);
+  let byName = $state.raw<FilterValue[]>([]);
   let finding = $state(false);
   $effect(() => {
     const q = query.trim();
@@ -431,7 +431,7 @@
   );
   /** A suggestion picked, followed: it joins the picks, and the text it was found by goes. */
   function pickFound(chip: Chip) {
-    named[chip.id] = chip;
+    named = { ...named, [chip.id]: chip };
     status = picking(chip.id, '').note;
   }
 </script>

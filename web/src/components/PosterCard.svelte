@@ -332,7 +332,9 @@
       </span>
     {/if}
     {#if progress !== undefined && progress > 0}
-      <span class="progress" style:--p={progress}></span>
+      <span class="progress"
+        ><span class="progress-fill" style:width={`${progress * 100}%`}></span></span
+      >
     {/if}
   </span>
   <span class="meta">
@@ -550,11 +552,15 @@
     left: 8px;
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(
-      to right,
-      var(--fg) calc(var(--p) * 100%),
-      rgb(255 255 255 / 0.3) 0
-    );
+    background: rgb(255 255 255 / 0.3);
+  }
+
+  .progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #e7e7ea;
+    background: var(--fg);
   }
 
   .standing {

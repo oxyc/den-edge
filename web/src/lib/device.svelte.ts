@@ -18,7 +18,7 @@ function read(): string {
 
 class ThisDevice {
   /** What the user typed, or empty while the guess stands. */
-  chosen = $state(read());
+  chosen = $state.raw(read());
 
   /** What to pair as: the chosen name, else what the browser looks like. */
   get name(): string {

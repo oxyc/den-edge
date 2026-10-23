@@ -10,11 +10,12 @@
   }: { active: boolean; entering?: boolean; children: Snippet } = $props();
   // Start closed: a RoutePage first created in the retained, hidden stack must never get one frame of active
   // observers, idle preloads, or cards before the prop-sync effect runs.
-  const visibility = $state<PageVisibility>({ active: false });
+  const visibility: PageVisibility = {
+    get active() {
+      return active;
+    },
+  };
   setContext(PAGE_VISIBILITY, visibility);
-  $effect(() => {
-    visibility.active = active;
-  });
   let root: HTMLDivElement;
   let scrolls: { element: HTMLElement; x: number; y: number }[] = [];
   let focused: HTMLElement | null = null;

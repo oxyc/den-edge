@@ -9,6 +9,8 @@ const webRoot = resolve(import.meta.dirname, '..');
 const shell = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'shell');
 const widget = join(webRoot, 'tv-packages', 'smoke-test', 'tizen', 'packages', 'den-tv-tizen.wgt');
 
+run(process.execPath, ['scripts/tizen3-core.integration.mjs'], process.env);
+
 function run(command, args, env) {
   const result = spawnSync(command, args, {
     cwd: webRoot,
@@ -66,6 +68,11 @@ function testTier(tizenVersion, wasmCspSource) {
     if (!config.includes(required)) throw new Error(`Tizen config validation failed: ${required}`);
   if (/script-src[^;]*'unsafe-inline'/.test(config))
     throw new Error('Inline JavaScript CSP source present in Tizen config');
+  // The `style-src` directive itself: every tier's `style-src-attr` already permits inline attributes.
+  if (tizenVersion === '3.0' && !/style-src\s[^;]*'unsafe-inline'/.test(config))
+    throw new Error('Tizen 3 config must permit Svelte legacy component styles');
+  if (tizenVersion !== '3.0' && /style-src\s[^;]*'unsafe-inline'/.test(config))
+    throw new Error('Supported Tizen tiers unnecessarily permit inline element styles');
   if (tizenVersion === '8.0' && /script-src[^;]*'unsafe-eval'/.test(config))
     throw new Error('Modern Tizen config unnecessarily permits JavaScript eval');
 
@@ -77,8 +84,18 @@ function testTier(tizenVersion, wasmCspSource) {
     throw new Error(
       'Packaged Tizen index is missing the Samsung Web API bridge required by AVPlay',
     );
-  if (index.indexOf(bridge) > index.indexOf('<script type="module"'))
-    throw new Error('Samsung Web API bridge must load before the application module');
+  const applicationScript =
+    tizenVersion === '3.0'
+      ? index.indexOf('id="vite-legacy-polyfill"')
+      : index.indexOf('<script type="module"');
+  if (applicationScript < 0 || index.indexOf(bridge) > applicationScript)
+    throw new Error('Samsung Web API bridge must load before the application');
+  if (tizenVersion === '3.0') {
+    if (/type=["']module["']|rel=["']modulepreload["']/.test(index))
+      throw new Error('Tizen 3 package contains native module loading');
+    if (!index.includes('id="vite-legacy-entry"'))
+      throw new Error('Tizen 3 package is missing its SystemJS entry');
+  }
   const icon = readFileSync(join(shell, 'icon.png'));
   if (
     icon.length < 24 ||
@@ -105,6 +122,7 @@ function testTier(tizenVersion, wasmCspSource) {
 testTier('8.0', "'wasm-unsafe-eval'");
 testTier('6.5', "'unsafe-eval'");
 testTier('5.5', "'unsafe-eval'");
+testTier('3.0', "'unsafe-eval'");
 
 const rejected = spawnSync(
   process.execPath,
@@ -123,5 +141,5 @@ const rejected = spawnSync(
 if (rejected.status === 0 || !rejected.stderr.includes('exact HTTPS origin'))
   throw new Error('Packager accepted an API URL with a path');
 console.log(
-  'Tizen 8.0, 6.5, and 5.5 unsigned WGTs passed metadata, CSP, root-layout, asset-path, icon, and optional XML validation.',
+  'Tizen 8.0, 6.5, 5.5, and experimental 3.0 unsigned WGTs passed metadata, CSP, root-layout, asset-path, icon, and optional XML validation.',
 );

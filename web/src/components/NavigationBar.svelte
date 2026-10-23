@@ -63,7 +63,7 @@
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
   let toggle = $state<HTMLButtonElement>();
-  let recent = $state<string[]>([]);
+  let recent = $state.raw<string[]>([]);
   let searchFocused = $state(false);
   /** Escape closed the recent searches; they come back the next time the field is focused. */
   let recentDismissed = $state(false);
@@ -307,6 +307,8 @@
         {@const r = (barHeight - 2) / 2}
         {@const d = `M ${1 + r} ${barHeight - 1} H ${barWidth - 1 - r} A ${r} ${r} 0 0 0 ${barWidth - 1 - r} 1 H ${1 + r} A ${r} ${r} 0 0 0 ${1 + r} ${barHeight - 1}`}
         <svg width={barWidth} height={barHeight} aria-hidden="true">
+          <!-- The whole outline, faint: the pill's shape shows even where it is as dark as the page behind it. -->
+          <path class="opening-track" {d} />
           <path {d} stroke-dasharray="{shown * outline} {outline}" />
         </svg>
         <!-- The line's head, breathing while the read runs: rides the same outline, in step with the line. -->
@@ -354,11 +356,12 @@
             {tab.label}
           </a>
         {/each}
+        <!-- On a TV the visible pill is the nav, not the full-width header around it. -->
+        {@render openingLine()}
       </nav>
       {#if profiles}<ProfileSwitcher {profiles} />{:else if profileHint}<ProfileHintTrigger
           choice={hintChoice(profileHint)}
         />{/if}
-      {@render openingLine()}
     </header>
   {:else}
     <header class="bar glass" class:searching={expanded} class:people={onPeople}>
@@ -548,6 +551,11 @@
     stroke-linecap: round;
     stroke-width: 2px;
     transition: stroke-dasharray 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .opening path.opening-track {
+    stroke: rgb(255 255 255 / 0.18);
+    transition: none;
   }
 
   /* The line's head: a dot on the outline that breathes, so a slow read never looks stopped. */

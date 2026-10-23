@@ -124,12 +124,12 @@
   }
 
   .pin-slot.filled {
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+    border-color: var(--accent-line-40);
     background: rgb(255 255 255 / 0.09);
   }
 
   .pin-slot.ready {
-    border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+    border-color: var(--accent-line-72);
   }
 
   .pin-slot.active {
@@ -139,7 +139,13 @@
 
   .pin-control.invalid .pin-slot {
     border-color: var(--bad, #ff9a9a);
-    background: color-mix(in srgb, var(--bad, #ff9a9a) 7%, transparent);
+    background: var(--pin-invalid-wash, transparent);
+  }
+
+  @supports (color: color-mix(in srgb, white, black)) {
+    .pin-control.invalid {
+      --pin-invalid-wash: color-mix(in srgb, var(--bad, #ff9a9a) 7%, transparent);
+    }
   }
 
   .pin-slot.active:not(.filled)::after {
