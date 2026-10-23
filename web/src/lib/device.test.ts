@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { thisDevice } from './device.svelte';
+import { thisDevice, tvGuess } from './device.svelte';
 
 const store = new Map<string, string>();
 vi.stubGlobal('localStorage', {
@@ -25,5 +25,18 @@ describe('this device’s name', () => {
     thisDevice.rename('');
     expect(thisDevice.name).toBe('iPhone · Safari');
     expect(store.has('den.deviceName')).toBe(false);
+  });
+
+  it('names a TV only when the browser is one, whatever the build was made for', () => {
+    const lg =
+      'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 Chrome/87.0.4280.88 Safari/537.36';
+    const samsung =
+      'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 SamsungBrowser/3.0';
+    const iphone = navigator.userAgent;
+    expect(tvGuess('webos', lg)).toBe('LG TV');
+    expect(tvGuess('tizen', samsung)).toBe('Samsung TV');
+    expect(tvGuess('android', iphone)).toBe('Android TV');
+    // The hosted webOS page opened on an iPhone is not an LG TV.
+    expect(tvGuess('webos', iphone)).toBeNull();
   });
 });
