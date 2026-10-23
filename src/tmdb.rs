@@ -1397,9 +1397,10 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
 async fn over_allowance(state: &AppState, ip: &str, asked: &HeaderMap) -> Option<Response> {
     let visitor_wait = crate::link::throttled_per_minute(state, &format!("tmdb:{ip}"), GUEST_PER_WINDOW)?;
     // Verify the more expensive membership claim only after the visitor allowance is spent. A forged
-    // header therefore buys nothing, while a paired household can finish naming a large library.
+    // header therefore buys nothing, while a paired household can finish naming a large library — a packaged TV's
+    // bare per-title questions included, once its address has proved membership.
     let member = asked.get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
-    if !crate::library::is_household_member(state, member).await {
+    if !crate::library::member_allowance(state, ip, member).await {
         return Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait));
     }
     let wait = crate::link::throttled_per_minute(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)?;
@@ -4478,5 +4479,9 @@ mod tests {
         let admitted =
             h.send("GET", "/tmdb/3/movie/550", None, &[(crate::library::MEMBER_HEADER, &member)]).await;
         assert_ne!(admitted.status(), StatusCode::TOO_MANY_REQUESTS);
+        // A packaged TV asks per title without the header, which would cost a preflight per URL from its origin: once
+        // its address has proved membership, those are the household's questions too.
+        let bare = h.send("GET", "/tmdb/3/movie/551", None, &[]).await;
+        assert_ne!(bare.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

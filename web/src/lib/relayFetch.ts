@@ -10,7 +10,7 @@
 // else a page happens to call. The allow-list is the security boundary here, not an optimisation.
 
 import type { LibraryKeys } from './wire';
-import { apiOrigin, serviceOrigin } from './runtimeUrl';
+import { apiOrigin, apiUrl, serviceOrigin } from './runtimeUrl';
 
 /**
  * The least authority a page needs to receive the household relay allowance. This is derived from the library key
@@ -42,6 +42,13 @@ const REMUX_CONTROL = new Set([
   '/remux/speed',
   '/remux/grant',
 ]);
+/**
+ * Per-title reads whose answers are everyone's, where the claim buys only the household's larger allowance. Sent to
+ * another origin (the packaged Samsung app's), any custom header makes the browser preflight each new URL first — a
+ * round trip per title, hundreds on a first Home. Those go without it: den-edge gives the allowance to an address
+ * that proved membership a moment ago (`library::member_allowance`), so nothing secret is needed on them at all.
+ */
+const UNCLAIMED_ACROSS_ORIGINS = ['/tmdb/', '/atlas/'];
 const MEMBER_HEADER = 'x-den-library-member';
 /** A shared library's own credential (`x-den-grant: <gid>:<secret>`): a guest is never a member. */
 const GRANT_HEADER = 'x-den-grant';
@@ -299,6 +306,18 @@ function relayed(href: string): boolean {
   );
 }
 
+/** A read in `UNCLAIMED_ACROSS_ORIGINS` that leaves this page's origin, and so would be preflighted with the claim. */
+function unclaimedRead(url: URL, input: Parameters<typeof fetch>[0], init?: RequestInit): boolean {
+  const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') return false;
+  if (!UNCLAIMED_ACROSS_ORIGINS.some((path) => url.pathname.startsWith(path))) return false;
+  try {
+    return new URL(apiUrl(url.href)).origin !== new URL(globalThis.location.href).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** A same-origin route whose authorization changes once a paired library hello finishes. */
 function membershipSensitive(url: URL): boolean {
   return (
@@ -390,7 +409,7 @@ export const relayFetch: typeof fetch = async (input, init) => {
   if (opening) await opening;
   const gid = url && grantOf(url, init);
   if (gid) return guestFetch(gid, input, init);
-  if (!credential || !relayed(href)) return fetch(input, init);
+  if (!credential || !relayed(href) || unclaimedRead(url!, input, init)) return fetch(input, init);
   const inherited = init?.headers ?? (input instanceof Request ? input.headers : undefined);
   const headers = new Headers(inherited);
   headers.set(MEMBER_HEADER, credential);

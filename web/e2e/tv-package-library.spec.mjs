@@ -95,6 +95,18 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   await devices.getByRole('button', { name: 'Get a code' }).click();
   const code = await devices.locator('.code').textContent();
   const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+  // Per-title reads leave the package without the member header, which would make the browser preflight every new
+  // URL; the household's other calls still carry it.
+  const claims = { perTitle: [], unclaimedPerTitle: 0, other: 0 };
+  context.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== API) return;
+    const claimed = 'x-den-library-member' in request.headers();
+    if (/^\/(?:tmdb|atlas)\//.test(url.pathname) && request.method() === 'GET') {
+      if (claimed) claims.perTitle.push(url.pathname);
+      else claims.unclaimedPerTitle++;
+    } else if (claimed) claims.other++;
+  });
   try {
     const tv = await context.newPage();
     observeCredentials(tv);
@@ -125,6 +137,9 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     expect(edge.libraryRequests.length).toBeGreaterThan(0);
     expect(localFailures).toEqual([]);
     expect(leakedCredentials).toEqual([]);
+    expect(claims.perTitle).toEqual([]);
+    expect(claims.unclaimedPerTitle).toBeGreaterThan(0);
+    expect(claims.other).toBeGreaterThan(0);
     expect(await host.evaluate(() => globalThis.__tvPolicyViolations)).toEqual([]);
     expect(await tv.evaluate(() => globalThis.__tvPolicyViolations)).toEqual([]);
   } finally {

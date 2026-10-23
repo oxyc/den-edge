@@ -618,6 +618,11 @@ async fn dispatch(
         Ok(resp) => return resp,
         Err(req) => *req,
     };
+    // A member's proof on any call earns its address the household's allowance for a while, which the packaged TV's
+    // bare per-title reads then spend (`library::member_allowance`).
+    if let Some(claim) = header_value(&req, crate::library::MEMBER_HEADER) {
+        crate::library::note_member_address(state, &client_ip(state, &req), claim).await;
+    }
     if path.starts_with("/grant/") || crate::grants::is_host_path(&path) {
         return crate::grants::handle(state, req).await;
     }

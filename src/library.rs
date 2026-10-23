@@ -2163,6 +2163,53 @@ pub async fn is_household_member(state: &AppState, member: Option<&str>) -> bool
     }
 }
 
+/// How long an address that proved household membership keeps the household's larger allowance for the calls it makes
+/// without the proof. A packaged TV app calls den-edge from another origin, where the member header on a per-title
+/// read makes the browser preflight each new URL; it sends those reads bare (`UNCLAIMED_ACROSS_ORIGINS`, web
+/// `relayFetch.ts`) and proves membership on its other calls, which a launch makes within seconds.
+const MEMBER_ADDRESS_MS: u64 = 10 * 60 * 1000;
+/// Member proofs checked a minute for one address while it holds none: a forged header buys at most this many
+/// library lookups, not one per request.
+const MEMBER_PROOFS_PER_WINDOW: u32 = 30;
+
+fn member_address(ip: &str) -> String {
+    format!("member-address:{ip}")
+}
+
+/// Note `ip` as a household member's address when `claim`, a call's member header, proves one. Checked only while the
+/// address holds no proof, or one past half its life, so a member's ordinary calls cost a lookup a few minutes apart.
+///
+/// What an address earns is only the allowance (`member_allowance`): the household's own routes — the scout and remux
+/// relay, grants, provider keys — still ask each request for its proof.
+pub(crate) async fn note_member_address(state: &AppState, ip: &str, claim: &str) {
+    let bucket = member_address(ip);
+    if crate::link::marked(state, &bucket).is_some_and(|left| left > MEMBER_ADDRESS_MS / 2) {
+        return;
+    }
+    if crate::link::throttled_per_minute(state, &format!("member-proof:{ip}"), MEMBER_PROOFS_PER_WINDOW)
+        .is_some()
+    {
+        return;
+    }
+    if is_household_member(state, Some(claim)).await {
+        crate::link::mark(state, &bucket, MEMBER_ADDRESS_MS);
+    }
+}
+
+/// Whether a call from `ip` gets a household's larger allowance: `claim` proves membership, or this address proved it
+/// within `MEMBER_ADDRESS_MS` (`note_member_address`). Anyone sharing that address shares the allowance, as they
+/// already share its budgets, which are counted per address too.
+pub(crate) async fn member_allowance(state: &AppState, ip: &str, claim: Option<&str>) -> bool {
+    if crate::link::marked(state, &member_address(ip)).is_some() {
+        return true;
+    }
+    if !is_household_member(state, claim).await {
+        return false;
+    }
+    crate::link::mark(state, &member_address(ip), MEMBER_ADDRESS_MS);
+    true
+}
+
 /// A successor a key reset's live lock declared, started by a holder of that household: the reset's work.
 async fn is_part_of_a_reset(state: &AppState, id: &str, member: Option<&str>) -> io::Result<bool> {
     let Some((household, _)) = member.and_then(|m| m.split_once(':')) else { return Ok(false) };

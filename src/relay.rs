@@ -1099,7 +1099,7 @@ async fn relay_with(
     };
     if let Some(visitor_wait) = visitor_wait {
         let member = member_claim(&req);
-        if !crate::library::is_household_member(state, member.as_deref()).await {
+        if !crate::library::member_allowance(state, &ip, member.as_deref()).await {
             return limited(visitor_wait);
         }
         if let Some(wait) =
@@ -4657,14 +4657,69 @@ mod tests {
             h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
         assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
 
-        let member = format!("{LIB}:{TOKEN}");
-        for i in 0..super::GUEST_PER_WINDOW + 10 {
-            let status = ask(&h, &[("x-den-library-member", &member)]).await;
-            assert_eq!(status, StatusCode::BAD_GATEWAY, "{i}");
+        for i in 0..super::GUEST_PER_WINDOW {
+            assert_eq!(ask(&h, &[]).await, StatusCode::BAD_GATEWAY, "{i}");
         }
         // The token is what earns it: a guessed id with the wrong token is a visitor, whose budget is now spent.
         let forged = format!("{LIB}:not-the-token");
         assert_eq!(ask(&h, &[("x-den-library-member", &forged)]).await, StatusCode::TOO_MANY_REQUESTS);
+        let member = format!("{LIB}:{TOKEN}");
+        for i in 0..10 {
+            let status = ask(&h, &[("x-den-library-member", &member)]).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{i}");
+        }
+    }
+
+    /// A packaged TV sends its per-title reads without the member header, which would make its browser preflight every
+    /// new URL: once its address has proved membership on another call, those get the household's allowance too.
+    #[tokio::test]
+    async fn an_address_that_proved_membership_browses_past_the_visitors_allowance_bare() {
+        let mut h = harness();
+        Arc::get_mut(&mut h.state).unwrap().trusted_proxies.push("192.168.1.9".parse().unwrap());
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
+        let tv = [("x-forwarded-for", "203.0.113.7")];
+        let member = format!("{LIB}:{TOKEN}");
+        let proof = [("x-forwarded-for", "203.0.113.7"), ("x-den-library-member", member.as_str())];
+        assert_eq!(ask(&h, &proof).await, StatusCode::BAD_GATEWAY, "one call with the proof");
+        for i in 0..super::GUEST_PER_WINDOW + 10 {
+            assert_eq!(ask(&h, &tv).await, StatusCode::BAD_GATEWAY, "{i}");
+        }
+        // Another address has proved nothing, and is a visitor.
+        let stranger = [("x-forwarded-for", "198.51.100.4")];
+        for i in 0..super::GUEST_PER_WINDOW {
+            assert_eq!(ask(&h, &stranger).await, StatusCode::BAD_GATEWAY, "{i}");
+        }
+        assert_eq!(ask(&h, &stranger).await, StatusCode::TOO_MANY_REQUESTS);
+        // A forged proof earns an address nothing.
+        let forged = format!("{LIB}:not-the-token");
+        let forger = [("x-forwarded-for", "198.51.100.5"), ("x-den-library-member", forged.as_str())];
+        for i in 0..super::GUEST_PER_WINDOW {
+            assert_eq!(ask(&h, &forger).await, StatusCode::BAD_GATEWAY, "{i}");
+        }
+        assert_eq!(ask(&h, &[("x-forwarded-for", "198.51.100.5")]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// What an address earns is the allowance and nothing else: the household's own routes still ask each call for
+    /// its proof.
+    #[tokio::test]
+    async fn a_proved_address_does_not_open_the_households_routes() {
+        let mut h = harness();
+        Arc::get_mut(&mut h.state).unwrap().web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        Arc::get_mut(&mut h.state).unwrap().trusted_proxies.push("192.168.1.9".parse().unwrap());
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
+        let claim = format!("{LIB}:{TOKEN}");
+        let tv = [("host", "d.oxy.fi"), ("x-forwarded-for", "203.0.113.7")];
+        let proof = [tv[0], tv[1], ("x-den-library-member", claim.as_str())];
+        let member = h.send("GET", "/scout/manifest.json", None, &proof).await;
+        assert_eq!(member.status(), StatusCode::BAD_GATEWAY, "the member reached the absent upstream");
+        let bare = h.send("GET", "/scout/manifest.json", None, &tv).await;
+        assert_eq!(bare.status(), StatusCode::NOT_FOUND, "the same address without the proof");
     }
 
     /// Relaying `/atlas` at a port nothing listens on, as `harness` does `/scout`.

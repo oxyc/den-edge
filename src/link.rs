@@ -155,6 +155,22 @@ pub(crate) fn throttled_per_window(
     None
 }
 
+/// Note `bucket` as true for the next `window_ms`, in the same bounded map as the budgets. False when the map is full
+/// of live entries and has no room for it.
+pub(crate) fn mark(state: &AppState, bucket: &str, window_ms: u64) -> bool {
+    let now = state.now();
+    let mut claims = lock(&state.claims);
+    let Some(t) = claims.entry(bucket, now) else { return false };
+    t.until = now + window_ms;
+    true
+}
+
+/// How long `bucket` stays marked (`mark`); `None` when it is not.
+pub(crate) fn marked(state: &AppState, bucket: &str) -> Option<u64> {
+    let now = state.now();
+    lock(&state.claims).map.get(bucket).map(|t| t.until.saturating_sub(now)).filter(|left| *left > 0)
+}
+
 /// A token bucket of `burst` acts that refills `per_minute` a minute, for work that arrives in bursts but must not
 /// go on at a rate: a fixed window would let a looping caller spend a whole window's budget at once, then again the
 /// instant the next opens. Kept as the generic cell rate algorithm — `until` holds when the bucket is full again, so
