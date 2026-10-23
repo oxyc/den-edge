@@ -136,6 +136,17 @@
   // Kept actions done, and on their way, in the library kept here: a move that copied it goes again if either changed.
   let keptActions = 0;
   let keptPending = 0;
+  let keptSettlers: Array<() => void> = [];
+  const changeKeptPending = (change: 1 | -1) => {
+    keptPending += change;
+    if (keptPending !== 0) return;
+    const settlers = keptSettlers;
+    keptSettlers = [];
+    for (const settle of settlers) settle();
+  };
+  const waitForKeptActions = async () => {
+    while (keptPending > 0) await new Promise<void>((resolve) => keptSettlers.push(resolve));
+  };
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
 
   let confirmedProfileHousehold = $state<string | null>(
@@ -191,7 +202,7 @@
               keptActions++;
               void startHousehold();
             },
-            (change) => (keptPending += change),
+            changeKeptPending,
           )
         : services.library;
     const model = new LibraryModel(library, {
@@ -796,12 +807,28 @@
       // A first-tab winner can change again while a TV join is copying it. Follow that pointer until the exact source
       // just copied can be removed; every earlier source is already safe in the destination.
       for (let round = 0; round < 8; round++) {
-        const { result } = await destination.model!.mergeLocalLibrary(sourceKey);
-        if (
-          result.kind !== 'local-library.merge' ||
-          (result.outcome !== 'merged' && result.outcome !== 'absent') ||
-          !alive
-        ) {
+        let settled = false;
+        // Keep the source until no action that started before or during a pass remains. A Watchlist click is drawn
+        // optimistically before its local command has finished; forgetting the source on the first pass could
+        // otherwise publish an empty linked library while that command was still being kept.
+        for (let pass = 0; pass < 3 && !settled; pass++) {
+          await waitForKeptActions();
+          const seen = keptActions;
+          const { result } = await destination.model!.mergeLocalLibrary(sourceKey, undefined, {
+            keep: true,
+            verify: true,
+          });
+          if (
+            result.kind !== 'local-library.merge' ||
+            (result.outcome !== 'merged' && result.outcome !== 'absent') ||
+            !alive
+          ) {
+            destination.close();
+            return false;
+          }
+          settled = keptActions === seen && keptPending === 0;
+        }
+        if (!settled) {
           destination.close();
           return false;
         }

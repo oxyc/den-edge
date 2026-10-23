@@ -561,24 +561,28 @@ export class LibraryAdminAuthority {
       let verified: number | undefined;
       if (part.verify) {
         // Read back from den-edge, not from what this browser holds: the source is retired only once den-edge has it.
-        const held = await this.log.heldRows();
-        const missing = held ? unaccounted(rows, held.rows) : null;
-        verified = held?.entries;
-        if (!missing || missing.length) {
-          console.warn(
-            missing
-              ? `den: ${missing.length} of ${rows.length} rows moved from this browser are not on den-edge yet (${missing.slice(0, 5).join(', ')})`
-              : 'den: the library could not be read back from den-edge to check the move',
-          );
-          const retryAfterMs = Math.round(this.log.retryAfterMs);
-          return {
-            result: {
-              kind: 'local-library.merge',
-              outcome: 'unverified',
-              ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
-            },
-            affected: affectedLibrary,
-          };
+        // An empty source has nothing to read back, and the reserved destination may not exist until its first write.
+        if (!rows.length) verified = 0;
+        else {
+          const held = await this.log.heldRows();
+          const missing = held ? unaccounted(rows, held.rows) : null;
+          verified = held?.entries;
+          if (!missing || missing.length) {
+            console.warn(
+              missing
+                ? `den: ${missing.length} of ${rows.length} rows moved from this browser are not on den-edge yet (${missing.slice(0, 5).join(', ')})`
+                : 'den: the library could not be read back from den-edge to check the move',
+            );
+            const retryAfterMs = Math.round(this.log.retryAfterMs);
+            return {
+              result: {
+                kind: 'local-library.merge',
+                outcome: 'unverified',
+                ...(retryAfterMs > 0 ? { retryAfterMs } : {}),
+              },
+              affected: affectedLibrary,
+            };
+          }
         }
       }
       if (!part.keep && !(await source.forget()))

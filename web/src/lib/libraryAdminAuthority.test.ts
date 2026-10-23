@@ -210,6 +210,39 @@ it('keeps the source until den-edge, read back, holds everything moved', async (
   vi.restoreAllMocks();
 });
 
+it('verifies an empty source without requiring the reserved destination to exist yet', async () => {
+  const source = {
+    storedRows: vi.fn(() => []),
+    forget: vi.fn(async () => true),
+    close: vi.fn(),
+  };
+  vi.spyOn(LibraryLog, 'openExistingLocal').mockResolvedValueOnce(source as unknown as LibraryLog);
+  const log = {
+    writeRows: vi.fn(async () => true),
+    heldRows: vi.fn(async () => null),
+    retryAfterMs: 0,
+  };
+  const authority = new LibraryAdminAuthority(log as unknown as LibraryLog, clock, {
+    mode: 'online',
+    libraryKey: KEY,
+    vault,
+  });
+
+  await expect(
+    authority.task({
+      kind: 'local-library.merge',
+      sourceLibraryKey: DESTINATION,
+      keep: true,
+      verify: true,
+    }),
+  ).resolves.toMatchObject({ result: { outcome: 'merged', held: 0 } });
+  expect(log.writeRows).not.toHaveBeenCalled();
+  expect(log.heldRows).not.toHaveBeenCalled();
+  expect(source.forget).not.toHaveBeenCalled();
+  expect(source.close).toHaveBeenCalledOnce();
+  vi.restoreAllMocks();
+});
+
 it('stops writing a move in batches once den-edge asks it to wait, and says how long', async () => {
   const rows = Array.from({ length: 250 }, (_, id) => ({
     kind: 'set',
