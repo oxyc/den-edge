@@ -292,7 +292,12 @@ it('correlates connection replacements and non-playback query results without ti
     plugins: [],
     servers: [],
     devices: [],
-    diagnostics: { libraryFormat: 4, pendingChanges: 0, selfDeviceId: '0123456789abcdef' },
+    diagnostics: {
+      libraryFormat: 4,
+      legacyRows: 0,
+      pendingChanges: 0,
+      selfDeviceId: '0123456789abcdef',
+    },
   };
   transport.emit({
     type: 'update',

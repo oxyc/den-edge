@@ -546,6 +546,13 @@ export class LibraryLog {
     return this.wireMin;
   }
 
+  /** Temporary removal gate: old-format rows in the last authenticated library read. */
+  get legacyRowCount(): number {
+    let count = 0;
+    for (const { row } of this.acknowledged.values()) if (legacy(row)) count++;
+    return count;
+  }
+
   /**
    * An exclusive profile migration has held this household since a write last bounced off it (`409
    * migration_in_progress`). Reads and playback are unaffected; edits are kept on this device meanwhile.

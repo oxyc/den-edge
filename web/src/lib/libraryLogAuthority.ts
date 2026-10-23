@@ -1626,6 +1626,7 @@ export class LibraryLogAuthority {
       })),
       diagnostics: {
         libraryFormat: this.#log.wireMinimum,
+        legacyRows: this.#log.legacyRowCount,
         pendingChanges: this.#log.pendingActions,
         selfDeviceId: this.#clock.device,
         ...(this.#log.profileTopologyPresent ? { profileTopology: true } : {}),

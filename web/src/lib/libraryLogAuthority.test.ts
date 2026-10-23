@@ -1705,6 +1705,7 @@ describe('LibraryLogAuthority', () => {
       ],
       diagnostics: {
         libraryFormat: 2,
+        legacyRows: 0,
         pendingChanges: 0,
         selfDeviceId: '0123456789abcdef',
       },
