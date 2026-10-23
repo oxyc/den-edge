@@ -282,74 +282,8 @@ export type Opened =
   | { newerFraming: true }
   | { unreadable: string; json?: Record<string, unknown> };
 
-export type MigrationOpenedRow =
-  | { status: 'unreadable'; name: null }
-  | { status: 'newer'; name: string | null }
-  | { status: 'document'; name: string; document: DocumentRow; dropped: unknown[] }
-  | { status: 'row'; name: string | null; legacy: boolean; row: Record<string, unknown> };
-
 const JSON_ROW_KINDS = new Set(['rec', 'ep', 'set']);
 
-/** Exact authenticated decoder evidence consumed by den-core's one-time profile row partition. */
-export async function openMigrationRow(
-  keys: LibraryKeys,
-  k: string,
-  v: string,
-): Promise<MigrationOpenedRow> {
-  const plain = await openPlaintext(keys, k, v);
-  if (!plain) return { status: 'unreadable', name: null };
-  const named = async (name: string | null | undefined) =>
-    !!name && hex(await rowMac(keys, name)) === k;
-  if (plain[0] === 0x7b) {
-    let row: Record<string, unknown>;
-    try {
-      row = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plain)) as Record<
-        string,
-        unknown
-      >;
-    } catch {
-      return { status: 'unreadable', name: null };
-    }
-    if (row.kind === 'wat' || row.kind === 'snt')
-      return { status: 'row', name: null, legacy: true, row };
-    const known = typeof row.kind === 'string' && JSON_ROW_KINDS.has(row.kind);
-    let name: string | null;
-    try {
-      name = known ? rowName(row as Row) : null;
-    } catch {
-      return { status: 'unreadable', name: null };
-    }
-    if (name !== null && !(await named(name))) return { status: 'unreadable', name: null };
-    // As den-core's `doc_decode`: a settings row is current in v4, except a v1 tracker event.
-    const legacy =
-      known &&
-      (row.kind !== 'set' ||
-        (typeof row.name === 'string' && row.name.startsWith('tracker-event:')));
-    return { status: 'row', name, legacy, row };
-  }
-  const decoded = syncPolicy<{
-    status: 'document' | 'newer' | 'row' | 'unreadable';
-    name?: string | null;
-    document?: DocumentRow;
-    row?: Record<string, unknown>;
-    dropped?: unknown[];
-  }>({ op: 'doc_decode', plaintext: toBase64url(plain) });
-  const name = typeof decoded.name === 'string' ? decoded.name : null;
-  if (name !== null && !(await named(name))) return { status: 'unreadable', name: null };
-  if (decoded.status === 'unreadable') return { status: 'unreadable', name: null };
-  if (decoded.status === 'newer') return { status: 'newer', name };
-  if (decoded.status === 'row')
-    return { status: 'row', name, legacy: false, row: decoded.row ?? {} };
-  if (name === null || decoded.document === undefined) return { status: 'unreadable', name: null };
-  return {
-    status: 'document',
-    name,
-    document: decoded.document,
-    dropped: decoded.dropped ?? [],
-  };
-}
-
-/** A stored row's plaintext, as sealed (v2 §2); null when it doesn't open under these keys at this `k`. */
 export async function openPlaintext(
   keys: LibraryKeys,
   k: string,

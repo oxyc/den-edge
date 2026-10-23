@@ -43,7 +43,7 @@ describe('selected library settings', () => {
     });
   });
 
-  it('forces full policy for assistant state and hides household prefs after a profile split', () => {
+  it('forces full policy for assistant state and hides household prefs in profile mode', () => {
     const prefs = setting('prefs', {
       'den.preferredAudioLanguage': { value: { string: 'sv' }, at: stamp() },
     });

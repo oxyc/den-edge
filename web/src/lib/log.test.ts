@@ -13,7 +13,6 @@ import {
 import { LibraryLog, LibraryUpdateRequiredError } from './log';
 import { LibraryFactStore } from './libraryFactStore';
 import { applyOps, opsFor } from './libraryV4';
-import { OwnerSplitWorkerStore } from './profileOwnerSplitWorkerStore';
 import { forgetLibraryCredential, hasLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
 import { fetchDetailsResult } from './workerTmdbProvider';
@@ -271,99 +270,6 @@ describe('LibraryLog', () => {
     expect(log.title({ type: 'movie', id: 91 })?.status.value).toBe('watchlist');
     // The membership this browser never registered is registered beside the open, not before it.
     await vi.waitFor(() => expect(requests).toEqual([`PUT /lib/${keys.id}/member`]));
-  });
-
-  it('seals migration credentials under the worker-only household key and reopens them after restart', async () => {
-    const server = await edge();
-    const { data, vault } = memoryVault();
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    const store = new OwnerSplitWorkerStore(log);
-    const attempt = '0123456789abcdef0123456789abcdef';
-    const handle = await store.allocateCandidate(attempt);
-    const opened = await store.resolveCandidate(handle.keyRef, attempt);
-    const rawKey = opened.libraryKey;
-
-    const persisted = data.get(`${log.libraryId}:profile-migration/v1/candidate/${handle.keyRef}`);
-    expect(persisted).toBeDefined();
-    expect(new TextDecoder().decode(persisted)).not.toContain(rawKey);
-
-    const restarted = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    await expect(
-      new OwnerSplitWorkerStore(restarted).resolveCandidate(handle.keyRef, attempt),
-    ).resolves.toMatchObject({ handle, libraryKey: rawKey });
-  });
-
-  it('fails closed when migration secure storage is unavailable', async () => {
-    const server = await edge();
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
-    await expect(
-      new OwnerSplitWorkerStore(log).allocateCandidate('0123456789abcdef0123456789abcdef'),
-    ).rejects.toThrow(/Encrypted library storage is unavailable/);
-  });
-
-  it('distinguishes absent migration state from a tampered encrypted journal', async () => {
-    const server = await edge();
-    const { data, vault } = memoryVault();
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
-    const store = new OwnerSplitWorkerStore(log);
-    await expect(store.load()).resolves.toBeNull();
-    await store.save({
-      version: 6,
-      attempt: '0123456789abcdef0123456789abcdef',
-      explicitIntent: true,
-      householdId: log.libraryId,
-      state: 'idle',
-      source: { generation: 1, head: 'a'.repeat(64) },
-      splitAuthorization: {
-        intent: {
-          version: 1,
-          action: 'enable-profiles',
-          attempt: '0123456789abcdef0123456789abcdef',
-          householdId: log.libraryId,
-          source: { generation: 1, head: 'a'.repeat(64) },
-        },
-        intentDigest: 'b'.repeat(64),
-        commitBinding: null,
-      },
-    });
-    const name = `${log.libraryId}:profile-migration/v1/state`;
-    const sealed = data.get(name)!;
-    const last = sealed.length - 1;
-    sealed[last] = sealed[last]! ^ 1;
-
-    await expect(store.load()).rejects.toThrow(/Encrypted migration state is corrupt/);
-  });
-
-  it('rejects noncanonical migration routes and token placement before network IO', async () => {
-    const { vault } = memoryVault();
-    const network = vi.fn<typeof fetch>();
-    const log = (await LibraryLog.openLocal(LIBRARY_KEY, vault, network))!;
-    const attempt = '0123456789abcdef0123456789abcdef';
-    const root = `/lib/${log.libraryId}/profile-migration/${attempt}`;
-    await expect(
-      log.profileMigrationRequest({
-        method: 'POST',
-        path: `${root}/rows`,
-        candidateToken: 'candidate-token',
-      }),
-    ).rejects.toThrow(/exact retirement/);
-    await expect(
-      log.profileMigrationRequest({ method: 'POST', path: `${root}/retire-candidate` }),
-    ).rejects.toThrow(/exact retirement/);
-    await expect(
-      log.profileMigrationRequest({
-        method: 'POST',
-        path: `${root}/../${attempt}/retire-candidate`,
-        candidateToken: 'candidate-token',
-      }),
-    ).rejects.toThrow(/not allowed/);
-    await expect(
-      log.profileMigrationRequest({
-        method: 'GET',
-        path: `/lib/${log.libraryId}/profile-capability?probe=1`,
-      }),
-    ).rejects.toThrow(/not allowed/);
-    expect(network).not.toHaveBeenCalled();
   });
 
   it('reads the validated profile directory beside, never as, profile activity', async () => {

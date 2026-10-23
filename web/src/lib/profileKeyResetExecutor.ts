@@ -1,11 +1,7 @@
 import { exclusive } from './exclusive';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import type { ProfileKidCreateVault } from './profileKidCreateWorker';
-import {
-  profilesMaterialize,
-  profilesResetNext,
-  profilesRotateLibrary,
-} from './profileMigrationCore';
+import { profilesMaterialize, profilesResetNext, profilesRotateLibrary } from './profilesCore';
 import { Clock, compareStamps, deriveLibraryId, ZERO_STAMP, type Stamp } from './wire';
 
 /*

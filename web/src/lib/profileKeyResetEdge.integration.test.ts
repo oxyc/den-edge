@@ -19,7 +19,7 @@ import {
 } from './profileKeyResetExecutor';
 import { ProfileKeyResetRecovery } from './profileKeyResetRecovery';
 import { ProfileKeyResetService, VaultResetAdoption } from './profileKeyResetService';
-import { profilesMaterialize } from './profileMigrationCore';
+import { profilesMaterialize } from './profilesCore';
 import type { ProfileKidCreateVault } from './profileKidCreateWorker';
 import { deriveKeys, fromBase64url, seal, sealPlaintext, type Row } from './wire';
 

@@ -26,8 +26,8 @@ function readTags(storage: Storage): string[] {
 }
 
 /**
- * Whether this browser has seen `libraryKey` bootstrapped from wire 4 to wire 5. The Owner split is one-way, so a
- * household once seen needing wire 5 always will. Blocked or damaged storage answers false, which opens on wire 4 and
+ * Whether this browser has seen `libraryKey` require wire 5. Profile mode is permanent, so a household once seen
+ * needing wire 5 always will. Blocked or damaged storage answers false, which opens on wire 4 and
  * bootstraps as before.
  */
 export function knownProfileHousehold(

@@ -23,7 +23,7 @@ import {
   type VerifiedProfileMove,
 } from './profileKeyResetExecutor';
 import type { ProfileKidCreateVault } from './profileKidCreateWorker';
-import { profilesMaterialize, profilesMerge } from './profileMigrationCore';
+import { profilesMaterialize, profilesMerge } from './profilesCore';
 import { compareStamps, deriveKeys } from './wire';
 
 const OWNER = '00112233445566778899aabbccddeeff';

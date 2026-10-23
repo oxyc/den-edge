@@ -12,7 +12,7 @@ import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import type { ProfileDirectoryDocument } from './profileDirectory';
 import { validateKidTitleApprovals, type KidTitleApprovalsDocument } from './kidTitleApprovals';
-import { profilesApplyCreate } from './profileMigrationCore';
+import { profilesApplyCreate } from './profilesCore';
 import { ensureSyncPolicy } from './syncLoader';
 import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
@@ -556,43 +556,7 @@ describe('LibraryLogAuthority', () => {
     log.close();
   });
 
-  it('queries the authenticated profile capability without starting a migration', async () => {
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(async (input, init) => {
-        requests.push({ url: String(input), init });
-        return new Response(
-          JSON.stringify({
-            enrollment: 'prepare',
-            wireMin: 4,
-            migrationWire: 5,
-            runtimeHouseholdWire: 5,
-            runtimeProfileWire: 4,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
-      }),
-    );
-    try {
-      const { authority } = await localAuthority();
-      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
-        kind: 'profile-migration.status',
-        phase: 'available',
-      });
-      expect(requests).toHaveLength(1);
-      expect(requests[0]?.url).toMatch(/\/profile-capability$/);
-      expect(requests[0]?.init?.method).toBe('GET');
-      const headers = requests[0]?.init?.headers as Record<string, string>;
-      expect(headers['x-den-library-token']).toBeTruthy();
-      expect(headers['x-den-wire']).toBe('5');
-      expect(JSON.stringify(requests)).not.toContain(KEY);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('keeps the compound key reset behind the profile capability and a fresh Owner PIN', async () => {
+  it('keeps the compound key reset behind its source route and a fresh Owner PIN', async () => {
     let enrolled = false;
     const requests: string[] = [];
     vi.stubGlobal(
@@ -600,18 +564,13 @@ describe('LibraryLogAuthority', () => {
       vi.fn<typeof fetch>(async (input, init) => {
         const url = String(input);
         requests.push(`${init?.method ?? 'GET'} ${url}`);
-        if (!url.endsWith('/profile-capability')) throw new Error(`unexpected request ${url}`);
+        if (!url.endsWith('/exclusive-operation/source'))
+          throw new Error(`unexpected request ${url}`);
         if (!enrolled) return new Response('{"error":"not_found"}', { status: 404 });
-        return new Response(
-          JSON.stringify({
-            enrollment: 'prepare',
-            wireMin: 5,
-            migrationWire: 5,
-            runtimeHouseholdWire: 5,
-            runtimeProfileWire: 4,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(JSON.stringify({ source: { generation: 1, head: 'a'.repeat(64) } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }),
     );
     try {
@@ -637,12 +596,14 @@ describe('LibraryLogAuthority', () => {
         },
       ] as const;
 
-      // Profile migration off: every entry is unavailable, and the only request is the capability read.
+      // Profile reset off: every entry is unavailable, and the only request is the source read.
       for (const task of tasks)
         await expect(reset.task(task, `off-${task.kind}`)).resolves.toMatchObject({
           result: { kind: task.kind, outcome: 'unavailable' },
         });
-      expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
+      expect(requests.every((request) => request.endsWith('/exclusive-operation/source'))).toBe(
+        true,
+      );
 
       // Confirming asks nothing of den-edge and nothing of the gate: with no journal there is nothing to confirm.
       const confirm = {
@@ -677,74 +638,9 @@ describe('LibraryLogAuthority', () => {
           failure: expect.objectContaining({ code: 'invalid-request' }),
         }),
       );
-      expect(requests.every((request) => request.endsWith('/profile-capability'))).toBe(true);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('tells another device’s migration lock from nothing, offers Restore, and never retries the refused open', async () => {
-    await ensureSyncPolicy();
-    const source = { generation: 7, head: 'a'.repeat(64) };
-    const posts: string[] = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(async (input, init) => {
-        const url = String(input);
-        const json = (body: unknown, status = 200) =>
-          new Response(JSON.stringify(body), {
-            status,
-            headers: { 'content-type': 'application/json' },
-          });
-        if (url.endsWith('/profile-capability'))
-          return json({
-            enrollment: 'prepare',
-            wireMin: 4,
-            migrationWire: 5,
-            runtimeHouseholdWire: 5,
-            runtimeProfileWire: 4,
-          });
-        if (url.endsWith('/profile-migration/source')) return json({ source });
-        if (init?.method === 'POST' && url.endsWith('/profile-migration')) {
-          posts.push(String(init.body));
-          // Metadata-free by contract: no attempt, purpose, fence, backup or timing.
-          return json({ error: 'migration_in_progress' }, 409);
-        }
-        throw new Error(`unexpected request ${init?.method} ${url}`);
-      }),
-    );
-    try {
-      const { authority } = await localAuthority();
-      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
-        kind: 'profile-migration.status',
-        phase: 'available',
-      });
-      const observed = await authority.query({ kind: 'profile-migration.observe' });
-      if (observed.kind !== 'profile-migration.observe') throw new Error('wrong result');
-
-      const enabled = await authority.task(
-        { kind: 'profile-migration.enable', attempt: observed.attempt, source: observed.source },
-        'enable-while-locked',
+      expect(requests.every((request) => request.endsWith('/exclusive-operation/source'))).toBe(
+        true,
       );
-      expect(enabled.result).toEqual({
-        kind: 'profile-migration.enable',
-        outcome: 'setup-in-progress',
-      });
-      expect(posts, 'one definitive refusal, no retry').toHaveLength(1);
-      await expect(authority.query({ kind: 'profile-migration.status' })).resolves.toEqual({
-        kind: 'profile-migration.status',
-        phase: 'setup-in-progress',
-      });
-      expect(posts).toHaveLength(1);
-
-      // The journal was cleared with nothing opened, so Restore is journal-less: it names no attempt.
-      await expect(
-        authority.query({ kind: 'profile-migration.observe-recovery', attempt: null }),
-      ).resolves.toMatchObject({
-        kind: 'profile-migration.observe-recovery',
-        attempt: null,
-        source,
-      });
     } finally {
       vi.unstubAllGlobals();
     }

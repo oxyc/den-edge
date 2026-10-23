@@ -8,7 +8,7 @@ import fixture from '../vendor/den-core/profiles-v1.json';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import { validateStoredProfileDirectory } from './profileDirectory';
-import { profilesMaterialize } from './profileMigrationCore';
+import { profilesMaterialize } from './profilesCore';
 import { ensureSyncPolicy } from './syncLoader';
 import {
   deriveKeys,
@@ -22,9 +22,9 @@ import {
 } from './wire';
 
 /*
- * A browser that cached a household before its profile split committed, against the real den-edge binary: on its next
- * visit it must adopt the split household (profiles-v1 §8.2), not write the old household back into it. Nothing in
- * den-edge is faked. The split's committed state is built with den-edge's own rewrite (a new generation, wire minimum
+ * A browser that cached a household before its profile directory committed, against the real den-edge binary: on its
+ * next visit it must adopt the committed household (profiles-v1 §8.2), not write the old household back into it.
+ * Nothing in den-edge is faked. The committed state is built with den-edge's own rewrite (a new generation, wire minimum
  * 5, the household half of the rows and the `profiles` directory) beside an Owner library holding the profile half.
  *
  * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one.
@@ -58,7 +58,7 @@ afterEach(async () => {
 async function startEdge(): Promise<Edge> {
   const data = await mkdtemp(join(tmpdir(), 'den-edge-adopt-'));
   const child: ChildProcess = spawn(BINARY, [], {
-    env: { PORT: '0', DATA_DIR: data, PROFILE_MIGRATION_ENABLED: '1' },
+    env: { PORT: '0', DATA_DIR: data },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const base = await new Promise<string>((done, fail) => {
@@ -128,7 +128,7 @@ const film = (id: number) =>
     addedAt: 1000,
   }) as unknown as Row;
 
-/** Owner's rows, as the household held them before the split. */
+/** Owner's rows, as the household held them before profiles were committed. */
 const OWNER_ROWS = () => [
   film(7),
   film(8),
@@ -170,8 +170,8 @@ async function entries(edge: Edge, key: string, wire = '5') {
   };
 }
 
-/** The committed split: den-edge's rewrite to wire minimum 5, holding the household half and the directory. */
-async function commitSplit(edge: Edge, householdKey: string) {
+/** A committed profile household: wire minimum 5, holding configuration rows and the directory. */
+async function commitProfileDirectory(edge: Edge, householdKey: string) {
   await ensureSyncPolicy();
   const keys = await keysOf(householdKey);
   const directory = validateStoredProfileDirectory(structuredClone(fixture.migrationBase));
@@ -221,10 +221,10 @@ async function settled(log: LibraryLog) {
 }
 
 describe.skipIf(!available)(
-  'a cached household meeting its committed profile split, against the real den-edge',
+  'a cached household meeting its committed profile directory, against the real den-edge',
   { timeout: 60_000 },
   () => {
-    it('adopts the split household in two tabs at once, and writes nothing of the old one back', async () => {
+    it('adopts the committed household in two tabs at once, and writes nothing of the old one back', async () => {
       const edge = await startEdge();
       const household = keyOf(41);
       const keys = await keysOf(household);
@@ -267,8 +267,8 @@ describe.skipIf(!available)(
       expect(offline.pendingActions).toBe(1);
       offline.close();
 
-      const ownerKey = await commitSplit(edge, household);
-      const split = await entries(edge, household);
+      const ownerKey = await commitProfileDirectory(edge, household);
+      const committed = await entries(edge, household);
       const owner = await entries(edge, ownerKey, '4');
 
       // The open wire-4 tab learns the household needs wire 5, and the page reopens it there.
@@ -293,10 +293,10 @@ describe.skipIf(!available)(
       }
 
       expect(batches() - batchesBefore, 'batches the reopened tabs sent to the household').toBe(0);
-      // The household is exactly what the split committed: nothing of the old household came back.
+      // The household is exactly what the profile commit stored: nothing of the old household came back.
       const after = await entries(edge, household);
-      expect(after.generation).toBe(split.generation);
-      expect(after.entries).toEqual(split.entries);
+      expect(after.generation).toBe(committed.generation);
+      expect(after.entries).toEqual(committed.entries);
       const names: string[] = [];
       for (const { k, v } of after.entries) {
         const opened = await openEntry(keys, k, v);
@@ -310,7 +310,7 @@ describe.skipIf(!available)(
         if (row.kind === 'set' && row.name === 'keys')
           expect(Object.keys(row.values)).toEqual(['tmdb']);
       }
-      // Every preference is a profile's: the split household holds no `set:prefs`.
+      // Every preference is a profile's: the committed household holds no `set:prefs`.
       expect(names.sort()).toEqual(['profiles', 'set:household', 'set:keys']);
       // The Owner library is untouched.
       expect((await entries(edge, ownerKey, '4')).entries).toEqual(owner.entries);
@@ -320,7 +320,7 @@ describe.skipIf(!available)(
       expect(
         [...data.keys()].filter((key) => key.startsWith(`${keys.id}:runtime:pending:`)),
       ).toEqual([]);
-      // The tabs hold the split household, not the old rows.
+      // The tabs hold the committed household, not the old rows.
       for (const tab of tabs) {
         expect(tab.profileDirectory()).not.toBeNull();
         expect(tab.title({ type: 'movie', id: 7 })).toBeUndefined();
@@ -332,12 +332,12 @@ describe.skipIf(!available)(
       expect(members.some(({ status }) => status < 300)).toBe(true);
     });
 
-    it('writes a split household only its own rows, no prefs, and only the household half of keys', async () => {
+    it('writes a profile household only its own rows, no prefs, and only the household half of keys', async () => {
       const edge = await startEdge();
       const household = keyOf(43);
       const keys = await keysOf(household);
       await seed(edge, household, [settings('household', { 'den.name': { string: 'Home' } })]);
-      await commitSplit(edge, household);
+      await commitProfileDirectory(edge, household);
       const log = (await LibraryLog.open(
         household,
         edge.fetch,
@@ -346,14 +346,14 @@ describe.skipIf(!available)(
         5,
       ))!;
       expect(log.profileDirectory()).not.toBeNull();
-      const split = await entries(edge, household);
+      const committed = await entries(edge, household);
 
       expect(await log.write(settings('trackers', { trakt: { string: 'token' } }))).toBeNull();
       expect(await log.writeAt(settings('handoff:tv', { x: { bool: true } }) as never, 0)).toBe(
         false,
       );
       expect(await log.writeAt(film(11) as never, 0)).toBe(false);
-      expect((await entries(edge, household)).entries).toEqual(split.entries);
+      expect((await entries(edge, household)).entries).toEqual(committed.entries);
 
       expect(await log.write(settings('prefs', PREFS))).toBeNull();
       const stored = new Map<string, Row>();
@@ -445,7 +445,7 @@ describe.skipIf(!available)(
 );
 
 describe.skipIf(available)(
-  'a cached household meeting its committed profile split (skipped)',
+  'a cached household meeting its committed profile directory (skipped)',
   () => {
     it.skip('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {});
   },
