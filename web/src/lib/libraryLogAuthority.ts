@@ -34,9 +34,13 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
-import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
-import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
+import {
+  libraryMetadataShape,
+  libraryMetadataShapeDigest,
+  libraryMetadataTitle,
+} from './libraryMetadata';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
@@ -1257,12 +1261,7 @@ export class LibraryLogAuthority {
         throw authorityError('invalid-request', 'title shape contains a duplicate season');
       counts.set(season, episodes);
     }
-    const digest = JSON.stringify({
-      seasons: [...counts]
-        .sort(([a], [b]) => a - b)
-        .map(([season, episodes]) => ({ season, episodes })),
-      lastAired: observation.lastAired ?? null,
-    });
+    const digest = libraryMetadataShapeDigest(observation);
     const key = titleKey(observation.title);
     if (this.#shapes.get(key)?.digest === digest) return { outcome: 'unchanged', affected: [] };
     this.#shapes.set(key, {
@@ -1395,25 +1394,13 @@ export class LibraryLogAuthority {
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
     const { home } = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
-    const library = { ...home.continueLibrary, shapes };
-    const devices = this.#log.settings('devices');
     return {
       kind: 'continue',
-      items: this.#continueProjector
-        .project(library)
-        .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
-          const device = by && deviceName(devices, by)?.slice(0, 256);
-          return {
-            title: { type: ref.type, id: ref.id },
-            fraction,
-            ...(episode ? { episode } : {}),
-            ...(seconds !== undefined ? { seconds } : {}),
-            ...(at !== undefined ? { updatedAt: at } : {}),
-            ...(liveEpisode ? { liveEpisode } : {}),
-            ...(liveFraction !== undefined ? { liveFraction } : {}),
-            ...(device ? { device } : {}),
-          };
-        }),
+      items: continueItems(
+        this.#continueProjector,
+        { ...home.continueLibrary, shapes },
+        this.#log.settings('devices'),
+      ),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
     };
   }

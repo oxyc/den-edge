@@ -703,11 +703,16 @@ it('applies one changed document to capability facts without opening unrelated d
 });
 
 /** A series in the fact store as Library v4 documents: its title, and season 1 with episodes 1–2 watched, 3 half. */
-async function seriesFacts(vault: FactVault) {
+/** A series in progress on `device`; `seconds` is where its third episode was left, when given. */
+async function seriesFacts(vault: FactVault, seconds?: number) {
   const keys = await deriveKeys(raw);
   const at: [number, number, string] = [Date.now() - 86_400_000, 0, 'device'];
-  const episode = (value: number) => ({
-    progress: { value, at, viewing: 0 },
+  const episode = (value: number, position?: number) => ({
+    // A position is the series' newest mark: Continue's live position comes from that one.
+    progress:
+      position === undefined
+        ? { value, at, viewing: 0 }
+        : { value, at: [at[0] + 1_000, 0, 'device'], viewing: 0, seconds: position },
     imported: false,
     plays: { 0: at[0] },
     cleared: null,
@@ -726,7 +731,7 @@ async function seriesFacts(vault: FactVault) {
       title: { type: 'tv', id: 55 },
       season: 1,
       seasonReset: null,
-      episodes: { 1: episode(1), 2: episode(1), 3: episode(0.5) },
+      episodes: { 1: episode(1), 2: episode(1), 3: episode(0.5, seconds) },
     },
   ] as unknown as Parameters<typeof seal>[1][];
   const entries = await Promise.all(
@@ -818,6 +823,49 @@ it('counts a served series’ episodes once naming finds its shape, and keeps ot
     expect.objectContaining({ kind: 'title-shape', title: series }),
   ]);
   expect(openFull).toHaveBeenCalledOnce();
+});
+
+it('names the device a Continue item was watched on, as the full log does', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  await seriesFacts(vault, 600);
+  // The device `seriesFacts` stamps its episodes with.
+  const devices = {
+    kind: 'set',
+    schema: 2,
+    name: 'devices',
+    values: { 'device.name': { value: { string: 'Living Room' }, at: [1_000, 0, 'device'] } },
+  } as unknown as Parameters<typeof seal>[1];
+  const sealed = await seal(await deriveKeys(raw), devices);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    13,
+    [{ k: sealed.k, seq: 13, value: sealed.v, row: devices }],
+    true,
+  );
+  const named = {
+    title: vi.fn(async () => ({
+      kind: 'found' as const,
+      value: {
+        title: { type: 'tv' as const, id: 55, title: 'Fifty-five' },
+        shape: { counts: new Map([[1, 3]]) },
+      },
+    })),
+  };
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    named,
+    vi.fn(),
+  );
+  await opened!.authority.select({ kind: 'continue' });
+  await opened!.authority.query({ kind: 'library.metadata', titles: [{ type: 'tv', id: 55 }] });
+  await expect(opened!.authority.select({ kind: 'continue' })).resolves.toMatchObject({
+    items: [{ title: { type: 'tv', id: 55 }, device: 'Living Room' }],
+  });
+  await opened!.authority.close?.();
 });
 
 /** Every root view a LibraryModel selects (`libraryModel.svelte.ts`). */

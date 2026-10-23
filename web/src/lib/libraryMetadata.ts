@@ -52,8 +52,15 @@ export function libraryMetadataShape(
   };
 }
 
-export const libraryMetadataShapeDigest = (shape: LibraryMetadataShape): string =>
-  JSON.stringify({
-    seasons: [...shape.seasons].sort((left, right) => left.season - right.season),
-    lastAired: shape.lastAired ?? null,
-  });
+/**
+ * A series layout as one short string, `season:episodes,…|season:episode` (its seasons in order, then the last aired
+ * episode), compared to tell whether a layout changed. Kept in Continue's saved piece once per series it holds, so it is
+ * as small as it can be and still say the whole layout.
+ */
+export const libraryMetadataShapeDigest = (
+  shape: Pick<LibraryMetadataShape, 'seasons' | 'lastAired'>,
+): string =>
+  `${[...shape.seasons]
+    .sort((left, right) => left.season - right.season)
+    .map(({ season, episodes }) => `${season}:${episodes}`)
+    .join(',')}|${shape.lastAired ? `${shape.lastAired.season}:${shape.lastAired.episode}` : ''}`;
