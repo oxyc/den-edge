@@ -34,7 +34,7 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
-import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
 import {
   libraryMetadataShape,
@@ -1394,25 +1394,13 @@ export class LibraryLogAuthority {
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
     const { home } = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
-    const library = { ...home.continueLibrary, shapes };
-    const devices = this.#log.settings('devices');
     return {
       kind: 'continue',
-      items: this.#continueProjector
-        .project(library)
-        .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
-          const device = by && deviceName(devices, by)?.slice(0, 256);
-          return {
-            title: { type: ref.type, id: ref.id },
-            fraction,
-            ...(episode ? { episode } : {}),
-            ...(seconds !== undefined ? { seconds } : {}),
-            ...(at !== undefined ? { updatedAt: at } : {}),
-            ...(liveEpisode ? { liveEpisode } : {}),
-            ...(liveFraction !== undefined ? { liveFraction } : {}),
-            ...(device ? { device } : {}),
-          };
-        }),
+      items: continueItems(
+        this.#continueProjector,
+        { ...home.continueLibrary, shapes },
+        this.#log.settings('devices'),
+      ),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
     };
   }
