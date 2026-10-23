@@ -583,8 +583,22 @@ struct LoadReport {
     /// Its Workers' requests by kind, the same way.
     #[serde(default)]
     worker_net: std::collections::BTreeMap<NetKind, (u32, u32)>,
+    /// The page's script and Wasm files by where they came from, and its Workers'.
+    files: Option<FileSources>,
+    worker_files: Option<FileSources>,
     /// The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`.
     long_tasks: Option<(u32, u32, u32)>,
+}
+
+/// Script and Wasm files counted by where each came from (`loadReport.ts` `fileTally`): the HTTP cache, a service
+/// worker, the network, or an engine that doesn't say. Counts only, never a file's name.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct FileSources {
+    cache: u32,
+    service_worker: u32,
+    network: u32,
+    unknown: u32,
 }
 
 /// What a page's request was for (`loadReport.ts` `netKindOf`). A closed set, so a report carries no path.
@@ -718,6 +732,17 @@ impl LoadReport {
                     kind.as_str(),
                     count.min(&MAX_REQUESTS),
                     ms.min(&MAX_NET_MS)
+                ));
+            }
+        }
+        for (prefix, files) in [("files", &self.files), ("wfiles", &self.worker_files)] {
+            if let Some(f) = files {
+                parts.push(format!(
+                    "{prefix}:cache{}/net{}/sw{}/unknown{}",
+                    f.cache.min(MAX_REQUESTS),
+                    f.network.min(MAX_REQUESTS),
+                    f.service_worker.min(MAX_REQUESTS),
+                    f.unknown.min(MAX_REQUESTS)
                 ));
             }
         }
@@ -1317,6 +1342,27 @@ mod tests {
              net_atlas:1/86ms,wnet_lib:3/900ms,wnet_meta:5/600ms,tmdb_fresh:3,tmdb_missing:132,\
              tmdb_write_failed:132,long:12/3400ms/max900ms"
         );
+    }
+
+    #[test]
+    fn a_load_report_says_where_the_page_and_worker_files_came_from() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 1,
+            "files": { "cache": 14, "serviceWorker": 0, "network": 2, "unknown": 0 },
+            "workerFiles": { "cache": 1, "network": 3, "unknown": 2, "names": ["/assets/x.js"] },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,workers:1,\
+             files:cache14/net2/sw0/unknown0,wfiles:cache1/net3/sw0/unknown2"
+        );
+        let capped: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 1,
+            "files": { "cache": u32::MAX, "serviceWorker": 0, "network": 0, "unknown": 0 },
+        }))
+        .unwrap();
+        assert!(capped.tag().ends_with(&format!("files:cache{MAX_REQUESTS}/net0/sw0/unknown0")));
     }
 
     #[test]

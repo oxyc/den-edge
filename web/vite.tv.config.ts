@@ -279,13 +279,10 @@ const tvEntry: Plugin = {
             .replace('/test/player.ts', '/src/tv/test-entry.ts');
         return html;
       }
-      // A packaged TV owns a 1920 x 1080 surface even where its embedded engine reports a different layout
-      // viewport. The hosted build is also our browser/device preview: desktop browsers ignore a numeric mobile
-      // viewport, but iOS obeys it and used to shrink a 1920px page onto the phone. Keep the fixed canvas only in
-      // the package and let the hosted preview use the device it is actually opened on.
-      const viewport = packaged
-        ? 'width=1920, initial-scale=1'
-        : 'width=device-width, initial-scale=1';
+      // The hosted page is a TV preview, not a responsive phone layout. iOS honors this numeric viewport and
+      // scales the complete 1920px TV canvas into the device; desktop browsers already expose that same canvas.
+      // Packages keep it too so every preview and real TV exercises one layout coordinate system.
+      const viewport = 'width=1920, initial-scale=1';
       return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 ${packaged ? `<meta http-equiv="Content-Security-Policy" content="${tvCspValue}">` : ''}
 <meta name="viewport" content="${viewport}"><meta name="theme-color" content="#0b0b0f">

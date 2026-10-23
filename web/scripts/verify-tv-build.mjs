@@ -46,14 +46,9 @@ const directory = resolve(
 );
 const assets = await readdir(resolve(directory, 'assets'));
 const entryHtml = await readFile(resolve(directory, 'index.html'), 'utf8');
-const expectedViewport =
-  process.env.DEN_TV_PACKAGED === '1'
-    ? 'width=1920, initial-scale=1'
-    : 'width=device-width, initial-scale=1';
+const expectedViewport = 'width=1920, initial-scale=1';
 if (!entryHtml.includes(`<meta name="viewport" content="${expectedViewport}">`))
-  throw new Error(
-    `TV entry is missing its ${process.env.DEN_TV_PACKAGED === '1' ? 'packaged' : 'hosted'} viewport`,
-  );
+  throw new Error('TV entry is missing its fixed 1920px viewport');
 const tizenVersion = process.env.DEN_TIZEN_VERSION;
 const tizen3 = platform === 'tizen' && tizenVersion === '3.0';
 if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {

@@ -39,12 +39,31 @@ let workers = 0;
 let stall: ReturnType<typeof setTimeout> | undefined;
 let handedOver = false;
 
-/** A finished request, as its resource timing entry has it. */
+/**
+ * A finished request, as its resource timing entry has it. The sizes, `workerStart` and `deliveryType` say whether it
+ * came from a cache (`fileTally`, `loadReport.ts`); an engine without them leaves them out.
+ */
 export interface StartupResource {
   name: string;
   initiatorType: string;
   duration: number;
+  transferSize?: number;
+  encodedBodySize?: number;
+  decodedBodySize?: number;
+  workerStart?: number;
+  deliveryType?: string;
 }
+
+const resourceOf = (entry: StartupResource): StartupResource => ({
+  name: entry.name,
+  initiatorType: entry.initiatorType,
+  duration: entry.duration,
+  transferSize: entry.transferSize,
+  encodedBodySize: entry.encodedBodySize,
+  decodedBodySize: entry.decodedBodySize,
+  workerStart: entry.workerStart,
+  deliveryType: entry.deliveryType,
+});
 
 /**
  * Workers' milestones and finished requests reach the page on this channel: its load report is sent as the page
@@ -89,11 +108,7 @@ if (channel && !inWorker)
     } else if (message.kind === 'count')
       counts.set(message.name, (counts.get(message.name) ?? 0) + 1);
     else if (workerResources.length < MAX_WORKER_RESOURCES)
-      workerResources.push({
-        name: message.name,
-        initiatorType: message.initiatorType,
-        duration: message.duration,
-      });
+      workerResources.push(resourceOf(message));
   };
 
 const observe = (type: string, each: (entry: PerformanceEntry) => void) => {
@@ -109,10 +124,13 @@ const observe = (type: string, each: (entry: PerformanceEntry) => void) => {
 };
 if (typeof PerformanceObserver === 'function') {
   if (channel && inWorker)
-    observe('resource', (entry) => {
-      const { name, initiatorType, duration } = entry as PerformanceResourceTiming;
-      relay({ origin: ORIGIN, kind: 'resource', name, initiatorType, duration });
-    });
+    observe('resource', (entry) =>
+      relay({
+        origin: ORIGIN,
+        kind: 'resource',
+        ...resourceOf(entry as PerformanceResourceTiming & { deliveryType?: string }),
+      }),
+    );
   if (!inWorker)
     observe('longtask', ({ duration }) => {
       longTasks.count++;

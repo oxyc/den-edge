@@ -31,6 +31,7 @@
     "test:e2e:budgets": "playwright test --config playwright.budgets.config.ts",
     "rehearse:household": "node scripts/rehearse-household.mjs",
     "rehearse:join": "node scripts/rehearse-household-join.mjs",
+    "rehearse:release": "node scripts/rehearse-release.mjs",
     "test:e2e:soak": "playwright test --grep @soak",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
