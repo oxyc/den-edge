@@ -1192,7 +1192,7 @@
      billboard ends. */
   .billboard {
     position: relative;
-    width: 100vw;
+    width: var(--presentation-width);
 
     /* Lets the picture, which is not inside the scroller, be animated by the scroller's own progress. */
     timeline-scope: --rail;
@@ -1200,7 +1200,7 @@
     /* Use the large viewport initially, then preserve the measured size through touch-browser
        toolbar changes. Width changes and desktop window resizing refresh the measurement. */
     min-height: var(--stable-hero-height, clamp(420px, 76vh, 860px));
-    margin-inline: calc(50% - 50vw);
+    margin-inline: calc(50% - var(--presentation-edge));
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 28px;
     overflow: hidden;
@@ -1222,12 +1222,18 @@
      than 16:9 without being a big screen, so an ungated floor would override the measurement there. */
   @media (width >= 1000px) {
     .billboard {
-      min-height: max(var(--stable-hero-height, clamp(420px, 76vh, 860px)), min(56.25vw, 94vh));
+      min-height: max(
+        var(--stable-hero-height, clamp(420px, 76vh, 860px)),
+        min(56.25vw, 1080px, 94vh)
+      );
     }
 
     @supports (height: 1lvh) {
       .billboard {
-        min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+        min-height: max(
+          var(--stable-hero-height, clamp(420px, 76lvh, 860px)),
+          min(56.25vw, 1080px, 94lvh)
+        );
       }
     }
   }

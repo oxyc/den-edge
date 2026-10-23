@@ -326,8 +326,8 @@
      on screen (or a tap forced layout). Chromium delivers that size for a skipped row and keeps the property fixed
      (`placementGate`). */
   .row-window {
-    width: 100vw;
-    margin-inline: calc(50% - 50vw);
+    width: var(--presentation-width);
+    margin-inline: calc(50% - var(--presentation-edge));
     contain-intrinsic-block-size: auto
       calc(
         var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.5 + var(--poster-row-chrome-block-size)

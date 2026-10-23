@@ -48,3 +48,17 @@ for (const touch of [true, false])
       await browser.close();
     }
   });
+
+test('an ultrawide window keeps the billboard on the centred 1920×1080 canvas', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 2560, height: 1200 } });
+  await guardNetwork(page);
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html`);
+
+  const hero = page.locator('.billboard');
+  await expect(hero).toBeVisible();
+  expect(await hero.boundingBox()).toMatchObject({ x: 320, width: 1920, height: 1080 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(2560);
+  await page.close();
+});

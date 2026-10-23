@@ -1281,7 +1281,7 @@
     isolation: isolate;
     display: grid;
     align-items: end;
-    width: 100vw;
+    width: var(--presentation-width);
 
     /* The same height the home billboard takes, so a trailer is the same size wherever you meet it and the
        page below starts where the eye already expects it. It used to stand deliberately taller than the
@@ -1296,7 +1296,7 @@
     --hero-drop: max(0px, calc(100lvh + 8px - var(--hero-h)));
 
     min-height: var(--hero-h);
-    margin-inline: calc(50% - 50vw);
+    margin-inline: calc(50% - var(--presentation-edge));
     margin-top: calc(-1 * var(--bar-space));
 
     /* The block now hangs past the hero, so the page below starts clear of it rather than under it. */
@@ -1310,7 +1310,10 @@
      was 740 tall while the drop was computed from 598 pushed the words 142px too far. */
   @media (width >= 1000px) {
     .hero {
-      --hero-h: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+      --hero-h: max(
+        var(--stable-hero-height, clamp(420px, 76lvh, 860px)),
+        min(56.25vw, 1080px, 94lvh)
+      );
     }
   }
 

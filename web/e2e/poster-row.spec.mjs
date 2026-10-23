@@ -77,6 +77,32 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
   await page.close();
 });
 
+test('an ultrawide window keeps shelves on the centred 1920px presentation canvas', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 2560, height: 900 } });
+  await guardNetwork(page);
+  await routePosterArt(page);
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
+
+  const row = page.getByRole('region', { name: 'Coming Soon' });
+  const [rowBox, trackBox, headingBox, firstCardBox] = await Promise.all([
+    row.boundingBox(),
+    row.locator('.track').boundingBox(),
+    row.getByRole('heading', { name: 'Coming Soon' }).boundingBox(),
+    row.locator('.card').first().boundingBox(),
+  ]);
+  expect(rowBox).not.toBeNull();
+  expect(trackBox).not.toBeNull();
+  expect(headingBox).not.toBeNull();
+  expect(firstCardBox).not.toBeNull();
+  expect(rowBox).toMatchObject({ x: 320, width: 1920 });
+  expect(trackBox).toMatchObject({ x: 320, width: 1920 });
+  expect(Math.abs(firstCardBox.x - headingBox.x)).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(2560);
+  await page.close();
+});
+
 // A shared observer activates art only where both axes are near. A far row has no posters; when the row arrives,
 // posters near its horizontal viewport load, and art at the far end remains reachable by scrolling the shelf.
 test('a row far below the screen draws its posters only once it comes near', async ({
