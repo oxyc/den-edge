@@ -7,6 +7,7 @@ import type { TitleRow } from './wire';
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
   failCommit = false;
+  commits = 0;
 
   async get(key: string) {
     return this.values.get(key)?.slice();
@@ -32,6 +33,7 @@ class MemoryVault implements Vault {
   }
   async commit(changes: readonly VaultChange[]) {
     if (this.failCommit) throw new Error('interrupted');
+    this.commits++;
     const next = new Map(this.values);
     for (const change of changes) {
       if (change.kind === 'put') next.set(change.key, change.value.slice());
@@ -79,6 +81,8 @@ describe('library fact store', () => {
       schema: 1,
       generation: 'generation-a',
       head: 7,
+      rowsVersion: 7,
+      revision: expect.any(String),
       complete: false,
       profileTopology: false,
       newest: { stamp: [70, 0, 'device'], reconsiderAt: null },
@@ -127,6 +131,22 @@ describe('library fact store', () => {
       true,
     );
     expect(await newest()).toEqual([30, 0, 'device']);
+  });
+
+  it('does not revise facts or notify their writer for an unchanged empty refresh', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    await store.commitBatch('generation-a', 7, [], true, { profileTopology: true });
+    const before = (await store.manifest())!;
+    let changes = 0;
+    store.listen(() => changes++);
+    const commits = vault.commits;
+
+    await store.commitBatch('generation-a', 7, [], true, { profileTopology: true });
+
+    expect(vault.commits).toBe(commits);
+    expect(changes).toBe(0);
+    await expect(store.manifest()).resolves.toEqual(before);
   });
 
   it('reduces Watchlist and Continue independently without a watched-history fact', async () => {

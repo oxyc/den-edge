@@ -385,17 +385,13 @@ export class LibraryLogAuthority {
         options.libraryKey,
         options.vault,
         facts,
-        () => {
-          const { home } = this.#projected();
-          const summary = this.#log.currentSummary();
-          return {
-            generation: this.#log.currentGeneration ?? null,
-            head: this.#log.logHead,
-            home,
-            reconsiderAt: Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
-            shapes: new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape])),
-          };
-        },
+        () => ({
+          generation: this.#log.currentGeneration ?? null,
+          head: this.#log.logHead,
+          // The durable facts derive Home. The live log can be ahead of them with pending work, but title shapes are
+          // independent metadata and safe to lend for Continue's layout projection.
+          shapes: new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape])),
+        }),
       );
       this.#viewWriter.schedule();
     }

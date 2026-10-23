@@ -59,6 +59,13 @@ export interface LibraryFactManifest {
   schema: typeof LIBRARY_FACT_SCHEMA;
   generation: string;
   head: number;
+  /** The greatest server row sequence retained for this generation, including writes kept beside `head`. */
+  rowsVersion?: number;
+  /**
+   * Unique identity of this exact committed fact snapshot. It prevents concurrent writers that began from the same
+   * manifest from producing the same cache identity. Absent in manifests written before it was introduced.
+   */
+  revision?: string;
   complete: boolean;
   profileTopology: boolean;
   /**
@@ -170,6 +177,12 @@ const validManifest = (value: unknown): value is LibraryFactManifest => {
     held.generation.length > 0 &&
     Number.isSafeInteger(held.head) &&
     held.head! >= 0 &&
+    (held.rowsVersion === undefined ||
+      (Number.isSafeInteger(held.rowsVersion) && held.rowsVersion >= held.head!)) &&
+    (held.revision === undefined ||
+      (typeof held.revision === 'string' &&
+        held.revision.length > 0 &&
+        held.revision.length <= 128)) &&
     typeof held.complete === 'boolean' &&
     typeof held.profileTopology === 'boolean' &&
     (held.floor === undefined || (Number.isSafeInteger(held.floor) && held.floor >= 0)) &&
@@ -208,6 +221,24 @@ function withNewest(
     reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
   }
   return { stamp, reconsiderAt: Number.isFinite(reconsiderAt) ? reconsiderAt : null };
+}
+
+/** This transaction's durable identity, compatible with manifests that predate it. */
+function nextIdentity(
+  held: LibraryFactManifest | null,
+  generation: string,
+  head: number,
+  entries: readonly LibraryFactEntry[],
+): Pick<LibraryFactManifest, 'revision' | 'rowsVersion'> {
+  const previous = held?.generation === generation ? (held.rowsVersion ?? held.head) : 0;
+  let rowsVersion = Math.max(head, previous);
+  for (const { seq } of entries) rowsVersion = Math.max(rowsVersion, seq);
+  return {
+    rowsVersion,
+    revision: [...crypto.getRandomValues(new Uint8Array(16))]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join(''),
+  };
 }
 
 export function mergeFactRows(previous: Row | null, replacement: Row | null): Row | null {
@@ -338,15 +369,27 @@ export class LibraryFactStore {
       this.profileTopology = false;
     }
     const held = await this.readManifest();
-    const changes = await this.changes(generation, entries);
+    if (held?.generation === generation) this.profileTopology ||= held.profileTopology;
     this.profileTopology ||= options.profileTopology === true;
+    const floor = options.floor !== undefined && !complete ? options.floor : undefined;
+    if (
+      !entries.length &&
+      held?.generation === generation &&
+      held.head === head &&
+      held.complete === complete &&
+      held.profileTopology === this.profileTopology &&
+      held.floor === floor
+    )
+      return;
+    const changes = await this.changes(generation, entries);
     const manifest: LibraryFactManifest = {
       schema: LIBRARY_FACT_SCHEMA,
       generation,
       head,
+      ...nextIdentity(held, generation, head, entries),
       complete,
       profileTopology: this.profileTopology,
-      ...(options.floor !== undefined && !complete ? { floor: options.floor } : {}),
+      ...(floor !== undefined ? { floor } : {}),
       newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
     };
     changes.push({
@@ -379,7 +422,11 @@ export class LibraryFactStore {
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
     const held = await this.readManifest();
     if (held?.generation === generation) {
-      const manifest = { ...held, newest: withNewest(held.newest, entries) };
+      const manifest = {
+        ...held,
+        ...nextIdentity(held, generation, held.head, entries),
+        newest: withNewest(held.newest, entries),
+      };
       changes.push({
         kind: 'put',
         key: `${this.libraryId}:${manifestName}`,

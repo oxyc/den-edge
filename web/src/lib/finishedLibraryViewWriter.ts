@@ -77,16 +77,15 @@ export const factViewIdentity = (
   manifest: LibraryFactManifest,
   reconsiderAt: number | null,
 ): FinishedLibraryViewIdentity => {
-  const rowsVersion = manifest.head;
+  const rowsVersion = manifest.rowsVersion ?? manifest.head;
   return {
     libraryId,
     generation: manifest.generation,
     head: manifest.head,
-    authorityRevision: libraryLocalAuthorityRevision(
-      manifest.head,
-      rowsVersion,
-      manifest.newest?.stamp ?? null,
-    ),
+    authorityRevision: libraryLocalAuthorityRevision(manifest.head, rowsVersion, {
+      stamp: manifest.newest?.stamp ?? null,
+      revision: manifest.revision ?? null,
+    }),
     policyVersion: FINISHED_LIBRARY_POLICY,
     rowsVersion,
     layoutVersion: 'facts',
@@ -98,6 +97,9 @@ export const factViewIdentity = (
 export interface FinishedLibraryViewProjection {
   generation: string | null;
   head: number;
+  /** When supplied by a fact authority, prove its lent projection is from this exact fact snapshot. */
+  authorityRevision?: string;
+  rowsVersion?: number;
   home?: HomeLibraryView;
   reconsiderAt?: number | null;
   shapes: ReadonlyMap<string, Shape>;
@@ -105,8 +107,9 @@ export interface FinishedLibraryViewProjection {
 
 /**
  * The sole saved-view writer. Fact commits and layout observations are coalesced into one complete projection; a
- * running whole-log authority may lend its already-folded Home view, but the durable identity and rows remain the
- * fact store's. Assistant policy is intentionally absent: Home does not use it and Settings opens full authority.
+ * a fact authority may lend a Home view proven to have the same fact identity, while a running whole-log authority
+ * lends only title shapes because pending work can make its Home newer than the durable facts. Assistant policy is
+ * intentionally absent: Home does not use it and Settings opens full authority.
  */
 export class FinishedLibraryViewWriter {
   readonly #projector = new ContinueProjector();
@@ -114,6 +117,7 @@ export class FinishedLibraryViewWriter {
   #timer?: ReturnType<typeof setTimeout>;
   #saving: Promise<void> = Promise.resolve();
   #closed = false;
+  #aborted = false;
   #force = false;
 
   constructor(
@@ -136,7 +140,10 @@ export class FinishedLibraryViewWriter {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closed) {
+      await this.#saving;
+      return;
+    }
     this.#closed = true;
     this.#stop();
     if (this.#timer !== undefined) {
@@ -148,12 +155,17 @@ export class FinishedLibraryViewWriter {
   }
 
   /** Stop without deriving: ownership is moving to a full authority with its own fact-store listener. */
-  abort(): void {
-    if (this.#closed) return;
+  async abort(): Promise<void> {
+    if (this.#closed) {
+      await this.#saving;
+      return;
+    }
     this.#closed = true;
+    this.#aborted = true;
     this.#stop();
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
+    await this.#saving;
   }
 
   #queue(): void {
@@ -167,6 +179,7 @@ export class FinishedLibraryViewWriter {
   }
 
   async #write(force: boolean): Promise<void> {
+    if (this.#aborted) return;
     const manifest = await this.store.manifest();
     if (!manifest) {
       await staleFinishedLibraryViews(this.libraryKey, this.vault);
@@ -200,15 +213,25 @@ export class FinishedLibraryViewWriter {
         return;
     }
     const supplied = this.projection?.();
+    const expected = factViewIdentity(
+      this.store.libraryId,
+      manifest,
+      supplied?.reconsiderAt ?? null,
+    );
     const current =
-      supplied?.generation === manifest.generation && supplied.head === manifest.head
+      supplied?.generation === manifest.generation &&
+      supplied.head === manifest.head &&
+      supplied.authorityRevision === expected.authorityRevision &&
+      supplied.rowsVersion === expected.rowsVersion
         ? supplied
         : undefined;
     if (!current?.home) await ensureSyncPolicy();
     const selected = current?.home
       ? { view: current.home, reconsiderAt: current.reconsiderAt ?? null }
       : await this.store.home(manifest.generation, ['watchlist', 'continue', 'recommendations']);
-    const shapes = current?.shapes ?? new Map<string, Shape>();
+    // Shape observations are independent metadata. A whole-log authority may lend those, but not its Home projection:
+    // pending rows can make that projection newer than the durable fact snapshot whose identity is published.
+    const shapes = supplied?.shapes ?? new Map<string, Shape>();
     const [settingsRows, runtimeRows, deviceRows] = await Promise.all([
       this.store.settings(manifest.generation, 'settings'),
       this.store.settings(manifest.generation, 'runtime'),
@@ -255,7 +278,9 @@ export class FinishedLibraryViewWriter {
         devices: selectedDevicesView(deviceRows),
       },
     };
+    if (this.#aborted) return;
     if (!(await writeFinishedLibraryViews(this.libraryKey, this.vault, value))) return;
+    if (this.#aborted) return;
     await writeEncryptedLibraryValue(this.libraryKey, this.vault, LIBRARY_LOCAL_AUTHORITY, {
       generation: value.identity.generation,
       head: value.identity.head,

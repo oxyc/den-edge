@@ -212,6 +212,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       () => ({
         generation: this.cached.identity.generation,
         head: this.cached.identity.head,
+        authorityRevision: this.cached.identity.authorityRevision,
+        rowsVersion: this.cached.identity.rowsVersion,
         ...(this.#factHomeComplete && this.#factHome
           ? { home: this.#factHome, reconsiderAt: this.cached.identity.reconsiderAt }
           : {}),
@@ -1150,9 +1152,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     startupLibraryPromoted(reason);
     this.#cancelTimer();
     this.#cancelReconsider();
-    this.#viewWriter?.abort();
+    const writerStopped = this.#viewWriter?.abort() ?? Promise.resolve();
     // A narrow edit still sending owns its kept work until it has come to an end; the whole log takes it from there.
-    const opening = (this.#narrowSending ?? Promise.resolve())
+    const opening = Promise.all([this.#narrowSending ?? Promise.resolve(), writerStopped])
       .then(() => this.openFull())
       .then(async (authority) => {
         if (!authority)
