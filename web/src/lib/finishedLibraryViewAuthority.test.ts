@@ -95,6 +95,17 @@ const request: LibraryServiceHello = {
 };
 const content = { title: vi.fn(async () => ({ kind: 'missing' as const })) };
 
+/**
+ * The import tests open a library of a thousand sealed rows: about half a second of decrypting on a quiet machine, and
+ * several times that on one running the rest of the suite, so vitest's five seconds measures the machine rather than
+ * the code. A test that never reaches its condition still fails, at this bound.
+ */
+const TEST_TIMEOUT = 30_000;
+vi.setConfig({ testTimeout: TEST_TIMEOUT });
+
+/** `vi.waitFor` bounded by the test's timeout, not by its default second, for the same reason. */
+const waitFor = <T>(check: () => T | Promise<T>) => vi.waitFor(check, { timeout: TEST_TIMEOUT });
+
 const factTitle = (status: TitleRow['status']['value'], at: number): TitleRow => ({
   kind: 'rec',
   schema: 2,
@@ -433,8 +444,22 @@ it('resumes a cold import from an older den-edge from the last atomically commit
   });
 });
 
-/** A library whose oldest row is its preferences (anime hidden), then `titles` watchlisted titles, newest last. */
-async function settledLongAgo(titles: number) {
+const settledHistories = new Map<number, ReturnType<typeof sealSettledLongAgo>>();
+
+/**
+ * A library whose oldest row is its preferences (anime hidden), then `titles` watchlisted titles, newest last. Sealing
+ * a thousand rows is most of what these tests cost, so each size is sealed once; callers copy before changing it.
+ */
+function settledLongAgo(titles: number) {
+  let sealed = settledHistories.get(titles);
+  if (!sealed) settledHistories.set(titles, (sealed = sealSettledLongAgo(titles)));
+  return sealed;
+}
+
+// Sealed while the file is collected, so no test spends its own timeout on it.
+await settledLongAgo(1_100);
+
+async function sealSettledLongAgo(titles: number) {
   const keys = await deriveKeys(raw);
   const prefs: SettingsRow = {
     kind: 'set',
@@ -496,13 +521,13 @@ it('draws a first open from its newest page and its settings by key, then reads 
   const changed = vi.fn();
   opened!.authority.listen?.(changed);
   release();
-  await vi.waitFor(async () =>
+  await waitFor(async () =>
     expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
       head: 1_101,
       complete: true,
     }),
   );
-  await vi.waitFor(() =>
+  await waitFor(() =>
     expect(changed).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'changed',
@@ -643,7 +668,7 @@ it('resumes a newest-first import below the last committed page, and opens the l
   );
   expect(opened).not.toBeNull();
   // The stopped read leaves Home to the full log rather than to half a history.
-  await vi.waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+  await waitFor(() => expect(openFull).toHaveBeenCalledOnce());
   await opened!.authority.close?.();
 
   const resumed = changesEdge(entries, 'generation-newest');
@@ -712,8 +737,8 @@ it('applies one changed document to capability facts without opening unrelated d
       playbackActive: false,
     });
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(facts.manifest()).resolves.toMatchObject({ head: 13 }));
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await waitFor(() => expect(facts.manifest()).resolves.toMatchObject({ head: 13 }));
     await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
       watchlist: [],
       watched: [{ type: 'movie', id: 77 }],
@@ -973,7 +998,7 @@ it('does not save false assistant flags and promotes Settings for live grant/rea
     watchlist: [],
   });
   expect(openFull).not.toHaveBeenCalled();
-  await vi.waitFor(() =>
+  await waitFor(() =>
     expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
       pieces: { watchlist: { titles: [] } },
     }),
@@ -1035,7 +1060,7 @@ it('keeps the views a facts visit read, once Continue has its layouts, and the n
   await first!.authority.query({ kind: 'library.metadata', titles: [series] });
   const drawn = await first!.authority.select({ kind: 'continue' });
   expect(drawn).toMatchObject({ items: [{ title: series }], needsShapes: [] });
-  await vi.waitFor(() =>
+  await waitFor(() =>
     expect(readFinishedLibraryViews(libraryKey, vault, ['continue'])).resolves.toMatchObject({
       pieces: { continue: { view: drawn } },
     }),
@@ -1080,13 +1105,11 @@ it('keeps no views while the history is still read, and keeps them once it is wh
   await new Promise((resolve) => setTimeout(resolve, 300));
   await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toBeNull();
   release();
-  await vi.waitFor(
-    () =>
-      expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
-        identity: { generation: 'generation-kept-after-fill', head: 1_101 },
-        pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
-      }),
-    { timeout: 5_000 },
+  await waitFor(() =>
+    expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+      identity: { generation: 'generation-kept-after-fill', head: 1_101 },
+      pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
+    }),
   );
   await opened!.authority.close?.();
 });
@@ -1154,7 +1177,7 @@ it('catches kept views up from facts when den-edge moved on, and keeps the new o
       online: true,
       playbackActive: false,
     });
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(changed).toHaveBeenCalledWith(
         expect.objectContaining({
           kind: 'changed',
@@ -1167,7 +1190,7 @@ it('catches kept views up from facts when den-edge moved on, and keeps the new o
       watchlist: [],
       watched: [{ type: 'movie', id: 77 }],
     });
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
         identity: { head: 13 },
         pieces: { watchlist: { titles: [] } },
@@ -1344,7 +1367,7 @@ it('promotes when uncached metadata needs credentials from the document authorit
     kind: 'library.metadata',
     retryable: [{ type: 'movie', id: 7 }],
   });
-  await vi.waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+  await waitFor(() => expect(openFull).toHaveBeenCalledOnce());
 });
 
 it('keeps retained presentation hints without opening library documents', async () => {
@@ -1426,7 +1449,7 @@ it('keeps matching TV layouts lazy and promotes a changed layout', async () => {
   await opened!.authority.query(query);
   expect(openFull).not.toHaveBeenCalled();
   await opened!.authority.query(query);
-  await vi.waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+  await waitFor(() => expect(openFull).toHaveBeenCalledOnce());
 });
 
 it('keeps the cache on an unchanged head and promotes when reconciliation finds a change', async () => {
