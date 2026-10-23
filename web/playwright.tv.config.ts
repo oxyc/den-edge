@@ -25,6 +25,8 @@ export default defineConfig({
         : {},
   },
   webServer: {
+    // Replacing the browser webServer must preserve its upstream isolation guard for build and preview.
+    env: { DEN_E2E: '1' },
     command: `DEN_TV_OUT_DIR=${output} DEN_TV_E2E=1 npm run build:tv:${platform} && DEN_TV_OUT_DIR=${output} npm run preview:tv:${platform} -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
     url: E2E_ORIGIN,
     reuseExistingServer: false,
