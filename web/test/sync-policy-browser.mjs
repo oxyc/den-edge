@@ -24,7 +24,8 @@ const loader = ts
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.ESNext,
   })
-  .replace('../vendor/den-core/index.js', '/core/index.js');
+  .replace('../vendor/den-core/startup.js', '/core/startup.js')
+  .replace('../vendor/den-core/deferred.js', '/core/deferred.js');
 const protocol = ts.transpile(
   await readFile(new URL('../src/lib/syncPolicyProtocol.ts', import.meta.url), 'utf8'),
   { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
@@ -35,13 +36,17 @@ const timing = ts.transpile(
 );
 /** The loader's own imports, each served by its specifier resolved against `/loader.js`. */
 const modules = { '/loader.js': loader, '/syncPolicyProtocol': protocol, '/startupTiming': timing };
-const harness = `import { evaluate } from '/core/index.js';
-import { ensureSyncPolicy, preloadSyncPolicy } from '/loader.js';
+const startupRequest = requests.find((test) => test.name === 'capture seen');
+const harness = `import { evaluateStartup } from '/core/startup.js';
+import { evaluateDeferred } from '/core/deferred.js';
+import { ensureSyncPolicy, ensureDeferredSyncPolicy, preloadSyncPolicy } from '/loader.js';
 window.preloadSync = preloadSyncPolicy;
-window.runSync = async () => { await ensureSyncPolicy(); return JSON.parse(evaluate(JSON.stringify({op:'issue',last:[5000,2,'peer'],now:2000,device:'web'}))); };
+window.runStartup = async () => { await ensureSyncPolicy(); return JSON.parse(evaluateStartup(JSON.stringify(${JSON.stringify(startupRequest.request)}))); };
+window.runDeferred = async () => { await ensureDeferredSyncPolicy(); return JSON.parse(evaluateDeferred(JSON.stringify({op:'issue',last:[5000,2,'peer'],now:2000,device:'web'}))); };
 window.harnessReady = true;
 window.benchmark = () => ${JSON.stringify(requests)}.map(test => {
   const start=performance.now(), count=10000;
+  const evaluate = test.request.op === 'commands' ? evaluateDeferred : evaluateStartup;
   for(let i=0;i<count;i++) JSON.parse(evaluate(JSON.stringify(test.request)));
   return {operation:test.name, count, totalMs:performance.now()-start};
 });`;
@@ -61,7 +66,10 @@ const server = createServer(async (request, response) => {
     } else if (path === '/harness.js' || path in modules) {
       response.writeHead(200, { 'content-type': 'text/javascript' });
       response.end(path === '/harness.js' ? harness : modules[path]);
-    } else if (/^\/core\/(index\.js|generated\/den_core(?:\.js|_bg\.wasm))$/.test(path)) {
+    } else if (
+      /^\/core\/(?:startup|deferred)\.js$/.test(path) ||
+      /^\/core\/generated\/den_core_(?:startup|deferred)(?:\.js|_bg\.wasm)$/.test(path)
+    ) {
       const wasm = path.endsWith('.wasm');
       if (wasm) downloads++;
       response.writeHead(200, {
@@ -108,18 +116,22 @@ try {
   await page.waitForFunction(() => window.harnessReady);
   await page.evaluate(() => window.preloadSync());
   assert.equal(downloads, 0, 'idle work has not fetched yet');
-  const expected = { version: 1, ok: [5000, 3, 'web'] };
-  assert.deepEqual(await page.evaluate(() => Promise.all([window.runSync(), window.runSync()])), [
-    expected,
-    expected,
-  ]);
-  assert.equal(downloads, 1, 'early concurrent actions share one request');
+  const expectedStartup = { version: 1, ok: startupRequest.ok };
+  const expectedDeferred = { version: 1, ok: [5000, 3, 'web'] };
+  assert.deepEqual(
+    await page.evaluate(() => Promise.all([window.runStartup(), window.runStartup()])),
+    [expectedStartup, expectedStartup],
+  );
+  assert.equal(downloads, 1, 'early concurrent reads share one startup request');
+  assert.deepEqual(
+    await page.evaluate(() => Promise.all([window.runDeferred(), window.runDeferred()])),
+    [expectedDeferred, expectedDeferred],
+  );
+  assert.equal(downloads, 2, 'early concurrent actions share one deferred request');
   console.log(JSON.stringify(await page.evaluate(() => ({ operations: window.benchmark() }))));
   await context.setOffline(true);
-  assert.deepEqual(await page.evaluate(() => window.runSync()), {
-    version: 1,
-    ok: [5000, 3, 'web'],
-  });
+  assert.deepEqual(await page.evaluate(() => window.runStartup()), expectedStartup);
+  assert.deepEqual(await page.evaluate(() => window.runDeferred()), expectedDeferred);
   await context.close();
   const idlePage = await browser.newPage();
   await idlePage.addInitScript(() => {
@@ -135,7 +147,7 @@ try {
     window.preloadSync();
     window.idleWork();
   });
-  assert.deepEqual(await idlePage.evaluate(() => window.runSync()), expected);
+  assert.deepEqual(await idlePage.evaluate(() => window.runStartup()), expectedStartup);
 
   const retry = await browser.newPage();
   let attempts = 0;
@@ -146,20 +158,20 @@ try {
   await retry.waitForFunction(() => window.harnessReady);
   assert.equal(
     await retry.evaluate(() =>
-      window.runSync().then(
+      window.runStartup().then(
         () => false,
         () => true,
       ),
     ),
     true,
   );
-  assert.deepEqual(await retry.evaluate(() => window.runSync()), expected);
+  assert.deepEqual(await retry.evaluate(() => window.runStartup()), expectedStartup);
   assert.equal(attempts, 2, 'failed loads retry without reloading the page');
   const blocked = await browser.newPage();
   await blocked.goto(`${origin}/blocked`);
   await blocked.waitForFunction(() => window.harnessReady);
   const error = await blocked.evaluate(() =>
-    window.runSync().then(
+    window.runStartup().then(
       () => '',
       (error) => String(error),
     ),
