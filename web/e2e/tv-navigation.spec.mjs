@@ -228,7 +228,6 @@ test('a touch preview opens Search and focuses its editor within the activating 
     });
     await setup(page);
     await browse(page);
-    expect(await page.evaluate(() => document.documentElement.clientWidth)).toBe(390);
     await page.getByRole('button', { name: 'Search', exact: true }).tap();
     await expect(page).toHaveURL(/\/search/);
     await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();
@@ -236,6 +235,55 @@ test('a touch preview opens Search and focuses its editor within the activating 
       active: true,
       editorFocused: true,
     });
+  } finally {
+    await context.close();
+  }
+});
+
+test('an iPhone preview scales one complete 1920px TV canvas', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await context.newPage();
+  try {
+    await setup(page);
+    await browse(page);
+    await expect(page.getByText('Services unavailable')).toBeVisible({ timeout: 30_000 });
+    const layout = await page.evaluate(() => ({
+      bodyWidth: document.body.getBoundingClientRect().width,
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      viewport: document.querySelector('meta[name="viewport"]')?.getAttribute('content'),
+      bar: (() => {
+        const box = document.querySelector('header.bar')?.getBoundingClientRect();
+        return box && { left: box.left, right: box.right, width: box.width };
+      })(),
+      main: (() => {
+        const box = document.querySelector('main')?.getBoundingClientRect();
+        return box && { left: box.left, right: box.right, width: box.width };
+      })(),
+      services: (() => {
+        const box = document.querySelector('[aria-label="Services"]')?.getBoundingClientRect();
+        return box && { left: box.left, right: box.right, width: box.width };
+      })(),
+    }));
+    expect(layout).toMatchObject({
+      clientWidth: 1920,
+      scrollWidth: 1920,
+      viewport: 'width=1920, initial-scale=1',
+    });
+    expect(layout.bodyWidth).toBeCloseTo(1920);
+    expect(layout.bar?.left).toBeCloseTo(96);
+    expect(layout.bar?.right).toBeCloseTo(1824);
+    expect(layout.bar?.width).toBeCloseTo(1728);
+    expect(layout.main?.left).toBeCloseTo(0);
+    expect(layout.main?.right).toBeCloseTo(1920);
+    expect(layout.main?.width).toBeCloseTo(1920);
+    expect(layout.services?.left).toBeCloseTo(96);
+    expect(layout.services?.right).toBeCloseTo(1824);
+    expect(layout.services?.width).toBeCloseTo(1728);
   } finally {
     await context.close();
   }
