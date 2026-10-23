@@ -871,10 +871,10 @@ it('names the device a Continue item was watched on, as the full log does', asyn
 /** Every root view a LibraryModel selects (`libraryModel.svelte.ts`). */
 const roots = ['overview', 'continue', 'settings', 'runtime', 'devices'] as const;
 
-it('saves preferences without assistant policy and promotes when Settings asks for connections', async () => {
+it('does not save false assistant flags and promotes Settings for live grant/read rows', async () => {
   const vault = new FactVault();
   const keys = await deriveKeys(raw);
-  const stamp: [number, number, string] = [10, 0, 'device'];
+  const stamp: [number, number, string] = [10, 0, '0123456789abcdef'];
   const prefs: SettingsRow = {
     kind: 'set',
     schema: 2,
@@ -885,31 +885,81 @@ it('saves preferences without assistant policy and promotes when Settings asks f
     kind: 'set',
     schema: 2,
     name: 'assistant-grants',
-    values: { grant: { value: { bool: true }, at: stamp } },
+    values: {
+      '0123456789abcdef0123456789abcdef': {
+        value: {
+          string: JSON.stringify({
+            v: 1,
+            client: 'Claude',
+            createdAt: Date.now() - 1_000,
+            expiresAt: Date.now() + 86_400_000,
+            revokedAt: null,
+            cap: 100,
+            ops: ['seen'],
+            pk: 'a'.repeat(43),
+          }),
+        },
+        at: stamp,
+      },
+    },
+  };
+  const reads: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'assistant-read',
+    values: {
+      fedcba9876543210fedcba9876543210: {
+        value: {
+          string: JSON.stringify({
+            v: 1,
+            client: 'ChatGPT',
+            createdAt: Date.now() - 1_000,
+            expiresAt: Date.now() + 86_400_000,
+            revokedAt: null,
+            key: 'b'.repeat(43),
+          }),
+        },
+        at: stamp,
+      },
+    },
   };
   const entries = await Promise.all(
-    [prefs, grants].map(async (row, index) => {
+    [prefs, grants, reads].map(async (row, index) => {
       const encrypted = await seal(keys, row);
       return { k: encrypted.k, seq: index + 1, value: encrypted.v, row };
     }),
   );
   const facts = (await LibraryFactStore.open(libraryKey, vault))!;
-  await facts.commitBatch('generation-assistant', 2, entries, true);
-  const openFull = vi.fn(async () => fullAuthority());
+  await facts.commitBatch('generation-assistant', 3, entries, true);
+  const full = fullAuthority();
+  vi.spyOn(full, 'select').mockImplementation(async (selection) => {
+    if (selection.kind === 'settings')
+      return {
+        kind: 'settings',
+        preferences: { hideAnime: true },
+        assistant: { read: true, write: true },
+      } as never;
+    throw new Error(`unexpected ${selection.kind}`);
+  });
+  const openFull = vi.fn(async () => full);
   const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
-  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
-    preferences: { hideAnime: true },
-    assistant: { read: false, write: false },
+  // The background writer keeps the assistant-independent Home pieces, but must not turn the live rows into a
+  // durable disabled Settings answer before Settings asks.
+  await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    kind: 'overview',
+    watchlist: [],
   });
   expect(openFull).not.toHaveBeenCalled();
   await vi.waitFor(() =>
-    expect(readFinishedLibraryViews(libraryKey, vault, ['settings'])).resolves.toMatchObject({
-      pieces: { settings: { preferences: { hideAnime: true } } },
+    expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+      pieces: { watchlist: { titles: [] } },
     }),
   );
-  await expect(opened!.authority.select({ kind: 'connections' })).rejects.toThrow(
-    'unexpected connections',
-  );
+  await expect(readFinishedLibraryViews(libraryKey, vault, ['settings'])).resolves.toBeNull();
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    preferences: { hideAnime: true },
+    assistant: { read: true, write: true },
+  });
   expect(openFull).toHaveBeenCalledOnce();
   await opened!.authority.close?.();
 });
@@ -1172,6 +1222,32 @@ it('answers a drain that found nothing from the drop-box row, without opening th
     affected: [],
   });
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('promotes an assistant renewal so live grant rows are renewed by the document authority', async () => {
+  const vault = new MemoryVault();
+  await cached(vault);
+  const full = fullAuthority();
+  vi.spyOn(full, 'task').mockResolvedValue({
+    result: { kind: 'assistant.renew', renewed: 2 },
+    affected: [],
+  });
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.task(
+      {
+        kind: 'assistant.renew',
+        grants: ['0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'],
+      },
+      'renew',
+    ),
+  ).resolves.toEqual({
+    result: { kind: 'assistant.renew', renewed: 2 },
+    affected: [],
+  });
+  expect(openFull).toHaveBeenCalledOnce();
 });
 
 it('promotes an unsupported view to the authoritative document path', async () => {

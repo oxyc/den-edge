@@ -106,10 +106,11 @@ export interface FinishedLibraryViewProjection {
 }
 
 /**
- * The sole saved-view writer. Fact commits and layout observations are coalesced into one complete projection; a
- * a fact authority may lend a Home view proven to have the same fact identity, while a running whole-log authority
- * lends only title shapes because pending work can make its Home newer than the durable facts. Assistant policy is
- * intentionally absent: Home does not use it and Settings opens full authority.
+ * One saved-view writer per authority. Fact commits and layout observations are coalesced into a durable projection.
+ * A fact authority may lend Home with the same fact identity; the whole-log authority lends only title shapes,
+ * because pending work can make its Home newer than the durable facts. Assistant policy is intentionally absent:
+ * grant/read rows omit Settings while preserving the other capabilities. Selecting Settings promotes to the full,
+ * time-aware authority before answering the flags that drive Home's background assistant work.
  */
 export class FinishedLibraryViewWriter {
   readonly #projector = new ContinueProjector();
@@ -237,13 +238,10 @@ export class FinishedLibraryViewWriter {
       this.store.settings(manifest.generation, 'runtime'),
       this.store.settings(manifest.generation, 'devices'),
     ]);
-    const settings = selectedSettingsView(
-      // The saved Home settings contain preferences only. Grant/read rows require assistant policy and are opened by
-      // the full authority when Settings asks for its connections view.
-      settingsRows.filter((row) => row.name === 'prefs'),
-      manifest.profileTopology,
-    );
-    if (!settings) return;
+    // Grant/read rows need the assistant policy. `selectedSettingsView` returns null for them, so this background
+    // writer omits only that capability instead of saving false connection flags. The other five views remain useful
+    // on the next visit; asking for Settings promotes to the time-aware document authority.
+    const settings = selectedSettingsView(settingsRows, manifest.profileTopology);
     const overview = factOverview(selected.view);
     const continued = factContinue(
       selected.view,
@@ -273,7 +271,7 @@ export class FinishedLibraryViewWriter {
         watchlist: { titles: overview.watchlist },
         recommendations,
         continue: { view: continued, layouts },
-        settings,
+        ...(settings ? { settings } : {}),
         runtime: selectedRuntimeView(runtimeRows),
         devices: selectedDevicesView(deviceRows),
       },

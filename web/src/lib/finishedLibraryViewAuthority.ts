@@ -1112,10 +1112,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         return false;
       if (capabilities.includes('settings')) {
         const rows = await this.factStore.settings(this.cached.identity.generation, 'settings');
-        const view = selectedSettingsView(
-          rows.filter((row) => row.name === 'prefs'),
-          factManifest.profileTopology,
-        );
+        // Assistant grant/read rows cannot be reduced without the assistant policy. A null view promotes to the
+        // document authority, which preserves its live connection flags and background-work contract.
+        const view = selectedSettingsView(rows, factManifest.profileTopology);
         if (!view) return false;
         this.cached.pieces.settings = view;
       }

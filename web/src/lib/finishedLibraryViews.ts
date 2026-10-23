@@ -16,7 +16,8 @@ import { LIBRARY_SERVICE_PROTOCOL } from './libraryServiceProtocol';
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
 
 export const FINISHED_LIBRARY_VIEWS_SCHEMA = 1;
-export const FINISHED_LIBRARY_POLICY = 1;
+// Version 2 invalidates settings views that could have recorded live assistant grants/reads as false.
+export const FINISHED_LIBRARY_POLICY = 2;
 export const FINISHED_LIBRARY_RECOMMENDATIONS = 1;
 const NAME = 'finished-views.v1';
 const CAPABILITIES: readonly FinishedLibraryViewCapability[] = [
