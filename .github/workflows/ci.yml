@@ -109,7 +109,21 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run audit
       - run: npm run lint
+      # The profile integration suites run against the real den-edge binary built from this commit. With
+      # DEN_EDGE_REQUIRED=1 a missing binary fails them instead of skipping them.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: .
+      - name: Build den-edge for the integration suites
+        working-directory: .
+        run: cargo build --locked --bin den-edge
       - run: npm test
+        env:
+          DEN_EDGE_REQUIRED: "1"
+          DEN_EDGE_BIN: ${{ github.workspace }}/target/debug/den-edge
       - run: node scripts/test-tv-core.mjs
       - run: npm run build
       - run: npm run check:tv-isolation

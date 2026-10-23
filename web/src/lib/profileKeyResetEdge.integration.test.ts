@@ -28,11 +28,13 @@ import { deriveKeys, fromBase64url, seal, sealPlaintext, type Row } from './wire
  * profile migration's off, and the real LibraryLog primitives over HTTP. Nothing in den-edge is faked, so every response shape the adapter
  * relies on, the source digest, the generation on a retirement and the new-library guards are the production ones.
  *
- * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one.
+ * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one, unless
+ * DEN_EDGE_REQUIRED=1 (CI), where a missing binary fails the suite.
  */
 
 const BINARY = process.env.DEN_EDGE_BIN ?? resolve(__dirname, '../../../target/debug/den-edge');
 const available = existsSync(BINARY);
+const required = process.env.DEN_EDGE_REQUIRED === '1';
 
 const OWNER = '00112233445566778899aabbccddeeff';
 const MINA = '11112222333344445555666677778888';
@@ -366,5 +368,7 @@ describe.skipIf(!available)(
 );
 
 describe.skipIf(available)('the compound key reset against the real den-edge (skipped)', () => {
-  it.skip('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {});
+  it.skipIf(!required)('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {
+    throw new Error(`DEN_EDGE_REQUIRED is set but there is no den-edge binary at ${BINARY}`);
+  });
 });
