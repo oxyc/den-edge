@@ -910,7 +910,15 @@ export class LibraryLogAuthority {
       (task.kind === 'local-library.merge' && task.sourceLibraryKey === this.#options.libraryKey)
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
-    return this.#administration().task(task, operationId);
+    const result = await this.#administration().task(task, operationId);
+    // Administrative work writes through LibraryAdminAuthority, outside the command helpers below that invalidate
+    // finished views. Make the invalidation durable before the task answer lets the page navigate: otherwise a
+    // local-library merge can reopen an empty pre-merge Watchlist at the post-merge head.
+    if (result.affected.length) {
+      this.#changeFinishedRevision();
+      await this.#finishedSaving;
+    }
+    return result;
   }
 
   /** The Owner PIN, only once it is delivered to every device: a queued PIN is not yet the household's. */
