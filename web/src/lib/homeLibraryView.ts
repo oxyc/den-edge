@@ -191,7 +191,11 @@ export function selectHomeLibraryViewFromFold(
       .filter((record) => !record.deleted && record.status === 'watchlist')
       .sort((a, b) => b.addedAt - a.addedAt)
       .map((record) => titleKey(record.title)),
-    standings: [...standings(library)],
+    // In key order: `standings` keeps the order marks were made in, which an episode mark moves without changing one
+    // title's standing, and a saved recommendations piece that says the same is not written again.
+    standings: [...standings(library)].sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    ),
     weighted: library.records.flatMap((record) => {
       if (record.deleted) return [];
       const key = titleKey(record.title);

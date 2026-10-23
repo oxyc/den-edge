@@ -1107,11 +1107,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           layouts: Object.fromEntries(
             [...this.#factShapes].map(([key, shape]) => [
               key,
-              JSON.stringify({
-                seasons: [...shape.counts]
-                  .map(([season, episodes]) => ({ season, episodes }))
-                  .sort((left, right) => left.season - right.season),
-                lastAired: shape.lastAired ?? null,
+              libraryMetadataShapeDigest({
+                seasons: [...shape.counts].map(([season, episodes]) => ({ season, episodes })),
+                ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
               }),
             ]),
           ),

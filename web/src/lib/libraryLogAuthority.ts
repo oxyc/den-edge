@@ -36,7 +36,11 @@ import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
 import { selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
-import { libraryMetadataShape, libraryMetadataTitle } from './libraryMetadata';
+import {
+  libraryMetadataShape,
+  libraryMetadataShapeDigest,
+  libraryMetadataTitle,
+} from './libraryMetadata';
 import {
   FINISHED_LIBRARY_POLICY,
   FINISHED_LIBRARY_RECOMMENDATIONS,
@@ -1257,12 +1261,7 @@ export class LibraryLogAuthority {
         throw authorityError('invalid-request', 'title shape contains a duplicate season');
       counts.set(season, episodes);
     }
-    const digest = JSON.stringify({
-      seasons: [...counts]
-        .sort(([a], [b]) => a - b)
-        .map(([season, episodes]) => ({ season, episodes })),
-      lastAired: observation.lastAired ?? null,
-    });
+    const digest = libraryMetadataShapeDigest(observation);
     const key = titleKey(observation.title);
     if (this.#shapes.get(key)?.digest === digest) return { outcome: 'unchanged', affected: [] };
     this.#shapes.set(key, {
