@@ -561,6 +561,40 @@ export async function forgetPublication(context, edge) {
   await forget.close();
 }
 
+/**
+ * The assistant publishes `page`'s library Worker is asked for (`publishWhileOpen`, one every 30 s), by when each was
+ * asked. `answeredSince(at)`: whether one asked at `at` or later has been answered — built and recorded, or found up
+ * to date, from everything the library had learnt by `at`.
+ */
+async function watchPublishes(page) {
+  // On the page's side of the Worker: the Worker can answer a request before its own listeners hear it.
+  await page.addInitScript(() => {
+    const asked = new Map();
+    const answered = (globalThis.__publishesAnswered = []);
+    const listening = new WeakSet();
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (message, ...rest) {
+      if (!listening.has(this)) {
+        listening.add(this);
+        this.addEventListener('message', ({ data }) => {
+          for (const reply of Array.isArray(data) ? data : [])
+            if (asked.has(reply?.requestId)) {
+              answered.push(asked.get(reply.requestId));
+              asked.delete(reply.requestId);
+            }
+        });
+      }
+      if (message?.type === 'task' && message.task?.kind === 'assistant.publish')
+        asked.set(message.requestId, Date.now());
+      return post.call(this, message, ...rest);
+    };
+  });
+  return {
+    answeredSince: (at) =>
+      page.evaluate((since) => globalThis.__publishesAnswered.some((asked) => asked >= since), at),
+  };
+}
+
 /** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */
 export async function settleProjection(context, edge, options = {}) {
   for (let round = 0; round < 4; round += 1) {
@@ -630,6 +664,7 @@ export async function bigHousehold(context, edge, options = {}) {
     page.on('request', (request) => {
       if (new URL(request.url()).pathname.startsWith('/tmdb/')) lastTmdb = Date.now();
     });
+    const publishes = await watchPublishes(page);
     for (const path of ['/', '/watchlist']) {
       await page.goto(`${E2E_ORIGIN}${path}`);
       await expect(page.locator('main').getByText('Continue Watching').first()).toBeVisible({
@@ -642,6 +677,17 @@ export async function bigHousehold(context, edge, options = {}) {
         })
         .toBeGreaterThan(3_000);
     }
+    // And published what it named: a projection is built from the series layouts the page has learnt as well as the
+    // library, and kept with them (`LibraryAssistantAuthority`). The Watchlist's first publish comes some seconds in,
+    // often after its names are in: a page closed once they are leaves this browser with nothing published, and each
+    // settling visit below then builds from as much as it had learnt by its own first publish.
+    const named = Date.now();
+    await expect
+      .poll(() => publishes.answeredSince(named), {
+        timeout: 90_000,
+        message: '/watchlist published what it named',
+      })
+      .toBe(true);
     step('primed');
   } finally {
     await page.close();

@@ -27,11 +27,13 @@ import {
  * Nothing in den-edge is faked. The committed state is built with den-edge's own rewrite (a new generation, wire minimum
  * 5, the household half of the rows and the `profiles` directory) beside an Owner library holding the profile half.
  *
- * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one.
+ * It needs a built binary (`cargo build --locked`, or DEN_EDGE_BIN) and is skipped, visibly, without one, unless
+ * DEN_EDGE_REQUIRED=1 (CI), where a missing binary fails the suite.
  */
 
 const BINARY = process.env.DEN_EDGE_BIN ?? resolve(__dirname, '../../../target/debug/den-edge');
 const available = existsSync(BINARY);
+const required = process.env.DEN_EDGE_REQUIRED === '1';
 
 const OWNER = '00112233445566778899aabbccddeeff';
 const keyOf = (byte: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(byte)));
@@ -462,6 +464,11 @@ describe.skipIf(!available)(
 describe.skipIf(available)(
   'a cached household meeting its committed profile directory (skipped)',
   () => {
-    it.skip('needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN', () => {});
+    it.skipIf(!required)(
+      'needs a built den-edge: cargo build --locked, or set DEN_EDGE_BIN',
+      () => {
+        throw new Error(`DEN_EDGE_REQUIRED is set but there is no den-edge binary at ${BINARY}`);
+      },
+    );
   },
 );

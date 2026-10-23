@@ -13,7 +13,7 @@ import { libraryVault, type Vault } from './localVault';
 import { LibraryLog, LibraryUpdateRequiredError, type DeferredDelivery } from './log';
 import { readApiKey } from './prefs';
 import { useLibraryRelayMembership } from './relayFetch';
-import { startupMark } from './startupTiming';
+import { startupLibraryWorker, startupMark } from './startupTiming';
 import { resetLibraryStartupMetrics } from './libraryStartupMetrics';
 import { openFinishedLibraryViewAuthority, type NarrowEdit } from './finishedLibraryViewAuthority';
 import {
@@ -185,6 +185,7 @@ export async function openLibraryServiceAuthority(
     progress,
     openNarrow,
   );
+  startupLibraryWorker(request.wire === 5 ? 'household' : 'profile', cached?.views ?? 'miss');
   if (!cached) return openFull();
   const releaseMembership = useLibraryRelayMembership(cached.membership);
   const releaseCredentials = contentCredentials?.bind({

@@ -2,9 +2,16 @@
 // TMDB later. Continue Watching keeps only the policy inputs that can still be affected by those late TV shapes.
 
 import { WATCHED } from './actions';
-import { readDownloads, type Download } from './downloadRows';
-import { standings, titleKey, type Library, type Standing } from './library';
-import type { Row, TitleRow } from './wire';
+import { deviceName, readDownloads, type Download } from './downloadRows';
+import {
+  standings,
+  titleKey,
+  type ContinueProjector,
+  type Library,
+  type Standing,
+} from './library';
+import type { LibrarySelectionValue } from './libraryServiceProtocol';
+import type { Row, SettingsRow, TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -191,7 +198,11 @@ export function selectHomeLibraryViewFromFold(
       .filter((record) => !record.deleted && record.status === 'watchlist')
       .sort((a, b) => b.addedAt - a.addedAt)
       .map((record) => titleKey(record.title)),
-    standings: [...standings(library)],
+    // In key order: `standings` keeps the order marks were made in, which an episode mark moves without changing one
+    // title's standing, and a saved recommendations piece that says the same is not written again.
+    standings: [...standings(library)].sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    ),
     weighted: library.records.flatMap((record) => {
       if (record.deleted) return [];
       const key = titleKey(record.title);
@@ -211,6 +222,32 @@ export function selectHomeLibraryViewFromFold(
     continueLibrary: compactContinueLibrary(library),
     downloads,
   };
+}
+
+/**
+ * Continue Watching's items as `projector` decides them, each naming the device it was last watched on from the
+ * library's `devices` row: the one projection of them the whole log and the fact store both answer with.
+ */
+export function continueItems(
+  projector: ContinueProjector,
+  library: Library,
+  devices: SettingsRow | undefined,
+): Extract<LibrarySelectionValue, { kind: 'continue' }>['items'] {
+  return projector
+    .project(library)
+    .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
+      const device = by && deviceName(devices, by)?.slice(0, 256);
+      return {
+        title: { type: ref.type, id: ref.id },
+        fraction,
+        ...(episode ? { episode } : {}),
+        ...(seconds !== undefined ? { seconds } : {}),
+        ...(at !== undefined ? { updatedAt: at } : {}),
+        ...(liveEpisode ? { liveEpisode } : {}),
+        ...(liveFraction !== undefined ? { liveFraction } : {}),
+        ...(device ? { device } : {}),
+      };
+    });
 }
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {

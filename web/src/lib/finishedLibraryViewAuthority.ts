@@ -56,7 +56,7 @@ import {
 } from './libraryAssistantAuthority';
 import { ensureAssistantPolicy } from './assistantCore';
 import { syncPolicy } from './syncCore';
-import { startupMark } from './startupTiming';
+import { startupLibraryPromoted, startupMark, type LibraryPromotion } from './startupTiming';
 import {
   RETAINED_HOME_SHELVES,
   RETAINED_PREFERENCE_SEED,
@@ -71,7 +71,7 @@ import {
   libraryMetadataTitle,
 } from './libraryMetadata';
 import { ContinueProjector, titleKey, type Shape } from './library';
-import type { HomeLibraryView } from './homeLibraryView';
+import { continueItems, type HomeLibraryView } from './homeLibraryView';
 import { episodeRow, episodeRowNames, titleCoordinates, titleRow, titleView } from './titleView';
 import {
   believe,
@@ -158,19 +158,10 @@ const factContinue = (
   home: HomeLibraryView,
   shapes: ReadonlyMap<string, Shape>,
   projector: ContinueProjector,
+  devices: SettingsRow | undefined,
 ): Extract<LibrarySelectionValue, { kind: 'continue' }> => ({
   kind: 'continue',
-  items: projector
-    .project({ ...home.continueLibrary, shapes: new Map(shapes) })
-    .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction }) => ({
-      title: { type: ref.type, id: ref.id },
-      fraction,
-      ...(episode ? { episode } : {}),
-      ...(seconds !== undefined ? { seconds } : {}),
-      ...(at !== undefined ? { updatedAt: at } : {}),
-      ...(liveEpisode ? { liveEpisode } : {}),
-      ...(liveFraction !== undefined ? { liveFraction } : {}),
-    })),
+  items: continueItems(projector, { ...home.continueLibrary, shapes: new Map(shapes) }, devices),
   needsShapes: home.requiredShapeRefs.filter((key) => !shapes.has(key)).map(factRef),
 });
 
@@ -194,6 +185,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   readonly #factProjector = new ContinueProjector();
   readonly #factShapes = new Map<string, Shape>();
   #factHome?: HomeLibraryView;
+  /** The `devices` row Continue's items name their device from, read with `#factHome`. */
+  #factDevices?: SettingsRow;
   /** Series shapes the page observed, by title: a title's view needs its episodes, and a promotion is told them. */
   readonly #titleShapes = new Map<
     string,
@@ -1014,7 +1007,12 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         });
       }
       this.cached.pieces.continue = {
-        view: factContinue(this.#factHome, this.#factShapes, this.#factProjector),
+        view: factContinue(
+          this.#factHome,
+          this.#factShapes,
+          this.#factProjector,
+          this.#factDevices,
+        ),
         layouts: {
           ...cached.layouts,
           ...Object.fromEntries(
@@ -1101,17 +1099,18 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       }
       if (capabilities.includes('continue')) {
         this.#factHome = home;
+        this.#factDevices = (
+          await this.factStore.settings(this.cached.identity.generation, 'devices')
+        ).find((row) => row.name === 'devices');
         this.cached.identity.reconsiderAt = reconsiderAt;
         this.cached.pieces.continue = {
-          view: factContinue(home, this.#factShapes, this.#factProjector),
+          view: factContinue(home, this.#factShapes, this.#factProjector, this.#factDevices),
           layouts: Object.fromEntries(
             [...this.#factShapes].map(([key, shape]) => [
               key,
-              JSON.stringify({
-                seasons: [...shape.counts]
-                  .map(([season, episodes]) => ({ season, episodes }))
-                  .sort((left, right) => left.season - right.season),
-                lastAired: shape.lastAired ?? null,
+              libraryMetadataShapeDigest({
+                seasons: [...shape.counts].map(([season, episodes]) => ({ season, episodes })),
+                ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
               }),
             ]),
           ),
@@ -1224,7 +1223,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       );
   }
 
-  #promote(reason: string): Promise<LibraryServiceAuthority> {
+  #promote(reason: `${LibraryPromotion}:${string}`): Promise<LibraryServiceAuthority> {
     if (this.#full) return Promise.resolve(this.#full);
     if (this.#opening) return this.#opening;
     if (this.#closed)
@@ -1238,6 +1237,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     noteFinishedViewPromotion(reason);
     // A promotion reads the whole log again: worth seeing in a startup's milestones when it happens.
     startupMark('library promoted', reason);
+    startupLibraryPromoted(reason);
     this.#cancelTimer();
     this.#cancelReconsider();
     // The whole log keeps its own views from here.
@@ -1283,6 +1283,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
 export interface FinishedLibraryViewAuthorityOpen {
   authority: LibraryServiceAuthority;
   membership: { libraryId: string; memberToken: string };
+  /** Opened from the views a visit saved, or from the fact store without them. */
+  views: 'saved' | 'facts';
 }
 
 /** One edit's authority on a log of its own documents, and how its send came to end (`LibraryLog.openNarrow`). */
@@ -1779,6 +1781,7 @@ export async function openFinishedLibraryViewAuthority(
         openNarrow,
       ),
       membership,
+      views: classic ? 'saved' : 'facts',
     };
   } finally {
     raw.fill(0);

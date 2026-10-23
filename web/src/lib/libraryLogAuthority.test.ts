@@ -18,7 +18,9 @@ import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
 import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
-import { readFinishedLibraryViews } from './finishedLibraryViews';
+import { readFinishedLibraryViews, writeFinishedLibraryViews } from './finishedLibraryViews';
+import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
+import { writeEncryptedLibraryValue } from './libraryLocalValue';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -427,6 +429,74 @@ describe('LibraryLogAuthority', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('leaves the views a visit read from facts at its head for the next one, until it edits', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    server.allowWrites();
+    const all = [
+      'watchlist',
+      'continue',
+      'recommendations',
+      'settings',
+      'runtime',
+      'devices',
+    ] as const;
+    const open = async () => {
+      const log = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'facts-views-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      return Object.assign(
+        authority(log, clock, 'online', undefined, undefined, { libraryKey: KEY, vault }),
+        { log },
+      );
+    };
+    const first = await open();
+    await first.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
+    await vi.waitFor(() => expect(first.log.pendingActions).toBe(0));
+    await first.close();
+    // A visit that has read the write back from den-edge draws Home, and keeps its views at that head.
+    const home = await open();
+    expect(home.log.logHead).toBeGreaterThan(0);
+    await cacheSelections(home);
+    const written = await vi.waitFor(async () => {
+      const views = await readFinishedLibraryViews(KEY, vault, [...all]);
+      expect(views?.identity.head).toBe(home.log.logHead);
+      return views!;
+    });
+    await home.close();
+    // The same views as a visit that drew Home from the fact store keeps them: named by the facts' head.
+    const identity = {
+      ...written.identity,
+      authorityRevision: `facts:${written.identity.head}`,
+      layoutVersion: 'facts',
+    };
+    await writeFinishedLibraryViews(KEY, vault, { ...written, identity });
+    await writeEncryptedLibraryValue(KEY, vault, LIBRARY_LOCAL_AUTHORITY, {
+      generation: identity.generation,
+      head: identity.head,
+      authorityRevision: identity.authorityRevision,
+      rowsVersion: identity.rowsVersion,
+    });
+
+    // The Watchlist reads the whole log for its history, and selects the overview but not Continue.
+    const watchlist = await open();
+    await watchlist.select({ kind: 'overview' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await watchlist.close();
+    await expect(readFinishedLibraryViews(KEY, vault, [...all])).resolves.toMatchObject({
+      identity: { authorityRevision: identity.authorityRevision },
+    });
+
+    const edits = await open();
+    await edits.select({ kind: 'overview' });
+    await edits.command({ kind: 'watchlist.add', title: series }, 'add-eleven');
+    await edits.close();
+    await expect(readFinishedLibraryViews(KEY, vault, [])).resolves.toBeNull();
   });
 
   it('keeps a projected PIN non-authoritative across reload until its exact row syncs', async () => {

@@ -663,8 +663,14 @@ export class LibraryAssistantAuthority {
     const prefs = this.#row(PREFS_ROW);
     const localRevoked = this.#revoked(records, lent);
     // The library as it stands now, written once: the inputs' digest and the build's request share it, and later
-    // changes to the rows cannot reach a build already on its way.
-    const documents = JSON.stringify(this.port.documents());
+    // changes to the rows cannot reach a build already on its way. In one order whatever order the log holds them in:
+    // a page that wrote or synced them holds them as they came, one that read them back from this device's store as
+    // the store keeps them, and the same library must be the same inputs on both, or every returning page rebuilds it.
+    const documents = `[${this.port
+      .documents()
+      .map((document) => JSON.stringify(document))
+      .sort()
+      .join(',')}]`;
     const known = JSON.stringify(layouts);
     // Not the log's head, which every write moves, nor the clock: what the lists are made of. Nor a grant's expiry,
     // which only its daily renewal moves: whether it is live is den-core's to decide when it is next built, and the
