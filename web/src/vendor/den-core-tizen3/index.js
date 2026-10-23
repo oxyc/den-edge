@@ -11,7 +11,7 @@ function core() {
   return value;
 }
 
-/** Keep the 4 MB fallback out of Babel and the app/Worker bundles; the browser loads it as an inert classic asset. */
+/** Keep the JavaScript fallback out of Babel and app/Worker bundles; load it once as a classic asset. */
 export function initialize() {
   if (initialized) return Promise.resolve();
   if (globalThis.DenTizen3Core) {
@@ -52,7 +52,6 @@ export function initialize() {
   return pending;
 }
 
-/** Policy stays synchronous after explicit asynchronous initialization. Never substitute empty state. */
 export function evaluate(request) {
   if (!initialized) throw new Error('Sync core is not initialized');
   const { memory, den_alloc: allocate, den_free: free, den_evaluate: evaluateRaw } = core();
