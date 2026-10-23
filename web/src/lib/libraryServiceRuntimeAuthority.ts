@@ -160,6 +160,7 @@ export async function openLibraryServiceAuthority(
       content,
       libraryKey: request.libraryKey,
       vault,
+      savedViews: false,
     });
     let settle!: (outcome: DeferredDelivery['outcome']) => void;
     const settled = new Promise<DeferredDelivery['outcome']>((resolve) => (settle = resolve));

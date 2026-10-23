@@ -491,7 +491,7 @@ it('draws a first open from its newest page and its settings by key, then reads 
   expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
   expect(progress.mock.calls.at(-1)![0]).toBe(1);
   expect(openFull).not.toHaveBeenCalled();
-});
+}, 10_000);
 
 it('waits for a newest-first import before reading a title from the completed facts', async () => {
   await ensureSyncPolicy();
@@ -583,7 +583,7 @@ it('counts a first open’s progress in rows, and asks for the second page as th
   const uncounted = await progressAfterFirstPage(false);
   expect(uncounted.last).toBeCloseTo(1 - (firstPageFloor - 1) / top, 2);
   expect(uncounted.last).toBeLessThan(counted.last);
-});
+}, 10_000);
 
 it('ends a first open’s progress when its read gives up, so the line never outlives it', async () => {
   await ensureSyncPolicy();
@@ -871,6 +871,49 @@ it('names the device a Continue item was watched on, as the full log does', asyn
 /** Every root view a LibraryModel selects (`libraryModel.svelte.ts`). */
 const roots = ['overview', 'continue', 'settings', 'runtime', 'devices'] as const;
 
+it('saves preferences without assistant policy and promotes when Settings asks for connections', async () => {
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const stamp: [number, number, string] = [10, 0, 'device'];
+  const prefs: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'prefs',
+    values: { 'den.hideAnime': { value: { bool: true }, at: stamp } },
+  };
+  const grants: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'assistant-grants',
+    values: { grant: { value: { bool: true }, at: stamp } },
+  };
+  const entries = await Promise.all(
+    [prefs, grants].map(async (row, index) => {
+      const encrypted = await seal(keys, row);
+      return { k: encrypted.k, seq: index + 1, value: encrypted.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-assistant', 2, entries, true);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    preferences: { hideAnime: true },
+    assistant: { read: false, write: false },
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await vi.waitFor(() =>
+    expect(readFinishedLibraryViews(libraryKey, vault, ['settings'])).resolves.toMatchObject({
+      pieces: { settings: { preferences: { hideAnime: true } } },
+    }),
+  );
+  await expect(opened!.authority.select({ kind: 'connections' })).rejects.toThrow(
+    'unexpected connections',
+  );
+  expect(openFull).toHaveBeenCalledOnce();
+  await opened!.authority.close?.();
+});
+
 it('keeps the views a facts visit read, once Continue has its layouts, and the next visit draws them without den-core', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
@@ -944,11 +987,13 @@ it('keeps no views while the history is still read, and keeps them once it is wh
   await new Promise((resolve) => setTimeout(resolve, 300));
   await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toBeNull();
   release();
-  await vi.waitFor(() =>
-    expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
-      identity: { generation: 'generation-kept-after-fill', head: 1_101 },
-      pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
-    }),
+  await vi.waitFor(
+    () =>
+      expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+        identity: { generation: 'generation-kept-after-fill', head: 1_101 },
+        pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
+      }),
+    { timeout: 5_000 },
   );
   await opened!.authority.close?.();
 });

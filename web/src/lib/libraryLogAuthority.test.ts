@@ -18,9 +18,8 @@ import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
 import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
-import { readFinishedLibraryViews, writeFinishedLibraryViews } from './finishedLibraryViews';
+import { readFinishedLibraryViews } from './finishedLibraryViews';
 import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
-import { writeEncryptedLibraryValue } from './libraryLocalValue';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -29,9 +28,9 @@ const missingContent = {
   title: async () => ({ kind: 'missing' as const }),
 } satisfies Pick<ContentReader, 'title'>;
 
-function memoryVault(): Vault {
+function memoryVault(withFacts = false): Vault {
   const data = new Map<string, Uint8Array>();
-  return {
+  const vault: Vault = {
     get: async (key) => data.get(key)?.slice(),
     entries: async (prefix) =>
       [...data]
@@ -43,6 +42,21 @@ function memoryVault(): Vault {
       for (const key of data.keys()) if (key.startsWith(prefix)) data.delete(key);
     },
   };
+  if (withFacts) {
+    vault.commit = async (changes) => {
+      for (const change of changes) {
+        if (change.kind === 'put') data.set(change.key, change.value.slice());
+        else data.delete(change.key);
+      }
+    };
+    vault.page = async (prefix, after, limit) =>
+      [...data]
+        .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, limit)
+        .map(([key, value]) => [key, value.slice()]);
+  }
+  return vault;
 }
 
 async function localAuthority() {
@@ -149,7 +163,7 @@ describe('LibraryLogAuthority', () => {
 
   const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
 
-  it('invalidates a published finished view as soon as a new revision is only partly selected', async () => {
+  it('does not keep a second saved-view copy of a browser-local library', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
     try {
@@ -165,7 +179,7 @@ describe('LibraryLogAuthority', () => {
       });
       await cacheSelections(opened);
       await vi.advanceTimersByTimeAsync(250);
-      await vi.waitFor(async () => expect(await cachedWatchlist(vault)).not.toBeNull());
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
 
       await opened.command({ kind: 'watchlist.add', title: movie }, 'add-seven');
       await opened.close();
@@ -199,7 +213,7 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
-  it('invalidates finished views before an administrative local-library merge answers', async () => {
+  it('leaves browser-local saved views absent through an administrative merge', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
     try {
@@ -225,7 +239,7 @@ describe('LibraryLogAuthority', () => {
       });
       await cacheSelections(opened);
       await vi.advanceTimersByTimeAsync(250);
-      await vi.waitFor(async () => expect(await cachedWatchlist(vault)).not.toBeNull());
+      await expect(cachedWatchlist(vault)).resolves.toBeNull();
 
       await expect(
         opened.task({ kind: 'local-library.merge', sourceLibraryKey: sourceKey }, 'merge-local'),
@@ -277,7 +291,7 @@ describe('LibraryLogAuthority', () => {
     await opened.close();
   });
 
-  it('does not write the finished views again when an unchanged library is opened again', async () => {
+  it('does not write finished views for unchanged browser-local libraries', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
     try {
@@ -316,26 +330,16 @@ describe('LibraryLogAuthority', () => {
         return readFinishedLibraryViews(KEY, vault, [...all]);
       };
       const first = await visit(true);
-      expect(first).not.toBeNull();
+      expect(first).toBeNull();
       puts.length = 0;
       const second = await visit(false);
-      const kept = first!;
-      const differs = [
-        ...(Object.keys(kept.identity) as Array<keyof typeof kept.identity>).filter(
-          (field) =>
-            JSON.stringify(kept.identity[field]) !== JSON.stringify(second?.identity[field]),
-        ),
-        ...all.filter(
-          (piece) => JSON.stringify(kept.pieces[piece]) !== JSON.stringify(second?.pieces[piece]),
-        ),
-      ];
-      expect({ puts, differs }).toEqual({ puts: [], differs: [] });
+      expect({ puts, second }).toEqual({ puts: [], second: null });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('keeps the finished views only once every series in Continue has its layout', async () => {
+  it('does not turn browser-local layouts into saved library views', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
     try {
@@ -373,18 +377,14 @@ describe('LibraryLogAuthority', () => {
       });
       await cacheSelections(opened);
       await vi.advanceTimersByTimeAsync(250);
-      await vi.waitFor(async () =>
-        expect(
-          (await readFinishedLibraryViews(KEY, vault, ['continue']))?.pieces.continue?.view,
-        ).toMatchObject({ needsShapes: [], items: [{ title: series }] }),
-      );
+      await expect(readFinishedLibraryViews(KEY, vault, ['continue'])).resolves.toBeNull();
       await opened.close();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('keeps the same Continue layouts whatever order a page learnt them in', async () => {
+  it('does not persist browser-local Continue layouts in either observation order', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers();
     try {
@@ -424,16 +424,16 @@ describe('LibraryLogAuthority', () => {
         );
       };
       const forwards = await kept([series, other]);
-      expect(forwards).toContain('tv:11');
+      expect(forwards).toBeUndefined();
       expect(await kept([other, series])).toBe(forwards);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('leaves the views a visit read from facts at its head for the next one, until it edits', async () => {
+  it('keeps fact-derived views under one identity through whole-log reads and edits', async () => {
     await ensureSyncPolicy();
-    const vault = memoryVault();
+    const vault = memoryVault(true);
     const server = await pinDeliveryServer();
     server.allowWrites();
     const all = [
@@ -461,42 +461,46 @@ describe('LibraryLogAuthority', () => {
     await first.close();
     // A visit that has read the write back from den-edge draws Home, and keeps its views at that head.
     const home = await open();
+    await home.log.refresh();
     expect(home.log.logHead).toBeGreaterThan(0);
     await cacheSelections(home);
     const written = await vi.waitFor(async () => {
       const views = await readFinishedLibraryViews(KEY, vault, [...all]);
       expect(views?.identity.head).toBe(home.log.logHead);
+      expect(views?.identity.authorityRevision.startsWith('facts:')).toBe(false);
       return views!;
     });
     await home.close();
-    // The same views as a visit that drew Home from the fact store keeps them: named by the facts' head.
-    const identity = {
-      ...written.identity,
-      authorityRevision: `facts:${written.identity.head}`,
-      layoutVersion: 'facts',
-    };
-    await writeFinishedLibraryViews(KEY, vault, { ...written, identity });
-    await writeEncryptedLibraryValue(KEY, vault, LIBRARY_LOCAL_AUTHORITY, {
-      generation: identity.generation,
-      head: identity.head,
-      authorityRevision: identity.authorityRevision,
-      rowsVersion: identity.rowsVersion,
-    });
 
     // The Watchlist reads the whole log for its history, and selects the overview but not Continue.
+    const derivedWrites: string[] = [];
+    const put = vault.put;
+    vault.put = async (key, value) => {
+      if (key.includes('finished-views') || key.includes(LIBRARY_LOCAL_AUTHORITY))
+        derivedWrites.push(key);
+      return put(key, value);
+    };
     const watchlist = await open();
     await watchlist.select({ kind: 'overview' });
     await new Promise((resolve) => setTimeout(resolve, 300));
     await watchlist.close();
     await expect(readFinishedLibraryViews(KEY, vault, [...all])).resolves.toMatchObject({
-      identity: { authorityRevision: identity.authorityRevision },
+      identity: { authorityRevision: written.identity.authorityRevision },
     });
+    expect(derivedWrites).toEqual([]);
 
     const edits = await open();
     await edits.select({ kind: 'overview' });
     await edits.command({ kind: 'watchlist.add', title: series }, 'add-eleven');
+    await vi.waitFor(() => expect(edits.log.pendingActions).toBe(0));
     await edits.close();
-    await expect(readFinishedLibraryViews(KEY, vault, [])).resolves.toBeNull();
+    const after = await open();
+    await after.log.refresh();
+    await cacheSelections(after);
+    await after.close();
+    await expect(readFinishedLibraryViews(KEY, vault, ['watchlist'])).resolves.toMatchObject({
+      pieces: { watchlist: { titles: expect.arrayContaining([series]) } },
+    });
   });
 
   it('keeps a projected PIN non-authoritative across reload until its exact row syncs', async () => {

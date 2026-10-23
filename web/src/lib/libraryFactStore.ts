@@ -235,6 +235,7 @@ export class LibraryFactStore {
   private profileTopology = false;
   private generation?: string;
   private readonly staleGenerations = new Set<string>();
+  private readonly listeners = new Set<() => void>();
   private constructor(
     readonly libraryId: string,
     private readonly key: CryptoKey,
@@ -253,6 +254,16 @@ export class LibraryFactStore {
     this.profileTopology = opened.profileTopology;
     this.generation = opened.generation;
     return opened;
+  }
+
+  /** Tell an owner of derived local state whenever this store's authoritative rows move. */
+  listen(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private changed(): void {
+    for (const listener of this.listeners) listener();
   }
 
   private async readManifest(): Promise<LibraryFactManifest | null> {
@@ -345,6 +356,7 @@ export class LibraryFactStore {
     });
     await this.vault.commit(changes);
     noteLibraryFactCommit(entries.length);
+    this.changed();
     if (complete)
       for (const stale of [...this.staleGenerations]) {
         try {
@@ -376,6 +388,7 @@ export class LibraryFactStore {
     }
     await this.vault.commit(changes);
     noteLibraryFactCommit(entries.length);
+    this.changed();
   }
 
   /** Forget every generation and the cursor: the next open reads den-edge from the start. */
@@ -384,6 +397,7 @@ export class LibraryFactStore {
     this.generation = undefined;
     this.profileTopology = false;
     this.staleGenerations.clear();
+    this.changed();
   }
 
   /** Each entry's document and facts, sealed. */

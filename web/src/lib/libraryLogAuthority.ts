@@ -41,17 +41,7 @@ import {
   libraryMetadataShapeDigest,
   libraryMetadataTitle,
 } from './libraryMetadata';
-import {
-  FINISHED_LIBRARY_POLICY,
-  FINISHED_LIBRARY_RECOMMENDATIONS,
-  FINISHED_LIBRARY_VIEWS_SCHEMA,
-  readFinishedLibraryViews,
-  staleFinishedLibraryViews,
-  writeFinishedLibraryViews,
-  type FinishedLibraryViewPieces,
-  type FinishedLibraryViews,
-} from './finishedLibraryViews';
-import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
+import { FinishedLibraryViewWriter } from './finishedLibraryViewWriter';
 import {
   applyLog,
   ContinueProjector,
@@ -194,6 +184,8 @@ export interface LibraryLogAuthorityOptions {
   content: Pick<ContentReader, 'title'>;
   libraryKey?: string;
   vault?: Vault;
+  /** False for a narrow edit authority: its surrounding fact authority owns the saved projections. */
+  savedViews?: boolean;
   fetchImpl?: typeof fetch;
   destination?: (key: string) => Promise<LibraryLog>;
   refreshDownloads?: (target?: DownloadTarget) => Promise<boolean>;
@@ -370,11 +362,7 @@ export class LibraryLogAuthority {
    */
   #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
-  #finishedRevision?: string;
-  #finishedPieces: Partial<FinishedLibraryViewPieces> = {};
-  #finishedSaving: Promise<void> = Promise.resolve();
-  #finishedPending?: FinishedLibraryViews;
-  #finishedTimer?: ReturnType<typeof setTimeout>;
+  readonly #viewWriter?: FinishedLibraryViewWriter;
   #kidCreate?: ProfileKidCreateCoordinator;
   #keyReset?: ProfileKeyResetService;
 
@@ -385,6 +373,32 @@ export class LibraryLogAuthority {
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
     log.onDeferred = (delivery) => this.#deferred(delivery);
+    const facts = options.libraryKey && options.vault ? log.libraryFacts() : null;
+    if (
+      options.mode === 'online' &&
+      options.savedViews !== false &&
+      options.libraryKey &&
+      options.vault &&
+      facts
+    ) {
+      this.#viewWriter = new FinishedLibraryViewWriter(
+        options.libraryKey,
+        options.vault,
+        facts,
+        () => {
+          const { home } = this.#projected();
+          const summary = this.#log.currentSummary();
+          return {
+            generation: this.#log.currentGeneration ?? null,
+            head: this.#log.logHead,
+            home,
+            reconsiderAt: Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
+            shapes: new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape])),
+          };
+        },
+      );
+      this.#viewWriter.schedule();
+    }
     if (options.libraryKey && options.vault)
       this.#admin = new LibraryAdminAuthority(log, clock, {
         mode: options.mode,
@@ -532,10 +546,7 @@ export class LibraryLogAuthority {
     this.#listeners.clear();
     this.#log.onDeferred = null;
     this.#admin?.close();
-    if (this.#finishedTimer !== undefined) clearTimeout(this.#finishedTimer);
-    this.#finishedTimer = undefined;
-    this.#flushFinished();
-    await this.#finishedSaving;
+    await this.#viewWriter?.close();
     this.#log.close();
   }
 
@@ -547,7 +558,7 @@ export class LibraryLogAuthority {
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
     switch (selection.kind) {
       case 'overview':
-        return this.#rememberFinished('overview', this.#overview());
+        return this.#overview();
       case 'watchlist': {
         const overview = this.#overview();
         return { kind: 'watchlist', titles: overview.watchlist };
@@ -557,22 +568,17 @@ export class LibraryLogAuthority {
         return { kind: 'recommendations', ...recommendations };
       }
       case 'continue':
-        return this.#rememberFinished('continue', this.#continue());
+        return this.#continue();
       case 'history':
         return this.#history();
       case 'title':
         return this.#title(selection.title);
       case 'presence':
         return this.#presence(selection.titles);
-      case 'settings': {
-        const revision =
-          this.#options.libraryKey && this.#options.vault
-            ? this.#finishedAuthorityRevision()
-            : undefined;
-        return this.#rememberFinished('settings', await this.#settings(), revision);
-      }
+      case 'settings':
+        return this.#settings();
       case 'devices':
-        return this.#rememberFinished('devices', this.#devices());
+        return this.#devices();
       case 'connections':
         return this.#connections();
       case 'simkl':
@@ -580,7 +586,7 @@ export class LibraryLogAuthority {
       case 'recovery':
         return this.#administration().recoveryView();
       case 'runtime':
-        return this.#rememberFinished('runtime', this.#runtime());
+        return this.#runtime();
       case 'profiles':
         return this.#profiles();
       case 'downloads':
@@ -918,13 +924,6 @@ export class LibraryLogAuthority {
     )
       throw authorityError('invalid-request', 'source and destination library must differ');
     const result = await this.#administration().task(task, operationId);
-    // Administrative work writes through LibraryAdminAuthority, outside the command helpers below that invalidate
-    // finished views. Make the invalidation durable before the task answer lets the page navigate: otherwise a
-    // local-library merge can reopen an empty pre-merge Watchlist at the post-merge head.
-    if (result.affected.length) {
-      this.#changeFinishedRevision();
-      await this.#finishedSaving;
-    }
     return result;
   }
 
@@ -1269,6 +1268,7 @@ export class LibraryLogAuthority {
       digest,
     });
     this.#shapesVersion++;
+    this.#viewWriter?.schedule(true);
     return {
       outcome: 'applied',
       affected: [{ kind: 'title', title: observation.title }, { kind: 'continue' }],
@@ -1697,159 +1697,6 @@ export class LibraryLogAuthority {
     noteLibraryFold(rows.length, performance.now() - foldedAt);
     this.#projection = { rows, home };
     return this.#projection;
-  }
-
-  #rememberFinished<T extends 'overview' | 'continue' | 'settings' | 'runtime' | 'devices'>(
-    kind: T,
-    value: Extract<LibrarySelectionValue, { kind: T }>,
-    computedRevision?: string,
-  ): Extract<LibrarySelectionValue, { kind: T }> {
-    if (!this.#options.libraryKey || !this.#options.vault) return value;
-    const summary = this.#log.currentSummary();
-    const revision = this.#finishedAuthorityRevision(summary);
-    this.#changeFinishedRevision(revision);
-    // Settings awaits assistant policy. A command may change the log while it is suspended; never stamp the old
-    // answer with the new revision merely because it completed afterward.
-    if (computedRevision !== undefined && computedRevision !== revision) return value;
-    if (kind === 'overview') {
-      const overview = value as Extract<LibrarySelectionValue, { kind: 'overview' }>;
-      this.#finishedPieces.watchlist = { titles: overview.watchlist };
-      const { kind: _kind, watchlist: _watchlist, ...recommendations } = overview;
-      this.#finishedPieces.recommendations = recommendations;
-    } else if (kind === 'continue') {
-      const view = value as Extract<LibrarySelectionValue, { kind: 'continue' }>;
-      // Continue is finished once every series in it has its layout: kept before then, it holds whichever layouts this
-      // page had learnt so far, which differ from one visit to the next, so the next visit opens the log to learn them
-      // again and keeps another partial Continue in its place.
-      if (view.needsShapes.length) {
-        delete this.#finishedPieces.continue;
-        this.#finishedPending = undefined;
-        return value;
-      }
-      const required = new Set(this.#projected().home.requiredShapeRefs);
-      this.#finishedPieces.continue = {
-        view,
-        // In key order, not the order this page learnt them in: the same layouts keep the same views.
-        layouts: Object.fromEntries(
-          [...this.#shapes]
-            .filter(([key]) => required.has(key))
-            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-            .map(([key, stored]) => [key, stored.digest]),
-        ),
-      };
-    } else if (kind === 'settings')
-      this.#finishedPieces.settings = value as FinishedLibraryViewPieces['settings'];
-    else if (kind === 'runtime')
-      this.#finishedPieces.runtime = value as FinishedLibraryViewPieces['runtime'];
-    else this.#finishedPieces.devices = value as FinishedLibraryViewPieces['devices'];
-
-    const generation =
-      this.#log.currentGeneration ?? (this.#options.mode === 'local' ? 'local' : undefined);
-    if (
-      generation &&
-      this.#finishedPieces.watchlist &&
-      this.#finishedPieces.continue &&
-      this.#finishedPieces.recommendations &&
-      this.#finishedPieces.settings &&
-      this.#finishedPieces.runtime &&
-      this.#finishedPieces.devices
-    ) {
-      const reconsiderAt = Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null;
-      const pieces = structuredClone(this.#finishedPieces);
-      this.#finishedPending = {
-        schema: FINISHED_LIBRARY_VIEWS_SCHEMA,
-        identity: {
-          libraryId: this.#log.libraryId,
-          generation,
-          head: this.#log.logHead,
-          authorityRevision: revision,
-          policyVersion: FINISHED_LIBRARY_POLICY,
-          rowsVersion: this.#log.rowsVersion,
-          layoutVersion: String(this.#shapesVersion),
-          recommendationVersion: FINISHED_LIBRARY_RECOMMENDATIONS,
-          reconsiderAt,
-        },
-        pieces,
-      };
-      if (this.#finishedTimer !== undefined) clearTimeout(this.#finishedTimer);
-      this.#finishedTimer = setTimeout(() => {
-        this.#finishedTimer = undefined;
-        this.#flushFinished();
-      }, 250);
-    }
-    return value;
-  }
-
-  #finishedAuthorityRevision(summary = this.#log.currentSummary()): string {
-    return libraryLocalAuthorityRevision(this.#log.logHead, this.#log.rowsVersion, summary.stamp);
-  }
-
-  /**
-   * A new revision is assembled from pieces selected at it. The views kept of the last one are marked stale meanwhile,
-   * so no visit opens them; their pieces stay, and each that says the same at the new revision is named again rather
-   * than written again (`writeFinishedLibraryViews`).
-   */
-  #changeFinishedRevision(revision?: string): void {
-    if (!this.#options.libraryKey || !this.#options.vault) return;
-    // A read (`#rememberFinished`) names the revision it read at; an edit leaves it to be worked out here.
-    const read = revision !== undefined;
-    revision ??= this.#finishedAuthorityRevision();
-    if (this.#finishedRevision === revision) return;
-    const first = this.#finishedRevision === undefined;
-    // Views a visit read from the fact store (`FinishedLibraryViewAuthority#flushFactViews`) name its head, not this
-    // log's revision. At this log's generation and head, with no work of its own kept, they say what it does: a surface
-    // that reads the whole log but not every view (the Watchlist's history) leaves them for the next Home to draw.
-    const generation = this.#log.currentGeneration;
-    const facts =
-      read && first && generation && this.#log.pendingActions === 0
-        ? { generation, revision: `facts:${this.#log.logHead}` }
-        : undefined;
-    this.#finishedRevision = revision;
-    this.#finishedPieces = {};
-    this.#finishedPending = undefined;
-    if (this.#finishedTimer !== undefined) clearTimeout(this.#finishedTimer);
-    this.#finishedTimer = undefined;
-    this.#finishedSaving = this.#finishedSaving
-      .then(async () => {
-        // This authority's first revision: views kept by an earlier visit at the same revision still describe it.
-        if (first) {
-          const kept = await readFinishedLibraryViews(
-            this.#options.libraryKey!,
-            this.#options.vault!,
-            [],
-          );
-          if (kept?.identity.authorityRevision === revision) return;
-          if (
-            facts &&
-            kept?.identity.generation === facts.generation &&
-            kept.identity.authorityRevision === facts.revision
-          )
-            return;
-        }
-        await staleFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!);
-      })
-      .catch((error: unknown) =>
-        console.warn('den: stale finished library views could not be marked', error),
-      );
-  }
-
-  #flushFinished(): void {
-    const pending = this.#finishedPending;
-    if (!pending || !this.#options.libraryKey || !this.#options.vault) return;
-    this.#finishedPending = undefined;
-    this.#finishedSaving = this.#finishedSaving
-      .then(async () => {
-        await this.#log.keep(LIBRARY_LOCAL_AUTHORITY, {
-          generation: pending.identity.generation,
-          head: pending.identity.head,
-          authorityRevision: pending.identity.authorityRevision,
-          rowsVersion: pending.identity.rowsVersion,
-        });
-        await writeFinishedLibraryViews(this.#options.libraryKey!, this.#options.vault!, pending);
-      })
-      .catch((error: unknown) =>
-        console.warn('den: the finished library views could not be kept', error),
-      );
   }
 
   #coordinates(ref: TitleRef): Array<{ season: number; episode: number }> {
@@ -2344,7 +2191,6 @@ export class LibraryLogAuthority {
       );
       if (row && !(await this.#log.write(row))) this.#writeFailed();
     }
-    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#delivery(pending),
@@ -2415,7 +2261,6 @@ export class LibraryLogAuthority {
       };
       if (!(await this.#log.write(row))) this.#writeFailed();
     }
-    this.#changeFinishedRevision();
     this.#simklApproval = undefined;
     return {
       outcome: 'applied',
@@ -2668,7 +2513,6 @@ export class LibraryLogAuthority {
     const queued = this.#log.queuedActions;
     const written = await this.#log.writeAction(journal);
     if (!written) this.#writeFailed();
-    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),
@@ -2684,7 +2528,6 @@ export class LibraryLogAuthority {
     const pending = this.#log.pendingActions;
     const queued = this.#log.queuedActions;
     if (!(await this.#log.writeActions(journals))) this.#writeFailed();
-    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),
@@ -2699,7 +2542,6 @@ export class LibraryLogAuthority {
     const pending = this.#log.pendingActions;
     const queued = this.#log.queuedActions;
     if (!(await this.#log.write(row))) this.#writeFailed();
-    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),
@@ -2713,7 +2555,6 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     const pending = this.#log.pendingActions;
     if (!(await this.#log.writeRows(rows))) this.#writeFailed();
-    this.#changeFinishedRevision();
     return {
       outcome: 'applied',
       delivery: this.#delivery(pending),
