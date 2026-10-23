@@ -338,8 +338,8 @@
   }
 
   .windowed {
-    width: 100vw;
-    margin-inline: calc(50% - 50vw);
+    width: var(--presentation-width);
+    margin-inline: calc(50% - var(--presentation-edge));
     contain-intrinsic-block-size: auto
       calc(
         var(--poster-card-w, clamp(140px, 38vw, 190px)) * 1.5 + var(--poster-row-chrome-block-size)

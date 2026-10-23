@@ -104,10 +104,10 @@
 
     /* A TV-only stylesheet can enlarge the shared shelf without adding TV selectors or code to the web build. */
     --card-w: var(--poster-card-w, clamp(140px, 38vw, 190px));
-    --page-inset: max(var(--gutter), calc((100vw - var(--page-max)) / 2 + var(--gutter)));
+    --page-inset: var(--gutter);
 
-    width: 100vw;
-    margin: 0 calc(50% - 50vw) 32px;
+    width: var(--presentation-width);
+    margin: 0 calc(50% - var(--presentation-edge)) 32px;
   }
 
   .head {
