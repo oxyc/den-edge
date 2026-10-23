@@ -1,5 +1,43 @@
 import { expect, test } from '@playwright/test';
 
+test('IndexedDB admits only one conditional publication from competing connections', async ({
+  page,
+}) => {
+  await page.goto('/test/router.html');
+  const results = await page.evaluate(async () => {
+    const { indexedVault } = await import('/src/lib/localVault.ts');
+    const first = indexedVault(indexedDB);
+    const second = indexedVault(indexedDB);
+    const key = 'publication-race-manifest';
+    const companion = 'publication-race-marker';
+    await first.put(key, new Uint8Array([0]));
+    await second.get(key);
+    const rounds = [];
+    for (let round = 1; round <= 10; round++) {
+      const expected = await first.get(key);
+      const outcomes = await Promise.all(
+        [first, second].map((vault, index) => {
+          const value = new Uint8Array([round * 2 + index]);
+          return vault.compareAndCommit(key, expected, [
+            { kind: 'put', key, value },
+            { kind: 'put', key: companion, value },
+          ]);
+        }),
+      );
+      rounds.push({
+        winners: outcomes.filter(Boolean).length,
+        manifest: [...(await first.get(key))],
+        marker: [...(await second.get(companion))],
+      });
+    }
+    return rounds;
+  });
+  for (const round of results) {
+    expect(round.winners).toBe(1);
+    expect(round.marker).toEqual(round.manifest);
+  }
+});
+
 test('two tabs publish saved views atomically without Web Locks', async ({ context, page }) => {
   await context.addInitScript(() =>
     Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true }),
@@ -20,7 +58,8 @@ test('two tabs publish saved views atomically without Web Locks', async ({ conte
       const key = btoa(String.fromCharCode(...raw));
       const id = (await deriveKeys(raw)).id;
       const vault = indexedVault(indexedDB);
-      if (!vault.compareAndCommit) throw new Error('IndexedDB must support conditional publication');
+      if (!vault.compareAndCommit)
+        throw new Error('IndexedDB must support conditional publication');
       window.savedViewRace = {
         vault,
         read: () => readFinishedLibraryViews(key, vault, ['watchlist', 'continue']),
