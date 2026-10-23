@@ -241,6 +241,14 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Time budgets on the production build
         run: npm run test:e2e:budgets
+      - name: Retain budget failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: budget-failures
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Preserve the stable `web` check name while making it represent the once-only checks, every shard and the budgets.
   web:
