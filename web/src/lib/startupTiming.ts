@@ -28,6 +28,13 @@ let last: { event: string; at: number } | undefined;
  * relays each one to the page (`relay`), where it is kept as `worker <event>`.
  */
 const firsts = new Map<string, number>();
+/**
+ * Each milestone's latest time: a page with two library Workers waits for the slower, and `firsts` only ever showed
+ * the quicker one.
+ */
+const lasts = new Map<string, number>();
+/** How often each counted thing happened (`startupCount`), the page's and its Workers' together. */
+const counts = new Map<string, number>();
 let workers = 0;
 let stall: ReturnType<typeof setTimeout> | undefined;
 let handedOver = false;
@@ -57,6 +64,7 @@ const channel = (() => {
 })();
 type Relayed =
   | { origin: string; kind: 'mark'; event: string; at: number }
+  | { origin: string; kind: 'count'; name: string }
   | ({ origin: string; kind: 'resource' } & StartupResource);
 const relay = (message: Relayed) => {
   try {
@@ -77,7 +85,10 @@ if (channel && !inWorker)
     if (message.kind === 'mark') {
       const event = `worker ${message.event}`;
       if (!firsts.has(event)) firsts.set(event, message.at);
-    } else if (workerResources.length < MAX_WORKER_RESOURCES)
+      lasts.set(event, Math.max(lasts.get(event) ?? 0, message.at));
+    } else if (message.kind === 'count')
+      counts.set(message.name, (counts.get(message.name) ?? 0) + 1);
+    else if (workerResources.length < MAX_WORKER_RESOURCES)
       workerResources.push({
         name: message.name,
         initiatorType: message.initiatorType,
@@ -113,6 +124,18 @@ if (typeof PerformanceObserver === 'function') {
 /** The page's Workers' finished requests so far. */
 export const startupWorkerResources = (): readonly StartupResource[] => workerResources;
 
+/** Count one `name` for this page's load report, from the page or a Worker. Names only: never a title or a URL. */
+export function startupCount(name: string): void {
+  if (inWorker) relay({ origin: ORIGIN, kind: 'count', name });
+  else counts.set(name, (counts.get(name) ?? 0) + 1);
+}
+
+/** How often each counted thing has happened on this page so far. */
+export const startupCounts = (): ReadonlyMap<string, number> => counts;
+
+/** When `event` last happened on this page, or in the last of its Workers to reach it. */
+export const startupMilestoneLast = (event: string): number | undefined => lasts.get(event);
+
 /** The page's long tasks so far: `[count, milliseconds in all, longest]`. */
 export const startupLongTasks = (): [number, number, number] => [
   longTasks.count,
@@ -141,6 +164,7 @@ export function startupMark(event: string, detail?: string): void {
   if (!inWorker) {
     last = { event, at };
     if (!firsts.has(event)) firsts.set(event, at);
+    lasts.set(event, at);
   } else if (!firsts.has(event)) {
     firsts.set(event, at);
     relay({ origin: ORIGIN, kind: 'mark', event, at });

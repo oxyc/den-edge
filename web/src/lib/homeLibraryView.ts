@@ -177,6 +177,11 @@ export function selectHomeLibraryViewFromFold(
       flag.type === 'tv' ? [titleKey(flag)] : [],
     ),
   ]);
+  /** When each series was last watched, so Continue Watching asks for the layouts it shows first, newest first. */
+  const watchedAt = new Map<string, number>();
+  for (const mark of library.marks)
+    if (mark.type === 'tv')
+      watchedAt.set(titleKey(mark), Math.max(watchedAt.get(titleKey(mark)) ?? 0, mark.updatedAt));
   return {
     owned: [...new Set(titles.map((row) => titleKey(row.title)))],
     watched: library.records
@@ -200,7 +205,9 @@ export function selectHomeLibraryViewFromFold(
       watchlisted: seeds.watchlisted.map((row) => titleKey(row.title)),
     },
     shelfRefs,
-    requiredShapeRefs: shelfRefs.filter((key) => key.startsWith('tv:') && shaped.has(key)),
+    requiredShapeRefs: shelfRefs
+      .filter((key) => key.startsWith('tv:') && shaped.has(key))
+      .sort((left, right) => (watchedAt.get(right) ?? 0) - (watchedAt.get(left) ?? 0)),
     continueLibrary: compactContinueLibrary(library),
     downloads,
   };

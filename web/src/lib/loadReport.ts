@@ -6,8 +6,10 @@
 import { currentRelease, reportUrl } from './diagnosticsReport';
 import { parseRoute } from './route';
 import {
+  startupCounts,
   startupLongTasks,
   startupMilestone,
+  startupMilestoneLast,
   startupWorkerResources,
   startupWorkers,
 } from './startupTiming';
@@ -56,6 +58,34 @@ export const MILESTONES = {
 } as const;
 
 /**
+ * The same steps as the last library Worker reached them: a household with profiles opens two, the handover waits
+ * for both, and the first one's times hid the second's. `worker ready` is the page's, once per Worker.
+ */
+export const LAST_MILESTONES = {
+  workerScriptLastMs: 'worker script evaluated',
+  workerCoreReadyLastMs: 'worker den-core ready',
+  workerReadyLastMs: 'worker ready',
+  workerLogOpenedLastMs: 'worker log opened',
+} as const;
+
+/**
+ * What the TMDB cache (`tmdbCache.ts`) did for this load, by outcome: answered from what it kept (fresh, or stale and
+ * refreshed behind), asked while the caller waited (nothing kept, or kept too long ago), or failed to read or keep.
+ */
+export const TMDB_CACHE = {
+  fresh: 'tmdb fresh',
+  stale: 'tmdb stale',
+  brief_fresh: 'tmdb brief fresh',
+  brief_stale: 'tmdb brief stale',
+  missing: 'tmdb missing',
+  too_old: 'tmdb too old',
+  read_failed: 'tmdb read failed',
+  write_failed: 'tmdb write failed',
+  no_store: 'tmdb no store',
+} as const;
+export type TmdbCacheOutcome = keyof typeof TMDB_CACHE;
+
+/**
  * Requests by what they are for, each as `[count, milliseconds summed]`, so a slow load says whether it waited on
  * the network and on what: the page's own (`net`), and its Workers' (`workerNet`), which make the library's and most
  * metadata requests.
@@ -95,8 +125,9 @@ export function netTally(
 export type LoadEntry = 'navigate' | 'reload' | 'back_forward' | 'swap';
 
 export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: BrowserEngine } & {
-  -readonly [K in keyof typeof MILESTONES]?: number;
+  -readonly [K in keyof typeof MILESTONES | keyof typeof LAST_MILESTONES]?: number;
 } & {
+  tmdbCache?: Partial<Record<TmdbCacheOutcome, number>>;
   workers: number;
   hidden?: true;
   entry?: LoadEntry;
@@ -172,6 +203,20 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
     const at = startupMilestone(event);
     if (at !== undefined) report[field] = at;
   }
+  for (const [field, event] of Object.entries(LAST_MILESTONES) as [
+    keyof typeof LAST_MILESTONES,
+    string,
+  ][]) {
+    const at = startupMilestoneLast(event);
+    if (at !== undefined) report[field] = at;
+  }
+  const counted = startupCounts();
+  const tmdbCache: Partial<Record<TmdbCacheOutcome, number>> = {};
+  for (const [outcome, name] of Object.entries(TMDB_CACHE) as [TmdbCacheOutcome, string][]) {
+    const count = counted.get(name);
+    if (count) tmdbCache[outcome] = count;
+  }
+  if (Object.keys(tmdbCache).length) report.tmdbCache = tmdbCache;
   if (hidden) report.hidden = true;
   const entry = entryOf(
     performance.getEntriesByType?.('navigation')[0] as PerformanceNavigationTiming | undefined,
@@ -190,14 +235,22 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
   return report;
 }
 
-/** The load's content is drawn, and a first library read it started has finished. */
-export function loadSettled(milestone: (event: string) => number | undefined): boolean {
+/**
+ * The load's content is drawn, and a first library read it started has finished. Home's content is its shelves too:
+ * its first poster can draw seconds before them, and a report sent then said nothing of the wait for them. A Home
+ * without a library never readies shelves, and reports when hidden or after `REPORT_AFTER_MS`.
+ */
+export function loadSettled(
+  milestone: (event: string) => number | undefined,
+  route?: LoadRoute,
+): boolean {
   const drawn =
     milestone(MILESTONES.posterMs) !== undefined || milestone(MILESTONES.episodesMs) !== undefined;
+  const shelved = route !== 'home' || milestone(MILESTONES.shelvesMs) !== undefined;
   const importing =
     milestone(MILESTONES.importStartMs) !== undefined &&
     milestone(MILESTONES.importMs) === undefined;
-  return drawn && !importing;
+  return drawn && shelved && !importing;
 }
 
 /**
@@ -212,7 +265,8 @@ export function watchLoadReport(): void {
   const started = performance.now();
   let sent = false;
   const check = setInterval(() => {
-    if (loadSettled(startupMilestone) || performance.now() - started >= REPORT_AFTER_MS) send();
+    if (loadSettled(startupMilestone, route) || performance.now() - started >= REPORT_AFTER_MS)
+      send();
   }, CHECK_MS);
   const send = () => {
     if (sent) return;
