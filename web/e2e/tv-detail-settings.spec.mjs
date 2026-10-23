@@ -208,6 +208,40 @@ test('TV detail utility buttons share the large action height', async ({ page })
   await expect(page.getByRole('button', { name: 'Not for me' })).toHaveCSS('font-size', '24px');
 });
 
+test('opening a TV detail focuses Play and keeps a saved Watchlist visually secondary', async ({
+  page,
+}) => {
+  await setupSeries(page, { playback: true });
+  await installSourcePlugin(page);
+
+  const play = page.locator('header.hero').getByRole('link', { name: 'Play', exact: true });
+  const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
+  await watchlist.focus();
+  await page.keyboard.press('Enter');
+  await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
+  await expect(watchlist).not.toHaveAttribute('aria-busy', 'true');
+  const [watchlistBackground, playBackground] = await Promise.all([
+    watchlist.evaluate((node) => getComputedStyle(node).backgroundColor),
+    play.evaluate((node) => getComputedStyle(node).backgroundColor),
+  ]);
+  expect(watchlistBackground).not.toBe(playBackground);
+
+  const home = page
+    .getByRole('navigation', { name: 'Main navigation' })
+    .getByRole('link', { name: 'Home', exact: true });
+  await home.focus();
+  await page.keyboard.press('Enter');
+  const card = page
+    .getByRole('region', { name: 'Watchlist', exact: true })
+    .getByRole('link', { name: /Remote Series/ });
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await card.focus();
+  await page.keyboard.press('Enter');
+
+  await expect(page).toHaveURL(/\/tv\/9/);
+  await expect(play).toBeFocused();
+});
+
 test('remote reveals an off-screen episode without animating every intermediate frame', async ({
   page,
 }) => {

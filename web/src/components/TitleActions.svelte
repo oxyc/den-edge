@@ -485,6 +485,19 @@
     color: var(--bg);
   }
 
+  /* A saved utility is state, not the page's primary action. Keep it visibly on without giving it Play's solid
+     white treatment; this is shared by the browser detail page and the TV presentation. */
+  .detail-page .utilities > :global(.pill[aria-pressed='true']),
+  .detail-page .pick.on {
+    --button-bg: var(--accent-wash-14);
+    --button-border: var(--accent-outline-45);
+    --button-fg: var(--accent-fg-78);
+
+    border-color: var(--button-border);
+    background: var(--button-bg);
+    color: var(--button-fg);
+  }
+
   .desktop-reactions {
     display: none;
   }
@@ -542,16 +555,6 @@
       overflow: hidden;
       clip-path: inset(50%);
       white-space: nowrap;
-    }
-
-    .detail-page .utilities > :global(.pill[aria-pressed='true']),
-    .detail-page .utilities > .pick.on {
-      --button-bg: var(--accent-wash-14);
-      --button-border: transparent;
-      --button-fg: var(--accent-fg-78);
-
-      background: var(--button-bg);
-      color: var(--button-fg);
     }
   }
 
