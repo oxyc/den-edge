@@ -2541,9 +2541,11 @@
     return current.external === true || route !== RELAY || playsHome(current);
   }
 
-  // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
+  // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none. The
+  // window opens when the cast page is asked (`lookOrigin`), so the profile check and the `/config` read before it
+  // are not spent from it: a slow answer there must not read as a network with no Chromecast.
   $effect(() => {
-    if (castOffer !== 'looking') return;
+    if (castOffer !== 'looking' || !lookOrigin) return;
     const wait = setTimeout(() => look({ kind: 'deadline' }), castDiscoveryMs);
     return () => clearTimeout(wait);
   });
