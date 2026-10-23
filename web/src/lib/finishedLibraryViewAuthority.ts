@@ -3,6 +3,7 @@ import {
   FINISHED_LIBRARY_RECOMMENDATIONS,
   FINISHED_LIBRARY_VIEWS_SCHEMA,
   readFinishedLibraryViews,
+  writeFinishedLibraryViews,
   type FinishedLibraryViews,
 } from './finishedLibraryViews';
 import {
@@ -106,6 +107,14 @@ const sameIdentity = (
   left.recommendationVersion === right.recommendationVersion &&
   left.reconsiderAt === right.reconsiderAt;
 
+/** The `LIBRARY_LOCAL_AUTHORITY` marker a hit compares kept views against (`openFinishedLibraryViewAuthority`). */
+const authorityMarker = ({
+  generation,
+  head,
+  authorityRevision,
+  rowsVersion,
+}: FinishedLibraryViews['identity']) => ({ generation, head, authorityRevision, rowsVersion });
+
 const rawLibraryKey = (encoded: string): Uint8Array<ArrayBuffer> | null => {
   try {
     const raw = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
@@ -205,6 +214,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #refillAgain = false;
   /** A narrow edit's send, until it has come to an end: the whole log opens only after it (`#promote`). */
   #narrowSending?: Promise<void>;
+  /** Views read from facts, kept once they settle (`#keepFactViews`). */
+  #factViewsTimer?: ReturnType<typeof setTimeout>;
+  #factViewsSaving: Promise<void> = Promise.resolve();
+  /** The authority marker the kept views are opened under: on a hit, the one this authority was opened with. */
+  #keptMarker?: string;
 
   constructor(
     private readonly request: LibraryServiceHello,
@@ -225,6 +239,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     private readonly openNarrow?: (names: readonly string[]) => Promise<NarrowEdit | null>,
   ) {
     this.#preferFacts = preferFacts;
+    if (!preferFacts) this.#keptMarker = JSON.stringify(authorityMarker(cached.identity));
     if (filling) {
       this.#filling = true;
       this.#fillingDone = filling.done;
@@ -608,6 +623,12 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     this.#closed = true;
     this.#cancelTimer();
     this.#cancelReconsider();
+    if (this.#factViewsTimer !== undefined) {
+      clearTimeout(this.#factViewsTimer);
+      this.#factViewsTimer = undefined;
+      this.#flushFactViews();
+    }
+    await this.#factViewsSaving;
     this.#stopFull?.();
     this.#listeners.clear();
     await this.#opening?.catch(() => undefined);
@@ -763,7 +784,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
 
   async #loadContinue(): Promise<boolean> {
     if (!(await this.#loadCapabilities(['continue']))) return false;
-    return this.#continueFresh();
+    if (this.#continueFresh()) return true;
+    // Kept past its reconsider time: facts complete at the same head say what Continue is now, without the log.
+    if (!this.factStore) return false;
+    delete this.cached.pieces.continue;
+    return (await this.#loadFactCapabilities(['continue'])) && this.#continueFresh();
   }
 
   #reconcile(): Promise<void> {
@@ -889,6 +914,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
 
     this.cached.identity.head = since;
     this.cached.identity.rowsVersion += changed;
+    // What is kept of it from here (`#flushFactViews`) is the facts' revision, never one the full log reached.
+    this.cached.identity.authorityRevision = `facts:${since}`;
     this.#preferFacts = true;
     for (const capability of loaded) delete this.cached.pieces[capability];
     this.#factHome = undefined;
@@ -1000,6 +1027,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         },
       };
       this.#emit({ kind: 'changed', affected: [{ kind: 'continue' }] });
+      this.#keepFactViews();
     } else if (layoutChange) void this.#promote(`layout:${layoutChange}`).catch(() => undefined);
     return {
       kind: 'library.metadata',
@@ -1111,11 +1139,89 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         this.cached.pieces.devices = selectedDevicesView(
           await this.factStore.settings(this.cached.identity.generation, 'devices'),
         );
+      this.#keepFactViews();
       return true;
     } catch (error) {
       console.warn('den: selected library facts could not be opened', error);
       return false;
     }
+  }
+
+  /**
+   * Views read from facts are kept as the full log keeps its own (`LibraryLogAuthority#flushFinished`), a moment after
+   * they settle: so the next visit opens them as a hit and draws Continue Watching before den-core loads.
+   */
+  #keepFactViews(): void {
+    if (this.#closed || this.#full) return;
+    if (this.#factViewsTimer !== undefined) clearTimeout(this.#factViewsTimer);
+    this.#factViewsTimer = setTimeout(() => {
+      this.#factViewsTimer = undefined;
+      this.#flushFactViews();
+    }, 250);
+  }
+
+  /**
+   * Only a whole set, as the log keeps one: every piece Home selects, Continue with every layout it needs, read from
+   * the whole history (not while `#filling`, whose first page draws a partial one) and from facts still complete at the
+   * identity's head. The marker first, then the views, so an interrupted write leaves a miss, never a mismatched hit.
+   */
+  #flushFactViews(): void {
+    const { identity, pieces } = this.cached;
+    const factStore = this.factStore;
+    if (this.#full || this.#filling || !factStore) return;
+    const { watchlist, recommendations, settings, runtime, devices } = pieces;
+    const continued = pieces.continue;
+    if (!watchlist || !recommendations || !settings || !runtime || !devices || !continued) return;
+    if (continued.view.needsShapes.length) return;
+    // The layouts of the series it holds, in key order, as the log keeps them: the same Continue keeps the same piece.
+    const required = this.#factHome && new Set(this.#factHome.requiredShapeRefs);
+    const layouts = Object.fromEntries(
+      Object.entries(continued.layouts)
+        .filter(([key]) => !required || required.has(key))
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    );
+    const value: FinishedLibraryViews = structuredClone({
+      schema: FINISHED_LIBRARY_VIEWS_SCHEMA,
+      identity,
+      pieces: {
+        watchlist,
+        recommendations,
+        settings,
+        runtime,
+        devices,
+        continue: { view: continued.view, layouts },
+      },
+    });
+    const marker = authorityMarker(value.identity);
+    this.#factViewsSaving = this.#factViewsSaving
+      .then(async () => {
+        const manifest = await factStore.manifest();
+        if (
+          this.#full ||
+          this.#opening ||
+          !manifest?.complete ||
+          manifest.generation !== value.identity.generation ||
+          manifest.head !== value.identity.head
+        )
+          return;
+        const kept = JSON.stringify(marker);
+        if (this.#keptMarker !== kept) {
+          if (
+            !(await writeEncryptedLibraryValue(
+              this.request.libraryKey,
+              this.vault,
+              LIBRARY_LOCAL_AUTHORITY,
+              marker,
+            ))
+          )
+            return;
+          this.#keptMarker = kept;
+        }
+        await writeFinishedLibraryViews(this.request.libraryKey, this.vault, value);
+      })
+      .catch((error: unknown) =>
+        console.warn('den: the library views read from facts could not be kept', error),
+      );
   }
 
   #promote(reason: string): Promise<LibraryServiceAuthority> {
@@ -1134,6 +1240,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     startupMark('library promoted', reason);
     this.#cancelTimer();
     this.#cancelReconsider();
+    // The whole log keeps its own views from here.
+    if (this.#factViewsTimer !== undefined) clearTimeout(this.#factViewsTimer);
+    this.#factViewsTimer = undefined;
     // A narrow edit still sending owns its kept work until it has come to an end; the whole log takes it from there.
     const opening = (this.#narrowSending ?? Promise.resolve())
       .then(() => this.openFull())
