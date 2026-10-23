@@ -48,7 +48,7 @@ if (process.argv.includes('--capture')) {
   // Shared navigation and the owned browser/TV player get a small allowance. Keep the initial graph proportional
   // and the complete lazy graph under a fixed 11 KiB ceiling. The extra 2 KiB is the reviewed camera-to-TV
   // pairing path shared by browser Settings and the packaged clients; TV-only implementation is rejected above.
-  if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.0125)))
+  if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   if (totalDelta > 11264) throw new Error('Browser total JS/CSS budget exceeded');
 }

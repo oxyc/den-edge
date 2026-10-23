@@ -15,6 +15,7 @@
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
+  import { nativeHlsFirst } from '../lib/detailTrailerSources';
   let {
     type,
     tmdbId,
@@ -399,11 +400,23 @@
       { signal: controller.signal },
     ).then(async (found) => {
       if (controller.signal.aborted) return;
-      const nextCursor = new PlaybackCursor(found, {
+      const candidates = preferNativeHls
+        ? found.map((candidate) =>
+            candidate.plan
+              ? {
+                  ...candidate,
+                  plan: {
+                    ...candidate.plan,
+                    sources: nativeHlsFirst(candidate.plan.sources),
+                  },
+                }
+              : candidate,
+          )
+        : found;
+      const nextCursor = new PlaybackCursor(candidates, {
         signal: controller.signal,
         // Chromium 47 has neither MSE nor a useful HLS stack. Skip straight to Reel's progressive MP4.
         accepts: __DEN_TV_LEGACY_JS_CORE__ ? (source) => source.kind === 'mp4' : undefined,
-        prefer: preferNativeHls ? (source) => source.kind === 'hls' : undefined,
       });
       owned = nextCursor;
       cursor = nextCursor;
