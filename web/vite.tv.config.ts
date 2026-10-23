@@ -29,6 +29,12 @@ const tizen3WorkerCompat = fileURLToPath(
 const tizen3PairCurve = fileURLToPath(new URL('./src/lib/pairCurve-tizen3.ts', import.meta.url));
 const tizen3Core = fileURLToPath(new URL('./src/vendor/den-core-tizen3/index.js', import.meta.url));
 const tizen3SyncLoader = fileURLToPath(new URL('./src/lib/syncLoader-tizen3.ts', import.meta.url));
+const tizen3SyncEvaluator = fileURLToPath(
+  new URL('./src/lib/syncEvaluator-tizen3.ts', import.meta.url),
+);
+const tizen3SyncLifecycle = fileURLToPath(
+  new URL('./src/lib/syncLifecycle-tizen3.ts', import.meta.url),
+);
 const tizen3HlsLoader = fileURLToPath(new URL('./src/lib/hlsLoader-tizen3.ts', import.meta.url));
 const tizen3UnsupportedMediaEngine = fileURLToPath(
   new URL('./src/lib/unsupportedMediaEngine-tizen3.ts', import.meta.url),
@@ -142,11 +148,20 @@ function workerCompatibility(): Plugin {
         return { code: oldLimits + code.replace(ordinary, replacement), map: null };
       }
       if (/\/src\/lib\/syncPolicyModule\.ts$/.test(id)) {
-        const original = '../vendor/den-core/generated/den_core_bg.wasm';
-        if (!code.includes(original))
-          throw new Error('TV den-core URL seam no longer matches syncPolicyModule');
+        const modules = ['den_core_startup', 'den_core_deferred'];
+        if (
+          modules.some((module) => !code.includes(`../vendor/den-core/generated/${module}_bg.wasm`))
+        )
+          throw new Error('TV den-core lifecycle URL seams no longer match syncPolicyModule');
         return {
-          code: code.replace(original, '../vendor/den-core-tv/generated/den_core_bg.wasm'),
+          code: modules.reduce(
+            (rewritten, module) =>
+              rewritten.replace(
+                `../vendor/den-core/generated/${module}_bg.wasm`,
+                `../vendor/den-core-tv/generated/${module}_bg.wasm`,
+              ),
+            code,
+          ),
           map: null,
         };
       }
@@ -401,6 +416,7 @@ export default mergeConfig(
               { find: /^hls\.js$/, replacement: tizen3UnsupportedMediaEngine },
               { find: './pairCurve', replacement: tizen3PairCurve },
               { find: './syncLoader', replacement: tizen3SyncLoader },
+              { find: './syncEvaluator', replacement: tizen3SyncEvaluator },
               { find: './hlsLoader', replacement: tizen3HlsLoader },
               { find: './syncPolicyModule', replacement: tizen3SyncPolicyModule },
               { find: './assistantCore', replacement: tizen3AssistantCore },
@@ -409,10 +425,14 @@ export default mergeConfig(
                 find: /^(?:.*\/)?vendor\/den-core\/index\.js$/,
                 replacement: tizen3Core,
               },
+              {
+                find: /^(?:.*\/)?vendor\/den-core\/(?:startup|deferred)\.js$/,
+                replacement: tizen3SyncLifecycle,
+              },
             ]
           : []),
         {
-          find: /^(?:.*\/)?vendor\/den-core\/(index|assistant|recovery)\.js$/,
+          find: /^(?:.*\/)?vendor\/den-core\/(index|startup|deferred|assistant|recovery)\.js$/,
           replacement: `${tvCore}/$1.js`,
         },
       ],

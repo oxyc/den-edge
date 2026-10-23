@@ -10,7 +10,8 @@ import { bigHousehold, routeBigHousehold } from './big-library.mjs';
 // Worker), and the browser's HTTP cache gives the second the first's transfer of that immutable asset. Request
 // interception, which these specs use, turns that cache off, so here it would always read as two.
 const kinds = {
-  wasm: (url) => url.pathname.endsWith('/den_core_bg.wasm'),
+  startupWasm: (url) => url.pathname.endsWith('/den_core_startup_bg.wasm'),
+  deferredWasm: (url) => url.pathname.endsWith('/den_core_deferred_bg.wasm'),
   routes: (url) => url.pathname === '/routes',
   profiles: (url) => url.pathname === '/capabilities/profiles',
 };
@@ -55,11 +56,17 @@ test('a profile household’s load downloads den-core once and asks each startup
     );
 
     const home = await countedLoad(page, '/');
-    expect(countsOf(home), JSON.stringify(home)).toEqual({ wasm: 1, routes: 1, profiles: 1 });
+    expect(countsOf(home), JSON.stringify(home)).toEqual({
+      startupWasm: 1,
+      deferredWasm: 1,
+      routes: 1,
+      profiles: 1,
+    });
     // Settings asks /routes of its own as it opens, beside the session's.
     const settings = await countedLoad(page, '/settings');
     expect(countsOf(settings), JSON.stringify(settings)).toEqual({
-      wasm: 1,
+      startupWasm: 1,
+      deferredWasm: 1,
       routes: 1,
       profiles: 1,
     });

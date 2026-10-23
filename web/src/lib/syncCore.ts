@@ -1,4 +1,4 @@
-import { evaluate } from '../vendor/den-core/index.js';
+import { evaluatePolicy } from './syncEvaluator';
 
 // At 120 Hz a frame is 8.3 ms; leaving roughly half for input, rendering and other app work proved materially
 // smoother than an 8 ms policy slice without increasing total projection time in the real-WASM fixture.
@@ -52,7 +52,7 @@ export async function inPolicySlices<T>(
 
 /** The same Rust policy as Apple TV. A failure is never an empty journal or an acknowledgement. */
 export function syncPolicy<T>(request: Record<string, unknown>): T {
-  return policyAnswer<T>(evaluate(JSON.stringify(request)));
+  return policyAnswer<T>(evaluatePolicy(request));
 }
 
 /** A den-core module's versioned answer: its value, or a throw naming its error. */

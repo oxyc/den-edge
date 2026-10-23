@@ -66,7 +66,7 @@ import {
 } from './wire';
 import { trackerEvent } from './trackerEvents';
 import { episodeRow, titleRow } from './titleView';
-import { ensureSyncPolicy } from './syncLoader';
+import { ensureDeferredSyncPolicy, ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
 import type { LibraryWire } from './libraryServiceProtocol';
@@ -990,6 +990,7 @@ export class LibraryLog {
 
   /** The rows, each merged over what the log already holds for it, written in batches. */
   async writeRows(rows: Row[]): Promise<boolean> {
+    await ensureDeferredSyncPolicy();
     await this.followKeptForm();
     if (this.readOnly) return false;
     if (rows.some((row) => preV4Row(row) && row.kind === 'set')) {
@@ -1079,6 +1080,7 @@ export class LibraryLog {
   async compact(): Promise<boolean> {
     if (this.offline || this.wireMin < WIRE || !this.unreadable.size || this.readOnly) return false;
     if (Date.now() - this.compactedAt < RECHECK_MS) return false;
+    await ensureDeferredSyncPolicy();
     this.compactedAt = Date.now();
     const compacted = this.compactedKeys;
     // Without storage this page can't know what an earlier page removed, so it removes nothing: compacting again
@@ -1936,7 +1938,7 @@ export class LibraryLog {
     if (this.offline || this.moved || this.wireMin < WIRE) return { refused: 'unavailable' };
     if (this.wireMin > Math.max(WIRE, this.instanceWire) || this.preV4Backup)
       return { refused: 'update_required' };
-    await ensureSyncPolicy();
+    await ensureDeferredSyncPolicy();
     // Writes queued before the move land in the log it reads.
     await this.writes;
     let read: { entries: RawEntry[]; head: number; generation: string | null } | null;
@@ -2144,7 +2146,7 @@ export class LibraryLog {
    * named by `member` — the library it moves from. True when every row is here.
    */
   async takeMoved(moving: Moving, member: string): Promise<boolean> {
-    await ensureSyncPolicy();
+    await ensureDeferredSyncPolicy();
     const rows = new Map(moving.rows.map((row) => [rowName(row), row]));
     const kept = new Map(moving.kept.map((entry) => [entry.name, entry.plaintext]));
     for (let round = 0; round < ROUNDS && (rows.size || kept.size); round++) {
@@ -3423,6 +3425,7 @@ export class LibraryLog {
    * — `moved` says when that is because the library moved to a new key.
    */
   async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
+    await ensureDeferredSyncPolicy();
     await this.followKeptForm();
     if (this.readOnly) return null;
     if (local.kind !== 'set') {
@@ -3783,6 +3786,7 @@ export class LibraryLog {
    * merged: the row is read again, and the caller decides again next pass.
    */
   async writeAt(given: DocumentRow | SettingsRow, base: number): Promise<boolean> {
+    await ensureDeferredSyncPolicy();
     if (this.readOnly || this.offline) return false;
     const row = this.householdRows([given])[0] as DocumentRow | SettingsRow | undefined;
     if (!row) return false;
@@ -4079,6 +4083,7 @@ export class LibraryLog {
 
   /** Persist one bulk intent atomically in the browser before any request. Network chunks are resumable. */
   async writeActions(journals: SettingsRow[]): Promise<boolean> {
+    await ensureDeferredSyncPolicy();
     if (!journals.length) return true;
     if (journals.some((row) => !trackerEvent(row))) return false;
     if (this.readOnly) return false;
@@ -4413,7 +4418,9 @@ export class LibraryLog {
 
   /** What the work kept in this browser will do once sent, shown now: projected, and nothing sent. */
   private async projectKept(): Promise<void> {
-    for (const work of await this.keptWork()) this.projectWork(work);
+    const kept = await this.keptWork();
+    if (kept.length) await ensureDeferredSyncPolicy();
+    for (const work of kept) this.projectWork(work);
   }
 
   private projectWork(work: KeptWork): void {
@@ -4489,6 +4496,7 @@ export class LibraryLog {
     const kept = (await this.keptWork()).sort(
       (a, b) => Number(a.kind === 'restore') - Number(b.kind === 'restore'),
     );
+    if (kept.length) await ensureDeferredSyncPolicy();
     for (const work of kept) {
       const { key, kind } = work;
       // Sent by a send that ended since it was read.

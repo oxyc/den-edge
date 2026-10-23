@@ -7,8 +7,9 @@
 // the code and its data characters are JavaScript strings, which nothing can zero, so §8 step 6's "zero the code"
 // is met here only by dropping every reference to it.
 
-import { evaluate } from '../vendor/den-core/index.js';
 import { ensureRecoveryPolicy, recoveryPolicy } from './recoveryCore';
+import { ensureDeferredSyncPolicy } from './syncLoader';
+import { evaluatePolicy } from './syncEvaluator';
 import { hex } from './crypto';
 import { readDevices } from '../settings/values';
 import { deviceLabel as browserDeviceLabel } from './edge';
@@ -94,8 +95,9 @@ export async function recoveryContext(
 
 type Policy<T> = { ok: T } | { error: string };
 
-function policy<T>(request: Record<string, unknown>): Policy<T> {
-  const envelope = JSON.parse(evaluate(JSON.stringify(request))) as {
+async function policy<T>(request: Record<string, unknown>): Promise<Policy<T>> {
+  await ensureDeferredSyncPolicy();
+  const envelope = JSON.parse(evaluatePolicy(request)) as {
     ok?: T;
     error?: string;
   };
@@ -105,18 +107,23 @@ function policy<T>(request: Record<string, unknown>): Policy<T> {
 }
 
 /** §2: a new code from 22 bytes of this browser's CSPRNG. */
-export function newCode(random = crypto.getRandomValues(new Uint8Array(22))): {
+export async function newCode(random = crypto.getRandomValues(new Uint8Array(22))): Promise<{
   code: string;
   data: string;
-} {
-  const made = policy<{ code: string; data: string }>({ op: 'recovery_code', random: hex(random) });
+}> {
+  const made = await policy<{ code: string; data: string }>({
+    op: 'recovery_code',
+    random: hex(random),
+  });
   if ('error' in made) throw new Error(`recovery_code: ${made.error}`);
   return made.ok;
 }
 
 /** §2: what was typed, as the code's data characters, or why it can't be one. Before any request. */
-export function readCode(text: string): { data: string } | { error: 'mistyped' | 'checksum' } {
-  const read = policy<{ data: string }>({ op: 'recovery_read', text });
+export async function readCode(
+  text: string,
+): Promise<{ data: string } | { error: 'mistyped' | 'checksum' }> {
+  const read = await policy<{ data: string }>({ op: 'recovery_read', text });
   if ('error' in read) return { error: read.error === 'checksum' ? 'checksum' : 'mistyped' };
   return read.ok;
 }
@@ -543,7 +550,7 @@ export interface Prepared {
 
 /** §6 step 1: a code, its locator, and the library key sealed under it. */
 export async function prepare(ctx: RecoveryContext, libraryKey: string): Promise<Prepared> {
-  const { code, data } = newCode();
+  const { code, data } = await newCode();
   const derived = await derive(data, { op: 'make' });
   const createdAt = now(ctx);
   const key = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
@@ -814,7 +821,7 @@ export async function redeem(
   text: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ libraryKey: string } | { error: RedeemError; retryAfter?: number }> {
-  const read = readCode(text);
+  const read = await readCode(text);
   if ('error' in read) return read;
   let derived: Derived;
   try {

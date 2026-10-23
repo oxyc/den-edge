@@ -121,6 +121,7 @@ import {
 import { acceptsAddonURL, readApiKey, readPlugins } from './prefs';
 import { ADDRESSES, healed, readPrivateAddresses, storable } from './privateAddresses';
 import { syncPolicy } from './syncCore';
+import { ensureDeferredSyncPolicy } from './syncLoader';
 import { recordTrackerEvent } from './trackerEvents';
 import { retryAfterMs } from './retryAfter';
 import {
@@ -545,6 +546,7 @@ export class LibraryLogAuthority {
   }
 
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
+    if (selection.kind === 'simkl') await ensureDeferredSyncPolicy();
     switch (selection.kind) {
       case 'overview':
         return this.#rememberFinished('overview', this.#overview());
@@ -593,6 +595,7 @@ export class LibraryLogAuthority {
     operationId: string,
   ): Promise<LibraryAuthorityCommandResult> {
     this.#writable();
+    await ensureDeferredSyncPolicy();
     switch (command.kind) {
       case 'watchlist.add':
         return this.#titleAction(
@@ -680,6 +683,8 @@ export class LibraryLogAuthority {
   }
 
   async query(query: LibraryQuery): Promise<LibraryQueryResult> {
+    if (query.kind === 'profile-create.status' || query.kind === 'key-reset.prepare')
+      await ensureDeferredSyncPolicy();
     switch (query.kind) {
       case 'playback.prepare':
         return this.#preparePlayback(query.title, query.episode);
@@ -888,6 +893,7 @@ export class LibraryLogAuthority {
       task.kind !== 'profile-key-reset.confirm'
     )
       this.#writable();
+    await ensureDeferredSyncPolicy();
     if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
     if (
       task.kind === 'profile-key-reset.start' ||

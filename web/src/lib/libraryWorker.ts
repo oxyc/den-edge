@@ -13,7 +13,7 @@ import {
   type Row,
   type Stamp,
 } from './wire';
-import { initialize } from '../vendor/den-core/index.js';
+import { initializeStartup } from '../vendor/den-core/startup.js';
 
 type Request =
   | {
@@ -97,7 +97,7 @@ function retainedSource(retainedId: number, buffer: ArrayBuffer): Row[] {
 }
 
 async function project(source: Row[], now: number) {
-  await initialize();
+  await initializeStartup();
   const rows: Row[] = [];
   let stamp: Stamp = ZERO_STAMP;
   let reconsiderAt = Infinity;
@@ -162,7 +162,7 @@ self.onmessage = async (event: MessageEvent<Request>) => {
         ...(HOME_VIEW_PROOF ? { homeView: proveHomeLibraryView(library, projected.rows) } : {}),
       };
     } else {
-      await initialize();
+      await initializeStartup();
       value = applyLog(request.library, request.rows);
     }
     self.postMessage({ id: request.id, value });

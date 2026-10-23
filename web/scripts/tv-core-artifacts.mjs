@@ -11,11 +11,23 @@ export const tvCoreArtifacts = [
   'LICENSE',
   'index.js',
   'index.d.ts',
+  'startup.js',
+  'startup.d.ts',
+  'deferred.js',
+  'deferred.d.ts',
+  'lifecycle.js',
+  'lifecycle.d.ts',
   'assistant.js',
   'assistant.d.ts',
   'recovery.js',
   'recovery.d.ts',
-  ...['den_core', 'den_core_assistant', 'den_core_recovery'].flatMap((name) =>
+  ...[
+    'den_core',
+    'den_core_startup',
+    'den_core_deferred',
+    'den_core_assistant',
+    'den_core_recovery',
+  ].flatMap((name) =>
     [`${name}.js`, `${name}.d.ts`, `${name}_bg.wasm`, `${name}_bg.wasm.d.ts`].map(
       (file) => `generated/${file}`,
     ),
@@ -61,6 +73,12 @@ export function verifyTvCore() {
   for (const name of [
     'index.js',
     'index.d.ts',
+    'startup.js',
+    'startup.d.ts',
+    'deferred.js',
+    'deferred.d.ts',
+    'lifecycle.js',
+    'lifecycle.d.ts',
     'assistant.js',
     'assistant.d.ts',
     'recovery.js',

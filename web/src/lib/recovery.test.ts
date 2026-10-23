@@ -50,10 +50,11 @@ const SLOW = 60_000;
 const quiet = { op: 'redeem', report: () => {} } as const;
 
 describe('den-spec recovery-v1 vectors', () => {
-  it('makes and reads codes as the vectors do', () => {
+  it('makes and reads codes as the vectors do', async () => {
     for (const entry of vectors.entries)
-      expect(newCode(fromHex(entry.random))).toEqual({ code: entry.code, data: entry.data });
-    for (const { input, parsed } of vectors.codes) expect(readCode(input), input).toEqual(parsed);
+      expect(await newCode(fromHex(entry.random))).toEqual({ code: entry.code, data: entry.data });
+    for (const { input, parsed } of vectors.codes)
+      expect(await readCode(input), input).toEqual(parsed);
   });
 
   it(

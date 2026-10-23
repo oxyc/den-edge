@@ -5,9 +5,10 @@ let ready = false;
 let pending: Promise<void> | undefined;
 let startPending: (() => void) | undefined;
 
-/** Tizen 3 has no transferable Wasm module; close a stale offer defensively. */
-export function acceptSyncPolicy(port: MessagePort): void {
-  port.close();
+/** Tizen 3 has no transferable Wasm modules; close stale offers defensively. */
+export function acceptSyncPolicy(startup: MessagePort, deferred: MessagePort): void {
+  startup.close();
+  deferred.close();
 }
 
 /** Load the checked-in JavaScript policy once, using the same idle/promotion contract as the Wasm loader. */
@@ -51,3 +52,6 @@ export function ensureSyncPolicy(idle = false): Promise<void> {
 export function preloadSyncPolicy(): void {
   void ensureSyncPolicy(true).catch(() => {});
 }
+
+/** Its generated JavaScript core is monolithic, so either lifecycle capability shares the same initialization. */
+export const ensureDeferredSyncPolicy = ensureSyncPolicy;
