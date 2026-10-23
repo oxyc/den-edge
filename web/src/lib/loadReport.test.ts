@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { deviceOf, entryOf, loadRouteOf, loadSettled, MILESTONES, netTally } from './loadReport';
+import {
+  deviceOf,
+  entryOf,
+  fileTally,
+  loadRouteOf,
+  loadSettled,
+  MILESTONES,
+  netTally,
+} from './loadReport';
 
 const IPHONE_SAFARI =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
@@ -103,6 +111,41 @@ describe('netTally', () => {
       plugins: [2, 70],
       other: [1, 5],
     });
+  });
+});
+
+describe('fileTally', () => {
+  const origin = 'https://den-tv.oxy.fi';
+  it('counts script and Wasm files by where they came from, and nothing else', () => {
+    const tally = fileTally([
+      // The HTTP cache: nothing transferred, a body all the same.
+      { name: `${origin}/assets/index-a1.js`, transferSize: 0, encodedBodySize: 9_000 },
+      { name: `${origin}/assets/den_core_bg-b2.wasm`, transferSize: 0, decodedBodySize: 40_000 },
+      { name: `${origin}/assets/worker-c3.js`, transferSize: 300, deliveryType: 'cache' },
+      // The network, a revalidation included.
+      { name: `${origin}/assets/chunk-d4.js`, transferSize: 9_300, encodedBodySize: 9_000 },
+      { name: `${origin}/assets/chunk-e5.mjs`, transferSize: 280, encodedBodySize: 5_000 },
+      // A service worker answered.
+      {
+        name: `${origin}/assets/chunk-f6.js`,
+        transferSize: 0,
+        encodedBodySize: 1,
+        workerStart: 12,
+      },
+      // The engine says nothing: no sizes at all, or zeros (a cross-origin file without timing access).
+      { name: `${origin}/assets/old-tv.js` },
+      { name: 'https://cdn.example/x.js', transferSize: 0, encodedBodySize: 0 },
+      // Not a script or Wasm file.
+      { name: `${origin}/assets/index.css`, transferSize: 0, encodedBodySize: 2_000 },
+      { name: `${origin}/lib/abc/changes`, transferSize: 900 },
+      { name: `${origin}/js/notes`, transferSize: 900 },
+    ]);
+    expect(tally).toEqual({ cache: 3, serviceWorker: 1, network: 2, unknown: 2 });
+  });
+
+  it('is absent when no script or Wasm file loaded', () => {
+    expect(fileTally([])).toBeUndefined();
+    expect(fileTally([{ name: `${origin}/tmdb/3/movie/550`, transferSize: 0 }])).toBeUndefined();
   });
 });
 

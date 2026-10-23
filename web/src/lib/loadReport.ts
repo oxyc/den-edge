@@ -148,6 +148,49 @@ export function netTally(
   return tally;
 }
 
+/**
+ * Where a script or Wasm file came from: the HTTP cache (`transferSize` 0 with a body), a service worker
+ * (`workerStart`), the network (a 304 included: it still waited on a round trip), or `unknown` when the engine
+ * doesn't say (no `transferSize`, as on older TVs). So a device that fetches its hashed files again on every launch
+ * shows it.
+ */
+export type FileSource = 'cache' | 'serviceWorker' | 'network' | 'unknown';
+export type FileTally = Record<FileSource, number>;
+
+/** The fields of a resource timing entry `fileTally` reads; each may be missing on an older engine. */
+export type FileTiming = { name: string } & Partial<
+  Pick<
+    PerformanceResourceTiming,
+    'transferSize' | 'encodedBodySize' | 'decodedBodySize' | 'workerStart'
+  > & { deliveryType: string }
+>;
+
+export function fileSourceOf(entry: FileTiming): FileSource {
+  if (entry.workerStart) return 'serviceWorker';
+  if (entry.deliveryType === 'cache') return 'cache';
+  if (typeof entry.transferSize !== 'number') return 'unknown';
+  if (entry.transferSize > 0) return 'network';
+  return entry.encodedBodySize || entry.decodedBodySize ? 'cache' : 'unknown';
+}
+
+/** The script and Wasm files among `entries`, by where each came from; undefined when there were none. */
+export function fileTally(entries: readonly FileTiming[]): FileTally | undefined {
+  const tally: FileTally = { cache: 0, serviceWorker: 0, network: 0, unknown: 0 };
+  let any = false;
+  for (const entry of entries) {
+    let path: string;
+    try {
+      path = new URL(entry.name).pathname;
+    } catch {
+      continue;
+    }
+    if (!/\.(?:m?js|wasm)$/.test(path)) continue;
+    tally[fileSourceOf(entry)] += 1;
+    any = true;
+  }
+  return any ? tally : undefined;
+}
+
 /** How the page was entered; `swap` is Den's own load onto a newer release (`release.ts`, under `den-retry`). */
 export type LoadEntry = 'navigate' | 'reload' | 'back_forward' | 'swap';
 
@@ -161,6 +204,9 @@ export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: Browse
   release?: string;
   net?: NetTally;
   workerNet?: NetTally;
+  /** The page's script and Wasm files by where they came from (`fileTally`), and its Workers'. */
+  files?: FileTally;
+  workerFiles?: FileTally;
   /** The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`. */
   longTasks?: [number, number, number];
 };
@@ -251,12 +297,16 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
   if (entry) report.entry = entry;
   const release = currentRelease();
   if (release) report.release = release;
-  const net = netTally(
-    (performance.getEntriesByType?.('resource') ?? []) as PerformanceResourceTiming[],
-  );
+  const resources = (performance.getEntriesByType?.('resource') ??
+    []) as PerformanceResourceTiming[];
+  const net = netTally(resources);
   if (Object.keys(net).length) report.net = net;
   const workerNet = netTally(startupWorkerResources());
   if (Object.keys(workerNet).length) report.workerNet = workerNet;
+  const files = fileTally(resources);
+  if (files) report.files = files;
+  const workerFiles = fileTally(startupWorkerResources());
+  if (workerFiles) report.workerFiles = workerFiles;
   const longTasks = startupLongTasks();
   if (longTasks[0]) report.longTasks = longTasks;
   return report;
