@@ -30,7 +30,7 @@ import {
   type Prepared,
   type RecoveryContext,
 } from './recovery';
-import { fromBase64url, toBase64url } from './wire';
+import { fromBase64url, isDocument, toBase64url } from './wire';
 import type { Row, Stamp } from './wire';
 
 const RESET_ROUNDS = 3;
@@ -590,9 +590,10 @@ export class LibraryAdminAuthority {
           result: { kind: 'local-library.merge', outcome: 'unavailable' },
           affected: affectedLibrary,
         };
+      const documents = rows.filter(isDocument).length;
       startupMark(
         'local library merge',
-        `${rows.length} rows${wasWritten ? ', already written' : ''}`,
+        `${documents} documents, ${rows.length - documents} settings${wasWritten ? ', already written' : ''}`,
       );
       return {
         result: {
