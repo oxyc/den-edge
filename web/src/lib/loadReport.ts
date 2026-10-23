@@ -90,8 +90,32 @@ export type TmdbCacheOutcome = keyof typeof TMDB_CACHE;
  * the network and on what: the page's own (`net`), and its Workers' (`workerNet`), which make the library's and most
  * metadata requests.
  */
-export type NetKind = 'lib' | 'tmdb' | 'meta' | 'atlas' | 'image' | 'other';
+export type NetKind =
+  | 'lib'
+  | 'tmdb'
+  | 'meta'
+  | 'atlas'
+  | 'image'
+  | (typeof SEGMENT_KINDS)[number]
+  | 'plugins'
+  | 'other';
 export type NetTally = Partial<Record<NetKind, [number, number]>>;
+
+/** den-edge endpoints named by their first path segment, so a slow load names the request it waited on. */
+const SEGMENT_KINDS = [
+  'routes',
+  'config',
+  'health',
+  'version',
+  'capabilities',
+  'reel',
+  'oauth',
+  'grant',
+  'assistant',
+  'remux',
+  'subtitles',
+  'pair',
+] as const;
 
 export function netKindOf(name: string, initiator: string): NetKind {
   if (initiator === 'img' || initiator === 'image') return 'image';
@@ -105,7 +129,10 @@ export function netKindOf(name: string, initiator: string): NetKind {
   if (path.startsWith('/tmdb/')) return 'tmdb';
   if (/^\/(?:metadata|ratings|warnings|skipdb)\//.test(path)) return 'meta';
   if (path.startsWith('/atlas/')) return 'atlas';
-  return 'other';
+  // Source plugins: den-scout through den-edge, or any addon's manifest on its own host.
+  if (path.startsWith('/scout/') || path.endsWith('/manifest.json')) return 'plugins';
+  const segment = path.split('/')[1];
+  return SEGMENT_KINDS.find((kind) => kind === segment) ?? 'other';
 }
 
 export function netTally(

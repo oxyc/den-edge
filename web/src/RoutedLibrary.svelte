@@ -3,9 +3,9 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import type LegacyBackupRecoveryComponent from './components/LegacyBackupRecovery.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
-  import ProfileSettings from './ProfileSettings.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import {
     activeProfileSession,
@@ -42,7 +42,7 @@
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
-  import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
+  import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
@@ -149,6 +149,13 @@
   };
   let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownHousehold ?? ownKey));
 
+  async function discardLocalLegacyBackup(): Promise<void> {
+    const key = libraryIdentity;
+    if (!key || !shown.local || !localLegacyBackup) return;
+    if (await dropLocalLibrary(key)) location.reload();
+    else shown.notify('Couldn’t discard this browser’s old library.');
+  }
+
   let confirmedProfileHousehold = $state<string | null>(
     untrack(() =>
       libraryIdentity && knownProfileHousehold(libraryIdentity) ? libraryIdentity : null,
@@ -252,6 +259,11 @@
   let openingCommittedProfiles = false;
   let committedProfilesOpen = 0;
   const settingsRoute = $derived(profileSettingsRoute(session, profileCoordinator?.mode ?? null));
+  // Settings can turn personal while open (a Kid restored after the route was drawn), so the screen loads from here.
+  let settingsOpen = $state(false);
+  $effect(() => {
+    if (settingsOpen && settingsRoute === 'personal') void ProfileSettingsScreen.load();
+  });
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
@@ -367,6 +379,16 @@
             : profileCoordinator.restoring))),
   );
   const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  const localLegacyBackup = $derived(
+    shown.local && shown.alert?.startsWith('This backup predates Library v4.') ? shown.alert : null,
+  );
+  let LegacyBackupRecovery = $state<typeof LegacyBackupRecoveryComponent | null>(null);
+  $effect(() => {
+    if (!localLegacyBackup || LegacyBackupRecovery) return;
+    void import('./components/LegacyBackupRecovery.svelte').then(
+      ({ default: component }) => (LegacyBackupRecovery = component),
+    );
+  });
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
   let optimisticShown = false;
@@ -1595,10 +1617,18 @@
          a new session always mounts a new tree, even one with the same identity (a reopened Owner, whose old model is
          closed). The adopted first-frame session is the coordinator's own object, so that handover keeps the tree. -->
     {#key shown}
-      <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+      {#if localLegacyBackup && LegacyBackupRecovery}
+        <LegacyBackupRecovery
+          message={localLegacyBackup}
+          ondiscard={() => void discardLocalLegacyBackup()}
+        />
+      {:else}
+        <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+      {/if}
       <Router
         profile={profileSessionKey(shown.identity)}
         onchange={(route) => {
+          settingsOpen = route.page === 'settings';
           if (route.page === 'settings')
             void (session.identity.kind === 'visitor'
               ? Promise.resolve()
@@ -1612,7 +1642,11 @@
           {#if route.page === 'settings'}
             {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
             {#if settingsRoute === 'personal'}
-              <ProfileSettings {session} profiles={profileCoordinator} />
+              {#if ProfileSettingsScreen.current}
+                <ProfileSettingsScreen.current {session} profiles={profileCoordinator} />
+              {:else}
+                <ScreenLoading screen={ProfileSettingsScreen} />
+              {/if}
             {:else if settingsRoute === 'unavailable'}
               <section
                 class="profile-settings-unavailable"

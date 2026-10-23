@@ -596,6 +596,19 @@ enum NetKind {
     Meta,
     Atlas,
     Image,
+    Routes,
+    Config,
+    Health,
+    Version,
+    Capabilities,
+    Plugins,
+    Reel,
+    Oauth,
+    Grant,
+    Assistant,
+    Remux,
+    Subtitles,
+    Pair,
     Other,
 }
 
@@ -638,6 +651,19 @@ impl NetKind {
             NetKind::Meta => "meta",
             NetKind::Atlas => "atlas",
             NetKind::Image => "image",
+            NetKind::Routes => "routes",
+            NetKind::Config => "config",
+            NetKind::Health => "health",
+            NetKind::Version => "version",
+            NetKind::Capabilities => "capabilities",
+            NetKind::Plugins => "plugins",
+            NetKind::Reel => "reel",
+            NetKind::Oauth => "oauth",
+            NetKind::Grant => "grant",
+            NetKind::Assistant => "assistant",
+            NetKind::Remux => "remux",
+            NetKind::Subtitles => "subtitles",
+            NetKind::Pair => "pair",
             NetKind::Other => "other",
         }
     }
@@ -1249,6 +1275,20 @@ mod tests {
             "route": "home", "device": "tv", "engine": "blink", "workers": 1, "net": { "/tmdb/3/movie/550": [1, 1] },
         }));
         assert!(unknown.is_err(), "a request's path never reaches the log");
+    }
+
+    #[test]
+    fn a_load_report_names_the_startup_endpoints_a_load_waited_on() {
+        let report: LoadReport = serde_json::from_value(serde_json::json!({
+            "route": "home", "device": "tv", "engine": "blink", "workers": 2,
+            "net": { "routes": [1, 900], "health": [3, 2_400], "config": [1, 120], "plugins": [2, 70], "other": [1, 5] },
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "route:home,device:tv,engine:blink,workers:2,\
+             net_routes:1/900ms,net_config:1/120ms,net_health:3/2400ms,net_plugins:2/70ms,net_other:1/5ms"
+        );
     }
 
     #[test]
