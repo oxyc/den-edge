@@ -965,7 +965,8 @@ async fn relay_with(
     // is what gets blocked. It is also the reason the public `d-scout` name sits behind Access.
     //
     // A refusal is the 404 an unknown route gets, so the gate never advertises what it is hiding. The
-    // LAN and tailnet faces are untouched — a TV reaches scout directly, never through here.
+    // LAN and tailnet faces are untouched. The hosted TV face is public like Web: its app reaches these routes
+    // through den-edge and must prove the same household membership before it can spend the home's address.
     let remux = req.uri().path().starts_with("/remux/");
     let scan = grant.is_none() && method == Method::POST && req.uri().path() == SEGMENT_SCAN;
     if remux && !remux_control(req.uri().path()) && !scan {
@@ -979,7 +980,7 @@ async fn relay_with(
     let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
     let den = req.uri().path() == "/den" || req.uri().path().starts_with("/den/");
     let member_only = grant.is_none()
-        && face == crate::handler::Face::Web
+        && matches!(face, crate::handler::Face::Web | crate::handler::Face::Tv)
         && (scout || den || remux)
         && !den_install_manifest(&method, req.uri().path());
     if member_only {
@@ -3996,19 +3997,22 @@ mod tests {
         let mut h = Harness::new();
         let socket = h.dir.join("managed-listener.sock");
         let unix = tokio::net::UnixListener::bind(&socket).unwrap();
-        let (opened, opening) = tokio::sync::oneshot::channel();
+        let (opened, mut opening) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let (stream, _) = unix.accept().await.unwrap();
-            let mut stream = BufReader::new(stream);
-            let mut line = String::new();
-            stream.read_line(&mut line).await.unwrap();
-            opened.send(line).unwrap();
-            stream.into_inner().write_all(b"ok\n").await.unwrap();
+            for _ in 0..2 {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                opened.send(line).unwrap();
+                stream.into_inner().write_all(b"ok\n").await.unwrap();
+            }
         });
         let state = Arc::get_mut(&mut h.state).unwrap();
         state.relays =
             crate::parse_relays(&format!("/den=http://{upstream_addr}, /remux=http://{upstream_addr}"));
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.oxy.fi");
         state.den_playback_enabled = true;
         state.remux_edge_secret = Some("edge-secret".into());
         state.public_media_base = Some("https://203.0.113.10".into());
@@ -4016,25 +4020,42 @@ mod tests {
         let claim = registered_library(&h).await;
         Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
 
-        let response = h
+        let stranger = h
             .send(
                 "POST",
                 "/den/config/playback",
                 Some(json!({ "imdb": "tt1" }).to_string()),
                 &[
-                    ("host", "d.oxy.fi"),
+                    ("host", "den-tv.oxy.fi"),
                     ("content-type", "application/json"),
-                    ("x-den-library-member", &claim),
-                    ("idempotency-key", "attempt-listener-open"),
+                    ("idempotency-key", "attempt-tv-stranger"),
                 ],
             )
             .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(received.recv().await.unwrap(), None);
-        assert!(opening.await.unwrap().contains(r#""open":true"#));
-        assert_eq!(received.recv().await.unwrap().as_deref(), Some("commit"));
-        let body = crate::handler::tests::body_json(response).await;
-        assert_eq!(body["url"], format!("https://203.0.113.10{playlist}"));
+        assert_eq!(stranger.status(), StatusCode::NOT_FOUND);
+        assert!(received.try_recv().is_err(), "the TV host let a non-member reach Hearth");
+
+        for (host, key) in [("d.oxy.fi", "attempt-web-listener"), ("den-tv.oxy.fi", "attempt-tv-listener")] {
+            let response = h
+                .send(
+                    "POST",
+                    "/den/config/playback",
+                    Some(json!({ "imdb": "tt1" }).to_string()),
+                    &[
+                        ("host", host),
+                        ("content-type", "application/json"),
+                        ("x-den-library-member", &claim),
+                        ("idempotency-key", key),
+                    ],
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+            assert_eq!(received.recv().await.unwrap(), None, "{host}");
+            assert!(opening.recv().await.unwrap().contains(r#""open":true"#), "{host}");
+            assert_eq!(received.recv().await.unwrap().as_deref(), Some("commit"), "{host}");
+            let body = crate::handler::tests::body_json(response).await;
+            assert_eq!(body["url"], format!("https://203.0.113.10{playlist}"), "{host}");
+        }
     }
 
     /// The TV asks for a segment scan on the LAN face: a POST to the one scan route goes through, and nothing else

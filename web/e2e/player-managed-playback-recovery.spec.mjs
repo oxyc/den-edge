@@ -171,6 +171,52 @@ test('a direct startup failure followed by a failed fallback tells the viewer an
   }
 });
 
+test('a replacement still opening is retried instead of leaving the player waiting forever', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+  try {
+    const page = await browser.newPage();
+    await base(page);
+    const operations = [];
+    await page.route(`${ORIGIN}/den/config/playback`, (route) => {
+      const request = route.request();
+      operations.push(request.postDataJSON());
+      if (operations.length === 1)
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(direct('replacement-startup-fails')),
+        });
+      if (operations.length === 2)
+        return route.fulfill({
+          status: 409,
+          headers: { 'retry-after': '1' },
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'replacement_pending' }),
+        });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(remux),
+      });
+    });
+    await page.route(`${ORIGIN}/torbox/replacement-startup-fails/**`, (route) =>
+      route.fulfill({ status: 404 }),
+    );
+    await page.route(`${ORIGIN}/managed-remux/s/**`, (route) => media(route));
+
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    await expect.poll(() => operations.length).toBe(2);
+    await expect.poll(() => operations.length, { timeout: 10_000 }).toBe(3);
+    expect(operations[1].directFailed).toBe(true);
+    expect(operations[2].directFailed).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('hls.js refreshes a failed direct stream once, then asks Hearth for Remux', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

@@ -1131,6 +1131,20 @@
           console.warn(
             `den-remux refused a mid-film change (${result.failure}); the playing session carries on.`,
           );
+        if (
+          result.failure === 'busy' ||
+          result.failure === 'starting' ||
+          result.failure === 'transcode' ||
+          result.failure === 'timedOut' ||
+          result.failure === 'temporarilyUnavailable' ||
+          cause === 'torbox_rate_limited'
+        ) {
+          const retryMessage = automaticRetryNotice(result.failure, cause);
+          retry = setTimeout(
+            () => void begin(pick, extra, replacing, delivery, retryMessage),
+            result.retryMs ?? RETRY_MS,
+          );
+        }
         return result.failure;
       }
       managedCause = cause;

@@ -433,6 +433,7 @@ export async function startPlayback(
     const failure = failureOf(response.status, error, cause);
     const retryMs =
       response.status === 429 ||
+      failure === 'starting' ||
       response.status === 503 ||
       response.status === 504 ||
       cause === 'torbox_rate_limited'
