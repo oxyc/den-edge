@@ -363,6 +363,34 @@ async function playerGeometry(page) {
   });
 }
 
+/**
+ * Record each Cast status the page renders (`window.castStatuses`), measured as the DOM changes. "Looking" lasts only
+ * the fixture's discovery window, which a busy machine can spend before a test's next call reaches the page; read
+ * from the test, that state is missed or measured as it is replaced.
+ */
+async function recordCastStatus(page) {
+  await page.locator('.player').evaluate((player) => {
+    const box = (element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    window.castStatuses = [];
+    new MutationObserver(() => {
+      const notice = player.querySelector('.cast-status .notice');
+      const text = notice?.querySelector('.notice-copy')?.textContent ?? null;
+      if (text === null || text === window.castStatuses.at(-1)?.text) return;
+      window.castStatuses.push({
+        text,
+        notice: box(notice),
+        geometry: {
+          stage: box(player.querySelector('.stage')),
+          video: box(player.querySelector('video')),
+        },
+      });
+    }).observe(player, { subtree: true, childList: true, characterData: true });
+  });
+}
+
 for (const viewport of [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'narrow', width: 390, height: 844 },
@@ -375,15 +403,25 @@ for (const viewport of [
     try {
       await playingPast(page, 1);
       const idle = await playerGeometry(page);
+      await recordCastStatus(page);
 
       await clickCast(page);
-      await expect(page.getByText('Looking for a Chromecast…')).toBeVisible();
-      expect(await playerGeometry(page)).toEqual(idle);
-      const searchingStatus = await page.locator('.cast-status .notice').boundingBox();
-
       await expect(page.getByText('No Chromecast found.')).toBeVisible();
-      expect(await playerGeometry(page)).toEqual(idle);
-      expect(await page.locator('.cast-status .notice').boundingBox()).toEqual(searchingStatus);
+      const statuses = await page.evaluate(() => window.castStatuses);
+      expect(statuses.map((status) => status.text)).toEqual([
+        'Looking for a Chromecast…',
+        'No Chromecast found. Check that it is awake and on the same network as this device.',
+      ]);
+      const [searching, none] = statuses;
+      expect(searching.geometry).toEqual(idle);
+      expect(none.geometry).toEqual(idle);
+      expect(none.notice).toEqual(searching.notice);
+    } catch (error) {
+      await page
+        .context()
+        .tracing.stop({ path: test.info().outputPath('page-trace.zip') })
+        .catch(() => undefined);
+      throw error;
     } finally {
       await browser.close();
     }
