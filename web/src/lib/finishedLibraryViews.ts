@@ -4,7 +4,11 @@ import {
   openLibraryLocalValue,
   sealLibraryLocalValue,
 } from './libraryLocalValue';
-import type { Vault } from './localVault';
+import {
+  LIBRARY_LOCAL_AUTHORITY,
+  type LibraryLocalAuthorityIdentity,
+} from './libraryLocalAuthority';
+import type { Vault, VaultChange } from './localVault';
 import type {
   ContinueView,
   DevicesView,
@@ -16,7 +20,8 @@ import { LIBRARY_SERVICE_PROTOCOL } from './libraryServiceProtocol';
 import { decodeLibraryServiceServerMessage } from './libraryServiceProtocolCodec';
 
 export const FINISHED_LIBRARY_VIEWS_SCHEMA = 1;
-export const FINISHED_LIBRARY_POLICY = 1;
+// Version 2 invalidates settings views that could have recorded live assistant grants/reads as false.
+export const FINISHED_LIBRARY_POLICY = 2;
 export const FINISHED_LIBRARY_RECOMMENDATIONS = 1;
 const NAME = 'finished-views.v1';
 const CAPABILITIES: readonly FinishedLibraryViewCapability[] = [
@@ -203,20 +208,31 @@ const sameState = (left: FinishedLibraryViewIdentity, right: FinishedLibraryView
     (field) => field === 'layoutVersion' || left[field] === right[field],
   );
 
-/** The kept manifest, when it opens and is this library's; null otherwise. */
+interface ManifestSnapshot {
+  /** The exact encrypted bytes used as the publication precondition, including unreadable bytes. */
+  bytes: Uint8Array | undefined;
+  /** The kept manifest, when it opens and is this library's. */
+  manifest: FinishedLibraryViewManifest | null;
+}
+
+/** The manifest and the exact encrypted bytes it was read from. */
 async function keptManifest(
   local: NonNullable<Awaited<ReturnType<typeof libraryLocalMaterials>>>,
   vault: Vault,
-): Promise<FinishedLibraryViewManifest | null> {
+): Promise<ManifestSnapshot> {
   const bytes = await vault.get(storedKey(local.libraryId));
-  if (!bytes) return null;
+  if (!bytes) return { bytes, manifest: null };
   try {
     const manifest = await openLibraryLocalValue(local.key, NAME, bytes);
-    return validManifest(manifest) && manifest.identity.libraryId === local.libraryId
-      ? manifest
-      : null;
+    return {
+      bytes,
+      manifest:
+        validManifest(manifest) && manifest.identity.libraryId === local.libraryId
+          ? manifest
+          : null,
+    };
   } catch {
-    return null;
+    return { bytes, manifest: null };
   }
 }
 
@@ -273,27 +289,37 @@ export async function readFinishedLibraryViews(
 export async function staleFinishedLibraryViews(libraryKey: string, vault: Vault): Promise<void> {
   const local = await libraryLocalMaterials(libraryKey);
   if (!local) return;
-  const kept = await keptManifest(local, vault);
+  const { bytes: expected, manifest: kept } = await keptManifest(local, vault);
   if (!kept || kept.stale) return;
-  noteFinishedViewsRewrite('stale');
+  const compareAndCommit = vault.compareAndCommit;
+  if (!compareAndCommit) return;
   const bytes = await sealLibraryLocalValue(local.key, NAME, { ...kept, stale: true });
-  await vault.put(storedKey(local.libraryId), bytes);
+  if (
+    !(await compareAndCommit.call(vault, storedKey(local.libraryId), expected, [
+      { kind: 'put', key: storedKey(local.libraryId), value: bytes },
+    ]))
+  )
+    return;
+  noteFinishedViewsRewrite('stale');
   noteLibraryCacheIO('write', bytes.byteLength);
 }
 
 /**
- * Write the pieces that say something the kept ones do not, each under a new revision, and publish their manifest
- * last, so interruption preserves the previous complete set. A piece that says the same is named again where it is.
+ * Prepare the pieces that say something the kept ones do not, then atomically publish them with their manifest,
+ * caller-supplied identity values, and cleanup only if the encrypted manifest read before preparation is still
+ * current. A piece that says the same is named again where it is. A competing publisher wins without this attempt
+ * writing or deleting.
  */
 export async function writeFinishedLibraryViews(
   libraryKey: string,
   vault: Vault,
   value: FinishedLibraryViews,
+  authority?: LibraryLocalAuthorityIdentity,
 ): Promise<boolean> {
   const local = await libraryLocalMaterials(libraryKey);
   if (!local || !validEnvelope(value) || value.identity.libraryId !== local.libraryId) return false;
   const capabilities = Object.keys(value.pieces) as FinishedLibraryViewCapability[];
-  const kept = await keptManifest(local, vault);
+  const { bytes: expected, manifest: kept } = await keptManifest(local, vault);
   const nextRevision = revision();
   const pieces: KeptPieces = {};
   const changed: FinishedLibraryViewCapability[] = [];
@@ -309,40 +335,63 @@ export async function writeFinishedLibraryViews(
   const dropped = Object.keys(kept?.pieces ?? {}).filter(
     (capability) => !capabilities.includes(capability as FinishedLibraryViewCapability),
   );
-  // A returning visit that opened the whole log recomputes the views it already keeps: nothing to write then.
-  if (
+  const compareAndCommit = vault.compareAndCommit;
+  if (!compareAndCommit) return false;
+  const unchanged =
     kept &&
     !kept.stale &&
     !changed.length &&
     !dropped.length &&
-    sameState(kept.identity, value.identity)
-  )
-    return true;
-  noteFinishedViewsRewrite(kept ? `write:${changed.join(',') || 'identity'}` : 'write:none kept');
-  for (const capability of changed) {
-    const aad = `${NAME}:${nextRevision}:${capability}`;
-    const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
-    await vault.put(pieceKey(local.libraryId, nextRevision, capability), bytes);
-    noteLibraryCacheIO('write', bytes.byteLength);
+    sameState(kept.identity, value.identity);
+  const changes: VaultChange[] = [];
+  const writtenBytes: number[] = [];
+  if (!unchanged) {
+    for (const capability of changed) {
+      const aad = `${NAME}:${nextRevision}:${capability}`;
+      const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
+      changes.push({
+        kind: 'put',
+        key: pieceKey(local.libraryId, nextRevision, capability),
+        value: bytes,
+      });
+      writtenBytes.push(bytes.byteLength);
+    }
+    const manifest: FinishedLibraryViewManifest = {
+      schema: value.schema,
+      identity: value.identity,
+      pieces,
+    };
+    const bytes = await sealLibraryLocalValue(local.key, NAME, manifest);
+    changes.push({ kind: 'put', key: storedKey(local.libraryId), value: bytes });
+    writtenBytes.push(bytes.byteLength);
+    if (changed.length || dropped.length) {
+      // What the manifest no longer names: replaced pieces and leftovers from an older interrupted implementation.
+      const active = new Set(
+        Object.entries(pieces).map(([capability, { revision }]) =>
+          pieceKey(local.libraryId, revision, capability as FinishedLibraryViewCapability),
+        ),
+      );
+      const storedPieces = await vault.entries(`${storedKey(local.libraryId)}:`);
+      changes.push(
+        ...storedPieces.flatMap(([key]): VaultChange[] =>
+          active.has(key) ? [] : [{ kind: 'delete', key }],
+        ),
+      );
+    }
   }
-  const manifest: FinishedLibraryViewManifest = {
-    schema: value.schema,
-    identity: value.identity,
-    pieces,
-  };
-  const bytes = await sealLibraryLocalValue(local.key, NAME, manifest);
-  await vault.put(storedKey(local.libraryId), bytes);
-  noteLibraryCacheIO('write', bytes.byteLength);
-  if (!changed.length && !dropped.length) return true;
-  // What the manifest no longer names: the pieces replaced, and any an interrupted write left behind.
-  const active = new Set(
-    Object.entries(pieces).map(([capability, { revision }]) =>
-      pieceKey(local.libraryId, revision, capability as FinishedLibraryViewCapability),
-    ),
-  );
-  const storedPieces = await vault.entries(`${storedKey(local.libraryId)}:`);
-  await Promise.allSettled(
-    storedPieces.flatMap(([key]) => (active.has(key) ? [] : [vault.delete(key)])),
-  );
+  if (authority) {
+    const bytes = await sealLibraryLocalValue(local.key, LIBRARY_LOCAL_AUTHORITY, authority);
+    changes.push({
+      kind: 'put',
+      key: `${local.libraryId}:${LIBRARY_LOCAL_AUTHORITY}`,
+      value: bytes,
+    });
+    writtenBytes.push(bytes.byteLength);
+  }
+  if (!(await compareAndCommit.call(vault, storedKey(local.libraryId), expected, changes)))
+    return false;
+  if (!unchanged)
+    noteFinishedViewsRewrite(kept ? `write:${changed.join(',') || 'identity'}` : 'write:none kept');
+  for (const length of writtenBytes) noteLibraryCacheIO('write', length);
   return true;
 }

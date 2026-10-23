@@ -3,6 +3,7 @@
 // Semantic parity for the capability Tizen 3 actually ships. This executes both generated cores; it does not merely
 // inspect filenames or source text. Recovery and assistant are intentionally browser-only on this tier.
 import { readFile } from 'node:fs/promises';
+import { checkSeasonProjection } from './season-projection-parity.mjs';
 const policy = JSON.parse(
   await readFile(new URL('../src/vendor/den-core/policy-v1.json', import.meta.url), 'utf8'),
 );
@@ -24,6 +25,11 @@ await wasmCore.initialize(
   await readFile(new URL('../src/vendor/den-core-tv/generated/den_core_bg.wasm', import.meta.url)),
 );
 await javascriptCore.initialize();
+for (const [runtime, core] of [
+  ['TV', wasmCore],
+  ['Tizen 3', javascriptCore],
+])
+  checkSeasonProjection((request) => JSON.parse(core.evaluate(JSON.stringify(request))), runtime);
 
 let compared = 0;
 let compiledOut = 0;

@@ -32,6 +32,13 @@ const sorted = (value: unknown) =>
 
 const projected = new WeakMap<DocumentRow, Row[]>();
 
+interface EpisodeState {
+  watched: boolean;
+  resume: EpisodeRow['progress'] | null;
+  viewing: number;
+  watched_at: number | null;
+}
+
 /**
  * A document as the rows the rest of the web reads: a title document as its `rec` row (`title_state`), and a season
  * document as its individual `ep` projections. A delivery document has no row to show.
@@ -43,11 +50,14 @@ export function projectDocument(document: DocumentRow): Row[] {
   if (document.kind === 'title') rows = [projectTitle(document)];
   else if (document.kind === 'season') {
     const season = document.season ?? 0;
-    rows = Object.keys((document.episodes ?? {}) as Record<string, unknown>).flatMap((number) => {
-      const episode = Number(number);
-      const projected = projectEpisode(undefined, document, document.title, season, episode);
-      return projected ? [projected] : [];
+    const states = syncPolicy<Record<string, EpisodeState>>({
+      op: 'season_state_v4',
+      season: document,
+      now: Date.now(),
     });
+    rows = Object.entries(states).map(([number, state]) =>
+      episodeRow(document.title, season, Number(number), state),
+    );
   }
   projected.set(document, rows);
   return rows;
@@ -242,18 +252,23 @@ export function projectEpisode(
 ): EpisodeRow | undefined {
   if (!(season.episodes as Record<string, unknown> | undefined)?.[String(episode)])
     return undefined;
-  const state = syncPolicy<{
-    watched: boolean;
-    resume: EpisodeRow['progress'] | null;
-    viewing: number;
-    watched_at: number | null;
-  }>({
+  const state = syncPolicy<EpisodeState>({
     op: 'episode_state_v4',
     ...(title ? { title } : {}),
     season,
     episode,
     now: Date.now(),
   });
+  return episodeRow(ref, seasonNumber, episode, state);
+}
+
+/** Keep the legacy row shape identical for the single-episode and bounded season policy operations. */
+function episodeRow(
+  ref: { id: number },
+  seasonNumber: number,
+  episode: number,
+  state: EpisodeState,
+): EpisodeRow {
   const at: Stamp = state.resume?.at ?? (state.watched_at ? [state.watched_at, 0, ''] : ZERO_STAMP);
   return {
     kind: 'ep',

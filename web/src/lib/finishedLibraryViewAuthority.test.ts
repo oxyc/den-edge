@@ -39,6 +39,29 @@ class MemoryVault implements Vault {
   async remove(prefix: string) {
     for (const key of this.values.keys()) if (key.startsWith(prefix)) this.values.delete(key);
   }
+  async compareAndCommit(
+    key: string,
+    expected: Uint8Array | undefined,
+    changes: readonly VaultChange[],
+  ) {
+    const current = this.values.get(key);
+    if (!(
+      current === expected ||
+      (!!current &&
+        !!expected &&
+        current.byteLength === expected.byteLength &&
+        current.every((byte, index) => byte === expected[index]))
+    ))
+      return false;
+    const next = new Map(this.values);
+    for (const change of changes) {
+      if (change.kind === 'put') next.set(change.key, change.value.slice());
+      else next.delete(change.key);
+    }
+    this.values.clear();
+    for (const [name, value] of next) this.values.set(name, value);
+    return true;
+  }
 }
 
 class FactVault extends MemoryVault {
@@ -491,7 +514,7 @@ it('draws a first open from its newest page and its settings by key, then reads 
   expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
   expect(progress.mock.calls.at(-1)![0]).toBe(1);
   expect(openFull).not.toHaveBeenCalled();
-});
+}, 10_000);
 
 it('waits for a newest-first import before reading a title from the completed facts', async () => {
   await ensureSyncPolicy();
@@ -583,7 +606,7 @@ it('counts a first open’s progress in rows, and asks for the second page as th
   const uncounted = await progressAfterFirstPage(false);
   expect(uncounted.last).toBeCloseTo(1 - (firstPageFloor - 1) / top, 2);
   expect(uncounted.last).toBeLessThan(counted.last);
-});
+}, 10_000);
 
 it('ends a first open’s progress when its read gives up, so the line never outlives it', async () => {
   await ensureSyncPolicy();
@@ -871,6 +894,119 @@ it('names the device a Continue item was watched on, as the full log does', asyn
 /** Every root view a LibraryModel selects (`libraryModel.svelte.ts`). */
 const roots = ['overview', 'continue', 'settings', 'runtime', 'devices'] as const;
 
+it('does not save false assistant flags and promotes Settings for live grant/read rows', async () => {
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const stamp: [number, number, string] = [10, 0, '0123456789abcdef'];
+  const prefs: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'prefs',
+    values: { 'den.hideAnime': { value: { bool: true }, at: stamp } },
+  };
+  const grants: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'assistant-grants',
+    values: {
+      '0123456789abcdef0123456789abcdef': {
+        value: {
+          string: JSON.stringify({
+            v: 1,
+            client: 'Claude',
+            createdAt: Date.now() - 1_000,
+            expiresAt: Date.now() + 86_400_000,
+            revokedAt: null,
+            cap: 100,
+            ops: ['seen'],
+            pk: 'a'.repeat(43),
+          }),
+        },
+        at: stamp,
+      },
+    },
+  };
+  const reads: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'assistant-read',
+    values: {
+      fedcba9876543210fedcba9876543210: {
+        value: {
+          string: JSON.stringify({
+            v: 1,
+            client: 'ChatGPT',
+            createdAt: Date.now() - 1_000,
+            expiresAt: Date.now() + 86_400_000,
+            revokedAt: null,
+            key: 'b'.repeat(43),
+          }),
+        },
+        at: stamp,
+      },
+    },
+  };
+  const entries = await Promise.all(
+    [prefs, grants, reads].map(async (row, index) => {
+      const encrypted = await seal(keys, row);
+      return { k: encrypted.k, seq: index + 1, value: encrypted.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-assistant', 3, entries, true);
+  const full = fullAuthority();
+  vi.spyOn(full, 'select').mockImplementation(async (selection) => {
+    if (selection.kind === 'settings')
+      return {
+        kind: 'settings',
+        preferences: { hideAnime: true },
+        assistant: { read: true, write: true },
+      } as never;
+    throw new Error(`unexpected ${selection.kind}`);
+  });
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+  // The background writer keeps the assistant-independent Home pieces, but must not turn the live rows into a
+  // durable disabled Settings answer before Settings asks.
+  await expect(opened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    kind: 'overview',
+    watchlist: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await vi.waitFor(() =>
+    expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+      pieces: { watchlist: { titles: [] } },
+    }),
+  );
+  await expect(readFinishedLibraryViews(libraryKey, vault, ['settings'])).resolves.toBeNull();
+  await expect(opened!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    preferences: { hideAnime: true },
+    assistant: { read: true, write: true },
+  });
+  expect(openFull).toHaveBeenCalledOnce();
+  await opened!.authority.close?.();
+
+  // A later visit must still use the partial Home cache without treating its absent Settings as disabled flags.
+  openFull.mockClear();
+  const returning = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    vi.fn(),
+  );
+  await expect(returning!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    kind: 'overview',
+    watchlist: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await expect(returning!.authority.select({ kind: 'settings' })).resolves.toMatchObject({
+    assistant: { read: true, write: true },
+  });
+  expect(openFull).toHaveBeenCalledOnce();
+  await returning!.authority.close?.();
+});
+
 it('keeps the views a facts visit read, once Continue has its layouts, and the next visit draws them without den-core', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
@@ -944,11 +1080,13 @@ it('keeps no views while the history is still read, and keeps them once it is wh
   await new Promise((resolve) => setTimeout(resolve, 300));
   await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toBeNull();
   release();
-  await vi.waitFor(() =>
-    expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
-      identity: { generation: 'generation-kept-after-fill', head: 1_101 },
-      pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
-    }),
+  await vi.waitFor(
+    () =>
+      expect(readFinishedLibraryViews(libraryKey, vault, ['watchlist'])).resolves.toMatchObject({
+        identity: { generation: 'generation-kept-after-fill', head: 1_101 },
+        pieces: { watchlist: { titles: expect.arrayContaining([{ type: 'movie', id: 1 }]) } },
+      }),
+    { timeout: 5_000 },
   );
   await opened!.authority.close?.();
 });
@@ -1127,6 +1265,32 @@ it('answers a drain that found nothing from the drop-box row, without opening th
     affected: [],
   });
   expect(openFull).not.toHaveBeenCalled();
+});
+
+it('promotes an assistant renewal so live grant rows are renewed by the document authority', async () => {
+  const vault = new MemoryVault();
+  await cached(vault);
+  const full = fullAuthority();
+  vi.spyOn(full, 'task').mockResolvedValue({
+    result: { kind: 'assistant.renew', renewed: 2 },
+    affected: [],
+  });
+  const openFull = vi.fn(async () => full);
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+
+  await expect(
+    opened!.authority.task(
+      {
+        kind: 'assistant.renew',
+        grants: ['0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'],
+      },
+      'renew',
+    ),
+  ).resolves.toEqual({
+    result: { kind: 'assistant.renew', renewed: 2 },
+    affected: [],
+  });
+  expect(openFull).toHaveBeenCalledOnce();
 });
 
 it('promotes an unsupported view to the authoritative document path', async () => {

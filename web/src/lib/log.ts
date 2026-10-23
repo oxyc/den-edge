@@ -33,7 +33,6 @@ import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } f
 import type { LibraryRelayMembership } from './relayFetch';
 import { startupMark } from './startupTiming';
 import { noteLibraryHydrate } from './libraryStartupMetrics';
-import { LIBRARY_LOCAL_AUTHORITY, libraryLocalAuthorityRevision } from './libraryLocalAuthority';
 import {
   believe,
   compareStamps,
@@ -2590,6 +2589,11 @@ export class LibraryLog {
     return this.entriesVersion;
   }
 
+  /** The individually retained authority that owns derived saved views, when storage supports it. */
+  libraryFacts(): LibraryFactStore | null {
+    return this.factStore;
+  }
+
   /** Every v4 document as it is held, with the seq den-edge last gave it: what tracker delivery decides on (§9). */
   documents(): { seq: number; document: DocumentRow }[] {
     return [...this.entries.values()].flatMap(({ seq, row }) =>
@@ -3000,8 +3004,7 @@ export class LibraryLog {
 
   /**
    * The rows acknowledged since the last keep (`unkept`), each as den-edge now holds it, read at their turn in
-   * `saving`: a page `keepFacts` kept meanwhile is never overwritten by an older copy. Then the marker the finished
-   * views are checked against.
+   * `saving`: a page `keepFacts` kept meanwhile is never overwritten by an older copy.
    */
   private async keepAcknowledged(): Promise<void> {
     const generation = this.generation;
@@ -3027,23 +3030,6 @@ export class LibraryLog {
     } catch (error) {
       for (const name of names) this.unkept.set(name, generation);
       throw error;
-    }
-    if (this.narrowNewest) return;
-    try {
-      const summary = this.currentSummary();
-      await this.keep(LIBRARY_LOCAL_AUTHORITY, {
-        generation,
-        head: this.head,
-        authorityRevision: libraryLocalAuthorityRevision(
-          this.head,
-          this.entriesVersion,
-          summary.stamp,
-        ),
-        rowsVersion: this.entriesVersion,
-      });
-    } catch (error) {
-      // A missing/older marker only makes the finished-view cache miss.
-      console.warn('den: the finished-view authority marker could not be kept', error);
     }
   }
 

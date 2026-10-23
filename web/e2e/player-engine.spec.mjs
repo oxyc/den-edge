@@ -1,7 +1,7 @@
 // Outside WebKit the player fetches hls.js as its own chunk only when a session starts. When that chunk can't be had
 // (offline, or gone after a deploy), the player says so and lets den-remux's session go at once rather than at the
-// close. Asking for the chunk again from the same page does not fetch it here: Chromium answers a second `import()` of
-// a module whose fetch failed with the same failure (the check before the reload). Reloading the page does.
+// close. Older Chromium answered a second `import()` of a module whose fetch failed with the same failure, so the
+// player offers a page reload; the test only relies on the reload fetching the chunk again.
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
@@ -75,17 +75,6 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
     await expect.poll(() => asked.ended).toEqual(['/direct/s/d1/sig']);
 
     await page.unroute(chunk);
-    // The chunk can be had again, and the same page still can't import it: nothing is fetched, the same failure comes.
-    expect(fetched).toHaveLength(1);
-    const again = await page.evaluate(
-      (url) =>
-        import(url).then(
-          () => 'loaded',
-          () => 'failed',
-        ),
-      fetched[0],
-    );
-    expect(again).toBe('failed');
     expect(fetched).toHaveLength(1);
     await page.getByRole('button', { name: 'Reload' }).click();
     await page.waitForFunction(

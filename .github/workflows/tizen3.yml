@@ -12,7 +12,7 @@ jobs:
     # This is a hard timing gate; pin the host and browsers instead of measuring whichever image `latest` selects.
     runs-on: ubuntu-24.04
     container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
       options: --ipc=host
     defaults:
       run:
@@ -30,8 +30,8 @@ jobs:
       - name: Verify Playwright image matches the lockfile
         run: |
           version=$(node -p "require('./node_modules/@playwright/test/package.json').version")
-          test "$version" = 1.63.0 || {
-            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.63.0-noble"
+          test "$version" = 1.64.1 || {
+            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.64.1-noble"
             exit 1
           }
           node --input-type=module -e "import { chromium, webkit } from '@playwright/test'; import { existsSync } from 'node:fs'; for (const browser of [chromium, webkit]) if (!existsSync(browser.executablePath())) throw new Error('browser missing: ' + browser.executablePath())"

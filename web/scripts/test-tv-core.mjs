@@ -4,6 +4,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { browserCore, tvCore, verifyTvCore } from './tv-core-artifacts.mjs';
+import { checkSeasonProjection } from './season-projection-parity.mjs';
 
 verifyTvCore();
 for (const [name, maximum] of [
@@ -69,3 +70,6 @@ for (const file of ['policy-v1.json', 'profiles-v1.json']) {
   }
 }
 console.log(`TV and browser core: ${count} source-pinned policy vectors agree`);
+for (const [index, runtime] of ['browser', 'TV'].entries())
+  checkSeasonProjection(cores[index], runtime);
+console.log('Browser and TV season projection matches scalar episode policy');
