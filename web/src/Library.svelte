@@ -622,10 +622,16 @@
   });
   // Fed to the "Play on TV" tracker on every pull, so it can notice a fresh position without a poll of its own.
   $effect(() => playOnTv.observe(continueEntries));
-  const downloading = $derived(
-    (downloadsLease?.snapshot.value?.items ?? []).filter(
-      ({ status }) => status.state === 'starting' || status.state === 'fetching',
-    ),
+  // Queue retention is den-core's policy: a ready item stays here until the queue prunes it.
+  const downloading = $derived.by(() => {
+    const items = downloadsLease?.snapshot.value?.items ?? [];
+    return [
+      ...items.filter(({ status }) => status.state === 'starting' || status.state === 'fetching'),
+      ...items.filter(({ status }) => status.state === 'ready'),
+    ];
+  });
+  const downloadsHeading = $derived(
+    downloading.some(({ status }) => status.state !== 'ready') ? 'Downloading' : 'Downloads',
   );
   const liveSeconds = (entry: ContinueEntry) => {
     const sighting = sighted.get(titleKey(entry.title));
@@ -2100,7 +2106,7 @@
     {/if}
     {#if !facet && downloading.length && shelfMounted('downloading')}
       <WindowedPosterRow
-        heading="Downloading"
+        heading={downloadsHeading}
         aside={__DEN_TV__ ? undefined : { label: 'All downloads', href: '/downloads' }}
         items={downloading}
         itemKey={(download) => download.content}
