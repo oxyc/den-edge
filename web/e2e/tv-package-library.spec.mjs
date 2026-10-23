@@ -77,6 +77,9 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   const saved = host.getByRole('button', { name: 'Watchlist', exact: true });
   await saved.click();
   await expect(saved).toHaveAttribute('aria-pressed', 'true');
+  // The pressed state is optimistic. Keep this page alive until its durable write finishes, or the hard
+  // navigation below can cancel the write before the linked package has anything to sync.
+  await expect(saved).not.toHaveAttribute('data-saving', 'true');
   // An invite is consumed on application startup, not by an in-document fragment change.
   await host.goto('about:blank');
   await host.goto(`${ENTRY}#invite=${CODE}`);
