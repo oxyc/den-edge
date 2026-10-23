@@ -1134,6 +1134,24 @@ describe('LibraryLog', () => {
     expect(reopened.rows()).toHaveLength(4);
   });
 
+  it('keeps acknowledged bulk documents before a local-library merge can navigate away', async () => {
+    const { vault } = memoryVault();
+    const server = await edge([row(1)], [], 'generation-1');
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    const imported = currentRows([row(2)])[0]!;
+
+    expect(await log.writeRows([imported])).toBe(true);
+
+    const reopened = (await LibraryLog.open(
+      LIBRARY_KEY,
+      async () => Promise.reject(new TypeError('offline')),
+      undefined,
+      vault,
+    ))!;
+    expect(reopened.fromCache).toBe(true);
+    expect(reopened.title({ type: 'movie', id: 2 })?.status.value).toBe('watchlist');
+  });
+
   /** A library an earlier build kept whole, under the name `persist` wrote it to before the fact store kept it. */
   async function keptWhole(snapshot: (log: LibraryLog) => unknown, generation = 'generation-1') {
     const { data, vault } = memoryVault();

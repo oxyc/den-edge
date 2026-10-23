@@ -974,7 +974,13 @@ export class LibraryLog {
     }
     const rowsWritten =
       !rest.length || (await this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [rest]));
-    return rowsWritten && this.writeOps(ops);
+    const written = rowsWritten && (await this.writeOps(ops));
+    // Bulk document writes are acknowledged directly by `flushRows`, unlike edits sent through `writeOps`. Keep
+    // those acknowledgements before answering: a local-library merge is followed immediately by navigation, and a
+    // return visit must not reopen the older fact-store cursor without the rows den-edge just accepted.
+    this.persist();
+    await this.saving;
+    return written;
   }
 
   /**
