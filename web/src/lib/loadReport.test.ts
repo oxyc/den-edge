@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deviceOf, entryOf, loadRouteOf } from './loadReport';
+import { deviceOf, entryOf, loadRouteOf, loadSettled, MILESTONES, netTally } from './loadReport';
 
 const IPHONE_SAFARI =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
@@ -61,5 +61,44 @@ describe('entryOf', () => {
   it('sends nothing it does not know', () => {
     expect(entryOf(undefined)).toBeUndefined();
     expect(entryOf({ type: 'prerender', name: page })).toBeUndefined();
+  });
+});
+
+describe('netTally', () => {
+  it('counts and sums the page’s requests by kind, never naming one', () => {
+    const tally = netTally([
+      { name: 'https://den-tv.oxy.fi/tmdb/3/movie/550', initiatorType: 'fetch', duration: 210.4 },
+      { name: 'https://den-tv.oxy.fi/tmdb/3/tv/1399', initiatorType: 'fetch', duration: 190.2 },
+      { name: 'https://den-tv.oxy.fi/lib/abc/changes', initiatorType: 'fetch', duration: 80 },
+      {
+        name: 'https://den-tv.oxy.fi/ratings/movie/tt1',
+        initiatorType: 'xmlhttprequest',
+        duration: 40,
+      },
+      { name: 'https://image.tmdb.org/t/p/w342/x.jpg', initiatorType: 'img', duration: 300 },
+      { name: 'https://den-tv.oxy.fi/assets/index.js', initiatorType: 'script', duration: 500 },
+    ]);
+    expect(tally).toEqual({ tmdb: [2, 400], lib: [1, 80], meta: [1, 40], image: [1, 300] });
+  });
+});
+
+describe('loadSettled', () => {
+  const at = (events: Record<string, number>) => (event: string) => events[event];
+
+  it('waits for content, and for a first library read that has started', () => {
+    expect(loadSettled(at({}))).toBe(false);
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900 }))).toBe(true);
+    expect(loadSettled(at({ [MILESTONES.posterMs]: 900, [MILESTONES.importStartMs]: 100 }))).toBe(
+      false,
+    );
+    expect(
+      loadSettled(
+        at({
+          [MILESTONES.posterMs]: 900,
+          [MILESTONES.importStartMs]: 100,
+          [MILESTONES.importMs]: 118_000,
+        }),
+      ),
+    ).toBe(true);
   });
 });

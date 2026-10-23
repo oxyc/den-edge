@@ -1,10 +1,14 @@
 import { SvelteMap } from 'svelte/reactivity';
+import { startupMarkOnce } from './startupTiming';
 
 /** Each library model's first read from den-edge while it runs, 0–1. */
 const reading = new SvelteMap<object, number>();
 
 /** `owner`'s first read is at `progress`; null (or 1) once it has finished, failed or closed. */
 export function noteLibraryOpening(owner: object, progress: number | null): void {
+  // A first read's start and end, for the page's one load report: on a slow device it is most of the wait.
+  if (progress !== null) startupMarkOnce('library import started');
+  if (progress !== null && progress >= 1) startupMarkOnce('library import finished');
   if (progress === null || progress >= 1) reading.delete(owner);
   else reading.set(owner, progress);
 }
