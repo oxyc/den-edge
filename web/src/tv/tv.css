@@ -40,6 +40,12 @@
   --button-large-min-height: 58px;
   --detail-content-max: clamp(1200px, 66.6667vw, 1320px);
   --page-max: 1920px;
+
+  /* Mobile WebKit keeps viewport units tied to the physical screen even when the document uses the fixed
+     1920px TV viewport. Full-bleed presentation elements must use the TV canvas itself, or an iPhone preview
+     draws a phone-width billboard inside an otherwise 1920px page. */
+  --presentation-width: 1920px;
+  --presentation-edge: 960px;
   --tv-type-caption: 20px;
   --tv-type-small: 24px;
   --tv-type-body: 28px;
