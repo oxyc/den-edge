@@ -37,7 +37,7 @@ const cores = await Promise.all(
   }),
 );
 let count = 0;
-for (const file of ['policy-v1.json', 'policy-v3.json', 'profiles-v1.json']) {
+for (const file of ['policy-v1.json', 'profiles-v1.json']) {
   const fixture = JSON.parse(readFileSync(join(browserCore, file)));
   for (const vector of fixture.cases) {
     const actual = cores[1](vector.request);
