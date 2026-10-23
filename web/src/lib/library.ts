@@ -4,7 +4,7 @@
 
 import { WATCHED } from './actions';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
-import { wellFormed, type Row, type Stamp } from './wire';
+import { isDocument, wellFormed, type Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
 /** What Explore browses and atlas's filter answers for: one type, or films and series together. */
@@ -244,13 +244,7 @@ export async function applyLogInSlices(
   function* steps() {
     for (const row of rows) {
       if (!wellFormed(row)) continue;
-      if (row.kind !== 'wat') {
-        yield () => fold.add(row);
-        continue;
-      }
-      if (row.title.type !== 'tv') continue;
-      for (const [number, register] of Object.entries(row.entries))
-        yield () => fold.addWatch(row, number, register);
+      yield () => fold.add(row);
     }
   }
   const completed = await inPolicySlices(steps(), (step) => step(), options);
@@ -280,14 +274,7 @@ class LibraryFold {
 
   add(row: Row): void {
     const { records, dismissed, marks, seriesMarks, flags, resets } = this;
-    if (row.kind === 'set' || row.kind === 'snt' || !wellFormed(row)) return; // settings and receipts have no display projection
-    if (row.kind === 'wat') {
-      if (row.title.type !== 'tv') return;
-      for (const [number, register] of Object.entries(row.entries)) {
-        this.addWatch(row, number, register);
-      }
-      return;
-    }
+    if (row.kind === 'set' || isDocument(row) || !wellFormed(row)) return;
     if (row.title.type !== 'movie' && row.title.type !== 'tv') return;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {
@@ -350,66 +337,6 @@ class LibraryFold {
     });
     if (row.dismissed.value)
       dismissed.set(key, Math.max(dismissed.get(key) ?? -Infinity, row.dismissed.at[0]));
-  }
-
-  addWatch(
-    row: Extract<Row, { kind: 'wat' }>,
-    number: string,
-    register: Extract<Row, { kind: 'wat' }>['entries'][string],
-  ): void {
-    const { marks, seriesMarks, flags } = this;
-    const key = titleKey(row.title);
-    const episode = {
-      type: 'tv' as const,
-      id: row.title.id,
-      season: row.season,
-      episode: Number(number),
-    };
-    const state = syncPolicy<{
-      watched: boolean;
-      resume: { value: number; at: Stamp; seconds?: number } | null;
-      watched_at: number | null;
-    }>({
-      op: 'episode_state',
-      register,
-      resets: [row.seasonReset].filter(Boolean),
-      now: Date.now(),
-    });
-    const held = marks.get(markKey(episode));
-    if (state.resume) {
-      const series = held ?? seriesMarks.get(key);
-      const mark = {
-        ...episode,
-        fraction: state.resume.value,
-        updatedAt: state.resume.at[0],
-        ...(state.resume.seconds !== undefined ? { seconds: state.resume.seconds } : {}),
-        ...(state.resume.at[2] ? { updatedBy: state.resume.at[2] } : {}),
-        title: series?.title ?? '',
-        posterPath: series?.posterPath,
-        voteAverage: series?.voteAverage ?? 0,
-      };
-      marks.set(markKey(episode), mark);
-      seriesMarks.set(key, mark);
-      flags.delete(markKey(episode));
-    } else if (state.watched) {
-      if (register.progress) {
-        const series = held ?? seriesMarks.get(key);
-        const mark = {
-          ...episode,
-          fraction: 1,
-          updatedAt: register.progress.at[0],
-          title: series?.title ?? '',
-          posterPath: series?.posterPath,
-          voteAverage: series?.voteAverage ?? 0,
-        };
-        marks.set(markKey(episode), mark);
-        seriesMarks.set(key, mark);
-        flags.delete(markKey(episode));
-      } else flags.set(markKey(episode), episode);
-    } else {
-      marks.delete(markKey(episode));
-      flags.delete(markKey(episode));
-    }
   }
 
   finish(): Library {

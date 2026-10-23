@@ -705,14 +705,10 @@ export class LibraryLogAuthority {
         return { kind: 'profile-migration.status', ...status };
       }
       case 'profile-migration.observe': {
-        // profiles-v1 §6.1: the split takes only a converted library. v2/v3 rows in it (a stray tracker event, say)
-        // are folded into its documents by the library-v4 switch first, before the source is observed.
-        const needed = this.#log.needsV4;
-        const switched = await this.#log.switchToV4(this.#clock.device, !needed);
-        if ((needed && !switched) || this.#log.switchFailure)
+        if (this.#log.readOnly)
           throw authorityError(
             'unavailable',
-            `the library must finish its Library v4 update first${this.#log.switchFailure ? ` (${this.#log.switchFailure})` : ''}`,
+            this.#log.readOnlyReason ?? 'the library is read-only',
             true,
           );
         const observation = await this.#profileMigration().observe();
@@ -1626,7 +1622,6 @@ export class LibraryLogAuthority {
       })),
       diagnostics: {
         libraryFormat: this.#log.wireMinimum,
-        legacyRows: this.#log.legacyRowCount,
         pendingChanges: this.#log.pendingActions,
         selfDeviceId: this.#clock.device,
         ...(this.#log.profileTopologyPresent ? { profileTopology: true } : {}),

@@ -5,13 +5,11 @@ import {
   Clock,
   deriveKeys,
   fromHex,
-  mergeV3,
   mergeSettings,
   mergeTitle,
   newestSummary,
   open,
   openMigrationRow,
-  rowName,
   seal,
   ZERO_STAMP,
   type Row,
@@ -19,7 +17,6 @@ import {
   type SettingsRow,
   type Stamp,
   type TitleRow,
-  type WatchRow,
 } from './wire';
 
 // den-spec, checked out at the repository root. The TV runs the same vectors, so passing here means both
@@ -124,53 +121,6 @@ describe('library wire v2 matches den-spec', () => {
   });
 });
 
-describe('library wire v3 rows', () => {
-  const watch = (stamp: Stamp): WatchRow => ({
-    kind: 'wat',
-    schema: 3,
-    title: { type: 'tv', id: 95396 },
-    season: 1,
-    block: 0,
-    seasonReset: null,
-    entries: {
-      '2': {
-        imported: false,
-        progress: { value: 1, viewing: stamp[0] / 1000, at: stamp },
-        plays: { [String(stamp[0] / 1000)]: stamp[0] },
-        cleared: null,
-      },
-    },
-  });
-
-  it('names, seals, and opens watch and settlement rows', async () => {
-    const keys = await deriveKeys(fromHex(library.libraryKey));
-    const rows: Row[] = [
-      watch([3000, 0, 'tv01']),
-      {
-        kind: 'snt',
-        schema: 3,
-        provider: 'simkl',
-        account: '42',
-        target: 'wat:tv:95396:1:0',
-        entries: { '2': ['w', 1, 3000, [3000, 0, 'tv01'], [1, 1, 'tv01']] },
-      },
-    ];
-    expect(rows.map(rowName)).toEqual(['wat:tv:95396:1:0', 'snt:simkl:42:wat:tv:95396:1:0']);
-    for (const row of rows) {
-      const sealed = await seal(keys, row);
-      expect(await open(keys, sealed.k, sealed.v)).toEqual(row);
-    }
-  });
-
-  it('delegates watch-register merging to den-core', () => {
-    const older = watch([2000, 0, 'web01']);
-    const newer = watch([3000, 0, 'tv01']);
-    const merged = mergeV3(older, newer);
-    expect(merged.entries['2']?.progress?.at).toEqual([3000, 0, 'tv01']);
-    expect(merged.entries['2']?.plays).toEqual({ '2': 2000, '3': 3000 });
-  });
-});
-
 describe('openMigrationRow legacy evidence', () => {
   const settings = (name: string): SettingsRow => ({ kind: 'set', schema: 2, name, values: {} });
 
@@ -190,15 +140,5 @@ describe('openMigrationRow legacy evidence', () => {
       name: 'set:tracker-event:x',
       legacy: true,
     });
-    const watching: WatchRow = {
-      kind: 'wat',
-      schema: 3,
-      title: { type: 'tv', id: 95396 },
-      season: 1,
-      block: 0,
-      seasonReset: null,
-      entries: {},
-    };
-    expect(await opened(watching)).toMatchObject({ status: 'row', legacy: true });
   });
 });

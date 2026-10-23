@@ -13,7 +13,7 @@ import { unaccounted } from './localLibraryMove';
 import { ASSISTANT_RECORDS } from './libraryAssistantAuthority';
 import type { LibraryQueryResult, KeyResetOutcome, LibraryTask } from './libraryServiceProtocol';
 import type { LibraryAuthorityTaskResult } from './libraryServiceCore';
-import { LibraryLog, projectV3Documents, successorTag } from './log';
+import { LibraryLog, successorTag } from './log';
 import type { Vault } from './localVault';
 import { sealHandover } from './pairHandover';
 import { completeDurableTaskOperation } from './libraryOperationAuthority';
@@ -160,16 +160,7 @@ export class LibraryAdminAuthority {
       .documents()
       .map(({ document }) => document)
       .filter((document) => document.kind !== 'delivery');
-    const documents = heldDocuments.length
-      ? heldDocuments
-      : projectV3Documents(
-          this.log
-            .rows()
-            .filter(
-              (row) =>
-                row.kind === 'rec' || row.kind === 'ep' || row.kind === 'wat' || row.kind === 'snt',
-            ),
-        ).filter((document) => document.kind !== 'delivery');
+    const documents = heldDocuments;
     const exported = buildHistoryExport(documents, new Map());
     return {
       kind: 'history.export',
@@ -534,7 +525,7 @@ export class LibraryAdminAuthority {
         affected: [],
       };
     try {
-      const rows = source.rows().flatMap((row): Row[] => {
+      const rows = source.storedRows().flatMap((row): Row[] => {
         if (row.kind === 'set' && row.name === 'recovery') return [];
         if (!part.scope) return [row];
         const scoped =

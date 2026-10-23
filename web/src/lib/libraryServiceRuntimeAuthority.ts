@@ -122,7 +122,7 @@ export async function openLibraryServiceAuthority(
     });
     const authority = new ScheduledLibraryServiceAuthority(
       new DurableOperationAuthority(logAuthority, log),
-      libraryLogMaintenance(log, clock, request.mode),
+      libraryLogMaintenance(log, request.mode),
       { background: downloads },
       librarySimklDelivery(log, clock),
     );

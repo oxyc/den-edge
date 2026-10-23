@@ -225,7 +225,6 @@ const connectionsValue = (): LibrarySelectionValue => ({
   devices: [],
   diagnostics: {
     libraryFormat: 4,
-    legacyRows: 0,
     pendingChanges: 0,
     selfDeviceId: '0123456789abcdef',
   },

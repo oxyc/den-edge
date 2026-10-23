@@ -500,7 +500,6 @@ const selectionValue = (selection: LibrarySelection, instance: string): LibraryS
       ],
       diagnostics: {
         libraryFormat: 4,
-        legacyRows: 0,
         pendingChanges: 0,
         selfDeviceId: 'bbbbbbbbbbbbbbbb',
       },

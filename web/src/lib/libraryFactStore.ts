@@ -15,7 +15,6 @@ import {
   mergeEpisode,
   mergeSettings,
   mergeTitle,
-  mergeV3,
   newestSummary,
   type Row,
   type SettingsRow,
@@ -224,8 +223,6 @@ export function mergeFactRows(previous: Row | null, replacement: Row | null): Ro
     return mergeEpisode(previous, replacement);
   if (previous.kind === 'set' && replacement.kind === 'set')
     return mergeSettings(previous, replacement);
-  if (previous.kind === 'wat' && replacement.kind === 'wat') return mergeV3(previous, replacement);
-  if (previous.kind === 'snt' && replacement.kind === 'snt') return mergeV3(previous, replacement);
   return replacement;
 }
 

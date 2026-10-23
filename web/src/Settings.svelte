@@ -106,7 +106,6 @@
   const pluginUrls = $derived(plugins?.map((plugin) => plugin.manifestUrl) ?? []);
   const disabled = $derived(!ready || saving);
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
-  const legacyRows = $derived(connections?.diagnostics.legacyRows ?? null);
   const profileTopology = $derived(connections?.diagnostics.profileTopology ?? false);
   /** One add-first migration probe per settled plugin view; a changed view (including TV approval) tries again. */
   let hearthMigrationAttempt = '';
@@ -464,7 +463,6 @@
         pendingActions={connections?.diagnostics.pendingChanges ?? 0}
         {edgeVersion}
         {libraryFormat}
-        {legacyRows}
         setRemoteAccess={(credentials) => run(() => model.setRemoteAccess(credentials))}
       />
     {/if}

@@ -1275,7 +1275,6 @@ describe('library service server protocol', () => {
       ],
       diagnostics: {
         libraryFormat: 4,
-        legacyRows: 0,
         pendingChanges: 1,
         selfDeviceId: '0123456789abcdef',
       },

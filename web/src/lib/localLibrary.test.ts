@@ -11,7 +11,7 @@ import { LibraryLog } from './log';
 import type { Stamp, TitleRow } from './wire';
 
 const key = (fill: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(fill)));
-const at = (t: number): Stamp => [t, 0, 'web1'];
+const at = (t: number): Stamp => [t, 0, '0000000000000001'];
 
 function row(id: number): TitleRow {
   return {

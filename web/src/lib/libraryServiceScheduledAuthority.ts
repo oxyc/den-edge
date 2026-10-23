@@ -1,5 +1,4 @@
 import type { ClockStore } from './clockStore';
-import { upgradeLibrary, switchLibraryToV4 } from './libraryUpgrade';
 import type { LibraryObservation } from './libraryServiceProtocol';
 import type {
   LibraryAuthorityEvent,
@@ -306,17 +305,13 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
 /** Production maintenance policy. The log stays private and only reports semantic change/status. */
 export function libraryLogMaintenance(
   log: LibraryLog,
-  clock: ClockStore,
   mode: 'online' | 'local',
-  fetchImpl: typeof fetch = (input, init) => fetch(input, init),
 ): LibraryMaintenance {
   return {
     mode,
     async run(options) {
       let changed = mode === 'online' ? await log.refresh(options?.waitSeconds) : false;
       if (log.moved) return { changed, status: logStatus(log) };
-      changed = (await upgradeLibrary(log, mode === 'local', Date.now(), clock)) || changed;
-      changed = (await switchLibraryToV4(log, Date.now(), fetchImpl, clock.device)) || changed;
       if (mode === 'online') changed = (await log.compact()) || changed;
       return { changed, status: logStatus(log) };
     },
@@ -345,8 +340,6 @@ function logStatus(log: LibraryLog): LibraryAuthorityStatus {
         requiredWire: log.upgradeRequired,
       },
     };
-  if (log.predatesV3) return { kind: 'read-only', reason: 'Library backup predates v3' };
-  if (log.switchFailure)
-    return { kind: 'read-only', reason: `Library update failed: ${log.switchFailure}` };
+  if (log.readOnlyReason) return { kind: 'read-only', reason: log.readOnlyReason };
   return { kind: 'ready' };
 }
