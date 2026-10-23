@@ -59,6 +59,13 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
       );
       await expect(back).toBeHidden();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      const bar = await page.locator('header.bar').boundingBox();
+      expect(bar).toMatchObject({ x: 16, width: width - 32 });
+      expect(
+        await page.evaluate(() =>
+          getComputedStyle(document.documentElement).getPropertyValue('--page-max').trim(),
+        ),
+      ).toBe('100%');
     }
     // Tablet widths, on search with Back showing: every tab stays inside the bar and the field has room to type.
     for (const width of [760, 820, 1099]) {
@@ -81,6 +88,9 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
       expect(fit.overflow, `tabs overflow the bar at ${width}px`).toBeLessThanOrEqual(0);
       expect(fit.field, `search field width at ${width}px`).toBeGreaterThanOrEqual(200);
     }
+    await page.setViewportSize({ width: 2560, height: 1200 });
+    const ultrawide = await page.locator('header.bar').boundingBox();
+    expect(ultrawide).toMatchObject({ x: 368, width: 1824 });
   } finally {
     await browser.close();
   }
