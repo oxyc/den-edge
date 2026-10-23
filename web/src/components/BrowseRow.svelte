@@ -24,6 +24,7 @@
     row,
     shown,
     prefetch = true,
+    onsettled,
   }: {
     row: RowDef;
     shown: (title: Title) => boolean;
@@ -33,6 +34,8 @@
      * most of the ~120 requests and ~1,000 nodes opening a title cost on a phone.
      */
     prefetch?: boolean;
+    /** Told whether the row turned out empty (and hid itself) once its first page settles, and again on any change. */
+    onsettled?: (empty: boolean) => void;
   } = $props();
 
   let wrapper: HTMLElement;
@@ -58,6 +61,12 @@
   const visible = $derived(pager.titles.filter(visibleHere));
   const done = $derived(pager.done);
   const key = (t: Title) => `${t.type}:${t.id}`;
+
+  // The same condition as `.gone`: a row that hides itself takes no height, which the screen needs to know.
+  $effect(() => {
+    if (visible.length) onsettled?.(false);
+    else if (done && !pager.failed) onsettled?.(true);
+  });
 
   // Keep loaders and light title slots alive, but mount card/menu trees only for a row near the active page.
   $effect(() => {
