@@ -1,41 +1,19 @@
 <!-- What the library itself says, above every page: a passing note ("Library updated to v4" on the browser that made
      the switch), and what keeps it from being written while that lasts ("Library update required"). -->
 <script lang="ts">
-  import Confirm from '../settings/Confirm.svelte';
-
   let {
     toast,
     alert,
     undo = null,
-    recovery = null,
   }: {
     toast: string | null;
     alert: string | null;
     /** Offered on the toast itself — "Removed from watchlist · Undo" — for the two actions that take something away. */
     undo?: { label: string; run: () => void } | null;
-    /** An explicit way out of a read-only library that cannot be upgraded by this build. */
-    recovery?: {
-      label: string;
-      question: string;
-      detail: string;
-      confirmLabel: string;
-      run: () => void;
-    } | null;
   } = $props();
 </script>
 
-{#if alert}<div class="library-status" role="alert">
-    <p>{alert}</p>
-    {#if recovery}
-      <Confirm
-        label={recovery.label}
-        question={recovery.question}
-        detail={recovery.detail}
-        confirmLabel={recovery.confirmLabel}
-        onconfirm={recovery.run}
-      />
-    {/if}
-  </div>{/if}
+{#if alert}<p class="library-status" role="alert">{alert}</p>{/if}
 {#if toast}<p class="library-status toast" role="status">
     <span>{toast}</span>{#if undo}<button type="button" class="undo" onclick={undo.run}
         >{undo.label}</button
@@ -52,14 +30,6 @@
     border-radius: 12px;
     background: var(--accent-surface);
     color: var(--fg);
-  }
-
-  .library-status > p {
-    margin: 0;
-  }
-
-  .library-status > p + :global(*) {
-    margin-top: 12px;
   }
 
   .toast {

@@ -3,6 +3,7 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import type LegacyBackupRecoveryComponent from './components/LegacyBackupRecovery.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
@@ -67,7 +68,6 @@
   } from './lib/profileModeCoordinator.svelte';
   import { profileHouseholdSettingsModel, profileSettingsRoute } from './lib/profileSettingsRoute';
   import { scopeRecentSearches } from './lib/recentSearches';
-  import { PRE_V4_BACKUP_ERROR } from './lib/libraryErrors';
   import {
     startupFailure,
     startupHandedOver,
@@ -152,7 +152,7 @@
 
   async function discardLocalLegacyBackup(): Promise<void> {
     const key = libraryIdentity;
-    if (!key || !shown.local || shown.alert !== PRE_V4_BACKUP_ERROR) return;
+    if (!key || !shown.local || !localLegacyBackup) return;
     if (await dropLocalLibrary(key)) location.reload();
     else shown.notify('Couldn’t discard this browser’s old library.');
   }
@@ -375,6 +375,16 @@
             : profileCoordinator.restoring))),
   );
   const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  const localLegacyBackup = $derived(
+    shown.local && shown.alert?.startsWith('This backup predates Library v4.') ? shown.alert : null,
+  );
+  let LegacyBackupRecovery = $state<typeof LegacyBackupRecoveryComponent | null>(null);
+  $effect(() => {
+    if (!localLegacyBackup || LegacyBackupRecovery) return;
+    void import('./components/LegacyBackupRecovery.svelte').then(
+      ({ default: component }) => (LegacyBackupRecovery = component),
+    );
+  });
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
   let optimisticShown = false;
@@ -1603,21 +1613,14 @@
          a new session always mounts a new tree, even one with the same identity (a reopened Owner, whose old model is
          closed). The adopted first-frame session is the coordinator's own object, so that handover keeps the tree. -->
     {#key shown}
-      <LibraryStatus
-        toast={shown.toast}
-        alert={shown.alert}
-        undo={shown.undo}
-        recovery={shown.local && shown.alert === PRE_V4_BACKUP_ERROR
-          ? {
-              label: 'Start with an empty library…',
-              question: 'Discard this old backup?',
-              detail:
-                'This removes the old library kept only in this browser. Use it only when there is no watchlist, watched history, progress, or settings you want to keep.',
-              confirmLabel: 'Start empty',
-              run: () => void discardLocalLegacyBackup(),
-            }
-          : null}
-      />
+      {#if localLegacyBackup && LegacyBackupRecovery}
+        <LegacyBackupRecovery
+          message={localLegacyBackup}
+          ondiscard={() => void discardLocalLegacyBackup()}
+        />
+      {:else}
+        <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+      {/if}
       <Router
         profile={profileSessionKey(shown.identity)}
         onchange={(route) => {
