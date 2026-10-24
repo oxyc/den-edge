@@ -4,7 +4,7 @@
 
 import { WATCHED } from './actions';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
-import { isDocument, wellFormed, type Row } from './wire';
+import { isDocument, wellFormed, type EpisodeRow, type Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
 /** What Explore browses and atlas's filter answers for: one type, or films and series together. */
@@ -292,30 +292,14 @@ class LibraryFold {
       // Authoritative: `rows()` hands us one merged row per name out of the log's own store, so a row IS the
       // record rather than a claim about it, and there is nothing for it to outrank.
       const held = marks.get(markKey(episode));
-      const decided = syncPolicy<EpisodeAction>({
-        op: 'episode_mark',
-        row,
-        mark: held ? { fraction: held.fraction, at: held.updatedAt } : null,
-        authoritative: true,
-      });
+      const decided = episodeAction(row, held);
       if (decided.action === 'clear') {
         marks.delete(markKey(episode));
         flags.delete(markKey(episode));
       } else if (decided.action === 'flag') {
         flags.set(markKey(episode), episode);
       } else if (decided.action === 'replace') {
-        // Display comes from the series' other marks, or TMDB once `untitled` asks for it.
-        const series = held ?? seriesMarks.get(key);
-        const mark = {
-          ...episode,
-          fraction: decided.fraction,
-          updatedAt: decided.at,
-          ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
-          ...(row.progress.at[2] ? { updatedBy: row.progress.at[2] } : {}),
-          title: series?.title ?? '',
-          posterPath: series?.posterPath,
-          voteAverage: series?.voteAverage ?? 0,
-        };
+        const mark = markFromEpisode(row, decided, held ?? seriesMarks.get(key));
         marks.set(markKey(episode), mark);
         seriesMarks.set(key, mark);
         // Real progress supersedes a timeless bit for the same episode.
@@ -363,6 +347,201 @@ class LibraryFold {
 
 const markKey = (m: { type: string; id: number; season: number; episode: number }) =>
   `${m.type}:${m.id}:${m.season}:${m.episode}`;
+
+const ahead = (a: { season: number; episode: number }, b: { season: number; episode: number }) =>
+  a.season > b.season || (a.season === b.season && a.episode > b.episode);
+
+function episodeAction(row: EpisodeRow, held?: Mark): EpisodeAction {
+  return syncPolicy<EpisodeAction>({
+    op: 'episode_mark',
+    row,
+    mark: held ? { fraction: held.fraction, at: held.updatedAt } : null,
+    authoritative: true,
+  });
+}
+
+function markFromEpisode(
+  row: EpisodeRow,
+  decided: Extract<EpisodeAction, { action: 'replace' }>,
+  display?: Mark,
+): Mark {
+  return {
+    type: row.title.type,
+    id: row.title.id,
+    season: row.season,
+    episode: row.episode,
+    fraction: decided.fraction,
+    updatedAt: decided.at,
+    ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
+    ...(row.progress.at[2] ? { updatedBy: row.progress.at[2] } : {}),
+    title: display?.title ?? '',
+    posterPath: display?.posterPath,
+    voteAverage: display?.voteAverage ?? 0,
+  };
+}
+
+type ProjectedMarkCandidate = {
+  row: EpisodeRow;
+  decided: Extract<EpisodeAction, { action: 'replace' }>;
+};
+type CompactMarkCandidate = Mark | ProjectedMarkCandidate;
+
+const isProjectedCandidate = (
+  candidate: CompactMarkCandidate,
+): candidate is ProjectedMarkCandidate => 'row' in candidate;
+const candidateAt = (candidate: CompactMarkCandidate) =>
+  isProjectedCandidate(candidate) ? candidate.decided.at : candidate.updatedAt;
+const candidateSeason = (candidate: CompactMarkCandidate) =>
+  isProjectedCandidate(candidate) ? candidate.row.season : candidate.season;
+const candidateEpisode = (candidate: CompactMarkCandidate) =>
+  isProjectedCandidate(candidate) ? candidate.row.episode : candidate.episode;
+const aheadOfCandidate = (
+  value: { season: number; episode: number },
+  candidate: CompactMarkCandidate,
+) =>
+  value.season > candidateSeason(candidate) ||
+  (value.season === candidateSeason(candidate) && value.episode > candidateEpisode(candidate));
+const sameCandidateEpisode = (mark: Mark, candidate: CompactMarkCandidate) =>
+  mark.season === candidateSeason(candidate) && mark.episode === candidateEpisode(candidate);
+const materializeCandidate = (candidate: CompactMarkCandidate) =>
+  isProjectedCandidate(candidate) ? markFromEpisode(candidate.row, candidate.decided) : candidate;
+
+/**
+ * The smallest ordinary `Library` on which Continue's shared policy makes the same decisions. The accumulator is
+ * also the direct sink for one v4 season document: those rows are authoritative and unique by episode, so it can
+ * discard every mark except Continue's latest and furthest-finished inputs as they arrive.
+ */
+export class ContinueLibraryAccumulator {
+  private readonly records: LibraryRecord[];
+  private readonly latest = new Map<string, CompactMarkCandidate>();
+  private readonly finished = new Map<string, CompactMarkCandidate>();
+  private readonly seriesOrder: string[] = [];
+  private readonly furthestFlags = new Map<
+    string,
+    { type: string; id: number; season: number; episode: number }
+  >();
+  private readonly flagOrder: string[] = [];
+  private readonly dismissed = new Map<string, number>();
+
+  constructor(library?: Library) {
+    this.records = library?.records ?? [];
+    if (library) {
+      for (const mark of library.marks) this.addMark(mark);
+      for (const flag of library.flags?.values() ?? []) this.addFlag(flag);
+      for (const [key, at] of library.dismissed) this.dismissed.set(key, at);
+    }
+  }
+
+  /** Fold one unique, authoritative episode projection using den-core's `episode_mark` answer. */
+  addEpisode(row: EpisodeRow): this {
+    const decided = episodeAction(row);
+    if (decided.action === 'replace') {
+      const key = titleKey(row.title);
+      if (!this.latest.has(key)) this.seriesOrder.push(key);
+      const latest = this.latest.get(key);
+      if (!latest || decided.at > candidateAt(latest))
+        this.replaceCandidate(this.latest, key, row, decided);
+      if (decided.fraction >= WATCHED) {
+        const front = this.finished.get(key);
+        if (!front || aheadOfCandidate(row, front))
+          this.replaceCandidate(this.finished, key, row, decided);
+      }
+    } else if (decided.action === 'flag') this.addProjectedFlag(row);
+    return this;
+  }
+
+  private replaceCandidate(
+    candidates: Map<string, CompactMarkCandidate>,
+    key: string,
+    row: EpisodeRow,
+    decided: Extract<EpisodeAction, { action: 'replace' }>,
+  ): void {
+    const held = candidates.get(key);
+    if (held && isProjectedCandidate(held)) {
+      held.row = row;
+      held.decided = decided;
+    } else candidates.set(key, { row, decided });
+  }
+
+  private addMark(mark: Mark): void {
+    if (mark.type !== 'tv') return;
+    const key = titleKey(mark);
+    if (!this.latest.has(key)) this.seriesOrder.push(key);
+    const held = this.latest.get(key);
+    if (!held || mark.updatedAt > candidateAt(held)) this.latest.set(key, mark);
+    if (mark.fraction >= WATCHED) {
+      const front = this.finished.get(key);
+      if (!front || aheadOfCandidate(mark, front)) this.finished.set(key, mark);
+    }
+  }
+
+  private addFlag(flag: { type: string; id: number; season: number; episode: number }): void {
+    if (flag.type !== 'tv') return;
+    const key = titleKey(flag);
+    if (!this.furthestFlags.has(key)) this.flagOrder.push(key);
+    const front = this.furthestFlags.get(key);
+    if (!front || ahead(flag, front)) this.furthestFlags.set(key, flag);
+  }
+
+  private addProjectedFlag(row: EpisodeRow): void {
+    const key = titleKey(row.title);
+    if (!this.furthestFlags.has(key)) this.flagOrder.push(key);
+    const front = this.furthestFlags.get(key);
+    if (!front) {
+      this.furthestFlags.set(key, {
+        type: row.title.type,
+        id: row.title.id,
+        season: row.season,
+        episode: row.episode,
+      });
+    } else if (ahead(row, front)) {
+      front.season = row.season;
+      front.episode = row.episode;
+    }
+  }
+
+  finish(): Library {
+    const activeSeries = new Set([...this.seriesOrder, ...this.flagOrder]);
+    const records = this.records.filter((record) => {
+      if (record.deleted) return false;
+      const key = titleKey(record.title);
+      if (record.title.type === 'movie') return record.status === 'inProgress';
+      return (
+        record.title.type === 'tv' &&
+        activeSeries.has(key) &&
+        (record.status === 'watched' || this.furthestFlags.has(key))
+      );
+    });
+    const marks = this.seriesOrder.flatMap((key) => {
+      const newest = materializeCandidate(this.latest.get(key)!);
+      const candidate = this.finished.get(key);
+      if (!candidate || sameCandidateEpisode(newest, candidate)) return [newest];
+      return [newest, materializeCandidate(candidate)];
+    });
+    const flags = new Map(
+      this.flagOrder.map((key) => {
+        const flag = this.furthestFlags.get(key)!;
+        return [markKey(flag), flag] as const;
+      }),
+    );
+    const live = new Set([
+      ...records.map((record) => titleKey(record.title)),
+      ...this.seriesOrder,
+      ...this.flagOrder,
+    ]);
+    return {
+      records,
+      marks,
+      flags,
+      shapes: new Map(),
+      dismissed: new Map([...this.dismissed].filter(([key]) => live.has(key))),
+    };
+  }
+}
+
+export function compactContinueLibrary(library: Library): Library {
+  return new ContinueLibraryAccumulator(library).finish();
+}
 
 /**
  * Titles with no display yet: the ones the rows would show, and series that only episode progress names.

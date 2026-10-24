@@ -1,8 +1,8 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { ensureSyncPolicy } from './syncLoader';
-import type { TitleRow } from './wire';
+import type { DocumentRow, EpisodeRow, Row, TitleRow } from './wire';
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
@@ -173,6 +173,135 @@ describe('library fact store', () => {
         },
       },
     });
+  });
+
+  it('streams the exact compact shared-policy facts for season documents', async () => {
+    vi.useFakeTimers();
+    try {
+      const now = 1_800_000_000_000;
+      vi.setSystemTime(now);
+      const stamp = (at: number, device = 'device'): [number, number, string] => [at, 0, device];
+      const episode = (
+        value: number | null,
+        at: number,
+        options: { imported?: boolean; seconds?: number } = {},
+      ) => ({
+        progress:
+          value === null
+            ? null
+            : {
+                value,
+                at: stamp(at),
+                viewing: 2,
+                ...(options.seconds === undefined ? {} : { seconds: options.seconds }),
+              },
+        imported: options.imported ?? false,
+        plays: value === null ? {} : { 0: at },
+        cleared: null,
+      });
+      const season = (
+        id: number,
+        number: number,
+        episodes: Record<number, ReturnType<typeof episode>>,
+        seasonReset: [number, number, string] | null = null,
+      ): DocumentRow => ({
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id },
+        season: number,
+        seasonReset,
+        episodes,
+      });
+      const rows: Row[] = [
+        // Specials, sparse numbers, a timeless import, equal-time ordering, furthest watched and live seconds/device.
+        season(20, 0, {
+          1: episode(null, now - 9_000, { imported: true }),
+          3: episode(1, now - 5_000),
+          8: episode(1, now - 5_000),
+          13: episode(0.4, now - 1_000, { seconds: 713 }),
+        }),
+        // The season policy, not this test, applies the reset before episode_mark sees each projection.
+        season(
+          21,
+          2,
+          { 1: episode(1, now - 8_000), 4: episode(0.6, now - 1_000, { seconds: 404 }) },
+          stamp(now - 4_000),
+        ),
+        // A future stamp stays on the same believability clock in projection and the stored reconsider deadline.
+        season(22, 1, { 2: episode(0.5, now + 86_400_000 + 5_000, { seconds: 222 }) }),
+        // Equal latest times keep the first projected row, including its identity and ordering.
+        season(24, 4, {
+          2: episode(0.4, now - 700, { seconds: 402 }),
+          5: episode(0.6, now - 700, { seconds: 405 }),
+        }),
+        // A legacy row remains on the unchanged project/apply/compact path.
+        {
+          kind: 'ep',
+          schema: 2,
+          title: { type: 'tv', id: 23 },
+          season: 3,
+          episode: 7,
+          progress: { value: 0.75, viewing: 1, seconds: 307, at: stamp(now - 500, 'legacy') },
+        } satisfies EpisodeRow,
+      ];
+      const vault = new MemoryVault();
+      const store = (await LibraryFactStore.open(libraryKey, vault))!;
+      await store.commitBatch(
+        'generation-a',
+        rows.length,
+        rows.map((row, index) => ({
+          k: String(index).padStart(64, String(index)),
+          seq: index + 1,
+          value: `ciphertext-${index}`,
+          row,
+        })),
+        true,
+      );
+
+      const opened = await store.home('generation-a', ['continue']);
+      expect(
+        opened.view.continueLibrary.marks.map(({ id, season, episode, fraction }) => [
+          id,
+          season,
+          episode,
+          fraction,
+        ]),
+      ).toEqual([
+        [20, 0, 13, 0.4],
+        [20, 0, 8, 1],
+        [21, 2, 4, 0.6],
+        [24, 4, 2, 0.4],
+        [23, 3, 7, 0.75],
+      ]);
+      expect([...(opened.view.continueLibrary.flags?.values() ?? [])]).toEqual([
+        { type: 'tv', id: 20, season: 0, episode: 1 },
+      ]);
+      expect(opened.view.continueLibrary.marks).toContainEqual(
+        expect.objectContaining({
+          id: 20,
+          season: 0,
+          episode: 13,
+          seconds: 713,
+          updatedBy: 'device',
+        }),
+      );
+      expect(opened.view.continueLibrary.marks).toContainEqual(
+        expect.objectContaining({
+          id: 23,
+          season: 3,
+          episode: 7,
+          seconds: 307,
+          updatedBy: 'legacy',
+        }),
+      );
+      // Empty future-only facts retain the existing baseline predicate; manifest.newest owns their deadline.
+      expect(opened.reconsiderAt).toBeNull();
+      await expect(store.manifest()).resolves.toMatchObject({
+        newest: { reconsiderAt: now + 5_000 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the old complete transaction when a replacement is interrupted', async () => {

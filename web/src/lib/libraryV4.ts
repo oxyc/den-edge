@@ -48,8 +48,22 @@ export function projectDocument(document: DocumentRow, now = Date.now()): Row[] 
   const known = projected.get(document);
   if (known && now >= known.at && now < known.reconsiderAt) return known.rows;
   const reconsiderAt = newestSummary(document, now).reconsiderAt ?? Infinity;
-  let rows: Row[] = [];
-  if (document.kind === 'title') rows = [projectTitle(document, now)];
+  const rows: Row[] = [];
+  forEachProjectedRow(document, (row) => rows.push(row), now);
+  projected.set(document, { rows, at: now, reconsiderAt });
+  return rows;
+}
+
+/**
+ * Visit a document's legacy projections without retaining an episode-row array. Consumers that need History or
+ * title/season detail still use `projectDocument`; compact consumers can fold one shared-core answer at a time.
+ */
+export function forEachProjectedRow(
+  document: DocumentRow,
+  visit: (row: TitleRow | EpisodeRow) => void,
+  now = Date.now(),
+): void {
+  if (document.kind === 'title') visit(projectTitle(document, now));
   else if (document.kind === 'season') {
     const season = document.season ?? 0;
     const states = syncPolicy<Record<string, EpisodeState>>({
@@ -57,12 +71,9 @@ export function projectDocument(document: DocumentRow, now = Date.now()): Row[] 
       season: document,
       now,
     });
-    rows = Object.entries(states).map(([number, state]) =>
-      episodeRow(document.title, season, Number(number), state),
-    );
+    for (const [number, state] of Object.entries(states))
+      visit(episodeRow(document.title, season, Number(number), state));
   }
-  projected.set(document, { rows, at: now, reconsiderAt });
-  return rows;
 }
 
 function projectTitle(document: DocumentRow, now: number): TitleRow {

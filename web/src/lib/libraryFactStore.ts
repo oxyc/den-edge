@@ -1,12 +1,20 @@
-import { compactContinueLibrary, selectHomeLibraryViewFromFold } from './homeLibraryView';
-import { applyLog, emptyLibrary, type Library, type LibraryRecord, type Mark } from './library';
+import { selectHomeLibraryViewFromFold } from './homeLibraryView';
+import {
+  applyLog,
+  compactContinueLibrary,
+  ContinueLibraryAccumulator,
+  emptyLibrary,
+  type Library,
+  type LibraryRecord,
+  type Mark,
+} from './library';
 import {
   libraryLocalMaterials,
   openLibraryLocalValue,
   sealLibraryLocalValue,
 } from './libraryLocalValue';
 import { noteLibraryFactCommit } from './libraryStartupMetrics';
-import { projectDocument } from './libraryV4';
+import { forEachProjectedRow, projectDocument } from './libraryV4';
 import type { Vault, VaultChange } from './localVault';
 import {
   compareStamps,
@@ -122,15 +130,35 @@ const openStoredLibrary = (library: StoredLibrary): Library => ({
   shapes: new Map(),
 });
 
-function projected(row: Row): Row[] {
-  return isDocument(row) && row.kind !== 'delivery' ? projectDocument(row) : [row];
+function projected(row: Row, now: number): Row[] {
+  return isDocument(row) && row.kind !== 'delivery' ? projectDocument(row, now) : [row];
 }
 
 function facts(
   row: Row | null,
 ): Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> {
   if (!row) return {};
-  const rows = projected(row);
+  const now = Date.now();
+  let rows: Row[];
+  let library: Library;
+  let folded: Library;
+  if (isDocument(row) && row.kind === 'season') {
+    const compact = new ContinueLibraryAccumulator();
+    forEachProjectedRow(
+      row,
+      (candidate) => {
+        if (candidate.kind === 'ep') compact.addEpisode(candidate);
+      },
+      now,
+    );
+    rows = [];
+    library = emptyLibrary();
+    folded = compact.finish();
+  } else {
+    rows = projected(row, now);
+    library = applyLog(emptyLibrary(), rows);
+    folded = compactContinueLibrary(library);
+  }
   const selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> =
     {};
   for (const setting of rows.filter(
@@ -147,8 +175,6 @@ function facts(
     if (setting.name === 'devices') selected.devices = fact;
   }
   const title = rows.find((candidate): candidate is TitleRow => candidate.kind === 'rec');
-  const library = applyLog(emptyLibrary(), rows);
-  const folded = compactContinueLibrary(library);
   if (title) {
     const fact = { schema: LIBRARY_FACT_SCHEMA, title, library: storedLibrary(library) } as const;
     if (!title.deleted.value && title.status.value === 'watchlist') selected.watchlist = fact;
@@ -163,7 +189,7 @@ function facts(
     selected.continue = {
       schema: LIBRARY_FACT_SCHEMA,
       library: storedLibrary(folded),
-      reconsiderAt: newestSummary(row, Date.now()).reconsiderAt ?? null,
+      reconsiderAt: newestSummary(row, now).reconsiderAt ?? null,
     };
   return selected;
 }
