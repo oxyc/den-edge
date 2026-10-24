@@ -935,6 +935,68 @@ describe('LibraryLog', () => {
     expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
   });
 
+  describe('when the fact store cannot keep an acknowledged edit', () => {
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+
+    async function failingStore() {
+      const memory = memoryVault();
+      let failing = false;
+      const vault: Vault = {
+        ...memory.vault,
+        commit: async (changes) => {
+          if (failing && changes.some((change) => change.key.includes(':library-facts.v1:')))
+            throw new DOMException('quota', 'QuotaExceededError');
+          await memory.vault.commit!(changes);
+        },
+      };
+      const server = await edge([row(1)], [], 'generation-1');
+      let posts = 0;
+      const connection: typeof fetch = async (input, init) => {
+        if (init?.method === 'POST') posts++;
+        return server.fetchImpl(input, init);
+      };
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      return { vault, log, posts: () => posts, fail: () => (failing = true) };
+    }
+
+    it('keeps a hand edit pending, and shows it on an offline reopen', async () => {
+      const { vault, log, posts, fail } = await failingStore();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      fail();
+
+      await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 2 }, 0), at(1000)));
+      await vi.waitFor(() => expect(posts()).toBe(1));
+      await vi.waitFor(() =>
+        expect(warn).toHaveBeenCalledWith(
+          'den: the library could not be kept for the next visit',
+          expect.anything(),
+        ),
+      );
+      log.close();
+      warn.mockRestore();
+
+      const reopened = (await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault))!;
+      expect(reopened.pendingActions).toBe(1);
+      expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
+    });
+
+    it('keeps a written settings row pending, and shows it on an offline reopen', async () => {
+      const { vault, log, posts, fail } = await failingStore();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      fail();
+      const values = { theme: { v: 'dark', at: at(1000) } };
+
+      await log.write({ kind: 'set', schema: 2, name: 'prefs', values } as unknown as SettingsRow);
+      expect(posts()).toBe(1);
+      log.close();
+      warn.mockRestore();
+
+      const reopened = (await LibraryLog.open(LIBRARY_KEY, offline, undefined, vault))!;
+      expect(reopened.pendingActions).toBe(1);
+      expect(reopened.settings('prefs')).toMatchObject({ values });
+    });
+  });
+
   it('advertises wire 4 and the generation on every library request', async () => {
     const server = await edge([row(1)]);
     const requests: RequestInit[] = [];
