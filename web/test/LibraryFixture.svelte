@@ -61,6 +61,7 @@
     (window as unknown as { denTestReleaseWrites: () => void }).denTestReleaseWrites =
       releaseWrites;
   const withDownload = params.has('downloading');
+  const homeDownloads = params.has('home-downloads');
   const downloadAt = Date.now();
   // Seed persisted fixture data directly. `startRow` is a write operation and real callers invoke it only after an
   // interaction, when deferred policy is ready; running it while this component is constructed would make every
@@ -86,6 +87,37 @@
       queuedAt: { value: { int: downloadAt }, at: [downloadAt, 0, 'test'] },
     },
   };
+  const homeDownloadRows = homeDownloads
+    ? ['Active download', 'Ready download', 'Unavailable download', 'Failed download'].map(
+        (title, index): SettingsRow => {
+          const at = downloadAt + index;
+          return {
+            kind: 'set',
+            schema: 2,
+            name: `download:movie:${9100 + index}:-1:-1`,
+            values: {
+              release: {
+                value: {
+                  string: JSON.stringify({
+                    identity: title,
+                    label: title,
+                    url: `/scout/p/home-${index}`,
+                  }),
+                },
+                at: [at, 0, 'test'],
+              },
+              title: {
+                value: {
+                  string: JSON.stringify({ mediaId: 9100 + index, mediaType: 'movie', title }),
+                },
+                at: [at, 0, 'test'],
+              },
+              queuedAt: { value: { int: at }, at: [at, 0, 'test'] },
+            },
+          };
+        },
+      )
+    : [];
   let route = $state<Route>(
     params.get('page') === 'watchlist'
       ? { page: 'watchlist' }
@@ -169,6 +201,7 @@
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
             : []),
           ...(withDownload ? [downloadRow] : []),
+          ...homeDownloadRows,
         ]
       : [],
   );
@@ -296,6 +329,33 @@
     openGate,
   });
   publish = () => library.publish();
+  if (homeDownloads) {
+    library.coordinator.answers.set(homeDownloadRows[0].name, {
+      state: 'preparing',
+      progress: 0.25,
+    });
+    library.coordinator.answers.set(homeDownloadRows[1].name, { state: 'ready' });
+    library.coordinator.answers.set(homeDownloadRows[2].name, { state: 'refused' });
+    library.coordinator.answers.set(homeDownloadRows[3].name, {
+      state: 'preparing',
+      progress: 0.5,
+      fetch: { state: 'failed' },
+    });
+    // Provider completion republishes the same DownloadsView as a real queue refresh.
+    (window as unknown as { denTestFinishDownload: () => void }).denTestFinishDownload = () => {
+      library.coordinator.answers.set(homeDownloadRows[0].name, { state: 'ready' });
+      publish();
+    };
+    (window as unknown as { denTestClearReadyDownloads: () => void }).denTestClearReadyDownloads =
+      () => {
+        stored = stored.filter(
+          (row) =>
+            row.kind !== 'set' ||
+            !homeDownloadRows.slice(0, 2).some((download) => download.name === row.name),
+        );
+        publish();
+      };
+  }
   const visitor = params.has('visitor');
   const kid = params.has('kid');
   const session: ProfileSession = visitor
