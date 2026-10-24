@@ -49,31 +49,30 @@ export function projectDocument(document: DocumentRow, now = Date.now()): Row[] 
   if (known && now >= known.at && now < known.reconsiderAt) return known.rows;
   const reconsiderAt = newestSummary(document, now).reconsiderAt ?? Infinity;
   const rows: Row[] = [];
-  forEachProjectedRow(document, (row) => rows.push(row), now);
+  if (document.kind === 'title') rows.push(projectTitle(document, now));
+  else if (document.kind === 'season')
+    forEachProjectedEpisode(document, (row) => rows.push(row), now);
   projected.set(document, { rows, at: now, reconsiderAt });
   return rows;
 }
 
 /**
- * Visit a document's legacy projections without retaining an episode-row array. Consumers that need History or
- * title/season detail still use `projectDocument`; compact consumers can fold one shared-core answer at a time.
+ * Visit a season document's `ep` projections without retaining them as an array: a consumer that only folds them
+ * (Continue's compact inputs) never needs the whole season at once. `projectDocument` is the retained form.
  */
-export function forEachProjectedRow(
+export function forEachProjectedEpisode(
   document: DocumentRow,
-  visit: (row: TitleRow | EpisodeRow) => void,
-  now = Date.now(),
+  visit: (row: EpisodeRow) => void,
+  now: number,
 ): void {
-  if (document.kind === 'title') visit(projectTitle(document, now));
-  else if (document.kind === 'season') {
-    const season = document.season ?? 0;
-    const states = syncPolicy<Record<string, EpisodeState>>({
-      op: 'season_state_v4',
-      season: document,
-      now,
-    });
-    for (const [number, state] of Object.entries(states))
-      visit(episodeRow(document.title, season, Number(number), state));
-  }
+  const season = document.season ?? 0;
+  const states = syncPolicy<Record<string, EpisodeState>>({
+    op: 'season_state_v4',
+    season: document,
+    now,
+  });
+  for (const [number, state] of Object.entries(states))
+    visit(episodeRow(document.title, season, Number(number), state));
 }
 
 function projectTitle(document: DocumentRow, now: number): TitleRow {

@@ -1,13 +1,9 @@
 import { beforeAll, expect, test } from 'vitest';
 import { Session } from 'node:inspector/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import {
-  applyLog,
-  compactContinueLibrary,
-  ContinueLibraryAccumulator,
-  emptyLibrary,
-} from './library';
-import { forEachProjectedRow, projectDocument } from './libraryV4';
+import { compactContinueLibrary } from './homeLibraryView';
+import { applyLog, ContinueSummaries, emptyLibrary, type Library } from './library';
+import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import { ensureSyncPolicy } from './syncLoader';
 import type { DocumentRow } from './wire';
 
@@ -98,19 +94,18 @@ async function allocationSample(name: string, work: () => unknown) {
   };
 }
 
+/** Continue's inputs for one season document, folded as its episodes are projected. */
+function streamed(document: DocumentRow): Library {
+  const summaries = new ContinueSummaries();
+  forEachProjectedEpisode({ ...document }, (row) => summaries.addEpisode(row), NOW);
+  return summaries.compact();
+}
+
 test('compact Continue fact for one 1,000-episode authority document', async ({ bench }) => {
   const rows = projectDocument({ ...season }, NOW);
   const full = applyLog(emptyLibrary(), rows);
   const compact = compactContinueLibrary(full);
-  const streamed = new ContinueLibraryAccumulator();
-  forEachProjectedRow(
-    { ...season },
-    (row) => {
-      if (row.kind === 'ep') streamed.addEpisode(row);
-    },
-    NOW,
-  );
-  const direct = streamed.finish();
+  const direct = streamed(season);
   // The old fact path held both 1,000-node graphs at once before selecting the same two policy inputs.
   expect({
     episodeRows: rows.length,
@@ -123,33 +118,12 @@ test('compact Continue fact for one 1,000-episode authority document', async ({ 
     const projected = projectDocument({ ...season }, NOW);
     return compactContinueLibrary(applyLog(emptyLibrary(), projected));
   };
-  const streamWork = () => {
-    const accumulator = new ContinueLibraryAccumulator();
-    forEachProjectedRow(
-      { ...season },
-      (row) => {
-        if (row.kind === 'ep') accumulator.addEpisode(row);
-      },
-      NOW,
-    );
-    return accumulator.finish();
-  };
+  const streamWork = () => streamed(season);
   const smallGraphWork = () =>
     manySmallSeasons.map((document) =>
       compactContinueLibrary(applyLog(emptyLibrary(), projectDocument({ ...document }, NOW))),
     );
-  const smallStreamWork = () =>
-    manySmallSeasons.map((document) => {
-      const accumulator = new ContinueLibraryAccumulator();
-      forEachProjectedRow(
-        { ...document },
-        (row) => {
-          if (row.kind === 'ep') accumulator.addEpisode(row);
-        },
-        NOW,
-      );
-      return accumulator.finish();
-    });
+  const smallStreamWork = () => manySmallSeasons.map(streamed);
   if (process.env.DEN_FACT_ALLOCATION_AUDIT === '1') {
     graphWork();
     streamWork();

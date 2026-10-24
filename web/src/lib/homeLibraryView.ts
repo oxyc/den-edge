@@ -3,7 +3,7 @@
 
 import { deviceName, readDownloads, type Download } from './downloadRows';
 import {
-  compactContinueLibrary,
+  ContinueSummaries,
   standings,
   titleKey,
   type ContinueProjector,
@@ -80,6 +80,11 @@ function weightOf(status: string, reaction: TitleRow['reaction']['value'] | unde
   const seen =
     status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0;
   return seen + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
+}
+
+/** The smallest ordinary `Library` on which the existing Continue projector makes the same decisions. */
+export function compactContinueLibrary(library: Library): Library {
+  return new ContinueSummaries(library).compact(library.records, library.dismissed);
 }
 
 const unique = (keys: string[]) => [...new Set(keys)];

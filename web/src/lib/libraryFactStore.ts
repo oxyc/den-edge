@@ -1,8 +1,7 @@
-import { selectHomeLibraryViewFromFold } from './homeLibraryView';
+import { compactContinueLibrary, selectHomeLibraryViewFromFold } from './homeLibraryView';
 import {
   applyLog,
-  compactContinueLibrary,
-  ContinueLibraryAccumulator,
+  ContinueSummaries,
   emptyLibrary,
   type Library,
   type LibraryRecord,
@@ -14,7 +13,7 @@ import {
   sealLibraryLocalValue,
 } from './libraryLocalValue';
 import { noteLibraryFactCommit } from './libraryStartupMetrics';
-import { forEachProjectedRow, projectDocument } from './libraryV4';
+import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import type { Vault, VaultChange } from './localVault';
 import {
   compareStamps,
@@ -24,6 +23,7 @@ import {
   mergeSettings,
   mergeTitle,
   newestSummary,
+  type DocumentRow,
   type Row,
   type SettingsRow,
   type Stamp,
@@ -134,32 +134,23 @@ function projected(row: Row, now: number): Row[] {
   return isDocument(row) && row.kind !== 'delivery' ? projectDocument(row, now) : [row];
 }
 
+function continueOfSeason(season: DocumentRow, now: number): Library {
+  const summaries = new ContinueSummaries();
+  forEachProjectedEpisode(season, (episode) => summaries.addEpisode(episode), now);
+  return summaries.compact();
+}
+
 function facts(
   row: Row | null,
   retainEpisodeProjection = false,
 ): Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> {
   if (!row) return {};
   const now = Date.now();
-  let rows: Row[];
-  let library: Library;
-  let folded: Library;
-  if (isDocument(row) && row.kind === 'season' && !retainEpisodeProjection) {
-    const compact = new ContinueLibraryAccumulator();
-    forEachProjectedRow(
-      row,
-      (candidate) => {
-        if (candidate.kind === 'ep') compact.addEpisode(candidate);
-      },
-      now,
-    );
-    rows = [];
-    library = emptyLibrary();
-    folded = compact.finish();
-  } else {
-    rows = projected(row, now);
-    library = applyLog(emptyLibrary(), rows);
-    folded = compactContinueLibrary(library);
-  }
+  // A season document is only ever Continue's input, so its episodes are folded one at a time instead of held.
+  const season = isDocument(row) && row.kind === 'season' && !retainEpisodeProjection ? row : null;
+  const rows = season ? [] : projected(row, now);
+  const library = applyLog(emptyLibrary(), rows);
+  const folded = season ? continueOfSeason(season, now) : compactContinueLibrary(library);
   const selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> =
     {};
   for (const setting of rows.filter(
