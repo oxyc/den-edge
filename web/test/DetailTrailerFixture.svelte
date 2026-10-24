@@ -67,6 +67,7 @@
       onseen={noop}
       onreact={noop}
       onplay={noop}
+      tvs={[{ id: 'aaaa000000000001', name: 'Living room', play: 'A'.repeat(43) }]}
       onplayhere={browserPlay ? noop : undefined}
       onepisode={noop}
     />

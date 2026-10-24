@@ -50,6 +50,7 @@
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Warning } from '../lib/contentWarnings';
   import type { MenuItem } from '../lib/titleActions';
+  import type { HouseholdTv } from '../settings/values';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -74,6 +75,7 @@
     onseen,
     onreact,
     onplay,
+    tvs = [],
     onplayhere,
     ontransport,
     remux = null,
@@ -133,7 +135,9 @@
     onseen: (title: Title, on: boolean) => void;
     onreact: (title: Title, reaction: Reaction) => void;
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
-    onplay?: (title: Title, season?: number, episode?: number) => void;
+    onplay?: (tv: string, title: Title, season?: number, episode?: number) => void;
+    /** The household's TVs, the one used last first: one Play on TV each. */
+    tvs?: readonly HouseholdTv[];
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     /** Controls the paired TV that authored `live`; absent when the live writer is another device. */
     ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => Promise<boolean>;
@@ -745,11 +749,17 @@
     onseason?.(d.title, displayedSeason, seasonMarkable, seen);
   }
 
+  /** Start it here when this browser can play, else on the TV a play last went to. */
+  function start(title: Title, season?: number, episode?: number) {
+    if (onplayhere) onplayhere(title, season, episode);
+    else if (onplay && tvs[0]) onplay(tvs[0].id, title, season, episode);
+  }
+
   function playEpisode(number: number) {
     const d = untrack(() => detail),
       picked = untrack(() => displayedSeason);
     // A guest has neither, so there is nothing to start and the episode row simply does not act.
-    if (d && picked !== null) (onplayhere ?? onplay)?.(d.title, picked, number);
+    if (d && picked !== null) start(d.title, picked, number);
   }
 
   /** The active profile's policy, asked again where a download starts (`title.eligibility`). */
@@ -971,7 +981,7 @@
               })}
               onclick={(event) =>
                 activateLinkInPlace(event, () =>
-                  (onplayhere ?? onplay)?.(d.title, coordinate?.season, coordinate?.episode),
+                  start(d.title, coordinate?.season, coordinate?.episode),
                 )}
             >
               <DetailIcon name="play" filled /><span
@@ -1040,8 +1050,9 @@
             seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
             onplay={!__DEN_TV__ && onplay
-              ? () => onplay(d.title, playbackTarget?.season, playbackTarget?.episode)
+              ? (tv) => onplay(tv, d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
+            {tvs}
             onplayhere={onplayhere
               ? () => onplayhere(d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
@@ -1247,8 +1258,9 @@
                   onseen={(seen) =>
                     displayedSeason !== null && onepisode(d.title, displayedSeason, e.number, seen)}
                   onplaytv={!__DEN_TV__ && onplay && displayedSeason !== null
-                    ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
+                    ? (tv) => onplay(tv, d.title, displayedSeason ?? undefined, e.number)
                     : undefined}
+                  {tvs}
                   onsources={guestScout
                     ? undefined
                     : () => {

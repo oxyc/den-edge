@@ -31,32 +31,6 @@ export interface Link {
 }
 
 /**
- * A real paired TV receiver, rather than a synthetic link that only opens a library.
- *
- * Recovery and guest-library links deliberately carry random inbox/link keys so the rest of the app can open their
- * synced library through the same shape. No device owns those keys, though, so sending to them can never reach a TV.
- *
- * A link is also made by joining another browser (Settings › "Use Den on your phone"): its inbox is that browser's,
- * which never plays what is sent to it, so a "Play on TV" through it reached no TV. The handover names its host by
- * stamp device id, and the library's device list says whether that device is a TV; a host the list does not show as
- * one (or a list not read yet) is not a receiver. Older links have no host id, so resolve those by their advertised
- * name instead. Failing closed matters here: a stale browser link must never turn "on TV" into "send to Mac".
- */
-export function linkedTv(
-  link: Link | null | undefined,
-  devices: readonly { id: string; name?: string; kind: 'tv' | 'browser' }[] | undefined,
-): Link | undefined {
-  if (!link || link.recovered || link.guest) return undefined;
-  if (link.deviceId)
-    return devices?.find((device) => device.id === link.deviceId)?.kind === 'tv' ? link : undefined;
-  if (link.name === undefined) return undefined;
-  const name = link.name.trim().toLowerCase();
-  const hosts = devices?.filter((device) => device.name?.trim().toLowerCase() === name) ?? [];
-  // A legacy name is not an identity. If both a browser and a TV have it, sending would be ambiguous, so fail closed.
-  return hosts.length > 0 && hosts.every((host) => host.kind === 'tv') ? link : undefined;
-}
-
-/**
  * A device this browser handed its library to. It keeps the library's key from then on, so this is a record of
  * what was given, not a grant that can be taken back: only a new library key cuts a device off.
  */

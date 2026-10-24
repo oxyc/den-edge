@@ -11,6 +11,7 @@ import { shareOrCopy } from './share';
 import type { Notify } from './toast';
 import { titleState, type Reaction } from './titleState';
 import type { TitleRow } from './wire';
+import { playOnLabel, type HouseholdTv } from '../settings/values';
 
 const TITLE_ACTIONS = Symbol('title actions');
 
@@ -26,8 +27,10 @@ export interface TitleActionsContext {
   toggleSeen: (title: Title, seen: boolean) => void;
   setReaction: (title: Title, reaction: Reaction | null) => void;
   dismissContinueWatching: (title: Title) => void;
-  /** Play it on the linked TV; absent for a guest, who has none. */
-  play?: (title: Title) => void;
+  /** Play it on the household TV with this id; absent for a guest, who has none. */
+  play?: (title: Title, tv: string) => void;
+  /** The household's TVs, the one used last first (`householdTvs`). */
+  readonly tvs?: readonly HouseholdTv[];
   /** Play it in this browser; absent where nothing here can. */
   playHere?: (title: Title) => void;
   /** Owner-only Kid exceptions. Selecting one opens the fresh Owner-PIN gate owned by Library. */
@@ -107,7 +110,13 @@ export function titleMenuItems(
       });
     }
     if (ctx.play && !blocked) {
-      items.push({ kind: 'item', label: 'Play on TV', onselect: () => ctx.play?.(title) });
+      const tvs = ctx.tvs ?? [];
+      for (const tv of tvs)
+        items.push({
+          kind: 'item',
+          label: playOnLabel(tv, tvs),
+          onselect: () => ctx.play?.(title, tv.id),
+        });
     }
     items.push({
       kind: 'checkbox',

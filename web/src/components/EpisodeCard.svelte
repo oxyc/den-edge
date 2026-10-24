@@ -17,6 +17,7 @@
   import type { MenuItem } from '../lib/titleActions';
   import type { Episode } from '../lib/detail';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { playOnLabel, type HouseholdTv } from '../settings/values';
   let {
     episode,
     href,
@@ -28,6 +29,7 @@
     fallback,
     onplay,
     onplaytv,
+    tvs = [],
     onseen,
     onsources,
     ondownload,
@@ -52,7 +54,9 @@
      * Send this episode to the linked TV. Absent for a guest, who has no TV to send to — and distinct from
      * `onplay`, which starts it here when this browser can play and only falls back to the TV when it can't.
      */
-    onplaytv?: () => void;
+    onplaytv?: (tv: string) => void;
+    /** The household's TVs, the one used last first: one Play on TV each. */
+    tvs?: readonly HouseholdTv[];
     onseen: (seen: boolean) => void;
     onsources?: () => void;
     ondownload?: () => void;
@@ -63,7 +67,11 @@
   const date = $derived(airDate(episode.airDate));
   const menuItems = $derived<MenuItem[]>([
     ...(onplaytv && !upcoming
-      ? [{ kind: 'item' as const, label: 'Play on TV', onselect: onplaytv }]
+      ? tvs.map((tv) => ({
+          kind: 'item' as const,
+          label: playOnLabel(tv, tvs),
+          onselect: () => onplaytv(tv.id),
+        }))
       : []),
     ...(onsources && !upcoming
       ? [{ kind: 'item' as const, label: 'Sources', onselect: onsources }]

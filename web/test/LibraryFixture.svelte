@@ -216,11 +216,13 @@
     row.kind !== 'set' && row.title.type === ref.type && row.title.id === ref.id;
 
   /**
-   * `link-host=tv|browser|legacy-tv|legacy-browser`: the library's device list says what kind of device hosts the
-   * link. Current handovers name it by id; legacy records can only be correlated by their advertised name.
+   * `link-host=tv|browser|legacy-tv|legacy-browser`: what the library's device list holds besides this browser. A `tv`
+   * publishes a household play key (den-spec inbox-v1 §5); a `legacy-tv` is one too old to, so nothing plays on it.
+   * `second-tv` adds a second TV with a key, the one a play last started on.
    */
   const linkHost = params.get('link-host');
   const hostDevice = 'cccc000000000003';
+  const secondTv = 'dddd000000000004';
   const at = [1, 0, 'test'];
   // Whole settings rows, as the log's own `settings` returns them: the selected views find them by `name`.
   const devices =
@@ -242,6 +244,17 @@
               at,
             },
             [`${hostDevice}.seen`]: { value: { int: 5000 }, at },
+            ...(linkHost === 'tv'
+              ? { [`${hostDevice}.play`]: { value: { string: 'A'.repeat(43) }, at } }
+              : {}),
+            ...(params.has('second-tv')
+              ? {
+                  [`${secondTv}.name`]: { value: { string: 'Bedroom' }, at },
+                  [`${secondTv}.kind`]: { value: { string: 'tv' }, at },
+                  [`${secondTv}.play`]: { value: { string: `${'B'.repeat(42)}A` }, at },
+                  [`${secondTv}.played`]: { value: { int: 7000 }, at },
+                }
+              : {}),
           },
         }
       : undefined;

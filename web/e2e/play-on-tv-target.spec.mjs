@@ -1,7 +1,7 @@
-// "Play on TV" only through a link to a TV. A browser that joined another browser (Settings › "Use Den on your
-// phone") holds a link whose inbox is that browser's: a Resume on TV sent through it was queued where no TV drains,
-// and the toast named the other browser ("Sent to Mac…"). The library's device list says what kind of device the
-// link's host is, and only a TV gets the action.
+// "Play on TV" goes to the household's TVs (den-spec inbox-v1 §5), not through a pairing: every TV in the library's
+// device list that publishes a play key is offered, the one a play last started on first, each sent to the queue its
+// own key derives. A browser is never a TV, and a TV too old to publish a key is not offered.
+import { hkdfSync } from 'node:crypto';
 import { test, expect, chromium } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
@@ -21,7 +21,13 @@ const movie = {
   recommendations: { results: [] },
 };
 
-async function openTitle(page, host) {
+/** The queue a play key derives, as a link key's (pairing-v1 §6). */
+const queueOf = (playKey) =>
+  Buffer.from(
+    hkdfSync('sha256', Buffer.from(playKey, 'base64url'), 'den/link/v1', 'inbox', 24),
+  ).toString('hex');
+
+async function openTitle(page, query) {
   await guardNetwork(page);
   await page.route('**/routes', (r) => r.fulfill({ json: {} }));
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
@@ -33,76 +39,59 @@ async function openTitle(page, host) {
   );
   const appends = [];
   await page.route('**/inbox/append', async (r) => {
-    appends.push(r.request().postDataJSON());
+    appends.push(r.request().headers()['x-den-link']);
     await r.fulfill({ json: { ok: true } });
   });
   await page.route('**/inbox/pending', (r) => r.fulfill({ json: { queued: true } }));
   await page.goto(
-    `${E2E_ORIGIN}/test/library.html?populated&page=title&type=movie&id=1001&link-host=${host}`,
+    `${E2E_ORIGIN}/test/library.html?populated&page=title&type=movie&id=1001&${query}`,
   );
   await expect(page.getByRole('heading', { name: 'Movie 1001', level: 1 })).toBeVisible();
   return { appends };
 }
 
-const onTv = (page) => page.getByRole('button', { name: /on TV$/ });
-
-test('a link made by joining a browser offers no Play on TV and sends nothing', async () => {
+async function withPage(run) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    const { appends } = await openTitle(page, 'browser');
-    // The library's device list has been read by now: the same page with a TV host draws the button.
-    await page.waitForTimeout(500);
-    await expect(onTv(page)).toHaveCount(0);
-    expect(appends).toHaveLength(0);
+    await run(await browser.newPage({ viewport: { width: 1280, height: 800 } }));
   } finally {
     await browser.close();
   }
-});
+}
 
-test('a legacy browser link named Mac is not mistaken for a TV receiver', async () => {
-  const browser = await chromium.launch({
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    const { appends } = await openTitle(page, 'legacy-browser');
-    await page.waitForTimeout(500);
-    await expect(onTv(page)).toHaveCount(0);
-    expect(appends).toHaveLength(0);
-  } finally {
-    await browser.close();
-  }
-});
+// The fixture's film is part-watched, so its primary action reads "Resume on …".
+const onTv = (page) => page.getByRole('button', { name: /^(Play|Resume) on / });
 
-test('a link to a TV the device list shows still plays on it', async () => {
-  const browser = await chromium.launch({
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    const { appends } = await openTitle(page, 'tv');
-    await onTv(page).click();
+for (const host of ['browser', 'legacy-tv']) {
+  test(`no TV that takes plays (${host}) offers no Play on TV and sends nothing`, () =>
+    withPage(async (page) => {
+      const { appends } = await openTitle(page, `link-host=${host}`);
+      // The library's device list has been read by now: the same page with a TV draws the button.
+      await page.waitForTimeout(500);
+      await expect(onTv(page)).toHaveCount(0);
+      expect(appends).toHaveLength(0);
+    }));
+}
+
+test("one TV is Play on TV, sent to that TV's household queue", () =>
+  withPage(async (page) => {
+    const { appends } = await openTitle(page, 'link-host=tv');
+    await page.getByRole('button', { name: 'Resume on TV', exact: true }).click();
     await expect(page.locator('p.library-status.toast')).toHaveText('Sent to Living Room TV…');
-    expect(appends).toHaveLength(1);
-  } finally {
-    await browser.close();
-  }
-});
+    expect(appends).toEqual([queueOf('A'.repeat(43))]);
+  }));
 
-test('a legacy TV link is accepted only when its name resolves to a TV device', async () => {
-  const browser = await chromium.launch({
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    const { appends } = await openTitle(page, 'legacy-tv');
-    await onTv(page).click();
+test('several TVs are each named, the one played on last first', () =>
+  withPage(async (page) => {
+    const { appends } = await openTitle(page, 'link-host=tv&second-tv');
+    await expect(page.getByRole('button', { name: 'Resume on TV', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Resume on Bedroom', exact: true }).click();
+    await expect(page.locator('p.library-status.toast')).toHaveText('Sent to Bedroom…');
+
+    await page.getByRole('button', { name: 'More ways to resume on bedroom' }).click();
+    await page.getByRole('menuitem', { name: 'Resume on Living Room TV' }).click();
     await expect(page.locator('p.library-status.toast')).toHaveText('Sent to Living Room TV…');
-    expect(appends).toHaveLength(1);
-  } finally {
-    await browser.close();
-  }
-});
+    expect(appends).toEqual([queueOf(`${'B'.repeat(42)}A`), queueOf('A'.repeat(43))]);
+  }));

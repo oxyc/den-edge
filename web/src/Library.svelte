@@ -29,11 +29,12 @@
     personalRows,
     type RowDef,
   } from './lib/catalog';
-  import { receiveTvMessages, sendToTV } from './lib/inbox';
+  import { householdQueue, receiveTvMessages, sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
-  import { linkedTv, type Link } from './lib/links.svelte';
+  import type { Link } from './lib/links.svelte';
+  import { householdTvs } from './settings/values';
   import {
     clock as timecode,
     livePosition,
@@ -343,7 +344,7 @@
       if (historyLease === lease) historyLease = undefined;
     };
   });
-  // The household's device list, which says whether the device this browser linked through is a TV (`linkedTv`).
+  // The household's device list, which names the TVs a play can go to (`householdTvs`).
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
   $effect(() => {
@@ -881,19 +882,22 @@
     );
   }
 
+  /** The household's TVs that take plays from any device holding the library, the one used last first. */
+  const tvs = $derived(householdTvs(householdModel?.devices.value?.devices));
   /**
-   * Start the title on the linked TV, as the TV's own Play would — it picks the source.
+   * Start the title on the household TV `tvId`, as the TV's own Play would — it picks the source. Sent to that TV's
+   * household queue (den-spec inbox-v1 §5), so no pairing with the TV is needed: holding the library is enough.
    *
-   * Undefined without a real TV receiver. Guest and recovery libraries use synthetic `Link`s to open their synced
-   * library, but no device owns those random inbox keys; treating that shape as a receiver offered a dead
-   * "Play on TV" action.
+   * Undefined while the library lists no TV that takes plays.
    *
    * Feedback from here on is the bottom toast (`playOnTv`), not `notice` — the press can be far from where
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
   const play = $derived(
-    tv
-      ? async (title: Title, season?: number, episode?: number) => {
+    tvs.length
+      ? async (tvId: string, title: Title, season?: number, episode?: number) => {
+          const tv = tvs.find((candidate) => candidate.id === tvId);
+          if (!tv) return;
           busy = true;
           failure = null;
           const blocked = await playGuard(title, {
@@ -908,7 +912,8 @@
             session.notify(blocked);
             return;
           }
-          const sealed = await sendToTV(tv, {
+          const queue = await householdQueue(tv.play);
+          const sealed = await sendToTV(queue, {
             type: 'play',
             tmdbId: title.id,
             mediaType: title.type,
@@ -918,11 +923,11 @@
           });
           busy = false;
           if (sealed)
-            playOnTv.start(tv, sealed, tv.name ?? 'your TV', {
+            playOnTv.start(queue, sealed, tv.name, {
               type: title.type,
               id: title.id,
             });
-          else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
+          else failure = `Couldn’t reach ${tv.name}. Check that this device is online.`;
         }
       : undefined,
   );
@@ -1113,7 +1118,11 @@
       kidAccessRequest = { kid, title, allow };
     },
     get play() {
-      return play;
+      const send = play;
+      return send && ((title: Title, tv: string) => send(tv, title));
+    },
+    get tvs() {
+      return tvs;
     },
     get playHere() {
       return playHere;
@@ -2031,6 +2040,7 @@
     onseason={markSeasonSeen}
     onreact={(title, reaction) => fromPage(setReaction(title, reaction))}
     onplay={play}
+    {tvs}
     onplayhere={playHere}
     {remux}
     away={remuxAway && !!scout}

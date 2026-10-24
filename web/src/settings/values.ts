@@ -112,6 +112,10 @@ export interface DeviceEntry {
   waiting: Record<string, number>;
   connectedAt: Record<string, string>;
   handoff: Record<string, string>;
+  /** A TV's household play key, base64url (inbox-v1 §5): any device holding the library plays on it through it. */
+  play?: string;
+  /** When a play sent from another device last started on this TV (ms). */
+  played?: number;
 }
 
 /** Every device in `set:devices` that still names itself, most recently seen first. */
@@ -119,7 +123,7 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
   const devices = new Map<string, Partial<DeviceEntry>>();
   for (const [name, stamped] of Object.entries(row?.values ?? {})) {
     const match =
-      /^([0-9a-z]+)\.(name|kind|seen|pending|format|facade|delivers|waiting:[^:]+|connectedAt:[^:]+|handoff:[^:]+)$/i.exec(
+      /^([0-9a-z]+)\.(name|kind|seen|pending|format|facade|delivers|play|played|waiting:[^:]+|connectedAt:[^:]+|handoff:[^:]+)$/i.exec(
         name,
       );
     const value = stamped.value;
@@ -134,6 +138,9 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
     if (field === 'format' && 'int' in value) device.format = value.int;
     if (field === 'facade' && 'strings' in value) device.facade = value.strings;
     if (field === 'delivers' && 'strings' in value) device.delivers = value.strings;
+    if (field === 'play' && 'string' in value && /^[A-Za-z0-9_-]{43}$/.test(value.string))
+      device.play = value.string;
+    if (field === 'played' && 'int' in value) device.played = value.int;
     if (field.startsWith('waiting:') && 'int' in value)
       (device.waiting ??= {})[field.slice('waiting:'.length)] = value.int;
     if (field.startsWith('connectedAt:') && 'string' in value)
@@ -158,11 +165,53 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
               waiting: d.waiting ?? {},
               connectedAt: d.connectedAt ?? {},
               handoff: d.handoff ?? {},
+              ...(d.play ? { play: d.play } : {}),
+              ...(d.played !== undefined ? { played: d.played } : {}),
             },
           ]
         : [],
     )
     .sort((a, b) => (b.seen ?? 0) - (a.seen ?? 0) || a.name.localeCompare(b.name));
+}
+
+/** A TV in the household that takes plays from any device holding the library (inbox-v1 §5). */
+export interface HouseholdTv {
+  id: string;
+  name: string;
+  /** Its household play key, base64url. */
+  play: string;
+}
+
+/**
+ * The household's TVs that take plays, the one a play last started on first (`<d>.played`), then the most recently
+ * seen. A TV too old to publish a play key isn't one: it can't be reached without a pairing.
+ */
+export function householdTvs(
+  devices:
+    | readonly {
+        readonly id: string;
+        readonly name: string;
+        readonly kind: 'tv' | 'browser';
+        readonly lastSeenAt?: number;
+        readonly playKey?: string;
+        readonly playedAt?: number;
+      }[]
+    | undefined,
+): HouseholdTv[] {
+  return (devices ?? [])
+    .filter((d) => d.kind === 'tv' && d.playKey !== undefined)
+    .sort(
+      (a, b) =>
+        (b.playedAt ?? 0) - (a.playedAt ?? 0) ||
+        (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0) ||
+        a.name.localeCompare(b.name),
+    )
+    .map(({ id, name, playKey }) => ({ id, name, play: playKey! }));
+}
+
+/** "Play on TV" with one TV; with several, each by its name. */
+export function playOnLabel(tv: HouseholdTv, tvs: readonly HouseholdTv[], verb = 'Play'): string {
+  return tvs.length > 1 ? `${verb} on ${tv.name}` : `${verb} on TV`;
 }
 
 /** How often a device rewrites its `seen`: once a day is enough to tell a device in use from a forgotten one. */

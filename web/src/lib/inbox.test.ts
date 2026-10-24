@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  householdQueue,
   receiveDeviceIdentity,
   receiveTvMessages,
   sealMessage,
@@ -8,7 +9,7 @@ import {
   stillQueued,
 } from './inbox';
 import { linkKeys } from './pair';
-import { fromHex } from './wire';
+import { fromHex, toBase64url } from './wire';
 
 // den-spec, checked out at the repository root; the TV opens the same messages.
 const vectors = JSON.parse(
@@ -70,6 +71,14 @@ describe('sending to a TV', () => {
       throw new TypeError('offline');
     }) as typeof fetch;
     expect(await sendToTV(link, play, down)).toBe(false);
+  });
+
+  it("uses a TV's published play key exactly as a link key (inbox-v1 §5)", async () => {
+    const key = fromHex(vectors.linkKey);
+    expect(await householdQueue(toBase64url(key))).toEqual({
+      inboxKey: (await linkKeys(key)).inbox,
+      linkKey: link.linkKey,
+    });
   });
 });
 

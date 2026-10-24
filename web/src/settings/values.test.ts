@@ -5,7 +5,9 @@ import {
   effectiveServicePicks,
   forgetDevice,
   hashPin,
+  householdTvs,
   parsePublicKey,
+  playOnLabel,
   pinMatches,
   readDevices,
   readServers,
@@ -16,6 +18,7 @@ import {
   toggled,
 } from './values';
 import { GUEST_PICKS } from '../lib/services';
+import { selectedDevicesView } from '../lib/librarySelectedSettings';
 import type { SettingsRow, Stamp } from '../lib/wire';
 
 const at: Stamp = [1000, 0, 'tv01'];
@@ -119,6 +122,45 @@ describe('synced prefs', () => {
         .maturityCeiling;
     expect([limit('pg13'), limit('r'), limit('none')]).toEqual(['pg13', 'r', undefined]);
     expect(change.maturityCeiling(undefined)).toEqual({ 'den.maturityCeiling': null });
+  });
+
+  it('offers the TVs with a play key, the one played on last first, and names them only when there are several', () => {
+    const key = (c: string) => ({ value: { string: c.repeat(43) }, at });
+    const { devices } = selectedDevicesView([
+      {
+        ...row({}),
+        name: 'devices',
+        values: {
+          'aaaa000000000001.name': { value: { string: 'Living room' }, at },
+          'aaaa000000000001.kind': { value: { string: 'tv' }, at },
+          'aaaa000000000001.seen': { value: { int: 9000 }, at },
+          'aaaa000000000001.play': key('a'),
+          'bbbb000000000002.name': { value: { string: 'Bedroom' }, at },
+          'bbbb000000000002.kind': { value: { string: 'tv' }, at },
+          'bbbb000000000002.play': key('b'),
+          'bbbb000000000002.played': { value: { int: 100 }, at },
+          // Too old to take household plays, a browser, and a key that isn't one.
+          'cccc000000000003.name': { value: { string: 'Old TV' }, at },
+          'cccc000000000003.kind': { value: { string: 'tv' }, at },
+          'dddd000000000004.name': { value: { string: 'Mac' }, at },
+          'dddd000000000004.play': key('d'),
+          'eeee000000000005.name': { value: { string: 'Odd' }, at },
+          'eeee000000000005.kind': { value: { string: 'tv' }, at },
+          'eeee000000000005.play': { value: { string: 'short' }, at },
+        },
+      },
+    ]);
+    const tvs = householdTvs(devices);
+    expect(tvs).toEqual([
+      { id: 'bbbb000000000002', name: 'Bedroom', play: 'b'.repeat(43) },
+      { id: 'aaaa000000000001', name: 'Living room', play: 'a'.repeat(43) },
+    ]);
+    expect(tvs.map((tv) => playOnLabel(tv, tvs))).toEqual([
+      'Play on Bedroom',
+      'Play on Living room',
+    ]);
+    expect(playOnLabel(tvs[0]!, [tvs[0]!], 'Resume')).toBe('Resume on TV');
+    expect(householdTvs(undefined)).toEqual([]);
   });
 
   it('lists the devices that name themselves, newest first, and lists this one only when stale', () => {

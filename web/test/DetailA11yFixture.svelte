@@ -150,6 +150,7 @@
       setReaction(reaction);
     }}
     onplay={fullActions ? noop : undefined}
+    tvs={fullActions ? [{ id: 'aaaa000000000001', name: 'Living room', play: 'A'.repeat(43) }] : []}
     onplayhere={fullActions ? noop : undefined}
     onepisode={() => {}}
   />

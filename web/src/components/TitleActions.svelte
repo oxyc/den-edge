@@ -19,6 +19,7 @@
   import { toastContext } from '../lib/toast';
   import { tick } from 'svelte';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { playOnLabel, type HouseholdTv } from '../settings/values';
 
   let {
     row,
@@ -28,6 +29,7 @@
     onseen,
     onreact,
     onplay,
+    tvs = [],
     onplayhere,
     playHref,
     onsources,
@@ -54,8 +56,10 @@
     onseen: (on: boolean) => void | Promise<unknown>;
     /** Set the opinion; no picker without it. */
     onreact?: (reaction: Reaction | null) => void | Promise<unknown>;
-    /** Play it on the linked TV; no button without it. */
-    onplay?: () => void;
+    /** Play it on the household TV with this id; no button without it. */
+    onplay?: (tv: string) => void;
+    /** The household's TVs, the one used last first (`householdTvs`): one Play on TV each. */
+    tvs?: readonly HouseholdTv[];
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
     /** A real address for the same in-app playback, including its episode coordinate. */
@@ -164,6 +168,12 @@
     ['love', 'Love'],
   ];
   const rated = $derived(reactions.find(([value]) => value === reaction)?.[1] ?? 'Rate');
+  /** "Play on TV", or one "Play on <name>" per TV, the one used last first. */
+  const onTv = $derived(
+    onplay
+      ? tvs.map((tv) => ({ label: playOnLabel(tv, tvs, playLabel), onselect: () => onplay(tv.id) }))
+      : [],
+  );
   const opinionIcon = (value: Reaction | null) =>
     value === 'dislike' ? 'thumb-down' : value === 'like' ? 'thumb-up' : 'heart';
 </script>
@@ -184,15 +194,14 @@
       {@render lock()}<span>Blocked by parental controls</span>
     </p>
   {:else if onplayhere}
-    {#if onplay}
+    {#if onTv.length}
       <SplitButton
         icon="play"
         label={playLabel}
         href={playHref}
         onclick={(event) => activateLinkInPlace(event, onplayhere)}
         alternateIcon="tv"
-        alternateLabel={playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}
-        onalternate={onplay}
+        alternates={onTv}
         menuId="play-destinations"
         busy={externallyBusy()}
       />
@@ -208,15 +217,26 @@
         onclick={(event) => activateLinkInPlace(event, onplayhere)}
       />
     {/if}
-  {:else if onplay}
+  {:else if onTv.length > 1}
+    <!-- Nothing plays here: the TV used last is the primary action, the others its alternates. -->
+    <SplitButton
+      icon="tv"
+      label={onTv[0]!.label}
+      onclick={onTv[0]!.onselect}
+      alternateIcon="tv"
+      alternates={onTv.slice(1)}
+      menuId="play-destinations"
+      busy={externallyBusy()}
+    />
+  {:else if onTv.length}
     <Button
       variant="primary"
       size="large"
       class="main-action"
       icon="tv"
-      label={playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}
+      label={onTv[0]!.label}
       busy={externallyBusy()}
-      onclick={onplay}
+      onclick={onTv[0]!.onselect}
     />
   {/if}
 
@@ -224,7 +244,7 @@
     <Button
       variant="secondary"
       size="large"
-      class={`pill sources${onplayhere || onplay ? ' with-primary' : ''}`}
+      class={`pill sources${onplayhere || onTv.length ? ' with-primary' : ''}`}
       icon="sources"
       label="Sources"
       busy={externallyBusy()}
