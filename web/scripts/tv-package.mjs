@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { getTizenVersion, tvCsp } from './tv-csp.mjs';
+import { bootBodyStyle, bootSplash } from './tv-boot-splash.mjs';
 
 const webRoot = resolve(import.meta.dirname, '..');
 const args = process.argv.slice(2);
@@ -215,7 +216,7 @@ if (platform === 'tizen') {
   prepareShell();
   const redirect = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=1920,height=1080,initial-scale=1,viewport-fit=cover"><title>Den</title></head>
-<body><p>Opening Den…</p><script>
+<body style="${bootBodyStyle}">${bootSplash('Opening Den…')}<script>
 const target = ${JSON.stringify(remote.href)};
 window.addEventListener('keydown', (event) => { if (event.key === 'Escape' || event.key === 'Backspace' || event.keyCode === 461) history.back(); });
 location.replace(target);
