@@ -25,8 +25,11 @@ import { routeTmdb } from './network.mjs';
 
 const DAY = 86_400_000;
 
-/** Today at midnight UTC: every stamp in the fixture is some days before it. */
-export const fixtureNow = () => Math.floor(Date.now() / DAY) * DAY;
+/** One midnight UTC for the whole process: every stamp in the fixture is some days before it. */
+const FIXTURE_NOW = Number(process.env.DEN_FIXTURE_NOW ?? Math.floor(Date.now() / DAY) * DAY);
+if (!Number.isFinite(FIXTURE_NOW) || FIXTURE_NOW % DAY !== 0)
+  throw new Error('DEN_FIXTURE_NOW must be midnight UTC as Unix milliseconds');
+export const fixtureNow = () => FIXTURE_NOW;
 
 /** A series being watched (`rehearse-synthetic.mjs`: every fifteenth long-history series), with four seasons. */
 export const WATCHED_SERIES = 200_000;
@@ -597,17 +600,29 @@ async function watchPublishes(page) {
 
 /** Open Home and the Watchlist until both find the projection up to date: a browser that has published it. */
 export async function settleProjection(context, edge, options = {}) {
+  const projectionBuildMs = Number(process.env.DEN_LATE_LAYOUT_BUILD_MS ?? 0);
+  if (!Number.isFinite(projectionBuildMs) || projectionBuildMs < 0)
+    throw new Error('DEN_LATE_LAYOUT_BUILD_MS must be a non-negative number of milliseconds');
   for (let round = 0; round < 4; round += 1) {
     const outcomes = [];
     for (const path of ['/', '/watchlist']) {
       const page = await context.newPage();
       try {
         await routeBigHousehold(page, edge, options);
+        // Reproduce a page learning series layouts while its assistant projection is already building. Keeping the
+        // existing four-round settle gate makes a lost post-snapshot layout fail instead of extending the timeout.
+        if (projectionBuildMs) holdProjectionBuilds(page, projectionBuildMs);
+        if (process.env.BIG_LIBRARY_DEBUG)
+          page.on('console', (message) => {
+            if (/assistant projection|library promoted/.test(message.text()))
+              console.log(`settle ${round} ${path}: ${message.text()}`);
+          });
         outcomes.push(await firstPublish(page, path));
       } finally {
         await page.close();
       }
     }
+    if (process.env.BIG_LIBRARY_DEBUG) console.log('settle outcomes', round, outcomes);
     if (outcomes.every((outcome) => outcome === 'current')) return;
   }
   throw new Error('the assistant projection never settled');
