@@ -2375,6 +2375,10 @@ export class LibraryLog {
     const factManifest = await log.factStore?.manifest();
     if (factManifest?.complete) {
       await policy;
+      // Unsent work is read before the facts. A write still settling meanwhile (another tab's, or another log's of this library) keeps its row in the facts
+      // before it drops its kept copy, so in this order the edit is found in one or the other; read the other way
+      // round, an open between the two finds it in neither.
+      const kept = await log.keptWork();
       if (await log.restoreFacts(factManifest.generation, factManifest.head)) {
         // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
         // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
@@ -2387,7 +2391,8 @@ export class LibraryLog {
         log.fromCache = true;
         log.projectJournal();
         // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
-        await log.projectKept();
+        if (kept.length) await ensureDeferredSyncPolicy();
+        for (const work of kept) log.projectWork(work);
         return log;
       }
     }
