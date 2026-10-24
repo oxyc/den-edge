@@ -172,6 +172,19 @@ export function subtitleResyncJourneys(platform = 'browser') {
     ).toBeVisible();
   });
 
+  test('replacing playback clears a completed alignment notice', async ({ page }) => {
+    const f = await fixture(page, platform);
+    await f.menu.click();
+    await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
+    const notice = page.getByText('Subtitles re-synced · -10.0s', { exact: true });
+    await expect(notice).toBeVisible();
+    await page.getByRole('button', { name: /^Audio track:/ }).click();
+    await page.getByRole('menuitem', { name: 'Re-sync audio & video', exact: true }).click();
+    await expect.poll(f.starts).toBe(2);
+    // Session replacement must clear it immediately, before the normal six-second notice timer.
+    await expect(notice).toHaveCount(0, { timeout: 2_000 });
+  });
+
   test('failed re-sync leaves the current subtitle and manual offset intact', async ({ page }) => {
     const f = await fixture(page, platform, { fail: true });
     await manualOffset(page, f.menu, platform);

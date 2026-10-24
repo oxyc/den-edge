@@ -2894,6 +2894,7 @@
   $effect(() => {
     const current = session;
     subtitleResyncOffset = 0;
+    subtitleResyncNotice = null;
     return () => {
       if (current) {
         subtitleResyncRequest?.abort();
