@@ -111,7 +111,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
     let den_disabled = (den_playback_path(&path)
         || matches!(path.as_str(), "/grant/den-install" | "/grant/den-configure"))
         && !state.den_playback_enabled;
-    let route_disabled = reset_path && !state.profile_reset_enabled || den_disabled;
+    let route_disabled = reset_path && !state.profile_reset_enabled || den_disabled || path == "/den/migrate";
     // A disabled feature is not a route. In particular, do not disclose its method/body contract in metrics or
     // let the generic preflight answer advertise its private candidate-token header.
     let route = if route_disabled { "other" } else { route_label(&path) };
@@ -479,7 +479,6 @@ fn den_route(path: &str) -> &'static str {
         "stream" => "install/stream",
         "subtitles" | "subtitle" => "install/subtitles",
         "meta" => "install/meta",
-        "migrate" => "install/migrate",
         _ => "other",
     }
 }
@@ -1050,7 +1049,6 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/scout/") => "/scout",
         p if p.starts_with("/atlas/") => "/atlas",
         p if p.starts_with("/subtitles/") => "/subtitles",
-        "/den/migrate" => "/den/migrate",
         p if den_playback_path(p) => "/den/:config/playback",
         p if crate::cast::is_stage_path(p) => "/den/:config/cast-subtitle",
         p if p == "/den" || p.starts_with("/den/") => "/den",
@@ -1129,7 +1127,6 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // dispatch and never enter the relay.
         "/den/:config/playback" => Some(POST_OPTIONS),
         "/den/:config/cast-subtitle" => Some(POST),
-        "/den/migrate" => Some(POST),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
             Some(DELETE)
@@ -1153,7 +1150,6 @@ fn body_cap(route: &str) -> usize {
         | "/playback/cast" => 2048,
         "/den/:config/playback" => 16 * 1024,
         "/den/:config/cast-subtitle" => crate::cast::MAX_SUBTITLE_BYTES,
-        "/den/migrate" => crate::relay::MIGRATION_BODY_BYTES,
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
@@ -1460,7 +1456,6 @@ pub mod tests {
         assert_eq!(allowed_methods("/den/:config/cast-subtitle"), Some(&[Method::POST][..]));
         assert_eq!(body_cap("/den/:config/cast-subtitle"), crate::cast::MAX_SUBTITLE_BYTES);
         assert!(!is_control("/den/:config/playback"));
-        assert_eq!(route_label("/den/migrate"), "/den/migrate");
         for (path, at) in [
             ("/den/configure", "configure"),
             ("/den/validate", "validate"),
@@ -1473,8 +1468,6 @@ pub mod tests {
             assert_eq!(route_label(path), "/den", "{path}");
             assert_eq!(den_route(path), at, "{path}");
         }
-        assert_eq!(allowed_methods("/den/migrate"), Some(&[Method::POST][..]));
-        assert_eq!(body_cap("/den/migrate"), 32 * 1024);
         assert_eq!(route_label("/grant/den-install"), "/grant/den-install");
         assert_eq!(allowed_methods("/grant/den-install"), Some(&[Method::PUT, Method::DELETE][..]));
     }
@@ -2324,9 +2317,6 @@ pub mod tests {
         // A batch carries a library's rows while every other route keeps the small cap.
         let over_small = declared(MAX_BODY_BYTES + 1);
         let r = h.send("POST", "/inbox/append", None, &[("content-length", &over_small)]).await;
-        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let over_migration = declared(crate::relay::MIGRATION_BODY_BYTES + 1);
-        let r = h.send("POST", "/den/migrate", None, &[("content-length", &over_migration)]).await;
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         // ...and a body that declares no length is held to the same cap as it is read.
         let big = format!(r#"{{"inboxKey":"abcdef0123456789","sealed":"{}"}}"#, "x".repeat(MAX_BODY_BYTES));

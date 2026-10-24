@@ -1,13 +1,11 @@
-// A migrated household whose library still lists its old Reel install. Since sealing went on, Reel answers that
-// install's plaintext config with 400 `bad_config`, for good. Settings retires a legacy install only once Hearth
-// carries its resource; one that never answers again must be retired too, or every page load asks it and is refused.
+// Retiring the automatic config exchange must also stop Settings from deleting old stored plugins.
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { FIXTURE, routeLibraryEdge } from './library-edge.mjs';
 
 const LEGACY = '/reel/plaintextcfg/manifest.json';
 
-test('Settings retires a legacy Reel install whose config Reel refuses, once Hearth carries trailers', async ({
+test('Settings preserves legacy installs after automatic config exchange retirement', async ({
   page,
 }) => {
   await routeLibraryEdge(page);
@@ -41,16 +39,13 @@ test('Settings retires a legacy Reel install whose config Reel refuses, once Hea
   });
   await page.goto(`${FIXTURE}?view=settings&online`);
   await expect.poll(() => reel.includes(LEGACY), { timeout: 30_000 }).toBe(true);
-  // Seeded with Scout, Hearth and the old Reel: Hearth's streams retire Scout, and the refusal retires Reel.
-  await expect(
-    page.getByRole('button', { name: 'Plugins 1', exact: true }),
-    'only Hearth is left',
-  ).toBeVisible({ timeout: 30_000 });
+  // Even with a healthy combined Hearth and a permanently refused legacy config, a Settings visit does not
+  // remove any of the three stored plugins. Removal remains an explicit viewer action.
+  await expect(page.getByRole('button', { name: 'Plugins 3', exact: true })).toBeVisible();
 
-  // Reopened, the page looks Reel up among the library's plugins, then falls back to the box's own. The retired
-  // install is no longer among them, so it is not asked.
+  // The persisted library is unchanged when Settings opens in a fresh page lifecycle.
   reel.length = 0;
-  await page.goto(`${FIXTURE}?online`);
-  await expect.poll(() => reel.includes('/reel/health'), { timeout: 30_000 }).toBe(true);
-  expect(reel).not.toContain(LEGACY);
+  await page.goto(`${FIXTURE}?view=settings&online`);
+  await expect.poll(() => reel.includes(LEGACY), { timeout: 30_000 }).toBe(true);
+  await expect(page.getByRole('button', { name: 'Plugins 3', exact: true })).toBeVisible();
 });

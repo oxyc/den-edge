@@ -39,7 +39,11 @@
       'den.myServicePicks': { strings: ['8@FI'] },
       'den.maturityCeiling': { string: 'pg13' },
     }),
-    row('plugins', { 'https://addon.example/manifest.json': { bool: true } }),
+    row('plugins', {
+      [new URLSearchParams(location.search).has('legacy-addon')
+        ? 'https://den.example/scout/OLD/manifest.json'
+        : 'https://addon.example/manifest.json']: { bool: true },
+    }),
     // An assistant allowed to change the library: den-spec's assistant-v1 vectors' `grant` key.
     row('assistant-grants', {
       d7047d7faa4c6f77e1919c132bb6bd9f: {

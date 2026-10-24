@@ -16,14 +16,7 @@
   import type { Link } from './lib/links.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { householdAssistantFetch, relayFetch } from './lib/relayFetch';
-  import {
-    findAddon,
-    findAtlas,
-    legacyMediaSuperseded,
-    migrateLegacyMedia,
-    REEL,
-    type Addon,
-  } from './lib/scout';
+  import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
@@ -108,9 +101,6 @@
   const disabled = $derived(!ready || saving);
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
   const profileTopology = $derived(connections?.diagnostics.profileTopology ?? false);
-  /** One add-first migration probe per settled plugin view; a changed view (including TV approval) tries again. */
-  let hearthMigrationAttempt = '';
-
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
     const restoreFocus =
       document.activeElement instanceof HTMLElement &&
@@ -209,34 +199,6 @@
     });
     return () => {
       gone = true;
-    };
-  });
-
-  // Installing Hearth is deliberately add-first. A plugin another device adds stays pending on the TV, so it is
-  // excluded here until every TV has approved it. Only then, and only after its live manifest proves the configured
-  // resource exists, retire that resource's legacy addon. Atlas is not part of this migration.
-  $effect(() => {
-    if (!ready || !Object.keys(routes).length) return;
-    const approved = plugins!
-      .filter((plugin) => plugin.pendingApprovalOn.length === 0)
-      .map((plugin) => plugin.manifestUrl);
-    const attempt = JSON.stringify([approved, routes]);
-    if (attempt === hearthMigrationAttempt) return;
-    hearthMigrationAttempt = attempt;
-    let cancelled = false;
-    void migrateLegacyMedia(approved, routes).then(async (manifestUrl) => {
-      if (cancelled) return;
-      if (manifestUrl) {
-        await run(() => model.installPlugin(manifestUrl), true);
-        return; // wait for the changed plugin view, and every TV's approval, before cleanup
-      }
-      const legacy = await legacyMediaSuperseded(approved, routes);
-      for (const url of legacy) {
-        if (cancelled || !(await run(() => model.removePlugin(url), true))) return;
-      }
-    });
-    return () => {
-      cancelled = true;
     };
   });
 
