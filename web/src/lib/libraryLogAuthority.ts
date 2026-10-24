@@ -34,7 +34,7 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
-import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { continueItems, projectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
 import {
   libraryMetadataShape,
@@ -43,9 +43,7 @@ import {
 } from './libraryMetadata';
 import { FinishedLibraryViewWriter } from './finishedLibraryViewWriter';
 import {
-  applyLog,
   ContinueProjector,
-  emptyLibrary,
   isAired,
   titleKey,
   type Shape,
@@ -145,7 +143,6 @@ import {
   compareStamps,
   type ConfigValue,
   type EpisodeRow,
-  type Row,
   type SettingsRow,
   type Stamp,
   type TitleRow,
@@ -363,7 +360,7 @@ export class LibraryLogAuthority {
    * in place of a freshly issued one, so it never overrides a change made after it.
    */
   #asOf: Stamp | null = null;
-  #projection?: { rows: Row[]; home: HomeLibraryView };
+  #projection?: { version: number; at: number; home: HomeLibraryView };
   #projectionTimer?: ReturnType<typeof setTimeout>;
   #projectionDeadline = Infinity;
   #closed = false;
@@ -1398,7 +1395,7 @@ export class LibraryLogAuthority {
   }
 
   #overview(): Extract<LibrarySelectionValue, { kind: 'overview' }> {
-    const { home } = this.#projected();
+    const home = this.#projected();
     return {
       kind: 'overview',
       owned: home.owned.map(refFromKey),
@@ -1421,7 +1418,7 @@ export class LibraryLogAuthority {
   }
 
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
-    const { home } = this.#projected();
+    const home = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
     return {
       kind: 'continue',
@@ -1435,7 +1432,7 @@ export class LibraryLogAuthority {
   }
 
   #presence(titles: TitleRef[]): Extract<LibrarySelectionValue, { kind: 'presence' }> {
-    const standings = new Map(this.#projected().home.standings);
+    const standings = new Map(this.#projected().standings);
     return {
       kind: 'presence',
       items: titles.map((title) => {
@@ -1451,7 +1448,9 @@ export class LibraryLogAuthority {
   }
 
   #history(): Extract<LibrarySelectionValue, { kind: 'history' }> {
-    const { rows } = this.#projected();
+    // Not Home's view: History reads the rows themselves, but its listeners still need the future-stamp deadline.
+    this.#scheduleProjectionReconsideration();
+    const rows = this.#log.rows();
     const seen = seenEpisodes(rows);
     const names = new Map<string, Title>();
     for (const row of rows) {
@@ -1718,15 +1717,22 @@ export class LibraryLogAuthority {
       .sort();
   }
 
-  #projected(): { rows: Row[]; home: HomeLibraryView } {
-    const rows = this.#log.rows();
+  /**
+   * Home's view, held while the rows and den-core's answers for them stand: the log's summary keeps its instant until
+   * an edit or a future stamp's deadline, as `LibraryLog.rows()` keeps its rows.
+   */
+  #projected(): HomeLibraryView {
     this.#scheduleProjectionReconsideration();
-    if (this.#projection?.rows === rows) return this.#projection;
+    const version = this.#log.rowsVersion;
+    const { at } = this.#log.currentSummary();
+    if (this.#projection?.version === version && this.#projection.at === at)
+      return this.#projection.home;
     const foldedAt = performance.now();
-    const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
-    noteLibraryFold(rows.length, performance.now() - foldedAt);
-    this.#projection = { rows, home };
-    return this.#projection;
+    const stored = this.#log.storedRows();
+    const home = projectHomeLibraryView(stored, Date.now());
+    noteLibraryFold(stored.length, performance.now() - foldedAt);
+    this.#projection = { version, at, home };
+    return home;
   }
 
   /** Reconsider future document stamps once, at the first instant den-core may answer differently. */
@@ -1749,7 +1755,6 @@ export class LibraryLogAuthority {
           this.#scheduleProjectionReconsideration();
           return;
         }
-        this.#projection = undefined;
         this.#projectionDeadline = Infinity;
         this.#scheduleProjectionReconsideration();
         this.#viewWriter?.schedule(true);

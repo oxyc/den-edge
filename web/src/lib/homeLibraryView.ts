@@ -3,15 +3,18 @@
 
 import { deviceName, readDownloads, type Download } from './downloadRows';
 import {
+  applyLog,
   ContinueSummaries,
+  emptyLibrary,
   standings,
   titleKey,
   type ContinueProjector,
   type Library,
   type Standing,
 } from './library';
+import { projectDocument } from './libraryV4';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
-import type { Row, SettingsRow, TitleRow } from './wire';
+import type { EpisodeRow, Row, SettingsRow, TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -185,6 +188,27 @@ export function continueItems(
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
   return selectHomeLibraryViewFromFold(library, activeTitleRows(rows), readDownloads(rows));
+}
+
+/**
+ * `selectHomeLibraryView` of a v4 log's stored documents and settings without the full fold: title documents first,
+ * so a series reset drops the marks and flags it outdates before Continue's summaries keep at most two per series.
+ * Each document is read through `projectDocument`, whose answers `LibraryLog.rows()` shares, so History after Home
+ * asks den-core nothing again. A season document's episodes are unique, so no mark has another to be merged with.
+ */
+export function projectHomeLibraryView(stored: Row[], now: number): HomeLibraryView {
+  const titles = stored.flatMap((row) =>
+    row.kind === 'title' ? projectDocument(row, now) : [],
+  ) as TitleRow[];
+  const library = applyLog(emptyLibrary(), titles);
+  const resets = new Map(titles.map((row) => [titleKey(row.title), row.episodesReset?.[0]]));
+  const summaries = new ContinueSummaries();
+  for (const row of stored)
+    if (row.kind === 'season')
+      for (const episode of projectDocument(row, now) as EpisodeRow[])
+        summaries.addEpisode(episode, resets.get(titleKey(episode.title)));
+  const { marks, flags } = summaries.compact();
+  return selectHomeLibraryView({ ...library, marks, flags }, [...titles, ...stored]);
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */
