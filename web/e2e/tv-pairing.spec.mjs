@@ -53,7 +53,14 @@ test('TV joins another device through encrypted pairing and retains its saved li
       .getByRole('listitem')
       .filter({ hasText: 'Living room LG' })
       .filter({ hasText: 'TV · seen' });
-    await expect(linkedTv).toHaveCount(1, { timeout: 30_000 });
+    // The TV lists itself a moment after it opens the library. This browser would pick that up on its 30-second
+    // foreground refresh, whose phase the test does not control (a pass just before the check-in puts the next one
+    // past any 30-second wait). Reopening Settings reads the relay now, so the wait is only on the check-in itself.
+    await expect(async () => {
+      await host.reload();
+      await host.getByRole('button', { name: /Linked devices/ }).click();
+      await expect(linkedTv).toHaveCount(1, { timeout: 3_000 });
+    }).toPass({ timeout: 30_000 });
     await tv.reload();
     await expect(tv.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible({
       timeout: 30_000,
