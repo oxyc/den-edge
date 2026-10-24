@@ -63,6 +63,7 @@
     (window as unknown as { denTestReleaseWrites: () => void }).denTestReleaseWrites =
       releaseWrites;
   const withDownload = params.has('downloading');
+  const homeDownloads = params.has('home-downloads');
   const fixtureClock = browserClock();
   const downloadRow = startRow(
     undefined,
@@ -77,6 +78,20 @@
     () => fixtureClock.issue(),
     Date.now(),
   );
+  const homeDownloadRows = homeDownloads
+    ? ['Active download', 'Ready download', 'Unavailable download', 'Failed download'].map(
+        (title, index) =>
+          startRow(
+            undefined,
+            {
+              release: { identity: title, label: title, url: `/scout/p/home-${index}` },
+              title: { mediaType: 'movie', mediaId: 9100 + index, title },
+            },
+            () => fixtureClock.issue(),
+            Date.now() + index,
+          ),
+      )
+    : [];
   let route = $state<Route>(
     params.get('page') === 'watchlist'
       ? { page: 'watchlist' }
@@ -160,6 +175,7 @@
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
             : []),
           ...(withDownload ? [downloadRow] : []),
+          ...homeDownloadRows,
         ]
       : [],
   );
@@ -287,6 +303,33 @@
     openGate,
   });
   publish = () => library.publish();
+  if (homeDownloads) {
+    library.coordinator.answers.set(homeDownloadRows[0].name, {
+      state: 'preparing',
+      progress: 0.25,
+    });
+    library.coordinator.answers.set(homeDownloadRows[1].name, { state: 'ready' });
+    library.coordinator.answers.set(homeDownloadRows[2].name, { state: 'refused' });
+    library.coordinator.answers.set(homeDownloadRows[3].name, {
+      state: 'preparing',
+      progress: 0.5,
+      fetch: { state: 'failed' },
+    });
+    // Provider completion republishes the same DownloadsView as a real queue refresh.
+    (window as unknown as { denTestFinishDownload: () => void }).denTestFinishDownload = () => {
+      library.coordinator.answers.set(homeDownloadRows[0].name, { state: 'ready' });
+      publish();
+    };
+    (window as unknown as { denTestClearReadyDownloads: () => void }).denTestClearReadyDownloads =
+      () => {
+        stored = stored.filter(
+          (row) =>
+            row.kind !== 'set' ||
+            !homeDownloadRows.slice(0, 2).some((download) => download.name === row.name),
+        );
+        publish();
+      };
+  }
   const visitor = params.has('visitor');
   const kid = params.has('kid');
   const session: ProfileSession = visitor

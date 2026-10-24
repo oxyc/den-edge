@@ -427,3 +427,35 @@ test('large Home shelves publish and extend in viewport-sized tranches', async (
   expect(details.size).toBeLessThanOrEqual(28);
   await page.close();
 });
+
+// Home keeps completed downloads visible until the shared queue removes them. Newest-first queue order
+// deliberately puts the ready and failed items before the active one, so the shelf must group active first.
+test('Home downloads survive completion, order active first, and omit unavailable items', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { results: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&home-downloads`);
+  const downloading = page.getByRole('region', { name: 'Downloading', exact: true });
+  await expect(downloading).toBeVisible();
+  const cards = downloading.locator('a[href^="/movie/"]');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0)).toHaveAttribute('href', /\/movie\/9100/);
+  await expect(cards.nth(1)).toHaveAttribute('href', /\/movie\/9101/);
+  await expect(downloading).toContainText('Downloading 25%');
+  await expect(downloading).toContainText('Ready to play');
+  await expect(downloading).not.toContainText('Unavailable download');
+  await expect(downloading).not.toContainText('Failed download');
+
+  await page.evaluate(() => window.denTestFinishDownload());
+  const ready = page.getByRole('region', { name: 'Downloads', exact: true });
+  await expect(ready).toBeVisible();
+  await expect(ready.locator('a[href^="/movie/"]')).toHaveCount(2);
+  await expect(ready.getByText('Ready to play', { exact: true })).toHaveCount(2);
+  await expect(downloading).toHaveCount(0);
+
+  await page.evaluate(() => window.denTestClearReadyDownloads());
+  await expect(ready).toHaveCount(0);
+  await expect(downloading).toHaveCount(0);
+});
