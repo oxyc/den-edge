@@ -136,13 +136,14 @@ function projected(row: Row, now: number): Row[] {
 
 function facts(
   row: Row | null,
+  retainEpisodeProjection = false,
 ): Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> {
   if (!row) return {};
   const now = Date.now();
   let rows: Row[];
   let library: Library;
   let folded: Library;
-  if (isDocument(row) && row.kind === 'season') {
+  if (isDocument(row) && row.kind === 'season' && !retainEpisodeProjection) {
     const compact = new ContinueLibraryAccumulator();
     forEachProjectedRow(
       row,
@@ -386,7 +387,12 @@ export class LibraryFactStore {
     head: number,
     entries: readonly LibraryFactEntry[],
     complete: boolean,
-    options: { readonly profileTopology?: boolean; readonly floor?: number } = {},
+    options: {
+      readonly profileTopology?: boolean;
+      readonly floor?: number;
+      /** Populate projectDocument's row cache when this caller will immediately need the full episode projection. */
+      readonly retainEpisodeProjection?: boolean;
+    } = {},
   ): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation) {
@@ -407,7 +413,7 @@ export class LibraryFactStore {
       held.floor === floor
     )
       return;
-    const changes = await this.changes(generation, entries);
+    const changes = await this.changes(generation, entries, options.retainEpisodeProjection);
     const manifest: LibraryFactManifest = {
       schema: LIBRARY_FACT_SCHEMA,
       generation,
@@ -444,7 +450,7 @@ export class LibraryFactStore {
   async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation || !entries.length) return;
-    const changes = await this.changes(generation, entries);
+    const changes = await this.changes(generation, entries, true);
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
     const held = await this.readManifest();
     if (held?.generation === generation) {
@@ -477,6 +483,7 @@ export class LibraryFactStore {
   private async changes(
     generation: string,
     entries: readonly LibraryFactEntry[],
+    retainEpisodeProjection = false,
   ): Promise<VaultChange[]> {
     // Every value of the batch is sealed at once: WebCrypto runs them off the thread, as many at a time as it can.
     const pending: Array<Promise<VaultChange>> = [];
@@ -490,7 +497,7 @@ export class LibraryFactStore {
           row: entry.row,
         }).then((value) => ({ kind: 'put', key: `${this.libraryId}:${document}`, value })),
       );
-      const selected = facts(entry.row);
+      const selected = facts(entry.row, retainEpisodeProjection);
       for (const capability of [
         'watchlist',
         'continue',
