@@ -48,21 +48,31 @@ export function projectDocument(document: DocumentRow, now = Date.now()): Row[] 
   const known = projected.get(document);
   if (known && now >= known.at && now < known.reconsiderAt) return known.rows;
   const reconsiderAt = newestSummary(document, now).reconsiderAt ?? Infinity;
-  let rows: Row[] = [];
-  if (document.kind === 'title') rows = [projectTitle(document, now)];
-  else if (document.kind === 'season') {
-    const season = document.season ?? 0;
-    const states = syncPolicy<Record<string, EpisodeState>>({
-      op: 'season_state_v4',
-      season: document,
-      now,
-    });
-    rows = Object.entries(states).map(([number, state]) =>
-      episodeRow(document.title, season, Number(number), state),
-    );
-  }
+  const rows: Row[] = [];
+  if (document.kind === 'title') rows.push(projectTitle(document, now));
+  else if (document.kind === 'season')
+    forEachProjectedEpisode(document, (row) => rows.push(row), now);
   projected.set(document, { rows, at: now, reconsiderAt });
   return rows;
+}
+
+/**
+ * Visit a season document's `ep` projections without retaining them as an array: a consumer that only folds them
+ * (Continue's compact inputs) never needs the whole season at once. `projectDocument` is the retained form.
+ */
+export function forEachProjectedEpisode(
+  document: DocumentRow,
+  visit: (row: EpisodeRow) => void,
+  now: number,
+): void {
+  const season = document.season ?? 0;
+  const states = syncPolicy<Record<string, EpisodeState>>({
+    op: 'season_state_v4',
+    season: document,
+    now,
+  });
+  for (const [number, state] of Object.entries(states))
+    visit(episodeRow(document.title, season, Number(number), state));
 }
 
 function projectTitle(document: DocumentRow, now: number): TitleRow {

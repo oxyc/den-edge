@@ -4,7 +4,7 @@
 
 import { WATCHED } from './actions';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
-import { isDocument, wellFormed, type Row } from './wire';
+import { isDocument, wellFormed, type EpisodeRow, type Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
 /** What Explore browses and atlas's filter answers for: one type, or films and series together. */
@@ -278,12 +278,7 @@ class LibraryFold {
     if (row.title.type !== 'movie' && row.title.type !== 'tv') return;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {
-      const episode = {
-        type: row.title.type,
-        id: row.title.id,
-        season: row.season,
-        episode: row.episode,
-      };
+      const episode = episodeRef(row);
       // What a row means for what we hold is the shared policy's to decide, so the TV and the web cannot
       // drift on it — above all on the zero stamp, which says "watched, time unknown". Written here as a
       // mark it became a fraction of 1 stamped at the epoch, and every later comparison then read real
@@ -292,30 +287,14 @@ class LibraryFold {
       // Authoritative: `rows()` hands us one merged row per name out of the log's own store, so a row IS the
       // record rather than a claim about it, and there is nothing for it to outrank.
       const held = marks.get(markKey(episode));
-      const decided = syncPolicy<EpisodeAction>({
-        op: 'episode_mark',
-        row,
-        mark: held ? { fraction: held.fraction, at: held.updatedAt } : null,
-        authoritative: true,
-      });
+      const decided = episodeAction(row, held);
       if (decided.action === 'clear') {
         marks.delete(markKey(episode));
         flags.delete(markKey(episode));
       } else if (decided.action === 'flag') {
         flags.set(markKey(episode), episode);
       } else if (decided.action === 'replace') {
-        // Display comes from the series' other marks, or TMDB once `untitled` asks for it.
-        const series = held ?? seriesMarks.get(key);
-        const mark = {
-          ...episode,
-          fraction: decided.fraction,
-          updatedAt: decided.at,
-          ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
-          ...(row.progress.at[2] ? { updatedBy: row.progress.at[2] } : {}),
-          title: series?.title ?? '',
-          posterPath: series?.posterPath,
-          voteAverage: series?.voteAverage ?? 0,
-        };
+        const mark = markFromEpisode(row, decided, held ?? seriesMarks.get(key));
         marks.set(markKey(episode), mark);
         seriesMarks.set(key, mark);
         // Real progress supersedes a timeless bit for the same episode.
@@ -361,8 +340,122 @@ class LibraryFold {
   }
 }
 
-const markKey = (m: { type: string; id: number; season: number; episode: number }) =>
+export const markKey = (m: { type: string; id: number; season: number; episode: number }) =>
   `${m.type}:${m.id}:${m.season}:${m.episode}`;
+
+const ahead = (a: { season: number; episode: number }, b: { season: number; episode: number }) =>
+  a.season > b.season || (a.season === b.season && a.episode > b.episode);
+
+const episodeRef = (row: EpisodeRow) => ({
+  type: row.title.type,
+  id: row.title.id,
+  season: row.season,
+  episode: row.episode,
+});
+
+function episodeAction(row: EpisodeRow, held?: Mark): EpisodeAction {
+  return syncPolicy<EpisodeAction>({
+    op: 'episode_mark',
+    row,
+    mark: held ? { fraction: held.fraction, at: held.updatedAt } : null,
+    authoritative: true,
+  });
+}
+
+function markFromEpisode(
+  row: EpisodeRow,
+  decided: Extract<EpisodeAction, { action: 'replace' }>,
+  display?: Mark,
+): Mark {
+  return {
+    type: row.title.type,
+    id: row.title.id,
+    season: row.season,
+    episode: row.episode,
+    fraction: decided.fraction,
+    updatedAt: decided.at,
+    ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
+    ...(row.progress.at[2] ? { updatedBy: row.progress.at[2] } : {}),
+    title: display?.title ?? '',
+    posterPath: display?.posterPath,
+    voteAverage: display?.voteAverage ?? 0,
+  };
+}
+
+type Flag = NonNullable<Library['flags']> extends Map<string, infer F> ? F : never;
+
+/**
+ * Three summaries per series, because the policy asks three different questions of them and conflating any
+ * two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), how
+ * far the series is actually finished (the furthest FINISHED mark, which is not the same episode), and how
+ * far a timeless bit says it was watched. Watching E1–E4 and then opening E5 for two seconds leaves the
+ * newest mark on E5 below the floor, and reading that alone drops a series being actively watched.
+ *
+ * Maps keep first-insertion order, which is the order series first appeared in.
+ */
+export class ContinueSummaries {
+  readonly latest = new Map<string, Mark>();
+  readonly finished = new Map<string, Mark>();
+  readonly flagged = new Map<string, Flag>();
+
+  constructor(library?: Library) {
+    for (const mark of library?.marks ?? []) this.addMark(mark);
+    for (const flag of library?.flags?.values() ?? []) this.addFlag(flag);
+  }
+
+  addMark(mark: Mark): void {
+    if (mark.type !== 'tv') return;
+    const key = titleKey(mark);
+    const current = this.latest.get(key);
+    if (!current || mark.updatedAt > current.updatedAt) this.latest.set(key, mark);
+    const front = this.finished.get(key);
+    if (mark.fraction >= WATCHED && (!front || ahead(mark, front))) this.finished.set(key, mark);
+  }
+
+  addFlag(flag: Flag): void {
+    if (flag.type !== 'tv') return;
+    const key = titleKey(flag);
+    const front = this.flagged.get(key);
+    if (!front || ahead(flag, front)) this.flagged.set(key, flag);
+  }
+
+  /**
+   * Fold one episode row, as the shared policy decides it. A season document's rows are authoritative and unique
+   * by episode, so a season streams straight into the summaries without ever being a `Library` of every mark.
+   */
+  addEpisode(row: EpisodeRow): void {
+    const decided = episodeAction(row);
+    if (decided.action === 'replace') this.addMark(markFromEpisode(row, decided));
+    else if (decided.action === 'flag') this.addFlag(episodeRef(row));
+  }
+
+  /** The smallest ordinary `Library` on which Continue's shared policy makes the same decisions. */
+  compact(records: LibraryRecord[] = [], dismissed: Library['dismissed'] = new Map()): Library {
+    const { latest, finished, flagged } = this;
+    const active = new Set([...latest.keys(), ...flagged.keys()]);
+    const kept = records.filter((record) => {
+      if (record.deleted) return false;
+      const key = titleKey(record.title);
+      if (record.title.type === 'movie') return record.status === 'inProgress';
+      return (
+        record.title.type === 'tv' &&
+        active.has(key) &&
+        (record.status === 'watched' || flagged.has(key))
+      );
+    });
+    const live = new Set([...kept.map((record) => titleKey(record.title)), ...active]);
+    return {
+      records: kept,
+      marks: [...latest].flatMap(([key, newest]) => {
+        const front = finished.get(key);
+        return front && markKey(front) !== markKey(newest) ? [newest, front] : [newest];
+      }),
+      flags: new Map([...flagged.values()].map((flag) => [markKey(flag), flag] as const)),
+      shapes: new Map(),
+      dismissed: new Map([...dismissed].filter(([key]) => live.has(key))),
+    };
+  }
+}
 
 /**
  * Titles with no display yet: the ones the rows would show, and series that only episode progress names.
@@ -723,34 +816,9 @@ function continueCandidates(
   const entries: ContinueCandidate[] = [];
   const activity = new Map<string, number>();
 
-  // Three summaries per series, because the policy asks three different questions of them and conflating any
-  // two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), how
-  // far the series is actually finished (the furthest FINISHED mark, which is not the same episode), and how
-  // far a timeless bit says it was watched. Watching E1–E4 and then opening E5 for two seconds leaves the
-  // newest mark on E5 below the floor, and reading that alone drops a series being actively watched.
-  const ahead = (a: { season: number; episode: number }, b: { season: number; episode: number }) =>
-    a.season > b.season || (a.season === b.season && a.episode > b.episode);
-  const latest = new Map<string, Mark>();
-  const finished = new Map<string, { season: number; episode: number }>();
-  const flagged = new Map<string, { season: number; episode: number }>();
-  for (const mark of library.marks) {
-    if (mark.type !== 'tv') continue;
-    const key = titleKey(mark);
-    const current = latest.get(key);
-    if (!current || mark.updatedAt > current.updatedAt) latest.set(key, mark);
-    if (mark.fraction >= WATCHED) {
-      const front = finished.get(key);
-      if (!front || ahead(mark, front))
-        finished.set(key, { season: mark.season, episode: mark.episode });
-    }
-  }
-  for (const flag of library.flags?.values() ?? []) {
-    if (flag.type !== 'tv') continue;
-    const key = titleKey(flag);
-    const front = flagged.get(key);
-    if (!front || ahead(flag, front))
-      flagged.set(key, { season: flag.season, episode: flag.episode });
-  }
+  const { latest, finished, flagged } = new ContinueSummaries(library);
+  const position = (at?: { season: number; episode: number }) =>
+    at ? { season: at.season, episode: at.episode } : null;
 
   // A series known only through a flag has no time behind it, so it has no place in an order built on when
   // things were watched: it sorts last among the series rather than claiming the top.
@@ -776,8 +844,8 @@ function continueCandidates(
             at: mark.updatedAt,
           }
         : null,
-      finished: finished.get(key) ?? null,
-      flag: flagged.get(key) ?? null,
+      finished: position(finished.get(key)),
+      flag: position(flagged.get(key)),
       seasons: [...(shape?.counts ?? new Map())].map(([season, episodes]) => ({
         season,
         episodes,

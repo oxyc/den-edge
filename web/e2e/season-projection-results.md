@@ -11,7 +11,86 @@ The four audit findings were implemented in separate commits and worktrees:
 
 The fixed web head is `be43fdda2af71adf95b060e4093dc0ef996d1580`, based on `fae52480`. The controlled browser baseline is `fae52480` plus the identical test-only late-layout harness, recorded as `abf6bf92`; dependency locks were identical.
 
-## Verification
+## Compact Continue fact candidate
+
+Commit `2a0b997e` (including production change `e33a59ca`) targets only finished fact-only imports. For one v4 season document, that path now visits the `season_state_v4` answer a row at a time and feeds each row through the unchanged shared-core `episode_mark` operation into `ContinueSummaries`, the same latest / furthest-finished / furthest-flag selection that `compactContinueLibrary` and the Continue projector use on a whole `Library`. It does not remove any of those per-episode policy calls, and each `EpisodeRow` and its candidate `Mark` are still allocated transiently; it removes the retained episode-row array and full `LibraryFold` mark/flag maps, retaining only Continue's at-most-two winning marks per series (plus its furthest timeless flag).
+
+Full `LibraryLog` imports, migrations and own-write retention explicitly keep the old `projectDocument` path. Those consumers retain episode rows for History/title-season detail and reuse the same document objects through `projectDocument`'s `WeakMap`; streaming there would only make the later full projection repeat work. The finished fact authority opens sealed facts on later visits, so it has no same-object row-cache consumer.
+
+The focused benchmark is reproducible with:
+
+```sh
+cd web
+npx vitest bench src/lib/libraryFactStore.bench.ts --run --reporter=verbose
+```
+
+Its 1,000-episode fixture deterministically observes the old intermediate graph holding 1,000 episode rows and 1,000 marks before compacting to two; the direct path retains only the same two marks. Three local timing samples were noisy and contradictory (stream/graph means 12.39/12.92 ms, 16.34/20.88 ms and 21.02/18.07 ms), so timing is deliberately not a gate and no latency improvement is claimed from this microbenchmark. The allocation measurements below isolate the projection/compaction algorithm, not a complete encrypted fact-store transaction or cold import. The warm browser measurements are a separate regression control.
+
+The final opt-in allocation audit sampled five iterations of each workload per measurement (five documents for the stress case, 500 for the short-season case), alternated old/new order, and repeated each shape three times. Set `DEN_FACT_ALLOCATION_AUDIT=1`, `DEN_ALLOCATION_AUDIT=1`, `DEN_FACT_ALLOCATION_OUTPUT=<file>`, and optionally `DEN_FACT_ALLOCATION_PROFILE_DIR=<directory>` on the command above. The table below was re-measured after the streamed path was folded into `ContinueSummaries`; its summary is in `/private/tmp/claude-501/-Users-cindy-Projects-Personal-den/76eb9e2d-6503-41e2-90e7-d9223e359d71/scratchpad/alloc-final.json`. An earlier revision kept two mutable candidates per series instead of building a `Mark` for every episode: it allocated 9.19 and 11.31 MiB (47.1% and 43.6% below the old graph; profiles in `/tmp/den809-candidate-fact-allocation-final.4SvAGO`) and 8.45 and 10.90 MiB on the same machine as the table below. Sharing the selection with the whole-`Library` compactor costs about 2 MiB per workload here and keeps the browser bundle inside its budget.
+
+| Shape                    | Old graph sampled JS allocation, median (range) | Streamed sampled JS allocation, median (range) | Median reduction |
+| ------------------------ | ----------------------------------------------: | ---------------------------------------------: | ---------------: |
+| One 1,000-episode season |                         16.32 MiB (16.25–17.14) |                         10.27 MiB (9.94–10.65) |            37.1% |
+| 100 10-episode seasons   |                         21.81 MiB (20.33–22.38) |                        12.86 MiB (12.68–13.67) |            41.0% |
+
+Every five-document stress sample made exactly five `season_state_v4` and 5,000 `episode_mark` calls in both strategies. Every representative sample made 500 and 5,000 respectively. These are cumulative sampled JavaScript allocations, including collected objects; they are neither peak nor retained memory and exclude WASM allocation. `season_state_v4` still materialises the full state object and `Object.entries` remains linear in episode count: the change removes the additional retained legacy `Row[]` and full Mark/flag graph, not all O(n) working memory.
+
+### Current browser control and attribution (#809)
+
+The exact production baseline was `de7f048b58b94ba8cb765fab728ab5679a5a255d` (`0.271.133`, including shipped #821); the candidate was `2a0b997e9c1d969ccdace1b2f18f97857faad371` (integrated locally as `f0dfe179`, with harness/report commits recorded in the raw artifacts). Both used the opt-in harness, fixed fixture day, serial browser, and three warm actual-rebuild samples. Harness hashes are recorded per run; later CPU-delta reporting does not change the allocation sampler. This warm path is a control rather than the targeted fact-only import, and it showed no material allocation shift:
+
+| Scale | Baseline main Worker allocation, median (range) | Candidate main Worker allocation, median (range) | Baseline / candidate post-GC JS+WASM |
+| ----- | ----------------------------------------------: | -----------------------------------------------: | -----------------------------------: |
+| 1     |                            92.1 MiB (91.2–93.1) |                             93.6 MiB (91.8–94.3) |                       27–28 / 28 MiB |
+| 3     |                         421.2 MiB (384.9–429.6) |                          430.6 MiB (393.2–431.7) |                       48–49 / 49 MiB |
+
+Candidate scale-1 Worker build elapsed was 167–185 ms, whole publish elapsed was 1.700–1.767 s, and all-Chromium process CPU delta was 1.528–1.655 s. At scale 3 those were 465–491 ms, 2.734–2.881 s, and 3.749–3.784 s. Worker build and whole publish are elapsed durations; process CPU is a sum across Chromium processes and may exceed either. The runs were not interleaved across revisions, the first baseline scale-3 timing interval briefly overlapped another test startup, and no latency or CPU improvement is claimed.
+
+The complete scale-3 baseline profile attributed 407.61 MiB cumulative allocation in the main Worker versus 39.19 MiB retained JS and 3.44 MiB WASM. Source-map-backed inclusive owners were JSON 69.33 MiB, encrypted local-fact decode 55.25 MiB, `applyLog` 50.14 MiB, `projectDocument` 33.92 MiB (including 1.81 MiB directly mapped inside `episodeRow`), and the fact store 71.95 MiB; these stack-inclusive buckets overlap and must not be added. The page allocated 202.29 MiB, including a 22.11 MiB lower-bound proxy at `LibraryServiceWorkerTransport.#message` for receiving the structured-cloned reply. `postMessage` calls themselves took 16.0 ms in the main Worker, while JSON handled 90,273 stringifies / 39.66 million characters and 104,291 parses / 36.77 million characters. JSON/fact decode and policy/fold graphs, rather than WebCrypto's retained result or WASM memory, are the principal remaining allocation targets.
+
+Reproduce source attribution after a profiled browser run with:
+
+```sh
+node --stack-size=65500 scripts/analyze-allocation-profile.mjs \
+  <profile.json> <copied-dist-assets-directory> > attribution.json
+```
+
+Focused verification at `2a0b997e` passed 233 tests across `log.test.ts` and seven projection/authority suites, plus Svelte/TypeScript checking and ESLint. The parity fixture pins sparse specials, equal-time ordering, newest versus furthest watched episodes, timeless flags, clears applied by season reset, resume seconds/device, future-stamp ownership through `manifest.newest`, and the unchanged legacy-row path.
+
+### Current candidate verification
+
+The combined local branch at `80471902` passed the full Vitest suite: 2,687 tests passed and 12 were skipped. Svelte checking reported zero errors and warnings; targeted ESLint and Prettier checks passed. The production implementation received independent review, followed by a coordinator review of the cache-preservation delta. These checks were local, not hosted CI, and no physical old-device benchmark was performed.
+
+After rebasing onto `92de3d0a` (main after #825 and #827, neither touching this work's code), `npm run lint` passed and Vitest passed 2,695 tests with 12 skipped. On the previous base, `77e77248`, the 299 Playwright tests in the e2e specs that mention Continue Watching or history passed with no retries.
+
+### Streamed Home projection: measured and dropped
+
+A follow-up candidate (`8198e29b`, rebased as `47994877`) projected Home straight from the stored v4 documents (`projectHomeLibraryView`) instead of from `LibraryLog.rows()`. It is not on this branch. It is preserved, with the measurement below, on `oxyc/den809-home-stream-dropped`.
+
+The reason is that `rows()` is the projection History reads too. Before the candidate, a library Worker that served Home's selections and then History built that projection once, and History reused it through `rows()`'s per-version cache. With the candidate, Home's stream did not fill that cache, so History then built the whole projection again. Measured in Node with `libraryFactStore.bench.ts` on the evidence branch, test `Home then History in one library Worker`. The household had 6,000 documents projecting to 18,000 rows. Each sample was five iterations, with three samples per strategy in alternating order:
+
+| Work                                     | Sampled JS allocation, median (range) | Elapsed, median (range) | `title_state` / `season_state_v4` / `episode_mark` calls |
+| ---------------------------------------- | ------------------------------------: | ----------------------: | -------------------------------------------------------: |
+| Home then History, one shared projection |               454.6 MiB (452.2–457.7) |  1,342 ms (1,327–1,356) |                                 10,000 / 20,000 / 80,000 |
+| Home then History, streamed Home first   |               440.2 MiB (434.9–441.3) |  1,980 ms (1,967–1,995) |                                 20,000 / 40,000 / 80,000 |
+| Home only, projection and full fold      |               420.8 MiB (418.4–423.7) |  1,335 ms (1,314–1,373) |                                 10,000 / 20,000 / 80,000 |
+| Home only, streamed                      |               246.5 MiB (242.3–248.1) |  1,226 ms (1,218–1,250) |                                 10,000 / 20,000 / 80,000 |
+
+Streaming cut Home-only allocation by 41%. When History followed, though, every title and season policy call ran twice: elapsed time went up 48%, while allocation went down only 3%.
+
+The browser shows where that tradeoff falls. In the Chromium phone budget run (`BIG_LIBRARY_SCALE=1`, `DEN_FIXTURE_NOW=1792713600000`), a returning Home visit is served from the saved view: it folds 0 documents on both revisions, so the candidate never runs there. It runs only once the full log is promoted. The table gives the largest library Worker's cumulative sampled allocation per visit, n=3 per revision, with revisions alternating:
+
+| Visit                        | Without candidate (`4e95cacb`), median (range) | With candidate (`47994877`), median (range) |
+| ---------------------------- | ---------------------------------------------: | ------------------------------------------: |
+| Home during a rebuild        |                         116.0 MB (108.8–118.7) |                      109.6 MB (108.8–112.5) |
+| Watchlist (History promoted) |                         118.8 MB (114.6–123.2) |                      114.8 MB (110.8–118.7) |
+| Returning Home               |                 2.3–5.7 MB, 0 documents folded |              2.5–6.4 MB, 0 documents folded |
+
+The browser allocation differences are within run-to-run range. The Worker's `foldMs` cannot compare the two, because the candidate's timer covered its own projection while the parent's started after `rows()` had built it. Host one-minute load during these runs was 10–31 on 10 cores, so no browser latency is claimed. Raw logs are in `/private/tmp/claude-501/-Users-cindy-Projects-Personal-den/76eb9e2d-6503-41e2-90e7-d9223e359d71/scratchpad/issue-809/runs/`.
+
+Before Home's projection is streamed again, History needs to stop depending on a full `rows()` projection, or both need to come from one pass. Otherwise Home's saving becomes History's cost.
+
+## Historical verification (previous shipped changes)
 
 Focused integration:
 
@@ -41,7 +120,7 @@ Vitest passed 2,678 tests in 202 files, with 12 tests and two files skipped. Pre
 - Returning surfaces used the existing 4× page throttle; dedicated Workers were unthrottled. Actual rebuilds were unthrottled and had `projectionDelayMs=0`; the 6,000 ms artificial hold was absent.
 - The settle gate retained its existing maximum of four rounds. Every recorded normal scale-1/3 run converged after two.
 
-The diagnostic-only tooling is archived outside this branch. Reproducing the commands below first requires applying `/tmp/den809-final-diagnostic-harness/harness.patch` in an isolated checkout at the recorded application revision.
+The current diagnostic-only tooling is tracked and remains off unless `DEN_ALLOCATION_AUDIT=1` is set. The tables below are historical measurements of earlier revisions and retain their original commands and provenance; they are not the candidate comparison above.
 
 Normal scale-1/3 command, run once for each revision and scale:
 
@@ -116,5 +195,13 @@ The historical rebuild values of 6,222/6,202 ms include an injected 6,000 ms `PH
 - Baseline delayed layout: `/tmp/den809-baseline-late-layout.0if6kv`
 - Fixed delayed layout: `/tmp/den809-fixed-late-layout.FVp6UH`
 - Archived diagnostic-only harness patch: `/tmp/den809-final-diagnostic-harness/harness.patch`
+- Current `de7f048b` scale-1 normal n=3: `/tmp/den809-de7f-scale1-normal.rda9Ep`
+- Current `de7f048b` scale-3 normal n=3: `/tmp/den809-de7f-scale3-normal.yofPxl`
+- Current `de7f048b` scale-3 complete profile and attribution: `/tmp/den809-de7f-scale3-profile.GWKQQj`
+- Candidate `2a0b997e` scale-1 normal n=3: `/tmp/den809-candidate-scale1-normal.5HirUX`
+- Candidate `2a0b997e` scale-3 normal n=3: `/tmp/den809-candidate-scale3-normal.NUKG1P`
+- Candidate targeted fact allocation n=3 with raw profiles: `/tmp/den809-candidate-fact-allocation-final.4SvAGO`
 
 Each browser artifact directory contains the raw log, Playwright results copied before the next reset, exact revision, and hashes of the lock and harness files. Two initial command attempts that passed a test filename through the npm wrapper found no tests; their preserved paths are `/tmp/den809-baseline-late-layout.CTcORh` and `/tmp/den809-baseline-late-layout.H8h6sL`. The first complete profiler attempt (`/tmp/den809-baseline-scale3-diagnostic.UdWAro`) profiled every target but its request counter instrumented only the page bundle, not Worker bundles; it is superseded by `diagnostic2` and excluded from the request table.
+
+The attempted whole-household import profile at `/tmp/den809-de7f-scale3-import-profile.XSKB6A` crossed multiple navigations, detached its earlier Workers, and was interrupted rather than reported. It is excluded from every result above; the bounded algorithm profiles and warm single-page browser profiles are complete.

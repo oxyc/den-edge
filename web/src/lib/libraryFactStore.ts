@@ -1,12 +1,19 @@
 import { compactContinueLibrary, selectHomeLibraryViewFromFold } from './homeLibraryView';
-import { applyLog, emptyLibrary, type Library, type LibraryRecord, type Mark } from './library';
+import {
+  applyLog,
+  ContinueSummaries,
+  emptyLibrary,
+  type Library,
+  type LibraryRecord,
+  type Mark,
+} from './library';
 import {
   libraryLocalMaterials,
   openLibraryLocalValue,
   sealLibraryLocalValue,
 } from './libraryLocalValue';
 import { noteLibraryFactCommit } from './libraryStartupMetrics';
-import { projectDocument } from './libraryV4';
+import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import type { Vault, VaultChange } from './localVault';
 import {
   compareStamps,
@@ -16,6 +23,7 @@ import {
   mergeSettings,
   mergeTitle,
   newestSummary,
+  type DocumentRow,
   type Row,
   type SettingsRow,
   type Stamp,
@@ -122,15 +130,27 @@ const openStoredLibrary = (library: StoredLibrary): Library => ({
   shapes: new Map(),
 });
 
-function projected(row: Row): Row[] {
-  return isDocument(row) && row.kind !== 'delivery' ? projectDocument(row) : [row];
+function projected(row: Row, now: number): Row[] {
+  return isDocument(row) && row.kind !== 'delivery' ? projectDocument(row, now) : [row];
+}
+
+function continueOfSeason(season: DocumentRow, now: number): Library {
+  const summaries = new ContinueSummaries();
+  forEachProjectedEpisode(season, (episode) => summaries.addEpisode(episode), now);
+  return summaries.compact();
 }
 
 function facts(
   row: Row | null,
+  retainEpisodeProjection = false,
 ): Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> {
   if (!row) return {};
-  const rows = projected(row);
+  const now = Date.now();
+  // A season document is only ever Continue's input, so its episodes are folded one at a time instead of held.
+  const season = isDocument(row) && row.kind === 'season' && !retainEpisodeProjection ? row : null;
+  const rows = season ? [] : projected(row, now);
+  const library = applyLog(emptyLibrary(), rows);
+  const folded = season ? continueOfSeason(season, now) : compactContinueLibrary(library);
   const selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> =
     {};
   for (const setting of rows.filter(
@@ -147,8 +167,6 @@ function facts(
     if (setting.name === 'devices') selected.devices = fact;
   }
   const title = rows.find((candidate): candidate is TitleRow => candidate.kind === 'rec');
-  const library = applyLog(emptyLibrary(), rows);
-  const folded = compactContinueLibrary(library);
   if (title) {
     const fact = { schema: LIBRARY_FACT_SCHEMA, title, library: storedLibrary(library) } as const;
     if (!title.deleted.value && title.status.value === 'watchlist') selected.watchlist = fact;
@@ -163,7 +181,7 @@ function facts(
     selected.continue = {
       schema: LIBRARY_FACT_SCHEMA,
       library: storedLibrary(folded),
-      reconsiderAt: newestSummary(row, Date.now()).reconsiderAt ?? null,
+      reconsiderAt: newestSummary(row, now).reconsiderAt ?? null,
     };
   return selected;
 }
@@ -360,7 +378,12 @@ export class LibraryFactStore {
     head: number,
     entries: readonly LibraryFactEntry[],
     complete: boolean,
-    options: { readonly profileTopology?: boolean; readonly floor?: number } = {},
+    options: {
+      readonly profileTopology?: boolean;
+      readonly floor?: number;
+      /** Populate projectDocument's row cache when this caller will immediately need the full episode projection. */
+      readonly retainEpisodeProjection?: boolean;
+    } = {},
   ): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation) {
@@ -381,7 +404,7 @@ export class LibraryFactStore {
       held.floor === floor
     )
       return;
-    const changes = await this.changes(generation, entries);
+    const changes = await this.changes(generation, entries, options.retainEpisodeProjection);
     const manifest: LibraryFactManifest = {
       schema: LIBRARY_FACT_SCHEMA,
       generation,
@@ -418,7 +441,7 @@ export class LibraryFactStore {
   async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation || !entries.length) return;
-    const changes = await this.changes(generation, entries);
+    const changes = await this.changes(generation, entries, true);
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
     const held = await this.readManifest();
     if (held?.generation === generation) {
@@ -451,6 +474,7 @@ export class LibraryFactStore {
   private async changes(
     generation: string,
     entries: readonly LibraryFactEntry[],
+    retainEpisodeProjection = false,
   ): Promise<VaultChange[]> {
     // Every value of the batch is sealed at once: WebCrypto runs them off the thread, as many at a time as it can.
     const pending: Array<Promise<VaultChange>> = [];
@@ -464,7 +488,7 @@ export class LibraryFactStore {
           row: entry.row,
         }).then((value) => ({ kind: 'put', key: `${this.libraryId}:${document}`, value })),
       );
-      const selected = facts(entry.row);
+      const selected = facts(entry.row, retainEpisodeProjection);
       for (const capability of [
         'watchlist',
         'continue',

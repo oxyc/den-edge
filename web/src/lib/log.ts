@@ -3284,7 +3284,9 @@ export class LibraryLog {
           })),
         );
         // Until the last batch the cursor stays at 0: a move cut off resumes as a first read, never above a row.
-        await store.commitBatch(generation, last ? saved.head : 0, entries, last);
+        await store.commitBatch(generation, last ? saved.head : 0, entries, last, {
+          retainEpisodeProjection: true,
+        });
       }
       const manifest = await store.manifest();
       if (!manifest?.complete || manifest.generation !== generation || manifest.head !== saved.head)
@@ -3340,7 +3342,7 @@ export class LibraryLog {
           last ? head : batch.at(-1)!.seq,
           batch,
           complete && last,
-          { profileTopology },
+          { profileTopology, retainEpisodeProjection: true },
         );
       }
     } catch (error) {

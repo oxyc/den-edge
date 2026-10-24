@@ -52,6 +52,13 @@ export async function inPolicySlices<T>(
 
 /** The same Rust policy as Apple TV. A failure is never an empty journal or an acknowledgement. */
 export function syncPolicy<T>(request: Record<string, unknown>): T {
+  if (import.meta.env.DEN_ALLOCATION_AUDIT) {
+    const operation = typeof request.op === 'string' ? request.op : 'unknown';
+    const audit = ((
+      globalThis as typeof globalThis & { __denPolicyRequests?: Record<string, number> }
+    ).__denPolicyRequests ??= {});
+    audit[operation] = (audit[operation] ?? 0) + 1;
+  }
   return policyAnswer<T>(evaluatePolicy(request));
 }
 

@@ -1,9 +1,9 @@
 // The fixed library data Home consumes without receiving the full projection graph. Display metadata arrives from
 // TMDB later. Continue Watching keeps only the policy inputs that can still be affected by those late TV shapes.
 
-import { WATCHED } from './actions';
 import { deviceName, readDownloads, type Download } from './downloadRows';
 import {
+  ContinueSummaries,
   standings,
   titleKey,
   type ContinueProjector,
@@ -82,76 +82,9 @@ function weightOf(status: string, reaction: TitleRow['reaction']['value'] | unde
   return seen + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
 }
 
-const markKey = (mark: { type: string; id: number; season: number; episode: number }) =>
-  `${mark.type}:${mark.id}:${mark.season}:${mark.episode}`;
-
-const ahead = (a: { season: number; episode: number }, b: { season: number; episode: number }) =>
-  a.season > b.season || (a.season === b.season && a.episode > b.episode);
-
 /** The smallest ordinary `Library` on which the existing Continue projector makes the same decisions. */
 export function compactContinueLibrary(library: Library): Library {
-  const latest = new Map<string, Library['marks'][number]>();
-  const finished = new Map<string, Library['marks'][number]>();
-  const seriesOrder: string[] = [];
-  for (const mark of library.marks) {
-    if (mark.type !== 'tv') continue;
-    const key = titleKey(mark);
-    if (!latest.has(key)) seriesOrder.push(key);
-    const held = latest.get(key);
-    if (!held || mark.updatedAt > held.updatedAt) latest.set(key, mark);
-    if (mark.fraction >= WATCHED) {
-      const front = finished.get(key);
-      if (!front || ahead(mark, front)) finished.set(key, mark);
-    }
-  }
-
-  const furthestFlags = new Map<
-    string,
-    NonNullable<Library['flags']> extends Map<string, infer V> ? V : never
-  >();
-  const flagOrder: string[] = [];
-  for (const flag of library.flags?.values() ?? []) {
-    if (flag.type !== 'tv') continue;
-    const key = titleKey(flag);
-    if (!furthestFlags.has(key)) flagOrder.push(key);
-    const front = furthestFlags.get(key);
-    if (!front || ahead(flag, front)) furthestFlags.set(key, flag);
-  }
-
-  const activeSeries = new Set([...seriesOrder, ...flagOrder]);
-  const records = library.records.filter((record) => {
-    if (record.deleted) return false;
-    const key = titleKey(record.title);
-    if (record.title.type === 'movie') return record.status === 'inProgress';
-    return (
-      record.title.type === 'tv' &&
-      activeSeries.has(key) &&
-      (record.status === 'watched' || furthestFlags.has(key))
-    );
-  });
-  const marks = seriesOrder.flatMap((key) => {
-    const newest = latest.get(key)!;
-    const front = finished.get(key);
-    return front && markKey(front) !== markKey(newest) ? [newest, front] : [newest];
-  });
-  const flags = new Map(
-    flagOrder.map((key) => {
-      const flag = furthestFlags.get(key)!;
-      return [markKey(flag), flag] as const;
-    }),
-  );
-  const live = new Set([
-    ...records.map((record) => titleKey(record.title)),
-    ...seriesOrder,
-    ...flagOrder,
-  ]);
-  return {
-    records,
-    marks,
-    flags,
-    shapes: new Map(),
-    dismissed: new Map([...library.dismissed].filter(([key]) => live.has(key))),
-  };
+  return new ContinueSummaries(library).compact(library.records, library.dismissed);
 }
 
 const unique = (keys: string[]) => [...new Set(keys)];

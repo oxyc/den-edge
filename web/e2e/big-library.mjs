@@ -514,7 +514,8 @@ export async function routeBigHousehold(
 
 /**
  * What the first publish of a page opened now makes of the household's assistant projection, as its library Worker
- * says (`LibraryAssistantAuthority.publish`): `built` (and recorded) or `current`.
+ * says (`LibraryAssistantAuthority.publish`): `built` (and recorded), `current`, or `too_large` when den-core's
+ * projection limit refuses the full library.
  */
 export async function firstPublish(page, path, options = {}) {
   const outcome = new Promise((resolve) => {
@@ -522,6 +523,8 @@ export async function firstPublish(page, path, options = {}) {
       const text = message.text();
       if (text.startsWith('den: assistant projection built')) resolve('built');
       else if (text === 'den: assistant projection up to date') resolve('current');
+      else if (text.startsWith('den: the library is too large to publish for assistants'))
+        resolve('too_large');
     };
     // Chromium forwards a Worker's console through its page; WebKit can expose it only on the Worker. Observe both
     // rather than timing out a settled projection because the engine chose the other console surface this run.
@@ -574,6 +577,7 @@ async function watchPublishes(page) {
   await page.addInitScript(() => {
     const asked = new Map();
     const answered = (globalThis.__publishesAnswered = []);
+    const audit = (globalThis.__publishAudit = []);
     const listening = new WeakSet();
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...rest) {
@@ -582,19 +586,25 @@ async function watchPublishes(page) {
         this.addEventListener('message', ({ data }) => {
           for (const reply of Array.isArray(data) ? data : [])
             if (asked.has(reply?.requestId)) {
-              answered.push(asked.get(reply.requestId));
+              const askedAt = asked.get(reply.requestId);
+              answered.push(askedAt);
+              const entry = audit.find(({ requestId }) => requestId === reply.requestId);
+              if (entry) entry.answeredAt = Date.now();
               asked.delete(reply.requestId);
             }
         });
       }
-      if (message?.type === 'task' && message.task?.kind === 'assistant.publish')
+      if (message?.type === 'task' && message.task?.kind === 'assistant.publish') {
         asked.set(message.requestId, Date.now());
+        audit.push({ requestId: message.requestId, askedAt: Date.now(), answeredAt: null });
+      }
       return post.call(this, message, ...rest);
     };
   });
   return {
     answeredSince: (at) =>
       page.evaluate((since) => globalThis.__publishesAnswered.some((asked) => asked >= since), at),
+    audit: () => page.evaluate(() => globalThis.__publishAudit),
   };
 }
 
@@ -680,7 +690,10 @@ export async function bigHousehold(context, edge, options = {}) {
       if (new URL(request.url()).pathname.startsWith('/tmdb/')) lastTmdb = Date.now();
     });
     const publishes = await watchPublishes(page);
+    let watchlistProjectionsBefore = 0;
     for (const path of ['/', '/watchlist']) {
+      if (path === '/watchlist')
+        watchlistProjectionsBefore = edge.assistant?.projections.length ?? 0;
       await page.goto(`${E2E_ORIGIN}${path}`);
       await expect(page.locator('main').getByText('Continue Watching').first()).toBeVisible({
         timeout: 90_000,
@@ -698,11 +711,19 @@ export async function bigHousehold(context, edge, options = {}) {
     // settling visit below then builds from as much as it had learnt by its own first publish.
     const named = Date.now();
     await expect
-      .poll(() => publishes.answeredSince(named), {
-        timeout: 90_000,
-        message: '/watchlist published what it named',
-      })
+      .poll(
+        async () =>
+          (await publishes.answeredSince(named)) ||
+          (options.acceptInFlightPrimingPublish &&
+            (edge.assistant?.projections.length ?? 0) > watchlistProjectionsBefore),
+        {
+          timeout: 90_000,
+          message: '/watchlist published what it named',
+        },
+      )
       .toBe(true);
+    if (process.env.BIG_LIBRARY_DEBUG)
+      console.log('priming publishes', JSON.stringify(await publishes.audit()));
     step('primed');
   } finally {
     await page.close();
