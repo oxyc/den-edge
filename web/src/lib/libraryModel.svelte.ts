@@ -136,15 +136,33 @@ export class LibraryModel {
   readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
   readonly #readyWaiters = new Set<() => void>();
+  #settleInitialRead = () => {};
   #closed = false;
 
   /** Settles only after the service and its Home-critical root replacements are ready. */
   readonly ready: Promise<LibraryVersion>;
+  /**
+   * Settles once the first remote read has finished filling the local fact store. `ready` may resolve after its
+   * first page so Home can render while the remaining history continues in bounded pages; automatic background
+   * writes use this later boundary to avoid loading mutation policy into that opening work.
+   */
+  readonly initialReadSettled: Promise<void>;
 
   constructor(
     readonly service: LibraryModelService,
     options: LibraryServiceOpenOptions,
   ) {
+    let settleInitialRead!: () => void;
+    let initialReadSettled = false;
+    let openingProgressSeen = false;
+    this.initialReadSettled = new Promise<void>((resolve) => {
+      settleInitialRead = () => {
+        if (initialReadSettled) return;
+        initialReadSettled = true;
+        resolve();
+      };
+    });
+    this.#settleInitialRead = settleInitialRead;
     this.#rootStops.push(
       service.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
         this.#overview = modelSnapshot<LibraryOverviewView>(snapshot);
@@ -164,20 +182,31 @@ export class LibraryModel {
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
     const progress = (value: number) => {
+      openingProgressSeen = true;
       if (!this.#closed) noteLibraryOpening(this, value);
+      if (value >= 1) settleInitialRead();
     };
     // Ready can come before the read is complete (the rest of the history follows the first page): the progress ends
     // at 1, or with a failed open or a closed model.
-    this.ready = service.open({ ...options, progress }).catch((error: unknown) => {
-      noteLibraryOpening(this, null);
-      const failure = failureFrom(error);
-      if (!this.#closed) {
-        this.#openFailure = failure;
-        this.#connection = 'failed';
-        this.#status = Object.freeze({ kind: 'failed', error: failure });
-      }
-      throw error;
-    });
+    this.ready = service
+      .open({ ...options, progress })
+      .then((version) => {
+        // A complete saved fact store reports no progress: the ready reply is its settled boundary. A paged import
+        // reports 0 before ready and 1 only after its remaining history has landed.
+        if (!openingProgressSeen) settleInitialRead();
+        return version;
+      })
+      .catch((error: unknown) => {
+        noteLibraryOpening(this, null);
+        settleInitialRead();
+        const failure = failureFrom(error);
+        if (!this.#closed) {
+          this.#openFailure = failure;
+          this.#connection = 'failed';
+          this.#status = Object.freeze({ kind: 'failed', error: failure });
+        }
+        throw error;
+      });
   }
 
   get overview(): LibraryModelSnapshot<LibraryOverviewView> {
@@ -987,6 +1016,7 @@ export class LibraryModel {
     if (this.#closed) return;
     this.#closed = true;
     noteLibraryOpening(this, null);
+    this.#settleInitialRead();
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();

@@ -80,17 +80,25 @@ test('a library with no assistant connection makes no assistant request and load
     });
     const page = await context.newPage();
     page.on('console', (message) => {
-      if (message.text().includes('shelves ready')) timing.shelves ??= Date.now();
+      if (message.text().includes('library import finished')) timing.importFinished ??= Date.now();
     });
     await page.goto(`${E2E_ORIGIN}/`);
     // The library has opened and synced: whatever the page would start for assistants, it has had time to.
     await expect.poll(() => synced, { timeout: 20_000 }).toBeGreaterThan(1);
-    await page.waitForTimeout(3_000);
     expect(startupCore, 'the Worker’s startup fetch is seen').toBe(true);
-    expect(deferredCore, 'the automatic device check-in loads deferred policy').toBe(true);
+    await expect
+      .poll(() => deferredCore, {
+        timeout: 15_000,
+        message: 'the automatic device check-in eventually loads deferred policy',
+      })
+      .toBe(true);
     expect(timing.startup, 'browse policy is requested before mutation policy').toBeLessThan(
       timing.deferred,
     );
+    expect(
+      timing.importFinished,
+      'the automatic heartbeat waits for the first library import',
+    ).toBeLessThan(timing.deferred);
     expect(assistant).toEqual([]);
   } finally {
     await browser.close();
