@@ -771,13 +771,17 @@ export class LibraryAssistantAuthority {
       if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
     }
     this.#dueAt = dueAt;
+    // Metadata can keep arriving while the projection Worker builds. The key still names the exact request above,
+    // so a later page rebuilds when these additions change it; carry them with the publication so closing this page
+    // does not lose them and force every fresh page to discover the same layouts during its own build.
+    const rememberedLayouts = { ...layouts, ...this.port.layouts() };
     await this.#remember({
       publication: {
         key,
         // No live grant: nothing is due until the inputs change.
         dueAt: Number.isFinite(dueAt) ? dueAt : Number.MAX_SAFE_INTEGER,
         sent: Object.fromEntries(this.#published),
-        layouts,
+        layouts: rememberedLayouts,
       },
     });
     // Once it is recorded: a page opened after this line neither builds nor sends it again.

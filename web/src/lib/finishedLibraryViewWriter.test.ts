@@ -137,6 +137,19 @@ it('invalidates saved identities made from a manifest that predates fact revisio
   );
 });
 
+it('keeps the raw-document reconsideration deadline when selected Continue facts have none', () => {
+  const manifest = {
+    schema: 1 as const,
+    generation: 'generation',
+    head: 10,
+    complete: true,
+    profileTopology: false,
+    newest: { stamp: [0, 0, ''] as [number, number, string], reconsiderAt: 5_000 },
+  };
+  expect(factViewIdentity('library', manifest, null).reconsiderAt).toBe(5_000);
+  expect(factViewIdentity('library', manifest, 4_000).reconsiderAt).toBe(4_000);
+});
+
 it('rewrites views when acknowledged rows change below the global newest stamp', async () => {
   const vault = new FactVault();
   const store = (await LibraryFactStore.open(libraryKey, vault))!;

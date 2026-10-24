@@ -94,16 +94,16 @@ it('opens and projects a kept snapshot in one reply without cloning its rows twi
                 rows: [second, first],
                 library,
                 stamp: [0, 0, ''],
-                reconsiderAt: Infinity,
+                reconsiderAt: 124,
                 at: 123,
               },
             }
           : {
-              rows: [first, second],
+              rows: (message.source as Row[]) ?? [first, second],
               library,
               stamp: [0, 0, ''],
               reconsiderAt: Infinity,
-              at: 123,
+              at: message.now,
             };
       const reply = structuredClone({ id: message.id, value });
       queueMicrotask(() => this.onmessage?.({ data: reply } as MessageEvent));
@@ -137,6 +137,14 @@ it('opens and projects a kept snapshot in one reply without cloning its rows twi
   expect(projected!.rows[1]).toBe(opened!.entries[1]![2]);
   expect(sent.map(({ op }) => op)).toEqual(['open']);
   expect(sent[0]?.projectAt).toBe(123);
+
+  await expect(
+    projectRowsInWorker([opened!.entries[0]![2], opened!.entries[1]![2]], 124),
+  ).resolves.toMatchObject({ at: 124 });
+  await expect(
+    projectRowsInWorker([opened!.entries[0]![2], opened!.entries[1]![2]], 122),
+  ).resolves.toMatchObject({ at: 122 });
+  expect(sent.map(({ op }) => op)).toEqual(['open', 'project', 'project']);
 });
 
 it('does not reuse the opened projection after the authoritative row order changes', async () => {

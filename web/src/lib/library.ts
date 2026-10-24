@@ -518,6 +518,8 @@ type ContinueDecision = (request: Record<string, unknown>) => ContinueAnswer;
 export class ContinueProjector {
   private decisions = new Map<string, { input: string; answer: ContinueAnswer }>();
   private library?: Library;
+  /** A value snapshot: callers often rebuild the Map, and metadata code is allowed to mutate its Shape objects. */
+  private shapes = new Map<string, Shape>();
   private series = new Map<string, Omit<Library, 'shapes' | 'dismissed'>>();
   private seriesOrder: string[] = [];
   private seriesCandidates = new Map<string, ContinueCandidate>();
@@ -531,6 +533,16 @@ export class ContinueProjector {
   ) {}
 
   project(library: Library): ContinueCandidate[] {
+    const previous = this.library;
+    if (
+      previous &&
+      previous.records === library.records &&
+      previous.marks === library.marks &&
+      previous.flags === library.flags &&
+      previous.dismissed === library.dismissed
+    )
+      return this.projectKnownShapeChanges(library, changedShapes(this.shapes, library.shapes));
+
     const live = new Set<string>();
     const decision = (key: string, request: Record<string, unknown>): ContinueAnswer => {
       live.add(key);
@@ -548,8 +560,10 @@ export class ContinueProjector {
   }
 
   /**
-   * Re-project only series whose episode layout arrived. Records and watch state are immutable between ordinary
-   * naming batches, so rebuilding their summaries (and every unrelated den-core request) would be pure overhead.
+   * Re-project only series whose episode layout changed. Records and watch state are immutable between ordinary
+   * metadata batches, so rebuilding their summaries (and every unrelated den-core request) would be pure overhead.
+   * `project` selects this path for production callers; the explicit change set remains useful to callers that
+   * already know what arrived, and is checked against the snapshot so an omitted removal cannot leave stale output.
    */
   projectShapeChanges(library: Library, changed: ReadonlySet<string>): ContinueCandidate[] {
     const previous = this.library;
@@ -561,18 +575,28 @@ export class ContinueProjector {
       previous.dismissed !== library.dismissed
     )
       return this.project(library);
-    if (!changed.size) {
+    const changes = new Set([...changed, ...changedShapes(this.shapes, library.shapes)]);
+    return this.projectKnownShapeChanges(library, changes);
+  }
+
+  private projectKnownShapeChanges(
+    library: Library,
+    changes: ReadonlySet<string>,
+  ): ContinueCandidate[] {
+    if (!changes.size) {
       this.library = library;
       return this.candidates;
     }
-    for (const key of changed) {
+    for (const key of changes) {
+      const current = library.shapes.get(key);
+      if (current) this.shapes.set(key, copyShape(current));
+      else this.shapes.delete(key);
       const held = this.series.get(key);
       if (!held) continue;
-      const shape = library.shapes.get(key);
       const dismissed = library.dismissed.get(key);
       const one: Library = {
         ...held,
-        shapes: shape ? new Map([[key, shape]]) : new Map(),
+        shapes: current ? new Map([[key, current]]) : new Map(),
         dismissed: dismissed === undefined ? new Map() : new Map([[key, dismissed]]),
       };
       const candidate = continueCandidates(one, (candidateKey, request) => {
@@ -641,8 +665,43 @@ export class ContinueProjector {
       ...this.seriesOrder.map((key) => [key, latest.get(key) ?? -Infinity] as const),
     ]);
     this.library = library;
+    this.shapes = copyShapes(library.shapes);
     this.candidates = candidates;
   }
+}
+
+function copyShape(shape: Shape): Shape {
+  return {
+    counts: new Map(shape.counts),
+    ...(shape.lastAired ? { lastAired: { ...shape.lastAired } } : {}),
+  };
+}
+
+function copyShapes(shapes: ReadonlyMap<string, Shape>): Map<string, Shape> {
+  return new Map([...shapes].map(([key, shape]) => [key, copyShape(shape)]));
+}
+
+function sameShape(left: Shape | undefined, right: Shape | undefined): boolean {
+  if (!left || !right) return left === right;
+  if (
+    left.lastAired?.season !== right.lastAired?.season ||
+    left.lastAired?.episode !== right.lastAired?.episode ||
+    left.counts.size !== right.counts.size
+  )
+    return false;
+  for (const [season, episodes] of left.counts)
+    if (right.counts.get(season) !== episodes) return false;
+  return true;
+}
+
+function changedShapes(
+  previous: ReadonlyMap<string, Shape>,
+  current: ReadonlyMap<string, Shape>,
+): Set<string> {
+  const changed = new Set<string>();
+  for (const [key, shape] of current) if (!sameShape(previous.get(key), shape)) changed.add(key);
+  for (const key of previous.keys()) if (!current.has(key)) changed.add(key);
+  return changed;
 }
 
 /** Started series (the episode to resume or start next), then in-progress movies, before display fields arrive. */

@@ -7,6 +7,7 @@ import { WATCHED } from './actions';
 import { syncPolicy } from './syncCore';
 import {
   compareStamps,
+  newestSummary,
   ZERO_STAMP,
   type DocumentRow,
   type EpisodeRow,
@@ -30,7 +31,7 @@ const sorted = (value: unknown) =>
       : v,
   );
 
-const projected = new WeakMap<DocumentRow, Row[]>();
+const projected = new WeakMap<DocumentRow, { rows: Row[]; at: number; reconsiderAt: number }>();
 
 interface EpisodeState {
   watched: boolean;
@@ -43,27 +44,28 @@ interface EpisodeState {
  * A document as the rows the rest of the web reads: a title document as its `rec` row (`title_state`), and a season
  * document as its individual `ep` projections. A delivery document has no row to show.
  */
-export function projectDocument(document: DocumentRow): Row[] {
+export function projectDocument(document: DocumentRow, now = Date.now()): Row[] {
   const known = projected.get(document);
-  if (known) return known;
+  if (known && now >= known.at && now < known.reconsiderAt) return known.rows;
+  const reconsiderAt = newestSummary(document, now).reconsiderAt ?? Infinity;
   let rows: Row[] = [];
-  if (document.kind === 'title') rows = [projectTitle(document)];
+  if (document.kind === 'title') rows = [projectTitle(document, now)];
   else if (document.kind === 'season') {
     const season = document.season ?? 0;
     const states = syncPolicy<Record<string, EpisodeState>>({
       op: 'season_state_v4',
       season: document,
-      now: Date.now(),
+      now,
     });
     rows = Object.entries(states).map(([number, state]) =>
       episodeRow(document.title, season, Number(number), state),
     );
   }
-  projected.set(document, rows);
+  projected.set(document, { rows, at: now, reconsiderAt });
   return rows;
 }
 
-function projectTitle(document: DocumentRow): TitleRow {
+function projectTitle(document: DocumentRow, now: number): TitleRow {
   const state = syncPolicy<{
     status: TitleRow['status'] | null;
     resume: TitleRow['resume'] | null;
@@ -76,7 +78,7 @@ function projectTitle(document: DocumentRow): TitleRow {
   }>({
     op: 'title_state',
     title: document,
-    now: Date.now(),
+    now,
   });
   // An absent field is import-owned, at the zero stamp (§3), which is how a v2 row says the same.
   return {
