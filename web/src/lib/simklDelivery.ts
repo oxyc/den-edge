@@ -3,6 +3,7 @@ import type { ClockStore } from './clockStore';
 import { exclusive } from './exclusive';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
+import { ensureDeferredSyncPolicy } from './syncLoader';
 import { rowName, type DocumentRow, type SettingsRow, type Stamp } from './wire';
 
 const pageStartedAt = Date.now();
@@ -547,6 +548,7 @@ export async function deliverSimklWithClock(
   } catch {
     return false;
   }
+  await ensureDeferredSyncPolicy();
   // One pass at a time per account in this browser: its tabs share the device id, and so the lease and the orders.
   return exclusive(`den.simkl.${account}`, () =>
     deliverAccount(log, clock, fetchImpl, elapsed, account, token, current),

@@ -28,7 +28,9 @@ test('a library with no assistant connection makes no assistant request and load
     );
     const assistant = [];
     let synced = 0;
-    let core = false;
+    let startupCore = false;
+    let deferredCore = false;
+    const timing = {};
     const headers = { 'x-den-generation': 'idle', 'x-den-wire-min': '4' };
     // The page's assistant loops, and den-core's assistant module with its wasm. (The Worker's few lines that would
     // load it, `assistantCore.ts`, are part of the Worker itself.)
@@ -40,8 +42,16 @@ test('a library with no assistant connection makes no assistant request and load
       if (url.origin !== E2E_ORIGIN) return route.abort('blockedbyclient');
       if (/^\/(?:src\/|@|node_modules\/)/.test(url.pathname) || url.pathname === '/') {
         if (assistantCode.test(url.pathname)) assistant.push(url.pathname);
-        // The Worker's own fetches pass here too: the main wasm, which every member library loads.
-        if (url.pathname.endsWith('/generated/den_core_bg.wasm')) core = true;
+        // The Worker's own fetches pass here too. Opening uses startup policy; an idle library has no reason to
+        // fetch mutation/delivery policy.
+        if (url.pathname.endsWith('/generated/den_core_startup_bg.wasm')) {
+          startupCore = true;
+          timing.startup ??= Date.now();
+        }
+        if (url.pathname.endsWith('/generated/den_core_deferred_bg.wasm')) {
+          deferredCore = true;
+          timing.deferred ??= Date.now();
+        }
         return route.continue();
       }
       if (url.pathname.startsWith('/assistant/') || url.pathname.startsWith('/oauth/'))
@@ -69,11 +79,18 @@ test('a library with no assistant connection makes no assistant request and load
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
     });
     const page = await context.newPage();
+    page.on('console', (message) => {
+      if (message.text().includes('shelves ready')) timing.shelves ??= Date.now();
+    });
     await page.goto(`${E2E_ORIGIN}/`);
     // The library has opened and synced: whatever the page would start for assistants, it has had time to.
     await expect.poll(() => synced, { timeout: 20_000 }).toBeGreaterThan(1);
     await page.waitForTimeout(3_000);
-    expect(core, 'the Worker’s fetches are seen').toBe(true);
+    expect(startupCore, 'the Worker’s startup fetch is seen').toBe(true);
+    expect(deferredCore, 'the automatic device check-in loads deferred policy').toBe(true);
+    expect(timing.startup, 'browse policy is requested before mutation policy').toBeLessThan(
+      timing.deferred,
+    );
     expect(assistant).toEqual([]);
   } finally {
     await browser.close();

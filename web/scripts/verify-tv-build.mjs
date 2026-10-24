@@ -135,7 +135,12 @@ if (tizen3) {
 }
 if (tizen3 && assets.some((file) => file.endsWith('.wasm')))
   throw new Error('A Wasm asset leaked into the Tizen 3 JavaScript-core package');
-for (const name of ['den_core', 'den_core_assistant', 'den_core_recovery']) {
+for (const name of [
+  'den_core_startup',
+  'den_core_deferred',
+  'den_core_assistant',
+  'den_core_recovery',
+]) {
   const matches = assets.filter((file) => file.startsWith(`${name}_bg-`) && file.endsWith('.wasm'));
   if (tizen3) continue;
   if (matches.length !== 1) throw new Error(`Expected only the compatible TV ${name} WASM asset`);
@@ -143,6 +148,8 @@ for (const name of ['den_core', 'den_core_assistant', 'den_core_recovery']) {
   if (sha256(bytes) !== tvCore.artifacts[`generated/${name}_bg.wasm`])
     throw new Error(`Non-TV WASM leaked into the TV build: ${matches[0]}`);
 }
+if (!tizen3 && assets.some((file) => /^den_core_bg-.*\.wasm$/.test(file)))
+  throw new Error('The duplicate full policy core leaked into the TV build');
 if (platform === 'webos' && assets.some((file) => /^avplay-/.test(file)))
   throw new Error('Samsung AVPlay leaked into the LG build');
 for (const worker of ['libraryServiceWorker', 'recoveryWorker']) {

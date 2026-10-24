@@ -21,7 +21,7 @@ import {
 } from './profileKeyResetExecutor';
 import type { ProfileDirectoryDocument } from './profileDirectory';
 import { profilesMaterialize, profilesSnapshotDigest } from './profilesCore';
-import { ensureSyncPolicy } from './syncLoader';
+import { ensureDeferredSyncPolicy } from './syncLoader';
 import { fromBase64url, rowName } from './wire';
 
 /*
@@ -139,7 +139,7 @@ export async function observeResetSource(
   library: ProfileResetLibrary,
   wire: ResetWire,
 ): Promise<AuthenticatedSource | null> {
-  await ensureSyncPolicy();
+  await ensureDeferredSyncPolicy();
   for (let round = 0; round < SOURCE_ROUNDS; round += 1) {
     const snapshot = await library.resetSnapshot();
     if (snapshot === 'absent') throw new ProfileResetRefusedError('library-unavailable');
@@ -458,7 +458,7 @@ export class HttpProfileKeyResetBackend implements ProfileKeyResetBackend {
       ...moving.rows.map((row) => rowName(row)),
       ...moving.kept.map(({ name }) => name),
     ]);
-    await ensureSyncPolicy();
+    await ensureDeferredSyncPolicy();
     return {
       profile: request.profile,
       successorLibraryId: newId,

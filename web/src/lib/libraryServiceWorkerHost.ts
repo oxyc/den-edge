@@ -40,13 +40,16 @@ export interface WorkerHostScope {
   postMessage(message: WorkerServerMessage[]): void;
 }
 
-function isSyncPolicyOffer(input: unknown): input is { port: MessagePort } {
+function isSyncPolicyOffer(
+  input: unknown,
+): input is { startup: MessagePort; deferred: MessagePort } {
   return (
     typeof input === 'object' &&
     input !== null &&
     (input as { type?: unknown }).type === SYNC_POLICY_OFFER &&
     typeof MessagePort !== 'undefined' &&
-    (input as { port?: unknown }).port instanceof MessagePort
+    (input as { startup?: unknown }).startup instanceof MessagePort &&
+    (input as { deferred?: unknown }).deferred instanceof MessagePort
   );
 }
 
@@ -94,7 +97,7 @@ export class LibraryServiceWorkerHost {
     const input = event.data;
     // The page's compiled den-core, offered before any request (`offerSyncPolicy`): no library or content message.
     if (isSyncPolicyOffer(input)) {
-      acceptSyncPolicy(input.port);
+      acceptSyncPolicy(input.startup, input.deferred);
       return;
     }
     // The dispatcher owns authority ordering. Admit every message to it in event order, but do not hold later

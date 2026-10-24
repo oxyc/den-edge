@@ -20,6 +20,7 @@ import {
 import { wantedItems, type WantedStatus } from './hearthWanted';
 import { applyLog, contentWatched, emptyLibrary } from './library';
 import { syncPolicy } from './syncCore';
+import { ensureDeferredSyncPolicy } from './syncLoader';
 import { answerOf, rankable, type SourceAnswer, type TitleSource } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped, Stamp } from './wire';
 
@@ -124,6 +125,7 @@ export class DownloadCoordinatorDriver {
       .filter((download) => !options.names || options.names.has(download.name));
     await this.#refresh(downloads, now, options.force ?? false, current);
     if (!current() || !downloads.length) return false;
+    await ensureDeferredSyncPolicy();
     if (!(await this.#holdLease(now, options.observedFor))) return false;
     return this.#holderPass(now, current);
   }

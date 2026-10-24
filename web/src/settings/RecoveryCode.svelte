@@ -68,7 +68,7 @@
     copied = false;
     manual = false;
     try {
-      const made = newCode();
+      const made = await newCode();
       const derived = await derive(made.data, { op: 'make' });
       if (current !== attempt) {
         derived.wrapKey.fill(0);

@@ -96,6 +96,39 @@ execFileSync(
     },
   },
 );
+// Startup and deferred select opposite den-sync features. Cargo would unify them if they shared one invocation,
+// silently rebuilding both as the full dispatcher; distinct target directories make that mistake impossible.
+const startupTarget = join(scratch, 'target-startup');
+const deferredTarget = join(scratch, 'target-deferred');
+for (const [policyPackage, target] of [
+  ['den-core-web-startup', startupTarget],
+  ['den-core-web-deferred', deferredTarget],
+])
+  execFileSync(
+    'cargo',
+    [
+      'build',
+      '-Z',
+      'build-std=std,panic_abort',
+      '--locked',
+      '--release',
+      '-p',
+      policyPackage,
+      '--target',
+      'wasm32-unknown-unknown',
+    ],
+    {
+      cwd: sourceRoot,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        RUSTC_BOOTSTRAP: '1',
+        RUSTFLAGS: rustflags,
+        CARGO_ENCODED_RUSTFLAGS: encodedFlags,
+        CARGO_TARGET_DIR: target,
+      },
+    },
+  );
 // Cargo unifies features across packages in one invocation. The recovery crate enables den-sync/recovery-kdf;
 // compiling it with the ordinary core would silently put Argon2 back into that core. A distinct invocation and
 // target directory are therefore part of the capability boundary, not merely a build optimization.
@@ -128,6 +161,8 @@ execFileSync(
 const generated = join(scratch, 'generated');
 for (const [crate, name, target = join(scratch, 'target')] of [
   ['den_core_web', 'den_core'],
+  ['den_core_web_startup', 'den_core_startup', startupTarget],
+  ['den_core_web_deferred', 'den_core_deferred', deferredTarget],
   ['den_core_web_assistant', 'den_core_assistant'],
   ['den_core_web_recovery', 'den_core_recovery', recoveryTarget],
 ]) {
@@ -150,6 +185,12 @@ mkdirSync(tvCore, { recursive: true });
 for (const name of [
   'index.js',
   'index.d.ts',
+  'startup.js',
+  'startup.d.ts',
+  'deferred.js',
+  'deferred.d.ts',
+  'lifecycle.js',
+  'lifecycle.d.ts',
   'assistant.js',
   'assistant.d.ts',
   'recovery.js',
@@ -162,6 +203,12 @@ const names = [
   'LICENSE',
   'index.js',
   'index.d.ts',
+  'startup.js',
+  'startup.d.ts',
+  'deferred.js',
+  'deferred.d.ts',
+  'lifecycle.js',
+  'lifecycle.d.ts',
   'assistant.js',
   'assistant.d.ts',
   'recovery.js',

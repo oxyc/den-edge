@@ -22,8 +22,6 @@
     type VisitorProfileSession,
   } from '../src/lib/visitorProfileSession.svelte';
   import { trackerEvent } from '../src/lib/trackerEvents';
-  import { browserClock } from '../src/lib/clock';
-  import { startRow } from '../src/lib/downloadRows';
   import type { LibraryLog } from '../src/lib/log';
   import { fixtureLibraryService } from './libraryService';
   import {
@@ -64,32 +62,60 @@
       releaseWrites;
   const withDownload = params.has('downloading');
   const homeDownloads = params.has('home-downloads');
-  const fixtureClock = browserClock();
-  const downloadRow = startRow(
-    undefined,
-    {
+  const downloadAt = Date.now();
+  // Seed persisted fixture data directly. `startRow` is a write operation and real callers invoke it only after an
+  // interaction, when deferred policy is ready; running it while this component is constructed would make every
+  // read-only fixture depend on the mutation module during startup.
+  const downloadRow: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'download:movie:9001:-1:-1',
+    values: {
       release: {
-        identity: 'fixture-download.mkv',
-        label: 'Fixture download',
-        url: '/scout/p/fixture-download',
+        value: {
+          string:
+            '{"identity":"fixture-download.mkv","label":"Fixture download","url":"/scout/p/fixture-download"}',
+        },
+        at: [downloadAt, 0, 'test'],
       },
-      title: { mediaType: 'movie', mediaId: 9001, title: 'Fixture download' },
+      title: {
+        value: {
+          string: '{"mediaId":9001,"mediaType":"movie","title":"Fixture download"}',
+        },
+        at: [downloadAt, 0, 'test'],
+      },
+      queuedAt: { value: { int: downloadAt }, at: [downloadAt, 0, 'test'] },
     },
-    () => fixtureClock.issue(),
-    Date.now(),
-  );
+  };
   const homeDownloadRows = homeDownloads
     ? ['Active download', 'Ready download', 'Unavailable download', 'Failed download'].map(
-        (title, index) =>
-          startRow(
-            undefined,
-            {
-              release: { identity: title, label: title, url: `/scout/p/home-${index}` },
-              title: { mediaType: 'movie', mediaId: 9100 + index, title },
+        (title, index): SettingsRow => {
+          const at = downloadAt + index;
+          return {
+            kind: 'set',
+            schema: 2,
+            name: `download:movie:${9100 + index}:-1:-1`,
+            values: {
+              release: {
+                value: {
+                  string: JSON.stringify({
+                    identity: title,
+                    label: title,
+                    url: `/scout/p/home-${index}`,
+                  }),
+                },
+                at: [at, 0, 'test'],
+              },
+              title: {
+                value: {
+                  string: JSON.stringify({ mediaId: 9100 + index, mediaType: 'movie', title }),
+                },
+                at: [at, 0, 'test'],
+              },
+              queuedAt: { value: { int: at }, at: [at, 0, 'test'] },
             },
-            () => fixtureClock.issue(),
-            Date.now() + index,
-          ),
+          };
+        },
       )
     : [];
   let route = $state<Route>(

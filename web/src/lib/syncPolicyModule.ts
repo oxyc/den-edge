@@ -1,27 +1,60 @@
-// den-core's policy wasm, downloaded and compiled once for every library Worker this page starts. A profile household
-// opens two libraries, one Worker each; each used to fetch the same 1.66 MB wasm and compile it again (WebKit
-// downloads both, Chromium shares the transfer but still compiles twice).
+// den-core's lifecycle policy Wasm, downloaded and compiled once for every library Worker this page starts. Startup
+// carries opening and browse reads; mutations and background delivery ask for the larger deferred module later.
 
 import { startupMarkOnce } from './startupTiming';
 import { SYNC_POLICY_OFFER, SYNC_POLICY_REQUEST } from './syncPolicyProtocol';
 
-const WASM = new URL('../vendor/den-core/generated/den_core_bg.wasm', import.meta.url);
+const STARTUP_WASM = new URL(
+  '../vendor/den-core/generated/den_core_startup_bg.wasm',
+  import.meta.url,
+);
+const DEFERRED_WASM = new URL(
+  '../vendor/den-core/generated/den_core_deferred_bg.wasm',
+  import.meta.url,
+);
 
-let compiling: Promise<WebAssembly.Module> | undefined;
+type PolicyModule = 'startup' | 'deferred';
+const compiling: Partial<Record<PolicyModule, Promise<WebAssembly.Module>>> = {};
 
-/** One compile per page; a failed one is tried again by the next Worker. */
-function syncPolicyModule(): Promise<WebAssembly.Module> {
-  if (!compiling) startupMarkOnce('den-core compile started');
-  compiling ??= WebAssembly.compileStreaming(fetch(WASM, { signal: AbortSignal.timeout(15_000) }))
+/** One compile of each lifecycle module per page; a failed one is tried again by the next Worker. */
+function syncPolicyModule(kind: PolicyModule): Promise<WebAssembly.Module> {
+  const held = compiling[kind];
+  if (held) return held;
+  const label = kind === 'startup' ? 'den-core' : 'den-core deferred';
+  startupMarkOnce(`${label} compile started`);
+  const wasm = kind === 'startup' ? STARTUP_WASM : DEFERRED_WASM;
+  const started = WebAssembly.compileStreaming(fetch(wasm, { signal: AbortSignal.timeout(15_000) }))
     .then((module) => {
-      startupMarkOnce('den-core compiled');
+      startupMarkOnce(`${label} compiled`);
       return module;
     })
     .catch((error: unknown) => {
-      compiling = undefined;
+      delete compiling[kind];
       throw error;
     });
-  return compiling;
+  compiling[kind] = started;
+  return started;
+}
+
+function answerPolicyOffer(port: MessagePort, kind: PolicyModule): void {
+  port.onmessage = (event: MessageEvent<unknown>) => {
+    if (event.data !== SYNC_POLICY_REQUEST) return;
+    port.onmessage = null;
+    void syncPolicyModule(kind).then(
+      (module) => {
+        port.postMessage(module);
+        port.close();
+      },
+      (error: unknown) => {
+        console.warn(
+          `den: the page could not compile den-core ${kind}; the Worker loads its own`,
+          error,
+        );
+        port.postMessage(null);
+        port.close();
+      },
+    );
+  };
 }
 
 /**
@@ -31,21 +64,12 @@ function syncPolicyModule(): Promise<WebAssembly.Module> {
  * answers null and the Worker loads den-core itself as before.
  */
 export function offerSyncPolicy(worker: Worker): void {
-  const { port1, port2 } = new MessageChannel();
-  worker.postMessage({ type: SYNC_POLICY_OFFER, port: port2 }, [port2]);
-  port1.onmessage = (event: MessageEvent<unknown>) => {
-    if (event.data !== SYNC_POLICY_REQUEST) return;
-    port1.onmessage = null;
-    void syncPolicyModule().then(
-      (module) => {
-        port1.postMessage(module);
-        port1.close();
-      },
-      (error: unknown) => {
-        console.warn('den: the page could not compile den-core; the Worker loads its own', error);
-        port1.postMessage(null);
-        port1.close();
-      },
-    );
-  };
+  const startup = new MessageChannel();
+  const deferred = new MessageChannel();
+  worker.postMessage(
+    { type: SYNC_POLICY_OFFER, startup: startup.port2, deferred: deferred.port2 },
+    [startup.port2, deferred.port2],
+  );
+  answerPolicyOffer(startup.port1, 'startup');
+  answerPolicyOffer(deferred.port1, 'deferred');
 }
