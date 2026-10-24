@@ -48,6 +48,19 @@ sub0.vtt
 const vtt =
   'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n00:00:00.000 --> 00:00:30.000\nFrån filen.\n';
 
+const contexts = [];
+
+/**
+ * Keep each context's own trace of a failure. These tests launch WebKit themselves, so the runner's trace holds none
+ * of the page's network, console or snapshots.
+ */
+async function savePageTraces() {
+  for (const [n, context] of contexts.entries())
+    await context.tracing
+      .stop({ path: test.info().outputPath(`page-${n + 1}-trace.zip`) })
+      .catch(() => undefined);
+}
+
 /**
  * An iPhone: its viewport, touch and user agent, and its answer to "does this browser play HLS itself?" on every
  * platform (see `subtitle-system-player.spec.mjs`'s `iphone`): a fresh, unattached `<video>` says yes; the player's
@@ -55,6 +68,7 @@ const vtt =
  */
 async function iphone(browser, locale) {
   const context = await browser.newContext({ ...devices['iPhone 13'], locale });
+  contexts.push(context);
   await context.addInitScript(() => {
     const canPlayType = HTMLMediaElement.prototype.canPlayType;
     HTMLMediaElement.prototype.canPlayType = function (type) {
@@ -218,7 +232,11 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       await back.getByRole('menuitem', { name: 'Switch to Den Remux' }).tap();
       await expect(stamp).toHaveText('Den Remux', { timeout: 30_000 });
       expect(playback[2]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
+    } catch (error) {
+      await savePageTraces();
+      throw error;
     } finally {
+      contexts.length = 0;
       await browser.close();
     }
   });
@@ -251,7 +269,11 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         'aria-disabled',
         'true',
       );
+    } catch (error) {
+      await savePageTraces();
+      throw error;
     } finally {
+      contexts.length = 0;
       await browser.close();
     }
   });
@@ -282,7 +304,11 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       await page.waitForTimeout(500);
       expect(playback).toHaveLength(1);
       await expect(stamp).toHaveText('Den Remux');
+    } catch (error) {
+      await savePageTraces();
+      throw error;
     } finally {
+      contexts.length = 0;
       await browser.close();
     }
   });
