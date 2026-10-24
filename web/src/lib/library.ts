@@ -432,10 +432,15 @@ export class ContinueLibraryAccumulator {
     }
   }
 
-  /** Fold one unique, authoritative episode projection using den-core's `episode_mark` answer. */
-  addEpisode(row: EpisodeRow): this {
+  /**
+   * Fold one unique, authoritative episode projection using den-core's `episode_mark` answer. A reset is supplied by
+   * consumers that pre-read a title document before streaming its season documents: full LibraryFold applies that
+   * reset after every mark, so rows at or before it and every timeless flag must be absent before winner reduction.
+   */
+  addEpisode(row: EpisodeRow, resetAt?: number): this {
     const decided = episodeAction(row);
     if (decided.action === 'replace') {
+      if (resetAt !== undefined && decided.at <= resetAt) return this;
       const key = titleKey(row.title);
       if (!this.latest.has(key)) this.seriesOrder.push(key);
       const latest = this.latest.get(key);
@@ -446,7 +451,7 @@ export class ContinueLibraryAccumulator {
         if (!front || aheadOfCandidate(row, front))
           this.replaceCandidate(this.finished, key, row, decided);
       }
-    } else if (decided.action === 'flag') this.addProjectedFlag(row);
+    } else if (decided.action === 'flag' && resetAt === undefined) this.addProjectedFlag(row);
     return this;
   }
 

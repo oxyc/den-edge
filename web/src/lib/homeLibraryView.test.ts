@@ -1,8 +1,21 @@
 import { expect, it, vi } from 'vitest';
-import { ContinueProjector, type Library } from './library';
-import { continueItems, digestHomeLibraryView, selectHomeLibraryView } from './homeLibraryView';
+import { applyLog, emptyLibrary, ContinueProjector, type Library } from './library';
+import {
+  continueItems,
+  digestHomeLibraryView,
+  projectHomeLibraryView,
+  selectHomeLibraryView,
+} from './homeLibraryView';
+import { applyOps, projectDocument } from './libraryV4';
 import { syncPolicy } from './syncCore';
-import type { SettingsRow, TitleRow } from './wire';
+import {
+  isDocument,
+  type DocumentRow,
+  type EpisodeRow,
+  type Row,
+  type SettingsRow,
+  type TitleRow,
+} from './wire';
 
 const titleRow = (
   id: number,
@@ -80,6 +93,157 @@ it('selects the fixed Home view from rows once', () => {
   });
   expect(digestHomeLibraryView(worker)).toMatchObject({ hash: expect.any(String) });
   expect(worker).not.toHaveProperty('continue');
+});
+
+it('streams v4 documents to the exact full-fold Home view without retaining episode rows', () => {
+  const now = 1_800_000_000_000;
+  const stamp = (value: number): [number, number, string] => [value, 0, 'aaaaaaaaaaaaaaaa'];
+  const resetAt = now - 2500;
+  const titleDocuments = applyOps(
+    [
+      {
+        target: { type: 'tv', id: 40 },
+        write: {
+          kind: 'title',
+          fields: { status: 'watched', reaction: 'love', dismissed: true },
+          added_at: now - 10_000,
+          at: stamp(now - 5000),
+        },
+      },
+      { target: { type: 'tv', id: 40 }, write: { kind: 'series_reset', at: stamp(resetAt) } },
+    ],
+    () => undefined,
+    now,
+  );
+  const stored: Row[] = [
+    ...titleDocuments,
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 41 },
+      status: { value: 'watchlist', at: stamp(now - 3000) },
+      addedAt: now - 20_000,
+    } satisfies DocumentRow,
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 40 },
+      season: 2,
+      seasonReset: null,
+      episodes: {
+        20: {
+          progress: null,
+          imported: true,
+          plays: {},
+          cleared: null,
+        },
+        10: {
+          progress: { value: 1, at: stamp(now - 3000), viewing: 1 },
+          imported: false,
+          plays: { 0: now - 3000 },
+          cleared: null,
+        },
+      },
+    } satisfies DocumentRow,
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 40 },
+      season: 1,
+      seasonReset: null,
+      episodes: {
+        2: {
+          progress: { value: 1, at: stamp(now - 1500), viewing: 1 },
+          imported: false,
+          plays: { 0: now - 1500 },
+          cleared: null,
+        },
+        5: {
+          progress: {
+            value: 0.4,
+            at: stamp(now - 1000),
+            viewing: 2,
+            seconds: 500,
+          },
+          imported: false,
+          plays: { 0: now - 1000 },
+          cleared: null,
+        },
+      },
+    } satisfies DocumentRow,
+    ...[43, 42].map(
+      (id) =>
+        ({
+          format: 4,
+          kind: 'season',
+          title: { type: 'tv', id },
+          season: 1,
+          seasonReset: null,
+          episodes: {
+            1: {
+              progress: { value: 0.5, at: stamp(now - 900), viewing: 1 },
+              imported: false,
+              plays: { 0: now - 900 },
+              cleared: null,
+            },
+          },
+        }) satisfies DocumentRow,
+    ),
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 44 },
+      season: 3,
+      seasonReset: null,
+      episodes: {
+        7: { progress: null, imported: true, plays: {}, cleared: null },
+      },
+    } satisfies DocumentRow,
+  ];
+  const rows = stored.flatMap((row) => (isDocument(row) ? projectDocument(row, now) : [row]));
+  const expected = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+  const direct = projectHomeLibraryView(stored, now);
+
+  expect(direct).toEqual({ view: expected, rows: rows.length });
+  expect(direct?.view.owned).toEqual(['tv:40', 'movie:41']);
+  expect(direct?.view.watchlist).toEqual(['movie:41']);
+  expect(
+    direct?.view.continueLibrary.records.map(({ title, status }) => [title.type, title.id, status]),
+  ).toEqual([['tv', 40, 'watched']]);
+  expect(
+    direct?.view.continueLibrary.marks.map(({ id, season, episode, fraction }) => [
+      id,
+      season,
+      episode,
+      fraction,
+    ]),
+  ).toEqual([
+    [40, 1, 5, 0.4],
+    [40, 1, 2, 1],
+    [43, 1, 1, 0.5],
+    [42, 1, 1, 0.5],
+  ]);
+  expect([...(direct?.view.continueLibrary.flags?.values() ?? [])]).toEqual([
+    { type: 'tv', id: 44, season: 3, episode: 7 },
+  ]);
+  expect(direct?.view.continueLibrary.dismissed).toEqual(new Map([['tv:40', now - 5000]]));
+  // A legacy episode can duplicate a document projection under another stored name, so it takes the full fallback.
+  expect(
+    projectHomeLibraryView(
+      [
+        ...stored,
+        {
+          kind: 'ep',
+          schema: 2,
+          title: { type: 'tv', id: 40 },
+          season: 1,
+          episode: 5,
+          progress: { value: 0.8, at: stamp(now), viewing: 3 },
+        } satisfies EpisodeRow,
+      ],
+      now,
+    ),
+  ).toBeUndefined();
 });
 
 it('asks for the layouts of the series watched most recently first', () => {

@@ -3,15 +3,19 @@
 
 import { deviceName, readDownloads, type Download } from './downloadRows';
 import {
+  applyLog,
   compactContinueLibrary,
+  ContinueLibraryAccumulator,
+  emptyLibrary,
   standings,
   titleKey,
   type ContinueProjector,
   type Library,
   type Standing,
 } from './library';
+import { forEachProjectedRow } from './libraryV4';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
-import type { Row, SettingsRow, TitleRow } from './wire';
+import { isDocument, type Row, type SettingsRow, type TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -180,6 +184,68 @@ export function continueItems(
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
   return selectHomeLibraryViewFromFold(library, activeTitleRows(rows), readDownloads(rows));
+}
+
+export interface ProjectedHomeLibraryView {
+  view: HomeLibraryView;
+  /** The legacy projection count retained for startup diagnostics without retaining those rows. */
+  rows: number;
+}
+
+/**
+ * Project a v4 log directly into Home's bounded inputs. Legacy rows use the ordinary full fold: unlike one document
+ * per title/season, mixed legacy and document names can describe the same episode and need LibraryFold's held-mark
+ * semantics. Title documents are projected first so resets can remove episode inputs before winner reduction.
+ */
+export function projectHomeLibraryView(
+  stored: readonly Row[],
+  now = Date.now(),
+): ProjectedHomeLibraryView | undefined {
+  if (stored.some((row) => !isDocument(row) && row.kind !== 'set')) return undefined;
+
+  const titles: TitleRow[] = [];
+  const resets = new Map<string, number>();
+  let projectedRows = 0;
+  for (const row of stored) {
+    if (row.kind === 'set') projectedRows++;
+    if (!isDocument(row) || row.kind !== 'title') continue;
+    forEachProjectedRow(
+      row,
+      (projected) => {
+        if (projected.kind !== 'rec') return;
+        titles.push(projected);
+        projectedRows++;
+        if (projected.episodesReset)
+          resets.set(titleKey(projected.title), projected.episodesReset[0]);
+      },
+      now,
+    );
+  }
+
+  const titlesLibrary = applyLog(emptyLibrary(), titles);
+  const compact = new ContinueLibraryAccumulator(titlesLibrary);
+  for (const row of stored) {
+    if (!isDocument(row) || row.kind !== 'season') continue;
+    forEachProjectedRow(
+      row,
+      (projected) => {
+        if (projected.kind !== 'ep') return;
+        projectedRows++;
+        compact.addEpisode(projected, resets.get(titleKey(projected.title)));
+      },
+      now,
+    );
+  }
+
+  const continueLibrary = compact.finish();
+  return {
+    view: selectHomeLibraryViewFromFold(
+      { ...continueLibrary, records: titlesLibrary.records },
+      activeTitleRows(titles),
+      readDownloads(stored),
+    ),
+    rows: projectedRows,
+  };
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */

@@ -34,7 +34,12 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
-import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import {
+  continueItems,
+  projectHomeLibraryView,
+  selectHomeLibraryView,
+  type HomeLibraryView,
+} from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
 import {
   libraryMetadataShape,
@@ -363,7 +368,14 @@ export class LibraryLogAuthority {
    * in place of a freshly issued one, so it never overrides a change made after it.
    */
   #asOf: Stamp | null = null;
-  #projection?: { rows: Row[]; home: HomeLibraryView };
+  #projection?: {
+    version: number;
+    at: number;
+    reconsiderAt: number;
+    home: HomeLibraryView;
+    /** Compatibility cache for narrow embeddings that expose rows but not the full LibraryLog projection surface. */
+    rows?: Row[];
+  };
   #projectionTimer?: ReturnType<typeof setTimeout>;
   #projectionDeadline = Infinity;
   #closed = false;
@@ -1398,7 +1410,7 @@ export class LibraryLogAuthority {
   }
 
   #overview(): Extract<LibrarySelectionValue, { kind: 'overview' }> {
-    const { home } = this.#projected();
+    const home = this.#projected();
     return {
       kind: 'overview',
       owned: home.owned.map(refFromKey),
@@ -1421,7 +1433,7 @@ export class LibraryLogAuthority {
   }
 
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
-    const { home } = this.#projected();
+    const home = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
     return {
       kind: 'continue',
@@ -1435,7 +1447,7 @@ export class LibraryLogAuthority {
   }
 
   #presence(titles: TitleRef[]): Extract<LibrarySelectionValue, { kind: 'presence' }> {
-    const standings = new Map(this.#projected().home.standings);
+    const standings = new Map(this.#projected().standings);
     return {
       kind: 'presence',
       items: titles.map((title) => {
@@ -1451,7 +1463,9 @@ export class LibraryLogAuthority {
   }
 
   #history(): Extract<LibrarySelectionValue, { kind: 'history' }> {
-    const { rows } = this.#projected();
+    // History does not build Home, but a History-only subscriber still needs future-stamp deadline notifications.
+    this.#scheduleProjectionReconsideration();
+    const rows = this.#log.rows();
     const seen = seenEpisodes(rows);
     const names = new Map<string, Title>();
     for (const row of rows) {
@@ -1718,15 +1732,54 @@ export class LibraryLogAuthority {
       .sort();
   }
 
-  #projected(): { rows: Row[]; home: HomeLibraryView } {
-    const rows = this.#log.rows();
+  #projected(): HomeLibraryView {
+    const partial = this.#log as Partial<LibraryLog>;
+    const version = partial.rowsVersion;
     this.#scheduleProjectionReconsideration();
-    if (this.#projection?.rows === rows) return this.#projection;
+    const now = Date.now();
+    if (typeof version !== 'number' || typeof partial.storedRows !== 'function') {
+      const rows = this.#log.rows();
+      if (this.#projection?.rows === rows) return this.#projection.home;
+      const foldedAt = performance.now();
+      const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+      noteLibraryFold(rows.length, performance.now() - foldedAt);
+      this.#projection = { version: -1, at: now, reconsiderAt: Infinity, home, rows };
+      return home;
+    }
+    if (
+      this.#projection?.version === version &&
+      now >= this.#projection.at &&
+      now < this.#projection.reconsiderAt
+    )
+      return this.#projection.home;
     const foldedAt = performance.now();
-    const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
-    noteLibraryFold(rows.length, performance.now() - foldedAt);
-    this.#projection = { rows, home };
-    return this.#projection;
+    const projected = projectHomeLibraryView(partial.storedRows.call(this.#log), now);
+    let rows: number;
+    let home: HomeLibraryView;
+    if (projected) {
+      rows = projected.rows;
+      home = projected.view;
+    } else {
+      const legacy = this.#log.rows();
+      rows = legacy.length;
+      home = selectHomeLibraryView(applyLog(emptyLibrary(), legacy), legacy);
+    }
+    const completedAt = Date.now();
+    const summary = this.#log.currentSummary(now);
+    if (
+      version !== this.#log.rowsVersion ||
+      completedAt < now ||
+      completedAt >= summary.reconsiderAt
+    )
+      return this.#projected();
+    noteLibraryFold(rows, performance.now() - foldedAt);
+    this.#projection = {
+      version,
+      at: now,
+      reconsiderAt: summary.reconsiderAt,
+      home,
+    };
+    return home;
   }
 
   /** Reconsider future document stamps once, at the first instant den-core may answer differently. */

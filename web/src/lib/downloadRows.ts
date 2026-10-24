@@ -221,7 +221,7 @@ function readRace(
 }
 
 /** Every live download the rows hold, newest first. */
-export function readDownloads(rows: Row[]): Download[] {
+export function readDownloads(rows: readonly Row[]): Download[] {
   return rows.flatMap((row) => readDownload(row) ?? []).sort((a, b) => b.queuedAt - a.queuedAt);
 }
 

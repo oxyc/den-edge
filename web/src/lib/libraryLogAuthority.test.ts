@@ -184,102 +184,115 @@ describe('LibraryLogAuthority', () => {
 
   const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
 
-  it('publishes fresh Home and Continue at an unchanged document deadline, and cancels on close', async () => {
-    await ensureSyncPolicy();
-    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
-    try {
-      const base = 1_789_000_000_000;
-      const future = base + 86_400_000 + 5_000;
-      vi.setSystemTime(base);
-      const document: DocumentRow = {
-        format: 4,
-        kind: 'season',
-        title: { type: 'tv', id: 1399 },
-        season: 2,
-        seasonReset: null,
-        episodes: {
-          1: {
-            progress: {
-              value: 0.5,
-              at: [future, 0, 'aaaaaaaaaaaaaaaa'],
-              viewing: 7,
-              seconds: 900,
+  it.each(['overview', 'history'] as const)(
+    'publishes fresh Home and Continue at an unchanged document deadline after %s-only selection',
+    async (initialSelection) => {
+      await ensureSyncPolicy();
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+      try {
+        const base = 1_789_000_000_000;
+        const future = base + 86_400_000 + 5_000;
+        vi.setSystemTime(base);
+        const document: DocumentRow = {
+          format: 4,
+          kind: 'season',
+          title: { type: 'tv', id: 1399 },
+          season: 2,
+          seasonReset: null,
+          episodes: {
+            1: {
+              progress: {
+                value: 0.5,
+                at: [future, 0, 'aaaaaaaaaaaaaaaa'],
+                viewing: 7,
+                seconds: 900,
+              },
+              imported: false,
+              plays: {},
+              cleared: null,
             },
-            imported: false,
-            plays: {},
-            cleared: null,
+            2: {
+              progress: {
+                value: 0.6,
+                at: [future + 2_000, 0, 'aaaaaaaaaaaaaaaa'],
+                viewing: 8,
+                seconds: 901,
+              },
+              imported: false,
+              plays: {},
+              cleared: null,
+            },
+            3: {
+              progress: {
+                value: 0.7,
+                at: [future + 4_000, 0, 'aaaaaaaaaaaaaaaa'],
+                viewing: 9,
+                seconds: 902,
+              },
+              imported: false,
+              plays: {},
+              cleared: null,
+            },
           },
-          2: {
-            progress: {
-              value: 0.6,
-              at: [future + 2_000, 0, 'aaaaaaaaaaaaaaaa'],
-              viewing: 8,
+        };
+        const vault = memoryVault();
+        const log = (await LibraryLog.openLocal(KEY, vault))!;
+        expect(await log.writeRows([document])).toBe(true);
+        const clock = await openClockStore(vault, {
+          key: 'future-projection-clock',
+          createDevice: () => '0123456789abcdef',
+        });
+        const opened = authority(log, clock, 'local');
+        const events: unknown[] = [];
+        opened.listen((event) => events.push(event));
+
+        if (initialSelection === 'history') {
+          // History still arms the authority deadline even though it no longer builds Home.
+          await expect(opened.select({ kind: 'history' })).resolves.toMatchObject({ items: [] });
+        } else {
+          await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
+            standings: [],
+          });
+          await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
+        }
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(events).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
+        // The next future stamp is scheduled without depending on a listener selecting a projection after the first.
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(events).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(events).toEqual([
+          { kind: 'changed', affected: [{ kind: 'all' }] },
+          { kind: 'changed', affected: [{ kind: 'all' }] },
+        ]);
+        await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
+          standings: [{ title: { type: 'tv', id: 1399 }, standing: 'in-progress' }],
+        });
+        await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
+          items: [
+            {
+              title: { type: 'tv', id: 1399 },
+              fraction: 0.6,
               seconds: 901,
+              updatedAt: future + 2_000,
             },
-            imported: false,
-            plays: {},
-            cleared: null,
-          },
-          3: {
-            progress: {
-              value: 0.7,
-              at: [future + 4_000, 0, 'aaaaaaaaaaaaaaaa'],
-              viewing: 9,
-              seconds: 902,
-            },
-            imported: false,
-            plays: {},
-            cleared: null,
-          },
-        },
-      };
-      const vault = memoryVault();
-      const log = (await LibraryLog.openLocal(KEY, vault))!;
-      expect(await log.writeRows([document])).toBe(true);
-      const clock = await openClockStore(vault, {
-        key: 'future-projection-clock',
-        createDevice: () => '0123456789abcdef',
-      });
-      const opened = authority(log, clock, 'local');
-      const events: unknown[] = [];
-      opened.listen((event) => events.push(event));
+          ],
+        });
+        vi.setSystemTime(base);
+        await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({ standings: [] });
+        await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
+        await opened.close();
 
-      await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({ standings: [] });
-      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
-      await vi.advanceTimersByTimeAsync(4_999);
-      expect(events).toEqual([]);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
-      // The next future stamp is scheduled without depending on a listener selecting a projection after the first.
-      await vi.advanceTimersByTimeAsync(1_999);
-      expect(events).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(events).toEqual([
-        { kind: 'changed', affected: [{ kind: 'all' }] },
-        { kind: 'changed', affected: [{ kind: 'all' }] },
-      ]);
-      await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
-        standings: [{ title: { type: 'tv', id: 1399 }, standing: 'in-progress' }],
-      });
-      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
-        items: [
-          {
-            title: { type: 'tv', id: 1399 },
-            fraction: 0.6,
-            seconds: 901,
-            updatedAt: future + 2_000,
-          },
-        ],
-      });
-      await opened.close();
-
-      events.length = 0;
-      await vi.advanceTimersByTimeAsync(2_000);
-      expect(events).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        events.length = 0;
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(events).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('reschedules a future deadline learned when a deferred delivery changes the log', async () => {
     await ensureSyncPolicy();

@@ -3,6 +3,7 @@ import { RESUME_FLOOR, WATCHED } from './actions';
 import {
   applyLog,
   applyLogInSlices,
+  ContinueLibraryAccumulator,
   ContinueProjector,
   continueWatching,
   contentWatched,
@@ -260,6 +261,21 @@ describe('a download row’s own watched state, never the series’', () => {
 });
 
 describe('folding episode rows in', () => {
+  it('discards reset episode inputs before compact winner reduction', () => {
+    const compact = new ContinueLibraryAccumulator()
+      // The furthest finished episode is stale; choosing it before applying the reset would lose episode 2.
+      .addEpisode(epRow(1, 10, 1, 1000), 2000)
+      .addEpisode(epRow(1, 2, 1, 3000), 2000)
+      // A reset removes timeless watched bits regardless of where the episode is in the season.
+      .addEpisode(epRow(1, 20, 1, 0), 2000)
+      .finish();
+
+    expect(compact.marks.map(({ episode, updatedAt }) => [episode, updatedAt])).toEqual([
+      [2, 3000],
+    ]);
+    expect([...(compact.flags?.values() ?? [])]).toEqual([]);
+  });
+
   it('matches the synchronous fold across yields, including a reset before one large season', async () => {
     const reset: Row = {
       kind: 'rec' as const,
