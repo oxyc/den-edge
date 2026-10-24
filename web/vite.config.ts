@@ -178,6 +178,9 @@ export default defineConfig({
     __DEN_TV_API_ORIGIN__: JSON.stringify(''),
     __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(''),
     __DEN_TV_WEB_ORIGIN__: JSON.stringify(''),
+    'import.meta.env.DEN_ALLOCATION_AUDIT': JSON.stringify(
+      process.env.DEN_ALLOCATION_AUDIT === '1',
+    ),
   },
   plugins: [
     {
@@ -221,6 +224,7 @@ export default defineConfig({
   // Keep route styles beside their already-split route chunks. Settings, Player and other uncommon screens are
   // intent-loaded, so Home should not transfer or parse their CSS either.
   build: {
+    sourcemap: process.env.DEN_ALLOCATION_AUDIT === '1',
     target: 'es2022',
     cssCodeSplit: true,
     // The production build the time budgets run against (`playwright.budgets.config.ts`) also carries the page that
