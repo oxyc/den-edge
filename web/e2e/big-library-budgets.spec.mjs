@@ -691,6 +691,9 @@ for (const [label, type, device, options] of ENGINES) {
                 fixtureDate: new Date(fixtureNow()).toISOString(),
                 diagnostic: process.env.DEN_ALLOCATION_PROFILE === '1',
                 revision: execFileSync('git', ['rev-parse', 'HEAD']).toString().trim(),
+                ...(process.env.DEN_BENCH_PRODUCTION_REVISION
+                  ? { productionRevision: process.env.DEN_BENCH_PRODUCTION_REVISION }
+                  : {}),
                 host: {
                   platform: platform(),
                   release: release(),
