@@ -32,4 +32,27 @@ describe('PlaybackProgressReporter', () => {
       [0.1, 10],
     ]);
   });
+
+  it('writes the first part-way position once per start or resume, and nothing more until the next', () => {
+    const write = vi.fn();
+    const progress = new PlaybackProgressReporter(write);
+
+    // Not started yet: nothing.
+    progress.reportStart(5, 100);
+    progress.playing();
+    // Still at the very start: nothing yet, and the start write waits for a part-way position.
+    progress.reportStart(0, 100);
+    progress.reportStart(0.4, 100);
+    progress.reportStart(2.2, 100);
+    progress.reportStart(3, 100);
+    progress.reportStart(4, 100);
+    // Paused: the pause writes, then the resume writes once the clock leaves that second.
+    progress.report(20.2, 100);
+    progress.playing();
+    progress.reportStart(20.6, 100);
+    progress.reportStart(21.1, 100);
+    progress.reportStart(22, 100);
+
+    expect(write.mock.calls.map(([, seconds]) => seconds)).toEqual([2, 20, 21]);
+  });
 });

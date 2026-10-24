@@ -10,11 +10,22 @@ export type ProgressWrite = (fraction: number, seconds: number) => void;
 export class PlaybackProgressReporter {
   private reported = -1;
   private completed = false;
+  /** Playback started or resumed and no position has been written since. */
+  private starting = false;
 
   constructor(private readonly write: ProgressWrite) {}
 
   playing() {
     this.completed = false;
+    this.starting = true;
+  }
+
+  /**
+   * The first part-way position after playback starts or resumes, written at once rather than at the next periodic
+   * report: another device of the same profile (the Apple TV) pauses itself when it sees this one start.
+   */
+  reportStart(currentTime: number, duration: number) {
+    if (this.starting) this.report(currentTime, duration);
   }
 
   report(currentTime: number, duration: number, slack = 0) {
@@ -29,6 +40,7 @@ export class PlaybackProgressReporter {
     const second = Math.floor(currentTime);
     if (this.reported >= 0 && Math.abs(second - this.reported) <= slack) return;
     this.reported = second;
+    this.starting = false;
     this.write(currentTime / duration, second);
   }
 
