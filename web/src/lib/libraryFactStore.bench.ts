@@ -7,9 +7,11 @@ import {
   ContinueLibraryAccumulator,
   emptyLibrary,
 } from './library';
+import { seenEpisodes, watchedHistory } from './history';
+import { projectHomeLibraryView, selectHomeLibraryView } from './homeLibraryView';
 import { forEachProjectedRow, projectDocument } from './libraryV4';
 import { ensureSyncPolicy } from './syncLoader';
-import type { DocumentRow } from './wire';
+import { isDocument, type DocumentRow, type Row } from './wire';
 
 const EPISODES = 1_000;
 const NOW = 1_800_000_000_000;
@@ -194,4 +196,96 @@ test('compact Continue fact for one 1,000-episode authority document', async ({ 
     return streamWork();
   });
   await bench.compare(history, graph, stream);
+});
+
+// A household near the budget fixture's Watchlist Worker (6,132 documents, 13,724 rows): 1,000 movie and 1,000 series
+// title documents and four four-episode seasons per series, 6,000 documents projecting to 18,000 rows.
+function household(): Row[] {
+  const stamp = (value: number): [number, number, string] => [value, 0, 'bench'];
+  const documents: Row[] = [];
+  for (let index = 0; index < 1_000; index++) {
+    documents.push({
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 20_000 + index },
+      status: { value: index % 2 ? 'watched' : 'watchlist', at: stamp(NOW - index) },
+      addedAt: NOW - 10_000 - index,
+    } satisfies DocumentRow);
+    documents.push({
+      format: 4,
+      kind: 'title',
+      title: { type: 'tv', id: 30_000 + index },
+      status: { value: 'watched', at: stamp(NOW - index) },
+      addedAt: NOW - 10_000 - index,
+    } satisfies DocumentRow);
+    for (let number = 1; number <= 4; number++)
+      documents.push({
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id: 30_000 + index },
+        season: number,
+        seasonReset: null,
+        episodes: Object.fromEntries(
+          Array.from({ length: 4 }, (_, episode) => {
+            const when = NOW - 100_000 + index * 20 + number * 4 + episode;
+            return [
+              episode + 1,
+              {
+                progress: { value: 1, at: stamp(when), viewing: 0 },
+                imported: false,
+                plays: { 0: when },
+                cleared: null,
+              },
+            ];
+          }),
+        ),
+      } satisfies DocumentRow);
+  }
+  return documents;
+}
+
+test('Home then History in one library Worker', async () => {
+  if (process.env.DEN_FACT_ALLOCATION_AUDIT !== '1') return;
+  // Fresh document objects per run, as a newly opened Worker holds: projectDocument's WeakMap starts empty.
+  const project = (stored: Row[]) =>
+    stored.flatMap((row) => (isDocument(row) ? projectDocument(row, NOW) : [row]));
+  const history = (rows: Row[]) => [seenEpisodes(rows), watchedHistory(rows, new Map())];
+  // Before #809's Home streaming: one shared projection serves Home's fold and then History.
+  const sharedHome = (stored: Row[]) => {
+    const rows = project(stored);
+    return [selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows), rows] as const;
+  };
+  const sharedJourney = () => {
+    const [, rows] = sharedHome(household());
+    return history(rows);
+  };
+  const streamedJourney = () => {
+    const stored = household();
+    projectHomeLibraryView(stored, NOW);
+    return history(project(stored));
+  };
+  const sharedHomeOnly = () => sharedHome(household());
+  const streamedHomeOnly = () => projectHomeLibraryView(household(), NOW);
+  const stored = household();
+  const [expected] = sharedHome(stored);
+  expect(projectHomeLibraryView(household(), NOW)?.view).toEqual(expected);
+  expect(project(stored)).toHaveLength(18_000);
+
+  const names = new Map<() => unknown, string>([
+    [sharedJourney, 'Home then History: one shared projection'],
+    [streamedJourney, 'Home then History: streamed Home, then projection'],
+    [sharedHomeOnly, 'Home only: projection + full fold'],
+    [streamedHomeOnly, 'Home only: streamed'],
+  ]);
+  for (const work of names.keys()) work();
+  const samples = [];
+  for (let repeat = 0; repeat < 3; repeat++) {
+    const journey = repeat % 2 ? [streamedJourney, sharedJourney] : [sharedJourney, streamedJourney];
+    const home = repeat % 2 ? [streamedHomeOnly, sharedHomeOnly] : [sharedHomeOnly, streamedHomeOnly];
+    for (const work of [...journey, ...home])
+      samples.push(await allocationSample(names.get(work)!, work));
+  }
+  console.log(`JOURNEY_ALLOCATION ${JSON.stringify(samples)}`);
+  if (process.env.DEN_JOURNEY_ALLOCATION_OUTPUT)
+    writeFileSync(process.env.DEN_JOURNEY_ALLOCATION_OUTPUT, JSON.stringify(samples, null, 2));
 });
