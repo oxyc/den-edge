@@ -131,8 +131,9 @@ jobs:
       - run: npm run test:e2e:tv
       # The full TV journey already ran against the platform-neutral/webOS build above and will run again in
       # WebKit below. Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
-      # separately covers the real Tizen bundle, file origin, CSP, API routing and playback.
-      - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-platform.spec.mjs
+      # separately covers the real Tizen bundle, file origin, CSP, API routing and playback. Re-sync additionally
+      # exercises replacement of the exact same-language sidecar through the AVPlay adapter.
+      - run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-platform.spec.mjs tv-subtitle-resync.spec.mjs
       - run: npm run test:e2e:tv-package
       - run: DEN_SKIP_TIZEN3=1 node scripts/tizen-package.integration.mjs
       - run: npm run test:tv-preflight

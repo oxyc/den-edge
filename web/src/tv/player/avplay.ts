@@ -48,7 +48,7 @@ interface AvplayGlobal {
 export interface SamsungAvplayAdapter {
   start(): Promise<void>;
   selectAudioTrack(ordinal: number): void;
-  selectSubtitleLanguage(language: string | null): void;
+  selectSubtitleLanguage(language: string | null, value?: string | null): void;
   setSubtitleOffset(seconds: number): void;
   failureKind(): 'decode' | 'format' | 'other' | undefined;
   destroy(): void;
@@ -145,6 +145,7 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   let failureKind: 'decode' | 'format' | 'other' | undefined;
   let audioTrack = options.audioTrack;
   let subtitleLanguage = options.subtitleLanguage;
+  let subtitleValue: string | null | undefined;
   const played: [number, number][] = [];
   let lastPlayingTime: number | undefined;
   let pendingSeek = Promise.resolve();
@@ -324,7 +325,9 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     }
     captionTrack = undefined;
     for (const track of element.querySelectorAll('track')) {
-      const selected = subtitleLanguage !== null && track.srclang === subtitleLanguage;
+      const selected =
+        subtitleLanguage !== null &&
+        (subtitleValue ? track.label === subtitleValue : track.srclang === subtitleLanguage);
       track.track.mode = selected ? 'hidden' : 'disabled';
       if (selected) captionTrack = track.track;
     }
@@ -588,8 +591,9 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
       audioTrack = ordinal;
       applyAudioTrack();
     },
-    selectSubtitleLanguage(language) {
+    selectSubtitleLanguage(language, value) {
       subtitleLanguage = language;
+      subtitleValue = value;
       applySubtitle();
     },
     setSubtitleOffset(seconds) {

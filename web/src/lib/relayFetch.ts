@@ -42,6 +42,14 @@ const REMUX_CONTROL = new Set([
   '/remux/speed',
   '/remux/grant',
 ]);
+function remuxControl(path: string): boolean {
+  return (
+    REMUX_CONTROL.has(path) ||
+    /^\/remux\/s\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}\/(?:subtitle-resync|sub[0-9]+\.aligned\.vtt)$/.test(
+      path,
+    )
+  );
+}
 const MEMBER_HEADER = 'x-den-library-member';
 /** A shared library's own credential (`x-den-grant: <gid>:<secret>`): a guest is never a member. */
 const GRANT_HEADER = 'x-den-grant';
@@ -291,7 +299,7 @@ function relayed(href: string): boolean {
   return (
     !!url &&
     (RELAYED.some((p) => url.pathname.startsWith(p)) ||
-      REMUX_CONTROL.has(url.pathname) ||
+      remuxControl(url.pathname) ||
       OAUTH.test(url.pathname) ||
       ASSISTANT.test(url.pathname) ||
       url.pathname === DEN_CONFIGURE_SESSION ||
@@ -303,7 +311,7 @@ function relayed(href: string): boolean {
 function membershipSensitive(url: URL): boolean {
   return (
     RELAYED.some((path) => url.pathname.startsWith(path)) ||
-    REMUX_CONTROL.has(url.pathname) ||
+    remuxControl(url.pathname) ||
     OAUTH.test(url.pathname) ||
     ASSISTANT.test(url.pathname) ||
     url.pathname === DEN_CONFIGURE_SESSION ||
@@ -320,7 +328,7 @@ function grantOf(url: URL, init: RequestInit | undefined): string | null {
   const shared = GRANT_BASE.exec(url.pathname)?.[1];
   if (shared) return shared;
   if (OAUTH.test(url.pathname)) return credential ? null : (heldGrant() ?? null);
-  if (!REMUX_CONTROL.has(url.pathname)) return null;
+  if (!remuxControl(url.pathname)) return null;
   if (typeof init?.body === 'string') {
     try {
       const install = (JSON.parse(init.body) as { scout?: unknown }).scout;

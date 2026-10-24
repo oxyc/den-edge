@@ -107,6 +107,8 @@
   import { setTvPlaybackActive } from '../tv/platform';
   import { startPlayback, type PlaybackCause, type PlaybackWant } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
+  import { checkSubtitleResync, resyncSubtitle } from '../lib/subtitleResync';
+  import type { MenuItem } from '../lib/titleActions';
   import {
     activeAt,
     canAutoSkip,
@@ -2847,6 +2849,155 @@
    */
   let subtitleChoice = $state<string | null>(untrack(() => subtitleLanguage ?? null));
   let subtitleOffset = $state(0);
+  let subtitleResyncOffset = $state(0);
+  const subtitleTimingOffset = $derived(subtitleOffset + subtitleResyncOffset);
+  let subtitleResyncReady = $state(false);
+  let subtitleResyncBusy = $state(false);
+  let subtitleResyncNotice = $state<string | null>(null);
+  let subtitleResyncRequest: AbortController | undefined;
+  let subtitleSelectionGeneration = 0;
+  const alignedUrls = new SvelteSet<string>();
+  fades(
+    () => subtitleResyncNotice,
+    () => (subtitleResyncNotice = null),
+  );
+
+  // System fullscreen and receivers own their playlist captions. These custom players can replace a sidecar.
+  function canRenderAlignedSubtitle() {
+    return !castMode && !casting && !airPlayActive && customTransport;
+  }
+
+  $effect(() => {
+    const current = session;
+    const choice = subtitleChoice;
+    const eligible = canRenderAlignedSubtitle();
+    subtitleResyncReady = false;
+    const controller = new AbortController();
+    const track = current && preferredSubtitleTrack(current.subtitles ?? [], choice);
+    if (
+      current?.subtitleResync?.supported &&
+      track?.resyncSupported &&
+      !track.hashMatch &&
+      eligible
+    ) {
+      void checkSubtitleResync(current, track, controller.signal)
+        .then((ready) => {
+          if (!controller.signal.aborted) subtitleResyncReady = ready;
+        })
+        .catch(() => {
+          /* An unavailable capability leaves manual timing and the current subtitle intact. */
+        });
+    }
+    return () => controller.abort();
+  });
+
+  $effect(() => {
+    const current = session;
+    subtitleResyncOffset = 0;
+    subtitleResyncNotice = null;
+    return () => {
+      if (current) {
+        subtitleResyncRequest?.abort();
+        for (const url of alignedUrls) URL.revokeObjectURL(url);
+        alignedUrls.clear();
+      }
+    };
+  });
+
+  async function resyncSelectedSubtitle() {
+    const current = session;
+    const choice = subtitleChoice;
+    const track = current && selectedSubtitle(current);
+    if (
+      !current ||
+      !choice ||
+      !track ||
+      !subtitleResyncReady ||
+      subtitleResyncBusy ||
+      !canRenderAlignedSubtitle()
+    )
+      return;
+    const generation = subtitleSelectionGeneration;
+    const controller = new AbortController();
+    subtitleResyncRequest = controller;
+    subtitleResyncBusy = true;
+    subtitleResyncNotice = null;
+    const pending = showTransition('Re-syncing subtitles with audio…');
+    try {
+      const result = await resyncSubtitle(current, track, controller.signal);
+      if (
+        controller.signal.aborted ||
+        !canRenderAlignedSubtitle() ||
+        ended ||
+        session !== current ||
+        subtitleChoice !== choice ||
+        generation !== subtitleSelectionGeneration
+      )
+        return;
+      const url = URL.createObjectURL(result.blob);
+      alignedUrls.add(url);
+      const previous = current.externalSubtitles?.find((one) => one.value === choice);
+      current.externalSubtitles = [
+        ...(current.externalSubtitles ?? []).filter((one) => one.value !== choice),
+        {
+          value: choice,
+          language: track.language,
+          name: track.name,
+          url,
+          alignedOffset: result.offset,
+        },
+      ];
+      subtitleOffset = 0;
+      subtitleResyncOffset = result.offset;
+      await renderTick();
+      applySubtitles();
+      if (previous && alignedUrls.delete(previous.url)) URL.revokeObjectURL(previous.url);
+      subtitleResyncNotice = `Subtitles re-synced · ${result.offset >= 0 ? '+' : ''}${result.offset.toFixed(1)}s`;
+    } catch {
+      if (
+        !controller.signal.aborted &&
+        session === current &&
+        subtitleChoice === choice &&
+        generation === subtitleSelectionGeneration
+      )
+        subtitleResyncNotice =
+          'Subtitles could not be re-synced. Your current timing is unchanged.';
+    } finally {
+      clearTransition(pending);
+      if (subtitleResyncRequest === controller) {
+        subtitleResyncRequest = undefined;
+        subtitleResyncBusy = false;
+      }
+    }
+  }
+
+  function subtitleResyncItems(): MenuItem[] {
+    const track = selectedSubtitle();
+    if (!track || track.hashMatch || track.source === 'built-in') return [];
+    if (
+      session?.subtitleResync?.supported === false &&
+      session.subtitleResync.reason === 'managed_delivery'
+    )
+      return [
+        {
+          kind: 'item',
+          label: 'Re-sync with audio',
+          description: 'Available when playing with Den Remux',
+          disabled: true,
+          onselect: () => {},
+        },
+      ];
+    return subtitleResyncReady && canRenderAlignedSubtitle()
+      ? [
+          {
+            kind: 'item',
+            label: 'Re-sync with audio',
+            disabled: subtitleResyncBusy,
+            onselect: () => void resyncSelectedSubtitle(),
+          },
+        ]
+      : [];
+  }
   const originalCueTimes = new WeakMap<TextTrackCue, { start: number; end: number }>();
   const timedTracks = new WeakSet<TextTrack>();
   let retiming = false;
@@ -2885,7 +3036,7 @@
   function applySubtitles() {
     const choice = subtitleChoice;
     if (__DEN_TV_PLATFORM__ === 'tizen' && avplay) {
-      avplay.selectSubtitleLanguage(choice);
+      avplay.selectSubtitleLanguage(selectedSubtitleLanguage(), choice);
       avplay.setSubtitleOffset(subtitleOffset);
       return;
     }
@@ -3122,6 +3273,13 @@
   }
 
   async function chooseSubtitle(next: string | null): Promise<void> {
+    if (next !== subtitleChoice) {
+      subtitleSelectionGeneration += 1;
+      subtitleResyncRequest?.abort();
+      subtitleResyncNotice = null;
+      subtitleResyncOffset =
+        session?.externalSubtitles?.find((track) => track.value === next)?.alignedOffset ?? 0;
+    }
     // A change once playback has already shown a frame is a signal the file first chosen was wrong,
     // for den-edge's own outcome report (`finish()`) — the very first pick, before anything played, is
     // just Settings' preference taking effect and says nothing about it.
@@ -3590,6 +3748,7 @@
 
   function finish() {
     if (ended) return;
+    subtitleResyncRequest?.abort();
     ended = true;
     if (tv) setTvPlaybackActive(false);
     clearInterval(timer);
@@ -4069,6 +4228,9 @@
     {#if transitionNotice}
       {@render banner(transitionNotice, { quiet: true, busy: true })}
     {/if}
+    {#if subtitleResyncNotice}
+      {@render banner(subtitleResyncNotice, { quiet: true })}
+    {/if}
     {#if session}
       {#if swapped}
         {@render banner(swapped, { dismiss: () => (swapped = null) })}
@@ -4397,7 +4559,7 @@
                 >Earlier</button
               >{:else}<span>‹ Earlier</span>{/if}
             <strong aria-live="polite"
-              >{subtitleOffset >= 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</strong
+              >{subtitleTimingOffset >= 0 ? '+' : ''}{subtitleTimingOffset.toFixed(1)}s</strong
             >
             {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
                 >Later</button
@@ -4592,16 +4754,17 @@
                   checked: subtitleValue(track) === subtitleChoice,
                   onselect: () => void chooseSubtitle(subtitleValue(track)),
                 })),
+                ...subtitleResyncItems(),
                 ...(customTransport && subtitleChoice !== null
                   ? [
                       {
                         kind: 'item' as const,
-                        label: `Adjust subtitle timing (${subtitleOffset >= 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s)`,
+                        label: `Adjust subtitle timing (${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}s)`,
                         onselect: openSubtitleTiming,
                       },
                       {
                         kind: 'item' as const,
-                        label: `Reset subtitle timing (${subtitleOffset >= 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s)`,
+                        label: `Reset subtitle timing (${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}s)`,
                         disabled: subtitleOffset === 0,
                         onselect: () => {
                           subtitleOffset = 0;

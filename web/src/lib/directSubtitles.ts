@@ -195,6 +195,7 @@ export async function directSubtitles(
       name: string;
       description: string;
       source: 'built-in' | 'opensubtitles';
+      hashMatch?: boolean;
       fallbackTorboxTrack?: number;
     }
   >();
@@ -243,6 +244,7 @@ export async function directSubtitles(
           name: subtitleName(candidateLanguage),
           description: candidateDescription(candidate),
           source: 'opensubtitles',
+          hashMatch: candidate.hashMatch === true,
         });
       }
     }
@@ -323,6 +325,7 @@ export async function directSubtitles(
         name: candidate.name,
         description: candidate.description,
         source: candidate.source,
+        hashMatch: candidate.hashMatch,
         ...(candidate.fallbackTorboxTrack === undefined
           ? {}
           : { fallbackTorboxTrack: candidate.fallbackTorboxTrack, delivery: 'sidecar' as const }),
