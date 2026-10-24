@@ -24,9 +24,9 @@ cd web
 npx vitest bench src/lib/libraryFactStore.bench.ts --run --reporter=verbose
 ```
 
-Its 1,000-episode fixture deterministically observes the old intermediate graph holding 1,000 episode rows and 1,000 marks before compacting to two; the direct path retains two mutable candidates and materialises the same two marks. Three local timing samples were noisy and contradictory (stream/graph means 12.39/12.92 ms, 16.34/20.88 ms and 21.02/18.07 ms), so timing is deliberately not a gate and no latency improvement is claimed from this microbenchmark. Production Worker allocation evidence remains the controlled profiler comparison below, not these object counts.
+Its 1,000-episode fixture deterministically observes the old intermediate graph holding 1,000 episode rows and 1,000 marks before compacting to two; the direct path retains two mutable candidates and materialises the same two marks. Three local timing samples were noisy and contradictory (stream/graph means 12.39/12.92 ms, 16.34/20.88 ms and 21.02/18.07 ms), so timing is deliberately not a gate and no latency improvement is claimed from this microbenchmark. The allocation measurements below isolate the projection/compaction algorithm, not a complete encrypted fact-store transaction or cold import. The warm browser measurements are a separate regression control.
 
-The final opt-in allocation audit sampled five documents per measurement, alternated old/new order, and repeated each shape three times. Set `DEN_FACT_ALLOCATION_AUDIT=1`, `DEN_ALLOCATION_AUDIT=1`, `DEN_FACT_ALLOCATION_OUTPUT=<file>`, and optionally `DEN_FACT_ALLOCATION_PROFILE_DIR=<directory>` on the command above. The raw V8 allocation profiles and summary are in `/tmp/den809-candidate-fact-allocation-final.4SvAGO`.
+The final opt-in allocation audit sampled five iterations of each workload per measurement (five documents for the stress case, 500 for the short-season case), alternated old/new order, and repeated each shape three times. Set `DEN_FACT_ALLOCATION_AUDIT=1`, `DEN_ALLOCATION_AUDIT=1`, `DEN_FACT_ALLOCATION_OUTPUT=<file>`, and optionally `DEN_FACT_ALLOCATION_PROFILE_DIR=<directory>` on the command above. The raw V8 allocation profiles and summary are in `/tmp/den809-candidate-fact-allocation-final.4SvAGO`.
 
 | Shape                    | Old graph sampled JS allocation, median (range) | Streamed sampled JS allocation, median (range) | Median reduction |
 | ------------------------ | ----------------------------------------------: | ---------------------------------------------: | ---------------: |
@@ -37,7 +37,7 @@ Every five-document stress sample made exactly five `season_state_v4` and 5,000 
 
 ### Current browser control and attribution (#809)
 
-The exact production baseline was `de7f048b58b94ba8cb765fab728ab5679a5a255d` (`0.271.133`, including shipped #821); the candidate was `2a0b997ef89f6522600ae75e04bbbcf667eced07`. Both used the same tracked opt-in harness, fixed fixture day, serial browser, and three warm actual-rebuild samples. This warm path is a control rather than the targeted fact-only import, and it showed no material allocation shift:
+The exact production baseline was `de7f048b58b94ba8cb765fab728ab5679a5a255d` (`0.271.133`, including shipped #821); the candidate was `2a0b997e9c1d969ccdace1b2f18f97857faad371` (integrated locally as `f0dfe179`, with harness/report commits recorded in the raw artifacts). Both used the opt-in harness, fixed fixture day, serial browser, and three warm actual-rebuild samples. Harness hashes are recorded per run; later CPU-delta reporting does not change the allocation sampler. This warm path is a control rather than the targeted fact-only import, and it showed no material allocation shift:
 
 | Scale | Baseline main Worker allocation, median (range) | Candidate main Worker allocation, median (range) | Baseline / candidate post-GC JS+WASM |
 | ----- | ----------------------------------------------: | -----------------------------------------------: | -----------------------------------: |
@@ -57,7 +57,11 @@ node --stack-size=65500 scripts/analyze-allocation-profile.mjs \
 
 Focused verification at `2a0b997e` passed 233 tests across `log.test.ts` and seven projection/authority suites, plus Svelte/TypeScript checking and ESLint. The parity fixture pins sparse specials, equal-time ordering, newest versus furthest watched episodes, timeless flags, clears applied by season reset, resume seconds/device, future-stamp ownership through `manifest.newest`, and the unchanged legacy-row path.
 
-## Verification
+### Current candidate verification
+
+The combined local branch at `80471902` passed the full Vitest suite: 2,687 tests passed and 12 were skipped. Svelte checking reported zero errors and warnings; targeted ESLint and Prettier checks passed. The production implementation received independent review, followed by a coordinator review of the cache-preservation delta. These checks were local, not hosted CI, and no physical old-device benchmark was performed.
+
+## Historical verification (previous shipped changes)
 
 Focused integration:
 
