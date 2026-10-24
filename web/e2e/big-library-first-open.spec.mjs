@@ -62,8 +62,11 @@ test('a big household opens for the first time within its budget', async () => {
     const note = (what) => log.push(`+${Date.now() - started}ms ${what}`);
     let reading = true;
     let changes = 0;
+    let deferredPolicyRequested = false;
     page.on('console', (message) => /^den: startup/.test(message.text()) && note(message.text()));
     page.on('request', (request) => {
+      if (new URL(request.url()).pathname.endsWith('/generated/den_core_deferred_bg.wasm'))
+        deferredPolicyRequested = true;
       if (reading && /\/lib\/[^/]+\/changes\?/.test(request.url())) {
         changes++;
         note(`changes ${new URL(request.url()).search}`);
@@ -83,6 +86,10 @@ test('a big household opens for the first time within its budget', async () => {
       await page.waitForTimeout(20_000);
       return;
     }
+    expect(
+      deferredPolicyRequested,
+      'automatic writes keep mutation policy out of first-open rendering',
+    ).toBe(false);
     expect.soft(ms, 'ms to Continue Watching on a first open').toBeLessThan(FIRST_OPEN_MS);
     expect
       .soft(changes, 'changes requests to read the history')

@@ -267,21 +267,34 @@
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
-  // Every device belongs in the household's device list as soon as it opens the library, not only after somebody
-  // visits Settings on that device. This also makes a TV paired from localhost visible later on d.oxy.fi, where the
-  // browser-local pairing record does not exist. A rename retriggers this; otherwise selfEntry writes at most daily.
+  // Every device belongs in the household's device list when it opens the library, not only after somebody visits
+  // Settings on that device. This also makes a TV paired from localhost visible later on d.oxy.fi, where the
+  // browser-local pairing record does not exist. The heartbeat is an automatic mutation: wait until both the
+  // household and active profile have finished their paged first reads, so loading deferred policy does not compete
+  // with opening them on an old device. The existing one-second grace then leaves their first render a turn of its
+  // own without making check-in depend on a particular route painting. A rename retriggers this; otherwise selfEntry
+  // writes at most daily. Explicit actions elsewhere remain immediate.
   $effect(() => {
     const model = householdSettingsModel;
+    const profileModel = session.model;
     if (!model) return;
     const name = thisDevice.name;
-    const timer = setTimeout(
-      () =>
-        void model
-          .heartbeatDevice(name, undefined, __DEN_TV__ ? 'tv' : 'browser')
-          .catch((error: unknown) => console.warn('den: this device could not check in', error)),
-      1_000,
-    );
-    return () => clearTimeout(timer);
+    let current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
+      if (!current) return;
+      timer = setTimeout(
+        () =>
+          void model
+            .heartbeatDevice(name, undefined, __DEN_TV__ ? 'tv' : 'browser')
+            .catch((error: unknown) => console.warn('den: this device could not check in', error)),
+        1_000,
+      );
+    });
+    return () => {
+      current = false;
+      if (timer) clearTimeout(timer);
+    };
   });
   // Linking, invites, assistant consent and the saved search list are the household's. A household without profiles
   // keeps them as ever; once profiles are active they open only for the active Owner session.

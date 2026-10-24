@@ -47,11 +47,13 @@ class FakeService {
   readonly close = vi.fn();
   readonly retry = vi.fn(async () => version(9));
   openFailure?: LibraryServiceFailure;
+  openProgress?: number;
   subscriptionsSeenAtOpen: LibrarySelection[] = [];
 
   async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     this.opened.push(options);
     this.subscriptionsSeenAtOpen = this.subscriptions.map(({ selection }) => selection);
+    if (this.openProgress !== undefined) options.progress?.(this.openProgress);
     if (this.openFailure) throw new LibraryServiceError(this.openFailure);
     this.publish({ kind: 'overview' }, overviewValue(), 1);
     this.publish({ kind: 'continue' }, continueValue(), 2);
@@ -353,6 +355,34 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   service.status({ kind: 'reconnecting', version: version(4) });
   service.publish({ kind: 'continue' }, continueValue(), 5);
   expect(model.continueWatching).not.toBe(before);
+  model.close();
+});
+
+it('distinguishes the first ready page from the settled paged library import', async () => {
+  const service = new FakeService();
+  service.openProgress = 0;
+  const model = new LibraryModel(service, options);
+  let settled = false;
+  void model.initialReadSettled.then(() => (settled = true));
+
+  await model.ready;
+  await Promise.resolve();
+  expect(settled).toBe(false);
+
+  service.opened[0]!.progress?.(0.75);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+
+  service.opened[0]!.progress?.(1);
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  expect(settled).toBe(true);
+  model.close();
+});
+
+it('settles a cached first open with no paged import at ready', async () => {
+  const model = new LibraryModel(new FakeService(), options);
+  await expect(model.ready).resolves.toEqual(version(4));
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
   model.close();
 });
 
