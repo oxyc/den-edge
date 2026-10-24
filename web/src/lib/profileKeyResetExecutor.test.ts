@@ -36,6 +36,11 @@ const FENCE = { generation: 14, head: 'd'.repeat(64) };
 const HOUSEHOLD_KEY = keyOf(4);
 const NOW = 1_800_000_100_000;
 
+// Each death-injection slice replays five full resets, which is CPU time rather than waiting: a fraction of a second
+// on a quiet machine and several times that beside the rest of the suite, so vitest's five seconds measures the
+// machine. A test that never completes still fails, at this bound.
+vi.setConfig({ testTimeout: 30_000 });
+
 function keyOf(byte: number): string {
   return btoa(String.fromCharCode(...new Uint8Array(32).fill(byte)));
 }
