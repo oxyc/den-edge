@@ -653,6 +653,49 @@ test('a page that holds the library’s documents in another order builds nothin
   expect(builds).toBe(1);
 });
 
+test('layouts learnt while a projection builds are carried into the next page', async () => {
+  const shared = library();
+  const layout = (episodes: number) => ({
+    seasons: [{ season: 1, episodes }],
+    last_aired: { season: 1, episode: episodes },
+  });
+  let layouts: ReturnType<AssistantPort['layouts']> = { '100': layout(10) };
+  let builds = 0;
+  let publishing = false;
+  const made = device(shared, [seed('other'), seed('limited')], {
+    layouts: () => layouts,
+    random: () => {
+      if (publishing) {
+        builds++;
+        // Metadata continues to arrive while the projection Worker builds. This layout was not in the request or its
+        // key, but it must survive this page closing so the next page can rebuild once with it.
+        layouts = { ...layouts, '300': layout(30) };
+      }
+      return randomHex();
+    },
+  });
+  const { grant } = await made.authority.consent('Reader', READ_ONLY);
+  publishing = true;
+  expect(await made.authority.publish()).toEqual([grant]);
+  const first = structuredClone(made.records()!.publication!);
+  expect(first.dueAt).toBeGreaterThan(fixed.now);
+  expect(first.layouts).toEqual({ '100': layout(10), '300': layout(30) });
+
+  // A fresh page starts without in-memory shapes. It rebuilds from the carried layout because the stored key still
+  // names the exact earlier request, then the following page recognizes that complete build as current.
+  layouts = {};
+  made.later(60_000);
+  expect(await made.reopen().publish()).toEqual([]);
+  expect(builds).toBe(2);
+  const second = structuredClone(made.records()!.publication!);
+  expect(second.key).not.toBe(first.key);
+  expect(second.layouts).toEqual(first.layouts);
+  expect(second.dueAt).toBeGreaterThan(fixed.now + 60_000);
+  made.later(60_000);
+  expect(await made.reopen().publish()).toEqual([]);
+  expect(builds).toBe(2);
+});
+
 test('a change to the household’s hide rules is a change of the projection, sent once it has settled', async () => {
   const shared = library();
   let builds = 0;
