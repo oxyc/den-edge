@@ -62,8 +62,8 @@ async function routeEdge(page, edge) {
   await page.route('**/version', (route) => route.fulfill({ json: { version: 'sharing-test' } }));
   await page.route('**/config', (route) => route.fulfill({ json: {} }));
   await page.route('**/oauth/connections', (route) => route.fulfill({ json: { connections: [] } }));
-  // Hearth serves streams, so Settings retires the legacy Scout install while Sharing is open: the plugin list (and
-  // with it Sharing's inputs) changes under the first rewrite, as it does for a household that just migrated.
+  // The library still lists Scout alongside combined Hearth. Sharing prefers Hearth without deleting the old
+  // plugin; late route discovery still settles Atlas's placement while the first rewrite is in flight.
   const manifests = {
     'scout/fixture-install': { id: 'com.den.scout', resources: ['stream'] },
     'den/hearthcfg789': { id: 'com.den.hearth', resources: ['stream'] },
