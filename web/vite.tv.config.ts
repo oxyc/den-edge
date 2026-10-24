@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
 import { getTizenVersion, tvCsp } from './scripts/tv-csp.mjs';
 import { bootBodyStyle, bootSplash } from './scripts/tv-boot-splash.mjs';
+import { previewDiagnostics } from './scripts/preview-diagnostics.ts';
 import {
   tizen3FixedViewportMath,
   tizen3FocusSelectors,
@@ -439,6 +440,7 @@ export default mergeConfig(
       ],
     },
     plugins: [
+      previewDiagnostics(process.env.DEN_TV_PREVIEW_DIAGNOSTICS),
       tvEntry,
       workerCompatibility(),
       legacyWorkerOutput(),
