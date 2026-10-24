@@ -9,8 +9,8 @@ const BASE = `/remux/s/${'a'.repeat(22)}/${'b'.repeat(22)}`;
 const ORIGINAL = `${ORIGIN}/fixture-original.vtt`;
 const VTT = (start, text) => `WEBVTT\n\n00:00:${start}.000 --> 00:00:59.000\n${text}\n`;
 
-async function fixture(page, { fail = false, held = false, hashMatch = false } = {}) {
-  const samsung = process.env.DEN_TV_PLATFORM === 'tizen';
+async function fixture(page, platform, { fail = false, held = false, hashMatch = false } = {}) {
+  const samsung = platform === 'tizen';
   if (samsung) await installAvplayInitScript(page);
   await guardNetwork(page);
   await page.route(`${ORIGIN}/assets/**`, (route) => route.continue());
@@ -98,7 +98,7 @@ async function fixture(page, { fail = false, held = false, hashMatch = false } =
       .catch(() => {});
   });
   await page.goto(`${ORIGIN}/test/player.html?remux=/remux&subtitleLanguage=en`);
-  if (!process.env.DEN_TV_PLATFORM)
+  if (platform === 'browser')
     await page.addStyleTag({ path: fileURLToPath(new URL('../src/app.css', import.meta.url)) });
   const video = page.locator('.player video');
   await expect.poll(() => video.evaluate((el) => el.currentTime)).toBeGreaterThan(0);
@@ -115,21 +115,21 @@ async function fixture(page, { fail = false, held = false, hashMatch = false } =
   };
 }
 
-async function manualOffset(page, menu) {
+async function manualOffset(page, menu, platform) {
   await menu.click();
   await page.getByRole('menuitem', { name: /^Adjust subtitle timing/ }).click();
   // The TV editor uses remote Left/Right; desktop has visible half-second controls.
-  if (process.env.DEN_TV_PLATFORM) await page.keyboard.press('ArrowRight');
+  if (platform !== 'browser') await page.keyboard.press('ArrowRight');
   else await page.getByRole('button', { name: 'Later', exact: true }).click();
   await page.keyboard.press('Escape');
 }
 
-export function subtitleResyncJourneys() {
+export function subtitleResyncJourneys(platform = 'browser') {
   test('audio re-sync preserves playback and candidate, clears manual adjustment and retains aligned reset baseline', async ({
     page,
   }) => {
-    const f = await fixture(page);
-    await manualOffset(page, f.menu);
+    const f = await fixture(page, platform);
+    await manualOffset(page, f.menu, platform);
     await f.menu.click();
     const resync = page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true });
     await expect(resync).toBeVisible();
@@ -160,7 +160,7 @@ export function subtitleResyncJourneys() {
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (-10.0s)', exact: true }),
     ).toBeVisible();
     await page.keyboard.press('Escape');
-    await manualOffset(page, f.menu);
+    await manualOffset(page, f.menu, platform);
     await f.menu.click();
     await expect(
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (-9.5s)', exact: true }),
@@ -173,8 +173,8 @@ export function subtitleResyncJourneys() {
   });
 
   test('failed re-sync leaves the current subtitle and manual offset intact', async ({ page }) => {
-    const f = await fixture(page, { fail: true });
-    await manualOffset(page, f.menu);
+    const f = await fixture(page, platform, { fail: true });
+    await manualOffset(page, f.menu, platform);
     await f.menu.click();
     await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
     await expect(
@@ -191,7 +191,7 @@ export function subtitleResyncJourneys() {
   });
 
   test('changing the chosen candidate discards a late alignment', async ({ page }) => {
-    const f = await fixture(page, { held: true });
+    const f = await fixture(page, platform, { held: true });
     await f.menu.click();
     await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
     await expect.poll(f.requested).toBe(1);
@@ -211,7 +211,7 @@ export function subtitleResyncJourneys() {
   });
 
   test('a hash-exact subtitle does not offer audio alignment', async ({ page }) => {
-    const f = await fixture(page, { hashMatch: true });
+    const f = await fixture(page, platform, { hashMatch: true });
     await f.menu.click();
     await expect(
       page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }),
@@ -220,7 +220,7 @@ export function subtitleResyncJourneys() {
   });
 
   test('replacing playback discards an alignment from the previous session', async ({ page }) => {
-    const f = await fixture(page, { held: true });
+    const f = await fixture(page, platform, { held: true });
     await f.menu.click();
     await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
     await expect.poll(f.requested).toBe(1);
