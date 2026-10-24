@@ -95,10 +95,8 @@ pub(crate) const MAX_BODY_IN_FLIGHT: usize = MAX_IN_FLIGHT * 2;
 /// so the larger allowance never multiplies across `MAX_BODY_IN_FLIGHT`.
 pub(crate) const RECOMMEND_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const RECOMMEND_BODIES_IN_FLIGHT: usize = 2;
-/// One legacy migration may carry Scout, Subtitles and Reel install segments plus the TV's target proof. Keep this
-/// explicit and small: unlike recommendations it never contains a library, while 16 KiB left too little room for
-/// the proof and three sealed configs at their bounded sizes.
-pub(crate) const MIGRATION_BODY_BYTES: usize = 32 * 1024;
+/// A guest overlay may carry the host install and personal sealed configs. Bound the complete envelope.
+pub(crate) const GUEST_BODY_BYTES: usize = 32 * 1024;
 
 /// Whether a relayed path is atlas's `/recommend` (an install's config may sit between the prefix and it).
 pub(crate) fn is_recommend(path: &str) -> bool {
@@ -732,8 +730,7 @@ pub async fn guest(
     let (target, guest) = match parsed {
         Some(Ok(p)) => {
             let personal_den = p.addon == "den";
-            // Migration consumes the owner's legacy bearer configs. A grant guest may configure and use only their
-            // own personal Hearth install; it can never exchange the host's escrowed installs.
+            // The retired exchange is unavailable through grant paths as well as the direct relay.
             if personal_den && p.rest == "/migrate" {
                 return Ok(not_found("not_allowed"));
             }
@@ -885,7 +882,7 @@ fn guest_overlay_body(
         envelope.insert("personal".into(), serde_json::Value::String(personal.clone()));
     }
     let encoded = serde_json::to_vec(&serde_json::Value::Object(envelope)).ok()?;
-    (encoded.len() <= MIGRATION_BODY_BYTES).then(|| Bytes::from(encoded))
+    (encoded.len() <= GUEST_BODY_BYTES).then(|| Bytes::from(encoded))
 }
 
 fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: &str) -> Option<String> {
@@ -947,7 +944,6 @@ async fn relay_with(
     let playback_path = crate::handler::den_playback_path(req.uri().path());
     let playback = playback_path && method == Method::POST;
     let playback_probe = playback_path && method == Method::OPTIONS;
-    let migration = req.uri().path() == "/den/migrate" && method == Method::POST;
     if (playback || playback_probe) && !state.den_playback_enabled {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
@@ -1211,8 +1207,6 @@ async fn relay_with(
     };
     let limit = if playback {
         16 * 1024
-    } else if migration {
-        MIGRATION_BODY_BYTES
     } else if recommend {
         RECOMMEND_BODY_BYTES
     } else {
@@ -1402,21 +1396,13 @@ async fn relay_with(
         out = out.header(header::ACCEPT_ENCODING, "identity");
     }
     if let Some(secret) = state.remux_edge_secret.as_deref().filter(|_| {
-        playback
-            || playback_probe
-            || migration
-            || grant.as_ref().is_some_and(|guest| guest.remux() || guest.overlay)
+        playback || playback_probe || grant.as_ref().is_some_and(|guest| guest.remux() || guest.overlay)
     }) {
         out = out.header("x-den-edge-secret", secret);
         if let Some(g) = grant.as_ref() {
             // Hearth uses the same owner for idempotency and for a Remux fallback; never accept this value from Web.
             out = out.header("x-den-owner", format!("grant:{}", g.gid));
         }
-    }
-    if migration && grant.is_none() {
-        // Set only after the public household membership gate above. Browser-supplied internal headers are never
-        // copied into `out`, so Hearth can distinguish an owner migration from every guest and forged request.
-        out = out.header("x-den-migration-owner", "1");
     }
     if public_playback {
         out = out.header("x-den-managed-playback", "1").header("x-den-playback-finalization", "1");
@@ -1501,7 +1487,7 @@ async fn relay_with(
                 rid.to_owned(),
                 upstream,
             ),
-            public_session || playback || migration || guest_configure || playground || speed,
+            public_session || playback || guest_configure || playground || speed,
             member_only || grant.is_some(),
             playback || guest_configure,
             None,
@@ -1697,7 +1683,7 @@ async fn relay_with(
     answer_response(
         &parts,
         collected_body(bytes, charge),
-        public_session || playback || migration || guest_configure || playground || speed,
+        public_session || playback || guest_configure || playground || speed,
         member_only || grant.is_some(),
         playback || guest_configure,
         scope,
@@ -3654,6 +3640,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_config_exchange_never_reaches_hearth_on_any_face() {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move || {
+            let sent = sent.clone();
+            async move {
+                sent.send(()).unwrap();
+                StatusCode::OK
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/den=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
+        state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.example");
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "d-tv.example");
+        state.web_origins = vec!["https://d.example".into()];
+        state.den_playback_enabled = true;
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        for host in ["den.lan", "d.example", "d-api.example", "d-tv.example"] {
+            for method in ["GET", "POST", "OPTIONS"] {
+                let response = h
+                    .send(
+                        method,
+                        "/den/migrate",
+                        Some("{}".into()),
+                        &[
+                            ("host", host),
+                            ("origin", "https://d.example"),
+                            ("access-control-request-method", "POST"),
+                            ("content-type", "application/json"),
+                            ("x-den-library-member", &claim),
+                            ("x-den-migration-owner", "1"),
+                        ],
+                    )
+                    .await;
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{host} {method}");
+                assert!(!response.headers().contains_key("access-control-allow-methods"));
+                assert!(received.try_recv().is_err(), "retired exchange reached upstream");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn public_den_playback_is_household_only_and_forwards_only_its_trusted_headers() {
         use axum::http::{header, HeaderValue};
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3663,7 +3696,7 @@ mod tests {
             let sent = sent.clone();
             async move {
                 let (parts, body) = req.into_parts();
-                let body = axum::body::to_bytes(body, super::MIGRATION_BODY_BYTES).await.unwrap();
+                let body = axum::body::to_bytes(body, super::GUEST_BODY_BYTES).await.unwrap();
                 sent.send((parts.headers, body)).unwrap();
                 let mut response =
                     Response::new(Body::from(json!({ "url": "https://flux.tb-cdn.io/x.m3u8" }).to_string()));
@@ -3698,17 +3731,6 @@ mod tests {
             .await;
         assert_eq!(visitor.status(), StatusCode::NOT_FOUND);
         assert!(received.try_recv().is_err(), "a visitor reached Hearth");
-        let visitor_migration = h
-            .send(
-                "POST",
-                "/den/migrate",
-                Some(r#"{"target":"tv-proof"}"#.into()),
-                &[("host", "d.oxy.fi"), ("content-type", "application/json")],
-            )
-            .await;
-        assert_eq!(visitor_migration.status(), StatusCode::NOT_FOUND);
-        assert!(received.try_recv().is_err(), "an unauthenticated migration reached Hearth");
-
         let claim = registered_library(&h).await;
         Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
         let answer = h
@@ -3742,46 +3764,6 @@ mod tests {
         assert!(!headers.contains_key(header::IF_NONE_MATCH));
         assert!(!headers.contains_key("x-den-owner"));
         assert!(!headers.contains_key("x-den-public-session"));
-
-        let migration = h
-            .send(
-                "POST",
-                "/den/migrate",
-                Some(r#"{"scout":"legacy","target":"tv-proof"}"#.into()),
-                &[
-                    ("host", "d.oxy.fi"),
-                    ("content-type", "application/json"),
-                    ("x-den-library-member", &claim),
-                    ("x-den-edge-secret", "forged"),
-                    ("x-den-owner", "grant:deadbeef"),
-                    ("x-den-migration-owner", "0"),
-                ],
-            )
-            .await;
-        assert_eq!(migration.status(), StatusCode::OK);
-        assert_eq!(migration.headers()[header::CACHE_CONTROL], "no-store");
-        let (headers, body) = received.recv().await.unwrap();
-        assert_eq!(headers["x-den-edge-secret"], "real-edge-secret");
-        assert_eq!(headers["x-den-migration-owner"], "1");
-        assert!(!headers.contains_key("x-den-owner"));
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["target"], "tv-proof");
-
-        let too_large = json!({ "target": "x".repeat(super::MIGRATION_BODY_BYTES) }).to_string();
-        let refused = h
-            .send(
-                "POST",
-                "/den/migrate",
-                Some(too_large),
-                &[
-                    ("host", "d.oxy.fi"),
-                    ("content-type", "application/json"),
-                    ("x-den-library-member", &claim),
-                ],
-            )
-            .await;
-        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(refused.headers()[header::CACHE_CONTROL], "no-store");
-        assert!(received.try_recv().is_err(), "an oversized migration reached Hearth");
     }
 
     #[tokio::test]

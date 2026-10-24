@@ -384,3 +384,48 @@ test('a profile household shows Owner PIN management instead of the legacy matur
   await expect(page.getByRole('heading', { name: 'Maturity ceiling' })).toHaveCount(0);
   await expect(page.getByText('Enter your current Owner PIN to change it.')).toBeVisible();
 });
+
+test('opening Settings preserves legacy installs without automatic config exchange', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (route) =>
+    route.fulfill({
+      json: {
+        addons: {
+          den: [{ url: 'https://den.example/den' }],
+          scout: [{ url: 'https://den.example/scout' }],
+        },
+      },
+    }),
+  );
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { results: [], images: {} } }));
+  // Even a reachable old install must not cause a Settings visit to mutate the plugin list.
+  await page.route('**/scout/OLD/manifest.json', (route) =>
+    route.fulfill({
+      json: {
+        id: 'com.den.scout',
+        resources: ['stream'],
+        name: 'Old Scout',
+        version: '1',
+      },
+    }),
+  );
+  const exchanges = [];
+  await page.route('**/den/migrate', (route) => {
+    exchanges.push(route.request().method());
+    return route.fulfill({ json: { manifestUrl: '/den/NEW/manifest.json' } });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?legacy-addon`);
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: /Plugins/ }).click();
+  await expect(page.getByRole('region', { name: 'Plugins' })).toContainText('den.example');
+  const stored = await page.evaluate(() =>
+    window.fixtureRows().find((row) => row.name === 'plugins'),
+  );
+  expect(Object.keys(stored.values)).toEqual(['https://den.example/scout/OLD/manifest.json']);
+  expect(exchanges).toEqual([]);
+});
