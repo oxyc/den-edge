@@ -4,7 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
-import { SEGMENT, sharedInstallOf, validInstallSegment, type GrantAddon } from './grants';
+import { sharedInstallOf, validInstallSegment, type GrantAddon } from './grants';
 import { isLanURL } from './prefs';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
