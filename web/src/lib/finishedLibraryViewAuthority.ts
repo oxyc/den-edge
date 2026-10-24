@@ -1088,7 +1088,6 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         this.#factDevices = (
           await this.factStore.settings(this.cached.identity.generation, 'devices')
         ).find((row) => row.name === 'devices');
-        this.cached.identity.reconsiderAt = reconsiderAt;
         this.cached.pieces.continue = {
           view: factContinue(home, this.#factShapes, this.#factProjector, this.#factDevices),
           layouts: Object.fromEntries(
@@ -1110,6 +1109,12 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         factManifest.generation !== this.cached.identity.generation
       )
         return false;
+      if (capabilities.includes('continue'))
+        this.cached.identity.reconsiderAt = factViewIdentity(
+          this.cached.identity.libraryId,
+          factManifest,
+          reconsiderAt,
+        ).reconsiderAt;
       if (capabilities.includes('settings')) {
         const rows = await this.factStore.settings(this.cached.identity.generation, 'settings');
         // Assistant grant/read rows cannot be reduced without the assistant policy. A null view promotes to the

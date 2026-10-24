@@ -162,6 +162,7 @@ const DEFAULT_KID_OPERATION = 'default-kid';
  * over one multiplexed connection. Six at a time made Home's first shelves wait on a round trip per six series.
  */
 const METADATA_LOOKUPS = 16;
+const MAX_TIMER_MS = 2_147_483_647;
 
 export type LibraryAffectedSelection = LibrarySelectionScope;
 
@@ -363,6 +364,9 @@ export class LibraryLogAuthority {
    */
   #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
+  #projectionTimer?: ReturnType<typeof setTimeout>;
+  #projectionDeadline = Infinity;
+  #closed = false;
   readonly #viewWriter?: FinishedLibraryViewWriter;
   #kidCreate?: ProfileKidCreateCoordinator;
   #keyReset?: ProfileKeyResetService;
@@ -508,6 +512,7 @@ export class LibraryLogAuthority {
       now: () => Date.now(),
       random: randomHex,
     });
+    this.#scheduleProjectionReconsideration();
   }
 
   /**
@@ -541,6 +546,9 @@ export class LibraryLogAuthority {
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
+    if (this.#projectionTimer !== undefined) clearTimeout(this.#projectionTimer);
+    this.#projectionTimer = undefined;
     this.#listeners.clear();
     this.#log.onDeferred = null;
     this.#admin?.close();
@@ -554,6 +562,7 @@ export class LibraryLogAuthority {
   }
 
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
+    this.#scheduleProjectionReconsideration();
     if (selection.kind === 'simkl') await ensureDeferredSyncPolicy();
     switch (selection.kind) {
       case 'overview':
@@ -599,6 +608,14 @@ export class LibraryLogAuthority {
   ): Promise<LibraryAuthorityCommandResult> {
     this.#writable();
     await ensureDeferredSyncPolicy();
+    try {
+      return await this.#command(command, operationId);
+    } finally {
+      this.#scheduleProjectionReconsideration();
+    }
+  }
+
+  #command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult> {
     switch (command.kind) {
       case 'watchlist.add':
         return this.#titleAction(
@@ -888,6 +905,14 @@ export class LibraryLogAuthority {
   }
 
   async task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
+    try {
+      return await this.#task(task, operationId);
+    } finally {
+      this.#scheduleProjectionReconsideration();
+    }
+  }
+
+  async #task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`, and so
     // does continuing a compound reset: it retires the very household this log belongs to.
     if (
@@ -1695,12 +1720,44 @@ export class LibraryLogAuthority {
 
   #projected(): { rows: Row[]; home: HomeLibraryView } {
     const rows = this.#log.rows();
+    this.#scheduleProjectionReconsideration();
     if (this.#projection?.rows === rows) return this.#projection;
     const foldedAt = performance.now();
     const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
     noteLibraryFold(rows.length, performance.now() - foldedAt);
     this.#projection = { rows, home };
     return this.#projection;
+  }
+
+  /** Reconsider future document stamps once, at the first instant den-core may answer differently. */
+  #scheduleProjectionReconsideration(): void {
+    if (this.#closed) return;
+    // A few narrow test/embedding authorities provide only the LibraryLog methods their surface uses.
+    const summary = (this.#log as Partial<LibraryLog>).currentSummary?.();
+    if (!summary) return;
+    const { reconsiderAt } = summary;
+    if (this.#projectionTimer !== undefined && reconsiderAt === this.#projectionDeadline) return;
+    if (this.#projectionTimer !== undefined) clearTimeout(this.#projectionTimer);
+    this.#projectionTimer = undefined;
+    this.#projectionDeadline = reconsiderAt;
+    if (!Number.isFinite(reconsiderAt)) return;
+    const remaining = reconsiderAt - Date.now();
+    this.#projectionTimer = setTimeout(
+      () => {
+        this.#projectionTimer = undefined;
+        if (Date.now() < this.#projectionDeadline) {
+          this.#scheduleProjectionReconsideration();
+          return;
+        }
+        this.#projection = undefined;
+        this.#projectionDeadline = Infinity;
+        this.#scheduleProjectionReconsideration();
+        this.#viewWriter?.schedule(true);
+        const event: LibraryAuthorityEvent = { kind: 'changed', affected: [{ kind: 'all' }] };
+        for (const listener of this.#listeners) listener(event);
+      },
+      Math.max(0, Math.min(remaining, MAX_TIMER_MS)),
+    );
   }
 
   #coordinates(ref: TitleRef): Array<{ season: number; episode: number }> {

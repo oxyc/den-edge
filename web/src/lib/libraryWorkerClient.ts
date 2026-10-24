@@ -197,7 +197,7 @@ export async function projectRowsInWorker(
 ): Promise<ProjectedRows | undefined> {
   try {
     const opened = openedProjection(source);
-    if (opened) {
+    if (opened && now >= opened.at && now < opened.reconsiderAt) {
       projectedLibraries.set(opened.rows, opened.library);
       if (HOME_VIEW_PROOF && opened.homeView) projectedHomeViews.set(opened.rows, opened.homeView);
       return opened;

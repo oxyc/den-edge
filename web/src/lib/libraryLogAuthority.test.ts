@@ -20,6 +20,7 @@ import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
 import { readFinishedLibraryViews } from './finishedLibraryViews';
 import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
+import type { DocumentRow } from './wire';
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -182,6 +183,157 @@ describe('LibraryLogAuthority', () => {
   };
 
   const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
+
+  it('publishes fresh Home and Continue at an unchanged document deadline, and cancels on close', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    try {
+      const base = 1_789_000_000_000;
+      const future = base + 86_400_000 + 5_000;
+      vi.setSystemTime(base);
+      const document: DocumentRow = {
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id: 1399 },
+        season: 2,
+        seasonReset: null,
+        episodes: {
+          1: {
+            progress: {
+              value: 0.5,
+              at: [future, 0, 'aaaaaaaaaaaaaaaa'],
+              viewing: 7,
+              seconds: 900,
+            },
+            imported: false,
+            plays: {},
+            cleared: null,
+          },
+          2: {
+            progress: {
+              value: 0.6,
+              at: [future + 2_000, 0, 'aaaaaaaaaaaaaaaa'],
+              viewing: 8,
+              seconds: 901,
+            },
+            imported: false,
+            plays: {},
+            cleared: null,
+          },
+          3: {
+            progress: {
+              value: 0.7,
+              at: [future + 4_000, 0, 'aaaaaaaaaaaaaaaa'],
+              viewing: 9,
+              seconds: 902,
+            },
+            imported: false,
+            plays: {},
+            cleared: null,
+          },
+        },
+      };
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      expect(await log.writeRows([document])).toBe(true);
+      const clock = await openClockStore(vault, {
+        key: 'future-projection-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local');
+      const events: unknown[] = [];
+      opened.listen((event) => events.push(event));
+
+      await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({ standings: [] });
+      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(events).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
+      // The next future stamp is scheduled without depending on a listener selecting a projection after the first.
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(events).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events).toEqual([
+        { kind: 'changed', affected: [{ kind: 'all' }] },
+        { kind: 'changed', affected: [{ kind: 'all' }] },
+      ]);
+      await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
+        standings: [{ title: { type: 'tv', id: 1399 }, standing: 'in-progress' }],
+      });
+      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
+        items: [
+          {
+            title: { type: 'tv', id: 1399 },
+            fraction: 0.6,
+            seconds: 901,
+            updatedAt: future + 2_000,
+          },
+        ],
+      });
+      await opened.close();
+
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(events).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reschedules an earlier deadline learned after opening from a non-projection selection', async () => {
+    await ensureSyncPolicy();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    try {
+      const base = 1_789_000_000_000;
+      const future = base + 86_400_000 + 5_000;
+      vi.setSystemTime(base);
+      const vault = memoryVault();
+      const log = (await LibraryLog.openLocal(KEY, vault))!;
+      const clock = await openClockStore(vault, {
+        key: 'future-arrival-clock',
+        createDevice: () => '0123456789abcdef',
+      });
+      const opened = authority(log, clock, 'local');
+      const events: unknown[] = [];
+      opened.listen((event) => events.push(event));
+      await opened.select({ kind: 'settings' });
+
+      expect(
+        await log.writeRows([
+          {
+            format: 4,
+            kind: 'season',
+            title: { type: 'tv', id: 1400 },
+            season: 1,
+            seasonReset: null,
+            episodes: {
+              1: {
+                progress: {
+                  value: 0.5,
+                  at: [future, 0, 'aaaaaaaaaaaaaaaa'],
+                  viewing: 1,
+                  seconds: 100,
+                },
+                imported: false,
+                plays: {},
+                cleared: null,
+              },
+            },
+          },
+        ]),
+      ).toBe(true);
+      // A maintenance change reselects subscribed scopes; even Settings must notice the new absolute deadline.
+      await opened.select({ kind: 'settings' });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(events).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
+      await opened.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('does not keep a second saved-view copy of a browser-local library', async () => {
     await ensureSyncPolicy();

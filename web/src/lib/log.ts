@@ -406,7 +406,7 @@ export class LibraryLog {
   /** A page of den-edge's log was read in the generation it now answers at, by this instance (not only a kept copy). */
   private readCurrentGeneration = false;
   /** Projecting v4 documents allocates rows. Every consumer of one unchanged log shares the completed snapshot. */
-  private rowsCache?: { version: number; rows: Row[] };
+  private rowsCache?: { version: number; at: number; reconsiderAt: number; rows: Row[] };
   /** One whole-log maximum, prepared with the sliced first projection and invalidated by every entries mutation. */
   private newestCache?: {
     version: number;
@@ -2524,11 +2524,18 @@ export class LibraryLog {
   /** Every row, a v4 document shown as the title or season row it stands for (`projectDocument`). */
   rows(): Row[] {
     const version = this.entriesVersion;
-    if (this.rowsCache?.version === version) return this.rowsCache.rows;
+    const now = Date.now();
+    if (
+      this.rowsCache?.version === version &&
+      now >= this.rowsCache.at &&
+      now < this.rowsCache.reconsiderAt
+    )
+      return this.rowsCache.rows;
     const rows = [...this.entries.values()].flatMap(({ row }) =>
-      isDocument(row) ? projectDocument(row) : [row],
+      isDocument(row) ? projectDocument(row, now) : [row],
     );
-    this.rowsCache = { version, rows };
+    const { reconsiderAt } = this.currentSummary(now);
+    this.rowsCache = { version, at: now, reconsiderAt, rows };
     return rows;
   }
 
@@ -2540,23 +2547,40 @@ export class LibraryLog {
   /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
   async rowsInSlices(options?: PolicySliceOptions): Promise<Row[] | null> {
     const version = this.entriesVersion;
-    if (this.rowsCache?.version === version) return this.rowsCache.rows;
     const now = Date.now();
+    if (
+      this.rowsCache?.version === version &&
+      now >= this.rowsCache.at &&
+      now < this.rowsCache.reconsiderAt
+    )
+      return this.rowsCache.rows;
     const source = [...this.entries.values()].map(({ row }) => row);
     if (options?.shouldContinue && !options.shouldContinue()) return null;
     const projected = await projectRowsInWorker(source, now);
     if (projected) {
       if (options?.shouldContinue && !options.shouldContinue()) return null;
       // The log is normally private until this finishes. If an unusual owner changed it meanwhile, retry the exact
-      // current snapshot instead of publishing the stale structured clone the Worker finished.
-      if (version !== this.entriesVersion) return this.rowsInSlices(options);
+      // current snapshot instead of publishing the stale structured clone the Worker finished. Time is part of that
+      // snapshot too: a projection that crossed a future-stamp deadline must be repeated at the new policy instant.
+      const completedAt = Date.now();
+      if (
+        version !== this.entriesVersion ||
+        completedAt < projected.at ||
+        completedAt >= projected.reconsiderAt
+      )
+        return this.rowsInSlices(options);
       this.newestCache = {
         version,
         at: projected.at,
         stamp: projected.stamp,
         reconsiderAt: projected.reconsiderAt,
       };
-      this.rowsCache = { version, rows: projected.rows };
+      this.rowsCache = {
+        version,
+        at: projected.at,
+        reconsiderAt: projected.reconsiderAt,
+        rows: projected.rows,
+      };
       return projected.rows;
     }
     const rows: Row[] = [];
@@ -2565,18 +2589,27 @@ export class LibraryLog {
     const completed = await inPolicySlices(
       this.entries.values(),
       ({ row }) => {
-        rows.push(...(isDocument(row) ? projectDocument(row) : [row]));
+        rows.push(...(isDocument(row) ? projectDocument(row, now) : [row]));
         const summary = newestSummary(row, now);
         if (compareStamps(summary.stamp, stamp) > 0) stamp = summary.stamp;
         reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
       },
       options,
     );
-    if (completed && version === this.entriesVersion) {
+    const completedAt = Date.now();
+    if (
+      completed &&
+      version === this.entriesVersion &&
+      completedAt >= now &&
+      completedAt < reconsiderAt
+    ) {
       this.newestCache = { version, at: now, stamp, reconsiderAt };
-      this.rowsCache = { version, rows };
+      this.rowsCache = { version, at: now, reconsiderAt, rows };
     }
-    return completed ? rows : null;
+    if (!completed) return null;
+    if (version !== this.entriesVersion || completedAt < now || completedAt >= reconsiderAt)
+      return this.rowsInSlices(options);
+    return rows;
   }
 
   /** The log's head as last read (library v2 §2): what an assistant projection says it is as of (assistant v1 §15). */

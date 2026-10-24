@@ -23,6 +23,7 @@ import {
   rowName,
   seal,
   sealPlaintext,
+  type DocumentRow,
   type EpisodeRow,
   type Row,
   type SettingsRow,
@@ -1661,6 +1662,108 @@ describe('LibraryLog', () => {
     await server.append(row(2));
     expect(await log.refresh()).toBe(true);
     expect(log.rows()).not.toBe(projected);
+  });
+
+  it('reconsiders unchanged document rows at their future-stamp deadline and on clock rollback', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const base = 1_789_000_000_000;
+      const future = base + 86_400_000 + 5_000;
+      vi.setSystemTime(base);
+      const document: DocumentRow = {
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id: 1399 },
+        season: 2,
+        seasonReset: null,
+        episodes: {
+          1: {
+            progress: { value: 0.5, at: at(future), viewing: 7, seconds: 900 },
+            imported: false,
+            plays: {},
+            cleared: null,
+          },
+        },
+      };
+      const log = (await LibraryLog.openLocal(LIBRARY_KEY, memoryVault().vault))!;
+      expect(await log.writeRows([document])).toBe(true);
+
+      const before = log.rows();
+      expect(before[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
+      vi.setSystemTime(base + 4_999);
+      expect(log.rows()).toBe(before);
+
+      vi.setSystemTime(base + 5_000);
+      const current = log.rows();
+      expect(current).not.toBe(before);
+      expect(current[0]).toMatchObject({
+        progress: { value: 0.5, viewing: 7, seconds: 900, at: at(future) },
+      });
+
+      vi.setSystemTime(base);
+      const rolledBack = log.rows();
+      expect(rolledBack).not.toBe(current);
+      expect(rolledBack[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
+      log.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a sliced projection that crosses a future-stamp deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const base = 1_789_000_000_000;
+      const future = base + 86_400_000 + 5_000;
+      vi.setSystemTime(base);
+      const document: DocumentRow = {
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id: 1399 },
+        season: 2,
+        seasonReset: null,
+        episodes: {
+          1: {
+            progress: { value: 0.5, at: at(future), viewing: 7, seconds: 900 },
+            imported: false,
+            plays: {},
+            cleared: null,
+          },
+        },
+      };
+      const log = (await LibraryLog.openLocal(LIBRARY_KEY, memoryVault().vault))!;
+      expect(await log.writeRows([document])).toBe(true);
+      let yields = 0;
+      let inserted = false;
+      const rows = await log.rowsInSlices({
+        budgetMs: 0,
+        now: () => 0,
+        yieldTask: async () => {
+          yields++;
+          if (!inserted) {
+            inserted = true;
+            await log.writeRows([
+              {
+                kind: 'set',
+                schema: 2,
+                name: 'crossed-deadline',
+                values: { kept: { value: { bool: true }, at: at(base) } },
+              },
+            ]);
+          }
+          vi.setSystemTime(base + 5_000);
+        },
+      });
+      expect(yields).toBeGreaterThanOrEqual(1);
+      expect(rows?.[0]).toMatchObject({
+        progress: { value: 0.5, viewing: 7, seconds: 900, at: at(future) },
+      });
+      expect(rows).toContainEqual(expect.objectContaining({ name: 'crossed-deadline' }));
+      expect(log.rows()).toBe(rows);
+      log.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the newest cache correct across concurrent conflict merges', async () => {

@@ -102,7 +102,7 @@ async function project(source: Row[], now: number) {
   let stamp: Stamp = ZERO_STAMP;
   let reconsiderAt = Infinity;
   for (const row of source) {
-    rows.push(...(isDocument(row) ? projectDocument(row) : [row]));
+    rows.push(...(isDocument(row) ? projectDocument(row, now) : [row]));
     const summary = newestSummary(row, now);
     if (compareStamps(summary.stamp, stamp) > 0) stamp = summary.stamp;
     reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);

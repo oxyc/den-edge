@@ -78,6 +78,9 @@ export const factViewIdentity = (
   reconsiderAt: number | null,
 ): FinishedLibraryViewIdentity => {
   const rowsVersion = manifest.rowsVersion ?? manifest.head;
+  const deadlines = [reconsiderAt, manifest.newest?.reconsiderAt].filter(
+    (deadline): deadline is number => deadline !== null && deadline !== undefined,
+  );
   return {
     libraryId,
     generation: manifest.generation,
@@ -90,7 +93,7 @@ export const factViewIdentity = (
     rowsVersion,
     layoutVersion: 'facts',
     recommendationVersion: FINISHED_LIBRARY_RECOMMENDATIONS,
-    reconsiderAt,
+    reconsiderAt: deadlines.length ? Math.min(...deadlines) : null,
   };
 };
 
