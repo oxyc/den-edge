@@ -26,6 +26,35 @@ npx vitest bench src/lib/libraryFactStore.bench.ts --run --reporter=verbose
 
 Its 1,000-episode fixture deterministically observes the old intermediate graph holding 1,000 episode rows and 1,000 marks before compacting to two; the direct path retains two mutable candidates and materialises the same two marks. Three local timing samples were noisy and contradictory (stream/graph means 12.39/12.92 ms, 16.34/20.88 ms and 21.02/18.07 ms), so timing is deliberately not a gate and no latency improvement is claimed from this microbenchmark. Production Worker allocation evidence remains the controlled profiler comparison below, not these object counts.
 
+The final opt-in allocation audit sampled five documents per measurement, alternated old/new order, and repeated each shape three times. Set `DEN_FACT_ALLOCATION_AUDIT=1`, `DEN_ALLOCATION_AUDIT=1`, `DEN_FACT_ALLOCATION_OUTPUT=<file>`, and optionally `DEN_FACT_ALLOCATION_PROFILE_DIR=<directory>` on the command above. The raw V8 allocation profiles and summary are in `/tmp/den809-candidate-fact-allocation-final.4SvAGO`.
+
+| Shape                    | Old graph sampled JS allocation, median (range) | Streamed sampled JS allocation, median (range) | Median reduction |
+| ------------------------ | ----------------------------------------------: | ---------------------------------------------: | ---------------: |
+| One 1,000-episode season |                         17.37 MiB (16.68–18.26) |                           9.19 MiB (8.67–9.43) |            47.1% |
+| 100 10-episode seasons   |                         20.07 MiB (19.91–22.29) |                        11.31 MiB (10.20–12.10) |            43.6% |
+
+Every five-document stress sample made exactly five `season_state_v4` and 5,000 `episode_mark` calls in both strategies. Every representative sample made 500 and 5,000 respectively. These are cumulative sampled JavaScript allocations, including collected objects; they are neither peak nor retained memory and exclude WASM allocation. `season_state_v4` still materialises the full state object and `Object.entries` remains linear in episode count: the change removes the additional retained legacy `Row[]` and full Mark/flag graph, not all O(n) working memory.
+
+### Current browser control and attribution (#809)
+
+The exact production baseline was `de7f048b58b94ba8cb765fab728ab5679a5a255d` (`0.271.133`, including shipped #821); the candidate was `2a0b997ef89f6522600ae75e04bbbcf667eced07`. Both used the same tracked opt-in harness, fixed fixture day, serial browser, and three warm actual-rebuild samples. This warm path is a control rather than the targeted fact-only import, and it showed no material allocation shift:
+
+| Scale | Baseline main Worker allocation, median (range) | Candidate main Worker allocation, median (range) | Baseline / candidate post-GC JS+WASM |
+| ----- | ----------------------------------------------: | -----------------------------------------------: | -----------------------------------: |
+| 1     |                            92.1 MiB (91.2–93.1) |                             93.6 MiB (91.8–94.3) |                       27–28 / 28 MiB |
+| 3     |                         421.2 MiB (384.9–429.6) |                          430.6 MiB (393.2–431.7) |                       48–49 / 49 MiB |
+
+Candidate scale-1 Worker build elapsed was 167–185 ms, whole publish elapsed was 1.700–1.767 s, and all-Chromium process CPU delta was 1.528–1.655 s. At scale 3 those were 465–491 ms, 2.734–2.881 s, and 3.749–3.784 s. Worker build and whole publish are elapsed durations; process CPU is a sum across Chromium processes and may exceed either. The runs were not interleaved across revisions, the first baseline scale-3 timing interval briefly overlapped another test startup, and no latency or CPU improvement is claimed.
+
+The complete scale-3 baseline profile attributed 407.61 MiB cumulative allocation in the main Worker versus 39.19 MiB retained JS and 3.44 MiB WASM. Source-map-backed inclusive owners were JSON 69.33 MiB, encrypted local-fact decode 55.25 MiB, `applyLog` 50.14 MiB, `projectDocument` 33.92 MiB (including 1.81 MiB directly mapped inside `episodeRow`), and the fact store 71.95 MiB; these stack-inclusive buckets overlap and must not be added. The page allocated 202.29 MiB, including a 22.11 MiB lower-bound proxy at `LibraryServiceWorkerTransport.#message` for receiving the structured-cloned reply. `postMessage` calls themselves took 16.0 ms in the main Worker, while JSON handled 90,273 stringifies / 39.66 million characters and 104,291 parses / 36.77 million characters. JSON/fact decode and policy/fold graphs, rather than WebCrypto's retained result or WASM memory, are the principal remaining allocation targets.
+
+Reproduce source attribution after a profiled browser run with:
+
+```sh
+node --stack-size=65500 scripts/analyze-allocation-profile.mjs \
+  <profile.json> <copied-dist-assets-directory> > attribution.json
+```
+
 Focused verification at `2a0b997e` passed 233 tests across `log.test.ts` and seven projection/authority suites, plus Svelte/TypeScript checking and ESLint. The parity fixture pins sparse specials, equal-time ordering, newest versus furthest watched episodes, timeless flags, clears applied by season reset, resume seconds/device, future-stamp ownership through `manifest.newest`, and the unchanged legacy-row path.
 
 ## Verification
@@ -58,7 +87,7 @@ Vitest passed 2,678 tests in 202 files, with 12 tests and two files skipped. Pre
 - Returning surfaces used the existing 4× page throttle; dedicated Workers were unthrottled. Actual rebuilds were unthrottled and had `projectionDelayMs=0`; the 6,000 ms artificial hold was absent.
 - The settle gate retained its existing maximum of four rounds. Every recorded normal scale-1/3 run converged after two.
 
-The diagnostic-only tooling is archived outside this branch. Reproducing the commands below first requires applying `/tmp/den809-final-diagnostic-harness/harness.patch` in an isolated checkout at the recorded application revision.
+The current diagnostic-only tooling is tracked and remains off unless `DEN_ALLOCATION_AUDIT=1` is set. The tables below are historical measurements of earlier revisions and retain their original commands and provenance; they are not the candidate comparison above.
 
 Normal scale-1/3 command, run once for each revision and scale:
 
@@ -133,5 +162,13 @@ The historical rebuild values of 6,222/6,202 ms include an injected 6,000 ms `PH
 - Baseline delayed layout: `/tmp/den809-baseline-late-layout.0if6kv`
 - Fixed delayed layout: `/tmp/den809-fixed-late-layout.FVp6UH`
 - Archived diagnostic-only harness patch: `/tmp/den809-final-diagnostic-harness/harness.patch`
+- Current `de7f048b` scale-1 normal n=3: `/tmp/den809-de7f-scale1-normal.rda9Ep`
+- Current `de7f048b` scale-3 normal n=3: `/tmp/den809-de7f-scale3-normal.yofPxl`
+- Current `de7f048b` scale-3 complete profile and attribution: `/tmp/den809-de7f-scale3-profile.GWKQQj`
+- Candidate `2a0b997e` scale-1 normal n=3: `/tmp/den809-candidate-scale1-normal.5HirUX`
+- Candidate `2a0b997e` scale-3 normal n=3: `/tmp/den809-candidate-scale3-normal.NUKG1P`
+- Candidate targeted fact allocation n=3 with raw profiles: `/tmp/den809-candidate-fact-allocation-final.4SvAGO`
 
 Each browser artifact directory contains the raw log, Playwright results copied before the next reset, exact revision, and hashes of the lock and harness files. Two initial command attempts that passed a test filename through the npm wrapper found no tests; their preserved paths are `/tmp/den809-baseline-late-layout.CTcORh` and `/tmp/den809-baseline-late-layout.H8h6sL`. The first complete profiler attempt (`/tmp/den809-baseline-scale3-diagnostic.UdWAro`) profiled every target but its request counter instrumented only the page bundle, not Worker bundles; it is superseded by `diagnostic2` and excluded from the request table.
+
+The attempted whole-household import profile at `/tmp/den809-de7f-scale3-import-profile.XSKB6A` crossed multiple navigations, detached its earlier Workers, and was interrupted rather than reported. It is excluded from every result above; the bounded algorithm profiles and warm single-page browser profiles are complete.
