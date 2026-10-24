@@ -188,6 +188,62 @@ pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<Strin
 /// opened again for the address it now comes from (`relay_with`).
 fn remux_control(path: &str) -> bool {
     matches!(path, "/remux/health" | "/remux/session" | "/remux/releases" | "/remux/speed" | GRANT)
+        || subtitle_resync_route(path).is_some()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubtitleResyncRoute {
+    Align,
+    Staged,
+}
+
+/// Only the alignment control and its bounded text result cross this origin, never session media/playlists.
+fn subtitle_resync_route(path: &str) -> Option<SubtitleResyncRoute> {
+    let (root, leaf) = path.rsplit_once('/')?;
+    signed_session_root(&format!("{root}/master.m3u8"))?;
+    if leaf == "subtitle-resync" {
+        return Some(SubtitleResyncRoute::Align);
+    }
+    let rendition = leaf.strip_prefix("sub")?.strip_suffix(".aligned.vtt")?;
+    let number = rendition.parse::<u32>().ok()?;
+    (number < 8 && number.to_string() == rendition).then_some(SubtitleResyncRoute::Staged)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubtitleResyncRequest {
+    rendition: u32,
+    audio_track: u32,
+    #[serde(default)]
+    check_only: bool,
+}
+
+fn subtitle_resync_answer(
+    body: &[u8],
+    control: &str,
+    asked: &SubtitleResyncRequest,
+) -> Option<serde_json::Value> {
+    let answer: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if asked.check_only {
+        if answer.get("source")?.as_str()? != "opensubtitles" {
+            return None;
+        }
+        return Some(serde_json::json!({
+            "supported": answer.get("supported")?.as_bool()?,
+            "hashMatch": answer.get("hashMatch")?.as_bool()?,
+            "source": "opensubtitles",
+        }));
+    }
+    let root = control.strip_suffix("/subtitle-resync")?;
+    let expected = format!("{root}/sub{}.aligned.vtt", asked.rendition);
+    if answer.get("url")?.as_str()? != expected {
+        return None;
+    }
+    Some(serde_json::json!({
+        "url": expected,
+        "offsetMs": answer.get("offsetMs")?.as_i64()?,
+        "viaSparse": answer.get("viaSparse")?.as_bool()?,
+    }))
 }
 
 /// Where a player asks den-remux to find an episode's intro and credits with its own scout install (oxyc/den#227).
@@ -964,6 +1020,16 @@ async fn relay_with(
     // LAN and tailnet faces are untouched. The hosted TV face is public like Web: its app reaches these routes
     // through den-edge and must prove the same household membership before it can spend the home's address.
     let remux = req.uri().path().starts_with("/remux/");
+    let subtitle_resync = subtitle_resync_route(req.uri().path());
+    if subtitle_resync.is_some_and(|route| {
+        req.uri().query().is_some()
+            || match route {
+                SubtitleResyncRoute::Align => method != Method::POST,
+                SubtitleResyncRoute::Staged => method != Method::GET,
+            }
+    }) {
+        return json(StatusCode::NOT_FOUND, "not_found");
+    }
     let scan = grant.is_none() && method == Method::POST && req.uri().path() == SEGMENT_SCAN;
     if remux && !remux_control(req.uri().path()) && !scan {
         return json(StatusCode::NOT_FOUND, "not_found");
@@ -1135,7 +1201,7 @@ async fn relay_with(
     if regrant && !public_session {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
-    if (playback || playback_probe) && state.remux_edge_secret.is_none() {
+    if (playback || playback_probe || subtitle_resync.is_some()) && state.remux_edge_secret.is_none() {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     // A guest's play refused at its start, counted by code on `/metrics`.
@@ -1162,11 +1228,14 @@ async fn relay_with(
     // An answer that has to be rewritten cannot be read compressed, so a guest's is asked for as it is.
     let identity = playback
         || playback_probe
+        || subtitle_resync.is_some()
         || guest_configure
         || grant.as_ref().is_some_and(|g| g.scrub || g.manifest);
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
-        .filter(|name| !(playback || playback_probe) || *name == header::ACCEPT_ENCODING)
+        .filter(|name| {
+            !(playback || playback_probe || subtitle_resync.is_some()) || *name == header::ACCEPT_ENCODING
+        })
         .filter(|name| !(identity && *name == header::ACCEPT_ENCODING))
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
@@ -1205,7 +1274,11 @@ async fn relay_with(
     } else {
         None
     };
-    let limit = if playback {
+    let limit = if subtitle_resync == Some(SubtitleResyncRoute::Align) {
+        1024
+    } else if subtitle_resync == Some(SubtitleResyncRoute::Staged) {
+        0
+    } else if playback {
         16 * 1024
     } else if recommend {
         RECOMMEND_BODY_BYTES
@@ -1219,6 +1292,14 @@ async fn relay_with(
     };
     drop(body_slot);
     drop(recommend_slot);
+    let resync_request = if subtitle_resync == Some(SubtitleResyncRoute::Align) {
+        match serde_json::from_slice::<SubtitleResyncRequest>(&body) {
+            Ok(asked) if asked.rendition < 8 && asked.audio_track <= 4095 => Some(asked),
+            _ => return json(StatusCode::BAD_REQUEST, "invalid_selection"),
+        }
+    } else {
+        None
+    };
     // Asked before an upstream slot is taken: on the day's first ranking this waits on TMDB.
     let body = if recommend && method == Method::POST {
         crate::billboard::with_tmdb_lists(state, body).await
@@ -1240,7 +1321,12 @@ async fn relay_with(
         }
     };
     let body = match &grant {
-        Some(g) if g.remux() && method == Method::POST && control != "/remux/health" => {
+        Some(g)
+            if g.remux()
+                && method == Method::POST
+                && control != "/remux/health"
+                && subtitle_resync.is_none() =>
+        {
             match remux_body(&state.relays, g, &body) {
                 Some(rewritten) => rewritten,
                 None => return bad_request("guest_install_body"),
@@ -1385,9 +1471,18 @@ async fn relay_with(
     let mut out = axum::http::Request::builder()
         .method(method)
         .uri(&target)
-        .header(header::ACCEPT, if guest_configure { "text/html" } else { "application/json" })
+        .header(
+            header::ACCEPT,
+            if subtitle_resync == Some(SubtitleResyncRoute::Staged) {
+                "text/vtt"
+            } else if guest_configure {
+                "text/html"
+            } else {
+                "application/json"
+            },
+        )
         .header("x-request-id", rid);
-    if overlay {
+    if overlay || resync_request.is_some() {
         out = out.header(header::CONTENT_TYPE, "application/json");
     } else if let Some(content_type) = content_type.filter(|_| !playback_probe) {
         out = out.header(header::CONTENT_TYPE, content_type);
@@ -1396,7 +1491,10 @@ async fn relay_with(
         out = out.header(header::ACCEPT_ENCODING, "identity");
     }
     if let Some(secret) = state.remux_edge_secret.as_deref().filter(|_| {
-        playback || playback_probe || grant.as_ref().is_some_and(|guest| guest.remux() || guest.overlay)
+        playback
+            || playback_probe
+            || subtitle_resync.is_some()
+            || grant.as_ref().is_some_and(|guest| guest.remux() || guest.overlay)
     }) {
         out = out.header("x-den-edge-secret", secret);
         if let Some(g) = grant.as_ref() {
@@ -1433,7 +1531,9 @@ async fn relay_with(
     let Ok(out) = out.body(Full::new(body)) else { return bad_request("upstream_request") };
     // One deadline for the head and the body: an addon that answered its head and then stalled held a relay slot
     // for as long as it stayed silent.
-    let deadline = tokio::time::Instant::now() + if playback { PLAYBACK_TIMEOUT } else { TIMEOUT };
+    // Hearth bounds alignment (including its queue) to 120 seconds; leave its answer time to reach Web.
+    let deadline = tokio::time::Instant::now()
+        + if playback || resync_request.is_some() { PLAYBACK_TIMEOUT } else { TIMEOUT };
     let answer = match tokio::time::timeout_at(deadline, state.relay_client.request(out)).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => {
@@ -1446,6 +1546,54 @@ async fn relay_with(
         }
     };
     let (parts, body) = answer.into_parts();
+    if let Some(route) = subtitle_resync {
+        // Never expose provider errors, redirects or upstream headers through this capability-bearing route.
+        if parts.status != StatusCode::OK {
+            let (status, code) = match parts.status {
+                StatusCode::BAD_REQUEST => (StatusCode::BAD_REQUEST, "invalid_selection"),
+                StatusCode::CONFLICT => (StatusCode::CONFLICT, "unsupported"),
+                StatusCode::GONE => (StatusCode::GONE, "session_ended"),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
+                    (StatusCode::NOT_FOUND, "not_found")
+                }
+                _ => (StatusCode::BAD_GATEWAY, "alignment_failed"),
+            };
+            return json(status, code);
+        }
+        let limit = if route == SubtitleResyncRoute::Staged { 4 * 1024 * 1024 } else { 4096 };
+        let (bytes, charge) = match collect_by(
+            body,
+            deadline,
+            Some(&state.relay_collect_budget),
+            1,
+            limit,
+            Some(&state.metrics),
+        )
+        .await
+        {
+            Ok(collected) => collected,
+            Err((status, code)) => return json(status, code),
+        };
+        if let Some(asked) = resync_request {
+            let Some(answer) = subtitle_resync_answer(&bytes, &control, &asked) else {
+                return json(StatusCode::BAD_GATEWAY, "alignment_failed");
+            };
+            return json_reply(StatusCode::OK, &answer);
+        }
+        if !std::str::from_utf8(&bytes)
+            .is_ok_and(|text| text.starts_with("WEBVTT\n") || text.starts_with("WEBVTT\r\n"))
+        {
+            return json(StatusCode::BAD_GATEWAY, "alignment_failed");
+        }
+        let mut response = Response::new(collected_body(bytes, charge));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/vtt; charset=utf-8"));
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+        return response;
+    }
     // Capability discovery reflects Hearth's live route, not merely Edge's flag. Its body and headers are not part
     // of the public contract: only an exact 204 opts Web in, while other statuses let it keep legacy playback.
     if playback_probe {
@@ -3608,6 +3756,202 @@ mod tests {
             |line: String| serde_json::from_str::<serde_json::Value>(line.trim()).unwrap()["scope"].clone();
         assert_eq!(scope(received.recv().await.unwrap()), "cast");
         assert_eq!(scope(received.recv().await.unwrap()), "browser");
+    }
+
+    #[tokio::test]
+    async fn subtitle_resync_is_authenticated_bounded_and_does_not_open_media_relay() {
+        use crate::handler::tests::body_json;
+        use sha2::{Digest, Sha256};
+        let sid = "a".repeat(22);
+        let sig = "b".repeat(22);
+        let root = format!("/remux/s/{sid}/{sig}");
+        let align = format!("{root}/subtitle-resync");
+        let staged = format!("{root}/sub0.aligned.vtt");
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let expected_root = root.clone();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            let root = expected_root.clone();
+            async move {
+                let (parts, body) = req.into_parts();
+                let body = axum::body::to_bytes(body, 1024).await.unwrap();
+                let input: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let path = parts.uri.path().to_owned();
+                sent.send((parts.method, path.clone(), parts.headers, body)).unwrap();
+                let (status, body) = if !path.starts_with(&root) {
+                    (StatusCode::FORBIDDEN, "bad signature upstream-secret".to_owned())
+                } else if path.ends_with("sub0.aligned.vtt") {
+                    (StatusCode::OK, "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nAligned\n".to_owned())
+                } else if path.ends_with("sub1.aligned.vtt") {
+                    (StatusCode::OK, "V".repeat(4 * 1024 * 1024 + 1))
+                } else if path.ends_with("sub2.aligned.vtt") {
+                    (StatusCode::OK, "media bytes are not VTT".to_owned())
+                } else if input["checkOnly"] == true {
+                    (StatusCode::OK, json!({"supported":true,"hashMatch":false,"source":"opensubtitles","secret":"upstream-secret"}).to_string())
+                } else if input["rendition"] == 1 {
+                    (StatusCode::CONFLICT, "provider error upstream-secret".to_owned())
+                } else if input["rendition"] == 2 {
+                    (StatusCode::OK, "J".repeat(4097))
+                } else if input["rendition"] == 3 {
+                    (StatusCode::OK, json!({"url":"https://provider.invalid/secret", "offsetMs":0,"viaSparse":false}).to_string())
+                } else {
+                    (StatusCode::OK, json!({"url":format!("{root}/sub0.aligned.vtt"),"offsetMs":-1250,"viaSparse":true,"secret":"upstream-secret"}).to_string())
+                };
+                let mut response = Response::new(Body::from(body));
+                *response.status_mut() = status;
+                response.headers_mut().insert("cache-control", "public,max-age=600".parse().unwrap());
+                response.headers_mut().insert("set-cookie", "upstream-secret".parse().unwrap());
+                response
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/remux=http://{addr}"));
+        state.remux_edge_secret = Some("edge-secret".into());
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.example");
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let selection = json!({"rendition":0,"audioTrack":0}).to_string();
+        for host in ["d.example", "den-tv.example"] {
+            assert_eq!(
+                h.send("POST", &align, Some(selection.clone()), &[("host", host)]).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(h.send("GET", &staged, None, &[("host", host)]).await.status(), StatusCode::NOT_FOUND);
+        }
+        assert!(received.try_recv().is_err());
+        let member = [("host", "d.example"), ("x-den-library-member", claim.as_str())];
+        let aligned = h.send("POST", &align, Some(selection.clone()), &member).await;
+        assert_eq!(aligned.status(), StatusCode::OK);
+        assert_eq!(aligned.headers()["cache-control"], "no-store");
+        assert!(!aligned.headers().contains_key("set-cookie"));
+        assert_eq!(body_json(aligned).await, json!({"url":staged,"offsetMs":-1250,"viaSparse":true}));
+        let (_, path, headers, body) = received.recv().await.unwrap();
+        assert_eq!(path, align);
+        assert_eq!(headers["x-den-edge-secret"], "edge-secret");
+        assert!(!headers.contains_key("x-den-library-member"));
+        assert_eq!(body, selection);
+
+        let made = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/grants"),
+                Some(
+                    json!({"name":"Guest", "addons":["scout"],"installs":{"scout":"S".repeat(64)}})
+                        .to_string(),
+                ),
+                &[("x-den-library-member", &claim)],
+            )
+            .await;
+        assert_eq!(made.status(), StatusCode::CREATED);
+        let made = body_json(made).await;
+        let secret = "a".repeat(43);
+        let hash = crate::oauth::b64url(&Sha256::digest(secret.as_bytes()));
+        let redeemed = h
+            .send(
+                "POST",
+                "/grant/redeem",
+                Some(json!({"code":made["code"],"secretHash":hash}).to_string()),
+                &[],
+            )
+            .await;
+        assert_eq!(redeemed.status(), StatusCode::OK);
+        let guest_claim = format!("{}:{secret}", made["gid"].as_str().unwrap());
+        let guest = [("host", "d.example"), ("x-den-grant", guest_claim.as_str())];
+        let checked = h
+            .send(
+                "POST",
+                &align,
+                Some(json!({"rendition":0,"audioTrack":0,"checkOnly":true}).to_string()),
+                &guest,
+            )
+            .await;
+        assert_eq!(checked.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(checked).await,
+            json!({"supported":true,"hashMatch":false,"source":"opensubtitles"})
+        );
+        let (_, _, headers, body) = received.recv().await.unwrap();
+        assert_eq!(headers["x-den-owner"], format!("grant:{}", made["gid"].as_str().unwrap()));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({"rendition":0,"audioTrack":0,"checkOnly":true}),
+            "guest install/owner fields must not enter the strict body"
+        );
+        assert!(!headers.contains_key("x-den-grant"));
+        for auth in [&member, &guest] {
+            let subtitle = h.send("GET", &staged, None, auth).await;
+            assert_eq!(subtitle.status(), StatusCode::OK);
+            assert_eq!(subtitle.headers()["cache-control"], "no-store");
+            assert_eq!(subtitle.headers()["content-type"], "text/vtt; charset=utf-8");
+            let text = axum::body::to_bytes(subtitle.into_body(), 4096).await.unwrap();
+            assert!(text.starts_with(b"WEBVTT\n"));
+            received.recv().await.unwrap();
+            for path in [
+                format!("{root}/master.m3u8"),
+                format!("{root}/v/0.ts"),
+                format!("{root}/sub0.vtt"),
+                format!("{root}/sub00.aligned.vtt"),
+                format!("{align}?url=http://provider.invalid"),
+            ] {
+                assert_eq!(h.send("GET", &path, None, auth).await.status(), StatusCode::NOT_FOUND);
+            }
+            assert_eq!(h.send("GET", &align, None, auth).await.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                h.send("POST", &staged, Some(selection.clone()), auth).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            for bad in [
+                json!({"rendition":-1,"audioTrack":0}),
+                json!({"rendition":0.5,"audioTrack":0}),
+                json!({"rendition":8,"audioTrack":0}),
+                json!({"rendition":0,"audioTrack":4096}),
+                json!({"rendition":0,"audioTrack":0,"checkOnly":"true"}),
+                json!({"rendition":0,"audioTrack":0,"scout":"secret"}),
+            ] {
+                assert_eq!(
+                    h.send("POST", &align, Some(bad.to_string()), auth).await.status(),
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            assert_eq!(
+                h.send("POST", &align, Some(" ".repeat(1025)), auth).await.status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        assert!(received.try_recv().is_err(), "refused requests must not reach Hearth");
+        for (rendition, status, error) in [
+            (1, StatusCode::CONFLICT, "unsupported"),
+            (2, StatusCode::BAD_GATEWAY, "addon_answer_unreadable"),
+            (3, StatusCode::BAD_GATEWAY, "alignment_failed"),
+        ] {
+            let failed = h
+                .send(
+                    "POST",
+                    &align,
+                    Some(json!({"rendition":rendition,"audioTrack":0}).to_string()),
+                    &member,
+                )
+                .await;
+            assert_eq!(failed.status(), status);
+            assert_eq!(failed.headers()["cache-control"], "no-store");
+            assert_eq!(body_json(failed).await, json!({"error":error}));
+            received.recv().await.unwrap();
+        }
+        for rendition in [1, 2] {
+            let failed = h.send("GET", &format!("{root}/sub{rendition}.aligned.vtt"), None, &member).await;
+            assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+            received.recv().await.unwrap();
+        }
+        let wrong_signature = format!("/remux/s/{sid}/{}/sub0.aligned.vtt", "c".repeat(22));
+        let rejected = h.send("GET", &wrong_signature, None, &member).await;
+        assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(rejected).await, json!({"error":"not_found"}));
+        assert_eq!(received.recv().await.unwrap().1, wrong_signature, "Hearth validates the signature");
     }
 
     #[tokio::test]
