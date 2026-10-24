@@ -61,6 +61,35 @@ Focused verification at `2a0b997e` passed 233 tests across `log.test.ts` and sev
 
 The combined local branch at `80471902` passed the full Vitest suite: 2,687 tests passed and 12 were skipped. Svelte checking reported zero errors and warnings; targeted ESLint and Prettier checks passed. The production implementation received independent review, followed by a coordinator review of the cache-preservation delta. These checks were local, not hosted CI, and no physical old-device benchmark was performed.
 
+After rebasing onto `92de3d0a` (main after #825 and #827, neither touching this work's code), `npm run lint` passed and Vitest passed 2,695 tests with 12 skipped. On the previous base, `77e77248`, the 299 Playwright tests in the e2e specs that mention Continue Watching or history passed with no retries.
+
+### Streamed Home projection: measured and dropped
+
+A follow-up candidate (`8198e29b`, rebased as `47994877`) projected Home straight from the stored v4 documents (`projectHomeLibraryView`) instead of from `LibraryLog.rows()`. It is not on this branch. It is preserved, with the measurement below, on `oxyc/den809-home-stream-dropped`.
+
+The reason is that `rows()` is the projection History reads too. Before the candidate, a library Worker that served Home's selections and then History built that projection once, and History reused it through `rows()`'s per-version cache. With the candidate, Home's stream did not fill that cache, so History then built the whole projection again. Measured in Node with `libraryFactStore.bench.ts` on the evidence branch, test `Home then History in one library Worker`. The household had 6,000 documents projecting to 18,000 rows. Each sample was five iterations, with three samples per strategy in alternating order:
+
+| Work                                     | Sampled JS allocation, median (range) | Elapsed, median (range) | `title_state` / `season_state_v4` / `episode_mark` calls |
+| ---------------------------------------- | ------------------------------------: | ----------------------: | -------------------------------------------------------: |
+| Home then History, one shared projection |               454.6 MiB (452.2–457.7) |  1,342 ms (1,327–1,356) |                                 10,000 / 20,000 / 80,000 |
+| Home then History, streamed Home first   |               440.2 MiB (434.9–441.3) |  1,980 ms (1,967–1,995) |                                 20,000 / 40,000 / 80,000 |
+| Home only, projection and full fold      |               420.8 MiB (418.4–423.7) |  1,335 ms (1,314–1,373) |                                 10,000 / 20,000 / 80,000 |
+| Home only, streamed                      |               246.5 MiB (242.3–248.1) |  1,226 ms (1,218–1,250) |                                 10,000 / 20,000 / 80,000 |
+
+Streaming cut Home-only allocation by 41%. When History followed, though, every title and season policy call ran twice: elapsed time went up 48%, while allocation went down only 3%.
+
+The browser shows where that tradeoff falls. In the Chromium phone budget run (`BIG_LIBRARY_SCALE=1`, `DEN_FIXTURE_NOW=1792713600000`), a returning Home visit is served from the saved view: it folds 0 documents on both revisions, so the candidate never runs there. It runs only once the full log is promoted. The table gives the largest library Worker's cumulative sampled allocation per visit, n=3 per revision, with revisions alternating:
+
+| Visit                        | Without candidate (`4e95cacb`), median (range) | With candidate (`47994877`), median (range) |
+| ---------------------------- | ---------------------------------------------: | ------------------------------------------: |
+| Home during a rebuild        |                         116.0 MB (108.8–118.7) |                      109.6 MB (108.8–112.5) |
+| Watchlist (History promoted) |                         118.8 MB (114.6–123.2) |                      114.8 MB (110.8–118.7) |
+| Returning Home               |                 2.3–5.7 MB, 0 documents folded |              2.5–6.4 MB, 0 documents folded |
+
+The browser allocation differences are within run-to-run range. The Worker's `foldMs` cannot compare the two, because the candidate's timer covered its own projection while the parent's started after `rows()` had built it. Host one-minute load during these runs was 10–31 on 10 cores, so no browser latency is claimed. Raw logs are in `/private/tmp/claude-501/-Users-cindy-Projects-Personal-den/76eb9e2d-6503-41e2-90e7-d9223e359d71/scratchpad/issue-809/runs/`.
+
+Before Home's projection is streamed again, History needs to stop depending on a full `rows()` projection, or both need to come from one pass. Otherwise Home's saving becomes History's cost.
+
 ## Historical verification (previous shipped changes)
 
 Focused integration:
