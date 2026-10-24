@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import browser from './vite.config.ts';
 import { getTizenVersion, tvCsp } from './scripts/tv-csp.mjs';
+import { bootBodyStyle, bootSplash } from './scripts/tv-boot-splash.mjs';
 import {
   tizen3FixedViewportMath,
   tizen3FocusSelectors,
@@ -301,7 +302,7 @@ const tvEntry: Plugin = {
       return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 ${packaged ? `<meta http-equiv="Content-Security-Policy" content="${tvCspValue}">` : ''}
 <meta name="viewport" content="${viewport}"><meta name="theme-color" content="#0b0b0f">
-<title>Den TV</title></head><body><div id="app"><p>Starting Den…</p></div>
+<title>Den TV</title></head><body style="${bootBodyStyle}"><div id="app">${bootSplash('Starting Den…')}</div>
 <script type="module" src="/src/tv/main.ts"></script></body></html>`;
     },
   },
