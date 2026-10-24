@@ -50,7 +50,7 @@
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import type { Warning } from '../lib/contentWarnings';
   import type { MenuItem } from '../lib/titleActions';
-  import type { HouseholdTv } from '../settings/values';
+  import type { HouseholdTv } from '../lib/householdTvs';
 
   type Reaction = TitleRow['reaction']['value'];
   let {

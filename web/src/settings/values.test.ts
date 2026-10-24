@@ -5,9 +5,7 @@ import {
   effectiveServicePicks,
   forgetDevice,
   hashPin,
-  householdTvs,
   parsePublicKey,
-  playOnLabel,
   pinMatches,
   readDevices,
   readServers,
@@ -19,6 +17,7 @@ import {
 } from './values';
 import { GUEST_PICKS } from '../lib/services';
 import { selectedDevicesView } from '../lib/librarySelectedSettings';
+import { householdTvs, playOnLabel } from '../lib/householdTvs';
 import type { SettingsRow, Stamp } from '../lib/wire';
 
 const at: Stamp = [1000, 0, 'tv01'];

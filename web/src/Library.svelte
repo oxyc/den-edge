@@ -33,8 +33,8 @@
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
-  import type { Link } from './lib/links.svelte';
-  import { householdTvs } from './settings/values';
+  import { linkedTv, type Link } from './lib/links.svelte';
+  import { householdTvs } from './lib/householdTvs';
   import {
     clock as timecode,
     livePosition,

@@ -11,7 +11,7 @@ import { shareOrCopy } from './share';
 import type { Notify } from './toast';
 import { titleState, type Reaction } from './titleState';
 import type { TitleRow } from './wire';
-import { playOnLabel, type HouseholdTv } from '../settings/values';
+import { playOnLabel, type HouseholdTv } from './householdTvs';
 
 const TITLE_ACTIONS = Symbol('title actions');
 

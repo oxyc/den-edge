@@ -17,7 +17,7 @@
   import type { MenuItem } from '../lib/titleActions';
   import type { Episode } from '../lib/detail';
   import { activateLinkInPlace } from '../lib/linkActivation';
-  import { playOnLabel, type HouseholdTv } from '../settings/values';
+  import { playOnLabel, type HouseholdTv } from '../lib/householdTvs';
   let {
     episode,
     href,
