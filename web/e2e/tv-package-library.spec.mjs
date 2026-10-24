@@ -88,6 +88,10 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     .getByRole('button', { name: 'Accept', exact: true })
     .click();
   await expect.poll(() => edge.libraries.size, { timeout: 30_000 }).toBe(1);
+  // The relay sees the upload before the page commits the new library and resets to Home; leave it alone until then.
+  await expect
+    .poll(() => host.evaluate(() => JSON.parse(localStorage.getItem('den.links') ?? '[]').length))
+    .toBe(1);
   await host.getByRole('link', { name: 'Settings', exact: true }).click();
   await expect(host).toHaveURL(`${ENTRY}#/settings`);
   await host.getByRole('button', { name: /Linked devices/ }).click();
