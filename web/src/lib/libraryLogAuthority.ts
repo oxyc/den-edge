@@ -2651,6 +2651,9 @@ export class LibraryLogAuthority {
 
   /** How an edit answered before it was sent came to end: what the views hold may have changed, and the page is told. */
   #deferred({ outcome, changed }: DeferredDelivery): void {
+    // A server response can merge rows after command() has already done its final deadline check. In particular,
+    // a future-stamped row must arm its absolute reconsideration timer even when no subscribed view is reselected.
+    if (changed) this.#scheduleProjectionReconsideration();
     const announce = (event: LibraryAuthorityEvent) => {
       for (const listener of this.#listeners) listener(event);
     };

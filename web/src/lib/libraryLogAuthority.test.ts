@@ -281,7 +281,7 @@ describe('LibraryLogAuthority', () => {
     }
   });
 
-  it('reschedules an earlier deadline learned after opening from a non-projection selection', async () => {
+  it('reschedules a future deadline learned when a deferred delivery changes the log', async () => {
     await ensureSyncPolicy();
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     try {
@@ -297,8 +297,6 @@ describe('LibraryLogAuthority', () => {
       const opened = authority(log, clock, 'local');
       const events: unknown[] = [];
       opened.listen((event) => events.push(event));
-      await opened.select({ kind: 'settings' });
-
       expect(
         await log.writeRows([
           {
@@ -323,12 +321,16 @@ describe('LibraryLogAuthority', () => {
           },
         ]),
       ).toBe(true);
-      // A maintenance change reselects subscribed scopes; even Settings must notice the new absolute deadline.
-      await opened.select({ kind: 'settings' });
-      await vi.advanceTimersByTimeAsync(4_999);
-      expect(events).toEqual([]);
-      await vi.advanceTimersByTimeAsync(1);
+      // The deferred response lands after command() has returned. No selection follows it to discover the deadline.
+      log.onDeferred!({ outcome: 'sent', changed: true });
       expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(events).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events).toEqual([
+        { kind: 'changed', affected: [{ kind: 'all' }] },
+        { kind: 'changed', affected: [{ kind: 'all' }] },
+      ]);
       await opened.close();
     } finally {
       vi.useRealTimers();
