@@ -181,7 +181,9 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
   page,
 }) => {
   await installAvplayInitScript(page);
-  await routePlayback(page, [{ language: 'en', name: 'English', url: `${ORIGIN}/captions.vtt` }]);
+  await routePlayback(page, [
+    { value: 'en', language: 'en', name: 'English', url: `${ORIGIN}/captions.vtt` },
+  ]);
   await page.route(`${ORIGIN}/captions.vtt`, (route) =>
     route.fulfill({
       contentType: 'text/vtt',
