@@ -11,6 +11,23 @@ The four audit findings were implemented in separate commits and worktrees:
 
 The fixed web head is `be43fdda2af71adf95b060e4093dc0ef996d1580`, based on `fae52480`. The controlled browser baseline is `fae52480` plus the identical test-only late-layout harness, recorded as `abf6bf92`; dependency locks were identical.
 
+## Compact Continue fact candidate
+
+Commit `2a0b997e` (including production change `e33a59ca`) targets only finished fact-only imports. For one v4 season document, that path now visits the `season_state_v4` answer a row at a time and feeds each row through the unchanged shared-core `episode_mark` operation into the existing Continue compactor. It does not remove any of those per-episode policy calls, and each `EpisodeRow` is still allocated transiently; it removes the retained episode-row array and full `LibraryFold` mark/flag maps, materialising only Continue's at-most-two winning marks per series (plus its furthest timeless flag).
+
+Full `LibraryLog` imports, migrations and own-write retention explicitly keep the old `projectDocument` path. Those consumers retain episode rows for History/title-season detail and reuse the same document objects through `projectDocument`'s `WeakMap`; streaming there would only make the later full projection repeat work. The finished fact authority opens sealed facts on later visits, so it has no same-object row-cache consumer.
+
+The focused benchmark is reproducible with:
+
+```sh
+cd web
+npx vitest bench src/lib/libraryFactStore.bench.ts --run --reporter=verbose
+```
+
+Its 1,000-episode fixture deterministically observes the old intermediate graph holding 1,000 episode rows and 1,000 marks before compacting to two; the direct path retains two mutable candidates and materialises the same two marks. Three local timing samples were noisy and contradictory (stream/graph means 12.39/12.92 ms, 16.34/20.88 ms and 21.02/18.07 ms), so timing is deliberately not a gate and no latency improvement is claimed from this microbenchmark. Production Worker allocation evidence remains the controlled profiler comparison below, not these object counts.
+
+Focused verification at `2a0b997e` passed 233 tests across `log.test.ts` and seven projection/authority suites, plus Svelte/TypeScript checking and ESLint. The parity fixture pins sparse specials, equal-time ordering, newest versus furthest watched episodes, timeless flags, clears applied by season reset, resume seconds/device, future-stamp ownership through `manifest.newest`, and the unchanged legacy-row path.
+
 ## Verification
 
 Focused integration:
