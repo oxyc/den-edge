@@ -893,6 +893,48 @@ describe('LibraryLog', () => {
     expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
   });
 
+  it('shows an edit that settles while another open reads the kept library', async () => {
+    const server = await edge([row(1)], [], 'generation-1');
+    const { storage } = memoryStorage();
+    const memory = memoryVault();
+    // The edit settles in the background: it keeps the acknowledged row in the fact store, then drops its kept copy.
+    // Here that happens just as the second open reads the kept work, and not before.
+    let armed = false;
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let dropped!: () => void;
+    const discarded = new Promise<void>((resolve) => (dropped = resolve));
+    const vault: Vault = {
+      ...memory.vault,
+      entries: async (prefix) => {
+        if (armed && prefix.endsWith(':runtime:pending:')) {
+          release();
+          await discarded;
+        }
+        return memory.vault.entries(prefix);
+      },
+      commit: async (changes) => {
+        if (armed) await released;
+        await memory.vault.commit!(changes);
+      },
+      delete: async (key) => {
+        await memory.vault.delete(key);
+        if (armed && key.includes(':runtime:pending:')) dropped();
+      },
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
+    armed = true;
+
+    await log.write(row(2));
+    const offline: typeof fetch = async () => {
+      throw new TypeError('offline');
+    };
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, offline, storage, vault))!;
+
+    expect(reopened.fromCache).toBe(true);
+    expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
+  });
+
   it('advertises wire 4 and the generation on every library request', async () => {
     const server = await edge([row(1)]);
     const requests: RequestInit[] = [];
