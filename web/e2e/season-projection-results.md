@@ -34,12 +34,14 @@ Vitest passed 2,678 tests in 202 files, with 12 tests and two files skipped. Pre
 
 ## Browser provenance
 
-- Fixture day: `DEN_FIXTURE_NOW=1792713600000` (`2026-10-24T00:00:00.000Z`).
+- Fixture day: `DEN_FIXTURE_NOW=1792713600000` (`2026-10-23T00:00:00.000Z`).
 - Mac16,1, Apple M4 (10 logical CPUs), 24 GiB, macOS 27.0 build 26A428.
 - Node 24.19.0, npm 11.17.0, Playwright 1.64.1, Chromium 156.0.8078.4.
 - Serial execution, one browser test at a time. Each sample opened a new page and Workers in the same warm browser context and origin stores.
 - Returning surfaces used the existing 4× page throttle; dedicated Workers were unthrottled. Actual rebuilds were unthrottled and had `projectionDelayMs=0`; the 6,000 ms artificial hold was absent.
 - The settle gate retained its existing maximum of four rounds. Every recorded normal scale-1/3 run converged after two.
+
+The diagnostic-only tooling is archived outside this branch. Reproducing the commands below first requires applying `/tmp/den809-final-diagnostic-harness/harness.patch` in an isolated checkout at the recorded application revision.
 
 Normal scale-1/3 command, run once for each revision and scale:
 
@@ -80,7 +82,7 @@ BIG_LIBRARY_DEBUG=1 npx playwright test --config playwright.budgets.config.ts \
 | baseline |                                                  88,140 |              4,520 |                  83,620 |                            552.5 MiB |
 | fixed    |                                                   9,040 |              4,520 |                   4,520 |                            405.2 MiB |
 
-Both profiles were complete, with no missing targets or protocol errors; this also verifies the previously unverified `Page.enable` path. Each diagnostic kept one retired nested projection Worker alive so its profile could be read. Diagnostic retained memory (75/76 MiB) and RSS therefore do not represent normal lifetime and are excluded from the normal table. This identifies a key-stringification reduction while demonstrating unchanged real policy request semantics; it is not an app-wide 2× claim.
+Both profiles were complete, with no missing targets or protocol errors; this also verifies the previously unverified `Page.enable` path. Each diagnostic kept one retired nested projection Worker alive so its profile could be read. Diagnostic retained memory (75/76 MiB) and RSS therefore do not represent normal lifetime and are excluded from the normal table. This identifies a key-stringification reduction with unchanged real policy request counts; parity tests, not counts alone, check result semantics. It is not an app-wide 2× claim.
 
 ### Late-layout convergence
 
@@ -100,6 +102,8 @@ The report previously recorded the following scale-1 full-journey samples on the
 | Projection rebuild | batched seasons        |         139.1 |              10.5 |      2.3 |         6,202 |                 267 |
 
 The Watchlist Worker folded 13,724 derived rows from 6,132 hydrated documents in both historical samples. Batching removed 15.4 MiB (11.9%) of sampled boundary allocation in Watchlist and 16.5 MiB (10.6%) in rebuild without changing the retained graph; the single-run latency differences were not attributed to batching. The complete-Worker 113.5 MiB remainder includes opening, projection, folding, and reply rather than episode-row objects alone.
+
+The historical rebuild values of 6,222/6,202 ms include an injected 6,000 ms `PHONE_PROJECTION_MS` hold. They are not CPU measurements or undelayed core-build durations and must not be compared directly with the current 174–482 ms build measurements.
 
 ## Raw artifacts
 
