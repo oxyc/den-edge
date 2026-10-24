@@ -3071,6 +3071,16 @@ export class LibraryLog {
     }
   }
 
+  /**
+   * Keep what changed and wait for it. False when the keep failed (`persist` has logged it and left `dirty` set): the
+   * kept copy of the work that changed it must then stay, to be sent again, rather than leave the edit nowhere here.
+   */
+  private async keptForNextVisit(): Promise<boolean> {
+    this.persist();
+    await this.saving;
+    return !this.dirty || !this.local;
+  }
+
   /** Every row another tab kept of this library kept only here, merged with this tab's the way a write is merged. */
   private async takeKept(): Promise<void> {
     const saved = await this.kept<Snapshot>(SNAPSHOT);
@@ -3483,9 +3493,7 @@ export class LibraryLog {
       // A return visit opens the acknowledged copy before it reaches den-edge. Keep the applied row there before
       // dropping its recovery copy, or an immediate reload briefly restores the older row and an offline reload loses
       // the edit altogether.
-      this.persist();
-      await this.saving;
-      if (kept) await this.discard(kept);
+      if ((await this.keptForNextVisit()) && kept) await this.discard(kept);
     }
     return saved ?? (kept ? this.project(local) : null);
   }
@@ -3622,9 +3630,7 @@ export class LibraryLog {
       })
       .finally(() => kept && this.flushing.delete(kept));
     if (sent) {
-      this.persist();
-      await this.saving;
-      if (kept) {
+      if ((await this.keptForNextVisit()) && kept) {
         await this.discard(kept);
         this.rejected.delete(kept);
       }
@@ -4559,8 +4565,9 @@ export class LibraryLog {
           !(await this.writeOps(ops, undefined, false, key, false, riders))
         )
           continue;
-        if (!restore.length) await this.discard(key);
-        else if ((await this.flushRows(key, [restore])) && kind === 'restore')
+        if (!restore.length) {
+          if (await this.keptForNextVisit()) await this.discard(key);
+        } else if ((await this.flushRows(key, [restore])) && kind === 'restore')
           this.recoveryRows = undefined;
       } catch (error) {
         // Keep unsent work; never acknowledge or delete it.
