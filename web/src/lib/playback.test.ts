@@ -119,6 +119,7 @@ describe('startPlayback', () => {
     expect(result).toMatchObject({
       external: true,
       playlist: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
+      subtitleResync: { supported: false, reason: 'managed_delivery' },
       release,
       duration: 0,
       audioTrack: 1,
@@ -164,6 +165,17 @@ describe('startPlayback', () => {
           endUrl: '/remux/s/id/sig',
           heartbeatUrl: '/remux/s/id/sig/heartbeat',
           reportUrl: '/remux/s/id/sig/report',
+          subtitleResync: { supported: true, url: '/remux/s/id/sig/subtitle-resync' },
+          subtitles: [
+            {
+              language: 'en',
+              name: 'English',
+              source: 'opensubtitles',
+              hashMatch: null,
+              resyncSupported: true,
+              rendition: 0,
+            },
+          ],
         },
       }),
     );
@@ -176,6 +188,16 @@ describe('startPlayback', () => {
       castOrigin: 'https://cast.example',
       hinted: true,
       duration: 7200,
+      subtitleResync: { supported: true, url: '/remux/s/id/sig/subtitle-resync' },
+      subtitles: [
+        {
+          value: 'remux:opensubtitles:0:en',
+          source: 'opensubtitles',
+          hashMatch: false,
+          resyncSupported: true,
+          rendition: 0,
+        },
+      ],
       control: {
         end: 'https://den.example/remux/s/id/sig',
         heartbeat: 'https://den.example/remux/s/id/sig/heartbeat',

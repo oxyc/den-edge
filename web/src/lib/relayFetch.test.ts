@@ -46,6 +46,8 @@ test('claims membership on the relayed addon and household API paths', async () 
     '/remux/health',
     '/remux/session',
     '/remux/releases',
+    `/remux/s/${'a'.repeat(22)}/${'b'.repeat(22)}/subtitle-resync`,
+    `/remux/s/${'a'.repeat(22)}/${'b'.repeat(22)}/sub2.aligned.vtt`,
     '/grant/den-configure',
   ]) {
     await relayFetch(path);

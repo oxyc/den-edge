@@ -131,11 +131,14 @@ function remuxSubtitles(value: unknown): NonNullable<Session['subtitles']> {
     const name = text(track?.name);
     if (!track || !language || !name) return [];
     const supplied = text(track.value);
-    const source: 'built-in' | 'opensubtitles' = /(?:\(in file\)|\bbuilt-in\b)/i.test(name)
-      ? 'built-in'
-      : /opensubtitles/i.test(name)
+    const source: 'built-in' | 'opensubtitles' =
+      track.source === 'opensubtitles'
         ? 'opensubtitles'
-        : 'built-in';
+        : /(?:\(in file\)|\bbuilt-in\b)/i.test(name)
+          ? 'built-in'
+          : /opensubtitles/i.test(name)
+            ? 'opensubtitles'
+            : 'built-in';
     return [
       {
         value: supplied ?? `remux:${source}:${index}:${language}`,
@@ -143,6 +146,12 @@ function remuxSubtitles(value: unknown): NonNullable<Session['subtitles']> {
         name,
         description: text(track.description),
         source,
+        hashMatch: track.hashMatch === true,
+        resyncSupported: track.resyncSupported === true,
+        rendition:
+          Number.isSafeInteger(track.rendition) && Number(track.rendition) >= 0
+            ? Number(track.rendition)
+            : undefined,
       },
     ];
   });
@@ -209,6 +218,7 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
       : [];
     return {
       external: true,
+      subtitleResync: { supported: false, reason: 'managed_delivery' },
       playlist,
       duration: 0,
       release,

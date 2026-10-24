@@ -15,6 +15,9 @@ import { serviceOrigin } from './runtimeUrl';
 export { nativeHls } from './nativeHls';
 
 export interface Session {
+  /** A session-bound alignment control; never the source URL or an addon credential. */
+  subtitleResync?:
+    { supported: true; url: string } | { supported: false; reason: 'managed_delivery' };
   /** A URL Hearth returned without a Remux lifecycle. Client-only; never sent by Hearth. */
   external?: boolean;
   /** Blob-backed WebVTT tracks fetched through Den, optionally staged for a Cast receiver. */
@@ -24,6 +27,8 @@ export interface Session {
     name: string;
     url: string;
     castUrl?: string;
+    /** Measured baseline already baked into this sidecar, in seconds. */
+    alignedOffset?: number;
   }[];
   /** Materializes one selected external subtitle language; repeated calls reuse its blob. */
   loadExternalSubtitle?: (value: string) => Promise<{
@@ -98,6 +103,9 @@ export interface Session {
     description?: string;
     /** Where this concrete picker row gets its cues. */
     source?: 'built-in' | 'opensubtitles';
+    hashMatch?: boolean;
+    resyncSupported?: boolean;
+    rendition?: number;
     /** A complete VTT capability that can be switched without replacing the video stream. */
     url?: string;
     delivery?: 'sidecar' | 'torbox';
