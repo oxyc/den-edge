@@ -26,7 +26,9 @@
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { arch, cpus, loadavg, platform, release, totalmem } from 'node:os';
 import { E2E_ORIGIN } from './base-url.mjs';
+import { allocationAudit } from './allocation-audit.mjs';
 import { newEdge } from './guest-edge.mjs';
 import {
   BIG_LIBRARY_SCALE,
@@ -37,6 +39,8 @@ import {
   PHONE_PROJECTION_MS,
   routeBigHousehold,
   WATCHED_SERIES,
+  firstPublish,
+  fixtureNow,
 } from './big-library.mjs';
 
 /** Milliseconds from navigation start to a surface's content. Today's iPhone took 5–10 s for most of these. */
@@ -227,6 +231,8 @@ function countWorkerWork(page) {
  * page's own Workers: a Worker one of them starts (the projection's) ends with its build.
  */
 async function watchMemory(cdp) {
+  if (process.env.DEN_ALLOCATION_PROFILE === '1')
+    return allocationAudit(cdp, test.info().outputPath(`profile-${Date.now()}`));
   const keep = () => {
     const memories = (globalThis.__denWasm = []);
     const kept = (made) => {
@@ -311,7 +317,17 @@ async function watchMemory(cdp) {
 /** `memoryMB`, the total of what `watchMemory` read, and `held`, the reading; nothing where nothing was read. */
 const heldMB = (held) =>
   held
-    ? { memoryMB: Math.round(held.reduce((sum, { heap, wasm }) => sum + heap + wasm, 0)), held }
+    ? {
+        ...(held.profileComplete === false
+          ? {}
+          : {
+              memoryMB: Math.round(held.reduce((sum, { heap, wasm }) => sum + heap + wasm, 0)),
+            }),
+        held,
+        ...(held.profileComplete === undefined
+          ? {}
+          : { profileComplete: held.profileComplete, profileErrors: held.profileErrors }),
+      }
     : {};
 
 /**
@@ -399,6 +415,55 @@ async function pageFootprint(page) {
       `this page's WebContent process is not known: ${marked.length} of ${JSON.stringify(processes)} grew`,
     );
   return { footprintMB: marked[0][1], processes };
+}
+
+/** Chromium's process list, with each process's resident bytes from the host where available. */
+async function chromiumProcessFootprint(browser) {
+  try {
+    const session = await browser.newBrowserCDPSession();
+    const { processInfo } = await session.send('SystemInfo.getProcessInfo');
+    await session.detach();
+    const rss = new Map(
+      processInfo.map(({ id }) => {
+        try {
+          const kb = Number(
+            execFileSync('ps', ['-o', 'rss=', '-p', String(id)])
+              .toString()
+              .trim(),
+          );
+          return [id, Number.isFinite(kb) ? kb * 1024 : null];
+        } catch {
+          return [id, null];
+        }
+      }),
+    );
+    const browserProcesses = processInfo.map(({ id, type, cpuTime }) => ({
+      pid: id,
+      type,
+      cpuSeconds: cpuTime,
+      rssBytes: rss.get(id),
+    }));
+    return {
+      processRSSBytes: browserProcesses.reduce((sum, process) => sum + (process.rssBytes ?? 0), 0),
+      processRSSComplete: browserProcesses.every((process) => process.rssBytes !== null),
+      processCpuSeconds: browserProcesses.reduce((sum, process) => sum + process.cpuSeconds, 0),
+      browserProcesses,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** CPU accumulated between two Chromium process snapshots; new processes count from their own zero. */
+function chromiumCpuDelta(before, after) {
+  if (!before?.browserProcesses || !after?.browserProcesses) return {};
+  const earlier = new Map(before.browserProcesses.map(({ pid, cpuSeconds }) => [pid, cpuSeconds]));
+  return {
+    processCpuDeltaSeconds: after.browserProcesses.reduce(
+      (sum, process) => sum + Math.max(0, process.cpuSeconds - (earlier.get(process.pid) ?? 0)),
+      0,
+    ),
+  };
 }
 
 /** One returning visit to `surface`: the ms its content took, the Worker transactions, the longest task. */
@@ -593,7 +658,9 @@ for (const [label, type, device, options] of ENGINES) {
       type === webkit && !process.env.CI && !existsSync(webkit.executablePath()),
       'needs WebKit: npx playwright install webkit',
     );
-    test.setTimeout(300_000 * BIG_LIBRARY_SCALE);
+    test.setTimeout(
+      (process.env.DEN_ALLOCATION_PROFILE === '1' ? 900_000 : 300_000) * BIG_LIBRARY_SCALE,
+    );
     const footprint = type === webkit ? pageFootprint : undefined;
     const browser = await type.launch(
       type === chromium ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {},
@@ -604,7 +671,97 @@ for (const [label, type, device, options] of ENGINES) {
     try {
       await context.addInitScript(markReady);
       const edge = newEdge({ profiles: true });
-      await bigHousehold(context, edge);
+      const processFootprint =
+        type === chromium ? () => chromiumProcessFootprint(browser) : undefined;
+      await bigHousehold(context, edge, {
+        acceptInFlightPrimingPublish: process.env.DEN_ALLOCATION_AUDIT === '1',
+      });
+      if (process.env.DEN_ALLOCATION_AUDIT === '1') {
+        const samples = [];
+        const auditPath = test.info().outputPath('audit-results.json');
+        const writeAudit = () =>
+          writeFileSync(
+            auditPath,
+            JSON.stringify(
+              {
+                engine: label,
+                browserVersion: browser.version(),
+                scale: BIG_LIBRARY_SCALE,
+                fixtureNow: fixtureNow(),
+                fixtureDate: new Date(fixtureNow()).toISOString(),
+                diagnostic: process.env.DEN_ALLOCATION_PROFILE === '1',
+                revision: execFileSync('git', ['rev-parse', 'HEAD']).toString().trim(),
+                host: {
+                  platform: platform(),
+                  release: release(),
+                  arch: arch(),
+                  cpuModel: cpus()[0]?.model,
+                  logicalCpus: cpus().length,
+                  totalMemoryBytes: totalmem(),
+                  node: process.version,
+                },
+                conditions: {
+                  page: 'new page and Workers for every sample',
+                  browserContext: 'same warm IndexedDB, Cache Storage, and HTTP/application caches',
+                  fixture: 'same generated household and UTC fixture day',
+                  cpu: 1,
+                  cpuScope: 'unthrottled',
+                },
+                units: {
+                  latency: 'milliseconds elapsed, not CPU time',
+                  'held.heap/held.wasm/held.allocated': 'MiB (bytes / 2^20)',
+                  processRSSBytes: 'bytes',
+                  processCpuSeconds: 'cumulative seconds',
+                },
+                samples,
+              },
+              null,
+              2,
+            ),
+          );
+        writeAudit();
+        for (let repeat = 0; repeat < Number(process.env.DEN_AUDIT_REPEATS ?? 3); repeat++) {
+          await forgetPublication(context, edge);
+          const page = await context.newPage();
+          await routeBigHousehold(page, edge);
+          const work = countWorkerWork(page);
+          let memory;
+          if (type === chromium) {
+            const cdp = await context.newCDPSession(page);
+            memory = await watchMemory(cdp);
+          }
+          const builds = [];
+          page.on('console', (message) => {
+            const match = /^den: assistant projection built in (\d+)ms/.exec(message.text());
+            if (match) builds.push(Number(match[1]));
+          });
+          const processBefore = await processFootprint?.();
+          const started = performance.now();
+          const outcome = await firstPublish(page, '/');
+          const processAfter = await processFootprint?.();
+          const result = {
+            repeat,
+            surface: 'Actual rebuild',
+            outcome,
+            elapsedMs: performance.now() - started,
+            projectionDelayMs: 0,
+            pageCpuRate: 1,
+            workerCpuRate: 1,
+            buildMs: builds,
+            ...(await work()),
+            ...heldMB(await memory?.()),
+            ...processAfter,
+            ...chromiumCpuDelta(processBefore, processAfter),
+            hostLoadAverage: loadavg(),
+          };
+          samples.push(result);
+          console.log(`AUDIT ${JSON.stringify(result)}`);
+          writeAudit();
+          await page.close();
+          await settleProjection(context, edge);
+        }
+        return;
+      }
       const rebuild = await openDuringRebuild(context, edge, { ...options, footprint });
       console.log(`${label}: during a rebuild ${JSON.stringify(rebuild)}`);
       for (const [name, ms] of [

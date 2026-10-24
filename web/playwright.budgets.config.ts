@@ -28,6 +28,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',
+  outputDir: process.env.DEN_BENCH_OUTPUT_DIR ?? 'test-results',
   use: { baseURL: E2E_ORIGIN },
   webServer: {
     command: `npm run build && npx vite preview --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
