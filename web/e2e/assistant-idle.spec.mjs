@@ -83,9 +83,12 @@ test('a library with no assistant connection makes no assistant request and load
       if (message.text().includes('library import finished')) timing.importFinished ??= Date.now();
     });
     await page.goto(`${E2E_ORIGIN}/`);
-    // The library has opened and synced: whatever the page would start for assistants, it has had time to.
     await expect.poll(() => synced, { timeout: 20_000 }).toBeGreaterThan(1);
-    expect(startupCore, 'the Worker’s startup fetch is seen').toBe(true);
+    // The finished views' reads come first and need no policy; the Worker asks for startup policy once it is ready,
+    // a few milliseconds after them, so it is waited for rather than sampled.
+    await expect
+      .poll(() => startupCore, { timeout: 15_000, message: 'the Worker’s startup fetch is seen' })
+      .toBe(true);
     await expect
       .poll(() => deferredCore, {
         timeout: 15_000,
