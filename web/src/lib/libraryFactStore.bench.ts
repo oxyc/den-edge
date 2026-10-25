@@ -232,7 +232,7 @@ test('Home and History in one library Worker', async () => {
   const foldedHome = (held: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), held), held);
   const work = {
     'Home only: rows() + full fold': () => foldedHome(rows(household())),
-    'Home only: one pass over documents': () => projectHomeLibraryView(household(), NOW),
+    'Home only: rows() + one pass': () => projectHomeLibraryView(rows(household())),
     'History only: rows() + full fold': () => {
       const held = rows(household());
       foldedHome(held);
@@ -244,14 +244,14 @@ test('Home and History in one library Worker', async () => {
       foldedHome(held);
       return history(held);
     },
-    'Home then History: one pass, then rows()': () => {
-      const stored = household();
-      projectHomeLibraryView(stored, NOW);
-      return history(rows(stored));
+    'Home then History: rows() + one pass': () => {
+      const held = rows(household());
+      projectHomeLibraryView(held);
+      return history(held);
     },
   };
   const stored = household();
-  expect(projectHomeLibraryView(stored, NOW)).toEqual(foldedHome(rows(stored)));
+  expect(projectHomeLibraryView(rows(stored))).toEqual(foldedHome(rows(stored)));
   expect(rows(stored)).toHaveLength(18_000);
 
   const entries = Object.entries(work);

@@ -12,9 +12,8 @@ import {
   type Library,
   type Standing,
 } from './library';
-import { projectDocument } from './libraryV4';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
-import type { EpisodeRow, Row, SettingsRow, TitleRow } from './wire';
+import { wellFormed, type Row, type SettingsRow, type TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -191,24 +190,20 @@ export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibrar
 }
 
 /**
- * `selectHomeLibraryView` of a v4 log's stored documents and settings without the full fold: title documents first,
- * so a series reset drops the marks and flags it outdates before Continue's summaries keep at most two per series.
- * Each document is read through `projectDocument`, whose answers `LibraryLog.rows()` shares, so History after Home
- * asks den-core nothing again. A season document's episodes are unique, so no mark has another to be merged with.
+ * `selectHomeLibraryView` of `LibraryLog.rows()` without the full fold: the title rows are folded first, so a series
+ * reset drops the marks and flags it outdates before Continue's summaries keep at most two per series. The rows hold
+ * one episode per name, so no episode has another mark to be merged with. History reads the same rows, so whichever
+ * of the two comes first, each document is projected through den-core once.
  */
-export function projectHomeLibraryView(stored: Row[], now: number): HomeLibraryView {
-  const titles = stored.flatMap((row) =>
-    row.kind === 'title' ? projectDocument(row, now) : [],
-  ) as TitleRow[];
-  const library = applyLog(emptyLibrary(), titles);
+export function projectHomeLibraryView(rows: Row[]): HomeLibraryView {
+  const titles = rows.filter((row): row is TitleRow => row.kind === 'rec');
   const resets = new Map(titles.map((row) => [titleKey(row.title), row.episodesReset?.[0]]));
   const summaries = new ContinueSummaries();
-  for (const row of stored)
-    if (row.kind === 'season')
-      for (const episode of projectDocument(row, now) as EpisodeRow[])
-        summaries.addEpisode(episode, resets.get(titleKey(episode.title)));
+  for (const row of rows)
+    if (row.kind === 'ep' && wellFormed(row))
+      summaries.addEpisode(row, resets.get(titleKey(row.title)));
   const { marks, flags } = summaries.compact();
-  return selectHomeLibraryView({ ...library, marks, flags }, [...titles, ...stored]);
+  return selectHomeLibraryView({ ...applyLog(emptyLibrary(), titles), marks, flags }, rows);
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */

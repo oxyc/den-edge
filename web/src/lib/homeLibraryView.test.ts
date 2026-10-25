@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { blankEpisode, blankTitle, markEpisode } from './actions';
 import { applyLog, emptyLibrary, ContinueProjector, type Library } from './library';
 import {
   continueItems,
@@ -205,16 +206,24 @@ it('projects v4 documents to the exact full-fold Home view without the full fold
       now - 100,
     ),
   );
-  const fullFold = (held: Row[]) => {
-    const rows = held.flatMap((row) => (isDocument(row) ? projectDocument(row, now) : [row]));
-    return selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
-  };
-  const direct = projectHomeLibraryView(stored, now);
+  const projected = (held: Row[]) =>
+    held.flatMap((row) => (isDocument(row) ? projectDocument(row, now) : [row]));
+  const fullFold = (rows: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+  const rows = projected(stored);
+  const direct = projectHomeLibraryView(rows);
 
-  expect(direct).toEqual(fullFold(stored));
+  expect(direct).toEqual(fullFold(rows));
   // Season documents held before their series' title document: the reset still drops their stale inputs.
-  const seasonsFirst = [...stored].reverse();
-  expect(projectHomeLibraryView(seasonsFirst, now)).toEqual(fullFold(seasonsFirst));
+  const seasonsFirst = projected([...stored].reverse());
+  expect(projectHomeLibraryView(seasonsFirst)).toEqual(fullFold(seasonsFirst));
+  // v2 rows, as a narrow log's `rows()` holds them, fold the same way.
+  const legacy: Row[] = [
+    { ...blankTitle({ type: 'tv', id: 50 }, now - 9000), episodesReset: stamp(now - 4000) },
+    markEpisode(blankEpisode({ type: 'tv', id: 50 }, 1, 1), true, stamp(now - 5000)),
+    markEpisode(blankEpisode({ type: 'tv', id: 50 }, 1, 2), true, stamp(now - 3000)),
+    markEpisode(blankEpisode({ type: 'tv', id: 51 }, 1, 1), true, [0, 0, '']),
+  ];
+  expect(projectHomeLibraryView(legacy)).toEqual(fullFold(legacy));
   expect(direct.owned).toEqual(['tv:40', 'movie:41']);
   expect(direct.watchlist).toEqual(['movie:41']);
   expect(direct.downloads.map(({ title }) => title.mediaId)).toEqual([40]);

@@ -143,6 +143,7 @@ import {
   compareStamps,
   type ConfigValue,
   type EpisodeRow,
+  type Row,
   type SettingsRow,
   type Stamp,
   type TitleRow,
@@ -360,7 +361,7 @@ export class LibraryLogAuthority {
    * in place of a freshly issued one, so it never overrides a change made after it.
    */
   #asOf: Stamp | null = null;
-  #projection?: { version: number; at: number; home: HomeLibraryView };
+  #projection?: { rows: Row[]; home: HomeLibraryView };
   #projectionTimer?: ReturnType<typeof setTimeout>;
   #projectionDeadline = Infinity;
   #closed = false;
@@ -1717,21 +1718,14 @@ export class LibraryLogAuthority {
       .sort();
   }
 
-  /**
-   * Home's view, held while the rows and den-core's answers for them stand: the log's summary keeps its instant until
-   * an edit or a future stamp's deadline, as `LibraryLog.rows()` keeps its rows.
-   */
   #projected(): HomeLibraryView {
+    const rows = this.#log.rows();
     this.#scheduleProjectionReconsideration();
-    const version = this.#log.rowsVersion;
-    const { at } = this.#log.currentSummary();
-    if (this.#projection?.version === version && this.#projection.at === at)
-      return this.#projection.home;
+    if (this.#projection?.rows === rows) return this.#projection.home;
     const foldedAt = performance.now();
-    const stored = this.#log.storedRows();
-    const home = projectHomeLibraryView(stored, Date.now());
-    noteLibraryFold(stored.length, performance.now() - foldedAt);
-    this.#projection = { version, at, home };
+    const home = projectHomeLibraryView(rows);
+    noteLibraryFold(rows.length, performance.now() - foldedAt);
+    this.#projection = { rows, home };
     return home;
   }
 
@@ -1755,6 +1749,7 @@ export class LibraryLogAuthority {
           this.#scheduleProjectionReconsideration();
           return;
         }
+        this.#projection = undefined;
         this.#projectionDeadline = Infinity;
         this.#scheduleProjectionReconsideration();
         this.#viewWriter?.schedule(true);
