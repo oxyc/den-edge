@@ -15,11 +15,8 @@ export const WARM_LEAD_SECS = 180;
 /**
  * Whether the next episode should be warmed now.
  *
- * Deliberately says nothing about WHICH release to play. den-remux's release list carries no readiness, and
- * choosing one unattended is how a viewer lands in a debrid download they never asked for — the tvOS app
- * refuses that for the same reason (`BingePlan.continuationSource`: "dropping a viewer into a debrid download
- * they never asked for is the one thing automatic playback must not do"). This warms the lookup and leaves
- * every decision to the session that actually starts.
+ * Release choice is a separate, stricter decision (`continuationPrefetch`): warming the list is harmless, while
+ * queueing is allowed only when the next episode lists the exact release already on screen.
  */
 export function shouldWarmNext(
   time: number,
@@ -31,4 +28,28 @@ export function shouldWarmNext(
   const left = duration - time;
   // Past the end is not a warm: `finished` has already run, and the advance is under way.
   return left > 0 && left <= lead;
+}
+
+/** The source fields needed to decide whether a binge prefetch is continuity rather than a new release choice. */
+export interface BingeSource {
+  bingeGroup?: string;
+  cached?: boolean;
+}
+
+/**
+ * Pick the one source a near-end prefetch may prepare.
+ *
+ * Scout's non-empty binge group identifies one release/season pack while its episode filenames naturally differ.
+ * It is deliberately stricter than Apple's quality fallback: a background request is allowed to keep using the
+ * season pack already on screen, not to choose a merely similar release. Crossing a season boundary also requires
+ * an ordinary foreground Play.
+ */
+export function continuationPrefetch<T extends BingeSource>(
+  sources: readonly T[],
+  playingBingeGroup: string | undefined,
+  season: number | undefined,
+  nextSeason: number | undefined,
+): T | undefined {
+  if (!playingBingeGroup || season === undefined || nextSeason !== season) return undefined;
+  return sources.find((source) => source.bingeGroup === playingBingeGroup);
 }

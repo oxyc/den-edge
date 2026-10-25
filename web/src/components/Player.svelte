@@ -117,7 +117,9 @@
     type SkipKind,
     type SkipSegment,
   } from '../lib/skipdb';
-  import { shouldWarmNext } from '../lib/binge';
+  import { continuationPrefetch, shouldWarmNext } from '../lib/binge';
+  import { fetchSourceList, prepareSource } from '../lib/titleSources';
+  import type { Routes } from '../lib/routes';
   import { titleAllowed } from '../lib/playGuard';
   import { lanReachable, privateLanRemuxPlaylist } from '../lib/localNetwork';
   import { named } from '../lib/pageTitle';
@@ -151,6 +153,7 @@
     filename,
     content,
     scout,
+    routes = {},
     remux,
     playback,
     subtitles,
@@ -174,6 +177,8 @@
     filename?: string;
     content: ContentServiceClientPort;
     scout: Addon;
+    /** Live service routes, used to validate the next episode's same-origin Scout play ticket. */
+    routes?: Routes;
     /** Where den-remux answers (`findRemux`): '' for this origin, else the tailnet's address. */
     remux: string;
     /** Hearth's unified operation; absent unless its configured route passed live capability discovery. */
@@ -3557,22 +3562,46 @@
   let warmedNext = false;
 
   /**
-   * Ask den-remux what the next episode could play, shortly before this one ends.
+   * Resolve the next episode shortly before this one ends, and keep its current season pack ready when possible.
    *
-   * Nothing is kept from the answer. The point is that den-scout has scraped the indexers and cached the list
-   * by the time the advance asks for it in earnest — the slow part of starting an episode — rather than the
-   * viewer waiting through it after the countdown. Choosing a release is left to that session, deliberately.
+   * Resolving still warms Scout's short-lived list cache. Preparing is narrower: only the exact season-pack group
+   * already playing, within the same season, is allowed to queue. `prefetch=1` leaves Scout's TorBox add reserve in
+   * charge, so this convenience cannot spend the adds kept for a viewer pressing Play.
    */
   function warmNext(at: number) {
-    if (warmedNext || !imdb || !onnext) return;
+    const activelyWatching = video
+      ? !video.paused && !video.ended
+      : customTransport && !remotePaused;
+    if (warmedNext || !imdb || !onnext || !session || !activelyWatching) return;
     const to = nextEpisode;
     if (!to || !shouldWarmNext(at, length())) return;
     warmedNext = true;
-    void listReleases(
-      { imdb, season: to.season, episode: to.episode, scout: scout.install },
-      undefined,
-      route,
-    );
+    const playingFilename = session.release.filename;
+    const from = { ...playingEpisode };
+    void Promise.all([
+      fetchSourceList(scout, imdb, routes, from.season, from.episode),
+      fetchSourceList(scout, imdb, routes, to.season, to.episode),
+    ]).then(async ([current, upcoming]) => {
+      const playingBingeGroup = current.sources?.find(
+        (source) => source.filename === playingFilename,
+      )?.bingeGroup;
+      const continuity = continuationPrefetch(
+        upcoming.sources ?? [],
+        playingBingeGroup,
+        from.season,
+        to.season,
+      );
+      if (!continuity) {
+        console.info(
+          `[Den binge] ${JSON.stringify({ event: 'next-prefetch', outcome: upcoming.sources ? 'no_continuity' : 'list_unavailable', season: to.season, episode: to.episode, answer: upcoming.answer?.kind })}`,
+        );
+        return;
+      }
+      const prepared = await prepareSource(continuity.url, true, undefined, true);
+      console.info(
+        `[Den binge] ${JSON.stringify({ event: 'next-prefetch', outcome: prepared.state, season: to.season, episode: to.episode, continuity: 'binge_group', listedCached: continuity.cached })}`,
+      );
+    });
   }
 
   /** Jump just past the active segment — the Skip button's action, and auto-skip's. */

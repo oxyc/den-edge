@@ -2201,6 +2201,7 @@
       filename={target.filename}
       content={session.content}
       {scout}
+      {routes}
       remux={remux ?? '/remux'}
       playback={scout.playback}
       subtitles={installsOf(plugins, routes, 'subs').filter(
