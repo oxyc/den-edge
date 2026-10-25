@@ -321,8 +321,8 @@ async fn enrolling_library(
 async fn authenticate(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<StoredController, Response> {
-    let invalid = || json_reply(StatusCode::UNAUTHORIZED, &error("invalid_controller"));
+) -> Result<StoredController, Box<Response>> {
+    let invalid = || Box::new(json_reply(StatusCode::UNAUTHORIZED, &error("invalid_controller")));
     let credential =
         headers.get("x-den-wake-controller").and_then(|value| value.to_str().ok()).ok_or_else(invalid)?;
     let (controller, secret) = credential.split_once('.').ok_or_else(invalid)?;
@@ -335,7 +335,7 @@ async fn authenticate(
         .store
         .get(NS, &stored_key(controller))
         .await
-        .map_err(|e| crate::handler::internal("wake controller read", e))?;
+        .map_err(|e| Box::new(crate::handler::internal("wake controller read", e)))?;
     let stored: StoredController = bytes
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .filter(|stored: &StoredController| stored.controller == controller)
@@ -525,7 +525,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     }
     let mut stored = match authenticate(state, req.headers()).await {
         Ok(stored) => stored,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     let wait = match poll_wait(crate::handler::query_param(&req, "wait")) {
         Ok(wait) => wait,
