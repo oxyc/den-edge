@@ -7,7 +7,8 @@ concurrency:
   group: tv-samsung-publish
   cancel-in-progress: false
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   tizen3:
