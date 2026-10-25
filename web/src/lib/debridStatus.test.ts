@@ -54,10 +54,10 @@ describe('readDebridState', () => {
     expect(asked).toEqual(['/den/health']);
   });
 
-  it('asks nothing for a shared addon', async () => {
+  it.each(['/den/~a1b2c3d4', '/scout/scoutcfg'])('asks nothing for %s', async (base) => {
     const asked: string[] = [];
     const fetchImpl = answering({ debrid: { state: 'down' } }, asked);
-    expect(await readDebridState({ install: 'x', base: '/den/~a1b2c3d4' }, fetchImpl)).toBeNull();
+    expect(await readDebridState({ install: 'x', base }, fetchImpl)).toBeNull();
     expect(asked).toEqual([]);
   });
 

@@ -52,10 +52,13 @@ export async function guardNetwork(page, origin = E2E_ORIGIN) {
     // The app asks this origin whether it serves atlas or reel itself, when the library lists neither as a
     // plugin — a guest lists nothing at all, and both have a same-origin fallback (findAtlas, findReel).
     // A 404 is what "not served here" looks like, which is what a fixture is.
+    // The same goes for Hearth's `/den/health`, which the app reads once on finding a Hearth install (`debridStatus.ts`):
+    // a fixture's Hearth says nothing of its debrid unless a spec answers it.
     const probe =
       url.pathname === '/atlas/manifest.json' ||
       url.pathname === '/reel/health' ||
-      url.pathname === '/remux/health';
+      url.pathname === '/remux/health' ||
+      url.pathname === '/den/health';
     if (url.origin === origin && probe)
       return route.fulfill({ status: 404, body: 'Fixture catalogue unavailable' });
     // Every detail page asks den-edge for the title's ratings and content warnings, key or not. Unless a spec says

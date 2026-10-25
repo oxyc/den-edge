@@ -35,23 +35,20 @@ export function debridPlayCodeOf(response: Response, body: unknown): DebridPlayC
 }
 
 /**
- * Where the playback addon's Hearth answers its health: the mount of the addon's base (`/den/<config>` → `/den/health`,
- * which Hearth answers with its aggregate report). A shared addon's `~<gid>` base has no health of its own here.
+ * One read of the debrid state for the playback addon just discovered; null when it can't be said. Only Hearth's
+ * combined addon (`/den/<config>`) is asked, at `/den/health`, its aggregate report. A legacy Scout install, or a shared
+ * addon's `~<gid>` base, is never asked.
  */
-function healthOf(addon: Addon): string | null {
-  const mount = /^\/(den|scout)\/(?!~)/.exec(addon.base)?.[1];
-  return mount ? `/${mount}/health` : null;
-}
-
-/** One read of the debrid state for the playback addon just discovered; null when it can't be said. */
 export async function readDebridState(
   addon: Addon,
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<DebridState | null> {
-  const path = healthOf(addon);
-  if (!path) return null;
+  if (!/^\/den\/(?!~)/.test(addon.base)) return null;
   try {
-    const res = await fetchImpl(path, { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
+    const res = await fetchImpl('/den/health', {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
     return res.ok ? debridStateOf(await res.json()) : null;
   } catch {
     return null;
