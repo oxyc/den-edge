@@ -412,17 +412,29 @@ describe('startPlayback', () => {
   });
 
   it.each([
-    [503, { error: 'playback_unavailable', cause: 'debrid_down' }, 'debrid_down'],
-    [504, { error: 'playback_timeout', cause: 'debrid_slow' }, 'debrid_slow'],
-    [404, { error: 'no_release', cause: 'release_uncached' }, 'release_uncached'],
-    [502, { error: 'debrid_down' }, 'debrid_down'],
+    [{ error: 'debrid_down', service: 'torbox', reason: 'timeout' }, {}, 'debrid_down'],
+    [
+      { error: 'status_unavailable', service: 'torbox' },
+      { 'x-den-degraded': 'debrid_slow' },
+      'debrid_slow',
+    ],
+    [
+      { error: 'store_unavailable', service: 'torbox' },
+      { 'x-den-degraded': 'debrid_down' },
+      'debrid_down',
+    ],
   ] as const)(
-    'a debrid answer (%i) is a final source failure carrying its code',
-    async (status, body, cause) => {
+    'a debrid answer %j waits out its Retry-After, carrying its code',
+    async (body, headers, cause) => {
       const result = await startPlayback('/den/config/playback', want, async () =>
-        json(body, status, { 'retry-after': '5' }),
+        json(body, 503, { 'retry-after': '7', ...headers }),
       );
-      expect(result).toMatchObject({ failure: 'sourceUnavailable', cause, httpStatus: status });
+      expect(result).toMatchObject({
+        failure: 'temporarilyUnavailable',
+        cause,
+        httpStatus: 503,
+        retryMs: 7_000,
+      });
     },
   );
 

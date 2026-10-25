@@ -13,14 +13,23 @@ describe('debridStateOf', () => {
 });
 
 describe('debridPlayCodeOf', () => {
-  it('reads a code from the cause or the error', () => {
-    expect(debridPlayCodeOf({ error: 'source_unavailable', cause: 'release_uncached' })).toBe(
-      'release_uncached',
+  const answer = (headers: Record<string, string> = {}) => new Response(null, { headers });
+
+  it('reads TorBox’s health from X-Den-Degraded', () => {
+    const body = { error: 'status_unavailable', service: 'torbox' };
+    expect(debridPlayCodeOf(answer({ 'x-den-degraded': 'debrid_slow' }), body)).toBe('debrid_slow');
+    expect(debridPlayCodeOf(answer({ 'x-den-degraded': 'debrid_down' }), body)).toBe('debrid_down');
+    expect(debridPlayCodeOf(answer({ 'x-den-degraded': 'cache-check' }), body)).toBeUndefined();
+  });
+
+  it('reads debrid_down for TorBox, whatever the case of its service', () => {
+    expect(debridPlayCodeOf(answer(), { error: 'debrid_down', service: 'TorBox' })).toBe(
+      'debrid_down',
     );
-    expect(debridPlayCodeOf({ error: 'debrid_slow' })).toBe('debrid_slow');
-    expect(
-      debridPlayCodeOf({ error: 'source_unavailable', cause: 'torbox_refused' }),
-    ).toBeUndefined();
+    expect(debridPlayCodeOf(answer(), { error: 'debrid_down', service: 'realdebrid' })).toBe(
+      undefined,
+    );
+    expect(debridPlayCodeOf(answer(), { error: 'source_unavailable' })).toBeUndefined();
   });
 });
 

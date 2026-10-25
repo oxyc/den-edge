@@ -1021,7 +1021,6 @@ closed_enum!(PlaybackRouteCause {
     TorboxUnsafeStreamUrl => "torbox_unsafe_stream_url",
     DebridDown => "debrid_down",
     DebridSlow => "debrid_slow",
-    ReleaseUncached => "release_uncached",
 });
 
 #[derive(Deserialize)]

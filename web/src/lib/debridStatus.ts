@@ -5,11 +5,12 @@ import { relayFetch } from './relayFetch';
 import type { Addon } from './scout';
 
 export type DebridState = 'ok' | 'slow' | 'down';
-export type DebridPlayCode = 'debrid_down' | 'debrid_slow' | 'release_uncached';
+export type DebridPlayCode = 'debrid_down' | 'debrid_slow';
 
 /**
  * Hearth's `/health` → the debrid state: `{…, "debrid": {"provider", "state": "ok"|"slow"|"down", "since", "reason"}}`.
- * An answer without `debrid`, or with a state Den doesn't know, is null: nothing is said about it.
+ * Hearth leaves `debrid` out until it has asked TorBox anything, so an answer without it, or with a state Den doesn't
+ * know, is null: nothing is said about it.
  */
 export function debridStateOf(health: unknown): DebridState | null {
   const debrid = (health as { debrid?: { state?: unknown } } | null)?.debrid;
@@ -17,13 +18,18 @@ export function debridStateOf(health: unknown): DebridState | null {
   return state === 'ok' || state === 'slow' || state === 'down' ? state : null;
 }
 
-/** A refused play's body → its debrid code, carried as `cause` (or as the `error` itself); else undefined. */
-export function debridPlayCodeOf(body: unknown): DebridPlayCode | undefined {
-  const answer = body as { cause?: unknown; error?: unknown } | null;
-  for (const code of [answer?.cause, answer?.error])
-    if (code === 'debrid_down' || code === 'debrid_slow' || code === 'release_uncached')
-      return code;
-  return undefined;
+/**
+ * A refused play → its debrid code. A 503 that could not ask the debrid names TorBox's health in `X-Den-Degraded`
+ * (`debrid_down` or `debrid_slow`); a play refused because TorBox is known down is `{"error": "debrid_down",
+ * "service": "torbox"}`. Anything else is undefined.
+ */
+export function debridPlayCodeOf(response: Response, body: unknown): DebridPlayCode | undefined {
+  const degraded = response.headers.get('x-den-degraded');
+  if (degraded === 'debrid_down' || degraded === 'debrid_slow') return degraded;
+  const answer = body as { error?: unknown; service?: unknown } | null;
+  return answer?.error === 'debrid_down' && String(answer.service).toLowerCase() === 'torbox'
+    ? 'debrid_down'
+    : undefined;
 }
 
 /**

@@ -131,29 +131,41 @@ test('a rejected TorBox key tells the guest exactly what to update', async () =>
   }
 });
 
-for (const [why, answer] of [
-  ['as its cause', { status: 503, body: { error: 'playback_unavailable', cause: 'debrid_down' } }],
-  ['as its error', { status: 502, body: { error: 'debrid_down' } }],
+// TorBox known down or slow (den-hearth's debrid health): said in the wait banner, and asked again only once the
+// answer's Retry-After (Hearth's next recovery probe) has passed.
+for (const [name, body, degraded, message] of [
+  [
+    'down',
+    { error: 'debrid_down', service: 'torbox', reason: 'timeout' },
+    'debrid_down',
+    'TorBox isn’t responding right now. Den will try again when it can…',
+  ],
+  [
+    'slow',
+    { error: 'status_unavailable', service: 'torbox' },
+    'debrid_slow',
+    'TorBox is slow right now, so this is taking longer to start. Trying again…',
+  ],
 ]) {
-  test(`a down debrid service named ${why} says so instead of waiting or a generic failure`, async () => {
-    const requests = [];
+  test(`a ${name} TorBox is said while Den waits out its Retry-After`, async () => {
+    const askedAt = [];
     const { browser, page } = await playerPage((route) => {
-      requests.push(route.request());
+      askedAt.push(Date.now());
       return route.fulfill({
-        status: answer.status,
-        contentType: 'application/json',
-        body: JSON.stringify(answer.body),
+        status: 503,
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '2',
+          'x-den-degraded': degraded,
+        },
+        body: JSON.stringify(body),
       });
     });
     try {
       await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-      await expect(page.getByRole('alert').locator('p')).toHaveText(
-        'TorBox isn’t responding right now, so this can’t start. Try again in a few minutes.',
-      );
-      await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
-      // A terminal answer, not a wait: nothing is asked again on its own.
-      await page.waitForTimeout(1_500);
-      expect(requests).toHaveLength(1);
+      await expect(page.getByRole('status')).toHaveText(message);
+      await expect.poll(() => askedAt.length, { timeout: 5_000 }).toBe(2);
+      expect(askedAt[1] - askedAt[0]).toBeGreaterThanOrEqual(1_900);
     } finally {
       await browser.close();
     }
