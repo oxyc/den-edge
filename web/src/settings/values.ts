@@ -177,10 +177,13 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
 /** How often a device rewrites its `seen`: once a day is enough to tell a device in use from a forgotten one. */
 export const SEEN_EVERY = 24 * 60 * 60 * 1000;
 
-/** This device's own entries, or nothing when what the library already says is recent and right. */
+/**
+ * This device's own entries, or nothing when what the library already says is recent and right. A TV that takes
+ * household plays passes its play key (inbox-v1 §5), published as `<d>.play`.
+ */
 export function selfEntry(
   row: SettingsRow | undefined,
-  self: { id: string; name: string; kind: 'tv' | 'browser' },
+  self: { id: string; name: string; kind: 'tv' | 'browser'; play?: string },
   now: number,
 ): Record<string, ConfigValue | null> | null {
   const listed = readDevices(row).find((d) => d.id === self.id);
@@ -192,7 +195,8 @@ export function selfEntry(
     now - listed.seen < SEEN_EVERY &&
     listed.format === 3 &&
     listed.facade.length === 0 &&
-    listed.delivers.length === 0
+    listed.delivers.length === 0 &&
+    (self.play === undefined || listed.play === self.play)
   )
     return null;
   return {
@@ -202,6 +206,7 @@ export function selfEntry(
     [`${self.id}.format`]: { int: 3 },
     [`${self.id}.facade`]: { strings: [] },
     [`${self.id}.delivers`]: { strings: [] },
+    ...(self.play !== undefined ? { [`${self.id}.play`]: { string: self.play } } : {}),
   };
 }
 

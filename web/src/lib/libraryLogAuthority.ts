@@ -669,7 +669,9 @@ export class LibraryLogAuthority {
       case 'server.patch':
         return this.#patchServer(command.server, command.value);
       case 'device.heartbeat':
-        return this.#heartbeatDevice(command.name, command.deviceKind);
+        return this.#heartbeatDevice(command.name, command.deviceKind, command.playKey);
+      case 'device.played':
+        return this.#markPlayed();
       case 'device.remove':
         return this.#removeDevice(command.deviceId);
       case 'simkl.connect':
@@ -2205,17 +2207,27 @@ export class LibraryLogAuthority {
   async #heartbeatDevice(
     name: string,
     kind: 'tv' | 'browser' = 'browser',
+    play?: string,
   ): Promise<LibraryAuthorityCommandResult> {
     if (!name.trim() || name.length > 256)
       throw authorityError('invalid-request', 'device name is empty or too long');
     const changes = selfEntry(
       this.#log.settings('devices'),
-      { id: this.#clock.device, name: name.trim(), kind },
+      { id: this.#clock.device, name: name.trim(), kind, ...(play ? { play } : {}) },
       Date.now(),
     );
     return changes
       ? this.#patchSettings('devices', changes, [{ kind: 'devices' }, { kind: 'connections' }])
       : this.#unchanged();
+  }
+
+  /** A play sent from another device started on this TV (`<d>.played`, library-v2 §3), so senders offer it first. */
+  async #markPlayed(): Promise<LibraryAuthorityCommandResult> {
+    return this.#patchSettings(
+      'devices',
+      { [`${this.#clock.device}.played`]: { int: Date.now() } },
+      [{ kind: 'devices' }],
+    );
   }
 
   async #removeDevice(deviceId: string): Promise<LibraryAuthorityCommandResult> {

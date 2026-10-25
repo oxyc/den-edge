@@ -953,7 +953,8 @@
 
   /**
    * Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. A series with
-   * no episode named picks up where Continue Watching would, or starts at the beginning.
+   * no episode named picks up where Continue Watching would, or starts at the beginning. False when the parental guard
+   * refused it.
    */
   const playHere = $derived(
     scout && (scout.playback || remux !== null)
@@ -967,7 +968,7 @@
           if (blocked) {
             failure = blocked;
             session.notify(blocked);
-            return;
+            return false;
           }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
             const up = continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode;
@@ -975,12 +976,14 @@
           } else {
             playerAddress({ title, season, episode, filename });
           }
+          return true;
         }
       : undefined,
   );
 
   // Hosted webOS and packaged Tizen TVs receive the same sealed inbox commands as the native Apple TV. An ordinary
-  // browser is a controller only, so it never drains the TV queue behind its pairing link.
+  // browser is a controller only, so it never drains the TV queue behind its pairing link. A play comes only through
+  // the household queue below (den-spec inbox-v1 §5), so one on this link is dropped.
   $effect(() => {
     if (!__DEN_TV__ || !link) return;
     let stopped = false;
@@ -989,14 +992,7 @@
         const messages = await receiveTvMessages(link);
         for (const message of messages) {
           if (stopped || Math.abs(Date.now() - message.sentAt) > 120_000) continue;
-          if (message.type === 'play') {
-            await playHere?.(
-              { type: message.mediaType, id: message.tmdbId, title: message.title },
-              message.season,
-              message.episode,
-            );
-            continue;
-          }
+          if (message.type === 'play') continue;
           const target = playing;
           if (
             !target ||
@@ -1019,6 +1015,40 @@
     return () => {
       stopped = true;
     };
+  });
+
+  // The TV build takes the plays any device holding the library sends it (den-spec inbox-v1 §5) and starts them as its
+  // own Play would, through `playHere` and its parental guard. Nobody at the TV asked, so a refusal is not offered a
+  // PIN: the guard's message says why.
+  $effect(() => {
+    if (!__DEN_TV__) return;
+    const stop = new AbortController();
+    void import('./lib/householdPlays').then(({ receivePlays }) =>
+      receivePlays(
+        {
+          play: async (push) => {
+            // A TV opened to take this play may still be finding its sources: give that a moment, well inside the
+            // play's two minutes, before saying there is none.
+            for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500)
+              await new Promise((resolve) => setTimeout(resolve, 500));
+            const start = untrack(() => playHere);
+            if (!start) {
+              session.notify(`No playable source for “${push.title}”`);
+              return;
+            }
+            const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
+            if (!(await start(title, push.season, push.episode))) return;
+            session.notify(`Starting “${push.title}”…`);
+            void householdModel
+              ?.markPlayed()
+              .catch((error: unknown) => console.warn('den: could not record the play', error));
+          },
+          stale: (push) => session.notify(`Ignored an old “Play on TV” for “${push.title}”`),
+        },
+        stop.signal,
+      ),
+    );
+    return () => stop.abort();
   });
 
   function closePlayer() {

@@ -684,13 +684,19 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'device.heartbeat':
       return (
-        exact(value, ['kind', 'name', 'deviceKind']) &&
+        exact(value, ['kind', 'name', 'deviceKind', 'playKey']) &&
         boundedText(value.name, 256) &&
         optional(
           value.deviceKind,
           (kind): kind is 'tv' | 'browser' => kind === 'tv' || kind === 'browser',
+        ) &&
+        optional(
+          value.playKey,
+          (key): key is string => typeof key === 'string' && /^[A-Za-z0-9_-]{43}$/.test(key),
         )
       );
+    case 'device.played':
+      return exact(value, ['kind']);
     case 'device.remove':
       return (
         exact(value, ['kind', 'deviceId']) &&

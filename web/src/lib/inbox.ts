@@ -455,3 +455,105 @@ async function identityIn(
     ? { name: newest.name, ...(newest.deviceId ? { deviceId: newest.deviceId } : {}) }
     : null;
 }
+
+/** A `play` from this TV's household queue (inbox-v1 §2). */
+export interface PlayRequest {
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  title: string;
+  season?: number;
+  episode?: number;
+}
+
+/**
+ * How old a play may be and still start: it is a request for now, and the queue keeps one for a week while the TV is
+ * off. Either side of now, for clocks that disagree. The native TV's `CompanionInbox.playFreshness`.
+ */
+export const PLAY_FRESHNESS = 120_000;
+
+const count = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0;
+
+/**
+ * Drain this TV's household queue (inbox-v1 §5) under its play key, held up to `wait` seconds for a message to land:
+ * the plays to start now, and those that waited too long to. Everything that is not an authentic `play` is dropped,
+ * as is an id already applied. Null when den-edge refused the drain or could not be reached.
+ */
+export async function drainPlays(
+  playKey: string,
+  {
+    wait,
+    fetchImpl = fetch,
+    now = () => Date.now(),
+    storage = globalThis.localStorage,
+  }: {
+    wait?: number;
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+    storage?: Storage | undefined;
+  } = {},
+): Promise<{ fresh: PlayRequest[]; stale: PlayRequest[] } | null> {
+  const { inbox, enc } = await linkKeys(fromBase64url(playKey) as Bytes);
+  let body: { queues?: unknown } | null;
+  try {
+    body = (await drainRequest(
+      fetchImpl,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ keys: [inbox] }),
+      },
+      wait ? `/inbox/drain?wait=${wait}` : '/inbox/drain',
+    )) as { queues?: unknown } | null;
+  } catch {
+    return null;
+  }
+  const messages = Array.isArray(body?.queues) ? (body.queues[0] as unknown) : null;
+  if (!Array.isArray(messages)) return null;
+  const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
+  const drained = { fresh: [] as PlayRequest[], stale: [] as PlayRequest[] };
+  const at = now();
+  for (const entry of messages as { sealed?: unknown }[]) {
+    if (typeof entry?.sealed !== 'string') continue;
+    try {
+      const combined = fromBase64url(entry.sealed);
+      if (combined.length < 28) continue;
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
+        key,
+        combined.slice(12),
+      );
+      const { id, sentAt, message } = JSON.parse(new TextDecoder().decode(plain)) as {
+        id?: unknown;
+        sentAt?: unknown;
+        message?: Record<string, unknown>;
+      };
+      const age = typeof sentAt === 'number' && Number.isFinite(sentAt) ? at - sentAt : NaN;
+      if (
+        typeof id !== 'string' ||
+        !/^[0-9a-f]{32}$/.test(id) ||
+        !(age <= SEAL_WINDOW && age >= -SEAL_AHEAD) ||
+        // The household queue takes nothing but a play (inbox-v1 §5).
+        message?.type !== 'play' ||
+        !count(message.tmdbId) ||
+        (message.mediaType !== 'movie' && message.mediaType !== 'tv') ||
+        typeof message.title !== 'string' ||
+        (message.season !== undefined && !count(message.season)) ||
+        (message.episode !== undefined && !count(message.episode)) ||
+        !admit(id, at, storage)
+      )
+        continue;
+      const play: PlayRequest = {
+        tmdbId: message.tmdbId,
+        mediaType: message.mediaType,
+        title: message.title.slice(0, 256),
+        ...(message.season !== undefined ? { season: message.season as number } : {}),
+        ...(message.episode !== undefined ? { episode: message.episode as number } : {}),
+      };
+      (Math.abs(age) <= PLAY_FRESHNESS ? drained.fresh : drained.stale).push(play);
+    } catch {
+      // Not sealed under this TV's play key, or not a message: den-edge could have written it, so it counts for nothing.
+    }
+  }
+  return drained;
+}

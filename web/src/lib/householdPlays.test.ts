@@ -1,0 +1,93 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { currentPlayKey, playKeyFor, receivePlays } from './householdPlays';
+import { linkKeys, sealMessage, type PlayRequest } from './inbox';
+import { fromBase64url } from './wire';
+
+function memoryStorage(): Storage {
+  const items = new Map<string, string>();
+  return {
+    get length() {
+      return items.size;
+    },
+    clear: () => items.clear(),
+    getItem: (key) => items.get(key) ?? null,
+    key: (index) => [...items.keys()][index] ?? null,
+    removeItem: (key) => void items.delete(key),
+    setItem: (key, value) => void items.set(key, value),
+  };
+}
+
+describe("a TV's household play key", () => {
+  it('is kept for its library, and made anew when the library key changes', async () => {
+    const storage = memoryStorage();
+    const first = await playKeyFor('library-one', storage);
+    expect(fromBase64url(first)).toHaveLength(32);
+    expect(await playKeyFor('library-one', storage)).toBe(first);
+    expect(currentPlayKey(storage)).toBe(first);
+
+    const second = await playKeyFor('library-two', storage);
+    expect(second).not.toBe(first);
+    expect(currentPlayKey(storage)).toBe(second);
+    expect(await playKeyFor('library-one', storage)).not.toBe(first);
+  });
+
+  it('never stores the library key itself', async () => {
+    const storage = memoryStorage();
+    await playKeyFor('a-library-key-that-must-stay-secret', storage);
+    expect(
+      JSON.stringify(
+        [...Array(storage.length).keys()].map((i) => storage.getItem(storage.key(i)!)),
+      ),
+    ).not.toContain('a-library-key-that-must-stay-secret');
+  });
+
+  it('still makes a key when site data is unavailable', async () => {
+    const storage = memoryStorage();
+    storage.setItem = () => {
+      throw new DOMException('denied', 'SecurityError');
+    };
+    expect(fromBase64url(await playKeyFor('library-one', storage))).toHaveLength(32);
+    expect(currentPlayKey(storage)).toBeUndefined();
+  });
+});
+
+describe('receiving household plays', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('starts the newest fresh play of a drain and reports a stale one, until stopped', async () => {
+    const storage = memoryStorage();
+    const key = await playKeyFor('library-one', storage);
+    const { enc } = await linkKeys(fromBase64url(key));
+    const now = Date.now();
+    const play = (title: string, sentAt = now) =>
+      sealMessage(enc, { type: 'play', tmdbId: 550, mediaType: 'movie', title }, { sentAt });
+    const queue = [
+      { sealed: await play('Waited', now - 600_000) },
+      { sealed: await play('First') },
+      { sealed: await play('Second') },
+    ];
+    let drains = 0;
+    vi.stubGlobal('fetch', async () => {
+      drains += 1;
+      return new Response(JSON.stringify({ queues: [drains === 1 ? queue : []] }), { status: 200 });
+    });
+
+    const stop = new AbortController();
+    const started: PlayRequest[] = [];
+    const stale: PlayRequest[] = [];
+    await receivePlays(
+      {
+        play: async (request) => {
+          started.push(request);
+          stop.abort();
+        },
+        stale: (request) => stale.push(request),
+      },
+      stop.signal,
+      storage,
+    );
+    expect(started.map((request) => request.title)).toEqual(['Second']);
+    expect(stale.map((request) => request.title)).toEqual(['Waited']);
+    expect(drains).toBe(1);
+  });
+});

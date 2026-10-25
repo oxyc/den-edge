@@ -234,6 +234,32 @@ describe('synced prefs', () => {
     expect(Object.keys(forgetDevice('aaaa000000000001'))).toHaveLength(13);
   });
 
+  it("publishes a TV's play key with its entry, and again whenever the key changes", () => {
+    const play = 'A'.repeat(43);
+    const self = { id: 'aaaa000000000001', name: 'Bedroom TV', kind: 'tv' as const, play };
+    const listed = (key?: string) =>
+      row({
+        'aaaa000000000001.name': { value: { string: 'Bedroom TV' }, at },
+        'aaaa000000000001.kind': { value: { string: 'tv' }, at },
+        'aaaa000000000001.seen': { value: { int: 9000 }, at },
+        'aaaa000000000001.format': { value: { int: 3 }, at },
+        'aaaa000000000001.facade': { value: { strings: [] }, at },
+        'aaaa000000000001.delivers': { value: { strings: [] }, at },
+        ...(key ? { 'aaaa000000000001.play': { value: { string: key }, at } } : {}),
+      });
+    expect(selfEntry(listed(), self, 9001)).toMatchObject({
+      'aaaa000000000001.play': { string: play },
+      'aaaa000000000001.seen': { int: 9001 },
+    });
+    expect(selfEntry(listed('B'.repeat(43)), self, 9001)).toMatchObject({
+      'aaaa000000000001.play': { string: play },
+    });
+    expect(selfEntry(listed(play), self, 9001)).toBeNull();
+    // A device that names no key leaves whatever is published alone.
+    const { play: _, ...withoutKey } = self;
+    expect(selfEntry(listed('B'.repeat(43)), withoutKey, 9001)).toBeNull();
+  });
+
   it('reads servers and pinned signing keys, and takes a key only when it is one', () => {
     expect(
       readServers(

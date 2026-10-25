@@ -2078,6 +2078,23 @@ describe('LibraryLogAuthority', () => {
       authority.command({ kind: 'device.remove', deviceId: '0123456789abcdef' }, 'remove-self'),
     ).rejects.toMatchObject({ failure: { code: 'conflict' } });
 
+    // A TV checks in with its household play key, and records a play sent from elsewhere starting on it.
+    const playKey = 'A'.repeat(43);
+    await authority.command(
+      { kind: 'device.heartbeat', name: 'MacBook', deviceKind: 'tv', playKey },
+      'tv-heartbeat',
+    );
+    expect(log.settings('devices')?.values['0123456789abcdef.play']?.value).toEqual({
+      string: playKey,
+    });
+    await expect(authority.command({ kind: 'device.played' }, 'played')).resolves.toMatchObject({
+      outcome: 'applied',
+      affected: [{ kind: 'devices' }],
+    });
+    expect(log.settings('devices')?.values['0123456789abcdef.played']?.value).toEqual({
+      int: expect.any(Number),
+    });
+
     await authority.command(
       { kind: 'server.patch', server: 'jellyfin', value: null },
       'remove-server',
