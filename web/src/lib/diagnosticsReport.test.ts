@@ -15,10 +15,12 @@ import {
   sendCastReport,
   sendPageError,
   sendPlaybackOutcome,
+  sendPlaybackRoute,
   subtitleSourceOf,
   type CastReport,
   type PageErrorReport,
   type PlaybackOutcomeReport,
+  type PlaybackRouteReport,
 } from './diagnosticsReport';
 
 describe('routeKindOf', () => {
@@ -311,6 +313,29 @@ describe('sendPlaybackOutcome and sendCastReport', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(outcome),
+      keepalive: true,
+    });
+  });
+});
+
+describe('sendPlaybackRoute', () => {
+  it('immediately posts the closed route report even when no session exists', async () => {
+    const report: PlaybackRouteReport = {
+      event: 'failed',
+      requestedSource: 'torbox',
+      reason: 'direct',
+      failure: 'source_unavailable',
+      cause: 'torbox_authentication_failed',
+      subtitleConstraint: 'den_subtitles_disabled',
+      replacement: false,
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    sendPlaybackRoute(report, fetchImpl);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchImpl).toHaveBeenCalledWith('/playback/route', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(report),
       keepalive: true,
     });
   });

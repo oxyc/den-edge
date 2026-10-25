@@ -188,6 +188,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("pageErr", resp.extensions().get::<PageErrorTag>().map(|s| s.0.as_str())),
             ("load", resp.extensions().get::<LoadTag>().map(|s| s.0.as_str())),
             ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
+            ("playbackRoute", resp.extensions().get::<PlaybackRouteTag>().map(|s| s.0.as_str())),
             ("cast", resp.extensions().get::<CastTag>().map(|s| s.0.as_str())),
             ("src", resp.extensions().get::<SrcTag>().map(|s| s.0)),
             ("at", (route == "/den").then(|| den_route(&path))),
@@ -447,6 +448,11 @@ pub struct ReportField(pub String);
 #[derive(Clone)]
 pub struct PlaybackOutcomeTag(pub String);
 
+/// A browser player's source-routing decision (`diagnostics.rs`), kept separate from a session outcome because a
+/// final managed failure may never open a session at all.
+#[derive(Clone)]
+pub struct PlaybackRouteTag(pub String);
+
 /// A browser's cast or AirPlay attempt (`diagnostics.rs`), carried on the response for the request log like
 /// `StartupTag`.
 #[derive(Clone)]
@@ -676,6 +682,9 @@ async fn dispatch(
     if path == "/playback/outcome" {
         return crate::diagnostics::handle_playback_outcome(state, req).await;
     }
+    if path == "/playback/route" {
+        return crate::diagnostics::handle_playback_route(state, req).await;
+    }
     if path == "/playback/cast" {
         return crate::diagnostics::handle_cast(state, req).await;
     }
@@ -848,6 +857,7 @@ impl Face {
             || path == "/playback/page-error"
             || path == "/playback/load"
             || path == "/playback/outcome"
+            || path == "/playback/route"
             || path == "/playback/cast"
             // An assistant's server asks for tokens and calls `/mcp` on whichever public name it was given, and its
             // person approves in the web app: the connector answers on every name, its own gate being the token.
@@ -1044,6 +1054,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/playback/page-error" => "/playback/page-error",
         "/playback/load" => "/playback/load",
         "/playback/outcome" => "/playback/outcome",
+        "/playback/route" => "/playback/route",
         "/playback/cast" => "/playback/cast",
         // One label each: what happens inside them is their own repo's log to keep.
         p if p.starts_with("/scout/") => "/scout",
@@ -1122,6 +1133,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/playback/page-error"
         | "/playback/load"
         | "/playback/outcome"
+        | "/playback/route"
         | "/playback/cast" => Some(POST),
         // Bare OPTIONS is Web's authenticated live Hearth capability probe. CORS preflights are answered before
         // dispatch and never enter the relay.
@@ -1147,6 +1159,7 @@ fn body_cap(route: &str) -> usize {
         | "/playback/page-error"
         | "/playback/load"
         | "/playback/outcome"
+        | "/playback/route"
         | "/playback/cast" => 2048,
         "/den/:config/playback" => 16 * 1024,
         "/den/:config/cast-subtitle" => crate::cast::MAX_SUBTITLE_BYTES,
@@ -1491,7 +1504,13 @@ pub mod tests {
 
     #[test]
     fn the_diagnostics_reports_are_small_post_only_routes_on_every_face() {
-        for route in ["/playback/page-error", "/playback/load", "/playback/outcome", "/playback/cast"] {
+        for route in [
+            "/playback/page-error",
+            "/playback/load",
+            "/playback/outcome",
+            "/playback/route",
+            "/playback/cast",
+        ] {
             assert_eq!(route_label(route), route);
             assert_eq!(allowed_methods(route), Some(&[Method::POST][..]));
             assert_eq!(body_cap(route), 2048);
@@ -1511,6 +1530,17 @@ pub mod tests {
         assert_eq!(
             log_line(&Method::POST, "/playback/outcome", 204, 1, "ab12", &[("playback", "engine:native")]),
             "POST /playback/outcome 204 1ms rid=ab12 playback=engine:native"
+        );
+        assert_eq!(
+            log_line(
+                &Method::POST,
+                "/playback/route",
+                204,
+                1,
+                "ab12",
+                &[("playbackRoute", "event:failed,requested:managed")],
+            ),
+            "POST /playback/route 204 1ms rid=ab12 playbackRoute=event:failed,requested:managed"
         );
         assert_eq!(
             log_line(&Method::POST, "/playback/cast", 204, 1, "ab12", &[("cast", "kind:airplay")]),

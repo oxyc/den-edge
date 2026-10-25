@@ -33,6 +33,7 @@ async function base(page) {
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
+  await page.route(`${ORIGIN}/playback/route`, (route) => route.fulfill({ status: 204 }));
   await page.route(`${ORIGIN}/den/config/subtitles/**`, (route) =>
     route.fulfill({ json: { subtitles: [] } }),
   );
@@ -99,6 +100,7 @@ test('checking a browser key replaces the login prompt with immediate progress',
     });
 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    await expect(page.getByRole('button', { name: 'Choose playback source' })).toHaveCount(0);
     await page.getByLabel('Browser key').fill('not-the-key');
     await page.getByRole('button', { name: 'Let this browser in' }).click();
     await expect(page.getByRole('status')).toHaveText('Checking key…');
@@ -114,7 +116,7 @@ test('checking a browser key replaces the login prompt with immediate progress',
   }
 });
 
-test('a direct startup failure followed by a failed fallback tells the viewer and stops', async () => {
+test('a direct startup failure refreshes TorBox only, then offers both paths explicitly', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -124,8 +126,8 @@ test('a direct startup failure followed by a failed fallback tells the viewer an
     await base(page);
     const operations = [];
     const logs = [];
-    let releaseFallback;
-    const fallbackGate = new Promise((resolve) => (releaseFallback = resolve));
+    let releaseRefresh;
+    const refreshGate = new Promise((resolve) => (releaseRefresh = resolve));
     page.on('console', (message) => logs.push(message.text()));
     await page.route(`${ORIGIN}/den/config/playback`, async (route) => {
       const request = route.request();
@@ -136,7 +138,7 @@ test('a direct startup failure followed by a failed fallback tells the viewer an
           contentType: 'application/json',
           body: JSON.stringify(direct('startup-fails')),
         });
-      await fallbackGate;
+      await refreshGate;
       return route.fulfill({
         status: 502,
         contentType: 'application/json',
@@ -149,23 +151,33 @@ test('a direct startup failure followed by a failed fallback tells the viewer an
 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
     await expect.poll(() => operations.length).toBe(2);
-    await expect(page.getByRole('status')).toHaveText('TorBox did not start—trying Den Remux…');
-    releaseFallback();
+    await expect(page.getByRole('status')).toHaveText('TorBox did not start—refreshing…');
+    releaseRefresh();
     await expect(page.getByRole('alert')).toContainText('available playback paths', {
       timeout: 15_000,
     });
-    await expect(
-      page.getByText('TorBox did not start—trying Den Remux…', { exact: true }),
-    ).toHaveCount(0);
+    await expect(page.getByText('TorBox did not start—refreshing…', { exact: true })).toHaveCount(
+      0,
+    );
     expect(operations).toHaveLength(2);
     expect(operations[0].body).not.toHaveProperty('directFailed');
-    expect(operations[1].body.directFailed).toBe(true);
+    expect(operations[1].body.directOnly).toBe(true);
+    expect(operations[1].body).not.toHaveProperty('directFailed');
     expect(new Set(operations.map((operation) => operation.key)).size).toBe(2);
     expect(logs.filter((line) => line.includes('Managed direct media failed'))).toHaveLength(1);
     expect(
       logs.filter((line) => line.includes('Managed direct media recovery failed')),
     ).toHaveLength(1);
+    expect(logs.join('\n')).toContain('"event":"recovery"');
+    expect(logs.join('\n')).toContain('"to":"torbox"');
     expect(logs.join('\n')).not.toContain('playing session carries on');
+    await expect(page.getByTestId('playback-source')).toHaveText('Source');
+    const source = page.getByRole('button', { name: 'Choose playback source' });
+    await source.click();
+    await expect(
+      page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }),
+    ).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Try Den Remux' })).toBeVisible();
   } finally {
     await browser.close();
   }
@@ -199,25 +211,25 @@ test('a replacement still opening is retried instead of leaving the player waiti
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(remux),
+        body: JSON.stringify(direct('replacement-recovered')),
       });
     });
     await page.route(`${ORIGIN}/torbox/replacement-startup-fails/**`, (route) =>
       route.fulfill({ status: 404 }),
     );
-    await page.route(`${ORIGIN}/managed-remux/s/**`, (route) => media(route));
+    await page.route(`${ORIGIN}/torbox/replacement-recovered/**`, (route) => media(route));
 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
     await expect.poll(() => operations.length).toBe(2);
     await expect.poll(() => operations.length, { timeout: 10_000 }).toBe(3);
-    expect(operations[1].directFailed).toBe(true);
-    expect(operations[2].directFailed).toBe(true);
+    expect(operations[1].directOnly).toBe(true);
+    expect(operations[2].directOnly).toBe(true);
   } finally {
     await browser.close();
   }
 });
 
-test('hls.js refreshes a failed direct stream once, then asks Hearth for Remux', async () => {
+test('hls.js refreshes a failed direct stream once, then stops on TorBox for a manual choice', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -235,12 +247,7 @@ test('hls.js refreshes a failed direct stream once, then asks Hearth for Remux',
         key: request.headers()['idempotency-key'],
       });
       if (operations.length === 2) await refreshGate;
-      const answer =
-        operations.length === 1
-          ? direct('initial')
-          : operations.length === 2
-            ? direct('refreshed')
-            : remux;
+      const answer = operations.length === 1 ? direct('initial') : direct('refreshed');
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -268,21 +275,17 @@ test('hls.js refreshes a failed direct stream once, then asks Hearth for Remux',
     await expect.poll(() => operations.length, { timeout: 30_000 }).toBe(2);
     await expect(page.getByRole('status')).toHaveText('TorBox stopped—refreshing…');
     releaseRefresh();
-    await page.waitForFunction(
-      () => (document.querySelector('.player video')?.currentTime ?? 0) > 5,
-      undefined,
-      { timeout: 30_000 },
-    );
+    await expect(page.getByRole('alert')).toContainText('stopped responding', { timeout: 30_000 });
 
-    expect(operations).toHaveLength(3);
+    expect(operations).toHaveLength(2);
     expect(operations[0].body).not.toHaveProperty('directFailed');
-    expect(operations[1].body).not.toHaveProperty('directFailed');
-    expect(operations[2].body.directFailed).toBe(true);
-    expect(new Set(operations.map((operation) => operation.key)).size).toBe(3);
+    expect(operations[1].body.directOnly).toBe(true);
+    expect(new Set(operations.map((operation) => operation.key)).size).toBe(2);
     expect(failedFragments).toBeGreaterThan(0);
     expect(failedFragments).toBeLessThanOrEqual(6);
     expect(refreshedRequests).toBeGreaterThan(0);
     expect(refreshedRequests).toBeLessThanOrEqual(6);
+    await expect(page.getByTestId('playback-source')).toHaveText('Source');
   } finally {
     await browser.close();
   }
@@ -347,7 +350,7 @@ test('a bad playback-address hint explains its one retry instead of repeating ge
   }
 });
 
-test('native Safari HLS failure falls back through Hearth without duplicating the Remux session', async () => {
+test('native Safari HLS failure refreshes only TorBox without crossing to Remux', async () => {
   const browser = await webkit.launch();
   try {
     const page = await browser.newPage();
@@ -359,22 +362,23 @@ test('native Safari HLS failure falls back through Hearth without duplicating th
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(operations.length === 1 ? direct('native-fails') : remux),
+        body: JSON.stringify(
+          operations.length === 1 ? direct('native-fails') : direct('native-refreshed-fails'),
+        ),
       });
     });
     await page.route(`${ORIGIN}/torbox/native-fails/**`, (route) => route.fulfill({ status: 404 }));
-    await page.route(`${ORIGIN}/managed-remux/s/**`, (route) => media(route));
+    await page.route(`${ORIGIN}/torbox/native-refreshed-fails/**`, (route) =>
+      route.fulfill({ status: 404 }),
+    );
 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await page.waitForFunction(
-      () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
-      undefined,
-      { timeout: 30_000 },
-    );
+    await expect(page.getByRole('alert')).toContainText('stopped responding', { timeout: 30_000 });
 
     expect(operations).toHaveLength(2);
     expect(operations[0].body).not.toHaveProperty('directFailed');
-    expect(operations[1].body.directFailed).toBe(true);
+    expect(operations[1].body.directOnly).toBe(true);
+    expect(operations[1].body).not.toHaveProperty('directFailed');
     expect(new Set(operations.map((operation) => operation.key)).size).toBe(2);
   } finally {
     await browser.close();

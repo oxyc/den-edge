@@ -80,6 +80,10 @@ export async function guardNetwork(page, origin = E2E_ORIGIN) {
     // Opening search asks den-edge to open its TMDB connection ahead of the lookups (`warmTmdb`); it answers nothing.
     if (url.origin === origin && url.pathname === '/tmdb/warm')
       return route.fulfill({ status: 204 });
+    // Playback source routing is an immediate fire-and-forget diagnostic. A spec that needs its body installs a
+    // page-level route; every other fixture accepts it like den-edge does so adding observability changes no flow.
+    if (url.origin === origin && url.pathname === '/playback/route')
+      return route.fulfill({ status: 204 });
     // Profiles are a host-scoped, default-off canary. Specs that opt in install a page route first; every other
     // application fixture receives the shipped explicit disabled response required to reveal the legacy Owner path.
     if (url.origin === origin && url.pathname === '/capabilities/profiles')

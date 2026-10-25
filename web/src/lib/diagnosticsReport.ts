@@ -1,5 +1,5 @@
 // den-edge's own request log sees nothing of what happens once the app has loaded: a page that broke or never
-// rendered, how a playback session ended, a cast or AirPlay attempt. These three reports join
+// rendered, how playback was routed or ended, a cast or AirPlay attempt. These reports join
 // `startupReport.ts`'s precedent (den-edge#234): POST a small, typed body to `den-edge/diagnostics.rs`, answered
 // with no content and logged as one tagged line. Never a title, a URL, a token or any other free text — enums and
 // capped numbers only, so a malformed or hostile body is a 400, never a line in the log.
@@ -415,6 +415,71 @@ export function sendPlaybackOutcome(
   fetchImpl: typeof fetch = fetch,
 ): void {
   beacon('/playback/outcome', report, fetchImpl);
+}
+
+// ---- A playback route decision (`POST /playback/route`) ----
+
+export type PlaybackRouteSource = 'managed' | 'torbox' | 'den_remux' | 'unavailable';
+export type PlaybackRouteReason = 'ordinary' | 'refresh' | 'fallback' | 'direct';
+export type PlaybackSubtitleConstraint = 'allowed' | 'playlist_required' | 'den_subtitles_disabled';
+export type PlaybackRouteFailure =
+  | 'login'
+  | 'none'
+  | 'busy'
+  | 'starting'
+  | 'transcode'
+  | 'unreachable'
+  | 'request'
+  | 'source_unavailable'
+  | 'timed_out'
+  | 'temporarily_unavailable'
+  | 'protocol'
+  | 'ended'
+  | 'public'
+  | 'ipv6'
+  | 'cast'
+  | 'no_copy'
+  | 'no_fit';
+export type PlaybackRouteCause =
+  | 'managed_prepare_timeout'
+  | 'torbox_authentication_failed'
+  | 'torbox_item_not_found'
+  | 'torbox_malformed_response'
+  | 'torbox_managed_streaming_unavailable_for_plan'
+  | 'torbox_playlist_unavailable'
+  | 'torbox_rate_limited'
+  | 'torbox_refused'
+  | 'torbox_unavailable'
+  | 'torbox_unreachable'
+  | 'torbox_unsafe_stream_url';
+
+/**
+ * One route transition, made entirely of closed values. In particular this carries no media URL, release name,
+ * provider response, token, title identity, address, language, track, or raw error.
+ */
+export interface PlaybackRouteReport {
+  event: 'request' | 'selected' | 'failed' | 'recovery' | 'viewer_selection';
+  requestedSource?: Exclude<PlaybackRouteSource, 'unavailable'>;
+  source?: Exclude<PlaybackRouteSource, 'managed' | 'unavailable'>;
+  from?: Exclude<PlaybackRouteSource, 'managed'>;
+  to?: Exclude<PlaybackRouteSource, 'managed' | 'unavailable'>;
+  reason?: PlaybackRouteReason;
+  context?: 'no_session' | 'active_session';
+  stage?: 'startup' | 'mid_playback';
+  attempt?: 'initial' | 'refreshed';
+  failure?: PlaybackRouteFailure;
+  cause?: PlaybackRouteCause;
+  subtitleConstraint?: PlaybackSubtitleConstraint;
+  replacement?: boolean;
+  embeddedSubtitles?: 'none' | 'available';
+}
+
+/** Unlike the visit outcome, route facts matter before any session exists, so send each one immediately. */
+export function sendPlaybackRoute(
+  report: PlaybackRouteReport,
+  fetchImpl: typeof fetch = fetch,
+): void {
+  post('/playback/route', report, fetchImpl);
 }
 
 // ---- A cast or AirPlay attempt (`POST /playback/cast`) ----

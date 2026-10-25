@@ -178,6 +178,101 @@ async function playsTo(page, seconds, timeout = 60_000) {
 /** Every switch the player made on its own: a session asked for with no release named. */
 const automatic = (asked) => asked.slice(1).filter((want) => !want.filename);
 
+/** Managed TorBox with enough delivery metadata for the player's ordinary early-link judgment. */
+async function fakeManagedTorBox(page) {
+  const duration = FIXTURE_SEGMENTS * SEGMENT_SECS;
+  const asked = [];
+  await page.route(`${ORIGIN}/den/config/subtitles/**`, (route) =>
+    route.fulfill({ json: { subtitles: [] } }),
+  );
+  await page.route(`${ORIGIN}/direct/releases`, (route) =>
+    route.fulfill({
+      json: {
+        releases: [A, B].map(({ filename, label, plays }) => ({ filename, label, plays })),
+      },
+    }),
+  );
+  await page.route(`${ORIGIN}/den/config/playback`, (route) => {
+    const want = route.request().postDataJSON();
+    asked.push(want);
+    if (asked.length === 1) return route.fulfill({ status: 404, json: { error: 'no_release' } });
+    const release = (want.exclude ?? []).includes(A.filename) ? B : A;
+    return route.fulfill({
+      json: {
+        url: `${ORIGIN}/torbox/${release.filename}/master.m3u8`,
+        release: {
+          filename: release.filename,
+          label: release.label,
+          size: (release.bitrate * duration) / 8,
+        },
+        session: {
+          external: true,
+          duration,
+          segments: Array.from({ length: FIXTURE_SEGMENTS }, (_, n) => [
+            n * SEGMENT_SECS,
+            FIXTURE_BYTES[n] * release.scale,
+          ]),
+          video: { codec: 'h264', transcoded: false },
+          audioTrack: 0,
+          audioTracks: [],
+        },
+      },
+    });
+  });
+  const due = new Map();
+  await page.route(`${ORIGIN}/torbox/**`, async (route) => {
+    const path = new URL(route.request().url()).pathname.split('/');
+    const release = path.at(-2) === A.filename ? A : B;
+    const file = path.at(-1);
+    if (file === 'master.m3u8')
+      return route.fulfill({
+        contentType: 'application/vnd.apple.mpegurl',
+        body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\nmedia.m3u8\n',
+      });
+    if (file.endsWith('.m3u8'))
+      return route.fulfill({
+        contentType: 'application/vnd.apple.mpegurl',
+        body: playlist(FIXTURE_SEGMENTS),
+      });
+    const n = /^seg(\d+)\.m4s$/.exec(file)?.[1];
+    if (release === A && n !== undefined && Number(n) >= 4) {
+      const key = `${release.filename}/${n}`;
+      if (!due.has(key)) due.set(key, Date.now() + 5_000);
+      const ms = due.get(key) - Date.now();
+      if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    return route.fulfill({
+      contentType: 'video/mp4',
+      body: await readFile(new URL(n === undefined ? file : `seg${n}.m4s`, hls)),
+    });
+  });
+  return asked;
+}
+
+test('early TorBox delivery switching stays on TorBox with its subtitle constraint', async () => {
+  test.setTimeout(120_000);
+  const { browser, page } = await openPlayer();
+  try {
+    const asked = await fakeManagedTorBox(page);
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
+    const source = page.getByRole('button', { name: 'Choose playback source' });
+    await source.click();
+    await page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }).click();
+    await expect(page.getByRole('button', { name: 'Playing from TorBox' })).toBeVisible();
+
+    await expect.poll(() => asked.length, { timeout: 90_000 }).toBe(3);
+    expect(asked[2]).toMatchObject({
+      directOnly: true,
+      subtitleLanguages: [],
+      exclude: [A.filename],
+    });
+    expect(asked[2]).not.toHaveProperty('directFailed');
+    await expect(page.getByRole('button', { name: 'Playing from TorBox' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a release the viewer picked is never switched away from, and the pick outlives a reload @soak', async () => {
   test.setTimeout(240_000);
   const { browser, page } = await openPlayer();
