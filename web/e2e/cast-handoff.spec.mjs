@@ -30,6 +30,19 @@ const CHROME_MAC =
 const hls = new URL('./media/hls/', import.meta.url);
 const web = fileURLToPath(new URL('..', import.meta.url));
 
+async function serveHls(route, emptyStatus = 200) {
+  const request = route.request();
+  const path = new URL(request.url()).pathname;
+  const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
+  if (request.method() !== 'GET' || !file?.match(/^(?:media\.m3u8|init\.mp4|seg\d+\.m4s)$/))
+    return route.fulfill({ status: emptyStatus, headers: { 'access-control-allow-origin': '*' } });
+  return route.fulfill({
+    contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
+    headers: { 'access-control-allow-origin': '*' },
+    body: await readFile(new URL(file, hls)),
+  });
+}
+
 /**
  * Google's sender as the cast page sees it: one receiver on the network once discovery starts, and a Cast session
  * that starts when `requestSession` is called — which only a press inside the cast page may do. Every LOAD the
@@ -137,7 +150,15 @@ const remuxAnswer = {
  * The player playing a title through Hearth, TorBox's managed HLS in the page. `castAnswer` is what Hearth answers
  * the request made for a receiver.
  */
-async function open({ castAnswer, hang = false, subtitle = false }) {
+async function open({
+  castAnswer,
+  initialAnswer = {
+    url: TORBOX,
+    release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 },
+  },
+  hang = false,
+  subtitle = false,
+}) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -156,9 +177,7 @@ async function open({ castAnswer, hang = false, subtitle = false }) {
     const request = r.request().postDataJSON();
     asked.managed.push(request);
     if (request.player === 'cast') return r.fulfill({ json: castAnswer });
-    return r.fulfill({
-      json: { url: TORBOX, release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 } },
-    });
+    return r.fulfill({ json: initialAnswer });
   });
   await page.route(`${ORIGIN}/den/config/subtitles/**`, (r) => {
     asked.subtitles.push(r.request().url());
@@ -195,16 +214,16 @@ async function open({ castAnswer, hang = false, subtitle = false }) {
       body: await readFile(new URL(file, hls)),
     });
   });
-  // The session's public listener answers the cast page's link measure and its end; nothing here plays from it.
-  await page.route(`${MEDIA}/**`, (r) => r.fulfill({ status: 204 }));
+  // The session's public listener serves the initial Remux fixture and answers its session bookkeeping.
+  await page.route(`${MEDIA}/**`, (r) => serveHls(r, r.request().method() === 'GET' ? 200 : 204));
   // At home: the player's page reaches den-remux's home-network address, but the browser keeps the cross-origin
   // cast page off the local network.
-  await page.route(`${LAN}/**`, (r) => {
-    const fromCastPage = r.request().frame().url().startsWith(CAST);
+  await page.route(`${LAN}/**`, async (r) => {
+    const request = r.request();
+    const fromCastPage = request.frame().url().startsWith(CAST);
     asked.lanProbes.push(fromCastPage ? 'cast page' : 'player');
-    return fromCastPage
-      ? r.abort('addressunreachable')
-      : r.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*' }, body: '' });
+    if (fromCastPage) return r.abort('addressunreachable');
+    return serveHls(r);
   });
   await context.route('https://www.gstatic.com/**', (r) =>
     r.fulfill({ contentType: 'text/javascript', body: sdk(hang) }),
@@ -230,11 +249,20 @@ async function open({ castAnswer, hang = false, subtitle = false }) {
 }
 
 const castFrame = (page) => page.frameLocator(`iframe[src^="${CAST}"]`);
-const castLoads = async (page) =>
-  (await page
-    .frames()
-    .find((frame) => frame.url().startsWith(CAST))
-    ?.evaluate(() => window.loads)) ?? [];
+async function castLoads(page) {
+  const frame = page.frames().find((candidate) => candidate.url().startsWith(CAST));
+  if (!frame) return [];
+  try {
+    return (await frame.evaluate(() => window.loads)) ?? [];
+  } catch (error) {
+    if (
+      frame.isDetached() ||
+      /Frame was detached|Execution context was destroyed/.test(String(error))
+    )
+      return [];
+    throw error;
+  }
+}
 
 /** Wait for the in-page video to be past `seconds`. */
 async function playingPast(page, seconds) {
@@ -338,7 +366,10 @@ test('a selected OpenSubtitles track stays on TorBox and is handed to Chromecast
 });
 
 test('at home a Remux session reaches the receiver on the home-network address the player reached', async () => {
-  const { browser, page, asked } = await open({ castAnswer: remuxAnswer });
+  const { browser, page, asked } = await open({
+    initialAnswer: remuxAnswer,
+    castAnswer: remuxAnswer,
+  });
   try {
     await playingPast(page, 2);
     await chooseReceiver(page, asked);

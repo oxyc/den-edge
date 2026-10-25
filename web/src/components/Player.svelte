@@ -128,11 +128,14 @@
     reportableLanguage,
     sendCastReport,
     sendPlaybackOutcome,
+    sendPlaybackRoute,
     subtitleSourceOf,
     type CastFailReason,
     type CastStage,
     type Engine,
     type FailSource,
+    type PlaybackRouteFailure,
+    type PlaybackRouteReport,
     type SwitchReason,
   } from '../lib/diagnosticsReport';
   import ActionMenu from './ActionMenu.svelte';
@@ -439,6 +442,16 @@
   >(null);
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
+  const sourceRecovery = $derived(
+    !session &&
+      !!playback &&
+      (failure === 'sourceUnavailable' ||
+        failure === 'source' ||
+        failure === 'none' ||
+        failure === 'noCopy'),
+  );
+  /** Whether the active direct session was explicitly opened without Den's sidecar subtitles. */
+  let directWithoutDenSubtitles = $state(false);
   /** On `none`: the containers of the releases that were ready but that the browser player can't open (`.ts`, …). */
   let skippedFormats = $state.raw<string[]>([]);
   /**
@@ -619,6 +632,28 @@
   const NO_TORBOX = 'This Hearth has no TorBox to play from';
   /** Set while the stamp's switch to the other path is under way (`switchDelivery`). */
   let deliverySwitching = $state(false);
+
+  function playbackRouteLog(report: PlaybackRouteReport) {
+    console.info(`[Den playback] ${JSON.stringify(report)}`);
+    sendPlaybackRoute(report);
+  }
+
+  function routeFailure(failure: Failure): PlaybackRouteFailure {
+    switch (failure) {
+      case 'sourceUnavailable':
+        return 'source_unavailable';
+      case 'timedOut':
+        return 'timed_out';
+      case 'temporarilyUnavailable':
+        return 'temporarily_unavailable';
+      case 'noCopy':
+        return 'no_copy';
+      case 'noFit':
+        return 'no_fit';
+      default:
+        return failure;
+    }
+  }
 
   /** Keep `chosenRelease` and `excluded` for a reload of this same visit. */
   function keepReleases() {
@@ -905,11 +940,13 @@
     replacing?: Session,
     delivery: 'ordinary' | 'refresh' | 'fallback' | 'direct' = 'ordinary',
     retryNotice: string | null = null,
+    compatibleSubtitles = true,
   ): Promise<boolean | Failure> {
     const replacingSubtitleLanguage = replacing
       ? selectedSubtitle(replacing, subtitleChoice)?.language
       : undefined;
     clearTimeout(retry);
+    retry = undefined;
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
     // shown, so a slow identifier query or `playable()` below counts as part of the wait too. Stopped once this
     // attempt's first frame arrives (the `requestVideoFrameCallback`/`loadeddata` listener below) or the player
@@ -957,15 +994,16 @@
     // session, for audio — in the title's original language, the most that can be told before a session says — that
     // this browser doesn't name. A title whose language is unknown is not taken for foreign.
     const subtitleWanted =
-      subtitleChoice !== null ||
-      (!replacing &&
-        subtitleLanguage === undefined &&
-        title.originalLanguage !== undefined &&
-        autoSubtitleLanguage(
-          title.originalLanguage,
-          navigator.languages,
-          subtitleLanguages.map((language) => ({ language })),
-        ) !== null);
+      compatibleSubtitles &&
+      (subtitleChoice !== null ||
+        (!replacing &&
+          subtitleLanguage === undefined &&
+          title.originalLanguage !== undefined &&
+          autoSubtitleLanguage(
+            title.originalLanguage,
+            navigator.languages,
+            subtitleLanguages.map((language) => ({ language })),
+          ) !== null));
     const claimed = (decodes ??= await playable());
     if (ended) return false;
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
@@ -1040,14 +1078,32 @@
     } = request;
     const asked: PlaybackWant = {
       ...fields,
+      ...(!compatibleSubtitles ? { subtitleLanguages: [] } : {}),
       // WebKit's system player needs captions in the HLS playlist itself. Cast does not: a selected external VTT
       // is staged as a short-lived receiver capability, so choosing captions must never disqualify TorBox.
       ...(delivery === 'fallback' ||
-      (delivery !== 'direct' && subtitleWanted && subtitlesNeedPlaylist())
+      (replacing !== undefined && !replacing.external && delivery !== 'direct') ||
+      (delivery !== 'direct' && delivery !== 'refresh' && subtitleWanted && subtitlesNeedPlaylist())
         ? { directFailed: true }
         : {}),
-      ...(delivery === 'direct' ? { directOnly: true } : {}),
+      ...(delivery === 'direct' || delivery === 'refresh' ? { directOnly: true } : {}),
     };
+    const requestedSource = asked.directOnly
+      ? ('torbox' as const)
+      : asked.directFailed
+        ? ('den_remux' as const)
+        : ('managed' as const);
+    playbackRouteLog({
+      event: 'request',
+      requestedSource,
+      reason: delivery,
+      replacement: replacing !== undefined,
+      subtitleConstraint: asked.directFailed
+        ? 'playlist_required'
+        : compatibleSubtitles
+          ? 'allowed'
+          : 'den_subtitles_disabled',
+    });
     // This used to wait until the playback session had completely opened, so the stream menu could show one
     // apparently-final choice for several seconds. Source discovery does not depend on that answer and belongs in
     // parallel with it.
@@ -1064,11 +1120,15 @@
     // playback is Remux, which a request for TorBox alone never takes.
     if ('failure' in result && result.failure === 'legacy')
       result =
-        delivery === 'direct'
+        delivery === 'direct' || delivery === 'refresh'
           ? { failure: 'sourceUnavailable' }
           : await startSession(request, undefined, on, undefined, attempt.signal);
     // TorBox was asked for and anything else is a refusal: a Remux answer is ended unplayed.
-    if (delivery === 'direct' && !('failure' in result) && !result.external) {
+    if (
+      (delivery === 'direct' || delivery === 'refresh') &&
+      !('failure' in result) &&
+      !result.external
+    ) {
       endSession(result);
       result = { failure: 'sourceUnavailable' };
     }
@@ -1105,6 +1165,13 @@
     if ('failure' in result) {
       // Only `startPlayback` adds this field, after its closed allow-list parser. Legacy Remux refusals do not.
       const cause = 'cause' in result ? (result.cause as PlaybackCause | undefined) : undefined;
+      playbackRouteLog({
+        event: 'failed',
+        requestedSource,
+        reason: delivery,
+        failure: routeFailure(result.failure),
+        ...(cause ? { cause } : {}),
+      });
       if (playback) {
         console.warn('Managed playback could not start.', {
           failure: result.failure,
@@ -1143,7 +1210,7 @@
         ) {
           const retryMessage = automaticRetryNotice(result.failure, cause);
           retry = setTimeout(
-            () => void begin(pick, extra, replacing, delivery, retryMessage),
+            () => void begin(pick, extra, replacing, delivery, retryMessage, compatibleSubtitles),
             result.retryMs ?? RETRY_MS,
           );
         }
@@ -1160,8 +1227,9 @@
           pick,
           extra,
           undefined,
-          'ordinary',
+          delivery,
           'The remaining releases did not work—trying the full list…',
+          compatibleSubtitles,
         );
       }
       failure = result.failure;
@@ -1177,9 +1245,17 @@
         // twenty seconds until then is work for a box that is already the reason we are waiting.
         const retryMessage = automaticRetryNotice(result.failure, cause);
         retry = setTimeout(
-          () => void begin(pick, extra, undefined, 'ordinary', retryMessage),
+          () => void begin(pick, extra, undefined, delivery, retryMessage, compatibleSubtitles),
           result.retryMs ?? RETRY_MS,
         );
+      }
+      if (
+        !compatibleSubtitles &&
+        retry === undefined &&
+        pendingDirectSubtitleRestore !== undefined
+      ) {
+        subtitleChoice = pendingDirectSubtitleRestore;
+        pendingDirectSubtitleRestore = undefined;
       }
       return false;
     }
@@ -1239,6 +1315,21 @@
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
     session = result;
+    directWithoutDenSubtitles = result.external === true && !compatibleSubtitles;
+    if (!compatibleSubtitles) pendingDirectSubtitleRestore = undefined;
+    playbackRouteLog({
+      event: 'selected',
+      source: result.external ? 'torbox' : 'den_remux',
+      requestedSource,
+      subtitleConstraint: compatibleSubtitles ? 'allowed' : 'den_subtitles_disabled',
+      ...(result.external
+        ? {
+            embeddedSubtitles: result.subtitles?.some((track) => track.torboxTrack !== undefined)
+              ? ('available' as const)
+              : ('none' as const),
+          }
+        : {}),
+    });
     playWhenMounted = shouldPlayWhenMounted ? session : null;
     directAttempt = result.external
       ? delivery === 'ordinary' || delivery === 'direct'
@@ -1267,6 +1358,7 @@
     // than name one that never appears, and choosing one there moves to Den Remux.
     if (
       !replacing &&
+      compatibleSubtitles &&
       subtitleLanguage === undefined &&
       subtitleChoice === null &&
       !(result.external && subtitlesNeedPlaylist())
@@ -1403,7 +1495,9 @@
       if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
       let moved: boolean | Failure;
       try {
-        moved = await begin(undefined, ask, current);
+        const delivery = current.external ? 'direct' : 'fallback';
+        const compatibleSubtitles = !current.external || !directWithoutDenSubtitles;
+        moved = await begin(undefined, ask, current, delivery, null, compatibleSubtitles);
       } catch (error) {
         // A request a suspended page never got the answer to (an iPhone's tab put in the background): the session
         // playing carries on, as for any refusal.
@@ -2649,32 +2743,44 @@
     watcher?.spent();
     reportFailure(current, code, message);
     if (current.external) {
-      const recovery =
-        current.castOrigin && castOffered
-          ? 'fallback'
-          : directRecovery(played, directAttempt ?? 'initial');
+      const recovery = directRecovery(played, directAttempt ?? 'initial');
       // The browser's native error may contain a signed media URL, so log only this closed recovery state. The
       // eventual Hearth refusal, if any, is logged separately with its allow-listed status/code/cause.
-      console.warn('Managed direct media failed; recovering through Hearth.', {
+      console.warn('Managed direct media failed.', {
         stage: played ? 'mid-playback' : 'startup',
         attempt: directAttempt ?? 'initial',
         action: recovery,
       });
+      playbackRouteLog({
+        event: 'recovery',
+        from: 'torbox',
+        to: 'torbox',
+        stage: played ? 'mid_playback' : 'startup',
+        attempt: directAttempt ?? 'initial',
+      });
       carryPosition();
+      if (recovery === 'stop') {
+        letGo();
+        failure = 'source';
+        return;
+      }
       const recovering = showTransition(
-        recovery === 'refresh'
-          ? `TorBox ${played ? 'stopped' : 'did not start'}—refreshing…`
-          : `TorBox ${played ? 'stopped' : 'did not start'}—trying Den Remux…`,
+        `TorBox ${played ? 'stopped' : 'did not start'}—refreshing…`,
       );
       const moved = await begin(
         undefined,
         {},
         current,
-        recovery === 'refresh' ? 'refresh' : 'fallback',
+        'refresh',
+        null,
+        !directWithoutDenSubtitles,
       );
       if (moved !== true) clearTransition(recovering);
-      if (session === current && moved !== true)
-        failure = typeof moved === 'string' && moved !== 'busy' ? moved : 'source';
+      if (session === current && moved !== true) {
+        const stopped = typeof moved === 'string' && moved !== 'busy' ? moved : 'source';
+        letGo();
+        failure = stopped;
+      }
       return;
     }
     // Opened for the address this page reported, and nothing ever arrived: most likely that address was wrong (a
@@ -2848,6 +2954,8 @@
    * path starts consistently, then this player applies the explicit choice on its local or away-browser path.
    */
   let subtitleChoice = $state<string | null>(untrack(() => subtitleLanguage ?? null));
+  /** The viewer's prior choice while an explicit no-session TorBox attempt, including its retries, omits Den subs. */
+  let pendingDirectSubtitleRestore: string | null | undefined;
   let subtitleOffset = $state(0);
   let subtitleResyncOffset = $state(0);
   const subtitleTimingOffset = $derived(subtitleOffset + subtitleResyncOffset);
@@ -3632,10 +3740,12 @@
       clearTransition(pending);
       return;
     }
+    const delivery = directOnly ?? (current.external ? 'direct' : 'fallback');
+    const compatibleSubtitles = !current.external || !directWithoutDenSubtitles;
     report();
     carryPosition();
     if (played) {
-      void begin(pick, { transcode: 'never' }, current, directOnly)
+      void begin(pick, { transcode: 'never' }, current, delivery, null, compatibleSubtitles)
         .catch((error: unknown): Failure => {
           console.warn('A requested player change got no answer; this stream carries on.', error);
           return 'unreachable';
@@ -3650,7 +3760,7 @@
         });
       return;
     }
-    void begin(pick, {}, undefined, directOnly)
+    void begin(pick, {}, undefined, delivery, null, compatibleSubtitles)
       .catch((error: unknown): Failure => {
         console.warn('A requested player change got no answer.', error);
         return 'unreachable';
@@ -3678,6 +3788,12 @@
     const current = session;
     if (!current || switching || deliverySwitching) return;
     const to = current.external ? 'Den Remux' : 'TorBox';
+    playbackRouteLog({
+      event: 'viewer_selection',
+      from: current.external ? 'torbox' : 'den_remux',
+      to: current.external ? 'den_remux' : 'torbox',
+      context: 'active_session',
+    });
     const pending = showTransition(label ?? `Switching to ${to}…`);
     report();
     carryPosition();
@@ -3704,6 +3820,49 @@
         if (typeof moved === 'string') {
           undo?.();
           unchanged = deliveryUnchangedNotice(to, moved, guestGrants.endedText());
+        }
+      })
+      .finally(() => (deliverySwitching = false));
+  }
+
+  /** A final managed failure has no session to replace, but it must not remove the viewer's route choice. */
+  function trySourceWithoutSession(source: 'torbox' | 'den-remux') {
+    if (session || !playback || deliverySwitching || switching) return;
+    const previousSubtitle = subtitleChoice;
+    const compatibleSubtitles = source !== 'torbox';
+    if (!compatibleSubtitles) {
+      pendingDirectSubtitleRestore = previousSubtitle;
+      subtitleChoice = null;
+    }
+    const pending = showTransition(
+      source === 'torbox' ? 'Trying TorBox without Den subtitles…' : 'Trying Den Remux…',
+    );
+    playbackRouteLog({
+      event: 'viewer_selection',
+      from: 'unavailable',
+      to: source === 'torbox' ? 'torbox' : 'den_remux',
+      context: 'no_session',
+      subtitleConstraint: compatibleSubtitles ? 'allowed' : 'den_subtitles_disabled',
+    });
+    deliverySwitching = true;
+    void begin(
+      chosenRelease ? { filename: chosenRelease } : undefined,
+      {},
+      undefined,
+      source === 'torbox' ? 'direct' : 'fallback',
+      null,
+      compatibleSubtitles,
+    )
+      .catch((error: unknown) => {
+        console.warn(`The requested ${source} source got no answer.`, error);
+        return false;
+      })
+      .then((moved) => {
+        if (moved === true) return;
+        clearTransition(pending);
+        if (!compatibleSubtitles && !session && retry === undefined) {
+          subtitleChoice = previousSubtitle;
+          pendingDirectSubtitleRestore = undefined;
         }
       })
       .finally(() => (deliverySwitching = false));
@@ -4155,46 +4314,74 @@
 >
   <header>
     <b>{heading}</b>
-    {#if session}
+    {#if session || sourceRecovery}
       <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
            Remux session. Wherever Hearth chooses the path it opens a menu saying so, with the switch to the other in
            it — disabled, and the note saying why, where TorBox can't play here: a stream restarts only on that choice,
            never on a press of the stamp itself. -->
-      {@const source = session.external ? 'TorBox' : 'Den Remux'}
+      {@const source = session ? (session.external ? 'TorBox' : 'Den Remux') : 'Source'}
       {#if !casting && playback}
-        {@const external = session.external}
-        {@const ruledOut = !external && typeof torbox === 'object' ? torbox.unavailable : undefined}
+        {@const external = session?.external === true}
+        {@const ruledOut = !external
+          ? (torboxRuledOut(managedCause) ??
+            (typeof torbox === 'object' ? torbox.unavailable : undefined))
+          : undefined}
         <!-- The system player shows only a playlist's subtitles, and TorBox's names none: the switch turns one off. -->
-        {@const dropsSubtitle = !external && subtitleChoice !== null && subtitlesNeedPlaylist()}
+        {@const dropsSubtitle =
+          !!session && !external && subtitleChoice !== null && subtitlesNeedPlaylist()}
         <ActionMenu
-          label={`Playing from ${source}`}
-          note={external
-            ? 'Playing directly from TorBox'
-            : ruledOut
-              ? `Playing through Den Remux. ${ruledOut}.`
-              : 'Playing through Den Remux'}
+          label={session ? `Playing from ${source}` : 'Choose playback source'}
+          note={session
+            ? external
+              ? directWithoutDenSubtitles
+                ? session.subtitles?.some((track) => track.torboxTrack !== undefined)
+                  ? 'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.'
+                  : 'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.'
+                : 'Playing directly from TorBox'
+              : ruledOut
+                ? `Playing through Den Remux. ${ruledOut}.`
+                : 'Playing through Den Remux'
+            : 'Playback has no active source. Try either path explicitly.'}
           triggerClass="den-button den-button-player den-button-compact player-source-switch"
           onclose={scheduleWebControls}
-          items={() => [
-            {
-              kind: 'item',
-              label: `Switch to ${external ? 'Den Remux' : 'TorBox'}`,
-              description: external
-                ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
-                : ruledOut
-                  ? undefined
-                  : dropsSubtitle
-                    ? 'Turns subtitles off: this player shows only Den Remux’s'
-                    : 'Straight from the source, no conversion',
-              disabled: !!ruledOut || deliverySwitching || switching,
-              onselect: () => {
-                if (!dropsSubtitle) return switchDelivery();
-                const previous = subtitleChoice;
-                subtitleChoice = null;
-                switchDelivery(() => (subtitleChoice = previous));
-              },
-            },
-          ]}
+          items={() =>
+            session
+              ? [
+                  {
+                    kind: 'item',
+                    label: `Switch to ${external ? 'Den Remux' : 'TorBox'}`,
+                    description: external
+                      ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
+                      : ruledOut
+                        ? undefined
+                        : dropsSubtitle
+                          ? 'Turns subtitles off: this player shows only Den Remux’s'
+                          : 'Straight from the source, no conversion',
+                    disabled: !!ruledOut || deliverySwitching || switching,
+                    onselect: () => {
+                      if (!dropsSubtitle) return switchDelivery();
+                      const previous = subtitleChoice;
+                      subtitleChoice = null;
+                      switchDelivery(() => (subtitleChoice = previous));
+                    },
+                  },
+                ]
+              : [
+                  {
+                    kind: 'item',
+                    label: 'Try TorBox without Den subtitles',
+                    description: ruledOut ?? 'Play the release directly, without Den subtitles',
+                    disabled: !!ruledOut || deliverySwitching || switching,
+                    onselect: () => trySourceWithoutSession('torbox'),
+                  },
+                  {
+                    kind: 'item',
+                    label: 'Try Den Remux',
+                    description: 'Use the home player for compatible audio and subtitles',
+                    disabled: deliverySwitching || switching,
+                    onselect: () => trySourceWithoutSession('den-remux'),
+                  },
+                ]}
         >
           {#snippet glyph()}<span data-testid="playback-source">{source}</span>{/snippet}
         </ActionMenu>
@@ -4732,12 +4919,15 @@
         <!-- Den owns this picker so it can distinguish built-in tracks from OpenSubtitles candidates and show
              match metadata the native video control cannot carry. The same choice is forwarded to Cast. -->
         {#if session.subtitles?.length}
-          {@const chosenSubtitle = preferredSubtitleTrack(session.subtitles, subtitleChoice)}
+          {@const chosenSubtitle = preferredSubtitleTrack(session.subtitles ?? [], subtitleChoice)}
           {@const chosenSubtitleLabel = chosenSubtitle ? subtitleLabel(chosenSubtitle) : 'Off'}
           <div class="pick-menu subtitle-pick">
             <ActionMenu
               label={`Subtitles: ${chosenSubtitleLabel}`}
               heading="Subtitles"
+              note={session.external && directWithoutDenSubtitles
+                ? 'Den subtitles were not requested for this direct stream. This release’s embedded TorBox subtitles remain available.'
+                : undefined}
               triggerClass="pick"
               onclose={scheduleWebControls}
               items={() => [
@@ -4748,7 +4938,7 @@
                   checked: subtitleChoice === null,
                   onselect: () => void chooseSubtitle(null),
                 },
-                ...session!.subtitles!.map((track) => ({
+                ...(session!.subtitles ?? []).map((track) => ({
                   kind: 'radio' as const,
                   group: 'subtitle',
                   label: subtitleLabel(track),

@@ -1,5 +1,5 @@
 //! What a browser's web player and Chromecast/AirPlay path saw and the device API never does: a page that broke
-//! or never rendered, how a playback session ended, and how a cast attempt went. Three sibling reports beside
+//! or never rendered, how playback was routed or ended, and how a cast attempt went. Sibling reports beside
 //! `startup.rs` (den-edge#234's precedent), same shape: `POST`, rate-limited per address, serde-allowlisted so a
 //! body this doesn't parse into one of the structs below is a 400, not a line in the log — and every field is an
 //! enum or a capped number. Never a title, a URL, a token, a library id or any other free text, by construction
@@ -7,7 +7,7 @@
 
 use crate::handler::{
     client_ip, error, json_reply, read_json, retry_after, CastTag, LoadTag, PageErrorTag, PlaybackOutcomeTag,
-    ReportField,
+    PlaybackRouteTag, ReportField,
 };
 use crate::AppState;
 use axum::body::Body;
@@ -927,6 +927,158 @@ pub async fn handle_load(state: &Arc<AppState>, req: Request) -> Response {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// A playback route decision (`POST /playback/route`), sent as it is made so even a request that never opens a
+// session leaves a durable, privacy-safe trail.
+
+const PLAYBACK_ROUTE_BUCKET: &str = "playback-route";
+
+macro_rules! closed_enum {
+    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum $name {
+            $($variant,)+
+        }
+        impl $name {
+            fn as_str(&self) -> &'static str {
+                match self { $(Self::$variant => $value,)+ }
+            }
+        }
+    };
+}
+
+closed_enum!(PlaybackRouteEvent {
+    Request => "request",
+    Selected => "selected",
+    Failed => "failed",
+    Recovery => "recovery",
+    ViewerSelection => "viewer_selection",
+});
+
+closed_enum!(PlaybackRouteSource {
+    Managed => "managed",
+    Torbox => "torbox",
+    DenRemux => "den_remux",
+    Unavailable => "unavailable",
+});
+closed_enum!(PlaybackRouteReason {
+    Ordinary => "ordinary",
+    Refresh => "refresh",
+    Fallback => "fallback",
+    Direct => "direct",
+});
+closed_enum!(PlaybackRouteContext {
+    NoSession => "no_session",
+    ActiveSession => "active_session",
+});
+closed_enum!(PlaybackRouteStage {
+    Startup => "startup",
+    MidPlayback => "mid_playback",
+});
+closed_enum!(PlaybackRouteAttempt {
+    Initial => "initial",
+    Refreshed => "refreshed",
+});
+closed_enum!(PlaybackSubtitleConstraint {
+    Allowed => "allowed",
+    PlaylistRequired => "playlist_required",
+    DenSubtitlesDisabled => "den_subtitles_disabled",
+});
+closed_enum!(PlaybackEmbeddedSubtitles {
+    None => "none",
+    Available => "available",
+});
+closed_enum!(PlaybackRouteFailure {
+    Login => "login",
+    None => "none",
+    Busy => "busy",
+    Starting => "starting",
+    Transcode => "transcode",
+    Unreachable => "unreachable",
+    Request => "request",
+    SourceUnavailable => "source_unavailable",
+    TimedOut => "timed_out",
+    TemporarilyUnavailable => "temporarily_unavailable",
+    Protocol => "protocol",
+    Ended => "ended",
+    Public => "public",
+    Ipv6 => "ipv6",
+    Cast => "cast",
+    NoCopy => "no_copy",
+    NoFit => "no_fit",
+});
+closed_enum!(PlaybackRouteCause {
+    ManagedPrepareTimeout => "managed_prepare_timeout",
+    TorboxAuthenticationFailed => "torbox_authentication_failed",
+    TorboxItemNotFound => "torbox_item_not_found",
+    TorboxMalformedResponse => "torbox_malformed_response",
+    TorboxManagedStreamingUnavailableForPlan => "torbox_managed_streaming_unavailable_for_plan",
+    TorboxPlaylistUnavailable => "torbox_playlist_unavailable",
+    TorboxRateLimited => "torbox_rate_limited",
+    TorboxRefused => "torbox_refused",
+    TorboxUnavailable => "torbox_unavailable",
+    TorboxUnreachable => "torbox_unreachable",
+    TorboxUnsafeStreamUrl => "torbox_unsafe_stream_url",
+});
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlaybackRouteReport {
+    event: PlaybackRouteEvent,
+    requested_source: Option<PlaybackRouteSource>,
+    source: Option<PlaybackRouteSource>,
+    from: Option<PlaybackRouteSource>,
+    to: Option<PlaybackRouteSource>,
+    reason: Option<PlaybackRouteReason>,
+    context: Option<PlaybackRouteContext>,
+    stage: Option<PlaybackRouteStage>,
+    attempt: Option<PlaybackRouteAttempt>,
+    failure: Option<PlaybackRouteFailure>,
+    cause: Option<PlaybackRouteCause>,
+    subtitle_constraint: Option<PlaybackSubtitleConstraint>,
+    replacement: Option<bool>,
+    embedded_subtitles: Option<PlaybackEmbeddedSubtitles>,
+}
+
+impl PlaybackRouteReport {
+    fn tag(&self) -> String {
+        let mut parts = vec![format!("event:{}", self.event.as_str())];
+        macro_rules! add {
+            ($field:ident, $name:literal) => {
+                if let Some(value) = &self.$field {
+                    parts.push(format!(concat!($name, ":{}"), value.as_str()));
+                }
+            };
+        }
+        add!(requested_source, "requested");
+        add!(source, "source");
+        add!(from, "from");
+        add!(to, "to");
+        add!(reason, "reason");
+        add!(context, "context");
+        add!(stage, "stage");
+        add!(attempt, "attempt");
+        add!(failure, "failure");
+        add!(cause, "cause");
+        add!(subtitle_constraint, "subtitles");
+        if let Some(replacement) = self.replacement {
+            parts.push(format!("replacement:{}", u8::from(replacement)));
+        }
+        add!(embedded_subtitles, "embeddedSubtitles");
+        parts.join(",")
+    }
+}
+
+pub async fn handle_playback_route(state: &Arc<AppState>, req: Request) -> Response {
+    let report: PlaybackRouteReport = match intake(state, req, PLAYBACK_ROUTE_BUCKET).await {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    accepted(report.tag(), |resp, tag| {
+        resp.extensions_mut().insert(PlaybackRouteTag(tag));
+    })
+}
+
 // A playback session's outcome (`POST /playback/outcome`), sent once as the session ends — on its natural end,
 // the viewer closing the player, a failure, or the tab hiding/unloading (`navigator.sendBeacon`, so the report
 // outruns the unload it is reporting on).
@@ -1600,6 +1752,33 @@ mod tests {
         // A required field that fails cannot be left out to prove it, so nothing is named.
         let bad_kind = serde_json::json!({ "kind": "nonsense", "module": "app", "route": "home" });
         assert_eq!(refused_field::<PageErrorReport>(&bad_kind), None);
+    }
+
+    #[test]
+    fn playback_route_tag_names_only_closed_route_facts() {
+        let report: PlaybackRouteReport = serde_json::from_value(serde_json::json!({
+            "event": "failed",
+            "requestedSource": "torbox",
+            "reason": "direct",
+            "failure": "source_unavailable",
+            "cause": "torbox_authentication_failed",
+            "subtitleConstraint": "den_subtitles_disabled",
+            "replacement": false,
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "event:failed,requested:torbox,reason:direct,failure:source_unavailable,\
+             cause:torbox_authentication_failed,subtitles:den_subtitles_disabled,replacement:0"
+        );
+    }
+
+    #[test]
+    fn playback_route_refuses_unknown_values_and_fields() {
+        let unknown_value = serde_json::json!({ "event": "failed", "failure": "provider_said_secret" });
+        assert!(serde_json::from_value::<PlaybackRouteReport>(unknown_value).is_err());
+        let unknown_field = serde_json::json!({ "event": "failed", "url": "https://signed.example/secret" });
+        assert!(serde_json::from_value::<PlaybackRouteReport>(unknown_field).is_err());
     }
 
     fn outcome() -> serde_json::Value {
