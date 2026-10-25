@@ -10,8 +10,10 @@
 //!   POST /assistant/ack             member   remove those up to a `seq`
 //!
 //! And a second queue for the TV (§16): `"queue": "tv"` in an append, `?queue=tv` on a drain or ack. Only a TV drains it.
+//! A household with several TVs gives each a lane of its own (`"tv"` / `?tv=`, the TV's lane id), named by the TV as
+//! it drains, so an assistant plays on the TV it means.
 //!
-//!   GET  /assistant/tv                         bearer   whether the TV is awake: drained its queue within 40 s
+//!   GET  /assistant/tv                         bearer   whether a TV is awake, and each TV's lane, name and state
 //!   GET  /assistant/request/{seq}?queue=Q      bearer   whether a request still waits, or a device took it
 //!
 //! And reads (§15): devices publish each read grant's projection, sealed under a read key den-edge holds only wrapped
@@ -80,62 +82,122 @@ const TV_TTL_MS: u64 = 10 * 60_000;
 const TV_APPENDS_PER_MINUTE: u32 = 10;
 /// A TV draining its queue with `wait=25` drains at least this often: within it, the TV is awake.
 const TV_ONLINE_MS: u64 = 40_000;
+/// TV lanes remembered per library, and the longest name a TV gives its lane (a pairing label's, pairing-v1 §3).
+const MAX_TVS: usize = 16;
+const TV_NAME_MAX: usize = 40;
 
-/// A library's two queues (§16): its own, which every device drains, and its TV's, which only a TV drains. den-edge
-/// never reads which a request belongs in; den-mcp says, and a device refuses one from the wrong queue.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// When a library's TVs last drained (§16), in memory alone: a TV draining refreshes it within seconds of a restart.
+#[derive(Default)]
+pub struct TvsSeen {
+    /// The shared TV queue, which a TV from before lanes drains.
+    shared: Option<u64>,
+    /// Each TV's own lane, the name it gave, and when it last drained.
+    lanes: Vec<SeenTv>,
+}
+
+struct SeenTv {
+    tv: String,
+    name: Option<String>,
+    at: u64,
+}
+
+/// A library's queues (§16): its own, which every device drains, and its TVs': the shared one, or a lane of a TV's
+/// own. den-edge never reads which a request belongs in; den-mcp says, and a device refuses one from the wrong queue.
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum Lane {
     Library,
-    Tv,
+    Tv(Option<String>),
 }
 
 impl Lane {
-    /// Absent is the library's queue, so every request made before §16 is unchanged.
-    fn parse(value: Option<&str>) -> Option<Lane> {
-        match value {
-            None | Some("library") => Some(Lane::Library),
-            Some("tv") => Some(Lane::Tv),
-            Some(_) => None,
+    /// Absent is the library's queue, so every request made before §16 is unchanged; `tv` names a TV's lane, and
+    /// only a TV queue has one. The refusal is the error code.
+    fn parse(queue: Option<&str>, tv: Option<&str>) -> Result<Lane, &'static str> {
+        match (queue, tv) {
+            (None | Some("library"), None) => Ok(Lane::Library),
+            (Some("tv"), None) => Ok(Lane::Tv(None)),
+            (Some("tv"), Some(tv)) if valid_tv(tv) => Ok(Lane::Tv(Some(tv.to_owned()))),
+            (Some("tv"), Some(_)) => Err("invalid_tv"),
+            _ => Err("invalid_queue"),
         }
     }
 
-    fn key(self, library: &str) -> String {
+    fn key(&self, library: &str) -> String {
         match self {
             Lane::Library => format!("q:{library}"),
-            Lane::Tv => format!("t:{library}"),
+            Lane::Tv(None) => format!("t:{library}"),
+            Lane::Tv(Some(tv)) => format!("t:{library}:{tv}"),
         }
     }
 
     /// What a held drain of this queue waits on: only an append to the same queue wakes it.
-    fn hold(self, library: &str) -> String {
+    fn hold(&self, library: &str) -> String {
         match self {
             Lane::Library => library.to_owned(),
-            Lane::Tv => format!("tv:{library}"),
+            Lane::Tv(None) => format!("tv:{library}"),
+            Lane::Tv(Some(tv)) => format!("tv:{library}:{tv}"),
         }
     }
 
-    fn max(self) -> usize {
+    fn max(&self) -> usize {
         match self {
             Lane::Library => MAX_QUEUED,
-            Lane::Tv => TV_MAX_QUEUED,
+            Lane::Tv(_) => TV_MAX_QUEUED,
         }
     }
 
-    fn ttl(self) -> u64 {
+    fn ttl(&self) -> u64 {
         match self {
             Lane::Library => TTL_MS,
-            Lane::Tv => TV_TTL_MS,
+            Lane::Tv(_) => TV_TTL_MS,
         }
     }
 }
 
-fn invalid_queue() -> Response {
-    json_reply(StatusCode::BAD_REQUEST, &error("invalid_queue"))
+/// A TV's lane id: 32 lowercase hex.
+fn valid_tv(tv: &str) -> bool {
+    tv.len() == 32 && tv.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A member route's `?queue=`, or `400 invalid_queue`.
+fn refused_lane(code: &'static str) -> Response {
+    json_reply(StatusCode::BAD_REQUEST, &error(code))
+}
+
+/// A member route's `?queue=` and `?tv=`, or `400 invalid_queue` / `invalid_tv`.
 fn lane_of(req: &Request) -> Result<Lane, Box<Response>> {
-    Lane::parse(crate::handler::query_param(req, "queue").as_deref()).ok_or_else(|| Box::new(invalid_queue()))
+    let param = |name| crate::handler::query_param(req, name);
+    Lane::parse(param("queue").as_deref(), param("tv").as_deref())
+        .map_err(|code| Box::new(refused_lane(code)))
+}
+
+/// What a TV calls its lane, from a drain's body: `{"name"}`, cleaned as a pairing label. Absent or unreadable is
+/// none, and the drain goes ahead.
+async fn drain_name(req: Request) -> Option<String> {
+    let bytes = axum::body::to_bytes(req.into_body(), DROPBOX_BODY_BYTES).await.ok()?;
+    let body: Value = serde_json::from_slice(&bytes).ok()?;
+    crate::oauth::clean_name(body.get("name")?.as_str()?, TV_NAME_MAX)
+}
+
+/// Note a TV queue's drain: the TV is awake, and a lane's TV is listed under the name it gave (or the last one).
+fn saw_tv(state: &AppState, library: &str, tv: Option<&str>, name: Option<String>) {
+    let now = state.now();
+    let mut seen = state.assistant_tv_seen.lock().expect("TV drain times");
+    let library = seen.entry(library.to_owned()).or_default();
+    let Some(tv) = tv else {
+        library.shared = Some(now);
+        return;
+    };
+    match library.lanes.iter_mut().find(|seen| seen.tv == tv) {
+        Some(seen) => {
+            seen.at = now;
+            seen.name = name.or(seen.name.take());
+        }
+        None => library.lanes.push(SeenTv { tv: tv.to_owned(), name, at: now }),
+    }
+    if library.lanes.len() > MAX_TVS {
+        library.lanes.sort_by_key(|seen| std::cmp::Reverse(seen.at));
+        library.lanes.truncate(MAX_TVS);
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -337,7 +399,7 @@ fn limited(wait: Option<u64>) -> Option<Response> {
     wait.map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
-async fn load_queue(state: &AppState, library: &str, lane: Lane, now: u64) -> std::io::Result<Queue> {
+async fn load_queue(state: &AppState, library: &str, lane: &Lane, now: u64) -> std::io::Result<Queue> {
     let mut queue: Queue = match state.store.get(NS, &lane.key(library)).await? {
         Some(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other)?,
         None => Queue { next: 1, ..Queue::default() },
@@ -349,7 +411,7 @@ async fn load_queue(state: &AppState, library: &str, lane: Lane, now: u64) -> st
     Ok(queue)
 }
 
-async fn save_queue(state: &AppState, library: &str, lane: Lane, queue: &Queue) -> std::io::Result<()> {
+async fn save_queue(state: &AppState, library: &str, lane: &Lane, queue: &Queue) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(queue).expect("a queue always serialises");
     state.store.put(NS, &lane.key(library), &bytes).await
 }
@@ -428,16 +490,35 @@ async fn append(state: &AppState, req: Request) -> Response {
         Ok(body) => body,
         Err(resp) => return *resp,
     };
-    let lane = match body.get("queue") {
-        None => Some(Lane::Library),
-        Some(Value::String(queue)) => Lane::parse(Some(queue)),
-        Some(_) => None,
+    let text = |name: &str, code| match body.get(name) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err(code),
     };
-    let Some(lane) = lane else { return invalid_queue() };
+    let lane = text("queue", "invalid_queue")
+        .and_then(|queue| Ok((queue, text("tv", "invalid_tv")?)))
+        .and_then(|(queue, tv)| Lane::parse(queue, tv));
+    let lane = match lane {
+        Ok(lane) => lane,
+        Err(code) => return refused_lane(code),
+    };
     let Some(sealed) = body.get("sealed").and_then(Value::as_str).filter(|s| valid_sealed(s)) else {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_sealed"));
     };
-    if lane == Lane::Tv {
+    if let Lane::Tv(tv) = &lane {
+        // A lane exists once its TV has drained it: den-mcp names only TVs `GET /assistant/tv` listed, and nothing
+        // else can make up lanes to be stored.
+        if let Some(tv) = tv {
+            let known = state
+                .assistant_tv_seen
+                .lock()
+                .expect("TV drain times")
+                .get(&session.library)
+                .is_some_and(|seen| seen.lanes.iter().any(|seen| &seen.tv == tv));
+            if !known {
+                return json_reply(StatusCode::NOT_FOUND, &error("unknown_tv"));
+            }
+        }
         let per_minute = format!("assistant-append-tv:{}", session.sid);
         if let Some(refused) =
             limited(crate::link::throttled_per_minute(state, &per_minute, TV_APPENDS_PER_MINUTE))
@@ -447,7 +528,7 @@ async fn append(state: &AppState, req: Request) -> Response {
     }
     let _write = state.assistant_lock.lock().await;
     let now = state.now();
-    let mut queue = match load_queue(state, &session.library, lane, now).await {
+    let mut queue = match load_queue(state, &session.library, &lane, now).await {
         Ok(queue) => queue,
         Err(e) => return internal("assistant queue read", e),
     };
@@ -458,7 +539,7 @@ async fn append(state: &AppState, req: Request) -> Response {
     let seq = queue.next;
     queue.next += 1;
     queue.messages.push(Entry { seq, sealed: sealed.to_owned(), received_at: now });
-    if let Err(e) = save_queue(state, &session.library, lane, &queue).await {
+    if let Err(e) = save_queue(state, &session.library, &lane, &queue).await {
         return internal("assistant queue write", e);
     }
     state.assistant_holds.wake(&lane.hold(&session.library));
@@ -477,18 +558,19 @@ async fn drain(state: &AppState, req: Request) -> Response {
         Ok(lane) => lane,
         Err(refused) => return *refused,
     };
-    // Only a TV drains its queue, so a drain of it says the TV is awake (`GET /assistant/tv`).
-    if lane == Lane::Tv {
-        state.assistant_tv_seen.lock().expect("TV drain times").insert(library.clone(), state.now());
-    }
     let ip = crate::handler::client_ip(state, &req);
     let wait = crate::hold::wait(crate::handler::query_param(&req, "wait"));
     let admission = req.extensions().get::<crate::handler::AdmissionSlot>().cloned();
+    // Only a TV drains a TV queue, so a drain of one says that TV is awake (`GET /assistant/tv`).
+    if let Lane::Tv(tv) = &lane {
+        let name = if tv.is_some() { drain_name(req).await } else { None };
+        saw_tv(state, &library, tv.as_deref(), name);
+    }
     // Registered before the queue is read: a request appended after the read still wakes the wait.
     let held_on = lane.hold(&library);
     let mut hold = wait.and_then(|wait| Some((state.assistant_holds.hold(&ip, &[held_on.as_str()])?, wait)));
     loop {
-        let messages = match load_queue(state, &library, lane, state.now()).await {
+        let messages = match load_queue(state, &library, &lane, state.now()).await {
             Ok(queue) => queue.messages,
             Err(e) => return internal("assistant queue read", e),
         };
@@ -524,7 +606,7 @@ async fn ack(state: &AppState, req: Request) -> Response {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_seq"));
     };
     let _write = state.assistant_lock.lock().await;
-    let mut queue = match load_queue(state, &library, lane, state.now()).await {
+    let mut queue = match load_queue(state, &library, &lane, state.now()).await {
         Ok(queue) => queue,
         Err(e) => return internal("assistant queue read", e),
     };
@@ -533,22 +615,36 @@ async fn ack(state: &AppState, req: Request) -> Response {
     let removed = taken.len();
     if removed > 0 {
         queue.taken.extend(taken.into_iter().map(|m| Taken { seq: m.seq, received_at: m.received_at }));
-        if let Err(e) = save_queue(state, &library, lane, &queue).await {
+        if let Err(e) = save_queue(state, &library, &lane, &queue).await {
             return internal("assistant queue write", e);
         }
     }
     json_reply(StatusCode::OK, &json!({ "removed": removed }))
 }
 
-/// `GET /assistant/tv` (§16): whether the session's library's TV is awake, by when it last drained its queue.
+/// `GET /assistant/tv` (§16): whether a TV of the session's library is awake, by when one last drained a TV queue, and
+/// each TV's lane — its id, the name it gave and whether it is awake — the one seen last first.
 async fn get_tv(state: &AppState, req: Request) -> Response {
     let session = match crate::oauth::write_session(state, req.headers()).await {
         Ok(session) => session,
         Err(refused) => return *refused,
     };
-    let seen = state.assistant_tv_seen.lock().expect("TV drain times").get(&session.library).copied();
-    let online = seen.is_some_and(|at| state.now().saturating_sub(at) < TV_ONLINE_MS);
-    json_reply(StatusCode::OK, &json!({ "online": online, "lastSeenAt": seen }))
+    let now = state.now();
+    let online = |at: u64| now.saturating_sub(at) < TV_ONLINE_MS;
+    let seen = state.assistant_tv_seen.lock().expect("TV drain times");
+    let (last, mut lanes) = match seen.get(&session.library) {
+        Some(seen) => {
+            let lanes = seen.lanes.iter().map(|tv| (tv.at, &tv.tv, &tv.name)).collect::<Vec<_>>();
+            (lanes.iter().map(|(at, ..)| *at).chain(seen.shared).max(), lanes)
+        }
+        None => (None, Vec::new()),
+    };
+    lanes.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
+    let tvs: Vec<Value> = lanes
+        .into_iter()
+        .map(|(at, tv, name)| json!({ "tv": tv, "name": name, "online": online(at), "lastSeenAt": at }))
+        .collect();
+    json_reply(StatusCode::OK, &json!({ "online": last.is_some_and(online), "lastSeenAt": last, "tvs": tvs }))
 }
 
 /// `GET /assistant/request/{seq}?queue=` (§16): whether a request the session's library's queue issued still waits or
@@ -564,7 +660,7 @@ async fn get_request(state: &AppState, req: Request, seq: Option<u64>) -> Respon
     };
     let unknown = || json_reply(StatusCode::NOT_FOUND, &error("unknown_request"));
     let Some(seq) = seq else { return unknown() };
-    let queue = match load_queue(state, &session.library, lane, state.now()).await {
+    let queue = match load_queue(state, &session.library, &lane, state.now()).await {
         Ok(queue) => queue,
         Err(e) => return internal("assistant queue read", e),
     };
@@ -580,12 +676,13 @@ async fn get_request(state: &AppState, req: Request, seq: Option<u64>) -> Respon
 /// A library deleted or moved to a new key: its queues and drop-box key go with it. A new key's library starts its own.
 pub async fn delete_library(state: &AppState, library: &str) -> std::io::Result<()> {
     let _write = state.assistant_lock.lock().await;
-    for lane in [Lane::Library, Lane::Tv] {
+    let seen = state.assistant_tv_seen.lock().expect("TV drain times").remove(library);
+    let tvs = seen.into_iter().flat_map(|seen| seen.lanes).map(|seen| Lane::Tv(Some(seen.tv)));
+    for lane in [Lane::Library, Lane::Tv(None)].into_iter().chain(tvs) {
         state.store.delete(NS, &lane.key(library)).await?;
         state.assistant_holds.wake(&lane.hold(library));
     }
     state.store.delete(NS, &dropbox_key(library)).await?;
-    state.assistant_tv_seen.lock().expect("TV drain times").remove(library);
     Ok(())
 }
 
@@ -901,7 +998,7 @@ mod tests {
         let ok = |body: Value| (StatusCode::OK, body);
         assert_eq!(
             as_assistant(&h, &access, "GET", "/assistant/tv", None).await,
-            ok(json!({ "online": false, "lastSeenAt": null }))
+            ok(json!({ "online": false, "lastSeenAt": null, "tvs": [] }))
         );
         for queue in [json!("bed"), json!(1), json!(null)] {
             assert_eq!(
@@ -937,7 +1034,7 @@ mod tests {
         h.advance(super::TV_ONLINE_MS);
         assert_eq!(
             as_assistant(&h, &access, "GET", "/assistant/tv", None).await,
-            ok(json!({ "online": false, "lastSeenAt": seen }))
+            ok(json!({ "online": false, "lastSeenAt": seen, "tvs": [] }))
         );
         // Queued, then taken once a TV acknowledged it; the library's own seq 1 is still queued.
         let request = |q: &str| format!("/assistant/request/1?queue={q}");
@@ -1000,6 +1097,83 @@ mod tests {
         );
     }
 
+    /// Two TVs' lanes (§16).
+    const TV_LANE: &str = "0123456789abcdef0123456789abcdef";
+    const OTHER_LANE: &str = "fedcba9876543210fedcba9876543210";
+
+    /// Each TV drains a lane of its own and names it; den-mcp lists them and plays on the one it means. A lane is a
+    /// queue of its own — seqs, acks, requests — and exists once its TV has drained it.
+    #[tokio::test]
+    async fn each_tv_has_a_lane_of_its_own_listed_under_its_name() {
+        Box::pin(tv_lanes_scenario()).await;
+    }
+
+    async fn tv_lanes_scenario() {
+        let h = write_harness().await;
+        let (_, access) = write_access(&h).await;
+        let drain = |tv: &str| format!("/assistant/drain?queue=tv&tv={tv}");
+        let append = |tv: &str| Some(json!({ "sealed": sealed(), "queue": "tv", "tv": tv }));
+        // Nothing can make up a lane: den-mcp names only a TV that has drained one.
+        assert_eq!(
+            as_assistant(&h, &access, "POST", "/assistant/append", append(TV_LANE)).await,
+            (StatusCode::NOT_FOUND, json!({ "error": "unknown_tv" }))
+        );
+        for (body, code) in [
+            (json!({ "sealed": sealed(), "queue": "tv", "tv": "LIVING" }), "invalid_tv"),
+            (json!({ "sealed": sealed(), "queue": "tv", "tv": 7 }), "invalid_tv"),
+            (json!({ "sealed": sealed(), "tv": TV_LANE }), "invalid_queue"),
+        ] {
+            assert_eq!(
+                as_assistant(&h, &access, "POST", "/assistant/append", Some(body)).await,
+                (StatusCode::BAD_REQUEST, json!({ "error": code }))
+            );
+        }
+        assert_eq!(
+            as_member(&h, "POST", "/assistant/drain?queue=tv&tv=x", None).await,
+            (StatusCode::BAD_REQUEST, json!({ "error": "invalid_tv" }))
+        );
+        // Two TVs drain their lanes, each naming itself; a name that isn't one is ignored, and the last kept.
+        as_member(&h, "POST", &drain(TV_LANE), Some(json!({ "name": "  Living room " }))).await;
+        h.advance(1_000);
+        as_member(&h, "POST", &drain(OTHER_LANE), Some(json!({ "name": "Bedroom" }))).await;
+        h.advance(1_000);
+        as_member(&h, "POST", &drain(TV_LANE), Some(json!({ "name": "\u{202E}x" }))).await;
+        let (_, listed) = as_assistant(&h, &access, "GET", "/assistant/tv", None).await;
+        let tvs: Vec<(Value, Value, Value)> = listed["tvs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tv| (tv["tv"].clone(), tv["name"].clone(), tv["online"].clone()))
+            .collect();
+        assert_eq!(
+            tvs,
+            [
+                (json!(TV_LANE), json!("Living room"), json!(true)),
+                (json!(OTHER_LANE), json!("Bedroom"), json!(true)),
+            ]
+        );
+        assert_eq!(listed["online"], true);
+        // A play for the bedroom waits in its lane alone, under that lane's seq.
+        let (status, appended) =
+            as_assistant(&h, &access, "POST", "/assistant/append", append(OTHER_LANE)).await;
+        assert_eq!((status, &appended["seq"]), (StatusCode::OK, &json!(1)));
+        assert_eq!(as_member(&h, "POST", &drain(TV_LANE), None).await.1["messages"], json!([]));
+        assert_eq!(as_member(&h, "POST", "/assistant/drain?queue=tv", None).await.1["messages"], json!([]));
+        assert_eq!(as_member(&h, "POST", &drain(OTHER_LANE), None).await.1["messages"][0]["seq"], 1);
+        let request = format!("/assistant/request/1?queue=tv&tv={OTHER_LANE}");
+        assert_eq!(as_assistant(&h, &access, "GET", &request, None).await.1["state"], "queued");
+        let ack = format!("/assistant/ack?queue=tv&tv={OTHER_LANE}");
+        assert_eq!(as_member(&h, "POST", &ack, Some(json!({ "upTo": 1 }))).await.1["removed"], 1);
+        assert_eq!(as_assistant(&h, &access, "GET", &request, None).await.1["state"], "taken");
+        // A TV that stops draining goes offline in the list, and stays listed.
+        h.advance(super::TV_ONLINE_MS);
+        as_member(&h, "POST", &drain(OTHER_LANE), None).await;
+        let (_, listed) = as_assistant(&h, &access, "GET", "/assistant/tv", None).await;
+        assert_eq!(listed["tvs"][0]["tv"], OTHER_LANE, "the one seen last first");
+        assert_eq!(listed["tvs"][0]["name"], "Bedroom", "a drain naming nothing keeps the name");
+        assert_eq!(listed["tvs"][1]["online"], false);
+    }
+
     /// A key reset retires the library: its queue and drop-box key go, and its write sessions end with it.
     #[tokio::test]
     async fn a_retired_library_takes_its_queue_dropbox_and_write_sessions_with_it() {
@@ -1016,6 +1190,10 @@ mod tests {
         )
         .await;
         as_member(&h, "POST", "/assistant/drain?queue=tv", None).await;
+        // A TV's own lane, with a play waiting in it.
+        as_member(&h, "POST", &format!("/assistant/drain?queue=tv&tv={TV_LANE}"), None).await;
+        let lane = Some(json!({ "sealed": sealed(), "queue": "tv", "tv": TV_LANE }));
+        assert_eq!(as_assistant(&h, &access, "POST", "/assistant/append", lane).await.0, StatusCode::OK);
         let resp = h
             .send(
                 "DELETE",
@@ -1026,7 +1204,13 @@ mod tests {
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!h.state.assistant_tv_seen.lock().unwrap().contains_key(LIB));
-        for key in [super::Lane::Library.key(LIB), super::Lane::Tv.key(LIB), super::dropbox_key(LIB)] {
+        let lane = super::Lane::Tv(Some(TV_LANE.to_owned()));
+        for key in [
+            super::Lane::Library.key(LIB),
+            super::Lane::Tv(None).key(LIB),
+            lane.key(LIB),
+            super::dropbox_key(LIB),
+        ] {
             assert!(h.state.store.get(super::NS, &key).await.unwrap().is_none(), "{key}");
         }
         assert_eq!(
