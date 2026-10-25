@@ -1375,8 +1375,12 @@
   const drainNeeded = $derived(
     session.foregrounded && (connectionModel?.settings.value?.assistant.write ?? false),
   );
+  // An LG or Samsung TV does not publish: the build reads the whole library and holds the Worker for seconds, which
+  // those TVs' CPU and memory pay dearly for, and every browser and the Apple TV publish the same projection.
   const publishNeeded = $derived(
-    session.foregrounded && (connectionModel?.settings.value?.assistant.read ?? false),
+    !__DEN_TV__ &&
+      session.foregrounded &&
+      (connectionModel?.settings.value?.assistant.read ?? false),
   );
   const renewNeeded = $derived(drainNeeded || publishNeeded);
 
