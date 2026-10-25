@@ -5359,7 +5359,7 @@
   }
 
   /* The startup status stays centred over an empty/held stage and never intercepts the player. */
-  .startup {
+  .notice.startup {
     width: min(calc(100% - 24px), 42rem);
     pointer-events: none;
   }
