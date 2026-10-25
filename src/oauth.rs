@@ -578,14 +578,15 @@ fn valid_redirect(uri: &str) -> bool {
         && (url.scheme() == "https" || (url.scheme() == "http" && loopback))
 }
 
-/// A client's name as a person reads it on the consent page: no control, bidi or zero-width characters.
-fn clean_name(name: &str) -> Option<String> {
+/// A name as a person reads it — a client's on the consent page, a TV's in an assistant's answer: trimmed, at most
+/// `max` characters, no control, bidi or zero-width characters.
+pub(crate) fn clean_name(name: &str, max: usize) -> Option<String> {
     let name = name.trim();
     let bad = |c: char| {
         c.is_control()
             || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
     };
-    ((1..=NAME_MAX).contains(&name.chars().count()) && !name.chars().any(bad)).then(|| name.to_owned())
+    ((1..=max).contains(&name.chars().count()) && !name.chars().any(bad)).then(|| name.to_owned())
 }
 
 async fn register(state: &AppState, oauth: &OAuth, req: Request) -> Response {
@@ -616,9 +617,13 @@ async fn register(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     }) {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata", "authorization_code only");
     }
-    let name = body.get("client_name").and_then(Value::as_str).and_then(clean_name).unwrap_or_else(|| {
-        url::Url::parse(&uris[0]).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default()
-    });
+    let name = body
+        .get("client_name")
+        .and_then(Value::as_str)
+        .and_then(|n| clean_name(n, NAME_MAX))
+        .unwrap_or_else(|| {
+            url::Url::parse(&uris[0]).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default()
+        });
     let now = state.now();
     let client = Client {
         v: VERSION,
