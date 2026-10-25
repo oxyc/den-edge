@@ -788,6 +788,13 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'relay.membership') return exact(value, ['kind']);
   if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
   if (value.kind === 'history.export') return exact(value, ['kind']);
+  if (value.kind === 'history.episodes')
+    return (
+      exact(value, ['kind', 'titles']) &&
+      list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles) &&
+      value.titles.every((title) => title.type === 'tv') &&
+      unique(value.titles, (title) => `${title.type}:${title.id}`)
+    );
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
   if (value.kind === 'assistant.connection') return exact(value, ['kind']);
   if (value.kind === 'profile-create.status') return exact(value, ['kind']);
@@ -1221,7 +1228,7 @@ function historyItem(value: unknown): value is HistoryItem {
   if (!record(value) || !titleRef(value.title)) return false;
   const title = value.title;
   return (
-    exact(value, ['title', 'watchedAt', 'episode', 'episodes', 'seen']) &&
+    exact(value, ['title', 'watchedAt', 'episode', 'episodes']) &&
     integer(value.watchedAt) &&
     optional(
       value.episode,
@@ -1234,22 +1241,7 @@ function historyItem(value: unknown): value is HistoryItem {
     ) &&
     (value.episode === undefined || title.type === 'tv') &&
     integer(value.episodes) &&
-    (title.type === 'tv' || value.episodes === 0) &&
-    optional(
-      value.seen,
-      (candidate): candidate is Array<{ season: number; episode: number }> =>
-        title.type === 'tv' &&
-        list(
-          candidate,
-          (episode): episode is { season: number; episode: number } =>
-            record(episode) &&
-            exact(episode, ['season', 'episode']) &&
-            integer(episode.season) &&
-            integer(episode.episode) &&
-            episode.episode > 0,
-        ) &&
-        unique(candidate, (episode) => `${episode.season}:${episode.episode}`),
-    )
+    (title.type === 'tv' || value.episodes === 0)
   );
 }
 
@@ -1952,6 +1944,42 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           ),
       )
     );
+  if (value.kind === 'history.episodes') {
+    if (
+      !exact(value, ['kind', 'items']) ||
+      !list(
+        value.items,
+        (
+          candidate,
+        ): candidate is Extract<
+          LibraryQueryResult,
+          { kind: 'history.episodes' }
+        >['items'][number] =>
+          record(candidate) &&
+          exact(candidate, ['title', 'seen']) &&
+          titleRef(candidate.title) &&
+          candidate.title.type === 'tv' &&
+          list(
+            candidate.seen,
+            (episode): episode is { season: number; episode: number } =>
+              record(episode) &&
+              exact(episode, ['season', 'episode']) &&
+              integer(episode.season) &&
+              integer(episode.episode) &&
+              episode.episode > 0,
+            LIBRARY_SERVICE_WIRE_LIMITS.historyDetailEpisodes,
+          ) &&
+          unique(candidate.seen, (episode) => `${episode.season}:${episode.episode}`),
+        LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles,
+      ) ||
+      !unique(value.items, (item) => `${item.title.type}:${item.title.id}`)
+    )
+      return false;
+    return (
+      value.items.reduce((total, item) => total + item.seen.length, 0) <=
+      LIBRARY_SERVICE_WIRE_LIMITS.historyDetailEpisodes
+    );
+  }
   if (value.kind === 'download.refresh')
     return exact(value, ['kind', 'refreshed']) && bool(value.refreshed);
   if (value.kind === 'download.sources') {

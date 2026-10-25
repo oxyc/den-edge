@@ -13,8 +13,10 @@ import {
   airedEpisodes,
   seenAired,
   seenEpisodes,
+  seenEpisodesFor,
   watchedHistory,
   watchedView,
+  withoutSeenEpisodes,
   type WatchedEntry,
 } from './history';
 import type { Title } from './library';
@@ -28,6 +30,15 @@ const seen = (id: number, season: number, episode: number, t: number) =>
   markEpisode(blankEpisode({ type: 'tv', id }, season, episode), true, at(t));
 
 describe('watched history', () => {
+  it('uses summary episode counts to hide started series before exact coordinates load', () => {
+    const saved = [show(10), show(11), movie(1)];
+    const counts = new Map([
+      ['tv:10', 3],
+      ['tv:11', 0],
+    ]);
+    expect(withoutSeenEpisodes(saved, counts).map((title) => title.id)).toEqual([11, 1]);
+  });
+
   it('lists seen titles and part-watched series together, newest first', () => {
     const rows: Row[] = [
       markWatched(blankTitle({ type: 'movie', id: 1 }, 1), at(1000)),
@@ -105,6 +116,9 @@ describe('watched history', () => {
       ['tv:10', 4],
       ['tv:11', 1],
     ]);
+    expect([
+      ...seenEpisodesFor([seen(10, 1, 1, 1000), seen(11, 3, 1, 1000)], new Set(['tv:10'])).keys(),
+    ]).toEqual(['tv:10']);
     const shape = {
       counts: new Map([
         [0, 4],

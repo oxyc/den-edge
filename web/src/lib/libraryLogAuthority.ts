@@ -32,7 +32,8 @@ import {
   type DownloadRaceEntry,
   type DownloadRelease,
 } from './downloadRows';
-import { seenEpisodes, watchedHistory } from './history';
+import { seenEpisodesFor, watchedHistory } from './history';
+import { projectDocument } from './libraryV4';
 import { titleCoordinates, titleView } from './titleView';
 import { continueItems, projectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
@@ -142,6 +143,7 @@ import {
 import {
   compareStamps,
   type ConfigValue,
+  type DocumentRow,
   type EpisodeRow,
   type Row,
   type SettingsRow,
@@ -362,6 +364,8 @@ export class LibraryLogAuthority {
    */
   #asOf: Stamp | null = null;
   #projection?: { rows: Row[]; home: HomeLibraryView };
+  /** Compact one-pass index of authoritative documents; exact episode arrays are still projected only on demand. */
+  #historyDocuments?: { version: number; byTitle: Map<string, DocumentRow[]> };
   #projectionTimer?: ReturnType<typeof setTimeout>;
   #projectionDeadline = Infinity;
   #closed = false;
@@ -739,6 +743,24 @@ export class LibraryLogAuthority {
         );
       case 'history.export':
         return this.#administration().historyExport();
+      case 'history.episodes': {
+        const requested = new Set(query.titles.map(titleKey));
+        const documents = this.#historyDocumentsByTitle();
+        const now = Date.now();
+        const rows = query.titles.flatMap((title) =>
+          (documents.get(titleKey(title)) ?? []).flatMap((document) =>
+            projectDocument(document, now),
+          ),
+        );
+        const seen = seenEpisodesFor(rows, requested);
+        return {
+          kind: 'history.episodes',
+          items: query.titles.map((title) => ({
+            title,
+            seen: seen.get(titleKey(title)) ?? [],
+          })),
+        };
+      }
       case 'library.metadata':
         return this.#libraryMetadata(query.titles);
       case 'assistant.grants':
@@ -1455,7 +1477,6 @@ export class LibraryLogAuthority {
     // Not Home's view: History reads the rows themselves, but its listeners still need the future-stamp deadline.
     this.#scheduleProjectionReconsideration();
     const rows = this.#log.rows();
-    const seen = seenEpisodes(rows);
     const names = new Map<string, Title>();
     for (const row of rows) {
       if (row.kind !== 'rec' && row.kind !== 'ep') continue;
@@ -1469,9 +1490,23 @@ export class LibraryLogAuthority {
         watchedAt: at,
         ...(episode ? { episode } : {}),
         episodes,
-        ...(title.type === 'tv' ? { seen: seen.get(titleKey(title)) ?? [] } : {}),
       })),
     };
+  }
+
+  #historyDocumentsByTitle(): ReadonlyMap<string, DocumentRow[]> {
+    const version = this.#log.rowsVersion;
+    if (this.#historyDocuments?.version === version) return this.#historyDocuments.byTitle;
+    const byTitle = new Map<string, DocumentRow[]>();
+    for (const { document } of this.#log.documents()) {
+      if (document.kind !== 'title' && document.kind !== 'season') continue;
+      const key = titleKey(document.title);
+      const held = byTitle.get(key);
+      if (held) held.push(document);
+      else byTitle.set(key, [document]);
+    }
+    this.#historyDocuments = { version, byTitle };
+    return byTitle;
   }
 
   async #settings(): Promise<Extract<LibrarySelectionValue, { kind: 'settings' }>> {

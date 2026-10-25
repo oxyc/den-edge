@@ -9,6 +9,57 @@ const version = { instance: 'worker-1', generation: 'generation-3', revision: 14
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 describe('library service client protocol', () => {
+  it('bounds lazy History episode-coordinate requests and replies', () => {
+    const query = (titles: unknown[]) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'history-details',
+        query: { kind: 'history.episodes', titles },
+      });
+    expect(query([{ type: 'tv', id: 42 }])).toMatchObject({ ok: true });
+    expect(query([{ type: 'movie', id: 42 }])).toMatchObject({ ok: false });
+    expect(
+      query(
+        Array.from({ length: LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles + 1 }, (_, id) => ({
+          type: 'tv',
+          id: id + 1,
+        })),
+      ),
+    ).toMatchObject({ ok: false });
+
+    const reply = (items: unknown[]) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'history-details',
+        version,
+        result: { kind: 'history.episodes', items },
+      });
+    expect(
+      reply([
+        {
+          title: { type: 'tv', id: 42 },
+          seen: [
+            { season: 1, episode: 1 },
+            { season: 2, episode: 3 },
+          ],
+        },
+      ]),
+    ).toMatchObject({ ok: true });
+    expect(
+      reply([
+        {
+          title: { type: 'tv', id: 42 },
+          seen: [
+            { season: 1, episode: 1 },
+            { season: 1, episode: 1 },
+          ],
+        },
+      ]),
+    ).toMatchObject({ ok: false });
+  });
+
   it('carries Watchlist and recommendation inputs as independent bounded selections', () => {
     for (const kind of ['watchlist', 'recommendations'])
       expect(
@@ -665,7 +716,7 @@ describe('library service client protocol', () => {
     expect(
       decodeLibraryServiceClientMessage({
         type: 'hello',
-        protocol: 99,
+        protocol: LIBRARY_SERVICE_PROTOCOL - 1,
         requestId: 'request-1',
         clientId: 'tab-1',
         libraryKey,
@@ -675,7 +726,7 @@ describe('library service client protocol', () => {
       ok: false,
       error: {
         code: 'protocol-mismatch',
-        message: 'library service protocol 99 is not supported',
+        message: `library service protocol ${LIBRARY_SERVICE_PROTOCOL - 1} is not supported`,
         retryable: false,
         expectedProtocol: LIBRARY_SERVICE_PROTOCOL,
       },

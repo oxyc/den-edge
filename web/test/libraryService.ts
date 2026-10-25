@@ -29,6 +29,13 @@ import type { Stamp } from '../src/lib/wire';
 import { fixtureContentService } from './contentService';
 
 class FixtureService {
+  readonly historyDetails = {
+    attempts: 0,
+    successes: 0,
+    failures: 0,
+    lastError: '',
+    lastItems: [] as { id: number; seen: number }[],
+  };
   readonly #subscriptions = new Map<
     number,
     { selection: LibrarySelection; listener: (snapshot: LibrarySelectionSnapshot) => void }
@@ -45,6 +52,7 @@ class FixtureService {
     private failOpenOnce = false,
     private openGate?: Promise<void>,
     private readonly openFailureMessage = 'fixture library service did not start',
+    private readonly failHistoryDetails = false,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -96,13 +104,32 @@ class FixtureService {
   }
 
   async query(query: LibraryQuery) {
-    const requested =
-      this.refreshDownloadSources && query.kind === 'download.sources'
-        ? { ...query, refresh: true as const }
-        : query;
-    const result = await this.authority.query(requested);
-    if (query.kind === 'download.refresh') await this.publish([{ kind: 'downloads' }]);
-    return { result, version: this.version };
+    const historyDetails = query.kind === 'history.episodes';
+    if (historyDetails) this.historyDetails.attempts++;
+    try {
+      if (this.failHistoryDetails && historyDetails)
+        throw new Error('fixture history details failed');
+      const requested =
+        this.refreshDownloadSources && query.kind === 'download.sources'
+          ? { ...query, refresh: true as const }
+          : query;
+      const result = await this.authority.query(requested);
+      if (query.kind === 'download.refresh') await this.publish([{ kind: 'downloads' }]);
+      if (historyDetails && result.kind === 'history.episodes') {
+        this.historyDetails.successes++;
+        this.historyDetails.lastItems = result.items.map(({ title, seen }) => ({
+          id: title.id,
+          seen: seen.length,
+        }));
+      }
+      return { result, version: this.version };
+    } catch (error) {
+      if (historyDetails) {
+        this.historyDetails.failures++;
+        this.historyDetails.lastError = error instanceof Error ? error.message : String(error);
+      }
+      throw error;
+    }
   }
 
   async task(task: LibraryTask, operationId: string = crypto.randomUUID()) {
@@ -203,6 +230,8 @@ export interface FixtureLibraryServiceOptions {
   openFailureMessage?: string;
   /** Page fixture only: hold startup so progressive loading behavior can be observed. */
   openGate?: Promise<void>;
+  /** Page fixture only: make the lazy History detail query fail so its summary fallback can be exercised. */
+  failHistoryDetails?: boolean;
 }
 
 /**
@@ -220,6 +249,7 @@ export function fixtureLibraryService({
   failOpenOnce,
   openFailureMessage,
   openGate,
+  failHistoryDetails,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -285,6 +315,7 @@ export function fixtureLibraryService({
     failOpenOnce,
     openGate,
     openFailureMessage,
+    failHistoryDetails,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
@@ -303,6 +334,7 @@ export function fixtureLibraryService({
     model,
     session,
     coordinator,
+    historyDetails: fixtureService.historyDetails,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
   };
 }

@@ -349,6 +349,8 @@ describe('LibraryLogAuthority', () => {
         createDevice: () => '0123456789abcdef',
       });
       const opened = authority(log, clock, 'local');
+      const rows = vi.spyOn(log, 'rows');
+      const documents = vi.spyOn(log, 'documents');
       policy.mockClear();
       const values = [];
       for (const kind of kinds) values.push(await opened.select({ kind }));
@@ -357,8 +359,19 @@ describe('LibraryLogAuthority', () => {
         const op = String(request.op);
         if (op === 'title_state' || op === 'season_state_v4') calls[op] = (calls[op] ?? 0) + 1;
       }
+      const details = kinds.includes('history')
+        ? await opened.query({ kind: 'history.episodes', titles: [series] })
+        : null;
+      if (kinds.includes('history'))
+        await opened.query({ kind: 'history.episodes', titles: [series] });
       await opened.close();
-      return { values, calls };
+      return {
+        values,
+        calls,
+        details,
+        detailRowsCalls: rows.mock.calls.length - kinds.filter((kind) => kind === 'history').length,
+        detailDocumentScans: documents.mock.calls.length,
+      };
     };
 
     const history = await visit(['history']);
@@ -376,14 +389,24 @@ describe('LibraryLogAuthority', () => {
           watchedAt: 3_002,
           episode: { season: 2, episode: 1 },
           episodes: 2,
+        },
+        { title: movie, watchedAt: 1_000, episodes: 0 },
+      ],
+    });
+    expect(history.details).toEqual({
+      kind: 'history.episodes',
+      items: [
+        {
+          title: series,
           seen: [
             { season: 1, episode: 1 },
             { season: 2, episode: 1 },
           ],
         },
-        { title: movie, watchedAt: 1_000, episodes: 0 },
       ],
     });
+    expect(history.detailRowsCalls).toBe(0);
+    expect(history.detailDocumentScans).toBe(1);
     expect(home.values[1]).toMatchObject({
       items: [{ title: series, fraction: 0.4, episode: { season: 2, episode: 2 } }],
     });

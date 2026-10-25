@@ -1,4 +1,6 @@
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
+import { LIBRARY_SERVICE_WIRE_LIMITS } from './libraryServiceProtocol';
+import type { SeenEpisode } from './history';
 import type {
   AssistantConnection,
   ConnectionsView,
@@ -231,6 +233,22 @@ export class LibraryModel {
       () => (this.#history = undefined),
     );
     return this.#history.acquire();
+  }
+
+  /** Exact watched coordinates for the bounded set of History cards currently being drawn. */
+  async historyEpisodes(titles: readonly TitleRef[]): Promise<ReadonlyMap<string, SeenEpisode[]>> {
+    this.#assertOpen();
+    const refs = [
+      ...new Map(
+        titles
+          .filter((title): title is TitleRef & { type: 'tv' } => title.type === 'tv')
+          .slice(0, LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles)
+          .map((title) => [titleKey(title), wireTitleRef(title) as TitleRef & { type: 'tv' }]),
+      ).values(),
+    ];
+    const { result } = await this.service.query({ kind: 'history.episodes', titles: refs });
+    if (result.kind !== 'history.episodes') throw wrongQueryResult('history.episodes');
+    return new Map(result.items.map((item) => [titleKey(item.title), item.seen] as const));
   }
 
   /** Downloads stay lazy because only the Downloads/settings surfaces render the queue. */

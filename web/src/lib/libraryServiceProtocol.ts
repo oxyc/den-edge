@@ -5,8 +5,8 @@
  * implementation that projects them are private to the service.
  */
 
-/** Version 8 adds the small, independently subscribable device view used by playback surfaces. */
-export const LIBRARY_SERVICE_PROTOCOL = 8 as const;
+/** Version 9 moves exact watched-episode coordinates out of the History subscription into a bounded query. */
+export const LIBRARY_SERVICE_PROTOCOL = 9 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -20,6 +20,9 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   routeServices: 64,
   routeEntries: 32,
   libraryMetadataTitles: 512,
+  /** Exact History coordinates are fetched only for the cards about to be drawn. */
+  historyDetailTitles: 48,
+  historyDetailEpisodes: 100_000,
   profileEntries: 64,
 } as const;
 
@@ -405,8 +408,6 @@ export interface HistoryItem {
   episode?: { season: number; episode: number };
   /** Number of watched episodes currently represented by the library. */
   episodes: number;
-  /** Exact watched episodes, retained only in the lazy history view. */
-  seen?: Array<{ season: number; episode: number }>;
 }
 
 export interface HistoryView {
@@ -889,6 +890,7 @@ export type LibraryQuery =
       grantTicket?: string;
     }
   | { kind: 'history.export' }
+  | { kind: 'history.episodes'; titles: Array<TitleRef & { type: 'tv' }> }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
   | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean }
@@ -948,6 +950,13 @@ export type LibraryQueryResult =
           episode: number;
           plays: Array<{ watchedAt: string | null; rewatch: boolean; source: 'den' | 'import' }>;
         }>;
+      }>;
+    }
+  | {
+      kind: 'history.episodes';
+      items: Array<{
+        title: TitleRef & { type: 'tv' };
+        seen: Array<{ season: number; episode: number }>;
       }>;
     }
   | {
