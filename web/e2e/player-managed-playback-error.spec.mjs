@@ -132,7 +132,9 @@ test('a rejected TorBox key tells the guest exactly what to update', async () =>
 });
 
 // TorBox known down or slow (den-hearth's debrid health): said in the wait banner, and asked again only once the
-// answer's Retry-After (Hearth's next recovery probe) has passed.
+// answer's Retry-After (Hearth's next recovery probe) has passed. That ask is a new operation with a new
+// Idempotency-Key: Hearth keeps a refusal in its replay table, so the same key would only get the same refusal back
+// after TorBox recovered.
 for (const [name, body, degraded, message] of [
   [
     'down',
@@ -149,8 +151,10 @@ for (const [name, body, degraded, message] of [
 ]) {
   test(`a ${name} TorBox is said while Den waits out its Retry-After`, async () => {
     const askedAt = [];
+    const keys = [];
     const { browser, page } = await playerPage((route) => {
       askedAt.push(Date.now());
+      keys.push(route.request().headers()['idempotency-key']);
       return route.fulfill({
         status: 503,
         headers: {
@@ -166,6 +170,9 @@ for (const [name, body, degraded, message] of [
       await expect(page.getByRole('status')).toHaveText(message);
       await expect.poll(() => askedAt.length, { timeout: 5_000 }).toBe(2);
       expect(askedAt[1] - askedAt[0]).toBeGreaterThanOrEqual(1_900);
+      expect(keys[0]).toBeTruthy();
+      expect(keys[1]).toBeTruthy();
+      expect(keys[1]).not.toBe(keys[0]);
     } finally {
       await browser.close();
     }
