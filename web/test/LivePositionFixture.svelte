@@ -22,7 +22,7 @@
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
     libraryKey,
-    linkKey: 'fixture',
+    linkKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(7))),
     deviceId: 'aaaaaaaaaaaaaaaa',
   };
   let route = $state(parseRoute(location.pathname + location.search));
@@ -32,10 +32,14 @@
 
   if (writer) {
     const services = createWorkerServiceSession();
-    const model = new LibraryModel(services.library, { libraryKey, mode: 'online' });
+    const model = new LibraryModel(services.library, {
+      libraryKey,
+      mode: 'online',
+      legacyClock: { device: 'aaaaaaaaaaaaaaaa', last: [0, 0, 'aaaaaaaaaaaaaaaa'] },
+    });
     // Listed in `set:devices` under the name the page shows it by ("Playing on Apple TV").
     void model.ready
-      .then(() => model.heartbeatDevice('Apple TV', 'fixture-device'))
+      .then(() => model.heartbeatDevice('Apple TV', 'fixture-device', 'tv'))
       .then(() => (ready = true));
     let written = 0;
     (

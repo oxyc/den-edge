@@ -1749,6 +1749,7 @@ describe('LibraryLogAuthority', () => {
       items: [
         {
           title: movie,
+          deviceId: '0123456789abcdef',
           fraction: 0.4,
           seconds: 240,
           updatedAt: expect.any(Number),

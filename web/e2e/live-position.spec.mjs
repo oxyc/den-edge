@@ -40,6 +40,7 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   const headers = { 'x-den-generation': generation, 'x-den-wire-min': '4' };
   const pulls = new Map();
   const arrivals = [];
+  const controls = [];
   let deviceWrote = 0;
   let pushedWrite = 0;
   let pulledWrite = 0;
@@ -95,6 +96,13 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
     });
     // A paired page drains its assistants' queue; this library has no assistant.
     await page.route(`${E2E_ORIGIN}/assistant/**`, (route) => route.fulfill({ status: 404 }));
+    await page.route(`${E2E_ORIGIN}/inbox/append`, (route) => {
+      controls.push({
+        header: route.request().headers()['x-den-link'],
+        body: route.request().postDataJSON(),
+      });
+      return route.fulfill({ status: 200, json: { queued: true } });
+    });
     pulls.set(name, []);
     // Registered last, so it answers before the per-page edge `routeLibraryEdge` installs.
     await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
@@ -161,6 +169,7 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
     route,
     pulls,
     arrivals,
+    controls,
     close: () => {
       clearInterval(pushing);
       wake();
@@ -299,12 +308,12 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
   }
 });
 
-test('a series’ page says which device plays which episode, and moves nothing as the clock comes and goes', async ({
+test('a series’ page says which device plays which episode, and keeps controls when playback pauses', async ({
   browser,
   page,
 }) => {
   test.setTimeout(240_000);
-  const { play, close } = await openWithDevice(browser, page);
+  const { edge, play, close } = await openWithDevice(browser, page);
   try {
     await page.locator('.card', { hasText: 'Series 1003' }).click();
     await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
@@ -329,6 +338,24 @@ test('a series’ page says which device plays which episode, and moves nothing 
     const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
     await expect(clock).toHaveText(/^1\d:\d\d$/, { timeout: 40_000 });
     await expect(label).toHaveText('Playing on Apple TV');
+    const sentBefore = edge.controls.length;
+    const controls = page.getByLabel('Controls for Apple TV');
+    await expect(controls).toBeVisible();
+    await controls.getByRole('button', { name: 'Pause' }).click();
+    await expect(label).toHaveText('Paused on Apple TV');
+    await controls.getByRole('button', { name: 'Skip back 10 seconds' }).click();
+    await controls.getByRole('button', { name: 'Resume' }).click();
+    await expect(label).toHaveText('Playing on Apple TV');
+    await controls.getByRole('button', { name: 'Skip forward 10 seconds' }).click();
+    await expect.poll(() => edge.controls.length).toBe(sentBefore + 4);
+    expect(
+      edge.controls
+        .slice(sentBefore)
+        .every(
+          ({ header, body }) =>
+            header === 'deadbeefcafe1234' && Object.keys(body).join() === 'sealed',
+        ),
+    ).toBe(true);
     await expect(block.locator('small')).toHaveText('S1 · E3');
     await expect(block).toHaveAttribute('href', /season=1&episode=3&play=1$/);
     await expect(resume).toHaveAttribute('href', /season=1&episode=3&play=1$/);
@@ -350,9 +377,11 @@ test('a series’ page says which device plays which episode, and moves nothing 
     await expect(clock).toBeVisible();
 
     playing.pause();
-    await expect(clock).toBeHidden({ timeout: 20_000 });
-    await expect(label).toHaveText('Continue Watching');
-    expect(await boxes(), 'nothing moved as the clock went').toEqual(without);
+    await expect(label).toHaveText('Paused on Apple TV', { timeout: 20_000 });
+    await expect(controls.getByRole('button', { name: 'Resume' })).toBeVisible();
+    const pausedSamples = await watch(clock, 3_000);
+    expect(new Set(pausedSamples).size, 'the paused clock stayed frozen').toBe(1);
+    expect(await boxes(), 'nothing moved when playback paused').toEqual(without);
   } finally {
     await close();
   }

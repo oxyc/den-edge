@@ -385,6 +385,8 @@ export interface ContinueItem {
   liveFraction?: number;
   /** The name the device that wrote `seconds` gives itself in `set:devices`. */
   device?: string;
+  /** Stable stamp-device id of the writer. */
+  deviceId?: string;
 }
 
 export interface ContinueView {

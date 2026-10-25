@@ -75,6 +75,7 @@
     onreact,
     onplay,
     onplayhere,
+    ontransport,
     remux = null,
     away = false,
     blocked = false,
@@ -120,6 +121,8 @@
       clock: string;
       episode?: { season: number; episode: number };
       device?: string;
+      deviceId?: string;
+      playing: boolean;
       fraction?: number;
     };
     episodes: Map<string, EpisodeRow>;
@@ -132,6 +135,8 @@
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
     onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
+    /** Controls the paired TV that authored `live`; absent when the live writer is another device. */
+    ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => Promise<boolean>;
     /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
@@ -278,6 +283,25 @@
   });
   let sourcesPanel = $state<TitleSources>();
   const notify = toastContext();
+  let transportBusy = $state(false);
+  let optimisticPlaying = $state<boolean>();
+  const transportPlaying = $derived(optimisticPlaying ?? live?.playing ?? false);
+  $effect(() => {
+    if (optimisticPlaying !== undefined && live?.playing === optimisticPlaying)
+      optimisticPlaying = undefined;
+  });
+  async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
+    if (!ontransport || transportBusy) return;
+    transportBusy = true;
+    const sent = await ontransport(action, offsetSeconds);
+    transportBusy = false;
+    if (!sent) {
+      notify?.('Couldn’t reach your TV. Check that Den is open.');
+      return;
+    }
+    if (action === 'play') optimisticPlaying = true;
+    if (action === 'pause') optimisticPlaying = false;
+  }
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   /**
    * TMDB answers are immutable here: each refresh replaces the whole answer. Keep them shallow-reactive so the
@@ -935,32 +959,60 @@
             : target && series?.kind === 'resume'
               ? target
               : undefined}
-          <a
-            class="continue"
-            data-spatial-section
-            href={titleHref({
-              ...d.title,
-              season: coordinate?.season,
-              episode: coordinate?.episode,
-              play: true,
-            })}
-            onclick={(event) =>
-              activateLinkInPlace(event, () =>
-                (onplayhere ?? onplay)?.(d.title, coordinate?.season, coordinate?.episode),
-              )}
-          >
-            <DetailIcon name="play" filled /><span
-              ><strong
-                >{live ? `Playing on ${live.device ?? 'another device'}` : continueLabel}</strong
+          <div class="continue-row">
+            <a
+              class="continue"
+              data-spatial-section
+              href={titleHref({
+                ...d.title,
+                season: coordinate?.season,
+                episode: coordinate?.episode,
+                play: true,
+              })}
+              onclick={(event) =>
+                activateLinkInPlace(event, () =>
+                  (onplayhere ?? onplay)?.(d.title, coordinate?.season, coordinate?.episode),
+                )}
+            >
+              <DetailIcon name="play" filled /><span
+                ><strong
+                  >{live
+                    ? `${transportPlaying ? 'Playing' : 'Paused'} on ${live.device ?? 'another device'}`
+                    : continueLabel}</strong
+                >
+                {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
+                {#if live || (fraction > RESUME_FLOOR && fraction < WATCHED)}<span
+                    class="resume-track"
+                    ><span style:width={`${(live?.fraction ?? fraction) * 100}%`}
+                    ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
+                  >{/if}
+              </span>
+            </a>
+            {#if live && ontransport}
+              <div
+                class="remote-controls"
+                aria-label={`Controls for ${live.device ?? 'your TV'}`}
+                aria-busy={transportBusy}
               >
-              {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
-              {#if live || (fraction > RESUME_FLOOR && fraction < WATCHED)}<span
-                  class="resume-track"
-                  ><span style:width={`${(live?.fraction ?? fraction) * 100}%`}
-                  ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
-                >{/if}
-            </span>
-          </a>
+                <button
+                  disabled={transportBusy}
+                  aria-label="Skip back 10 seconds"
+                  onclick={() => transport('skip', -10)}>−10</button
+                >
+                <button
+                  disabled={transportBusy}
+                  onclick={() => transport(transportPlaying ? 'pause' : 'play')}
+                >
+                  {transportPlaying ? 'Pause' : 'Resume'}
+                </button>
+                <button
+                  disabled={transportBusy}
+                  aria-label="Skip forward 10 seconds"
+                  onclick={() => transport('skip', 10)}>+10</button
+                >
+              </div>
+            {/if}
+          </div>
         {/if}
         <div class="hero-actions" data-spatial-section>
           {#snippet tvSeasonDownload()}
@@ -1429,11 +1481,18 @@
     display: none;
   }
 
+  .continue-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px 24px;
+    margin-top: 24px;
+  }
+
   .continue {
     display: inline-flex;
     align-items: center;
     gap: 16px;
-    margin-top: 24px;
     min-height: 52px;
     padding: 4px 0;
     border: 0;
@@ -1487,6 +1546,39 @@
     outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 6px;
     border-radius: 6px;
+  }
+
+  .remote-controls {
+    display: inline-flex;
+    gap: 8px;
+  }
+
+  .remote-controls button {
+    min-width: 54px;
+    min-height: 42px;
+    padding: 0 14px;
+    border: 1px solid #fff4;
+    border-radius: 999px;
+    background: #fff1;
+    color: var(--fg);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  .remote-controls button:hover {
+    background: #fff2;
+  }
+
+  .remote-controls button:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .remote-controls button:disabled {
+    cursor: wait;
+    opacity: 0.55;
   }
 
   .seasons {

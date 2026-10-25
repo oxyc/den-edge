@@ -29,7 +29,7 @@
     personalRows,
     type RowDef,
   } from './lib/catalog';
-  import { sendToTV } from './lib/inbox';
+  import { receiveTvMessages, sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
@@ -359,6 +359,11 @@
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
+  let tvControls = $state<{
+    play: () => void;
+    pause: () => void;
+    seekBy: (seconds: number) => void;
+  } | null>(null);
 
   /**
    * A mounted player is still a place the browser can restore.
@@ -544,6 +549,7 @@
             ...(entry.liveEpisode === undefined ? {} : { liveEpisode: entry.liveEpisode }),
             ...(entry.liveFraction === undefined ? {} : { liveFraction: entry.liveFraction }),
             ...(entry.device === undefined ? {} : { device: entry.device }),
+            ...(entry.deviceId === undefined ? {} : { deviceId: entry.deviceId }),
           },
         ]
       : [];
@@ -645,6 +651,8 @@
     const at = liveSeconds(entry);
     return at === undefined ? undefined : timecode(at);
   };
+  // The one paired TV this library can command. Identity, not its editable label, joins a live write to it.
+  const tv = $derived(linkedTv(link, householdModel?.devices.value?.devices));
   /**
    * The open title's clock, as its Continue Watching card shows it, which episode for a series, the device it plays
    * on, and how far in: the written position's seconds over its fraction is the runtime.
@@ -654,7 +662,14 @@
     const entry =
       opening &&
       continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
-    const at = entry ? liveSeconds(entry) : undefined;
+    const sighting = entry && sighted.get(titleKey(entry.title));
+    const controlling = !!tv?.deviceId && entry?.deviceId === tv.deviceId;
+    const playingAt = sighting && livePosition(sighting, now);
+    // A paused TV keeps writing the same position. Keep this widget (and its Resume control) while that write is
+    // fresh, but only when identity proves it is the paired TV this browser can actually command.
+    const at =
+      playingAt ??
+      (controlling && sighting && recent(sighting, now) ? sighting.seconds : undefined);
     if (!entry || at === undefined) return undefined;
     const positionFraction = entry.liveFraction ?? entry.fraction;
     const runtime = entry.seconds && positionFraction > 0 ? entry.seconds / positionFraction : 0;
@@ -662,6 +677,8 @@
       clock: timecode(at),
       episode: entry.liveEpisode ?? entry.episode,
       device: entry.device,
+      deviceId: entry.deviceId,
+      playing: playingAt !== undefined,
       fraction: runtime ? Math.min(1, at / runtime) : undefined,
     };
   });
@@ -874,7 +891,6 @@
    * Feedback from here on is the bottom toast (`playOnTv`), not `notice` — the press can be far from where
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
-  const tv = $derived(linkedTv(link, householdModel?.devices.value?.devices));
   const play = $derived(
     tv
       ? async (title: Title, season?: number, episode?: number) => {
@@ -911,6 +927,25 @@
       : undefined,
   );
 
+  /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
+  async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
+    const receiver = tv;
+    const live = pageLive;
+    const opening = page;
+    if (!receiver || !live || !opening || live.deviceId !== receiver.deviceId) return false;
+    return Boolean(
+      await sendToTV(receiver, {
+        type: 'transport',
+        action,
+        tmdbId: opening.id,
+        mediaType: opening.type,
+        season: live.episode?.season,
+        episode: live.episode?.episode,
+        ...(action === 'skip' ? { offsetSeconds } : {}),
+      }),
+    );
+  }
+
   /**
    * Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. A series with
    * no episode named picks up where Continue Watching would, or starts at the beginning.
@@ -938,6 +973,48 @@
         }
       : undefined,
   );
+
+  // Hosted webOS and packaged Tizen TVs receive the same sealed inbox commands as the native Apple TV. An ordinary
+  // browser is a controller only, so it never drains the TV queue behind its pairing link.
+  $effect(() => {
+    if (!__DEN_TV__ || !link) return;
+    let stopped = false;
+    const poll = async () => {
+      while (!stopped) {
+        const messages = await receiveTvMessages(link);
+        for (const message of messages) {
+          if (stopped || Math.abs(Date.now() - message.sentAt) > 120_000) continue;
+          if (message.type === 'play') {
+            await playHere?.(
+              { type: message.mediaType, id: message.tmdbId, title: message.title },
+              message.season,
+              message.episode,
+            );
+            continue;
+          }
+          const target = playing;
+          if (
+            !target ||
+            target.title.type !== message.mediaType ||
+            target.title.id !== message.tmdbId ||
+            target.season !== message.season ||
+            target.episode !== message.episode ||
+            !tvControls
+          )
+            continue;
+          if (message.action === 'play') tvControls.play();
+          else if (message.action === 'pause') tvControls.pause();
+          else tvControls.seekBy(message.offsetSeconds ?? 0);
+        }
+        // An older den-edge without held drains, or an outage, can answer immediately. Do not spin on either.
+        if (!messages.length) await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+    };
+  });
 
   function closePlayer() {
     playing = null;
@@ -1941,6 +2018,7 @@
     {scout}
     row={pageRow}
     live={pageLive}
+    ontransport={pageLive?.deviceId === tv?.deviceId ? transport : undefined}
     episodes={pageEpisodes}
     seed={pageSeed}
     still={pageStill}
@@ -2218,6 +2296,7 @@
       onprogress={(fraction, seconds, at) =>
         void progressed({ title: target.title, ...at }, fraction, seconds)}
       onnext={after ? () => void advance(after) : undefined}
+      oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}
     />
   {/key}
