@@ -41,6 +41,7 @@
   const content = services.content;
   let open = $state(!startsClosed);
   let progress = $state<{ fraction: number; seconds: number }>();
+  let progressWrites = $state(0);
   let closeCount = $state(0);
   let nextCount = $state(0);
   let reelUrl = $state<string>();
@@ -93,7 +94,10 @@
     next={hasNext ? 'S1 · E2' : undefined}
     {castDiscoveryMs}
     {castPlayMs}
-    onprogress={(fraction, seconds) => (progress = { fraction, seconds })}
+    onprogress={(fraction, seconds) => {
+      progress = { fraction, seconds };
+      progressWrites += 1;
+    }}
     onclose={() => {
       closeCount += 1;
       open = false;
@@ -106,6 +110,7 @@
 {/if}
 <output data-testid="player-close-count" hidden>{closeCount}</output>
 <output data-testid="player-next-count" hidden>{nextCount}</output>
+<output data-testid="player-progress-writes" hidden>{progressWrites}</output>
 
 {#if progress}
   <output data-testid="player-progress" hidden>{JSON.stringify(progress)}</output>

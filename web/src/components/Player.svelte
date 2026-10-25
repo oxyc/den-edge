@@ -3432,6 +3432,8 @@
     // Where it last was, for `carryPosition`'s fallback once the element is gone. How much actually played is
     // `totalPlayedSecs`, from the element's own `played` ranges — never summed here.
     lastPosition = at;
+    // The first part-way position once playback starts or resumes goes out now, not a minute later.
+    if (session && !(video ? video.paused : remotePaused)) progress.reportStart(at, length());
     weighDelivery();
     warmNext(at);
     if (!segments.length) return;

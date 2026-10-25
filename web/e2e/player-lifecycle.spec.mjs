@@ -96,6 +96,47 @@ test('playback progress clears startup and leaves no hls.js head poll behind', a
   }
 });
 
+test('a play writes its position within seconds of starting, and again on resume', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+  try {
+    const page = await browser.newPage();
+    await mockPlayer(page);
+    await page.goto(`${ORIGIN}/test/player.html`);
+    const video = page.locator('.player video');
+    const writes = page.getByTestId('player-progress-writes');
+    const written = async () =>
+      JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+    await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
+      timeout: 30_000,
+    });
+
+    // The first part-way position goes out a moment after playback starts, not at the one-minute report.
+    await expect(writes).toHaveText('1', { timeout: 5_000 });
+    const first = await written();
+    expect(first.seconds).toBeGreaterThanOrEqual(1);
+    expect(first.fraction).toBeGreaterThan(0);
+    expect(first.fraction).toBeLessThan(1);
+    // Then nothing more while it plays on.
+    await page.waitForTimeout(3_000);
+    await expect(writes).toHaveText('1');
+
+    // Paused, its position is written; resumed, it is written again once the clock moves on.
+    await video.evaluate((element) => element.pause());
+    await expect(writes).toHaveText('2');
+    const pausedAt = (await written()).seconds;
+    await video.evaluate((element) => element.play());
+    await expect(writes).toHaveText('3', { timeout: 5_000 });
+    expect((await written()).seconds).toBeGreaterThan(pausedAt);
+    await page.waitForTimeout(3_000);
+    await expect(writes).toHaveText('3');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('player polling sleeps while paused', async () => {
   const browser = await webkit.launch();
   try {
