@@ -1,11 +1,16 @@
 import { beforeAll, expect, test } from 'vitest';
 import { Session } from 'node:inspector/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { compactContinueLibrary } from './homeLibraryView';
+import { seenEpisodes, watchedHistory } from './history';
+import {
+  compactContinueLibrary,
+  projectHomeLibraryView,
+  selectHomeLibraryView,
+} from './homeLibraryView';
 import { applyLog, ContinueSummaries, emptyLibrary, type Library } from './library';
 import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import { ensureSyncPolicy } from './syncLoader';
-import type { DocumentRow } from './wire';
+import { isDocument, type DocumentRow, type Row } from './wire';
 
 const EPISODES = 1_000;
 const NOW = 1_800_000_000_000;
@@ -168,4 +173,97 @@ test('compact Continue fact for one 1,000-episode authority document', async ({ 
     return streamWork();
   });
   await bench.compare(history, graph, stream);
+});
+
+// A household near the budget fixture's Watchlist Worker (6,132 documents, 13,724 rows): 1,000 movie and 1,000 series
+// title documents and four four-episode seasons per series, 6,000 documents projecting to 18,000 rows.
+function household(): Row[] {
+  const stamp = (value: number): [number, number, string] => [value, 0, 'bench'];
+  const documents: Row[] = [];
+  for (let index = 0; index < 1_000; index++) {
+    documents.push({
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 20_000 + index },
+      status: { value: index % 2 ? 'watched' : 'watchlist', at: stamp(NOW - index) },
+      addedAt: NOW - 10_000 - index,
+    } satisfies DocumentRow);
+    documents.push({
+      format: 4,
+      kind: 'title',
+      title: { type: 'tv', id: 30_000 + index },
+      status: { value: 'watched', at: stamp(NOW - index) },
+      addedAt: NOW - 10_000 - index,
+    } satisfies DocumentRow);
+    for (let number = 1; number <= 4; number++)
+      documents.push({
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id: 30_000 + index },
+        season: number,
+        seasonReset: null,
+        episodes: Object.fromEntries(
+          Array.from({ length: 4 }, (_, episode) => {
+            const when = NOW - 100_000 + index * 20 + number * 4 + episode;
+            return [
+              episode + 1,
+              {
+                progress: { value: 1, at: stamp(when), viewing: 0 },
+                imported: false,
+                plays: { 0: when },
+                cleared: null,
+              },
+            ];
+          }),
+        ),
+      } satisfies DocumentRow);
+  }
+  return documents;
+}
+
+test('Home and History in one library Worker', async () => {
+  if (process.env.DEN_FACT_ALLOCATION_AUDIT !== '1') return;
+  // Fresh document objects per run, as a newly opened Worker holds: projectDocument's WeakMap starts empty.
+  // `rows` is `LibraryLog.rows()`; History reads it as `LibraryLogAuthority.#history` does.
+  const rows = (stored: Row[]) =>
+    stored.flatMap((row) => (isDocument(row) ? projectDocument(row, NOW) : [row]));
+  const history = (held: Row[]) => [seenEpisodes(held), watchedHistory(held, new Map())];
+  // Before: History asked for Home's view, which folded the whole `rows()` projection.
+  const foldedHome = (held: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), held), held);
+  const work = {
+    'Home only: rows() + full fold': () => foldedHome(rows(household())),
+    'Home only: rows() + one pass': () => projectHomeLibraryView(rows(household())),
+    'History only: rows() + full fold': () => {
+      const held = rows(household());
+      foldedHome(held);
+      return history(held);
+    },
+    'History only: rows()': () => history(rows(household())),
+    'Home then History: rows() + full fold': () => {
+      const held = rows(household());
+      foldedHome(held);
+      return history(held);
+    },
+    'Home then History: rows() + one pass': () => {
+      const held = rows(household());
+      projectHomeLibraryView(held);
+      return history(held);
+    },
+  };
+  const stored = household();
+  expect(projectHomeLibraryView(rows(stored))).toEqual(foldedHome(rows(stored)));
+  expect(rows(stored)).toHaveLength(18_000);
+
+  const entries = Object.entries(work);
+  for (const [, run] of entries) run();
+  const samples = [];
+  for (let repeat = 0; repeat < 3; repeat++)
+    for (let pair = 0; pair < entries.length; pair += 2) {
+      const [before, after] = [entries[pair]!, entries[pair + 1]!];
+      for (const [name, run] of repeat % 2 ? [after, before] : [before, after])
+        samples.push(await allocationSample(name, run));
+    }
+  console.log(`JOURNEY_ALLOCATION ${JSON.stringify(samples)}`);
+  if (process.env.DEN_JOURNEY_ALLOCATION_OUTPUT)
+    writeFileSync(process.env.DEN_JOURNEY_ALLOCATION_OUTPUT, JSON.stringify(samples, null, 2));
 });

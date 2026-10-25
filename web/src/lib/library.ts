@@ -421,12 +421,14 @@ export class ContinueSummaries {
 
   /**
    * Fold one episode row, as the shared policy decides it. A season document's rows are authoritative and unique
-   * by episode, so a season streams straight into the summaries without ever being a `Library` of every mark.
+   * by episode, so a season streams straight into the summaries without ever being a `Library` of every mark. A
+   * series reset (`resetAt`) drops what `applyLog` would: marks at or before it, and every timeless flag.
    */
-  addEpisode(row: EpisodeRow): void {
+  addEpisode(row: EpisodeRow, resetAt?: number): void {
     const decided = episodeAction(row);
-    if (decided.action === 'replace') this.addMark(markFromEpisode(row, decided));
-    else if (decided.action === 'flag') this.addFlag(episodeRef(row));
+    if (decided.action === 'replace' && decided.at > (resetAt ?? -Infinity))
+      this.addMark(markFromEpisode(row, decided));
+    else if (decided.action === 'flag' && resetAt === undefined) this.addFlag(episodeRef(row));
   }
 
   /** The smallest ordinary `Library` on which Continue's shared policy makes the same decisions. */

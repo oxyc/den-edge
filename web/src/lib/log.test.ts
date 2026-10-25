@@ -1742,7 +1742,7 @@ describe('LibraryLog', () => {
       row(2, { reaction: { value: 'love', at: at(9000, 'web1') } }),
     ]);
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
-    await log.rowsInSlices();
+    log.rows();
     expect(log.newestStamp()).toEqual(at(9000, 'web1'));
 
     await server.append(row(3, { reaction: { value: 'love', at: at(10_000, 'phone') } }));
@@ -1758,7 +1758,7 @@ describe('LibraryLog', () => {
   it('shares one projected row snapshot until an entry changes', async () => {
     const server = await edge([row(1)]);
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
-    const projected = await log.rowsInSlices();
+    const projected = log.rows();
 
     expect(log.rows()).toBe(projected);
     expect(log.rows()).toBe(projected);
@@ -1814,69 +1814,14 @@ describe('LibraryLog', () => {
     }
   });
 
-  it('retries a sliced projection that crosses a future-stamp deadline', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const base = 1_789_000_000_000;
-      const future = base + 86_400_000 + 5_000;
-      vi.setSystemTime(base);
-      const document: DocumentRow = {
-        format: 4,
-        kind: 'season',
-        title: { type: 'tv', id: 1399 },
-        season: 2,
-        seasonReset: null,
-        episodes: {
-          1: {
-            progress: { value: 0.5, at: at(future), viewing: 7, seconds: 900 },
-            imported: false,
-            plays: {},
-            cleared: null,
-          },
-        },
-      };
-      const log = (await LibraryLog.openLocal(LIBRARY_KEY, memoryVault().vault))!;
-      expect(await log.writeRows([document])).toBe(true);
-      let yields = 0;
-      let inserted = false;
-      const rows = await log.rowsInSlices({
-        budgetMs: 0,
-        now: () => 0,
-        yieldTask: async () => {
-          yields++;
-          if (!inserted) {
-            inserted = true;
-            await log.writeRows([
-              {
-                kind: 'set',
-                schema: 2,
-                name: 'crossed-deadline',
-                values: { kept: { value: { bool: true }, at: at(base) } },
-              },
-            ]);
-          }
-          vi.setSystemTime(base + 5_000);
-        },
-      });
-      expect(yields).toBeGreaterThanOrEqual(1);
-      expect(rows?.[0]).toMatchObject({
-        progress: { value: 0.5, viewing: 7, seconds: 900, at: at(future) },
-      });
-      expect(rows).toContainEqual(expect.objectContaining({ name: 'crossed-deadline' }));
-      expect(log.rows()).toBe(rows);
-      log.close();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('keeps the newest cache correct across concurrent conflict merges', async () => {
     const server = await edge([row(1)]);
     const [phone, laptop] = await Promise.all([
       LibraryLog.open(LIBRARY_KEY, server.fetchImpl),
       LibraryLog.open(LIBRARY_KEY, server.fetchImpl),
     ]);
-    await Promise.all([phone!.rowsInSlices(), laptop!.rowsInSlices()]);
+    phone!.rows();
+    laptop!.rows();
     const ref = { type: 'movie' as const, id: 1 };
 
     await phone!.write(react(phone!.title(ref)!, 'love', at(12_000, 'phone')));
@@ -2028,7 +1973,7 @@ describe('a library kept only in this browser', () => {
     });
     const settings: SettingsRow = { kind: 'set', schema: 2, name: 'counted', values };
     expect(await log.writeRows([settings])).toBe(true);
-    expect(await log.rowsInSlices()).not.toBeNull();
+    expect(log.rows()).toHaveLength(1);
     traversals = 0;
 
     expect(log.newestStamp()).toEqual(at(14_000, 'tv01'));

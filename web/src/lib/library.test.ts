@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { RESUME_FLOOR, WATCHED } from './actions';
+import { blankTitle, RESUME_FLOOR, WATCHED } from './actions';
 import {
   applyLog,
   applyLogInSlices,
   ContinueProjector,
+  ContinueSummaries,
   continueWatching,
   contentWatched,
   emptyLibrary,
@@ -260,6 +261,34 @@ describe('a download row’s own watched state, never the series’', () => {
 });
 
 describe('folding episode rows in', () => {
+  it('discards reset episode inputs before compact winner reduction', () => {
+    const summaries = new ContinueSummaries();
+    // The furthest finished episode is stale; choosing it before applying the reset would lose episode 2.
+    summaries.addEpisode(epRow(1, 10, 1, 1000), 2000);
+    summaries.addEpisode(epRow(1, 2, 1, 3000), 2000);
+    // A reset removes timeless watched bits regardless of where the episode is in the season.
+    summaries.addEpisode(epRow(1, 20, 1, 0), 2000);
+    const compact = summaries.compact();
+    const reset: Row = {
+      ...blankTitle({ type: 'tv', id: 7 }, 0),
+      episodesReset: [2000, 0, 'aaaa'],
+    };
+    const full = applyLog(emptyLibrary(), [
+      reset,
+      epRow(1, 10, 1, 1000),
+      epRow(1, 2, 1, 3000),
+      epRow(1, 20, 1, 0),
+    ]);
+
+    expect(compact.marks.map(({ episode, updatedAt }) => [episode, updatedAt])).toEqual([
+      [2, 3000],
+    ]);
+    expect([...(compact.flags?.values() ?? [])]).toEqual([]);
+    // The full fold drops the same inputs.
+    expect(full.marks.map(({ episode, updatedAt }) => [episode, updatedAt])).toEqual([[2, 3000]]);
+    expect(full.flags?.size).toBe(0);
+  });
+
   it('matches the synchronous fold across yields, including a reset before one large season', async () => {
     const reset: Row = {
       kind: 'rec' as const,

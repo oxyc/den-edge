@@ -66,8 +66,8 @@ import {
 import { trackerEvent } from './trackerEvents';
 import { episodeRow, titleRow } from './titleView';
 import { ensureDeferredSyncPolicy, ensureSyncPolicy } from './syncLoader';
-import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
-import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
+import { inPolicySlices, syncPolicy } from './syncCore';
+import { openKeptInWorker } from './libraryWorkerClient';
 import type { LibraryWire } from './libraryServiceProtocol';
 
 interface Entry {
@@ -2547,74 +2547,6 @@ export class LibraryLog {
   /** The v4 documents and settings exactly as this log holds them, for moving without a lossy projection. */
   storedRows(): Row[] {
     return [...this.entries.values()].map(({ row }) => row);
-  }
-
-  /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
-  async rowsInSlices(options?: PolicySliceOptions): Promise<Row[] | null> {
-    const version = this.entriesVersion;
-    const now = Date.now();
-    if (
-      this.rowsCache?.version === version &&
-      now >= this.rowsCache.at &&
-      now < this.rowsCache.reconsiderAt
-    )
-      return this.rowsCache.rows;
-    const source = [...this.entries.values()].map(({ row }) => row);
-    if (options?.shouldContinue && !options.shouldContinue()) return null;
-    const projected = await projectRowsInWorker(source, now);
-    if (projected) {
-      if (options?.shouldContinue && !options.shouldContinue()) return null;
-      // The log is normally private until this finishes. If an unusual owner changed it meanwhile, retry the exact
-      // current snapshot instead of publishing the stale structured clone the Worker finished. Time is part of that
-      // snapshot too: a projection that crossed a future-stamp deadline must be repeated at the new policy instant.
-      const completedAt = Date.now();
-      if (
-        version !== this.entriesVersion ||
-        completedAt < projected.at ||
-        completedAt >= projected.reconsiderAt
-      )
-        return this.rowsInSlices(options);
-      this.newestCache = {
-        version,
-        at: projected.at,
-        stamp: projected.stamp,
-        reconsiderAt: projected.reconsiderAt,
-      };
-      this.rowsCache = {
-        version,
-        at: projected.at,
-        reconsiderAt: projected.reconsiderAt,
-        rows: projected.rows,
-      };
-      return projected.rows;
-    }
-    const rows: Row[] = [];
-    let stamp = ZERO_STAMP;
-    let reconsiderAt = Infinity;
-    const completed = await inPolicySlices(
-      this.entries.values(),
-      ({ row }) => {
-        rows.push(...(isDocument(row) ? projectDocument(row, now) : [row]));
-        const summary = newestSummary(row, now);
-        if (compareStamps(summary.stamp, stamp) > 0) stamp = summary.stamp;
-        reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
-      },
-      options,
-    );
-    const completedAt = Date.now();
-    if (
-      completed &&
-      version === this.entriesVersion &&
-      completedAt >= now &&
-      completedAt < reconsiderAt
-    ) {
-      this.newestCache = { version, at: now, stamp, reconsiderAt };
-      this.rowsCache = { version, at: now, reconsiderAt, rows };
-    }
-    if (!completed) return null;
-    if (version !== this.entriesVersion || completedAt < now || completedAt >= reconsiderAt)
-      return this.rowsInSlices(options);
-    return rows;
   }
 
   /** The log's head as last read (library v2 §2): what an assistant projection says it is as of (assistant v1 §15). */

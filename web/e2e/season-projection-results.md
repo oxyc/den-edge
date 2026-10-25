@@ -90,6 +90,31 @@ The browser allocation differences are within run-to-run range. The Worker's `fo
 
 Before Home's projection is streamed again, History needs to stop depending on a full `rows()` projection, or both need to come from one pass. Otherwise Home's saving becomes History's cost.
 
+### Home from one pass, History from `rows()` alone
+
+The calls doubled because the dropped candidate streamed through `forEachProjectedRow`, which skips `projectDocument`'s per-document `WeakMap`. The current change (`perf/809-one-pass`) keeps both on `rows()`, whose per-version cache already holds each document's den-core answer. `projectHomeLibraryView(rows)` folds the title rows, then feeds each well-formed episode row into `ContinueSummaries` with its series reset, dropping what a reset would drop; it never builds the full `LibraryFold`. History no longer asks for Home's view: it reads the same cached `rows()`, so each document goes through den-core once per Worker in whichever order the two are opened. (A first version read the stored documents directly; the e2e fixtures' cut-down logs offer only `rows()`, so it was moved onto `rows()`, which also covers old-format rows.) `libraryLogAuthority.test.ts` pins that: History alone, Home alone and Home then History each make 2 `title_state` and 2 `season_state_v4` calls, and the test fails (4 `season_state_v4`) on the uncached stream.
+
+The Node measurement is `Home and History in one library Worker` in `libraryFactStore.bench.ts`. It uses the same 6,000-document / 18,000-row household, five iterations per sample, and three samples per strategy, with old and new alternating:
+
+```sh
+cd web
+DEN_FACT_ALLOCATION_AUDIT=1 DEN_ALLOCATION_AUDIT=1 DEN_JOURNEY_ALLOCATION_OUTPUT=<file> \
+  npx vitest bench src/lib/libraryFactStore.bench.ts --run
+```
+
+| Work                                           | Sampled JS allocation, median (range) | Elapsed, median (range) | `title_state` / `season_state_v4` / `episode_mark` |
+| ---------------------------------------------- | ------------------------------------: | ----------------------: | -------------------------------------------------: |
+| Home only, before: `rows()` and full fold      |               426.4 MiB (423.7–428.5) |                       — |                           10,000 / 20,000 / 80,000 |
+| Home only, after: `rows()` and one pass        |               327.0 MiB (317.7–328.4) |                       — |                           10,000 / 20,000 / 80,000 |
+| History only, before: `rows()` and Home's fold |               468.4 MiB (464.7–479.2) |                       — |                           10,000 / 20,000 / 80,000 |
+| History only, after: `rows()`                  |               247.3 MiB (244.1–249.5) |                       — |                                10,000 / 20,000 / 0 |
+| Home then History, before                      |               469.7 MiB (466.7–477.6) |                       — |                           10,000 / 20,000 / 80,000 |
+| Home then History, after                       |               369.8 MiB (369.6–375.4) |                       — |                           10,000 / 20,000 / 80,000 |
+
+Measured on the `rows()` version (`a6e7112d`). History-only allocation fell 47%, and it makes no `episode_mark` calls, because it no longer builds Home. Home-only allocation fell 23%, and Home then History 21%. Call counts are unchanged in every journey. These match the first (stored-documents) version's figures within about 1%. Elapsed time is not reported: the host's load was 12–39 on 10 cores and two samples stalled for over 15 minutes, so timings from this run are not evidence; an earlier run on the first version measured History-only at 1,421 → 783 ms. Home's saving is smaller than the dropped candidate's 41% because each season's projection is held in `rows()`'s cache for History to reuse; the variant that streamed past that cache is the one that doubled the calls.
+
+The browser comparison is incomplete. Chromium phone budget runs (`BIG_LIBRARY_SCALE=1`, `DEN_FIXTURE_NOW=1792713600000`, `BIG_LIBRARY_DEBUG=1`, alternating `2400843a` main and this branch) finished once on main and twice on the branch. The other three timed out while the host's one-minute load rose to 31–121 on 10 cores from unrelated work. The largest library Worker's cumulative sampled allocation on Watchlist was 118.1 MB on main and 106.1 / 108.6 MB on the branch. Home during a rebuild was 114.2 MB on main and 106.2 / 104.6 MB on the branch. Watchlist's `documentsFolded` reads 13,748 on main and 6,156 on the branch: it now counts stored documents rather than projected rows, and History no longer records a fold. Returning surfaces stayed at 2–7 MB with 24 documents folded on both. With n=1 on main, this is not a measured improvement.
+
 ## Historical verification (previous shipped changes)
 
 Focused integration:

@@ -3,7 +3,9 @@
 
 import { deviceName, readDownloads, type Download } from './downloadRows';
 import {
+  applyLog,
   ContinueSummaries,
+  emptyLibrary,
   standings,
   titleKey,
   type ContinueProjector,
@@ -11,7 +13,7 @@ import {
   type Standing,
 } from './library';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
-import type { Row, SettingsRow, TitleRow } from './wire';
+import { wellFormed, type Row, type SettingsRow, type TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -185,6 +187,23 @@ export function continueItems(
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
   return selectHomeLibraryViewFromFold(library, activeTitleRows(rows), readDownloads(rows));
+}
+
+/**
+ * `selectHomeLibraryView` of `LibraryLog.rows()` without the full fold: the title rows are folded first, so a series
+ * reset drops the marks and flags it outdates before Continue's summaries keep at most two per series. The rows hold
+ * one episode per name, so no episode has another mark to be merged with. History reads the same rows, so whichever
+ * of the two comes first, each document is projected through den-core once.
+ */
+export function projectHomeLibraryView(rows: Row[]): HomeLibraryView {
+  const titles = rows.filter((row): row is TitleRow => row.kind === 'rec');
+  const resets = new Map(titles.map((row) => [titleKey(row.title), row.episodesReset?.[0]]));
+  const summaries = new ContinueSummaries();
+  for (const row of rows)
+    if (row.kind === 'ep' && wellFormed(row))
+      summaries.addEpisode(row, resets.get(titleKey(row.title)));
+  const { marks, flags } = summaries.compact();
+  return selectHomeLibraryView({ ...applyLog(emptyLibrary(), titles), marks, flags }, rows);
 }
 
 /** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */

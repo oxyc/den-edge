@@ -14,6 +14,7 @@ import type { ProfileDirectoryDocument } from './profileDirectory';
 import { validateKidTitleApprovals, type KidTitleApprovalsDocument } from './kidTitleApprovals';
 import { profilesApplyCreate } from './profilesCore';
 import { ensureSyncPolicy } from './syncLoader';
+import { syncPolicy } from './syncCore';
 import profileFixture from '../vendor/den-core/profiles-v1.json';
 import type { TitleSource } from './titleSources';
 import { readApiKey } from './prefs';
@@ -21,6 +22,12 @@ import { TMDB_PROXY_KEY } from './tmdbCache';
 import { readFinishedLibraryViews } from './finishedLibraryViews';
 import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
 import type { DocumentRow } from './wire';
+
+// The real policy, counted: which den-core operations a selection costs.
+vi.mock('./syncCore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./syncCore')>();
+  return { ...actual, syncPolicy: vi.fn(actual.syncPolicy) };
+});
 
 const KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(19)));
 const movie = { type: 'movie' as const, id: 7 };
@@ -184,101 +191,202 @@ describe('LibraryLogAuthority', () => {
 
   const cachedWatchlist = (vault: Vault) => readFinishedLibraryViews(KEY, vault, ['watchlist']);
 
-  it('publishes fresh Home and Continue at an unchanged document deadline, and cancels on close', async () => {
-    await ensureSyncPolicy();
-    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
-    try {
-      const base = 1_789_000_000_000;
-      const future = base + 86_400_000 + 5_000;
-      vi.setSystemTime(base);
-      const document: DocumentRow = {
-        format: 4,
-        kind: 'season',
-        title: { type: 'tv', id: 1399 },
-        season: 2,
-        seasonReset: null,
-        episodes: {
-          1: {
-            progress: {
-              value: 0.5,
-              at: [future, 0, 'aaaaaaaaaaaaaaaa'],
-              viewing: 7,
-              seconds: 900,
+  it.each(['overview', 'history'] as const)(
+    'publishes fresh Home and Continue at an unchanged document deadline after %s-only selection',
+    async (initialSelection) => {
+      await ensureSyncPolicy();
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+      try {
+        const base = 1_789_000_000_000;
+        const future = base + 86_400_000 + 5_000;
+        vi.setSystemTime(base);
+        const document: DocumentRow = {
+          format: 4,
+          kind: 'season',
+          title: { type: 'tv', id: 1399 },
+          season: 2,
+          seasonReset: null,
+          episodes: {
+            1: {
+              progress: {
+                value: 0.5,
+                at: [future, 0, 'aaaaaaaaaaaaaaaa'],
+                viewing: 7,
+                seconds: 900,
+              },
+              imported: false,
+              plays: {},
+              cleared: null,
             },
-            imported: false,
-            plays: {},
-            cleared: null,
+            2: {
+              progress: {
+                value: 0.6,
+                at: [future + 2_000, 0, 'aaaaaaaaaaaaaaaa'],
+                viewing: 8,
+                seconds: 901,
+              },
+              imported: false,
+              plays: {},
+              cleared: null,
+            },
+            3: {
+              progress: {
+                value: 0.7,
+                at: [future + 4_000, 0, 'aaaaaaaaaaaaaaaa'],
+                viewing: 9,
+                seconds: 902,
+              },
+              imported: false,
+              plays: {},
+              cleared: null,
+            },
           },
-          2: {
-            progress: {
-              value: 0.6,
-              at: [future + 2_000, 0, 'aaaaaaaaaaaaaaaa'],
-              viewing: 8,
+        };
+        const vault = memoryVault();
+        const log = (await LibraryLog.openLocal(KEY, vault))!;
+        expect(await log.writeRows([document])).toBe(true);
+        const clock = await openClockStore(vault, {
+          key: 'future-projection-clock',
+          createDevice: () => '0123456789abcdef',
+        });
+        const opened = authority(log, clock, 'local');
+        const events: unknown[] = [];
+        opened.listen((event) => events.push(event));
+
+        if (initialSelection === 'history') {
+          // History still arms the authority deadline even though it no longer builds Home.
+          await expect(opened.select({ kind: 'history' })).resolves.toMatchObject({ items: [] });
+        } else {
+          await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
+            standings: [],
+          });
+          await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
+        }
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(events).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
+        // The next future stamp is scheduled without depending on a listener selecting a projection after the first.
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(events).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(events).toEqual([
+          { kind: 'changed', affected: [{ kind: 'all' }] },
+          { kind: 'changed', affected: [{ kind: 'all' }] },
+        ]);
+        await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
+          standings: [{ title: { type: 'tv', id: 1399 }, standing: 'in-progress' }],
+        });
+        await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
+          items: [
+            {
+              title: { type: 'tv', id: 1399 },
+              fraction: 0.6,
               seconds: 901,
+              updatedAt: future + 2_000,
             },
-            imported: false,
-            plays: {},
-            cleared: null,
-          },
-          3: {
-            progress: {
-              value: 0.7,
-              at: [future + 4_000, 0, 'aaaaaaaaaaaaaaaa'],
-              viewing: 9,
-              seconds: 902,
-            },
-            imported: false,
-            plays: {},
-            cleared: null,
-          },
+          ],
+        });
+        vi.setSystemTime(base);
+        await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({ standings: [] });
+        await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
+        await opened.close();
+
+        events.length = 0;
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(events).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('asks den-core about each document once whether History opens alone or after Home', async () => {
+    await ensureSyncPolicy();
+    const stamp = (at: number): [number, number, string] => [at, 0, 'aaaaaaaaaaaaaaaa'];
+    const episode = (value: number, at: number) => ({
+      progress: { value, at: stamp(at), viewing: 1 },
+      imported: false,
+      plays: { 0: at },
+      cleared: null,
+    });
+    const vault = memoryVault();
+    const seed = (await LibraryLog.openLocal(KEY, vault))!;
+    expect(
+      await seed.writeRows([
+        ...[1, 2].map((season): DocumentRow => ({
+          format: 4,
+          kind: 'season',
+          title: series,
+          season,
+          seasonReset: null,
+          episodes: { 1: episode(1, 3_000 + season), 2: episode(0.4, 4_000 + season) },
+        })),
+        {
+          format: 4,
+          kind: 'title',
+          title: movie,
+          status: { value: 'watched', at: stamp(1_000) },
+          addedAt: 900,
         },
-      };
-      const vault = memoryVault();
+        {
+          format: 4,
+          kind: 'title',
+          title: series,
+          status: { value: 'watchlist', at: stamp(2_000) },
+          addedAt: 900,
+        },
+      ]),
+    ).toBe(true);
+    seed.close();
+
+    const policy = vi.mocked(syncPolicy);
+    const visit = async (kinds: Array<'overview' | 'continue' | 'history'>) => {
+      // A newly opened log holds new document objects, so no projection carries over from another visit.
       const log = (await LibraryLog.openLocal(KEY, vault))!;
-      expect(await log.writeRows([document])).toBe(true);
       const clock = await openClockStore(vault, {
-        key: 'future-projection-clock',
+        key: 'policy-count-clock',
         createDevice: () => '0123456789abcdef',
       });
       const opened = authority(log, clock, 'local');
-      const events: unknown[] = [];
-      opened.listen((event) => events.push(event));
-
-      await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({ standings: [] });
-      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
-      await vi.advanceTimersByTimeAsync(4_999);
-      expect(events).toEqual([]);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(events).toEqual([{ kind: 'changed', affected: [{ kind: 'all' }] }]);
-      // The next future stamp is scheduled without depending on a listener selecting a projection after the first.
-      await vi.advanceTimersByTimeAsync(1_999);
-      expect(events).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(events).toEqual([
-        { kind: 'changed', affected: [{ kind: 'all' }] },
-        { kind: 'changed', affected: [{ kind: 'all' }] },
-      ]);
-      await expect(opened.select({ kind: 'overview' })).resolves.toMatchObject({
-        standings: [{ title: { type: 'tv', id: 1399 }, standing: 'in-progress' }],
-      });
-      await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
-        items: [
-          {
-            title: { type: 'tv', id: 1399 },
-            fraction: 0.6,
-            seconds: 901,
-            updatedAt: future + 2_000,
-          },
-        ],
-      });
+      policy.mockClear();
+      const values = [];
+      for (const kind of kinds) values.push(await opened.select({ kind }));
+      const calls: Record<string, number> = {};
+      for (const [request] of policy.mock.calls) {
+        const op = String(request.op);
+        if (op === 'title_state' || op === 'season_state_v4') calls[op] = (calls[op] ?? 0) + 1;
+      }
       await opened.close();
+      return { values, calls };
+    };
 
-      events.length = 0;
-      await vi.advanceTimersByTimeAsync(2_000);
-      expect(events).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
+    const history = await visit(['history']);
+    const home = await visit(['overview', 'continue']);
+    const homeThenHistory = await visit(['overview', 'continue', 'history']);
+    expect(history.calls).toEqual({ title_state: 2, season_state_v4: 2 });
+    expect(home.calls).toEqual(history.calls);
+    expect(homeThenHistory.calls).toEqual(history.calls);
+    expect(homeThenHistory.values.slice(0, 2)).toEqual(home.values);
+    expect(homeThenHistory.values[2]).toEqual(history.values[0]);
+    expect(history.values[0]).toMatchObject({
+      items: [
+        {
+          title: series,
+          watchedAt: 3_002,
+          episode: { season: 2, episode: 1 },
+          episodes: 2,
+          seen: [
+            { season: 1, episode: 1 },
+            { season: 2, episode: 1 },
+          ],
+        },
+        { title: movie, watchedAt: 1_000, episodes: 0 },
+      ],
+    });
+    expect(home.values[1]).toMatchObject({
+      items: [{ title: series, fraction: 0.4, episode: { season: 2, episode: 2 } }],
+    });
   });
 
   it('reschedules a future deadline learned when a deferred delivery changes the log', async () => {

@@ -1,8 +1,16 @@
 import { expect, it, vi } from 'vitest';
-import { ContinueProjector, type Library } from './library';
-import { continueItems, digestHomeLibraryView, selectHomeLibraryView } from './homeLibraryView';
+import { blankEpisode, blankTitle, markEpisode } from './actions';
+import { applyLog, emptyLibrary, ContinueProjector, type Library } from './library';
+import {
+  continueItems,
+  digestHomeLibraryView,
+  projectHomeLibraryView,
+  selectHomeLibraryView,
+} from './homeLibraryView';
+import { applyOps, projectDocument } from './libraryV4';
 import { syncPolicy } from './syncCore';
-import type { SettingsRow, TitleRow } from './wire';
+import { startRow } from './downloadRows';
+import { isDocument, type DocumentRow, type Row, type SettingsRow, type TitleRow } from './wire';
 
 const titleRow = (
   id: number,
@@ -80,6 +88,165 @@ it('selects the fixed Home view from rows once', () => {
   });
   expect(digestHomeLibraryView(worker)).toMatchObject({ hash: expect.any(String) });
   expect(worker).not.toHaveProperty('continue');
+});
+
+it('projects v4 documents to the exact full-fold Home view without the full fold', () => {
+  const now = 1_800_000_000_000;
+  const stamp = (value: number): [number, number, string] => [value, 0, 'aaaaaaaaaaaaaaaa'];
+  const resetAt = now - 2500;
+  const titleDocuments = applyOps(
+    [
+      {
+        target: { type: 'tv', id: 40 },
+        write: {
+          kind: 'title',
+          fields: { status: 'watched', reaction: 'love', dismissed: true },
+          added_at: now - 10_000,
+          at: stamp(now - 5000),
+        },
+      },
+      { target: { type: 'tv', id: 40 }, write: { kind: 'series_reset', at: stamp(resetAt) } },
+    ],
+    () => undefined,
+    now,
+  );
+  const stored: Row[] = [
+    ...titleDocuments,
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id: 41 },
+      status: { value: 'watchlist', at: stamp(now - 3000) },
+      addedAt: now - 20_000,
+    } satisfies DocumentRow,
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 40 },
+      season: 2,
+      seasonReset: null,
+      episodes: {
+        20: {
+          progress: null,
+          imported: true,
+          plays: {},
+          cleared: null,
+        },
+        10: {
+          progress: { value: 1, at: stamp(now - 3000), viewing: 1 },
+          imported: false,
+          plays: { 0: now - 3000 },
+          cleared: null,
+        },
+      },
+    } satisfies DocumentRow,
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 40 },
+      season: 1,
+      seasonReset: null,
+      episodes: {
+        2: {
+          progress: { value: 1, at: stamp(now - 1500), viewing: 1 },
+          imported: false,
+          plays: { 0: now - 1500 },
+          cleared: null,
+        },
+        5: {
+          progress: {
+            value: 0.4,
+            at: stamp(now - 1000),
+            viewing: 2,
+            seconds: 500,
+          },
+          imported: false,
+          plays: { 0: now - 1000 },
+          cleared: null,
+        },
+      },
+    } satisfies DocumentRow,
+    ...[43, 42].map(
+      (id) =>
+        ({
+          format: 4,
+          kind: 'season',
+          title: { type: 'tv', id },
+          season: 1,
+          seasonReset: null,
+          episodes: {
+            1: {
+              progress: { value: 0.5, at: stamp(now - 900), viewing: 1 },
+              imported: false,
+              plays: { 0: now - 900 },
+              cleared: null,
+            },
+          },
+        }) satisfies DocumentRow,
+    ),
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 44 },
+      season: 3,
+      seasonReset: null,
+      episodes: {
+        7: { progress: null, imported: true, plays: {}, cleared: null },
+      },
+    } satisfies DocumentRow,
+  ];
+  stored.push(
+    startRow(
+      undefined,
+      {
+        release: { identity: 'r', label: 'Release', url: 'https://example.invalid/r' },
+        title: { mediaType: 'tv', mediaId: 40, season: 1, episode: 5, title: 'Forty' },
+      },
+      () => stamp(now - 100),
+      now - 100,
+    ),
+  );
+  const projected = (held: Row[]) =>
+    held.flatMap((row) => (isDocument(row) ? projectDocument(row, now) : [row]));
+  const fullFold = (rows: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+  const rows = projected(stored);
+  const direct = projectHomeLibraryView(rows);
+
+  expect(direct).toEqual(fullFold(rows));
+  // Season documents held before their series' title document: the reset still drops their stale inputs.
+  const seasonsFirst = projected([...stored].reverse());
+  expect(projectHomeLibraryView(seasonsFirst)).toEqual(fullFold(seasonsFirst));
+  // v2 rows, as a narrow log's `rows()` holds them, fold the same way.
+  const legacy: Row[] = [
+    { ...blankTitle({ type: 'tv', id: 50 }, now - 9000), episodesReset: stamp(now - 4000) },
+    markEpisode(blankEpisode({ type: 'tv', id: 50 }, 1, 1), true, stamp(now - 5000)),
+    markEpisode(blankEpisode({ type: 'tv', id: 50 }, 1, 2), true, stamp(now - 3000)),
+    markEpisode(blankEpisode({ type: 'tv', id: 51 }, 1, 1), true, [0, 0, '']),
+  ];
+  expect(projectHomeLibraryView(legacy)).toEqual(fullFold(legacy));
+  expect(direct.owned).toEqual(['tv:40', 'movie:41']);
+  expect(direct.watchlist).toEqual(['movie:41']);
+  expect(direct.downloads.map(({ title }) => title.mediaId)).toEqual([40]);
+  expect(
+    direct.continueLibrary.records.map(({ title, status }) => [title.type, title.id, status]),
+  ).toEqual([['tv', 40, 'watched']]);
+  expect(
+    direct.continueLibrary.marks.map(({ id, season, episode, fraction }) => [
+      id,
+      season,
+      episode,
+      fraction,
+    ]),
+  ).toEqual([
+    [40, 1, 5, 0.4],
+    [40, 1, 2, 1],
+    [43, 1, 1, 0.5],
+    [42, 1, 1, 0.5],
+  ]);
+  expect([...(direct.continueLibrary.flags?.values() ?? [])]).toEqual([
+    { type: 'tv', id: 44, season: 3, episode: 7 },
+  ]);
+  expect(direct.continueLibrary.dismissed).toEqual(new Map([['tv:40', now - 5000]]));
 });
 
 it('asks for the layouts of the series watched most recently first', () => {

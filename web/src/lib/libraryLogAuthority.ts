@@ -34,7 +34,7 @@ import {
 } from './downloadRows';
 import { seenEpisodes, watchedHistory } from './history';
 import { titleCoordinates, titleView } from './titleView';
-import { continueItems, selectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { continueItems, projectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
 import { noteLibraryFold } from './libraryStartupMetrics';
 import {
   libraryMetadataShape,
@@ -43,9 +43,7 @@ import {
 } from './libraryMetadata';
 import { FinishedLibraryViewWriter } from './finishedLibraryViewWriter';
 import {
-  applyLog,
   ContinueProjector,
-  emptyLibrary,
   isAired,
   titleKey,
   type Shape,
@@ -1398,7 +1396,7 @@ export class LibraryLogAuthority {
   }
 
   #overview(): Extract<LibrarySelectionValue, { kind: 'overview' }> {
-    const { home } = this.#projected();
+    const home = this.#projected();
     return {
       kind: 'overview',
       owned: home.owned.map(refFromKey),
@@ -1421,7 +1419,7 @@ export class LibraryLogAuthority {
   }
 
   #continue(): Extract<LibrarySelectionValue, { kind: 'continue' }> {
-    const { home } = this.#projected();
+    const home = this.#projected();
     const shapes = new Map([...this.#shapes].map(([key, stored]) => [key, stored.shape]));
     return {
       kind: 'continue',
@@ -1435,7 +1433,7 @@ export class LibraryLogAuthority {
   }
 
   #presence(titles: TitleRef[]): Extract<LibrarySelectionValue, { kind: 'presence' }> {
-    const standings = new Map(this.#projected().home.standings);
+    const standings = new Map(this.#projected().standings);
     return {
       kind: 'presence',
       items: titles.map((title) => {
@@ -1451,7 +1449,9 @@ export class LibraryLogAuthority {
   }
 
   #history(): Extract<LibrarySelectionValue, { kind: 'history' }> {
-    const { rows } = this.#projected();
+    // Not Home's view: History reads the rows themselves, but its listeners still need the future-stamp deadline.
+    this.#scheduleProjectionReconsideration();
+    const rows = this.#log.rows();
     const seen = seenEpisodes(rows);
     const names = new Map<string, Title>();
     for (const row of rows) {
@@ -1718,15 +1718,15 @@ export class LibraryLogAuthority {
       .sort();
   }
 
-  #projected(): { rows: Row[]; home: HomeLibraryView } {
+  #projected(): HomeLibraryView {
     const rows = this.#log.rows();
     this.#scheduleProjectionReconsideration();
-    if (this.#projection?.rows === rows) return this.#projection;
+    if (this.#projection?.rows === rows) return this.#projection.home;
     const foldedAt = performance.now();
-    const home = selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
+    const home = projectHomeLibraryView(rows);
     noteLibraryFold(rows.length, performance.now() - foldedAt);
     this.#projection = { rows, home };
-    return this.#projection;
+    return home;
   }
 
   /** Reconsider future document stamps once, at the first instant den-core may answer differently. */
