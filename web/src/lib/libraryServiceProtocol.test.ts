@@ -202,6 +202,18 @@ describe('library service client protocol', () => {
         ],
       }),
     ).toMatchObject({ ok: true });
+    // A TV's lane of the assistant's TV queue says when the TV last woke (den-spec assistant-v1 §16).
+    expect(
+      decodeTask({
+        kind: 'assistant.apply',
+        messages: [{ seq: 1, sealed: 'x' }],
+        tv: { awakeSince: 1_800_000_000_000 },
+      }),
+    ).toMatchObject({ ok: true });
+    for (const tv of [{}, { awakeSince: 'now' }, { awakeSince: 1, lane: 'x' }])
+      expect(decodeTask({ kind: 'assistant.apply', messages: [], tv })).toMatchObject({
+        ok: false,
+      });
     expect(
       decodeTask({
         kind: 'history.import',
@@ -352,6 +364,31 @@ describe('library service client protocol', () => {
         version,
       }),
     ).toMatchObject({ ok: true });
+    // An accepted play on a TV's lane comes back with its episode, for the page to start.
+    const applied = (result: object) =>
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-task',
+        operationId: 'operation-task',
+        result: { kind: 'assistant.apply', results: [result], ack: 1, dropbox: null },
+        version,
+      });
+    const play = {
+      seq: 1,
+      outcome: 'accepted',
+      op: 'play',
+      title: { type: 'tv', id: 1399 },
+      season: 1,
+      episode: 2,
+      detail: 'started S1 · E2 of %s',
+    };
+    expect(applied(play)).toMatchObject({ ok: true });
+    expect(
+      applied({ ...play, op: 'play_trailer', season: undefined, episode: undefined }),
+    ).toMatchObject({ ok: true });
+    expect(applied({ ...play, op: 'cast' })).toMatchObject({ ok: false });
+    expect(applied({ ...play, season: 'one' })).toMatchObject({ ok: false });
   });
 
   it('accepts the complete semantic preferences patch', () => {

@@ -689,6 +689,8 @@ export type LibraryTask =
       kind: 'assistant.apply';
       messages: Array<{ seq: number; sealed: string }>;
       connection?: AssistantConnection;
+      /** Drained from this TV's lane of the TV queue (§16): opened as the TV queue's, not applied to the library. */
+      tv?: { awakeSince: number };
     }
   | { kind: 'profile.create'; name: string; maximumAge: number; pin: string }
   | { kind: 'profile.create.ack'; receipt: string }
@@ -756,8 +758,11 @@ export type AssistantApplied =
   | {
       seq: number;
       outcome: 'accepted';
-      op: 'watchlist_add' | 'watchlist_remove' | 'seen' | 'rate';
+      op: 'watchlist_add' | 'watchlist_remove' | 'seen' | 'rate' | 'play' | 'play_trailer';
       title: TitleRef;
+      /** A play's episode, when it names one: the page starts it, as nothing in the library changes. */
+      season?: number;
+      episode?: number;
       /** What it did, in the words of the page's toast: "added to your watchlist". */
       detail: string;
     }

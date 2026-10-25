@@ -964,8 +964,13 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'assistant.apply':
       return (
-        exact(value, ['kind', 'messages', 'connection']) &&
+        exact(value, ['kind', 'messages', 'connection', 'tv']) &&
         optional(value.connection, assistantConnection) &&
+        optional(
+          value.tv,
+          (tv): tv is { awakeSince: number } =>
+            record(tv) && exact(tv, ['awakeSince']) && integer(tv.awakeSince),
+        ) &&
         list(
           value.messages,
           (message): message is { seq: number; sealed: string } =>
@@ -1070,12 +1075,16 @@ function assistantApplied(value: unknown): value is AssistantApplied {
     return exact(value, ['seq', 'outcome', 'reason']) && boundedText(value.reason, 64);
   return (
     value.outcome === 'accepted' &&
-    exact(value, ['seq', 'outcome', 'op', 'title', 'detail']) &&
+    exact(value, ['seq', 'outcome', 'op', 'title', 'season', 'episode', 'detail']) &&
     (value.op === 'watchlist_add' ||
       value.op === 'watchlist_remove' ||
       value.op === 'seen' ||
-      value.op === 'rate') &&
+      value.op === 'rate' ||
+      value.op === 'play' ||
+      value.op === 'play_trailer') &&
     titleRef(value.title) &&
+    optional(value.season, integer) &&
+    optional(value.episode, integer) &&
     boundedText(value.detail, 256)
   );
 }

@@ -2,10 +2,11 @@
 // the plays any device holding the library sends to it, and the transport commands of the browser that paired it.
 // Only the TV build loads this.
 
-import { hex } from './crypto';
+import type { OtherQueue } from './assistant';
+import { hex, hkdf } from './crypto';
 import { drainTv, type PlayRequest, type TransportCommand } from './inbox';
 import type { Link } from './links.svelte';
-import { toBase64url } from './wire';
+import { fromBase64url, toBase64url } from './wire';
 
 const KEY = 'den.tvPlayKey.v1';
 /** How long den-edge may hold a drain for a message to land (inbox-v1 §3 allows 25). */
@@ -64,6 +65,50 @@ export async function playKeyFor(
 export const currentPlayKey = (
   storage: Storage | undefined = globalThis.localStorage,
 ): string | undefined => stored(storage)?.key;
+
+/**
+ * This TV's lane of the assistant's TV queue (den-spec assistant-v1 §16 *TV lanes*): derived from its play key, so it
+ * is made anew with it and says nothing of the library or the device.
+ */
+export async function laneId(playKey: string): Promise<string> {
+  return hex(await hkdf(fromBase64url(playKey), 'den/link/v1', 'assistant-tv', 16));
+}
+
+/** The lane as the assistant drain loop takes it: drained under this TV's name, so den-mcp can ask for it by name. */
+export async function laneQueue(playKey: string, name: string): Promise<OtherQueue> {
+  const id = await laneId(playKey);
+  return { query: `queue=tv&tv=${id}`, body: JSON.stringify({ name }), key: `.tv.${id}` };
+}
+
+/** When this TV last woke or came to the foreground: a play sent before that never starts (§16 *Freshness*). */
+let awake = Date.now();
+if (typeof document !== 'undefined')
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') awake = Date.now();
+  });
+export const awakeSince = () => awake;
+
+/** A play for this TV, and whether it is the title's trailer rather than the title. */
+export type TvPlay = PlayRequest & { trailer?: boolean };
+let starter: ((play: TvPlay) => Promise<void>) | null = null;
+
+/**
+ * The page that can start a play on this TV registers here, so a play from the assistant's lane starts through the same
+ * path as one from the household queue. Returns its unregistering.
+ */
+export function startPlaysWith(start: (play: TvPlay) => Promise<void>): () => void {
+  starter = start;
+  return () => {
+    if (starter === start) starter = null;
+  };
+}
+
+/** Start `play` through the registered page; false when none is open to start it. */
+export async function startPlay(play: TvPlay): Promise<boolean> {
+  if (!starter) return false;
+  await starter(play);
+  return true;
+}
 
 const pause = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {

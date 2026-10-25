@@ -1,5 +1,5 @@
 import { expect, test, vi } from 'vitest';
-import { drainWhileOpen, type ApplyOutcome, type QueuedRequest } from './assistant';
+import { drainWhileOpen, type ApplyOutcome, type OtherQueue, type QueuedRequest } from './assistant';
 
 const DROPBOX = { kid: '0123456789abcdef0123456789abcdef', public: 'pk-one' };
 
@@ -19,7 +19,7 @@ function edge(drains: QueuedRequest[][]) {
       }
       return Response.json({ messages: next });
     }
-    if (path === '/assistant/ack') return Response.json({ removed: 1 });
+    if (path.startsWith('/assistant/ack')) return Response.json({ removed: 1 });
     return new Response(null, { status: 204 });
   });
   return { calls, fetchImpl: fetchImpl as unknown as typeof fetch };
@@ -28,6 +28,7 @@ function edge(drains: QueuedRequest[][]) {
 async function run(
   drains: QueuedRequest[][],
   apply: (messages: QueuedRequest[]) => Promise<ApplyOutcome>,
+  queue?: OtherQueue,
 ) {
   const answered = drains.length;
   const { calls, fetchImpl } = edge(drains);
@@ -37,6 +38,7 @@ async function run(
   const done = drainWhileOpen(
     {
       libraryId: 'lib',
+      ...(queue ? { queue } : {}),
       apply,
       applied,
       fetchImpl,
@@ -92,6 +94,37 @@ test('a drain is applied, announced, acknowledged, and then held', async () => {
   expect(calls[1]?.body).toEqual({ pk: DROPBOX.public });
   expect(calls[2]?.body).toEqual({ upTo: 2 });
   info.mockRestore();
+});
+
+test("a TV drains and acknowledges its own lane, naming it, and leaves the drop-box key to the library's drain", async () => {
+  const id = '579a181ad69c71c579c33c0aac33a1f9';
+  const lane = {
+    query: `queue=tv&tv=${id}`,
+    body: JSON.stringify({ name: 'Living room LG' }),
+    key: `.tv.${id}`,
+  };
+  const play = {
+    seq: 3,
+    outcome: 'accepted' as const,
+    op: 'play',
+    title: { type: 'tv' as const, id: 1399 },
+    season: 1,
+    episode: 2,
+    detail: 'started S1 · E2 of %s',
+  };
+  const { calls, applied } = await run(
+    [[{ seq: 3, sealed: 'p' }]],
+    async () => ({ results: [play], ack: 3, dropbox: DROPBOX }),
+    lane,
+  );
+  expect(applied).toHaveBeenCalledWith(play);
+  expect(calls.map((c) => c.path)).toEqual([
+    `/assistant/drain?queue=tv&tv=${id}`,
+    `/assistant/ack?queue=tv&tv=${id}`,
+    `/assistant/drain?queue=tv&tv=${id}&wait=25`,
+  ]);
+  expect(calls[0]?.body).toEqual({ name: 'Living room LG' });
+  expect(calls[1]?.body).toEqual({ upTo: 3 });
 });
 
 test('the drop-box key is given to den-edge again only when the library’s changes', async () => {

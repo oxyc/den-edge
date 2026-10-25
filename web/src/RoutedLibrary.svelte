@@ -50,6 +50,7 @@
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { thisDevice } from './lib/device.svelte';
+  import { cleanLabel } from './lib/edge';
   import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
   import { knownProfileHousehold, rememberProfileHousehold } from './lib/profileHouseholdHint';
   import {
@@ -1466,6 +1467,50 @@
         },
         signal,
       );
+    });
+  });
+
+  // An LG or Samsung TV also drains its own lane of the assistant's TV queue (den-spec assistant-v1 §16), so an
+  // assistant can play on it by name. The lane derives from the TV's play key, made at check-in, so it starts once
+  // that key exists. An accepted play starts through the page's own Play (`householdPlays.startPlay`).
+  $effect(() => {
+    if (!__DEN_TV__) return;
+    const current = session;
+    return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
+      void (async () => {
+        const plays = await import('./lib/householdPlays');
+        let playKey = plays.currentPlayKey();
+        while (!playKey && !signal.aborted) {
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+          playKey = plays.currentPlayKey();
+        }
+        if (!playKey || signal.aborted) return;
+        await drainWhileOpen(
+          {
+            libraryId: work.libraryId,
+            queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
+            apply: async (messages) =>
+              work.model.applyAssistant(messages, await work.lend(), {
+                awakeSince: plays.awakeSince(),
+              }),
+            applied: (result) => {
+              if (result.op !== 'play' && result.op !== 'play_trailer')
+                return void announceAssistant(current, result);
+              const title = current.displayTitle(result.title)?.title ?? '';
+              void plays.startPlay({
+                tmdbId: result.title.id,
+                mediaType: result.title.type,
+                title,
+                ...(result.season !== undefined ? { season: result.season } : {}),
+                ...(result.episode !== undefined ? { episode: result.episode } : {}),
+                ...(result.op === 'play_trailer' ? { trailer: true } : {}),
+              });
+            },
+            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+          },
+          signal,
+        );
+      })();
     });
   });
 

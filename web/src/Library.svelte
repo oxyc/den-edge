@@ -997,7 +997,7 @@
     }
     const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
     if (!(await start(title, push.season, push.episode))) return;
-    session.notify(`Starting “${push.title}”…`);
+    session.notify(push.title ? `Starting “${push.title}”…` : 'Starting…');
     void householdModel
       ?.markPlayed()
       .catch((error: unknown) => console.warn('den: could not record the play', error));
@@ -1009,8 +1009,18 @@
   $effect(() => {
     if (!__DEN_TV__) return;
     const stop = new AbortController();
-    void import('./lib/householdPlays').then(({ receiveTv }) =>
-      receiveTv(
+    let unregister: (() => void) | undefined;
+    void import('./lib/householdPlays').then(({ receiveTv, startPlaysWith }) => {
+      if (stop.signal.aborted) return;
+      // An assistant's play on this TV's lane (RoutedLibrary) starts here too: a trailer as the title page's.
+      unregister = startPlaysWith(async (play) => {
+        if (play.trailer)
+          navigate(
+            titleHref({ type: play.mediaType, id: play.tmdbId, title: play.title, trailer: true }),
+          );
+        else await startPushed(play);
+      });
+      return receiveTv(
         {
           play: startPushed,
           stale: (push) => session.notify(`Ignored an old “Play on TV” for “${push.title}”`),
@@ -1034,9 +1044,12 @@
         },
         () => untrack(() => link),
         stop.signal,
-      ),
-    );
-    return () => stop.abort();
+      );
+    });
+    return () => {
+      stop.abort();
+      unregister?.();
+    };
   });
 
   function closePlayer() {

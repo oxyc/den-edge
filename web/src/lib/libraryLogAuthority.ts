@@ -1264,6 +1264,7 @@ export class LibraryLogAuthority {
         const { results, ack, dropbox, affected } = await this.#assistant.apply(
           task.messages,
           task.connection ?? null,
+          task.tv ?? null,
         );
         return { result: { kind: 'assistant.apply', results, ack, dropbox }, affected };
       }
