@@ -104,6 +104,7 @@
     play: () => {
       calls.play += 1;
     },
+    tvs: [{ id: 'aaaa000000000001', name: 'Living room', play: 'a'.repeat(43) }],
     playHere: () => {
       calls.playHere += 1;
     },

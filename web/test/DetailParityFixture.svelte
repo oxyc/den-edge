@@ -128,7 +128,10 @@
           onwatchlist={noop}
           onseen={noop}
           onreact={(title, value) => (row = { ...row, reaction: stamped(value) })}
-          onplay={noDirectPlayback ? undefined : play}
+          onplay={noDirectPlayback
+            ? undefined
+            : (_tv: string, t: Title, s?: number, e?: number) => play(t, s, e)}
+          tvs={[{ id: 'aaaa000000000001', name: 'Living room', play: 'A'.repeat(43) }]}
           onplayhere={noDirectPlayback ? undefined : play}
           onepisode={seen}
           onseason={seenSeason}

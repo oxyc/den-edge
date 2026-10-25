@@ -121,7 +121,7 @@ test('says so when den-edge is unreachable, same as before this feature', async 
     await expect(page.getByRole('heading', { name: 'Movie 1001', level: 1 })).toBeVisible();
     await play(page).click();
     await expect(page.getByRole('alert')).toHaveText(
-      'Couldn’t reach your TV. Check that this device is on your network.',
+      'Couldn’t reach Living Room TV. Check that this device is online.',
     );
     await expect(toast(page)).toHaveCount(0);
   } finally {

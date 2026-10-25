@@ -263,6 +263,16 @@ export async function sendToTV(
   }
 }
 
+/**
+ * A TV's household queue (inbox-v1 §5) in the shape `sendToTV` and `stillQueued` take: its published play key is used
+ * exactly as a link key.
+ */
+export async function householdQueue(playKey: string): Promise<Pick<Link, 'inboxKey' | 'linkKey'>> {
+  const key = fromBase64url(playKey) as Bytes;
+  const { inbox } = await linkKeys(key);
+  return { inboxKey: inbox, linkKey: btoa(String.fromCharCode(...key)) };
+}
+
 /** Queue one sealed message using a raw pairing link key. */
 export async function sendToLink(
   linkKey: Bytes,

@@ -1,5 +1,5 @@
-<!-- One primary action with a less common alternate destination. The alternate is disclosed as a real menu:
-     it costs no permanent chrome, while keyboard and assistive-technology users get the same two choices. -->
+<!-- One primary action with less common alternate destinations. The alternates are disclosed as a real menu:
+     they cost no permanent chrome, while keyboard and assistive-technology users get the same choices. -->
 <script lang="ts">
   import { tick } from 'svelte';
   import Button from './Button.svelte';
@@ -10,9 +10,8 @@
     icon,
     href,
     onclick,
-    alternateLabel,
+    alternates,
     alternateIcon,
-    onalternate,
     menuId,
     busy = false,
   }: {
@@ -20,9 +19,9 @@
     icon?: ButtonIconName;
     href?: string;
     onclick: (event: MouseEvent) => void;
-    alternateLabel: string;
+    /** The other destinations, in the order the menu lists them; the first takes focus when it opens. */
+    alternates: { label: string; onselect: () => void }[];
     alternateIcon?: ButtonIconName;
-    onalternate: () => void;
     menuId: string;
     busy?: boolean;
   } = $props();
@@ -62,9 +61,9 @@
     void show(!fromPointer);
   }
 
-  function chooseAlternate() {
+  function chooseAlternate(onselect: () => void) {
     hide();
-    onalternate();
+    onselect();
   }
 
   function leave(event: FocusEvent) {
@@ -142,17 +141,32 @@
   </div>
   {#if open}
     <div class="split-menu" id={menuId} role="menu">
-      <Button
-        bind:element={alternate}
-        variant="menu"
-        class="split-alternate"
-        icon={alternateIcon}
-        label={alternateLabel}
-        role="menuitem"
-        {busy}
-        onclick={chooseAlternate}
-        onkeydown={() => (pointerOpen = false)}
-      />
+      {#each alternates as item, index (item.label)}
+        {#if index === 0}
+          <Button
+            bind:element={alternate}
+            variant="menu"
+            class="split-alternate"
+            icon={alternateIcon}
+            label={item.label}
+            role="menuitem"
+            {busy}
+            onclick={() => chooseAlternate(item.onselect)}
+            onkeydown={() => (pointerOpen = false)}
+          />
+        {:else}
+          <Button
+            variant="menu"
+            class="split-alternate"
+            icon={alternateIcon}
+            label={item.label}
+            role="menuitem"
+            {busy}
+            onclick={() => chooseAlternate(item.onselect)}
+            onkeydown={() => (pointerOpen = false)}
+          />
+        {/if}
+      {/each}
     </div>
   {/if}
 </div>

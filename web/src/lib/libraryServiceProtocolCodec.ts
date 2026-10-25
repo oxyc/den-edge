@@ -1428,14 +1428,20 @@ function preferencesView(value: unknown): boolean {
   );
 }
 
+/** A household play key: 32 bytes, unpadded base64url (den-spec inbox-v1 §5). */
+const playKey = (value: unknown): value is string =>
+  typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+
 const libraryDevice = (candidate: unknown): candidate is ConnectionsView['devices'][number] =>
   record(candidate) &&
-  exact(candidate, ['id', 'name', 'kind', 'lastSeenAt', 'libraryFormat']) &&
+  exact(candidate, ['id', 'name', 'kind', 'lastSeenAt', 'libraryFormat', 'playKey', 'playedAt']) &&
   boundedText(candidate.id, 128) &&
   boundedText(candidate.name, 256) &&
   (candidate.kind === 'tv' || candidate.kind === 'browser') &&
   optional(candidate.lastSeenAt, integer) &&
-  optional(candidate.libraryFormat, integer);
+  optional(candidate.libraryFormat, integer) &&
+  optional(candidate.playKey, playKey) &&
+  optional(candidate.playedAt, integer);
 
 function connectionsView(value: unknown): value is ConnectionsView {
   if (

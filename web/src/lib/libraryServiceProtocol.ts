@@ -461,6 +461,10 @@ export interface LibraryDeviceView {
   kind: 'tv' | 'browser';
   lastSeenAt?: number;
   libraryFormat?: number;
+  /** A TV's household play key, base64url (den-spec inbox-v1 §5). */
+  playKey?: string;
+  /** When a play sent from another device last started on this TV (ms). */
+  playedAt?: number;
 }
 
 /** Playback-facing devices, separate from Settings' credentials, plugins, servers and diagnostics. */
