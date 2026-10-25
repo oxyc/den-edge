@@ -335,6 +335,9 @@ fn is_control(route: &str) -> bool {
             | "/assistant/ack"
             | "/assistant/tv"
             | "/assistant/request"
+            | "/wake/controllers"
+            | "/wake/poll"
+            | "/wake/targets"
     )
 }
 
@@ -695,7 +698,10 @@ async fn dispatch(
         return crate::inbox::handle(state, req).await;
     }
     if crate::assistant::is_path(&path) {
-        return crate::assistant::handle(state, req).await;
+        return Box::pin(crate::assistant::handle(state, req)).await;
+    }
+    if crate::controller::is_path(&path) {
+        return Box::pin(crate::controller::handle(state, req)).await;
     }
     if path.starts_with("/pair/") {
         return crate::pair::handle(state, req).await;
@@ -831,7 +837,8 @@ impl Face {
             ["/link", "/inbox", "/pair/", "/sync/", "/lib/", "/grant/"].iter().any(|p| path.starts_with(p))
                 || path == "/metrics"
                 || crate::recovery::is_path(path)
-                || crate::assistant::is_path(path);
+                || crate::assistant::is_path(path)
+                || crate::controller::is_path(path);
         // Recovery codes are made and redeemed mostly in the web app (den-spec `wire/recovery-code.md`). The web app
         // also keeps a library's assistant drop-box key here and drains its requests while it is open.
         let web_app_calls = crate::assistant::is_path(path)
@@ -869,6 +876,7 @@ impl Face {
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both | Face::Tv, _) => true,
             _ if tmdb => true,
             (Face::Api, _) => device,
+            (Face::Web, _) if crate::controller::is_path(path) => false,
             (Face::Web, _) => !device || web_app_calls,
         }
     }
@@ -996,6 +1004,10 @@ pub fn route_label(path: &str) -> &'static str {
         "/assistant/drain" => "/assistant/drain",
         "/assistant/ack" => "/assistant/ack",
         "/assistant/tv" => "/assistant/tv",
+        "/wake/controllers" => "/wake/controllers",
+        p if p.starts_with("/wake/controllers/") => "/wake/controllers/:id",
+        "/wake/poll" => "/wake/poll",
+        "/wake/targets" => "/wake/targets",
         p if p.starts_with("/assistant/request/") => "/assistant/request",
         // A grant id never becomes a label: every projection call counts as one route.
         p if p == "/assistant/projection" || p.starts_with("/assistant/projection/") => {
@@ -1114,7 +1126,11 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/changes"
         | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
-        "/assistant/append" | "/assistant/drain" | "/assistant/ack" => Some(POST),
+        "/assistant/append" | "/assistant/drain" | "/assistant/ack" | "/wake/controllers" | "/wake/poll" => {
+            Some(POST)
+        }
+        "/wake/targets" => Some(GET),
+        "/wake/controllers/:id" => Some(DELETE),
         "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE]),
         "/assistant/tv" | "/assistant/request" => Some(GET),
         "/inbox/append"
@@ -1166,6 +1182,7 @@ fn body_cap(route: &str) -> usize {
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
+        "/wake/controllers" | "/wake/poll" => crate::controller::BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }
 }

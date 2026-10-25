@@ -8,6 +8,7 @@ mod assistant;
 mod billboard;
 mod cache;
 mod cast;
+mod controller;
 mod diagnostics;
 mod grants;
 mod handler;
@@ -53,6 +54,9 @@ pub struct AppState {
     pub inbox_holds: hold::Holds,
     /// `POST /assistant/drain?wait=` requests waiting for a request in their library's queue.
     pub assistant_holds: hold::Holds,
+    pub controller_holds: hold::Holds,
+    pub controllers: controller::Controllers,
+    pub controller_lock: tokio::sync::Mutex<()>,
     /// Held across every read-modify-write of an assistant queue or drop-box key (`assistant.rs`).
     pub assistant_lock: tokio::sync::Mutex<()>,
     /// When each library's TVs last drained their queues (assistant v1 §16): whether a TV is awake, and each TV's lane
@@ -359,6 +363,9 @@ impl AppState {
             library_holds: hold::Holds::new(library::MAX_HELD, library::MAX_HELD_PER_LIBRARY),
             inbox_holds: hold::Holds::new(inbox::MAX_HELD, inbox::MAX_HELD_PER_ADDRESS),
             assistant_holds: hold::Holds::new(assistant::MAX_HELD, assistant::MAX_HELD_PER_ADDRESS),
+            controller_holds: hold::Holds::new(controller::MAX_HELD, controller::MAX_HELD_PER_CONTROLLER),
+            controllers: controller::Controllers::default(),
+            controller_lock: tokio::sync::Mutex::new(()),
             assistant_lock: tokio::sync::Mutex::new(()),
             assistant_tv_seen: std::sync::Mutex::default(),
             library_v3,
@@ -471,6 +478,7 @@ impl AppState {
         self.library_holds.release_all();
         self.inbox_holds.release_all();
         self.assistant_holds.release_all();
+        self.controller_holds.release_all();
     }
 }
 

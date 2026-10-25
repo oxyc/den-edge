@@ -14,6 +14,7 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 const NS: &str = "inbox";
+const WAKE_PREFIX: &str = "wake:";
 /// Appends per address per minute. A key is the only credential here — den-edge never learns the link keys, which
 /// pairing derives without it — so the limit is what stands between a public name and anyone's queue.
 const APPENDS_PER_WINDOW: u32 = 60;
@@ -134,6 +135,10 @@ async fn take(state: &AppState, keys: &[&str]) -> Vec<Vec<Value>> {
                 if let Err(e) = state.store.delete(NS, key).await {
                     eprintln!("inbox delete: {e}");
                 }
+                let _ = state
+                    .store
+                    .delete(NS, &format!("{WAKE_PREFIX}{}", crate::controller::inbox_wake_id(key)))
+                    .await;
                 queue
             }
             Ok(None) => Vec::new(),
@@ -195,9 +200,26 @@ async fn append(state: &AppState, req: Request) -> Response {
         queue.drain(..queue.len() - MAX_MESSAGES);
     }
     let stored = json!({ "expiresAt": now + TTL_MS, "messages": queue });
+    let wake = crate::controller::inbox_wake_id(key);
+    let wake_key = format!("{WAKE_PREFIX}{wake}");
+    let first = state
+        .store
+        .get(NS, &wake_key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|marker| marker.get("firstTriggeredAt").and_then(Value::as_u64))
+        .unwrap_or(now);
+    let marker = json!({ "expiresAt": now + TTL_MS, "firstTriggeredAt": first, "lastTriggeredAt": now });
+    if let Err(e) = state.store.put(NS, &wake_key, marker.to_string().as_bytes()).await {
+        return internal("inbox wake marker write", e);
+    }
     if let Err(e) = state.store.put(NS, key, stored.to_string().as_bytes()).await {
+        let _ = state.store.delete(NS, &format!("{WAKE_PREFIX}{wake}")).await;
         return internal("inbox write", e);
     }
+    state.controllers.notify_inbox(state, &wake, now);
     state.inbox_holds.wake(key);
     json_reply(StatusCode::OK, &json!({ "ok": true }))
 }
@@ -245,11 +267,34 @@ async fn drain(state: &AppState, key: String) -> Response {
             if let Err(e) = state.store.delete(NS, &key).await {
                 return internal("inbox delete", e);
             }
+            if let Err(e) = state
+                .store
+                .delete(NS, &format!("{WAKE_PREFIX}{}", crate::controller::inbox_wake_id(&key)))
+                .await
+            {
+                eprintln!("inbox wake marker delete: {e}");
+            }
             messages
         }
         Err(e) => return internal("inbox read", e),
     };
     json_reply(StatusCode::OK, &json!({ "messages": messages }))
+}
+
+/// A recent accepted append for a public wake id. The marker contains no queue credential or sealed body.
+pub(crate) async fn wake_trigger(state: &AppState, wake: &str) -> std::io::Result<Option<(u64, u64)>> {
+    let key = format!("{WAKE_PREFIX}{wake}");
+    let Some(bytes) = state.store.get(NS, &key).await? else { return Ok(None) };
+    let marker: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let now = state.now();
+    if marker.get("expiresAt").and_then(Value::as_u64).is_none_or(|at| at <= now) {
+        state.store.delete(NS, &key).await?;
+        return Ok(None);
+    }
+    Ok(marker
+        .get("firstTriggeredAt")
+        .and_then(Value::as_u64)
+        .zip(marker.get("lastTriggeredAt").and_then(Value::as_u64)))
 }
 
 /// The queue under `key`, or `None` when there is none or it has expired (and is then deleted).

@@ -514,8 +514,11 @@ async fn append(state: &AppState, req: Request) -> Response {
                 .lock()
                 .expect("TV drain times")
                 .get(&session.library)
-                .is_some_and(|seen| seen.lanes.iter().any(|seen| &seen.tv == tv));
-            if !known {
+                .is_some_and(|seen| seen.lanes.iter().any(|seen| &seen.tv == tv))
+                || state.controllers.lane_registered(&session.library, tv, state.now());
+            let persisted =
+                crate::controller::persisted_lane(state, &session.library, tv).await.unwrap_or(false);
+            if !known && !persisted {
                 return json_reply(StatusCode::NOT_FOUND, &error("unknown_tv"));
             }
         }
@@ -541,6 +544,11 @@ async fn append(state: &AppState, req: Request) -> Response {
     queue.messages.push(Entry { seq, sealed: sealed.to_owned(), received_at: now });
     if let Err(e) = save_queue(state, &session.library, &lane, &queue).await {
         return internal("assistant queue write", e);
+    }
+    if let Lane::Tv(Some(tv)) = &lane {
+        if !tv_online(state, &session.library, tv) {
+            state.controllers.notify_assistant(&state.controller_holds, &session.library, tv, now);
+        }
     }
     state.assistant_holds.wake(&lane.hold(&session.library));
     json_reply(StatusCode::OK, &json!({ "seq": seq, "queued": queue.messages.len() }))
@@ -631,20 +639,87 @@ async fn get_tv(state: &AppState, req: Request) -> Response {
     };
     let now = state.now();
     let online = |at: u64| now.saturating_sub(at) < TV_ONLINE_MS;
-    let seen = state.assistant_tv_seen.lock().expect("TV drain times");
-    let (last, mut lanes) = match seen.get(&session.library) {
-        Some(seen) => {
-            let lanes = seen.lanes.iter().map(|tv| (tv.at, &tv.tv, &tv.name)).collect::<Vec<_>>();
-            (lanes.iter().map(|(at, ..)| *at).chain(seen.shared).max(), lanes)
+    let (last, mut lanes) = {
+        let seen = state.assistant_tv_seen.lock().expect("TV drain times");
+        match seen.get(&session.library) {
+            Some(seen) => {
+                let lanes =
+                    seen.lanes.iter().map(|tv| (tv.at, tv.tv.clone(), tv.name.clone())).collect::<Vec<_>>();
+                (lanes.iter().map(|(at, ..)| *at).chain(seen.shared).max(), lanes)
+            }
+            None => (None, Vec::new()),
         }
-        None => (None, Vec::new()),
     };
+    let mut registered = state.controllers.registered(&session.library);
+    if let Ok(persisted) = crate::controller::persisted_registered(state, &session.library).await {
+        for (lane, name) in persisted {
+            if !registered.iter().any(|(registered, ..)| registered == &lane) {
+                registered.push((lane, name, 0));
+            }
+        }
+    }
+    let wakeable = state.controllers.wakeable(&session.library, now);
+    for (tv, name, at) in &registered {
+        if !lanes.iter().any(|(_, lane, _)| lane == tv) {
+            lanes.push((0, tv.clone(), Some(name.clone())));
+        }
+        if let Some((_, _, current_name)) = lanes.iter_mut().find(|(_, lane, _)| lane == tv) {
+            if current_name.is_none() {
+                *current_name = Some(name.clone());
+            }
+        }
+        let _ = at;
+    }
     lanes.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
     let tvs: Vec<Value> = lanes
         .into_iter()
-        .map(|(at, tv, name)| json!({ "tv": tv, "name": name, "online": online(at), "lastSeenAt": at }))
+        .map(|(at, tv, name)| {
+            let registration = registered.iter().find(|(lane, ..)| lane == &tv);
+            json!({
+                "tv": tv,
+                "name": name,
+                "online": at > 0 && online(at),
+                "registered": registration.is_some(),
+                "wakeable": wakeable.iter().any(|(lane, ..)| lane == &tv),
+                "lastSeenAt": (at > 0).then_some(at),
+                "registeredAt": registration.map(|(_, _, registered_at)| *registered_at),
+            })
+        })
         .collect();
     json_reply(StatusCode::OK, &json!({ "online": last.is_some_and(online), "lastSeenAt": last, "tvs": tvs }))
+}
+
+pub(crate) fn tv_online(state: &AppState, library: &str, lane: &str) -> bool {
+    let now = state.now();
+    state
+        .assistant_tv_seen
+        .lock()
+        .expect("TV drain times")
+        .get(library)
+        .and_then(|seen| seen.lanes.iter().find(|seen| seen.tv == lane))
+        .is_some_and(|seen| now.saturating_sub(seen.at) < TV_ONLINE_MS)
+}
+
+pub(crate) fn tv_last_seen(state: &AppState, library: &str, lane: &str) -> Option<u64> {
+    state
+        .assistant_tv_seen
+        .lock()
+        .expect("TV drain times")
+        .get(library)
+        .and_then(|seen| seen.lanes.iter().find(|seen| seen.tv == lane))
+        .map(|seen| seen.at)
+}
+
+pub(crate) async fn lane_trigger(
+    state: &AppState,
+    library: &str,
+    lane: &str,
+) -> std::io::Result<Option<u64>> {
+    Ok(load_queue(state, library, &Lane::Tv(Some(lane.to_owned())), state.now())
+        .await?
+        .messages
+        .last()
+        .map(|message| message.received_at))
 }
 
 /// `GET /assistant/request/{seq}?queue=` (§16): whether a request the session's library's queue issued still waits or
@@ -683,6 +758,7 @@ pub async fn delete_library(state: &AppState, library: &str) -> std::io::Result<
         state.assistant_holds.wake(&lane.hold(library));
     }
     state.store.delete(NS, &dropbox_key(library)).await?;
+    crate::controller::delete_library(state, library).await?;
     Ok(())
 }
 

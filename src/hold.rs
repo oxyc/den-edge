@@ -2,7 +2,7 @@
 //! (a library's `/changes?wait=`, the inbox's `POST /inbox/drain?wait=`), so a client hears of a change at once
 //! instead of at its next poll. A write wakes only the requests waiting on what it wrote; nothing polls or scans.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -34,6 +34,7 @@ struct State {
     /// The requests waiting on each key, by their id.
     waiting: HashMap<String, Vec<(u64, Arc<Notify>)>>,
     owners: HashMap<String, usize>,
+    active: HashMap<u64, String>,
     total: usize,
     next: u64,
 }
@@ -70,6 +71,7 @@ impl Holds {
         *state.owners.entry(owner.to_owned()).or_default() += 1;
         state.next += 1;
         let id = state.next;
+        state.active.insert(id, owner.to_owned());
         let notify = Arc::new(Notify::new());
         for key in keys {
             state.waiting.entry((*key).to_owned()).or_default().push((id, Arc::clone(&notify)));
@@ -86,6 +88,47 @@ impl Holds {
                 notify.notify_one();
             }
         }
+    }
+
+    /// Remove and wake this owner's current holds before admitting a replacement request. The removed hold's
+    /// eventual drop is a no-op, so the replacement can take the same bounded slot immediately.
+    pub fn cancel_owner(&self, owner: &str) {
+        let notifications = {
+            let mut state = crate::lock(&self.state);
+            let ids: HashSet<u64> = state
+                .active
+                .iter()
+                .filter(|(_, held_owner)| *held_owner == owner)
+                .map(|(id, _)| *id)
+                .collect();
+            if ids.is_empty() {
+                return;
+            }
+            let mut notifications = Vec::new();
+            for waiting in state.waiting.values_mut() {
+                waiting.retain(|(id, notify)| {
+                    if ids.contains(id) {
+                        notifications.push(Arc::clone(notify));
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            state.waiting.retain(|_, waiting| !waiting.is_empty());
+            state.total = state.total.saturating_sub(ids.len());
+            state.active.retain(|id, _| !ids.contains(id));
+            state.owners.remove(owner);
+            notifications
+        };
+        for notify in notifications {
+            notify.notify_one();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn held_by(&self, owner: &str) -> usize {
+        crate::lock(&self.state).owners.get(owner).copied().unwrap_or(0)
     }
 }
 
@@ -113,6 +156,9 @@ impl Hold<'_> {
 impl Drop for Hold<'_> {
     fn drop(&mut self) {
         let mut state = crate::lock(&self.holds.state);
+        if state.active.remove(&self.id).is_none() {
+            return;
+        }
         state.total -= 1;
         if let Some(count) = state.owners.get_mut(&self.owner) {
             *count -= 1;
