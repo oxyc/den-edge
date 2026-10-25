@@ -677,19 +677,19 @@ async fn dispatch(
     // Fire-and-forget: a page error, a playback session's outcome, or a cast/AirPlay attempt — den-edge's own
     // log otherwise sees none of them (den-edge#262).
     if path == "/playback/page-error" {
-        return crate::diagnostics::handle_page_error(state, req).await;
+        return Box::pin(crate::diagnostics::handle_page_error(state, req)).await;
     }
     if path == "/playback/load" {
-        return crate::diagnostics::handle_load(state, req).await;
+        return Box::pin(crate::diagnostics::handle_load(state, req)).await;
     }
     if path == "/playback/outcome" {
-        return crate::diagnostics::handle_playback_outcome(state, req).await;
+        return Box::pin(crate::diagnostics::handle_playback_outcome(state, req)).await;
     }
     if path == "/playback/route" {
-        return crate::diagnostics::handle_playback_route(state, req).await;
+        return Box::pin(crate::diagnostics::handle_playback_route(state, req)).await;
     }
     if path == "/playback/cast" {
-        return crate::diagnostics::handle_cast(state, req).await;
+        return Box::pin(crate::diagnostics::handle_cast(state, req)).await;
     }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
