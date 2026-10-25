@@ -29,7 +29,7 @@
     personalRows,
     type RowDef,
   } from './lib/catalog';
-  import { householdQueue, receiveTvMessages, sendToTV } from './lib/inbox';
+  import { householdQueue, sendToTV, type PlayRequest } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
@@ -981,70 +981,58 @@
       : undefined,
   );
 
-  // Hosted webOS and packaged Tizen TVs receive the same sealed inbox commands as the native Apple TV. An ordinary
-  // browser is a controller only, so it never drains the TV queue behind its pairing link. A play comes only through
-  // the household queue below (den-spec inbox-v1 §5), so one on this link is dropped.
-  $effect(() => {
-    if (!__DEN_TV__ || !link) return;
-    let stopped = false;
-    const poll = async () => {
-      while (!stopped) {
-        const messages = await receiveTvMessages(link);
-        for (const message of messages) {
-          if (stopped || Math.abs(Date.now() - message.sentAt) > 120_000) continue;
-          if (message.type === 'play') continue;
-          const target = playing;
-          if (
-            !target ||
-            target.title.type !== message.mediaType ||
-            target.title.id !== message.tmdbId ||
-            target.season !== message.season ||
-            target.episode !== message.episode ||
-            !tvControls
-          )
-            continue;
-          if (message.action === 'play') tvControls.play();
-          else if (message.action === 'pause') tvControls.pause();
-          else tvControls.seekBy(message.offsetSeconds ?? 0);
-        }
-        // An older den-edge without held drains, or an outage, can answer immediately. Do not spin on either.
-        if (!messages.length) await new Promise((resolve) => setTimeout(resolve, 1_000));
-      }
-    };
-    void poll();
-    return () => {
-      stopped = true;
-    };
-  });
+  /**
+   * Start a play sent from another device as this TV's own Play would, through `playHere` and its parental guard.
+   * Nobody at the TV asked, so a refusal is not offered a PIN: the guard's message says why.
+   */
+  async function startPushed(push: PlayRequest) {
+    // A TV opened to take this play may still be finding its sources: give that a moment, well inside the play's two
+    // minutes, before saying there is none.
+    for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500)
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    const start = untrack(() => playHere);
+    if (!start) {
+      session.notify(`No playable source for “${push.title}”`);
+      return;
+    }
+    const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
+    if (!(await start(title, push.season, push.episode))) return;
+    session.notify(`Starting “${push.title}”…`);
+    void householdModel
+      ?.markPlayed()
+      .catch((error: unknown) => console.warn('den: could not record the play', error));
+  }
 
-  // The TV build takes the plays any device holding the library sends it (den-spec inbox-v1 §5) and starts them as its
-  // own Play would, through `playHere` and its parental guard. Nobody at the TV asked, so a refusal is not offered a
-  // PIN: the guard's message says why.
+  // Hosted webOS and packaged Tizen TVs take the plays any device holding the library sends them (den-spec inbox-v1
+  // §5) and the transport commands of the browser that paired them, both drained in one held request: these TVs are
+  // short of memory and connections. An ordinary browser is a controller only and drains neither.
   $effect(() => {
     if (!__DEN_TV__) return;
     const stop = new AbortController();
-    void import('./lib/householdPlays').then(({ receivePlays }) =>
-      receivePlays(
+    void import('./lib/householdPlays').then(({ receiveTv }) =>
+      receiveTv(
         {
-          play: async (push) => {
-            // A TV opened to take this play may still be finding its sources: give that a moment, well inside the
-            // play's two minutes, before saying there is none.
-            for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500)
-              await new Promise((resolve) => setTimeout(resolve, 500));
-            const start = untrack(() => playHere);
-            if (!start) {
-              session.notify(`No playable source for “${push.title}”`);
-              return;
-            }
-            const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
-            if (!(await start(title, push.season, push.episode))) return;
-            session.notify(`Starting “${push.title}”…`);
-            void householdModel
-              ?.markPlayed()
-              .catch((error: unknown) => console.warn('den: could not record the play', error));
-          },
+          play: startPushed,
           stale: (push) => session.notify(`Ignored an old “Play on TV” for “${push.title}”`),
+          transport: (command) => {
+            const target = untrack(() => playing);
+            const controls = untrack(() => tvControls);
+            if (
+              Math.abs(Date.now() - command.sentAt) > 120_000 ||
+              !target ||
+              target.title.type !== command.mediaType ||
+              target.title.id !== command.tmdbId ||
+              target.season !== command.season ||
+              target.episode !== command.episode ||
+              !controls
+            )
+              return;
+            if (command.action === 'play') controls.play();
+            else if (command.action === 'pause') controls.pause();
+            else controls.seekBy(command.offsetSeconds ?? 0);
+          },
         },
+        () => untrack(() => link),
         stop.signal,
       ),
     );

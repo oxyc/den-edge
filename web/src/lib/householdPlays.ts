@@ -1,8 +1,10 @@
-// A TV's household queue (den-spec inbox-v1 §5) from the receiving side: the play key this TV publishes as
-// `<d>.play`, and the plays any device holding the library sends to it. Only the TV build loads this.
+// A TV's queues from the receiving side: the household play key it publishes as `<d>.play` (den-spec inbox-v1 §5),
+// the plays any device holding the library sends to it, and the transport commands of the browser that paired it.
+// Only the TV build loads this.
 
 import { hex } from './crypto';
-import { drainPlays, type PlayRequest } from './inbox';
+import { drainTv, type PlayRequest, type TransportCommand } from './inbox';
+import type { Link } from './links.svelte';
 import { toBase64url } from './wire';
 
 const KEY = 'den.tvPlayKey.v1';
@@ -12,7 +14,7 @@ const WAIT_S = 25;
 const DRAIN_GAP_MS = 5_000;
 /** After a refused or failed drain. */
 const RETRY_MS = 15_000;
-/** Before this TV has published a play key, there is nothing to drain yet. */
+/** With neither a play key nor a pairing link yet, there is nothing to drain. */
 const IDLE_MS = 10_000;
 
 /** A short, one-way tag of the library key, so a stored play key can say which library it was made for. */
@@ -78,29 +80,44 @@ const pause = (ms: number, signal: AbortSignal) =>
   });
 
 /**
- * Drain this TV's household queue until `signal` aborts. The newest fresh play of a drain (the queue keeps arrival
- * order) goes to `play`, since several in one drain would only replace each other; each play that waited too long
- * goes to `stale`, and never starts.
+ * Drain this TV's queues until `signal` aborts, both in one held request: its household queue and the queue of the
+ * link that paired it (`link`, read again each round). The newest fresh play of a drain (the queue keeps arrival order)
+ * goes to `play`, since several in one drain would only replace each other; each play that waited too long goes to
+ * `stale`, and never starts; transport commands go to `transport` in order.
  */
-export async function receivePlays(
-  handlers: { play: (play: PlayRequest) => Promise<void>; stale: (play: PlayRequest) => void },
+export async function receiveTv(
+  handlers: {
+    play: (play: PlayRequest) => Promise<void>;
+    stale: (play: PlayRequest) => void;
+    transport: (command: TransportCommand) => void;
+  },
+  link: () => Pick<Link, 'inboxKey' | 'linkKey'> | null | undefined,
   signal: AbortSignal,
   storage: Storage | undefined = globalThis.localStorage,
 ): Promise<void> {
   while (!signal.aborted) {
-    const key = currentPlayKey(storage);
-    if (!key) {
+    const playKey = currentPlayKey(storage);
+    const paired = link() ?? undefined;
+    if (!playKey && !paired) {
       await pause(IDLE_MS, signal);
       continue;
     }
     const started = Date.now();
-    const drained = await drainPlays(key, { wait: WAIT_S, storage }).catch(() => null);
+    const drained = await drainTv({ playKey, link: paired }, { wait: WAIT_S, storage }).catch(
+      () => null,
+    );
     if (signal.aborted) return;
-    if (drained) {
-      for (const play of drained.stale) handlers.stale(play);
-      const newest = drained.fresh.at(-1);
-      if (newest) await handlers.play(newest).catch(() => undefined);
+    if (!drained) {
+      await pause(RETRY_MS, signal);
+      continue;
     }
-    await pause(drained ? Math.max(0, DRAIN_GAP_MS - (Date.now() - started)) : RETRY_MS, signal);
+    for (const play of drained.stale) handlers.stale(play);
+    for (const command of drained.transport) handlers.transport(command);
+    const newest = drained.fresh.at(-1);
+    if (newest) await handlers.play(newest).catch(() => undefined);
+    // An empty answer that came early (no held drains on this den-edge, or its cap on them reached) must not be
+    // followed straight away by another (inbox-v1 §3). One that brought something drains again at once.
+    const empty = !drained.fresh.length && !drained.stale.length && !drained.transport.length;
+    if (empty) await pause(Math.max(0, DRAIN_GAP_MS - (Date.now() - started)), signal);
   }
 }

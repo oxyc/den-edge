@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  drainPlays,
+  drainTv,
   householdQueue,
   receiveDeviceIdentity,
-  receiveTvMessages,
   sealMessage,
   sendToTV,
   stillQueued,
@@ -204,119 +203,100 @@ describe('receiving a paired device identity', () => {
   };
 });
 
-describe('receiving TV playback commands', () => {
-  const link = {
-    inboxKey: 'abcdef0123456789',
-    linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))),
-  };
-
-  it('opens targeted play and transport messages through a held sealed drain', async () => {
-    const now = 1_800_000_200_000;
-    const messages = await Promise.all([
-      sealMessage(
-        fromHex(vectors.enc),
-        {
-          type: 'play',
-          tmdbId: 1399,
-          mediaType: 'tv',
-          title: 'Game of Thrones',
-          season: 1,
-          episode: 2,
-        },
-        { id: '40000000000000000000000000000000', sentAt: now },
-      ),
-      sealMessage(
-        fromHex(vectors.enc),
-        {
-          type: 'transport',
-          action: 'skip',
-          tmdbId: 1399,
-          mediaType: 'tv',
-          season: 1,
-          episode: 2,
-          offsetSeconds: 10,
-        },
-        { id: '50000000000000000000000000000000', sentAt: now },
-      ),
-      sealMessage(
-        fromHex(vectors.enc),
-        { type: 'transport', action: 'skip', tmdbId: 1399, mediaType: 'tv' },
-        { id: '60000000000000000000000000000000', sentAt: now },
-      ),
-    ]);
-    const fetchImpl = (async (url: string, init?: RequestInit) => {
-      expect(url).toBe('/inbox/drain?wait=25');
-      expect((init?.headers as Record<string, string>)['x-den-link']).toBe(link.inboxKey);
-      return new Response(JSON.stringify({ messages: messages.map((sealed) => ({ sealed })) }), {
-        status: 200,
-      });
-    }) as typeof fetch;
-    expect(await receiveTvMessages(link, fetchImpl, now)).toEqual([
-      {
-        type: 'play',
-        tmdbId: 1399,
-        mediaType: 'tv',
-        title: 'Game of Thrones',
-        season: 1,
-        episode: 2,
-        sentAt: now,
-      },
-      {
-        type: 'transport',
-        action: 'skip',
-        tmdbId: 1399,
-        mediaType: 'tv',
-        season: 1,
-        episode: 2,
-        offsetSeconds: 10,
-        sentAt: now,
-      },
-    ]);
-  });
-});
-
-describe("draining a TV's household queue", () => {
+describe("draining a TV's queues", () => {
   const playKey = toBase64url(fromHex(vectors.linkKey));
   const now = 1_810_000_000_000;
   const play = { type: 'play', tmdbId: 550, mediaType: 'movie', title: 'Fight Club' };
   let next = 0;
   const seal = (message: object, sentAt = now, id = (++next).toString(16).padStart(32, 'a')) =>
     sealMessage(fromHex(vectors.enc), message, { id, sentAt });
-  const answering = (messages: object[], seen: { url?: string; body?: unknown } = {}) =>
+  const answering = (queues: object[][], seen: { url?: string; body?: unknown } = {}) =>
     (async (url: string, init?: RequestInit) => {
       seen.url = url;
       seen.body = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ queues: [messages] }), { status: 200 });
+      return new Response(JSON.stringify({ queues }), { status: 200 });
     }) as typeof fetch;
   const drain = (fetchImpl: typeof fetch, wait?: number) =>
-    drainPlays(playKey, { fetchImpl, now: () => now, storage: undefined, wait });
+    drainTv({ playKey }, { fetchImpl, now: () => now, storage: undefined, wait });
 
-  it('asks for the queue its play key names, held, in the body rather than the URL', async () => {
+  // The pairing link has a key of its own, so a message sealed for one queue opens in neither other.
+  const linkKey = new Uint8Array(32).fill(7);
+  const link = { inboxKey: 'abcdef0123456789', linkKey: btoa(String.fromCharCode(...linkKey)) };
+  const sealForLink = async (message: object, sentAt = now) =>
+    sealMessage((await linkKeys(linkKey)).enc, message, {
+      id: (++next).toString(16).padStart(32, 'b'),
+      sentAt,
+    });
+  const skip = { type: 'transport', action: 'skip', tmdbId: 1399, mediaType: 'tv', season: 1 };
+
+  it('asks for both queues in one held request, in the body rather than the URL', async () => {
     const seen: { url?: string; body?: unknown } = {};
-    await drain(answering([], seen), 25);
+    await drainTv(
+      { playKey, link },
+      { fetchImpl: answering([[], []], seen), now: () => now, storage: undefined, wait: 25 },
+    );
     expect(seen.url).toBe('/inbox/drain?wait=25');
-    expect(seen.body).toEqual({ keys: [(await linkKeys(fromHex(vectors.linkKey))).inbox] });
+    expect(seen.body).toEqual({
+      keys: [(await linkKeys(fromHex(vectors.linkKey))).inbox, link.inboxKey],
+    });
+  });
+
+  it('takes transport commands from the pairing link, and no play from it', async () => {
+    const drained = await drainTv(
+      { playKey, link },
+      {
+        fetchImpl: answering([
+          [{ sealed: await seal(skip) }],
+          [
+            { sealed: await sealForLink({ ...skip, episode: 2, offsetSeconds: 10 }) },
+            { sealed: await sealForLink({ ...skip, offsetSeconds: 601 }) },
+            { sealed: await sealForLink({ ...skip, action: 'pause', offsetSeconds: 10 }) },
+            { sealed: await sealForLink(play) },
+            { sealed: await seal({ ...skip, offsetSeconds: -10 }) },
+          ],
+        ]),
+        now: () => now,
+        storage: undefined,
+      },
+    );
+    expect(drained).toEqual({
+      fresh: [],
+      stale: [],
+      transport: [
+        {
+          action: 'skip',
+          tmdbId: 1399,
+          mediaType: 'tv',
+          season: 1,
+          episode: 2,
+          offsetSeconds: 10,
+          sentAt: now,
+        },
+      ],
+    });
   });
 
   it('starts a fresh play, and holds back one that waited past two minutes either way', async () => {
     const drained = await drain(
       answering([
-        { sealed: await seal(play) },
-        { sealed: await seal({ ...play, title: 'Old' }, now - 121_000) },
-        { sealed: await seal({ ...play, title: 'Ahead' }, now + 121_000) },
-        {
-          sealed: await seal(
-            {
-              type: 'play',
-              tmdbId: 1396,
-              mediaType: 'tv',
-              title: 'Breaking Bad',
-              season: 2,
-              episode: 3,
-            },
-            now - 119_000,
-          ),
-        },
+        [
+          { sealed: await seal(play) },
+          { sealed: await seal({ ...play, title: 'Old' }, now - 121_000) },
+          { sealed: await seal({ ...play, title: 'Ahead' }, now + 121_000) },
+          {
+            sealed: await seal(
+              {
+                type: 'play',
+                tmdbId: 1396,
+                mediaType: 'tv',
+                title: 'Breaking Bad',
+                season: 2,
+                episode: 3,
+              },
+              now - 119_000,
+            ),
+          },
+        ],
       ]),
     );
     expect(drained).toEqual({
@@ -328,6 +308,7 @@ describe("draining a TV's household queue", () => {
         { tmdbId: 550, mediaType: 'movie', title: 'Old' },
         { tmdbId: 550, mediaType: 'movie', title: 'Ahead' },
       ],
+      transport: [],
     });
   });
 
@@ -344,11 +325,16 @@ describe("draining a TV's household queue", () => {
       { sealed: await seal({ ...play, season: 1.5 }) },
       { sealed: replayed },
     ];
-    expect(await drain(answering(messages))).toEqual({
+    expect(await drain(answering([messages]))).toEqual({
       fresh: [{ tmdbId: 550, mediaType: 'movie', title: 'Fight Club' }],
       stale: [],
+      transport: [],
     });
-    expect(await drain(answering([{ sealed: replayed }]))).toEqual({ fresh: [], stale: [] });
+    expect(await drain(answering([[{ sealed: replayed }]]))).toEqual({
+      fresh: [],
+      stale: [],
+      transport: [],
+    });
   });
 
   it('is null — not empty — when den-edge refused the drain or could not be reached', async () => {

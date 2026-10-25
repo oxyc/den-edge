@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { currentPlayKey, playKeyFor, receivePlays } from './householdPlays';
+import { currentPlayKey, playKeyFor, receiveTv } from './householdPlays';
 import { linkKeys, sealMessage, type PlayRequest } from './inbox';
 import { fromBase64url } from './wire';
 
@@ -75,14 +75,16 @@ describe('receiving household plays', () => {
     const stop = new AbortController();
     const started: PlayRequest[] = [];
     const stale: PlayRequest[] = [];
-    await receivePlays(
+    await receiveTv(
       {
         play: async (request) => {
           started.push(request);
           stop.abort();
         },
         stale: (request) => stale.push(request),
+        transport: () => undefined,
       },
+      () => null,
       stop.signal,
       storage,
     );
