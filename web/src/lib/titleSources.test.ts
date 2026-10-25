@@ -14,7 +14,7 @@ const routes = { scout: [{ url: 'http://lan:8080' }] };
 const raw = {
   title: 'Film.mkv',
   url: 'http://lan:8080/p/ticket',
-  behaviorHints: { filename: 'Film.mkv' },
+  behaviorHints: { filename: 'Film.mkv', bingeGroup: 'season-pack-hash' },
   attributes: { resolution: '2160p', hdr: true, cached: false, sizeBytes: 1000 },
 };
 it('rewrites current tickets and legacy play URLs only from configured Scout origins', () => {
@@ -73,7 +73,11 @@ it('preserves unknown readiness and only trusts supplied display metadata', () =
     routes,
   )!;
   expect(sources).toHaveLength(2);
-  expect(sources[0]).toMatchObject({ cached: false, badges: ['4K', 'HDR'] });
+  expect(sources[0]).toMatchObject({
+    cached: false,
+    badges: ['4K', 'HDR'],
+    bingeGroup: 'season-pack-hash',
+  });
   expect(sources[1]!.cached).toBeUndefined();
   expect(sources[1]!.probed).toBe(false);
 });

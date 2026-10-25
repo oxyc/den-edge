@@ -6,6 +6,8 @@ import { retryAfterMs } from './retryAfter';
 
 export interface TitleSource {
   filename: string;
+  /** Scout's stable release/season-pack identity across episodes. */
+  bingeGroup?: string;
   url: string;
   label: string;
   cached?: boolean;
@@ -81,6 +83,10 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
     return [
       {
         filename,
+        bingeGroup:
+          typeof s.behaviorHints?.bingeGroup === 'string' && s.behaviorHints.bingeGroup
+            ? s.behaviorHints.bingeGroup
+            : undefined,
         url,
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,

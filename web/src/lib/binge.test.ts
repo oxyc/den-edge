@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldWarmNext, WARM_LEAD_SECS } from './binge';
+import { continuationPrefetch, shouldWarmNext, WARM_LEAD_SECS } from './binge';
 
 describe('shouldWarmNext', () => {
   /**
@@ -32,5 +32,40 @@ describe('shouldWarmNext', () => {
   /** A short episode is all lead, and warming it from the start is right rather than a bug. */
   it('warms a whole episode shorter than the lead', () => {
     expect(shouldWarmNext(1, 120)).toBe(true);
+  });
+});
+
+describe('continuationPrefetch', () => {
+  const sources = [
+    {
+      filename: 'jordskott.s01e10.1080p.bluray.x264-skgtv.mkv',
+      bingeGroup: 'den-scout|1080p|bluray||skgtv',
+      cached: false,
+      url: '/pack',
+    },
+    {
+      filename: 'Jordskott.S01E10.other.mkv',
+      bingeGroup: 'den-scout|720p|webdl||other',
+      cached: true,
+      url: '/other',
+    },
+  ];
+
+  it('keeps the exact season pack across differing episode filenames, even when it needs fetching', () => {
+    // The production E9 and E10 files differ; bingeGroup, derived from their common infohash, is the continuity.
+    const playing = {
+      filename: 'jordskott.s01e09.1080p.bluray.x264-skgtv.mkv',
+      bingeGroup: 'den-scout|1080p|bluray||skgtv',
+    };
+    expect(continuationPrefetch(sources, playing.bingeGroup, 1, 1)).toBe(sources[0]);
+  });
+
+  it('does not choose an arbitrary fallback when continuity is absent', () => {
+    expect(continuationPrefetch(sources, 'den-scout|1080p|webdl||missing', 1, 1)).toBeUndefined();
+    expect(continuationPrefetch(sources, undefined, 1, 1)).toBeUndefined();
+  });
+
+  it('does not carry a release across a season boundary unattended', () => {
+    expect(continuationPrefetch(sources, sources[0]!.bingeGroup, 1, 2)).toBeUndefined();
   });
 });
