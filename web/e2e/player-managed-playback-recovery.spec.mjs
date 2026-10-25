@@ -14,20 +14,6 @@ const direct = (name) => ({
   release,
 });
 
-const remux = {
-  url: '/managed-remux/s/r1/sig/master.m3u8',
-  release,
-  session: {
-    id: 'r1',
-    duration: 60,
-    audioTrack: 0,
-    audioTracks: [],
-    endUrl: '/managed-remux/s/r1/sig',
-    heartbeatUrl: '/managed-remux/s/r1/sig/heartbeat',
-    reportUrl: '/managed-remux/s/r1/sig/report',
-  },
-};
-
 async function base(page) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
