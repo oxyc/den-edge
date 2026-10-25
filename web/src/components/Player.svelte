@@ -353,6 +353,12 @@
       'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
     managed_prepare_timeout:
       'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
+    debrid_down:
+      'TorBox isn’t responding right now, so this can’t start. Try again in a few minutes.',
+    debrid_slow:
+      'TorBox is too slow right now to start this. Try again in a few minutes, or try another release.',
+    release_uncached:
+      'TorBox doesn’t have this release ready to stream yet. Try another release, or try again later.',
   };
 
   let playerRoot = $state<HTMLDivElement>();

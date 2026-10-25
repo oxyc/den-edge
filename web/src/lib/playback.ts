@@ -6,6 +6,7 @@ import { relayFetch } from './relayFetch';
 import type { Failure, Session, Want } from './remux';
 import { directSubtitles } from './directSubtitles';
 import { apiUrl, serviceOrigin } from './runtimeUrl';
+import { debridPlayCodeOf, type DebridPlayCode } from './debridStatus';
 
 /** Longer than Edge's route-specific 130 s bound; the caller may still cancel an obsolete attempt immediately. */
 export const PLAYBACK_ANSWER_MS = 150_000;
@@ -41,7 +42,8 @@ export type PlaybackCause =
   | 'torbox_refused'
   | 'torbox_unavailable'
   | 'torbox_unreachable'
-  | 'torbox_unsafe_stream_url';
+  | 'torbox_unsafe_stream_url'
+  | DebridPlayCode;
 
 /** Safe diagnostics for the page console. Arbitrary upstream bodies and provider identifiers never cross this type. */
 interface PlaybackDiagnostics {
@@ -280,7 +282,7 @@ async function errorBody(
     const formats: unknown = body?.formats;
     return {
       error: text(body?.error),
-      cause: knownCause(text(body?.cause)),
+      cause: knownCause(text(body?.cause)) ?? debridPlayCodeOf(body),
       formats: Array.isArray(formats)
         ? formats
             .filter(
@@ -336,6 +338,10 @@ function failureOf(
   error: string | undefined,
   cause?: PlaybackCause,
 ): Failure | 'legacy' {
+  // The debrid service itself is down, slow or lacks the release: whatever the status, that is the answer to show,
+  // never a wait-and-retry or an empty result.
+  if (cause === 'debrid_down' || cause === 'debrid_slow' || cause === 'release_uncached')
+    return 'sourceUnavailable';
   // Hearth includes a closed, non-secret cause when its preferred source failed and its fallback then found
   // nothing usable. That is a source failure with an actionable explanation, not an ordinary empty result.
   if (status === 404 && error === 'no_release') return cause ? 'sourceUnavailable' : 'none';

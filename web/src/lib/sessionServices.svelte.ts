@@ -2,6 +2,7 @@
 // owns the live probes and the render-facing addresses they discover.
 
 import { availability } from './availability.svelte';
+import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
 import type { Immutable, LibraryModel } from './libraryModel.svelte';
@@ -28,6 +29,8 @@ export class SessionServices {
   remux = $state<string | null>(null);
   remuxAway = $state(false);
   remuxBlocked = $state(false);
+  /** The debrid service behind the playback addon, read once per live discovery; null when Hearth doesn't say. */
+  debrid = $state<DebridState | null>(null);
 
   #for?: string;
   #stop?: () => void;
@@ -148,6 +151,10 @@ export class SessionServices {
               scout: (found: Addon | null) => {
                 this.scout = found;
                 if (this.#foregroundReady) availability.connect(found, this.content);
+                if (found)
+                  void readDebridState(found).then((state) => {
+                    if (current) this.debrid = state;
+                  });
                 this.#settled();
               },
               remux: (found: string | null) => {

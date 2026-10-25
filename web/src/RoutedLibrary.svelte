@@ -20,6 +20,7 @@
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
   import { legacyClockBootstrap } from './lib/legacyClockBootstrap';
   import { phoneLanding } from './lib/phoneLanding.svelte';
+  import { debridNotice, type DebridState } from './lib/debridStatus';
   import {
     links,
     readPendingReset,
@@ -1473,6 +1474,17 @@
     const current = session;
     const timer = setTimeout(() => current.foregroundReady(), 10_000);
     return () => clearTimeout(timer);
+  });
+
+  // The debrid service behind playback, as Hearth's health said on the latest discovery: told once per change of
+  // state, so navigation and rediscovery never repeat it, and a recovery says nothing.
+  let debridTold: DebridState | null = null;
+  $effect(() => {
+    const state = shown.services.debrid;
+    if (state === debridTold) return;
+    debridTold = state;
+    const message = debridNotice(state);
+    if (message) untrack(() => shown.notify(message));
   });
 
   $effect(() => {

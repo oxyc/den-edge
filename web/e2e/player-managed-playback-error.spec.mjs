@@ -131,6 +131,35 @@ test('a rejected TorBox key tells the guest exactly what to update', async () =>
   }
 });
 
+for (const [why, answer] of [
+  ['as its cause', { status: 503, body: { error: 'playback_unavailable', cause: 'debrid_down' } }],
+  ['as its error', { status: 502, body: { error: 'debrid_down' } }],
+]) {
+  test(`a down debrid service named ${why} says so instead of waiting or a generic failure`, async () => {
+    const requests = [];
+    const { browser, page } = await playerPage((route) => {
+      requests.push(route.request());
+      return route.fulfill({
+        status: answer.status,
+        contentType: 'application/json',
+        body: JSON.stringify(answer.body),
+      });
+    });
+    try {
+      await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+      await expect(page.getByRole('alert').locator('p')).toHaveText(
+        'TorBox isn’t responding right now, so this can’t start. Try again in a few minutes.',
+      );
+      await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+      // A terminal answer, not a wait: nothing is asked again on its own.
+      await page.waitForTimeout(1_500);
+      expect(requests).toHaveLength(1);
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
 test('a no-release fallback still shows the specific managed-provider failure', async () => {
   const { browser, page } = await playerPage((route) =>
     route.fulfill({
