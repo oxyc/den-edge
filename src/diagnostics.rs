@@ -1019,6 +1019,8 @@ closed_enum!(PlaybackRouteCause {
     TorboxUnavailable => "torbox_unavailable",
     TorboxUnreachable => "torbox_unreachable",
     TorboxUnsafeStreamUrl => "torbox_unsafe_stream_url",
+    DebridDown => "debrid_down",
+    DebridSlow => "debrid_slow",
 });
 
 #[derive(Deserialize)]

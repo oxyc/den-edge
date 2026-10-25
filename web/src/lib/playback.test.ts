@@ -411,6 +411,33 @@ describe('startPlayback', () => {
     expect(JSON.stringify(result)).not.toContain('private provider response');
   });
 
+  it.each([
+    [{ error: 'debrid_down', service: 'torbox', reason: 'timeout' }, {}, 'debrid_down'],
+    [
+      { error: 'status_unavailable', service: 'torbox' },
+      { 'x-den-degraded': 'debrid_slow' },
+      'debrid_slow',
+    ],
+    [
+      { error: 'store_unavailable', service: 'torbox' },
+      { 'x-den-degraded': 'debrid_down' },
+      'debrid_down',
+    ],
+  ] as const)(
+    'a debrid answer %j waits out its Retry-After, carrying its code',
+    async (body, headers, cause) => {
+      const result = await startPlayback('/den/config/playback', want, async () =>
+        json(body, 503, { 'retry-after': '7', ...headers }),
+      );
+      expect(result).toMatchObject({
+        failure: 'temporarilyUnavailable',
+        cause,
+        httpStatus: 503,
+        retryMs: 7_000,
+      });
+    },
+  );
+
   it('honours a TorBox rate-limit wait attached to a final source failure', async () => {
     await expect(
       startPlayback('/den/config/playback', want, async () =>

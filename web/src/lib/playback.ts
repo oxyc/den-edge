@@ -6,6 +6,7 @@ import { relayFetch } from './relayFetch';
 import type { Failure, Session, Want } from './remux';
 import { directSubtitles } from './directSubtitles';
 import { apiUrl, serviceOrigin } from './runtimeUrl';
+import { debridPlayCodeOf, type DebridPlayCode } from './debridStatus';
 
 /** Longer than Edge's route-specific 130 s bound; the caller may still cancel an obsolete attempt immediately. */
 export const PLAYBACK_ANSWER_MS = 150_000;
@@ -41,7 +42,8 @@ export type PlaybackCause =
   | 'torbox_refused'
   | 'torbox_unavailable'
   | 'torbox_unreachable'
-  | 'torbox_unsafe_stream_url';
+  | 'torbox_unsafe_stream_url'
+  | DebridPlayCode;
 
 /** Safe diagnostics for the page console. Arbitrary upstream bodies and provider identifiers never cross this type. */
 interface PlaybackDiagnostics {
@@ -275,24 +277,20 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
 async function errorBody(
   response: Response,
 ): Promise<{ error?: string; cause?: PlaybackCause; formats?: string[] }> {
-  try {
-    const body = record(await response.json());
-    const formats: unknown = body?.formats;
-    return {
-      error: text(body?.error),
-      cause: knownCause(text(body?.cause)),
-      formats: Array.isArray(formats)
-        ? formats
-            .filter(
-              (ext: unknown): ext is string =>
-                typeof ext === 'string' && /^\.[a-z0-9]{1,5}$/i.test(ext),
-            )
-            .slice(0, 20)
-        : undefined,
-    };
-  } catch {
-    return {};
-  }
+  const body = record(await response.json().catch(() => null));
+  const formats: unknown = body?.formats;
+  return {
+    error: text(body?.error),
+    cause: knownCause(text(body?.cause)) ?? debridPlayCodeOf(response, body),
+    formats: Array.isArray(formats)
+      ? formats
+          .filter(
+            (ext: unknown): ext is string =>
+              typeof ext === 'string' && /^\.[a-z0-9]{1,5}$/i.test(ext),
+          )
+          .slice(0, 20)
+      : undefined,
+  };
 }
 
 function knownCause(cause: string | undefined): PlaybackCause | undefined {
@@ -336,6 +334,8 @@ function failureOf(
   error: string | undefined,
   cause?: PlaybackCause,
 ): Failure | 'legacy' {
+  // TorBox is down or slow: a wait for Hearth's Retry-After (its next recovery probe), whatever the status.
+  if (cause === 'debrid_down' || cause === 'debrid_slow') return 'temporarilyUnavailable';
   // Hearth includes a closed, non-secret cause when its preferred source failed and its fallback then found
   // nothing usable. That is a source failure with an actionable explanation, not an ordinary empty result.
   if (status === 404 && error === 'no_release') return cause ? 'sourceUnavailable' : 'none';
@@ -444,7 +444,7 @@ export async function startPlayback(
     const retryMs =
       response.status === 429 ||
       failure === 'starting' ||
-      response.status === 503 ||
+      failure === 'temporarilyUnavailable' ||
       response.status === 504 ||
       cause === 'torbox_rate_limited'
         ? retryAfterMs(response, 0) || undefined

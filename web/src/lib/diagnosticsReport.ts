@@ -451,7 +451,9 @@ export type PlaybackRouteCause =
   | 'torbox_refused'
   | 'torbox_unavailable'
   | 'torbox_unreachable'
-  | 'torbox_unsafe_stream_url';
+  | 'torbox_unsafe_stream_url'
+  | 'debrid_down'
+  | 'debrid_slow';
 
 /**
  * One route transition, made entirely of closed values. In particular this carries no media URL, release name,

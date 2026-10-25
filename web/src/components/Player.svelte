@@ -353,6 +353,8 @@
       'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
     managed_prepare_timeout:
       'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
+    debrid_down: 'TorBox isn’t responding right now. Den will try again when it can…',
+    debrid_slow: 'TorBox is slow right now, so this is taking longer to start. Trying again…',
   };
 
   let playerRoot = $state<HTMLDivElement>();
@@ -762,6 +764,7 @@
   let startupRetryNotice = $state<string | null>(null);
   function automaticRetryNotice(failure: Failure, cause?: PlaybackCause): string {
     if (cause === 'torbox_rate_limited') return 'TorBox asked Den to wait—trying again…';
+    if (cause === 'debrid_down' || cause === 'debrid_slow') return managedCauseMessages[cause];
     if (failure === 'busy') return 'The player is busy—trying again…';
     if (failure === 'starting') return 'The release is still being prepared—trying again…';
     if (failure === 'transcode') return 'The release is still being converted—trying again…';
@@ -4513,7 +4516,12 @@
         </p>
       </div>
     {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode' || failure === 'timedOut' || failure === 'temporarilyUnavailable'}
-      {@render banner(waits[failure], { busy: true, startup: true })}
+      {@render banner(
+        managedCause === 'debrid_down' || managedCause === 'debrid_slow'
+          ? managedCauseMessages[managedCause]
+          : waits[failure],
+        { busy: true, startup: true },
+      )}
     {:else if failure === 'lost'}
       <div class="terminal-message" role="alert">
         <p>The connection was gone too long for this to carry on.</p>
