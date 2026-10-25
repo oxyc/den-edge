@@ -17,7 +17,7 @@ import { bigHousehold, routeBigHousehold } from './big-library.mjs';
 const ROUND_TRIP_MS = Number(process.env.ROUND_TRIP_MS ?? 80);
 /** Milliseconds from navigation to Continue Watching on a first open. 1.5 s here once reads were batched. */
 const FIRST_OPEN_MS = 4_000;
-/** Changes requests the library Workers may make to read the whole history: about 5,100 rows, 1,000 a request. */
+/** Changes requests the library Workers may make: one 128-row first-paint page, then 1,000-row history pages. */
 const CHANGES_REQUESTS = 16;
 
 /** Forget every library this browser keeps, but not its keys: the next open reads the history from den-edge. */

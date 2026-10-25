@@ -458,6 +458,7 @@ function settledLongAgo(titles: number) {
 
 // Sealed while the file is collected, so no test spends its own timeout on it.
 await settledLongAgo(1_100);
+await settledLongAgo(2_300);
 
 async function sealSettledLongAgo(titles: number) {
   const keys = await deriveKeys(raw);
@@ -504,6 +505,7 @@ it('draws a first open from its newest page and its settings by key, then reads 
     'before&limit',
     'keys',
   ]);
+  expect(edge.requests[0]!.searchParams.get('limit')).toBe('128');
   const first = (await opened!.authority.select({ kind: 'overview' })) as { watchlist: unknown[] };
   expect(first.watchlist).toContainEqual({ type: 'movie', id: 1_100 });
   expect(first.watchlist).not.toContainEqual({ type: 'movie', id: 1 });
@@ -514,7 +516,7 @@ it('draws a first open from its newest page and its settings by key, then reads 
   expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
     head: 1_101,
     complete: false,
-    floor: 102,
+    floor: 974,
   });
   expect(progress.mock.calls.at(-1)![0]).toBeLessThan(1);
 
@@ -535,11 +537,96 @@ it('draws a first open from its newest page and its settings by key, then reads 
       }),
     ),
   );
+  expect(
+    edge.requests
+      .filter((url) => url.searchParams.has('before'))
+      .map((url) => url.searchParams.get('limit')),
+  ).toEqual(['128', '1000']);
   const filled = (await opened!.authority.select({ kind: 'overview' })) as { watchlist: unknown[] };
   expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
   expect(progress.mock.calls.at(-1)![0]).toBe(1);
   expect(openFull).not.toHaveBeenCalled();
 }, 10_000);
+
+it('keeps full background pages pipelined and refills after each one until a large first import is complete', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(2_300);
+  const edge = changesEdge(entries, 'generation-many-background-pages', { counted: true });
+  const gates = Array.from({ length: 3 }, () => {
+    let release!: () => void;
+    return { waiting: new Promise<void>((resolve) => (release = resolve)), release };
+  });
+  let backgroundAsked = 0;
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    const before = new URL(String(input), 'https://den.test').searchParams.get('before');
+    if (before !== null && Number(before) < Number.MAX_SAFE_INTEGER) {
+      const gate = gates[backgroundAsked++];
+      if (gate) await gate.waiting;
+    }
+    return edge.fetchImpl(input, init);
+  });
+  const progress = vi.fn();
+  const opened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    fetchImpl,
+    progress,
+  );
+  expect(opened).not.toBeNull();
+  expect(backgroundAsked).toBe(1);
+  const initial = (await opened!.authority.select({ kind: 'overview' })) as {
+    watchlist: unknown[];
+  };
+  expect(initial.watchlist).toContainEqual({ type: 'movie', id: 2_300 });
+  expect(initial.watchlist).not.toContainEqual({ type: 'movie', id: 1 });
+
+  const changed = vi.fn();
+  opened!.authority.listen?.(changed);
+  gates[0]!.release();
+  await waitFor(() => expect(backgroundAsked).toBe(2));
+  await waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      complete: false,
+      floor: 1_174,
+    }),
+  );
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+
+  gates[1]!.release();
+  await waitFor(() => expect(backgroundAsked).toBe(3));
+  await waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      complete: false,
+      floor: 174,
+    }),
+  );
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
+
+  gates[2]!.release();
+  await waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      head: 2_301,
+      complete: true,
+    }),
+  );
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(3));
+  expect(
+    edge.requests
+      .filter((url) => url.searchParams.has('before'))
+      .map((url) => url.searchParams.get('limit')),
+  ).toEqual(['128', '1000', '1000', '1000']);
+  const reported = progress.mock.calls.map(([value]) => value);
+  for (const value of [128, 1_128, 2_128])
+    expect(reported).toContainEqual(expect.closeTo(value / entries.length, 5));
+  expect(reported.at(-1)).toBe(1);
+  const filled = (await opened!.authority.select({ kind: 'overview' })) as {
+    watchlist: unknown[];
+  };
+  expect(filled.watchlist).toContainEqual({ type: 'movie', id: 1 });
+});
 
 it('waits for a newest-first import before reading a title from the completed facts', async () => {
   await ensureSyncPolicy();
@@ -600,7 +687,7 @@ it('counts a first open’s progress in rows, and asks for the second page as th
     seq: at < older ? 1 + at * 10 : 1 + older * 10 + (at - older),
   }));
   const top = entries.at(-1)!.seq;
-  const firstPageFloor = entries.at(-1_000)!.seq;
+  const firstPageFloor = entries.at(-128)!.seq;
   const progressAfterFirstPage = async (counted: boolean) => {
     const vault = new FactVault();
     const edge = changesEdge(entries, 'generation-rows', { counted });
@@ -624,8 +711,8 @@ it('counts a first open’s progress in rows, and asks for the second page as th
   };
 
   const counted = await progressAfterFirstPage(true);
-  // 1,000 of 1,100 rows kept: what the line says, not how far below the head the page reached.
-  expect(counted.last).toBeCloseTo(1_000 / entries.length, 2);
+  // 128 of 1,100 rows kept: what the line says, not how far below the head the page reached.
+  expect(counted.last).toBeCloseTo(128 / entries.length, 2);
   expect(counted.askedAtFirstSave).toBe(2);
   // An older den-edge says no count: the share of sequence numbers read, as before.
   const uncounted = await progressAfterFirstPage(false);
@@ -680,11 +767,18 @@ it('resumes a newest-first import below the last committed page, and opens the l
     resumed.fetchImpl,
   );
   // Below the floor the first open kept, without reading the settings again.
-  expect(resumed.requests.map((url) => url.searchParams.get('before'))).toEqual(['102']);
-  expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
-    head: 1_101,
-    complete: true,
-  });
+  expect(
+    resumed.requests.map((url) => [url.searchParams.get('before'), url.searchParams.get('limit')]),
+  ).toEqual([
+    ['974', '128'],
+    ['846', '1000'],
+  ]);
+  await waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      head: 1_101,
+      complete: true,
+    }),
+  );
   await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 1 }]),
   });

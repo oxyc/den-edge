@@ -1233,6 +1233,13 @@ export function narrowEditNames(command: LibraryCommand): string[] | null {
 }
 
 const FACT_BATCH = 64;
+/**
+ * Rows a new device opens before Home may draw. Keep this small: every row is decrypted, projected and committed as
+ * one authority value plus its selected encrypted facts on the device's critical path. The rest of the history uses
+ * full pages below, where network round trips matter more than first paint.
+ */
+const NEWEST_BOOTSTRAP_PAGE = 128;
+const NEWEST_BACKGROUND_PAGE = 1_000;
 
 /**
  * The rows a Settings, runtime or devices view is read from (`librarySelectedSettings.ts`), and the profile directory
@@ -1458,10 +1465,10 @@ async function importNewestFirst(
   const settingsKeys = manifest
     ? null
     : await Promise.all(SETTINGS_ROWS.map((name) => rowKey(keys, name)));
-  const below = (before: number) =>
-    reading.page(`before=${before}&limit=1000`, generation, (seq) => seq > 0 && seq < before);
+  const below = (before: number, limit: number) =>
+    reading.page(`before=${before}&limit=${limit}`, generation, (seq) => seq > 0 && seq < before);
   const [first, settings] = await Promise.all([
-    below(floor),
+    below(floor, NEWEST_BOOTSTRAP_PAGE),
     settingsKeys && reading.page(`keys=${settingsKeys.join(',')}`, generation, (seq) => seq > 0),
   ]);
   if (!first) return null;
@@ -1526,7 +1533,10 @@ async function importNewestFirst(
   }
   // The page below the first, asked for as it arrives: on its way while the first is decrypted and kept, rather than
   // after (a round trip and more on a phone, while the line stood still). Unread if this import stops early.
-  const second = first.more && first.entries.length ? below(first.entries.at(-1)!.seq) : null;
+  const second =
+    first.more && first.entries.length
+      ? below(first.entries.at(-1)!.seq, NEWEST_BACKGROUND_PAGE)
+      : null;
   if (!(await keep(first, settingsFacts))) return null;
   const opened = await store.manifest();
   if (!opened || opened.generation !== generation) return null;
@@ -1535,11 +1545,12 @@ async function importNewestFirst(
   const page = { committed: () => {} };
   const done = (async () => {
     // The page below the one being decrypted and committed, already on its way.
-    let next = second ?? below(floor);
+    let next = second ?? below(floor, NEWEST_BACKGROUND_PAGE);
     for (;;) {
       const current = await next;
       if (!current || current.order !== 'desc' || current.generation !== generation) return false;
-      if (current.more && current.entries.length) next = below(current.entries.at(-1)!.seq);
+      if (current.more && current.entries.length)
+        next = below(current.entries.at(-1)!.seq, NEWEST_BACKGROUND_PAGE);
       if (!(await keep(current))) return false;
       page.committed();
       if (!current.more || !current.entries.length) return true;
