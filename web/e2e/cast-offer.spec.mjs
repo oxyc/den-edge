@@ -230,7 +230,7 @@ async function open(
   return { browser, page, asked };
 }
 
-test('managed direct HLS casts its capability, then asks Hearth once for Remux on failure', async () => {
+test('managed direct HLS refreshes TorBox once on Cast failure without switching sources', async () => {
   const { browser, page, asked } = await open('direct-fail', { managed: true });
   try {
     await playingPast(page, 3);
@@ -268,15 +268,21 @@ test('managed direct HLS casts its capability, then asks Hearth once for Remux o
     expect(directLoad).not.toHaveProperty('speed');
 
     await expect.poll(() => asked.managed.length).toBe(3);
-    expect(asked.managed[2]).toMatchObject({ player: 'cast', directFailed: true });
+    expect(asked.managed[2]).toMatchObject({ player: 'cast', directOnly: true });
+    expect(asked.managed[2]).not.toHaveProperty('directFailed');
     await expect
       .poll(async () => {
         const loads = await castLoads(page);
-        return loads.at(-1)?.url ?? '';
+        return loads.filter(
+          (load) => load.url === `${CDN}/stream/master.m3u8?token=fixture&scrobbling_enabled=false`,
+        ).length;
       })
-      .toBe(`${MEDIA}/remux/s/cast/sig/master.m3u8`);
+      .toBe(2);
+    await expect(page.getByRole('alert')).toContainText('stopped responding');
+    expect(asked.managed).toHaveLength(3);
+    expect(asked.managed).not.toContainEqual(expect.objectContaining({ directFailed: true }));
     expect(asked.direct, 'managed playback never posts to the legacy direct facade').toEqual([]);
-    expect(asked.relay, 'Hearth, not Web, chooses the Remux implementation').toEqual([]);
+    expect(asked.relay, 'a TorBox Cast failure does not open a Remux session').toEqual([]);
   } catch (error) {
     await savePageTrace(page);
     throw error;
