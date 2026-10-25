@@ -280,15 +280,23 @@
     const profileModel = session.model;
     if (!model) return;
     const name = thisDevice.name;
+    const libraryKey = session.identity.libraryKey;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
       if (!current) return;
       timer = setTimeout(
         () =>
-          void model
-            .heartbeatDevice(name, undefined, __DEN_TV__ ? 'tv' : 'browser')
-            .catch((error: unknown) => console.warn('den: this device could not check in', error)),
+          void (async () => {
+            // A TV publishes its household play key, so any device holding the library can play on it.
+            const playKey =
+              __DEN_TV__ && libraryKey
+                ? await (await import('./lib/householdPlays')).playKeyFor(libraryKey)
+                : undefined;
+            await model.heartbeatDevice(name, undefined, __DEN_TV__ ? 'tv' : 'browser', playKey);
+          })().catch((error: unknown) =>
+            console.warn('den: this device could not check in', error),
+          ),
         1_000,
       );
     });

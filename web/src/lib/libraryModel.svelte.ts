@@ -589,8 +589,17 @@ export class LibraryModel {
     name: string,
     operationId?: string,
     deviceKind: 'tv' | 'browser' = 'browser',
+    playKey?: string,
   ): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'device.heartbeat', name, deviceKind }, operationId);
+    return this.#command(
+      { kind: 'device.heartbeat', name, deviceKind, ...(playKey ? { playKey } : {}) },
+      operationId,
+    );
+  }
+
+  /** Record that a play sent from another device started on this TV. */
+  markPlayed(operationId?: string): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'device.played' }, operationId);
   }
 
   removeDevice(deviceId: string, operationId?: string): Promise<LibraryServiceCommandResult> {

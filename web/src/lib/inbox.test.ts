@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  drainPlays,
   householdQueue,
   receiveDeviceIdentity,
   receiveTvMessages,
@@ -271,5 +272,93 @@ describe('receiving TV playback commands', () => {
         sentAt: now,
       },
     ]);
+  });
+});
+
+describe("draining a TV's household queue", () => {
+  const playKey = toBase64url(fromHex(vectors.linkKey));
+  const now = 1_810_000_000_000;
+  const play = { type: 'play', tmdbId: 550, mediaType: 'movie', title: 'Fight Club' };
+  let next = 0;
+  const seal = (message: object, sentAt = now, id = (++next).toString(16).padStart(32, 'a')) =>
+    sealMessage(fromHex(vectors.enc), message, { id, sentAt });
+  const answering = (messages: object[], seen: { url?: string; body?: unknown } = {}) =>
+    (async (url: string, init?: RequestInit) => {
+      seen.url = url;
+      seen.body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ queues: [messages] }), { status: 200 });
+    }) as typeof fetch;
+  const drain = (fetchImpl: typeof fetch, wait?: number) =>
+    drainPlays(playKey, { fetchImpl, now: () => now, storage: undefined, wait });
+
+  it('asks for the queue its play key names, held, in the body rather than the URL', async () => {
+    const seen: { url?: string; body?: unknown } = {};
+    await drain(answering([], seen), 25);
+    expect(seen.url).toBe('/inbox/drain?wait=25');
+    expect(seen.body).toEqual({ keys: [(await linkKeys(fromHex(vectors.linkKey))).inbox] });
+  });
+
+  it('starts a fresh play, and holds back one that waited past two minutes either way', async () => {
+    const drained = await drain(
+      answering([
+        { sealed: await seal(play) },
+        { sealed: await seal({ ...play, title: 'Old' }, now - 121_000) },
+        { sealed: await seal({ ...play, title: 'Ahead' }, now + 121_000) },
+        {
+          sealed: await seal(
+            {
+              type: 'play',
+              tmdbId: 1396,
+              mediaType: 'tv',
+              title: 'Breaking Bad',
+              season: 2,
+              episode: 3,
+            },
+            now - 119_000,
+          ),
+        },
+      ]),
+    );
+    expect(drained).toEqual({
+      fresh: [
+        { tmdbId: 550, mediaType: 'movie', title: 'Fight Club' },
+        { tmdbId: 1396, mediaType: 'tv', title: 'Breaking Bad', season: 2, episode: 3 },
+      ],
+      stale: [
+        { tmdbId: 550, mediaType: 'movie', title: 'Old' },
+        { tmdbId: 550, mediaType: 'movie', title: 'Ahead' },
+      ],
+    });
+  });
+
+  it('drops everything but an authentic, well-formed play, and a play it already took', async () => {
+    const replayed = await seal(play, now, 'f'.repeat(32));
+    const otherKey = await sealMessage(new Uint8Array(32), play, { sentAt: now });
+    const messages = [
+      { type: 'play', tmdbId: 550, mediaType: 'movie', title: 'forged' },
+      { sealed: otherKey },
+      { sealed: await seal({ type: 'addon', manifestUrl: 'https://addon.example/manifest.json' }) },
+      { sealed: await seal({ type: 'libraryKey', key: 'AAAA' }) },
+      { sealed: await seal({ ...play, tmdbId: -1 }) },
+      { sealed: await seal({ ...play, mediaType: 'person' }) },
+      { sealed: await seal({ ...play, season: 1.5 }) },
+      { sealed: replayed },
+    ];
+    expect(await drain(answering(messages))).toEqual({
+      fresh: [{ tmdbId: 550, mediaType: 'movie', title: 'Fight Club' }],
+      stale: [],
+    });
+    expect(await drain(answering([{ sealed: replayed }]))).toEqual({ fresh: [], stale: [] });
+  });
+
+  it('is null — not empty — when den-edge refused the drain or could not be reached', async () => {
+    const status = (code: number) =>
+      (async () => new Response('{}', { status: code })) as typeof fetch;
+    expect(await drain(status(429))).toBeNull();
+    expect(
+      await drain((async () => {
+        throw new TypeError('offline');
+      }) as typeof fetch),
+    ).toBeNull();
   });
 });
