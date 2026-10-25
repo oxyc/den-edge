@@ -181,6 +181,7 @@ export function continueItems(
         ...(liveEpisode ? { liveEpisode } : {}),
         ...(liveFraction !== undefined ? { liveFraction } : {}),
         ...(device ? { device } : {}),
+        ...(by ? { deviceId: by } : {}),
       };
     });
 }

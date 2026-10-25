@@ -197,10 +197,12 @@ export interface ContinueEntry {
   liveFraction?: number;
   /** The name the device that wrote `seconds` gives itself in `set:devices`. */
   device?: string;
+  /** The stable id of the device that wrote `seconds`; transport controls use identity, never its label. */
+  deviceId?: string;
 }
 
 /** A Continue Watching decision before the title's late TMDB display fields are laid over it. */
-export interface ContinueCandidate extends Omit<ContinueEntry, 'title' | 'device'> {
+export interface ContinueCandidate extends Omit<ContinueEntry, 'title' | 'device' | 'deviceId'> {
   ref: Pick<Title, 'type' | 'id'>;
   /** The stamp device id that wrote `seconds`, which the library service names (`device`). */
   by?: string;
@@ -939,9 +941,9 @@ export function nameContinueCandidates(
         updatedAt: mark.updatedAt,
       });
   }
-  return candidates.flatMap(({ ref, display, by: _by, ...entry }) => {
+  return candidates.flatMap(({ ref, display, by, ...entry }) => {
     const title = display === 'mark' ? marks.get(titleKey(ref))?.title : records.get(titleKey(ref));
-    return title?.title ? [{ ...entry, title }] : [];
+    return title?.title ? [{ ...entry, title, ...(by ? { deviceId: by } : {}) }] : [];
   });
 }
 

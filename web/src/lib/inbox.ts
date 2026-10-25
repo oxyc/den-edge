@@ -37,7 +37,11 @@ const REQUEST_MS = 15_000;
 const DRAIN_MS = 60_000;
 
 /** `/inbox/drain`'s answer, read under `DRAIN_MS`; null when den-edge refused the drain. */
-async function drainRequest(fetchImpl: typeof fetch, init: RequestInit): Promise<unknown> {
+async function drainRequest(
+  fetchImpl: typeof fetch,
+  init: RequestInit,
+  path = '/inbox/drain',
+): Promise<unknown> {
   const controller = new AbortController();
   const limit = () =>
     setTimeout(
@@ -46,7 +50,7 @@ async function drainRequest(fetchImpl: typeof fetch, init: RequestInit): Promise
     );
   let timer = limit();
   try {
-    const response = await fetchImpl('/inbox/drain', {
+    const response = await fetchImpl(path, {
       ...init,
       signal: controller.signal,
       cache: 'no-store',
@@ -58,6 +62,127 @@ async function drainRequest(fetchImpl: typeof fetch, init: RequestInit): Promise
   } finally {
     clearTimeout(timer);
   }
+}
+
+export type TvInboxMessage =
+  | {
+      type: 'play';
+      tmdbId: number;
+      mediaType: 'movie' | 'tv';
+      title: string;
+      season?: number;
+      episode?: number;
+      sentAt: number;
+    }
+  | {
+      type: 'transport';
+      action: 'play' | 'pause' | 'skip';
+      tmdbId: number;
+      mediaType: 'movie' | 'tv';
+      season?: number;
+      episode?: number;
+      offsetSeconds?: number;
+      sentAt: number;
+    };
+
+/** Drain commands for a paired webOS/Tizen receiver. Unknown authenticated messages remain for their own feature
+ * only in meaning, not in storage: the inbox is single-use, as it is on Apple TV. */
+export async function receiveTvMessages(
+  link: Pick<Link, 'inboxKey' | 'linkKey'>,
+  fetchImpl: typeof fetch = fetch,
+  now = Date.now(),
+  storage: Storage | undefined = globalThis.localStorage,
+): Promise<TvInboxMessage[]> {
+  try {
+    const body = (await drainRequest(
+      fetchImpl,
+      { headers: { 'x-den-link': link.inboxKey } },
+      '/inbox/drain?wait=25',
+    )) as { messages?: unknown } | null;
+    if (!Array.isArray(body?.messages)) return [];
+    const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
+    const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
+    const opened: TvInboxMessage[] = [];
+    for (const entry of body.messages as { sealed?: unknown }[]) {
+      if (typeof entry?.sealed !== 'string') continue;
+      try {
+        const combined = fromBase64url(entry.sealed);
+        if (combined.length < 28) continue;
+        const plain = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
+          key,
+          combined.slice(12),
+        );
+        const envelope = JSON.parse(new TextDecoder().decode(plain)) as {
+          id?: unknown;
+          sentAt?: unknown;
+          message?: Record<string, unknown>;
+        };
+        const sentAt = envelope.sentAt;
+        const age = typeof sentAt === 'number' ? now - sentAt : Number.POSITIVE_INFINITY;
+        if (
+          typeof envelope.id !== 'string' ||
+          !/^[0-9a-f]{32}$/.test(envelope.id) ||
+          typeof sentAt !== 'number' ||
+          !Number.isFinite(sentAt) ||
+          age > SEAL_WINDOW ||
+          age < -SEAL_AHEAD ||
+          !admit(envelope.id, now, storage)
+        )
+          continue;
+        const message = tvMessage(envelope.message, sentAt);
+        if (message) opened.push(message);
+      } catch {
+        // One malformed or differently keyed entry cannot poison the rest of the drained queue.
+      }
+    }
+    return opened;
+  } catch {
+    return [];
+  }
+}
+
+function tvMessage(
+  message: Record<string, unknown> | undefined,
+  sentAt: number,
+): TvInboxMessage | null {
+  if (!message) return null;
+  const { type, tmdbId, mediaType, season, episode } = message;
+  if (
+    !Number.isInteger(tmdbId) ||
+    (mediaType !== 'movie' && mediaType !== 'tv') ||
+    (season !== undefined && !Number.isInteger(season)) ||
+    (episode !== undefined && !Number.isInteger(episode))
+  )
+    return null;
+  const medium = mediaType as 'movie' | 'tv';
+  const target = {
+    tmdbId: tmdbId as number,
+    mediaType: medium,
+    ...(season === undefined ? {} : { season: season as number }),
+    ...(episode === undefined ? {} : { episode: episode as number }),
+    sentAt,
+  };
+  if (type === 'play')
+    return typeof message.title === 'string' && message.title
+      ? { type, ...target, title: message.title }
+      : null;
+  if (type !== 'transport' || !['play', 'pause', 'skip'].includes(String(message.action)))
+    return null;
+  const action = message.action as 'play' | 'pause' | 'skip';
+  const offset = message.offsetSeconds;
+  if (
+    action === 'skip' &&
+    (typeof offset !== 'number' || !Number.isFinite(offset) || Math.abs(offset) > 600)
+  )
+    return null;
+  if (action !== 'skip' && offset !== undefined) return null;
+  return {
+    type,
+    action,
+    ...target,
+    ...(action === 'skip' ? { offsetSeconds: offset as number } : {}),
+  };
 }
 
 function replayEntries(storage: Storage | undefined, now: number): Record<string, number> {

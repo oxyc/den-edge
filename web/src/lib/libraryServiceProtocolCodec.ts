@@ -1161,6 +1161,7 @@ function continueItem(value: unknown): value is ContinueItem {
       'liveEpisode',
       'liveFraction',
       'device',
+      'deviceId',
     ]) &&
     titleRef(value.title) &&
     finite(value.fraction) &&
@@ -1192,7 +1193,12 @@ function continueItem(value: unknown): value is ContinueItem {
     ) &&
     optional(value.seconds, finite) &&
     optional(value.updatedAt, integer) &&
-    optional(value.device, text)
+    optional(value.device, text) &&
+    optional(
+      value.deviceId,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && /^[0-9a-f]{16}$/.test(candidate),
+    )
   );
 }
 

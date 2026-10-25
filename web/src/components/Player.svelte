@@ -170,6 +170,7 @@
     onprogress,
     onnext,
     onclose,
+    oncontrols,
   }: {
     title: Title;
     season?: number;
@@ -208,6 +209,10 @@
     onprogress: (fraction: number, seconds: number, at: Episode) => void;
     onnext?: () => void;
     onclose: () => void;
+    /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
+    oncontrols?: (
+      controls: { play: () => void; pause: () => void; seekBy: (seconds: number) => void } | null,
+    ) => void;
   } = $props();
   const nextHref = $derived(
     onnext && nextEpisode?.season !== undefined && nextEpisode.episode !== undefined
@@ -3640,6 +3645,16 @@
     if (video.paused) void video.play();
     else video.pause();
   }
+
+  $effect(() => {
+    if (!oncontrols) return;
+    oncontrols({
+      play: () => void video?.play(),
+      pause: () => video?.pause(),
+      seekBy,
+    });
+    return () => oncontrols(null);
+  });
 
   function setVolume(event: Event) {
     if (!video) return;

@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { receiveDeviceIdentity, sealMessage, sendToTV, stillQueued } from './inbox';
+import {
+  receiveDeviceIdentity,
+  receiveTvMessages,
+  sealMessage,
+  sendToTV,
+  stillQueued,
+} from './inbox';
 import { linkKeys } from './pair';
 import { fromHex } from './wire';
 
@@ -186,4 +192,75 @@ describe('receiving a paired device identity', () => {
     inboxKey: 'abcdef0123456789',
     linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))),
   };
+});
+
+describe('receiving TV playback commands', () => {
+  const link = {
+    inboxKey: 'abcdef0123456789',
+    linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))),
+  };
+
+  it('opens targeted play and transport messages through a held sealed drain', async () => {
+    const now = 1_800_000_200_000;
+    const messages = await Promise.all([
+      sealMessage(
+        fromHex(vectors.enc),
+        {
+          type: 'play',
+          tmdbId: 1399,
+          mediaType: 'tv',
+          title: 'Game of Thrones',
+          season: 1,
+          episode: 2,
+        },
+        { id: '40000000000000000000000000000000', sentAt: now },
+      ),
+      sealMessage(
+        fromHex(vectors.enc),
+        {
+          type: 'transport',
+          action: 'skip',
+          tmdbId: 1399,
+          mediaType: 'tv',
+          season: 1,
+          episode: 2,
+          offsetSeconds: 10,
+        },
+        { id: '50000000000000000000000000000000', sentAt: now },
+      ),
+      sealMessage(
+        fromHex(vectors.enc),
+        { type: 'transport', action: 'skip', tmdbId: 1399, mediaType: 'tv' },
+        { id: '60000000000000000000000000000000', sentAt: now },
+      ),
+    ]);
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      expect(url).toBe('/inbox/drain?wait=25');
+      expect((init?.headers as Record<string, string>)['x-den-link']).toBe(link.inboxKey);
+      return new Response(JSON.stringify({ messages: messages.map((sealed) => ({ sealed })) }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+    expect(await receiveTvMessages(link, fetchImpl, now)).toEqual([
+      {
+        type: 'play',
+        tmdbId: 1399,
+        mediaType: 'tv',
+        title: 'Game of Thrones',
+        season: 1,
+        episode: 2,
+        sentAt: now,
+      },
+      {
+        type: 'transport',
+        action: 'skip',
+        tmdbId: 1399,
+        mediaType: 'tv',
+        season: 1,
+        episode: 2,
+        offsetSeconds: 10,
+        sentAt: now,
+      },
+    ]);
+  });
 });
