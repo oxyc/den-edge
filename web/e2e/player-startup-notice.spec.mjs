@@ -30,7 +30,9 @@ test('the startup notice counts the wait, names a large release once open, and c
   try {
     const context = await browser.newContext({
       userAgent: CHROME_MAC,
-      viewport: { width: 1280, height: 800 },
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
     });
     const page = await context.newPage();
     await page.addInitScript(() => {
@@ -77,8 +79,23 @@ test('the startup notice counts the wait, names a large release once open, and c
     expect(await page.evaluate(() => window.__firstStartupStatusAt)).toBeGreaterThanOrEqual(450);
     // Four real seconds, held open: NOTICE_DELAY_MS (startupNotice.ts) is exactly this.
     await new Promise((resolve) => setTimeout(resolve, 4_200));
+    const startup = page.locator('.startup');
     await expect(page.getByText('Opening the release…', { exact: false })).toBeVisible();
-    await expect(page.locator('.startup .clock')).toBeVisible();
+    await expect(startup.locator('.clock')).toBeVisible();
+    const startupLayout = await startup.evaluate((element) => {
+      const notice = element.getBoundingClientRect();
+      const copy = element.querySelector('.notice-copy').getBoundingClientRect();
+      const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+      return {
+        left: notice.left,
+        right: notice.right,
+        viewport: document.documentElement.clientWidth,
+        copyLines: Math.round(copy.height / lineHeight),
+      };
+    });
+    expect(startupLayout.left).toBeGreaterThanOrEqual(0);
+    expect(startupLayout.right).toBeLessThanOrEqual(startupLayout.viewport);
+    expect(startupLayout.copyLines).toBeGreaterThan(1);
 
     releaseSession();
     await expect(page.getByText('Starting 4K • REMUX • 58 GB…', { exact: false })).toBeVisible({
