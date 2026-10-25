@@ -21,9 +21,11 @@ export function debridStateOf(health: unknown): DebridState | null {
 /**
  * A refused play → its debrid code. A 503 that could not ask the debrid names TorBox's health in `X-Den-Degraded`
  * (`debrid_down` or `debrid_slow`); a play refused because TorBox is known down is `{"error": "debrid_down",
- * "service": "torbox"}`. Anything else is undefined.
+ * "service": "torbox"}`. Anything else is undefined, including a failed play's own code that only names the state
+ * (`404 no_release` with `debrid_slow`): that answer stays what it is.
  */
 export function debridPlayCodeOf(response: Response, body: unknown): DebridPlayCode | undefined {
+  if (response.status !== 503) return undefined;
   const degraded = response.headers.get('x-den-degraded');
   if (degraded === 'debrid_down' || degraded === 'debrid_slow') return degraded;
   const answer = body as { error?: unknown; service?: unknown } | null;

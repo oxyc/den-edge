@@ -13,7 +13,14 @@ describe('debridStateOf', () => {
 });
 
 describe('debridPlayCodeOf', () => {
-  const answer = (headers: Record<string, string> = {}) => new Response(null, { headers });
+  const answer = (headers: Record<string, string> = {}, status = 503) =>
+    new Response(null, { status, headers });
+
+  it('leaves a refusal other than a 503 as it is, even when it names TorBox’s health', () => {
+    // Hearth names a slow TorBox on a failed play's own code too (`404 no_release`): that stays a no-release answer.
+    const slow = answer({ 'x-den-degraded': 'debrid_slow' }, 404);
+    expect(debridPlayCodeOf(slow, { error: 'no_release' })).toBeUndefined();
+  });
 
   it('reads TorBox’s health from X-Den-Degraded', () => {
     const body = { error: 'status_unavailable', service: 'torbox' };
