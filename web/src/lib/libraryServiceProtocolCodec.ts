@@ -83,6 +83,8 @@ function titleRef(value: unknown): value is TitleRef {
   );
 }
 
+const titleIdentity = (title: { type: unknown; id: unknown }) => `${title.type}:${title.id}`;
+
 export function isLibraryMetadataTitle(value: unknown): value is LibraryMetadataTitle {
   return (
     record(value) &&
@@ -608,7 +610,7 @@ function command(value: unknown): value is LibraryCommand {
           (candidate): candidate is number => integer(candidate) && candidate > 0,
           LIBRARY_SERVICE_WIRE_LIMITS.seasonEpisodes,
         ) ||
-        new Set(value.episodes).size !== value.episodes.length ||
+        !unique(value.episodes) ||
         !bool(value.watched)
       )
         return false;
@@ -772,10 +774,7 @@ function selection(value: unknown): value is LibrarySelection {
         !list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.presenceTitles)
       )
         return false;
-      return (
-        new Set(value.titles.map((title) => `${title.type}:${title.id}`)).size ===
-        value.titles.length
-      );
+      return unique(value.titles, titleIdentity);
     }
     default:
       return false;
@@ -793,7 +792,7 @@ function query(value: unknown): value is LibraryQuery {
       exact(value, ['kind', 'titles']) &&
       list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles) &&
       value.titles.every((title) => title.type === 'tv') &&
-      unique(value.titles, (title) => `${title.type}:${title.id}`)
+      unique(value.titles, titleIdentity)
     );
   if (value.kind === 'assistant.grants') return exact(value, ['kind']);
   if (value.kind === 'assistant.connection') return exact(value, ['kind']);
@@ -839,7 +838,7 @@ function query(value: unknown): value is LibraryQuery {
     return (
       exact(value, ['kind', 'titles']) &&
       list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
-      unique(value.titles, (title) => `${title.type}:${title.id}`)
+      unique(value.titles, titleIdentity)
     );
   return (
     value.kind === 'playback.prepare' &&
@@ -1113,7 +1112,7 @@ function observation(value: unknown): value is LibraryObservation {
             integer(candidate.episodes),
           LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons,
         ) ||
-        new Set(value.seasons.map(({ season }) => season)).size !== value.seasons.length ||
+        !unique(value.seasons, ({ season }) => String(season)) ||
         !optional(
           value.lastAired,
           (candidate): candidate is { season: number; episode: number } =>
@@ -1547,7 +1546,7 @@ function simklView(value: unknown): value is SimklView {
     bool(value.connected) &&
     optional(value.account, (candidate): candidate is string => boundedText(candidate, 256)) &&
     list(value.heldRemovals, titleRef, 10_000) &&
-    unique(value.heldRemovals, (title) => `${title.type}:${title.id}`) &&
+    unique(value.heldRemovals, titleIdentity) &&
     optional(value.approvalId, (candidate): candidate is string => boundedText(candidate, 256)) &&
     (value.connected ||
       (value.account === undefined &&
@@ -1630,17 +1629,14 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         list(value.items, continueItem) &&
         list(value.needsShapes, titleRef) &&
         value.needsShapes.every((title) => title.type === 'tv') &&
-        new Set(value.items.map(({ title }) => `${title.type}:${title.id}`)).size ===
-          value.items.length &&
-        new Set(value.needsShapes.map((title) => `${title.type}:${title.id}`)).size ===
-          value.needsShapes.length
+        unique(value.items, ({ title }) => titleIdentity(title)) &&
+        unique(value.needsShapes, titleIdentity)
       );
     case 'history':
       return (
         exact(value, ['kind', 'items']) &&
         list(value.items, historyItem) &&
-        new Set(value.items.map(({ title }) => `${title.type}:${title.id}`)).size ===
-          value.items.length
+        unique(value.items, ({ title }) => titleIdentity(title))
       );
     case 'title':
       return (
@@ -1661,8 +1657,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         nullable(value.standing, standing) &&
         nullable(value.progress, progress) &&
         list(value.episodes, episodeProgress) &&
-        new Set(value.episodes.map(({ season, episode }) => `${season}:${episode}`)).size ===
-          value.episodes.length
+        unique(value.episodes, ({ season, episode }) => `${season}:${episode}`)
       );
     case 'presence':
       return (
@@ -1683,8 +1678,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
             nullable(candidate.reaction, reaction),
           LIBRARY_SERVICE_WIRE_LIMITS.presenceTitles,
         ) &&
-        new Set(value.items.map(({ title }) => `${title.type}:${title.id}`)).size ===
-          value.items.length
+        unique(value.items, ({ title }) => titleIdentity(title))
       );
     case 'settings':
       return (
@@ -1799,8 +1793,7 @@ function profileDirectoryView(
         optional(
           profile.approvals,
           (approvals): approvals is TitleRef[] =>
-            list(approvals, titleRef, 10_000) &&
-            unique(approvals, (title) => `${title.type}:${title.id}`),
+            list(approvals, titleRef, 10_000) && unique(approvals, titleIdentity),
         ) &&
         bool(profile.deleted),
       LIBRARY_SERVICE_WIRE_LIMITS.profileEntries,
@@ -1852,11 +1845,11 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         isLibraryMetadataTitle,
         LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles,
       ) &&
-      unique(value.titles, (title) => `${title.type}:${title.id}`) &&
+      unique(value.titles, titleIdentity) &&
       list(value.shapes, libraryMetadataShape, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
-      unique(value.shapes, (shape) => `${shape.title.type}:${shape.title.id}`) &&
+      unique(value.shapes, (shape) => titleIdentity(shape.title)) &&
       list(value.retryable, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
-      unique(value.retryable, (title) => `${title.type}:${title.id}`) &&
+      unique(value.retryable, titleIdentity) &&
       optional(value.retryAfterMs, positiveInteger)
     );
   if (value.kind === 'relay.membership') {
@@ -1972,7 +1965,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           unique(candidate.seen, (episode) => `${episode.season}:${episode.episode}`),
         LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles,
       ) ||
-      !unique(value.items, (item) => `${item.title.type}:${item.title.id}`)
+      !unique(value.items, (item) => titleIdentity(item.title))
     )
       return false;
     return (
