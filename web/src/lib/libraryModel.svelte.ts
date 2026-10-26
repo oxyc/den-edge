@@ -248,6 +248,10 @@ export class LibraryModel {
       .catch((error: unknown) => {
         noteLibraryOpening(this, null);
         settleInitialRead();
+        // A failed cached open has no later Home replacement to wait for. A paged open can resume through retry,
+        // so preserve its stronger boundary until that retry publishes authoritative full Home roots.
+        if (pagedRead) awaitingFullHome = true;
+        else settleInitialHome();
         const failure = failureFrom(error);
         if (!this.#closed) {
           this.#openFailure = failure;

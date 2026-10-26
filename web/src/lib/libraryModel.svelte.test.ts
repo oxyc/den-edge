@@ -910,6 +910,45 @@ it('exposes open failure, retries explicitly, and closes every source once', asy
   expect(() => model.title({ type: 'movie', id: 13 })).toThrow('library model is closed');
 });
 
+it('settles Home after a failed cached open and permits a successful retry', async () => {
+  const service = new FakeService();
+  service.openFailure = failure;
+  const model = new LibraryModel(service, options);
+
+  await expect(model.ready).rejects.toMatchObject({ failure });
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+
+  await expect(model.retry()).resolves.toEqual(version(9));
+  service.status({ kind: 'ready', version: version(9) });
+  expect(model.connection).toBe('ready');
+  model.close();
+});
+
+it('waits for authoritative Home replacements when a failed paged open retries', async () => {
+  const service = new FakeService();
+  service.openProgress = 0;
+  service.openFailure = failure;
+  const model = new LibraryModel(service, options);
+
+  await expect(model.ready).rejects.toMatchObject({ failure });
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  let homeSettled = false;
+  void model.initialHomeSettled.then(() => (homeSettled = true));
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+
+  await expect(model.retry()).resolves.toEqual(version(9));
+  service.status({ kind: 'ready', version: version(9) });
+  service.publish({ kind: 'overview' }, overviewValue(), 10);
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'continue' }, continueValue(), 11);
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+  expect(homeSettled).toBe(true);
+  model.close();
+});
+
 it('replaces an open cached library with a non-retryable update-required failure', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);
