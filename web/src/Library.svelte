@@ -35,7 +35,7 @@
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
-  import { linkedTv, type Link } from './lib/links.svelte';
+  import type { Link } from './lib/links.svelte';
   import { householdTvs } from './lib/householdTvs';
   import {
     clock as timecode,
@@ -654,8 +654,8 @@
     const at = liveSeconds(entry);
     return at === undefined ? undefined : timecode(at);
   };
-  // The one paired TV this library can command. Identity, not its editable label, joins a live write to it.
-  const tv = $derived(linkedTv(link, householdModel?.devices.value?.devices));
+  /** The household's TVs that take playback commands, the one used last first. */
+  const tvs = $derived(householdTvs(householdModel?.devices.value?.devices));
   /**
    * The open title's clock, as its Continue Watching card shows it, which episode for a series, the device it plays
    * on, and how far in: the written position's seconds over its fraction is the runtime.
@@ -666,10 +666,11 @@
       opening &&
       continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
     const sighting = entry && sighted.get(titleKey(entry.title));
-    const controlling = !!tv?.deviceId && entry?.deviceId === tv.deviceId;
+    const controlling =
+      !!entry?.deviceId && tvs.some((tv) => tv.id === entry.deviceId && tv.controls);
     const playingAt = sighting && livePosition(sighting, now);
     // A paused TV keeps writing the same position. Keep this widget (and its Resume control) while that write is
-    // fresh, but only when identity proves it is the paired TV this browser can actually command.
+    // fresh, but only when identity and capability prove this household can command that exact TV.
     const at =
       playingAt ??
       (controlling && sighting && recent(sighting, now) ? sighting.seconds : undefined);
@@ -884,8 +885,6 @@
     );
   }
 
-  /** The household's TVs that take plays from any device holding the library, the one used last first. */
-  const tvs = $derived(householdTvs(householdModel?.devices.value?.devices));
   /**
    * Start the title on the household TV `tvId`, as the TV's own Play would — it picks the source. Sent to that TV's
    * household queue (den-spec inbox-v1 §5), so no pairing with the TV is needed: holding the library is enough.
@@ -936,12 +935,15 @@
 
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
-    const receiver = tv;
     const live = pageLive;
     const opening = page;
-    if (!receiver || !live || !opening || live.deviceId !== receiver.deviceId) return false;
+    const receiver = live?.deviceId
+      ? tvs.find((candidate) => candidate.id === live.deviceId && candidate.controls)
+      : undefined;
+    if (!receiver || !live || !opening) return false;
+    const queue = await householdQueue(receiver.play);
     return Boolean(
-      await sendToTV(receiver, {
+      await sendToTV(queue, {
         type: 'transport',
         action,
         tmdbId: opening.id,
@@ -1005,9 +1007,8 @@
       .catch((error: unknown) => console.warn('den: could not record the play', error));
   }
 
-  // Hosted webOS and packaged Tizen TVs take the plays any device holding the library sends them (den-spec inbox-v1
-  // §5) and the transport commands of the browser that paired them, both drained in one held request: these TVs are
-  // short of memory and connections. An ordinary browser is a controller only and drains neither.
+  // Hosted webOS and packaged Tizen TVs take the plays and transport commands any device holding the library sends
+  // them (den-spec inbox-v1 §5). An ordinary browser is a controller only and drains neither.
   $effect(() => {
     if (!__DEN_TV__) return;
     const stop = new AbortController();
@@ -1044,7 +1045,6 @@
             else controls.seekBy(command.offsetSeconds ?? 0);
           },
         },
-        () => untrack(() => link),
         stop.signal,
       );
     });
@@ -2099,7 +2099,9 @@
     {scout}
     row={pageRow}
     live={pageLive}
-    ontransport={pageLive?.deviceId === tv?.deviceId ? transport : undefined}
+    ontransport={pageLive?.deviceId && tvs.some((tv) => tv.id === pageLive.deviceId && tv.controls)
+      ? transport
+      : undefined}
     episodes={pageEpisodes}
     seed={pageSeed}
     still={pageStill}

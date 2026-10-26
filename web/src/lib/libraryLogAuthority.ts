@@ -673,7 +673,12 @@ export class LibraryLogAuthority {
       case 'server.patch':
         return this.#patchServer(command.server, command.value);
       case 'device.heartbeat':
-        return this.#heartbeatDevice(command.name, command.deviceKind, command.playKey);
+        return this.#heartbeatDevice(
+          command.name,
+          command.deviceKind,
+          command.playKey,
+          command.controlVersion,
+        );
       case 'device.played':
         return this.#markPlayed();
       case 'device.remove':
@@ -2244,12 +2249,19 @@ export class LibraryLogAuthority {
     name: string,
     kind: 'tv' | 'browser' = 'browser',
     play?: string,
+    control?: number,
   ): Promise<LibraryAuthorityCommandResult> {
     if (!name.trim() || name.length > 256)
       throw authorityError('invalid-request', 'device name is empty or too long');
     const changes = selfEntry(
       this.#log.settings('devices'),
-      { id: this.#clock.device, name: name.trim(), kind, ...(play ? { play } : {}) },
+      {
+        id: this.#clock.device,
+        name: name.trim(),
+        kind,
+        ...(play ? { play } : {}),
+        ...(control ? { control } : {}),
+      },
       Date.now(),
     );
     return changes

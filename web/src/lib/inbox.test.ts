@@ -219,40 +219,29 @@ describe("draining a TV's queues", () => {
   const drain = (fetchImpl: typeof fetch, wait?: number) =>
     drainTv({ playKey }, { fetchImpl, now: () => now, storage: undefined, wait });
 
-  // The pairing link has a key of its own, so a message sealed for one queue opens in neither other.
-  const linkKey = new Uint8Array(32).fill(7);
-  const link = { inboxKey: 'abcdef0123456789', linkKey: btoa(String.fromCharCode(...linkKey)) };
-  const sealForLink = async (message: object, sentAt = now) =>
-    sealMessage((await linkKeys(linkKey)).enc, message, {
-      id: (++next).toString(16).padStart(32, 'b'),
-      sentAt,
-    });
   const skip = { type: 'transport', action: 'skip', tmdbId: 1399, mediaType: 'tv', season: 1 };
 
-  it('asks for both queues in one held request, in the body rather than the URL', async () => {
+  it('asks for the household queue in one held request, in the body rather than the URL', async () => {
     const seen: { url?: string; body?: unknown } = {};
     await drainTv(
-      { playKey, link },
-      { fetchImpl: answering([[], []], seen), now: () => now, storage: undefined, wait: 25 },
+      { playKey },
+      { fetchImpl: answering([[]], seen), now: () => now, storage: undefined, wait: 25 },
     );
     expect(seen.url).toBe('/inbox/drain?wait=25');
     expect(seen.body).toEqual({
-      keys: [(await linkKeys(fromHex(vectors.linkKey))).inbox, link.inboxKey],
+      keys: [(await linkKeys(fromHex(vectors.linkKey))).inbox],
     });
   });
 
-  it('takes transport commands from the pairing link, and no play from it', async () => {
+  it('takes valid transport from the household queue and drops invalid commands', async () => {
     const drained = await drainTv(
-      { playKey, link },
+      { playKey },
       {
         fetchImpl: answering([
-          [{ sealed: await seal(skip) }],
           [
-            { sealed: await sealForLink({ ...skip, episode: 2, offsetSeconds: 10 }) },
-            { sealed: await sealForLink({ ...skip, offsetSeconds: 601 }) },
-            { sealed: await sealForLink({ ...skip, action: 'pause', offsetSeconds: 10 }) },
-            { sealed: await sealForLink(play) },
             { sealed: await seal({ ...skip, offsetSeconds: -10 }) },
+            { sealed: await seal({ ...skip, offsetSeconds: 601 }) },
+            { sealed: await seal({ ...skip, action: 'pause', offsetSeconds: 10 }) },
           ],
         ]),
         now: () => now,
@@ -268,8 +257,7 @@ describe("draining a TV's queues", () => {
           tmdbId: 1399,
           mediaType: 'tv',
           season: 1,
-          episode: 2,
-          offsetSeconds: 10,
+          offsetSeconds: -10,
           sentAt: now,
         },
       ],

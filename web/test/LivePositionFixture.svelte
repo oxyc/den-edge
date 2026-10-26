@@ -10,6 +10,7 @@
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import type { Link } from '../src/lib/links.svelte';
+  import { toBase64url } from '../src/lib/wire';
   import '../src/app.css';
 
   const params = new URLSearchParams(location.search);
@@ -23,7 +24,9 @@
     name: 'Living Room TV',
     libraryKey,
     linkKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(7))),
-    deviceId: 'aaaaaaaaaaaaaaaa',
+    // This browser received the library from another browser, not from the TV. Playback controls must use the
+    // household TV command key rather than this legacy link's identity or inbox.
+    deviceId: 'bbbbbbbbbbbbbbbb',
   };
   let route = $state(parseRoute(location.pathname + location.search));
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
@@ -39,7 +42,15 @@
     });
     // Listed in `set:devices` under the name the page shows it by ("Playing on Apple TV").
     void model.ready
-      .then(() => model.heartbeatDevice('Apple TV', 'fixture-device', 'tv'))
+      .then(() =>
+        model.heartbeatDevice(
+          'Apple TV',
+          'fixture-device',
+          'tv',
+          toBase64url(new Uint8Array(32).fill(9)),
+          1,
+        ),
+      )
       .then(() => (ready = true));
     let written = 0;
     (

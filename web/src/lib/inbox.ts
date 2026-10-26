@@ -64,7 +64,7 @@ async function drainRequest(
   }
 }
 
-/** A transport command for the paired TV's player, from the browser that paired it. */
+/** A transport command for one household TV's active player. */
 export interface TransportCommand {
   action: 'play' | 'pause' | 'skip';
   tmdbId: number;
@@ -470,18 +470,17 @@ export interface TvDrain {
   fresh: PlayRequest[];
   /** Plays that waited too long to start. */
   stale: PlayRequest[];
-  /** Transport commands from the browser that paired this TV. */
+  /** Transport commands from the household queue. */
   transport: TransportCommand[];
 }
 
 /**
- * Drain this TV's queues in one request, held up to `wait` seconds for a message to land (§3): its household queue
- * (§5), under `playKey`, and the queue of the link that paired it, under `link`. A play comes only through the
- * household queue and that queue takes nothing else; the link brings transport commands for the player. Everything
- * else is dropped, as is an id already taken. Null when den-edge refused the drain or could not be reached.
+ * Drain this TV's household command queue, held up to `wait` seconds for a message to land (§3). Plays and transport
+ * controls both come through `playKey`; pairing credentials have no playback authority. Everything else is dropped,
+ * as is an id already taken. Null when den-edge refused the drain or could not be reached.
  */
 export async function drainTv(
-  { playKey, link }: { playKey?: string; link?: Pick<Link, 'inboxKey' | 'linkKey'> },
+  { playKey }: { playKey?: string },
   {
     wait,
     fetchImpl = fetch,
@@ -495,13 +494,7 @@ export async function drainTv(
   } = {},
 ): Promise<TvDrain | null> {
   const household = playKey ? await linkKeys(fromBase64url(playKey) as Bytes) : null;
-  const paired = link
-    ? {
-        inbox: link.inboxKey,
-        enc: (await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)))).enc,
-      }
-    : null;
-  const keys = [household?.inbox, paired?.inbox].filter((key): key is string => !!key);
+  const keys = [household?.inbox].filter((key): key is string => !!key);
   if (!keys.length) return { fresh: [], stale: [], transport: [] };
   let body: { queues?: unknown } | null;
   try {
@@ -525,14 +518,6 @@ export async function drainTv(
       const play = playRequest(message);
       if (play)
         (Math.abs(at - sentAt) <= PLAY_FRESHNESS ? drained.fresh : drained.stale).push(play);
-    }
-  if (paired)
-    for (const { sentAt, message } of await openQueue(
-      body.queues.at(-1),
-      paired.enc,
-      at,
-      storage,
-    )) {
       const command = transportCommand(message, sentAt);
       if (command) drained.transport.push(command);
     }

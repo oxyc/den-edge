@@ -3,6 +3,7 @@
 // (so the lifecycle it reports and the refresh cadence it gets are the real ones), and a second browser is the other
 // device, writing the position every three seconds as the Apple TV's player does. Real time, not a fake clock: the
 // cadence lives in the Worker, which a page clock does not reach.
+import { hkdfSync } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { FIXTURE as SEED_FIXTURE, routeLibraryEdge } from './library-edge.mjs';
@@ -19,6 +20,9 @@ const SHORT_PLAYING_MS = 12_000;
 const EXPIRE_LIVE_MS = 46_000;
 /** A held read of den-edge (25 s) and the sync after it: how often the Apple TV's log reaches den-edge. */
 const TV_PUSH_MS = 27_000;
+const HOUSEHOLD_TV_QUEUE = Buffer.from(
+  hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'inbox', 24),
+).toString('hex');
 
 /**
  * One den-edge for both browsers: what one writes, the other pulls. `pulls` lists when each page asked, and
@@ -341,8 +345,13 @@ test('a series’ page says which device plays which episode, and keeps controls
     const sentBefore = edge.controls.length;
     const controls = page.getByLabel('Controls for Apple TV');
     await expect(controls).toBeVisible();
-    await controls.getByRole('button', { name: 'Pause' }).click();
+    const addressBeforeRemotePause = page.url();
+    await block.click();
     await expect(label).toHaveText('Paused on Apple TV');
+    expect(
+      page.url(),
+      'pressing the live row controls the TV rather than opening Web playback',
+    ).toBe(addressBeforeRemotePause);
     await controls.getByRole('button', { name: 'Skip back 10 seconds' }).click();
     await controls.getByRole('button', { name: 'Resume' }).click();
     await expect(label).toHaveText('Playing on Apple TV');
@@ -353,7 +362,7 @@ test('a series’ page says which device plays which episode, and keeps controls
         .slice(sentBefore)
         .every(
           ({ header, body }) =>
-            header === 'deadbeefcafe1234' && Object.keys(body).join() === 'sealed',
+            header === HOUSEHOLD_TV_QUEUE && Object.keys(body).join() === 'sealed',
         ),
     ).toBe(true);
     await expect(block.locator('small')).toHaveText('S1 · E3');

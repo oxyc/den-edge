@@ -512,7 +512,13 @@ describe('library service client protocol', () => {
         value: { url: 'http://jellyfin.local:8096', user: 'u1', credential: 'token' },
       },
       { kind: 'device.heartbeat', name: 'Living room browser' },
-      { kind: 'device.heartbeat', name: 'Bedroom TV', deviceKind: 'tv', playKey: 'A'.repeat(43) },
+      {
+        kind: 'device.heartbeat',
+        name: 'Bedroom TV',
+        deviceKind: 'tv',
+        playKey: 'A'.repeat(43),
+        controlVersion: 1,
+      },
       { kind: 'device.played' },
       { kind: 'device.remove', deviceId: 'abcdef0123456789' },
     ])
@@ -521,6 +527,16 @@ describe('library service client protocol', () => {
     for (const playKey of ['A'.repeat(42), 'A'.repeat(44), `${'A'.repeat(42)}=`, 7])
       expect(
         decodeCommand({ kind: 'device.heartbeat', name: 'Bedroom TV', deviceKind: 'tv', playKey }),
+      ).toMatchObject({ ok: false });
+    for (const controlVersion of [0, -1, 1.5, '1'])
+      expect(
+        decodeCommand({
+          kind: 'device.heartbeat',
+          name: 'Bedroom TV',
+          deviceKind: 'tv',
+          playKey: 'A'.repeat(43),
+          controlVersion,
+        }),
       ).toMatchObject({ ok: false });
     expect(decodeCommand({ kind: 'device.played', at: 1 })).toMatchObject({ ok: false });
 

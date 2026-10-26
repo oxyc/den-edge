@@ -123,7 +123,6 @@ describe('receiving household plays', () => {
         stale: (request) => stale.push(request),
         transport: () => undefined,
       },
-      () => null,
       stop.signal,
       storage,
     );

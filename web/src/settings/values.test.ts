@@ -137,6 +137,7 @@ describe('synced prefs', () => {
           'bbbb000000000002.name': { value: { string: 'Bedroom' }, at },
           'bbbb000000000002.kind': { value: { string: 'tv' }, at },
           'bbbb000000000002.play': key('b'),
+          'bbbb000000000002.control': { value: { int: 1 }, at },
           'bbbb000000000002.played': { value: { int: 100 }, at },
           // Too old to take household plays, a browser, and a key that isn't one.
           'cccc000000000003.name': { value: { string: 'Old TV' }, at },
@@ -151,8 +152,8 @@ describe('synced prefs', () => {
     ]);
     const tvs = householdTvs(devices);
     expect(tvs).toEqual([
-      { id: 'bbbb000000000002', name: 'Bedroom', play: 'b'.repeat(43) },
-      { id: 'aaaa000000000001', name: 'Living room', play: 'a'.repeat(43) },
+      { id: 'bbbb000000000002', name: 'Bedroom', play: 'b'.repeat(43), controls: true },
+      { id: 'aaaa000000000001', name: 'Living room', play: 'a'.repeat(43), controls: false },
     ]);
     expect(tvs.map((tv) => playOnLabel(tv, tvs))).toEqual([
       'Play on Bedroom',
@@ -231,13 +232,19 @@ describe('synced prefs', () => {
       'bbbb000000000002.facade': { strings: [] },
       'bbbb000000000002.delivers': { strings: [] },
     });
-    expect(Object.keys(forgetDevice('aaaa000000000001'))).toHaveLength(13);
+    expect(Object.keys(forgetDevice('aaaa000000000001'))).toHaveLength(16);
   });
 
-  it("publishes a TV's play key with its entry, and again whenever the key changes", () => {
+  it("publishes a TV's command key and transport capability, and again whenever either changes", () => {
     const play = 'A'.repeat(43);
-    const self = { id: 'aaaa000000000001', name: 'Bedroom TV', kind: 'tv' as const, play };
-    const listed = (key?: string) =>
+    const self = {
+      id: 'aaaa000000000001',
+      name: 'Bedroom TV',
+      kind: 'tv' as const,
+      play,
+      control: 1,
+    };
+    const listed = (key?: string, control?: number) =>
       row({
         'aaaa000000000001.name': { value: { string: 'Bedroom TV' }, at },
         'aaaa000000000001.kind': { value: { string: 'tv' }, at },
@@ -246,18 +253,20 @@ describe('synced prefs', () => {
         'aaaa000000000001.facade': { value: { strings: [] }, at },
         'aaaa000000000001.delivers': { value: { strings: [] }, at },
         ...(key ? { 'aaaa000000000001.play': { value: { string: key }, at } } : {}),
+        ...(control ? { 'aaaa000000000001.control': { value: { int: control }, at } } : {}),
       });
     expect(selfEntry(listed(), self, 9001)).toMatchObject({
       'aaaa000000000001.play': { string: play },
+      'aaaa000000000001.control': { int: 1 },
       'aaaa000000000001.seen': { int: 9001 },
     });
-    expect(selfEntry(listed('B'.repeat(43)), self, 9001)).toMatchObject({
+    expect(selfEntry(listed('B'.repeat(43), 1), self, 9001)).toMatchObject({
       'aaaa000000000001.play': { string: play },
     });
-    expect(selfEntry(listed(play), self, 9001)).toBeNull();
+    expect(selfEntry(listed(play, 1), self, 9001)).toBeNull();
     // A device that names no key leaves whatever is published alone.
-    const { play: _, ...withoutKey } = self;
-    expect(selfEntry(listed('B'.repeat(43)), withoutKey, 9001)).toBeNull();
+    const { play: _, control: __, ...withoutKey } = self;
+    expect(selfEntry(listed('B'.repeat(43), 2), withoutKey, 9001)).toBeNull();
   });
 
   it('reads servers and pinned signing keys, and takes a key only when it is one', () => {

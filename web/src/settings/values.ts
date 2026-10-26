@@ -114,6 +114,8 @@ export interface DeviceEntry {
   handoff: Record<string, string>;
   /** A TV's household play key, base64url (inbox-v1 §5): any device holding the library plays on it through it. */
   play?: string;
+  /** Household transport protocol version; absent means play-only. */
+  control?: number;
   /** When a play sent from another device last started on this TV (ms). */
   played?: number;
 }
@@ -123,7 +125,7 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
   const devices = new Map<string, Partial<DeviceEntry>>();
   for (const [name, stamped] of Object.entries(row?.values ?? {})) {
     const match =
-      /^([0-9a-z]+)\.(name|kind|seen|pending|format|facade|delivers|play|played|waiting:[^:]+|connectedAt:[^:]+|handoff:[^:]+)$/i.exec(
+      /^([0-9a-z]+)\.(name|kind|seen|pending|format|facade|delivers|play|control|played|waiting:[^:]+|connectedAt:[^:]+|handoff:[^:]+)$/i.exec(
         name,
       );
     const value = stamped.value;
@@ -140,6 +142,8 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
     if (field === 'delivers' && 'strings' in value) device.delivers = value.strings;
     if (field === 'play' && 'string' in value && /^[A-Za-z0-9_-]{43}$/.test(value.string))
       device.play = value.string;
+    if (field === 'control' && 'int' in value && Number.isSafeInteger(value.int) && value.int > 0)
+      device.control = value.int;
     if (field === 'played' && 'int' in value) device.played = value.int;
     if (field.startsWith('waiting:') && 'int' in value)
       (device.waiting ??= {})[field.slice('waiting:'.length)] = value.int;
@@ -166,6 +170,7 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
               connectedAt: d.connectedAt ?? {},
               handoff: d.handoff ?? {},
               ...(d.play ? { play: d.play } : {}),
+              ...(d.control !== undefined ? { control: d.control } : {}),
               ...(d.played !== undefined ? { played: d.played } : {}),
             },
           ]
@@ -183,7 +188,13 @@ export const SEEN_EVERY = 24 * 60 * 60 * 1000;
  */
 export function selfEntry(
   row: SettingsRow | undefined,
-  self: { id: string; name: string; kind: 'tv' | 'browser'; play?: string },
+  self: {
+    id: string;
+    name: string;
+    kind: 'tv' | 'browser';
+    play?: string;
+    control?: number;
+  },
   now: number,
 ): Record<string, ConfigValue | null> | null {
   const listed = readDevices(row).find((d) => d.id === self.id);
@@ -196,7 +207,8 @@ export function selfEntry(
     listed.format === 3 &&
     listed.facade.length === 0 &&
     listed.delivers.length === 0 &&
-    (self.play === undefined || listed.play === self.play)
+    (self.play === undefined || listed.play === self.play) &&
+    (self.control === undefined || listed.control === self.control)
   )
     return null;
   return {
@@ -207,6 +219,7 @@ export function selfEntry(
     [`${self.id}.facade`]: { strings: [] },
     [`${self.id}.delivers`]: { strings: [] },
     ...(self.play !== undefined ? { [`${self.id}.play`]: { string: self.play } } : {}),
+    ...(self.control !== undefined ? { [`${self.id}.control`]: { int: self.control } } : {}),
   };
 }
 
@@ -221,6 +234,9 @@ export const forgetDevice = (id: string): Record<string, null> =>
       'format',
       'facade',
       'delivers',
+      'play',
+      'control',
+      'played',
       'connectedAt:simkl',
       'connectedAt:trakt',
       'waiting:simkl',
