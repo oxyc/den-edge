@@ -1,5 +1,10 @@
 import { expect, test, vi } from 'vitest';
-import { drainWhileOpen, type ApplyOutcome, type OtherQueue, type QueuedRequest } from './assistant';
+import {
+  drainWhileOpen,
+  type ApplyOutcome,
+  type OtherQueue,
+  type QueuedRequest,
+} from './assistant';
 
 const DROPBOX = { kid: '0123456789abcdef0123456789abcdef', public: 'pk-one' };
 
