@@ -73,8 +73,11 @@ if (process.argv.includes('--capture')) {
   // work: it removes repeated snapshot scans, full-detail messages and speculative startup parsing on every client.
   // The one-way catalogue readiness gate adds under 0.2 KiB while preventing Browse from loading twice as provider
   // defaults and names settle. Keep one KiB of cross-machine gzip room for that correctness fix; this revision still
-  // removes more than 14 KiB from the initial graph and does not relax its ceiling or the TV-only implementation scan.
+  // removes more than 13 KiB from the initial graph and does not relax its ceiling or the TV-only implementation scan.
+  // The atomic profile-preference boundary and explicit three-state subtitle contract add 2.8 KiB to the complete
+  // graph versus their merged base. Allow three KiB for that reviewed validation/core bridge while retaining the
+  // original baseline and the tighter, independently measured initial-graph ceiling.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 35840) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 38912) throw new Error('Browser total JS/CSS budget exceeded');
 }

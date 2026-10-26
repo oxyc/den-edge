@@ -33,6 +33,12 @@ export interface SeenEpisode {
   episode: number;
 }
 
+export interface EpisodeHistoryTally {
+  watchedEpisodes: number;
+  totalEpisodes?: number;
+  latestEpisode?: SeenEpisode;
+}
+
 /** A saved series with watched episodes belongs under Continue/Watched, not in the unstarted Watchlist grid. */
 export function withoutSeenEpisodes<T extends { type: MediaType; id: number }>(
   titles: readonly T[],
@@ -42,7 +48,9 @@ export function withoutSeenEpisodes<T extends { type: MediaType; id: number }>(
 }
 
 interface SeenSeries {
-  latest: SeenEpisode & { at: number };
+  /** Specials still date the series' history row, but are not part of regular-series progress. */
+  latestWatchedAt: number;
+  latest?: SeenEpisode & { at: number };
   count: number;
 }
 
@@ -63,13 +71,15 @@ function seenSeries(rows: Row[], titles: Map<string, TitleRow>): Map<string, See
     const at = row.progress.at[0];
     const reset = titles.get(key)?.episodesReset;
     if (reset && at <= reset[0]) continue;
-    const found = series.get(key);
+    let found = series.get(key);
+    if (!found) {
+      found = { latestWatchedAt: at, count: 0 };
+      series.set(key, found);
+    } else if (at > found.latestWatchedAt) found.latestWatchedAt = at;
+    if (row.season <= 0) continue;
     const episode = { season: row.season, episode: row.episode };
-    if (!found) series.set(key, { latest: { ...episode, at }, count: 1 });
-    else {
-      found.count++;
-      if (at > found.latest.at) found.latest = { ...episode, at };
-    }
+    found.count++;
+    if (!found.latest || at > found.latest.at) found.latest = { ...episode, at };
   }
   return series;
 }
@@ -132,6 +142,48 @@ export function seenAired(seen: readonly SeenEpisode[], shape: Shape | undefined
 }
 
 /**
+ * The shared Apple/Web history caption policy. Specials are extras. A watched regular-season coordinate absent from
+ * the cached aired layout remains part of the truthful watched count, but suppresses the denominator until metadata
+ * catches up instead of being silently dropped into a stale “x of y” total.
+ */
+export function episodeHistoryTally(
+  seen: readonly SeenEpisode[],
+  shape: Shape | undefined,
+): EpisodeHistoryTally {
+  const regular = [
+    ...new Map(
+      seen
+        .filter(({ season }) => season > 0)
+        .map((episode) => [`${episode.season}:${episode.episode}`, episode] as const),
+    ).values(),
+  ];
+  const latestEpisode = regular.reduce<SeenEpisode | undefined>(
+    (latest, episode) =>
+      !latest ||
+      episode.season > latest.season ||
+      (episode.season === latest.season && episode.episode > latest.episode)
+        ? episode
+        : latest,
+    undefined,
+  );
+  if (!shape)
+    return { watchedEpisodes: regular.length, ...(latestEpisode ? { latestEpisode } : {}) };
+  const totalEpisodes = airedEpisodes(shape);
+  const trustworthy =
+    totalEpisodes > 0 &&
+    regular.every(
+      (episode) =>
+        episode.episode <= (shape.counts.get(episode.season) ?? 0) &&
+        isAired(episode, shape.lastAired),
+    );
+  return {
+    watchedEpisodes: regular.length,
+    ...(trustworthy ? { totalEpisodes } : {}),
+    ...(latestEpisode ? { latestEpisode } : {}),
+  };
+}
+
+/**
  * The watched titles in `rows`, newest first, then those watched at a time the library doesn't know. A title TMDB
  * hasn't named yet (`names`, by `type:id`) waits, as the library's other lists make it wait. An episode from before a
  * series was un-seen (`episodesReset`) no longer counts, and a title removed from the library after it was last
@@ -150,12 +202,14 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
     const seenAt =
       row?.status.value === 'watched' ? Math.max(row.watchedAt ?? 0, row.status.at[0], 0) : -1;
     const episodes = series.get(key);
-    const at = Math.max(seenAt, episodes ? Math.max(episodes.latest.at, 0) : -1);
+    const at = Math.max(seenAt, episodes ? Math.max(episodes.latestWatchedAt, 0) : -1);
     if (at < 0 || (row?.deleted.value && row.deleted.at[0] >= at)) continue;
     entries.push({
       title,
       at,
-      episode: episodes && { season: episodes.latest.season, episode: episodes.latest.episode },
+      ...(episodes?.latest
+        ? { episode: { season: episodes.latest.season, episode: episodes.latest.episode } }
+        : {}),
       episodes: episodes?.count ?? 0,
     });
   }

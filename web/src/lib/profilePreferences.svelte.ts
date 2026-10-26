@@ -5,6 +5,17 @@ import type { Immutable, LibraryModel } from './libraryModel.svelte';
 import type { ProfileIdentity } from './profileIdentity';
 import type { ProfilePolicy } from './profilePolicy';
 import type { VisitorActivityNamespace } from './visitorProfileSession.svelte';
+import {
+  isProfileLanguage,
+  isProfileRegion,
+  isProfileSubtitleLimit,
+  isProfileYear,
+  PROFILE_GENRE_LIMIT,
+  PROFILE_LANGUAGE_LIMIT,
+  PROFILE_RATING_SOURCES,
+  PROFILE_SERVICE_LIMIT,
+  PROFILE_WARNING_CATEGORIES,
+} from './profilePreferenceSchema';
 
 const KID_PREFIX = 'den.profile.preferences.preview.v1:';
 const VISITOR_DOCUMENT = 'preferences';
@@ -32,6 +43,7 @@ const personalDefaults = (): PersonalPreferences => ({
   minReleaseYear: undefined,
   audioLanguage: undefined,
   subtitleLanguage: undefined,
+  hasExplicitSubtitlePreference: false,
   shownSubtitleLanguages: [],
   subtitlesPerLanguage: 3,
   autoSkipSegments: false,
@@ -47,6 +59,36 @@ const strings = (value: unknown): string[] | undefined =>
   Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : undefined;
 const numbers = (value: unknown): number[] | undefined =>
   Array.isArray(value) && value.every((item) => typeof item === 'number') ? value : undefined;
+const validLanguages = (value: unknown): string[] | undefined => {
+  const values = strings(value);
+  return values && values.length <= PROFILE_LANGUAGE_LIMIT && values.every(isProfileLanguage)
+    ? values
+    : undefined;
+};
+const validGenres = (value: unknown): number[] | undefined => {
+  const values = numbers(value);
+  return values &&
+    values.length <= PROFILE_GENRE_LIMIT &&
+    values.every((id) => Number.isSafeInteger(id) && id > 0)
+    ? values
+    : undefined;
+};
+const validRatings = (value: unknown): PersonalPreferences['ratingSources'] | undefined => {
+  const values = strings(value);
+  return values &&
+    values.length <= PROFILE_RATING_SOURCES.size &&
+    values.every((source) => PROFILE_RATING_SOURCES.has(source))
+    ? (values as PersonalPreferences['ratingSources'])
+    : undefined;
+};
+const validWarnings = (value: unknown): string[] | undefined => {
+  const values = strings(value);
+  return values &&
+    values.length <= PROFILE_WARNING_CATEGORIES.size &&
+    values.every((warning) => PROFILE_WARNING_CATEGORIES.has(warning))
+    ? values
+    : undefined;
+};
 
 /** Damaged preview storage falls back field-by-field and can never inject household/admin settings. */
 const readPersonal = (value: unknown): PersonalPreferences => {
@@ -54,25 +96,29 @@ const readPersonal = (value: unknown): PersonalPreferences => {
   if (!value || typeof value !== 'object') return defaults;
   const stored = value as Record<string, unknown>;
   return {
-    excludedGenres: numbers(stored.excludedGenres) ?? defaults.excludedGenres,
-    excludedLanguages: strings(stored.excludedLanguages) ?? defaults.excludedLanguages,
+    excludedGenres: validGenres(stored.excludedGenres) ?? defaults.excludedGenres,
+    excludedLanguages: validLanguages(stored.excludedLanguages) ?? defaults.excludedLanguages,
     hideAnime: typeof stored.hideAnime === 'boolean' ? stored.hideAnime : defaults.hideAnime,
     hideWatched:
       typeof stored.hideWatched === 'boolean' ? stored.hideWatched : defaults.hideWatched,
-    minReleaseYear:
-      typeof stored.minReleaseYear === 'number' ? stored.minReleaseYear : defaults.minReleaseYear,
-    audioLanguage:
-      typeof stored.audioLanguage === 'string' ? stored.audioLanguage : defaults.audioLanguage,
-    subtitleLanguage:
-      typeof stored.subtitleLanguage === 'string'
-        ? stored.subtitleLanguage
-        : defaults.subtitleLanguage,
+    minReleaseYear: isProfileYear(stored.minReleaseYear)
+      ? stored.minReleaseYear
+      : defaults.minReleaseYear,
+    audioLanguage: isProfileLanguage(stored.audioLanguage)
+      ? stored.audioLanguage
+      : defaults.audioLanguage,
+    subtitleLanguage: isProfileLanguage(stored.subtitleLanguage)
+      ? stored.subtitleLanguage
+      : defaults.subtitleLanguage,
+    hasExplicitSubtitlePreference:
+      typeof stored.hasExplicitSubtitlePreference === 'boolean'
+        ? stored.hasExplicitSubtitlePreference
+        : typeof stored.subtitleLanguage === 'string',
     shownSubtitleLanguages:
-      strings(stored.shownSubtitleLanguages) ?? defaults.shownSubtitleLanguages,
-    subtitlesPerLanguage:
-      typeof stored.subtitlesPerLanguage === 'number'
-        ? Math.max(0, Math.trunc(stored.subtitlesPerLanguage))
-        : defaults.subtitlesPerLanguage,
+      validLanguages(stored.shownSubtitleLanguages) ?? defaults.shownSubtitleLanguages,
+    subtitlesPerLanguage: isProfileSubtitleLimit(stored.subtitlesPerLanguage)
+      ? stored.subtitlesPerLanguage
+      : defaults.subtitlesPerLanguage,
     autoSkipSegments:
       typeof stored.autoSkipSegments === 'boolean'
         ? stored.autoSkipSegments
@@ -81,15 +127,9 @@ const readPersonal = (value: unknown): PersonalPreferences => {
       typeof stored.autoplayTrailers === 'boolean'
         ? stored.autoplayTrailers
         : defaults.autoplayTrailers,
-    ratingSources:
-      (strings(stored.ratingSources)?.filter((source) =>
-        RATING_SOURCES.some((known) => known.id === source),
-      ) as PersonalPreferences['ratingSources'] | undefined) ?? defaults.ratingSources,
-    shownWarnings: strings(stored.shownWarnings) ?? defaults.shownWarnings,
-    watchRegion:
-      typeof stored.watchRegion === 'string' && /^[A-Z]{2}$/.test(stored.watchRegion)
-        ? stored.watchRegion
-        : defaults.watchRegion,
+    ratingSources: validRatings(stored.ratingSources) ?? defaults.ratingSources,
+    shownWarnings: validWarnings(stored.shownWarnings) ?? defaults.shownWarnings,
+    watchRegion: isProfileRegion(stored.watchRegion) ? stored.watchRegion : defaults.watchRegion,
     ...readServices(stored),
   };
 };
@@ -97,16 +137,20 @@ const readPersonal = (value: unknown): PersonalPreferences => {
 const readServices = (
   stored: Record<string, unknown>,
 ): Pick<PersonalPreferences, 'services' | 'servicesConfigured'> => {
-  const picks = Array.isArray(stored.services)
-    ? stored.services.filter(
-        (pick): pick is ServiceRef =>
-          !!pick &&
-          typeof pick === 'object' &&
-          Number.isInteger((pick as ServiceRef).id) &&
-          typeof (pick as ServiceRef).country === 'string',
-      )
-    : [];
-  return stored.servicesConfigured === true
+  const services = stored.services;
+  const valid =
+    Array.isArray(services) &&
+    services.length <= PROFILE_SERVICE_LIMIT &&
+    services.every(
+      (pick): pick is ServiceRef =>
+        !!pick &&
+        typeof pick === 'object' &&
+        Number.isSafeInteger((pick as ServiceRef).id) &&
+        (pick as ServiceRef).id > 0 &&
+        isProfileRegion((pick as ServiceRef).country),
+    );
+  const picks = valid ? services : [];
+  return stored.servicesConfigured === true && valid
     ? { services: picks.map(({ id, country }) => ({ id, country })), servicesConfigured: true }
     : { services: [], servicesConfigured: false };
 };
@@ -131,8 +175,11 @@ const applyPersonalPatch = (
   if (patch.hideWatched !== undefined) next.hideWatched = patch.hideWatched;
   if (patch.minReleaseYear !== undefined) next.minReleaseYear = patch.minReleaseYear ?? undefined;
   if (patch.audioLanguage !== undefined) next.audioLanguage = patch.audioLanguage ?? undefined;
-  if (patch.subtitleLanguage !== undefined)
-    next.subtitleLanguage = patch.subtitleLanguage ?? undefined;
+  if (patch.subtitlePreference !== undefined) {
+    next.hasExplicitSubtitlePreference = patch.subtitlePreference.mode !== 'automatic';
+    next.subtitleLanguage =
+      patch.subtitlePreference.mode === 'language' ? patch.subtitlePreference.language : undefined;
+  }
   if (patch.shownSubtitleLanguages) next.shownSubtitleLanguages = [...patch.shownSubtitleLanguages];
   if (patch.subtitlesPerLanguage !== undefined)
     next.subtitlesPerLanguage = patch.subtitlesPerLanguage;
@@ -295,6 +342,37 @@ export class SyncedProfilePreferences implements ProfilePreferences {
 const assertPersonalPatch = (patch: PreferenceChanges): void => {
   if ('maturityCeiling' in patch)
     throw new TypeError('A profile cannot write its content policy through preferences');
+  const valid =
+    (patch.minReleaseYear === undefined ||
+      patch.minReleaseYear === null ||
+      isProfileYear(patch.minReleaseYear)) &&
+    (patch.audioLanguage === undefined ||
+      patch.audioLanguage === null ||
+      isProfileLanguage(patch.audioLanguage)) &&
+    (patch.subtitlePreference === undefined ||
+      patch.subtitlePreference.mode !== 'language' ||
+      isProfileLanguage(patch.subtitlePreference.language)) &&
+    (patch.excludedGenres === undefined || validGenres(patch.excludedGenres) !== undefined) &&
+    (patch.excludedLanguages === undefined ||
+      validLanguages(patch.excludedLanguages) !== undefined) &&
+    (patch.shownSubtitleLanguages === undefined ||
+      validLanguages(patch.shownSubtitleLanguages) !== undefined) &&
+    (patch.subtitlesPerLanguage === undefined ||
+      isProfileSubtitleLimit(patch.subtitlesPerLanguage)) &&
+    (patch.ratingSources === undefined ||
+      patch.ratingSources.kind === 'default' ||
+      validRatings(patch.ratingSources.values) !== undefined) &&
+    (patch.shownWarnings === undefined || validWarnings(patch.shownWarnings) !== undefined) &&
+    (patch.watchRegion === undefined ||
+      patch.watchRegion === null ||
+      isProfileRegion(patch.watchRegion)) &&
+    (patch.services === undefined ||
+      patch.services.kind === 'default' ||
+      (patch.services.values.length <= PROFILE_SERVICE_LIMIT &&
+        patch.services.values.every(
+          ({ id, country }) => Number.isSafeInteger(id) && id > 0 && isProfileRegion(country),
+        )));
+  if (!valid) throw new TypeError('Profile preference patch is outside the shared schema');
 };
 
 const ownPreferences = (preferences: Immutable<LibraryPreferences>): LibraryPreferences => ({

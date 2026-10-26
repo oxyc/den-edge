@@ -35,6 +35,8 @@ const workerReferences = (
     })),
   )
 ).filter(({ source }) => source.includes(workers[0]));
+// Budget E2E builds deliberately disable the SharedWorker transport so an isolated fixture can route every request;
+// their browser entry is therefore the only reference. Production builds must still contain both entry points.
 const expectedReferences = process.env.DEN_E2E === '1' ? 1 : 2;
 if (workerReferences.length !== expectedReferences)
   throw new Error(

@@ -1807,6 +1807,7 @@ describe('LibraryLogAuthority', () => {
         minReleaseYear: undefined,
         audioLanguage: undefined,
         subtitleLanguage: undefined,
+        hasExplicitSubtitlePreference: false,
         shownSubtitleLanguages: [],
         subtitlesPerLanguage: 3,
         autoSkipSegments: false,
@@ -1832,7 +1833,7 @@ describe('LibraryLogAuthority', () => {
             hideWatched: true,
             minReleaseYear: 2000,
             audioLanguage: 'fi',
-            subtitleLanguage: 'sv',
+            subtitlePreference: { mode: 'language', language: 'sv' },
             shownSubtitleLanguages: ['sv', 'en'],
             subtitlesPerLanguage: 0,
             autoSkipSegments: true,
@@ -1877,6 +1878,7 @@ describe('LibraryLogAuthority', () => {
         minReleaseYear: 2000,
         audioLanguage: 'fi',
         subtitleLanguage: 'sv',
+        hasExplicitSubtitlePreference: true,
         shownSubtitleLanguages: ['en', 'sv'],
         subtitlesPerLanguage: 0,
         autoSkipSegments: true,
@@ -1944,6 +1946,8 @@ describe('LibraryLogAuthority', () => {
     const household = {
       'den.watchRegion': { value: { string: 'SE' }, at: stamp },
       'den.myServicePicks': { value: { strings: ['337@SE'] }, at: stamp },
+      'den.minReleaseYear': { value: { int: 2201 }, at: stamp },
+      'den.maturityCeiling': { value: { string: 'r' }, at: stamp },
     };
     await authority.command(
       { kind: 'preferences.patch', patch: { watchRegion: 'FI' } },
@@ -1961,6 +1965,8 @@ describe('LibraryLogAuthority', () => {
     ).resolves.toMatchObject({ outcome: 'applied', affected: [{ kind: 'settings' }] });
     const values = log.settings('prefs')!.values;
     expect(values['den.myServicePicks']).toEqual(household['den.myServicePicks']);
+    expect(values['den.minReleaseYear']).toBeUndefined();
+    expect(values['den.maturityCeiling']).toBeUndefined();
     // The region was cleared in the profile before: a decision, so the household's is not given over it.
     expect(values['den.watchRegion']?.value).toBeNull();
     await expect(

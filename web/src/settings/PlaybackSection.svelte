@@ -40,10 +40,25 @@
     {#snippet control()}
       <Select
         labelledby="subtitle-language-label"
-        value={prefs.subtitleLanguage ?? ''}
-        options={[{ value: '', label: 'Off' }, ...languages]}
+        value={prefs.hasExplicitSubtitlePreference
+          ? (prefs.subtitleLanguage ?? '__off')
+          : '__automatic'}
+        options={[
+          { value: '__automatic', label: 'Automatic' },
+          { value: '__off', label: 'Off' },
+          ...languages,
+        ]}
         {disabled}
-        onchange={(code) => save(change.subtitleLanguage(code || undefined))}
+        onchange={(code) =>
+          save(
+            change.subtitlePreference(
+              code === '__automatic'
+                ? { mode: 'automatic' }
+                : code === '__off'
+                  ? { mode: 'off' }
+                  : { mode: 'language', language: code },
+            ),
+          )}
       />
     {/snippet}
   </SettingRow>

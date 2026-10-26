@@ -38,6 +38,7 @@ describe('synced prefs', () => {
       minReleaseYear: undefined,
       audioLanguage: undefined,
       subtitleLanguage: undefined,
+      hasExplicitSubtitlePreference: false,
       shownSubtitleLanguages: [],
       subtitlesPerLanguage: 3,
       autoSkipSegments: false,
@@ -70,7 +71,7 @@ describe('synced prefs', () => {
         'den.maxSubtitlesPerLanguage': { value: { int: 0 }, at },
         'den.autoplayTrailers': { value: { bool: false }, at },
         'den.enabledRatingSources': { value: { strings: [] }, at },
-        'den.watchRegion': { value: { string: 'se' }, at },
+        'den.watchRegion': { value: { string: 'SE' }, at },
         'den.minReleaseYear': { value: null, at },
       }),
     );
@@ -81,6 +82,42 @@ describe('synced prefs', () => {
       ratingSources: [],
       watchRegion: 'SE',
       minReleaseYear: undefined,
+    });
+  });
+
+  it('drops malformed remote profile values as a whole and bounds every local write', () => {
+    expect(
+      readSyncedPrefs(
+        row({
+          'den.maxSubtitlesPerLanguage': { value: { int: 101 }, at },
+          'den.minReleaseYear': { value: { int: 1879 }, at },
+          'den.preferredAudioLanguage': { value: { string: 'EN' }, at },
+          'den.watchRegion': { value: { string: 'fi' }, at },
+          'den.enabledRatingSources': { value: { strings: ['imdb', 'unknown'] }, at },
+          'den.shownWarningCategories': { value: { strings: ['Spoiler', 'invented'] }, at },
+          'den.myServicePicks': { value: { strings: ['8@FI', 'bad'] }, at },
+        }),
+      ),
+    ).toMatchObject({
+      subtitlesPerLanguage: 3,
+      minReleaseYear: undefined,
+      audioLanguage: undefined,
+      watchRegion: undefined,
+      ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+      shownWarnings: [],
+      services: [],
+      servicesConfigured: false,
+    });
+    expect(change.subtitlesPerLanguage(101)).toEqual({
+      'den.maxSubtitlesPerLanguage': { int: 100 },
+    });
+    expect(change.minReleaseYear(2201)).toEqual({ 'den.minReleaseYear': null });
+    expect(change.audioLanguage('EN')).toEqual({ 'den.preferredAudioLanguage': null });
+    expect(change.ratingSources(['imdb', 'unknown'])).toEqual({
+      'den.enabledRatingSources': { strings: ['imdb'] },
+    });
+    expect(change.shownWarnings(['Spoiler', 'invented'])).toEqual({
+      'den.shownWarningCategories': { strings: ['Spoiler'] },
     });
   });
 
@@ -110,9 +147,38 @@ describe('synced prefs', () => {
     expect(change.minReleaseYear(Number.NaN)).toEqual({ 'den.minReleaseYear': null });
     expect(change.watchRegion(undefined)).toEqual({ 'den.watchRegion': null });
     expect(change.minReleaseYear(undefined)).toEqual({ 'den.minReleaseYear': null });
-    expect(change.subtitleLanguage(undefined)).toEqual({ 'den.preferredSubtitleLanguage': null });
+    expect(change.subtitlePreference({ mode: 'off' })).toEqual({
+      'den.preferredSubtitleLanguage': null,
+      'den.hasExplicitSubtitlePreference': { bool: true },
+    });
     expect(toggled(['a', 'b'], 'a', false)).toEqual(['b']);
     expect(toggled(['b'], 'a', true)).toEqual(['b', 'a']);
+  });
+
+  it('keeps Automatic, explicit Off, language, and stale-Web Off distinct', () => {
+    expect(readSyncedPrefs(row({}))).toMatchObject({
+      subtitleLanguage: undefined,
+      hasExplicitSubtitlePreference: false,
+    });
+    expect(
+      readSyncedPrefs(
+        row({
+          'den.preferredSubtitleLanguage': { value: null, at },
+          'den.hasExplicitSubtitlePreference': { value: { bool: true }, at },
+        }),
+      ),
+    ).toMatchObject({ subtitleLanguage: undefined, hasExplicitSubtitlePreference: true });
+    expect(
+      readSyncedPrefs(
+        row({
+          'den.preferredSubtitleLanguage': { value: { string: 'sv' }, at },
+          'den.hasExplicitSubtitlePreference': { value: { bool: true }, at },
+        }),
+      ),
+    ).toMatchObject({ subtitleLanguage: 'sv', hasExplicitSubtitlePreference: true });
+    expect(
+      readSyncedPrefs(row({ 'den.preferredSubtitleLanguage': { value: null, at } })),
+    ).toMatchObject({ subtitleLanguage: undefined, hasExplicitSubtitlePreference: true });
   });
 
   it('reads the parental limit, anything but pg13 or r as none', () => {

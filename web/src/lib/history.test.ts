@@ -11,6 +11,7 @@ import {
 import {
   UNKNOWN_YEAR,
   airedEpisodes,
+  episodeHistoryTally,
   seenAired,
   seenEpisodes,
   seenEpisodesFor,
@@ -133,6 +134,26 @@ describe('watched history', () => {
     // S0E1 is a Special and S2E9 hasn't aired: two of the four count; without a layout, the three regular ones.
     expect(seenAired(episodes.get('tv:10') ?? [], shape)).toBe(2);
     expect(seenAired(episodes.get('tv:10') ?? [], undefined)).toBe(3);
+    const stale = episodeHistoryTally(episodes.get('tv:10') ?? [], shape);
+    expect(stale).toMatchObject({
+      watchedEpisodes: 3,
+      latestEpisode: { season: 2, episode: 9 },
+    });
+    expect(stale.totalEpisodes).toBeUndefined();
+    expect(
+      episodeHistoryTally(
+        [
+          { season: 0, episode: 1 },
+          { season: 1, episode: 1 },
+          { season: 1, episode: 2 },
+        ],
+        shape,
+      ),
+    ).toEqual({
+      watchedEpisodes: 2,
+      totalEpisodes: 14,
+      latestEpisode: { season: 1, episode: 2 },
+    });
   });
 
   it('falls back to when the status changed for a watched title without a watched date', () => {

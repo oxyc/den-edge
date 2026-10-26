@@ -10,6 +10,15 @@ import { acceptsAddonURL, readPlugins } from './prefs';
 import { ADDRESSES, readPrivateAddresses } from './privateAddresses';
 import { readDevices, readSyncedPrefs } from '../settings/values';
 import type { SettingsRow } from './wire';
+import {
+  isProfileLanguage,
+  isProfileSubtitleLimit,
+  isProfileYear,
+  PROFILE_GENRE_LIMIT,
+  PROFILE_LANGUAGE_LIMIT,
+  PROFILE_SERVICE_LIMIT,
+  PROFILE_WARNING_CATEGORIES,
+} from './profilePreferenceSchema';
 
 const uniqueSorted = <T>(values: Iterable<T>, compare?: (a: T, b: T) => number): T[] =>
   [...new Set(values)].sort(compare);
@@ -32,8 +41,6 @@ export function selectedSettingsView(
   )
     return null;
   const stored = readSyncedPrefs(profileAware ? undefined : byName.get('prefs'));
-  const validLanguage = (value: string | undefined): value is string =>
-    value !== undefined && /^[a-z]{2}$/.test(value);
   const services = [
     ...new Map(
       stored.services
@@ -44,7 +51,7 @@ export function selectedSettingsView(
     ).values(),
   ]
     .sort((a, b) => a.country.localeCompare(b.country) || a.id - b.id)
-    .slice(0, 256);
+    .slice(0, PROFILE_SERVICE_LIMIT);
   return {
     kind: 'settings',
     preferences: {
@@ -52,29 +59,26 @@ export function selectedSettingsView(
       excludedGenres: uniqueSorted(
         stored.excludedGenres.filter((id) => Number.isSafeInteger(id) && id > 0),
         (a, b) => a - b,
-      ).slice(0, 256),
-      excludedLanguages: uniqueSorted(stored.excludedLanguages.filter(validLanguage)).slice(0, 256),
-      minReleaseYear:
-        stored.minReleaseYear !== undefined &&
-        stored.minReleaseYear >= 1800 &&
-        stored.minReleaseYear <= 3000
-          ? stored.minReleaseYear
-          : undefined,
-      audioLanguage: validLanguage(stored.audioLanguage) ? stored.audioLanguage : undefined,
-      subtitleLanguage: validLanguage(stored.subtitleLanguage)
+      ).slice(0, PROFILE_GENRE_LIMIT),
+      excludedLanguages: uniqueSorted(stored.excludedLanguages.filter(isProfileLanguage)).slice(
+        0,
+        PROFILE_LANGUAGE_LIMIT,
+      ),
+      minReleaseYear: isProfileYear(stored.minReleaseYear) ? stored.minReleaseYear : undefined,
+      audioLanguage: isProfileLanguage(stored.audioLanguage) ? stored.audioLanguage : undefined,
+      subtitleLanguage: isProfileLanguage(stored.subtitleLanguage)
         ? stored.subtitleLanguage
         : undefined,
       shownSubtitleLanguages: uniqueSorted(
-        stored.shownSubtitleLanguages.filter(validLanguage),
-      ).slice(0, 256),
-      subtitlesPerLanguage:
-        Number.isSafeInteger(stored.subtitlesPerLanguage) && stored.subtitlesPerLanguage >= 0
-          ? stored.subtitlesPerLanguage
-          : 3,
+        stored.shownSubtitleLanguages.filter(isProfileLanguage),
+      ).slice(0, PROFILE_LANGUAGE_LIMIT),
+      subtitlesPerLanguage: isProfileSubtitleLimit(stored.subtitlesPerLanguage)
+        ? stored.subtitlesPerLanguage
+        : 3,
       ratingSources: [...new Set(stored.ratingSources.filter(isRatingSource))],
       shownWarnings: uniqueSorted(
-        stored.shownWarnings.filter((warning) => warning.length > 0 && warning.length <= 4_096),
-      ).slice(0, 256),
+        stored.shownWarnings.filter((warning) => PROFILE_WARNING_CATEGORIES.has(warning)),
+      ).slice(0, PROFILE_WARNING_CATEGORIES.size),
       services,
     },
     assistant: { read: false, write: false },

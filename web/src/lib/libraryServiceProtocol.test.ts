@@ -469,7 +469,7 @@ describe('library service client protocol', () => {
           hideWatched: true,
           minReleaseYear: null,
           audioLanguage: 'fi',
-          subtitleLanguage: null,
+          subtitlePreference: { mode: 'off' },
           shownSubtitleLanguages: ['en', 'sv'],
           subtitlesPerLanguage: 0,
           autoSkipSegments: true,
@@ -907,7 +907,32 @@ describe('library service client protocol', () => {
       decodePatch({ services: { kind: 'values', values: [{ id: 8, country: 'fi' }] } }),
     ).toMatchObject({ ok: false });
     expect(decodePatch({ watchRegion: '' })).toMatchObject({ ok: false });
+    expect(decodePatch({ minReleaseYear: 1879 })).toMatchObject({ ok: false });
+    expect(decodePatch({ minReleaseYear: 2201 })).toMatchObject({ ok: false });
+    expect(decodePatch({ subtitlesPerLanguage: 101 })).toMatchObject({ ok: false });
+    expect(decodePatch({ shownWarnings: ['invented'] })).toMatchObject({ ok: false });
     expect(decodePatch({ rawSetting: { string: 'secret' } })).toMatchObject({ ok: false });
+  });
+
+  it('accepts only canonical stamped values for profile preference seeding', () => {
+    const decodeSeed = (household: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-preference-seed',
+        operationId: 'operation-preference-seed',
+        command: { kind: 'preferences.seed', household },
+      });
+    const at = [1_000, 0, 'device'];
+    expect(decodeSeed({ 'den.minReleaseYear': { value: { int: 1880 }, at } })).toMatchObject({
+      ok: true,
+    });
+    expect(decodeSeed({ 'den.minReleaseYear': { value: { int: 2201 }, at } })).toMatchObject({
+      ok: false,
+    });
+    expect(decodeSeed({ 'den.maturityCeiling': { value: { string: 'r' }, at } })).toMatchObject({
+      ok: false,
+    });
   });
 
   it('rejects duplicate and internally inconsistent title shapes', () => {
@@ -1162,6 +1187,7 @@ describe('library service server protocol', () => {
       minReleaseYear: 2000,
       audioLanguage: 'fi',
       subtitleLanguage: 'en',
+      hasExplicitSubtitlePreference: true,
       shownSubtitleLanguages: ['en', 'sv'],
       subtitlesPerLanguage: 3,
       autoSkipSegments: true,
@@ -1206,6 +1232,9 @@ describe('library service server protocol', () => {
       update({ ...preferences, servicesConfigured: false, services: [{ id: 8, country: 'FI' }] }),
     ).toMatchObject({ ok: false });
     expect(update({ ...preferences, subtitlesPerLanguage: -1 })).toMatchObject({ ok: false });
+    expect(update({ ...preferences, subtitlesPerLanguage: 101 })).toMatchObject({ ok: false });
+    expect(update({ ...preferences, minReleaseYear: 2201 })).toMatchObject({ ok: false });
+    expect(update({ ...preferences, shownWarnings: ['invented'] })).toMatchObject({ ok: false });
   });
 
   it('accepts normalized connection views and bounded relay capabilities', () => {

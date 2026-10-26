@@ -17,6 +17,14 @@
  * The cost is that a stop on the TV shows here up to this long after its last write.
  */
 export const LIVE_MS = 45_000;
+/**
+ * An exact unfinished position remains eligible for a guarded Resume command for ten minutes. This is deliberately
+ * longer than `LIVE_MS`: it never makes the clock advance, and the listening probe plus the TV's exact-title guard
+ * still decide whether a command may affect a player.
+ */
+export const REMOTE_RESUME_MS = 10 * 60_000;
+/** library-v2/v4's ordinary HLC future bound; farther-ahead values are not trustworthy live activity. */
+export const MAX_ACTIVITY_CLOCK_SKEW_MS = 24 * 60 * 60_000;
 /** How often the library is pulled while something plays, so a pause stops the clock soon after. */
 export const LIVE_PULL_MS = 5_000;
 
@@ -47,7 +55,16 @@ export function sight(
 
 /** Whether a write is recent enough that its device may still be playing (or paused with the player open). */
 export function recent(entry: { at?: number }, now: number): boolean {
-  return entry.at !== undefined && now - entry.at <= LIVE_MS;
+  if (entry.at === undefined) return false;
+  const age = now - entry.at;
+  return age >= -MAX_ACTIVITY_CLOCK_SKEW_MS && age <= LIVE_MS;
+}
+
+/** Whether an exact position can still offer guarded Resume without claiming that it is live. */
+export function resumable(entry: { at?: number }, now: number): boolean {
+  if (entry.at === undefined) return false;
+  const age = now - entry.at;
+  return age >= -MAX_ACTIVITY_CLOCK_SKEW_MS && age <= REMOTE_RESUME_MS;
 }
 
 /** Where a title is now, in seconds, if its last position is recent enough to be playing; else undefined. */
@@ -58,8 +75,9 @@ export function livePosition(
   if (entry.seconds === undefined || entry.at === undefined || entry.moving === false)
     return undefined;
   // A clock a little ahead of this one reads as a write from the future: count from its own time.
-  const age = Math.max(0, now - entry.at);
-  return age > LIVE_MS ? undefined : entry.seconds + age / 1000;
+  const rawAge = now - entry.at;
+  if (rawAge < -MAX_ACTIVITY_CLOCK_SKEW_MS || rawAge > LIVE_MS) return undefined;
+  return entry.seconds + Math.max(0, rawAge) / 1000;
 }
 
 /** A position as the player shows it: 4:05, 1:02:09. */
