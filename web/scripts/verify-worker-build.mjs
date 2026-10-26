@@ -35,9 +35,15 @@ const workerReferences = (
     })),
   )
 ).filter(({ source }) => source.includes(workers[0]));
-if (workerReferences.length !== 2)
+// Budget E2E builds deliberately disable the SharedWorker transport so an isolated fixture can route every request;
+// their browser entry is therefore the only reference. Production builds must still contain both entry points.
+const expectedReferences = process.env.DEN_E2E === '1' ? 1 : 2;
+if (workerReferences.length !== expectedReferences)
   throw new Error(
-    `expected browser entry and lazy shared transport to name ${workers[0]}, found ${workerReferences.length}`,
+    `expected ${expectedReferences} browser worker reference(s) to name ${workers[0]}, found ${workerReferences.length}`,
   );
-if (!workerReferences.some(({ name }) => name.startsWith('libraryServiceSharedWorkerTransport-')))
+if (
+  process.env.DEN_E2E !== '1' &&
+  !workerReferences.some(({ name }) => name.startsWith('libraryServiceSharedWorkerTransport-'))
+)
   throw new Error(`expected the lazy SharedWorker transport to reference ${workers[0]}`);
