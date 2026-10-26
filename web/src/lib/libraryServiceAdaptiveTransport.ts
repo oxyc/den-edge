@@ -87,7 +87,13 @@ export class AdaptiveLibraryServiceTransport implements LibraryServiceMultiplexT
   async #start(preferShared: boolean): Promise<void> {
     this.#starting = true;
     let backend: LibraryServiceMultiplexTransport;
-    if (!__DEN_TV__ && preferShared && sharedWorkerUsable && typeof SharedWorker !== 'undefined') {
+    if (
+      !__DEN_TV__ &&
+      !import.meta.env.DEN_E2E &&
+      preferShared &&
+      sharedWorkerUsable &&
+      typeof SharedWorker !== 'undefined'
+    ) {
       try {
         const { SharedWorkerLibraryServiceTransport } =
           await import('./libraryServiceSharedWorkerTransport');

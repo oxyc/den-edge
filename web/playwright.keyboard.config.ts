@@ -24,6 +24,7 @@ export default defineConfig({
   webServer: {
     command: `npx vite build --outDir ${output} && npx vite preview --outDir ${output} --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
     url: E2E_ORIGIN,
+    env: { DEN_E2E: '1' },
     reuseExistingServer: false,
   },
 });

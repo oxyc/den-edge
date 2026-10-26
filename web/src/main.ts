@@ -7,7 +7,7 @@ import { startupMark } from './lib/startupTiming';
 startupMark('page boot');
 // Desktop used to fetch and compile its DedicatedWorker beside the app module. Preserve that overlap for a browser
 // which already has a library to open, without constructing an authority before its exact shared identity is known.
-if (!__DEN_TV__) {
+if (!__DEN_TV__ && !import.meta.env.DEN_E2E) {
   const openingLibrary = openingLibraryIdentity();
   if (openingLibrary && typeof SharedWorker !== 'undefined')
     void import('./lib/libraryServiceSharedWorkerTransport')
