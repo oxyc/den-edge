@@ -686,7 +686,7 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'device.heartbeat':
       return (
-        exact(value, ['kind', 'name', 'deviceKind', 'playKey']) &&
+        exact(value, ['kind', 'name', 'deviceKind', 'playKey', 'controlVersion']) &&
         boundedText(value.name, 256) &&
         optional(
           value.deviceKind,
@@ -695,6 +695,10 @@ function command(value: unknown): value is LibraryCommand {
         optional(
           value.playKey,
           (key): key is string => typeof key === 'string' && /^[A-Za-z0-9_-]{43}$/.test(key),
+        ) &&
+        optional(
+          value.controlVersion,
+          (version): version is number => integer(version) && version > 0,
         )
       );
     case 'device.played':
@@ -1440,13 +1444,26 @@ const playKey = (value: unknown): value is string =>
 
 const libraryDevice = (candidate: unknown): candidate is ConnectionsView['devices'][number] =>
   record(candidate) &&
-  exact(candidate, ['id', 'name', 'kind', 'lastSeenAt', 'libraryFormat', 'playKey', 'playedAt']) &&
+  exact(candidate, [
+    'id',
+    'name',
+    'kind',
+    'lastSeenAt',
+    'libraryFormat',
+    'playKey',
+    'controlVersion',
+    'playedAt',
+  ]) &&
   boundedText(candidate.id, 128) &&
   boundedText(candidate.name, 256) &&
   (candidate.kind === 'tv' || candidate.kind === 'browser') &&
   optional(candidate.lastSeenAt, integer) &&
   optional(candidate.libraryFormat, integer) &&
   optional(candidate.playKey, playKey) &&
+  optional(
+    candidate.controlVersion,
+    (version): version is number => integer(version) && version > 0,
+  ) &&
   optional(candidate.playedAt, integer);
 
 function connectionsView(value: unknown): value is ConnectionsView {

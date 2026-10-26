@@ -1,11 +1,10 @@
-// A TV's queues from the receiving side: the household play key it publishes as `<d>.play` (den-spec inbox-v1 §5),
-// the plays any device holding the library sends to it, and the transport commands of the browser that paired it.
+// A TV's household command queue from the receiving side: the key it publishes as `<d>.play` (the compatibility
+// field name in den-spec inbox-v1 §5), and the plays and transport commands any device holding the library sends.
 // Only the TV build loads this.
 
 import type { OtherQueue } from './assistant';
 import { hex, hkdf } from './crypto';
 import { drainTv, type PlayRequest, type TransportCommand } from './inbox';
-import type { Link } from './links.svelte';
 import { fromBase64url, toBase64url } from './wire';
 
 const KEY = 'den.tvPlayKey.v1';
@@ -15,7 +14,7 @@ const WAIT_S = 25;
 const DRAIN_GAP_MS = 5_000;
 /** After a refused or failed drain. */
 const RETRY_MS = 15_000;
-/** With neither a play key nor a pairing link yet, there is nothing to drain. */
+/** With no household command key yet, there is nothing to drain. */
 const IDLE_MS = 10_000;
 
 /** A short, one-way tag of the library key, so a stored play key can say which library it was made for. */
@@ -125,10 +124,9 @@ const pause = (ms: number, signal: AbortSignal) =>
   });
 
 /**
- * Drain this TV's queues until `signal` aborts, both in one held request: its household queue and the queue of the
- * link that paired it (`link`, read again each round). The newest fresh play of a drain (the queue keeps arrival order)
- * goes to `play`, since several in one drain would only replace each other; each play that waited too long goes to
- * `stale`, and never starts; transport commands go to `transport` in order.
+ * Drain this TV's household command queue until `signal` aborts. The newest fresh play of a drain (the queue keeps
+ * arrival order) goes to `play`, since several in one drain would only replace each other; each play that waited too
+ * long goes to `stale`, and never starts; transport commands go to `transport` in order.
  */
 export async function receiveTv(
   handlers: {
@@ -136,21 +134,17 @@ export async function receiveTv(
     stale: (play: PlayRequest) => void;
     transport: (command: TransportCommand) => void;
   },
-  link: () => Pick<Link, 'inboxKey' | 'linkKey'> | null | undefined,
   signal: AbortSignal,
   storage: Storage | undefined = globalThis.localStorage,
 ): Promise<void> {
   while (!signal.aborted) {
     const playKey = currentPlayKey(storage);
-    const paired = link() ?? undefined;
-    if (!playKey && !paired) {
+    if (!playKey) {
       await pause(IDLE_MS, signal);
       continue;
     }
     const started = Date.now();
-    const drained = await drainTv({ playKey, link: paired }, { wait: WAIT_S, storage }).catch(
-      () => null,
-    );
+    const drained = await drainTv({ playKey }, { wait: WAIT_S, storage }).catch(() => null);
     if (signal.aborted) return;
     if (!drained) {
       await pause(RETRY_MS, signal);

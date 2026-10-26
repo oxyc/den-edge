@@ -247,7 +247,13 @@ export type LibraryCommand =
       server: MediaServerKind;
       value: { url: string; user?: string; credential?: string } | null;
     }
-  | { kind: 'device.heartbeat'; name: string; deviceKind?: 'tv' | 'browser'; playKey?: string }
+  | {
+      kind: 'device.heartbeat';
+      name: string;
+      deviceKind?: 'tv' | 'browser';
+      playKey?: string;
+      controlVersion?: number;
+    }
   | { kind: 'device.played' }
   | { kind: 'device.remove'; deviceId: string }
   | { kind: 'simkl.connect'; token: string }
@@ -465,6 +471,8 @@ export interface LibraryDeviceView {
   libraryFormat?: number;
   /** A TV's household play key, base64url (den-spec inbox-v1 §5). */
   playKey?: string;
+  /** Household transport protocol version; absent means play-only. */
+  controlVersion?: number;
   /** When a play sent from another device last started on this TV (ms). */
   playedAt?: number;
 }

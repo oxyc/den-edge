@@ -8,11 +8,13 @@ export interface HouseholdTv {
   name: string;
   /** Its household play key, base64url. */
   play: string;
+  /** Whether this TV advertises the household transport protocol. */
+  controls?: boolean;
 }
 
 /**
  * The household's TVs that take plays, the one a play last started on first (`<d>.played`), then the most recently
- * seen. A TV too old to publish a play key isn't one: it can't be reached without a pairing.
+ * seen. A TV too old to publish a play key isn't one: it cannot take household playback commands.
  */
 export function householdTvs(
   devices: readonly Readonly<LibraryDeviceView>[] | undefined,
@@ -25,7 +27,12 @@ export function householdTvs(
         (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0) ||
         a.name.localeCompare(b.name),
     )
-    .map(({ id, name, playKey }) => ({ id, name, play: playKey! }));
+    .map(({ id, name, playKey, controlVersion }) => ({
+      id,
+      name,
+      play: playKey!,
+      controls: (controlVersion ?? 0) >= 1,
+    }));
 }
 
 /** "Play on TV" with one TV; with several, each by its name. */

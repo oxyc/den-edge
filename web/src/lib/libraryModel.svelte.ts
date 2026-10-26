@@ -608,9 +608,16 @@ export class LibraryModel {
     operationId?: string,
     deviceKind: 'tv' | 'browser' = 'browser',
     playKey?: string,
+    controlVersion?: number,
   ): Promise<LibraryServiceCommandResult> {
     return this.#command(
-      { kind: 'device.heartbeat', name, deviceKind, ...(playKey ? { playKey } : {}) },
+      {
+        kind: 'device.heartbeat',
+        name,
+        deviceKind,
+        ...(playKey ? { playKey } : {}),
+        ...(controlVersion ? { controlVersion } : {}),
+      },
       operationId,
     );
   }

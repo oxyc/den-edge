@@ -294,7 +294,13 @@
               __DEN_TV__ && libraryKey
                 ? await (await import('./lib/householdPlays')).playKeyFor(libraryKey)
                 : undefined;
-            await model.heartbeatDevice(name, undefined, __DEN_TV__ ? 'tv' : 'browser', playKey);
+            await model.heartbeatDevice(
+              name,
+              undefined,
+              __DEN_TV__ ? 'tv' : 'browser',
+              playKey,
+              __DEN_TV__ ? 1 : undefined,
+            );
           })().catch((error: unknown) =>
             console.warn('den: this device could not check in', error),
           ),

@@ -88,7 +88,7 @@ export function selectedDevicesView(rows: readonly SettingsRow[]): DevicesView {
     devices: readDevices(devices)
       .filter(({ id }) => id.length > 0 && id.length <= 128)
       .slice(0, 512)
-      .map(({ id, name, kind, seen, format, play, played }) => ({
+      .map(({ id, name, kind, seen, format, play, control, played }) => ({
         id,
         name: name.slice(0, 256),
         kind,
@@ -99,6 +99,7 @@ export function selectedDevicesView(rows: readonly SettingsRow[]): DevicesView {
           ? { libraryFormat: format }
           : {}),
         ...(kind === 'tv' && play ? { playKey: play } : {}),
+        ...(kind === 'tv' && control !== undefined ? { controlVersion: control } : {}),
         ...(kind === 'tv' && played !== undefined && Number.isSafeInteger(played) && played >= 0
           ? { playedAt: played }
           : {}),

@@ -139,7 +139,7 @@
     /** The household's TVs, the one used last first: one Play on TV each. */
     tvs?: readonly HouseholdTv[];
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
-    /** Controls the paired TV that authored `live`; absent when the live writer is another device. */
+    /** Controls the command-capable household TV that authored `live`; absent for another or older device. */
     ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => Promise<boolean>;
     /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
@@ -981,7 +981,9 @@
               })}
               onclick={(event) =>
                 activateLinkInPlace(event, () =>
-                  start(d.title, coordinate?.season, coordinate?.episode),
+                  live && ontransport
+                    ? void transport(transportPlaying ? 'pause' : 'play')
+                    : start(d.title, coordinate?.season, coordinate?.episode),
                 )}
             >
               <DetailIcon name="play" filled /><span

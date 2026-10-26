@@ -2101,14 +2101,23 @@ describe('LibraryLogAuthority', () => {
       authority.command({ kind: 'device.remove', deviceId: '0123456789abcdef' }, 'remove-self'),
     ).rejects.toMatchObject({ failure: { code: 'conflict' } });
 
-    // A TV checks in with its household play key, and records a play sent from elsewhere starting on it.
+    // A TV checks in with its household command key and capability, then records a remote play starting on it.
     const playKey = 'A'.repeat(43);
     await authority.command(
-      { kind: 'device.heartbeat', name: 'MacBook', deviceKind: 'tv', playKey },
+      {
+        kind: 'device.heartbeat',
+        name: 'MacBook',
+        deviceKind: 'tv',
+        playKey,
+        controlVersion: 1,
+      },
       'tv-heartbeat',
     );
     expect(log.settings('devices')?.values['0123456789abcdef.play']?.value).toEqual({
       string: playKey,
+    });
+    expect(log.settings('devices')?.values['0123456789abcdef.control']?.value).toEqual({
+      int: 1,
     });
     await expect(authority.command({ kind: 'device.played' }, 'played')).resolves.toMatchObject({
       outcome: 'applied',
