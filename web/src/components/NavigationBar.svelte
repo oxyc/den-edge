@@ -123,14 +123,6 @@
     // the phone keyboard.
     if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
   }
-  function openTVSearch() {
-    // The TV route and its preloaded Search editor can mount in this activation. Flush and focus before the click
-    // bubbles so touch shells open their software keyboard without waiting for route-focus restoration.
-    flushSync(() => navigate(searchHref('')));
-    document
-      .querySelector<HTMLInputElement>('[data-route-page][data-active="true"] .tv-search-input')
-      ?.focus({ preventScroll: true });
-  }
   function closeSearch() {
     flushSync(() => {
       expanded = false;
@@ -350,7 +342,7 @@
           type="button"
           aria-label="Search"
           aria-current={route.page === 'search' ? 'page' : undefined}
-          onclick={openTVSearch}
+          onclick={() => navigate(searchHref(''))}
         >
           <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
             ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg

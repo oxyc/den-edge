@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { flushSync, onMount, tick, untrack, type Snippet } from 'svelte';
+  import { onMount, tick, untrack, type Snippet } from 'svelte';
   import type { PageSnapshot } from './lib/pageSnapshot';
   import type * as TouchNavigation from './lib/touchNavigation';
   import RoutePage from './components/RoutePage.svelte';
@@ -349,23 +349,17 @@
         }
         if (ticket !== revision) return;
         const outgoing = cover ?? captured;
-        const visit = () => {
-          entering = animate ? visitKey : null;
-          current = navigation.visit(path, visitKey);
-          // Selecting a detail is a new visit; history traversal restores the saved position.
-          // Top-level tabs still retain their browsing position when selected explicitly.
-          if (push && (current.route.page === 'title' || current.route.page === 'person')) {
-            navigation.save(0, 0);
-          }
-          navigation.prune(nearest(entries, position));
-          for (const key of snapshots.keys()) if (!navigation.pages.has(key)) snapshots.delete(key);
-          pages = [...navigation.pages.values()];
-          onchange(current.route);
-        };
-        // A touch TV preview has one activation task in which to mount and focus Search or mobile WebKit will not
-        // open its keyboard. Keep every other route on the ordinary batched path.
-        if (__DEN_TV__ && key === 'search' && navigator.userActivation.isActive) flushSync(visit);
-        else visit();
+        entering = animate ? visitKey : null;
+        current = navigation.visit(path, visitKey);
+        // Selecting a detail is a new visit; history traversal restores the saved position.
+        // Top-level tabs still retain their browsing position when selected explicitly.
+        if (push && (current.route.page === 'title' || current.route.page === 'person')) {
+          navigation.save(0, 0);
+        }
+        navigation.prune(nearest(entries, position));
+        for (const key of snapshots.keys()) if (!navigation.pages.has(key)) snapshots.delete(key);
+        pages = [...navigation.pages.values()];
+        onchange(current.route);
         await tick();
         if (ticket !== revision) return;
         window.scrollTo({ left: current.x, top: current.y, behavior: 'instant' });
