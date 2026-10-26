@@ -215,6 +215,25 @@ export class MaterializedHistoryIndex {
     for (const item of items) this.#append(item);
   }
 
+  /** Build from an already projected stream (used by narrow in-memory/embedding logs without document lookup). */
+  static fromItems(
+    source: HistoryIndexSource,
+    items: readonly HistoryItem[],
+    now: number = Date.now(),
+    timeZone = currentHistoryTimeZone(),
+  ): MaterializedHistoryIndex {
+    const index = new MaterializedHistoryIndex(source, [], now, timeZone);
+    const sorted = items
+      .map((item) => ({
+        ...item,
+        title: { ...item.title },
+        ...(item.episode ? { episode: { ...item.episode } } : {}),
+      }))
+      .sort(compareHistoryItems);
+    for (const item of sorted) index.#append(item);
+    return index;
+  }
+
   static revision(source: HistoryIndexSource, timeZone: string): string {
     return `history-${HISTORY_INDEX_SCHEMA}.${HISTORY_INDEX_POLICY}:${encodeURIComponent(source.generation ?? 'local')}:${source.version}:${encodeURIComponent(source.revision)}:${encodeURIComponent(timeZone)}:${source.reconsiderAt ?? 'none'}`;
   }
@@ -232,15 +251,7 @@ export class MaterializedHistoryIndex {
       return null;
     const identities = new Set(snapshot.items.map((item) => titleKey(item.title)));
     if (identities.size !== snapshot.items.length) return null;
-    const restored = new MaterializedHistoryIndex(snapshot.source, [], snapshot.builtAt);
-    const items = snapshot.items.map((item) => ({
-      ...item,
-      title: { ...item.title },
-      ...(item.episode ? { episode: { ...item.episode } } : {}),
-    }));
-    items.sort(compareHistoryItems);
-    for (const item of items) restored.#append(item);
-    return restored;
+    return MaterializedHistoryIndex.fromItems(snapshot.source, snapshot.items, snapshot.builtAt);
   }
 
   get revision(): string {

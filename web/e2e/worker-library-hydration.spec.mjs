@@ -998,7 +998,9 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
       'movie:1009',
       'movie:1010',
     ]),
-    holdId: 1227,
+    // Inside History's first revisioned page. Titles beyond that page are intentionally not named until scrolling
+    // asks for them; holding one of those would test the removed eager whole-history behavior instead.
+    holdId: 1127,
     grantMembers: new Set(),
     providerRequests: [],
   };
@@ -1018,8 +1020,8 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
     timeout: 15_000,
   });
 
-  // Reopen the local snapshot as an online/paired library. History's second progressive metadata batch is held,
-  // while the first batch and the small Home seed batch can already paint the real Watchlist screen.
+  // Reopen the local snapshot as an online/paired library. The tail of History's bounded first page is held while
+  // Home and the earlier History cards can already paint the real Watchlist screen.
   await page.goto(`${FIXTURE}?view=library&online`);
   const continued = page.getByRole('region', { name: 'Continue Watching', exact: true });
   const watchlist = page.getByRole('region', { name: 'Watchlist', exact: true });
@@ -1049,7 +1051,10 @@ test('a large paired library cold-loads every lazy view through the Worker', asy
   const workerRequests = metadata.requests.filter(({ realm }) => realm === undefined);
   expect(metadata.members.size).toBe(1);
   const [membership] = metadata.members;
-  expect(workerRequests.length).toBeGreaterThan(120);
+  // The viewport asks for two 48-title History pages, not all 128 watched titles up front.
+  expect(workerRequests.length).toBeGreaterThan(100);
+  expect(workerRequests.some(({ ref }) => ref === 'movie:1195')).toBe(true);
+  expect(workerRequests.some(({ ref }) => ref === 'movie:1196')).toBe(false);
   expect(membership).toMatch(/^[a-f0-9]{32}:[a-f0-9]{64}$/);
   expect(workerRequests.every(({ member }) => member === membership)).toBe(true);
   const counts = new Map();

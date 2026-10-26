@@ -32,7 +32,7 @@ import {
   type DownloadRaceEntry,
   type DownloadRelease,
 } from './downloadRows';
-import { seenEpisodesFor } from './history';
+import { seenEpisodesFor, watchedHistory } from './history';
 import { MaterializedHistoryIndex, type HistoryIndexSource } from './historyIndex';
 import { projectDocument } from './libraryV4';
 import { titleCoordinates, titleView } from './titleView';
@@ -50,6 +50,7 @@ import {
   titleKey,
   type Shape,
   type Standing as ProjectedStanding,
+  type Title,
 } from './library';
 import {
   LIBRARY_SERVICE_WIRE_LIMITS,
@@ -1513,18 +1514,42 @@ export class LibraryLogAuthority {
   }
 
   #historySource(): HistoryIndexSource {
-    const summary = this.#log.currentSummary();
+    // Some test/embedding authorities deliberately provide only the narrow LibraryLog surface their view uses.
+    // They can still materialize History: rowsVersion invalidates the in-memory index after each write, while the
+    // full production log supplies the exact head/future-stamp deadline used by durable checkpoints.
+    const summary = (this.#log as Partial<LibraryLog>).currentSummary?.();
     return {
       generation: this.generation,
       version: this.#log.rowsVersion,
-      revision: `${this.#log.logHead}:${JSON.stringify(summary.stamp)}`,
-      reconsiderAt: Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
+      revision: `${this.#log.logHead}:${JSON.stringify(summary?.stamp ?? this.#log.newestStamp())}`,
+      reconsiderAt: summary && Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
     };
   }
 
   #materializedHistory(): MaterializedHistoryIndex {
     const source = this.#historySource();
     if (this.#historyIndex?.hasSource(source)) return this.#historyIndex;
+    // A few in-memory and embedding authorities expose projected rows but no document-by-name lookup. Preserve that
+    // supported narrow surface without making their initial read load mutation policy merely to synthesize v4 docs.
+    if (typeof (this.#log as Partial<LibraryLog>).documentNamed !== 'function') {
+      const rows = this.#log.rows();
+      const names = new Map<string, Title>();
+      for (const row of rows) {
+        if (row.kind !== 'rec' && row.kind !== 'ep') continue;
+        const key = titleKey(row.title);
+        if (!names.has(key)) names.set(key, { ...row.title, title: key });
+      }
+      this.#historyIndex = MaterializedHistoryIndex.fromItems(
+        source,
+        watchedHistory(rows, names).map(({ title, at, episode, episodes }) => ({
+          title: { type: title.type, id: title.id },
+          watchedAt: at,
+          ...(episode ? { episode } : {}),
+          episodes,
+        })),
+      );
+      return this.#historyIndex;
+    }
     const documents = [...this.#historyDocumentsByTitle().values()].flat();
     this.#historyIndex = new MaterializedHistoryIndex(source, documents, Date.now());
     return this.#historyIndex;
@@ -1536,6 +1561,10 @@ export class LibraryLogAuthority {
     command: LibraryCommand,
   ): void {
     if (!this.#historyIndex || !affected.some(({ kind }) => kind === 'history')) return;
+    if (typeof (this.#log as Partial<LibraryLog>).documentNamed !== 'function') {
+      this.#historyIndex = undefined;
+      return;
+    }
     const titles = new Map<string, TitleRef>();
     for (const scope of affected)
       if (scope.kind === 'title') titles.set(titleKey(scope.title), scope.title);

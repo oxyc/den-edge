@@ -177,7 +177,9 @@
     let current = true;
     requestedFilterKey = selectedFilter;
     if (selectedFilter === 'all:all') {
-      const previous = requestedPage;
+      // This effect is driven by the authoritative first page/filter. Its own merged-page assignment must not make
+      // it self-trigger forever when a subscription republishes an equivalent revision.
+      const previous = untrack(() => requestedPage);
       if (previous?.revision === base.revision) {
         const first = new Set(base.items.map((entry) => key(entry.title)));
         requestedPage = {
