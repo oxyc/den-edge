@@ -271,7 +271,17 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       return structuredClone(pieces.continue!.view);
     }
     if (selection.kind === 'history') {
-      const page = await this.#historyPage({}, undefined, 48);
+      // History needs the complete materialized index. A lazy screen can be acquired from an early Home root while
+      // the newest-first import is still filling; join that one read instead of promoting and reading the whole log
+      // alongside it, then select from the completed index.
+      const filling = this.#fillingDone;
+      let page = await this.#historyPage({}, undefined, 48);
+      if (!page && filling) {
+        const complete = await filling;
+        const full = this.#full as LibraryServiceAuthority | undefined;
+        if (full) return full.select(selection);
+        if (complete) page = await this.#historyPage({}, undefined, 48);
+      }
       if (page) return { kind: 'history', ...page };
     }
     if (selection.kind === 'settings') {

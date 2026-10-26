@@ -17,12 +17,17 @@ import type {
   LibraryVersion,
   TitleRef,
 } from './libraryServiceProtocol';
-import type { LibrarySelectionSnapshot } from './libraryServiceSupervisor';
+import type {
+  LibrarySelectionConnection,
+  LibrarySelectionSnapshot,
+  LibrarySubscriptionOptions,
+} from './libraryServiceSupervisor';
 
 type Subscription = {
   selection: LibrarySelection;
   listener: (snapshot: LibrarySelectionSnapshot) => void;
   stopped: boolean;
+  options: LibrarySubscriptionOptions;
 };
 
 const version = (revision: number): LibraryVersion => ({
@@ -175,8 +180,9 @@ class FakeService {
   subscribeSnapshot(
     selection: LibrarySelection,
     listener: (snapshot: LibrarySelectionSnapshot) => void,
+    options: LibrarySubscriptionOptions = {},
   ): () => void {
-    const subscription = { selection, listener, stopped: false };
+    const subscription = { selection, listener, stopped: false, options };
     this.subscriptions.push(subscription);
     listener({ selection, connection: 'connecting' });
     return () => {
@@ -193,13 +199,18 @@ class FakeService {
     for (const listener of this.statusListeners) listener(status);
   }
 
-  publish(selection: LibrarySelection, value: LibrarySelectionValue, revision: number): void {
+  publish(
+    selection: LibrarySelection,
+    value: LibrarySelectionValue,
+    revision: number,
+    connection: LibrarySelectionConnection = 'ready',
+  ): void {
     const key = JSON.stringify(selection);
     for (const subscription of this.subscriptions)
       if (!subscription.stopped && JSON.stringify(subscription.selection) === key)
         subscription.listener({
           selection: subscription.selection,
-          connection: 'ready',
+          connection,
           value,
           version: version(revision),
         });
@@ -314,6 +325,15 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
     { kind: 'settings' },
     { kind: 'runtime' },
   ]);
+  expect(
+    service.subscriptions.map(({ selection, options }) => [selection.kind, options.readiness]),
+  ).toEqual([
+    ['overview', undefined],
+    ['continue', undefined],
+    ['devices', 'background'],
+    ['settings', undefined],
+    ['runtime', 'background'],
+  ]);
   await expect(model.ready).resolves.toEqual(version(4));
 
   expect(model.connection).toBe('ready');
@@ -407,6 +427,41 @@ it('distinguishes the first ready page from the settled paged library import', a
   service.opened[0]!.progress?.(1);
   await expect(model.initialReadSettled).resolves.toBeUndefined();
   expect(settled).toBe(true);
+
+  let homeSettled = false;
+  void model.initialHomeSettled.then(() => (homeSettled = true));
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'overview' }, overviewValue(), 5);
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'continue' }, continueValue(), 6);
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+  model.close();
+});
+
+it('waits for authoritative Home replacements after a paged read reconnects', async () => {
+  const service = new FakeService();
+  service.openProgress = 0;
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  service.opened[0]!.progress?.(1);
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  let homeSettled = false;
+  void model.initialHomeSettled.then(() => (homeSettled = true));
+
+  service.publish({ kind: 'overview' }, overviewValue(), 5, 'reconnecting');
+  service.publish({ kind: 'continue' }, continueValue(), 6, 'reconnecting');
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+
+  service.publish({ kind: 'overview' }, overviewValue(), 7);
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'continue' }, continueValue(), 8);
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+  expect(homeSettled).toBe(true);
   model.close();
 });
 
@@ -414,6 +469,7 @@ it('settles a cached first open with no paged import at ready', async () => {
   const model = new LibraryModel(new FakeService(), options);
   await expect(model.ready).resolves.toEqual(version(4));
   await expect(model.initialReadSettled).resolves.toBeUndefined();
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
   model.close();
 });
 
@@ -464,6 +520,64 @@ it('exposes named discovery and retained-Home operations without a generic cache
   ]);
 
   model.close();
+});
+
+it('keeps an early Home snapshot without issuing its command before required roots are ready', async () => {
+  let finishOpen!: () => void;
+  class OpeningService extends FakeService {
+    override open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+      this.opened.push(options);
+      this.subscriptionsSeenAtOpen = this.subscriptions.map(({ selection }) => selection);
+      // The incremental supervisor can publish these Home roots before its Settings boundary resolves.
+      this.publish({ kind: 'overview' }, overviewValue(), 1);
+      this.publish({ kind: 'continue' }, continueValue(), 2);
+      return new Promise((resolve) => {
+        finishOpen = () => {
+          this.publish({ kind: 'settings' }, settingsValue(), 3);
+          this.status({ kind: 'ready', version: version(3) });
+          resolve(version(3));
+        };
+      });
+    }
+  }
+
+  const service = new OpeningService();
+  const model = new LibraryModel(service, options);
+  const keeping = model.retainHomeContinue(true, 'early-home');
+
+  await Promise.resolve();
+  expect(model.overview.value).toMatchObject({ kind: 'overview' });
+  expect(model.continueWatching.value).toMatchObject({ kind: 'continue' });
+  expect(service.commands).toEqual([]);
+
+  finishOpen();
+  await expect(keeping).resolves.toMatchObject({ outcome: 'applied' });
+  expect(service.commands).toContainEqual({
+    command: { kind: 'retained.home-continue.set', present: true },
+    operationId: 'early-home',
+  });
+  model.close();
+});
+
+it('does not keep an early Home snapshot after its model closes', async () => {
+  let finishOpen!: () => void;
+  class OpeningService extends FakeService {
+    override open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+      this.opened.push(options);
+      return new Promise((resolve) => {
+        finishOpen = () => resolve(version(1));
+      });
+    }
+  }
+
+  const service = new OpeningService();
+  const model = new LibraryModel(service, options);
+  const keeping = model.retainHomeContinue(true, 'closed-home');
+
+  model.close();
+  finishOpen();
+  await expect(keeping).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  expect(service.commands).toEqual([]);
 });
 
 it('asks a retained read again once the service is back, not answers it as nothing kept', async () => {
@@ -794,6 +908,45 @@ it('exposes open failure, retries explicitly, and closes every source once', asy
   expect(model.overview.connection).toBe('closed');
   expect(lease.snapshot.connection).toBe('closed');
   expect(() => model.title({ type: 'movie', id: 13 })).toThrow('library model is closed');
+});
+
+it('settles Home after a failed cached open and permits a successful retry', async () => {
+  const service = new FakeService();
+  service.openFailure = failure;
+  const model = new LibraryModel(service, options);
+
+  await expect(model.ready).rejects.toMatchObject({ failure });
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+
+  await expect(model.retry()).resolves.toEqual(version(9));
+  service.status({ kind: 'ready', version: version(9) });
+  expect(model.connection).toBe('ready');
+  model.close();
+});
+
+it('waits for authoritative Home replacements when a failed paged open retries', async () => {
+  const service = new FakeService();
+  service.openProgress = 0;
+  service.openFailure = failure;
+  const model = new LibraryModel(service, options);
+
+  await expect(model.ready).rejects.toMatchObject({ failure });
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  let homeSettled = false;
+  void model.initialHomeSettled.then(() => (homeSettled = true));
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+
+  await expect(model.retry()).resolves.toEqual(version(9));
+  service.status({ kind: 'ready', version: version(9) });
+  service.publish({ kind: 'overview' }, overviewValue(), 10);
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'continue' }, continueValue(), 11);
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+  expect(homeSettled).toBe(true);
+  model.close();
 });
 
 it('replaces an open cached library with a non-retryable update-required failure', async () => {

@@ -145,9 +145,10 @@ export class LibraryModel {
   readonly #stopStatus: () => void;
   readonly #readyWaiters = new Set<() => void>();
   #settleInitialRead = () => {};
+  #settleInitialHome = () => {};
   #closed = false;
 
-  /** Settles only after the service and its Home-critical root replacements are ready. */
+  /** Settles after Home's roots and the profile-settings safety boundary are authoritative. */
   readonly ready: Promise<LibraryVersion>;
   /**
    * Settles once the first remote read has finished filling the local fact store. `ready` may resolve after its
@@ -155,6 +156,8 @@ export class LibraryModel {
    * writes use this later boundary to avoid loading mutation policy into that opening work.
    */
   readonly initialReadSettled: Promise<void>;
+  /** Settles after a paged first read's complete Overview and Continue replacements have been published. */
+  readonly initialHomeSettled: Promise<void>;
 
   constructor(
     readonly service: LibraryModelService,
@@ -162,6 +165,18 @@ export class LibraryModel {
   ) {
     let settleInitialRead!: () => void;
     let initialReadSettled = false;
+    let settleInitialHome!: () => void;
+    let initialHomeSettled = false;
+    let pagedRead = false;
+    let awaitingFullHome = false;
+    let overviewAfterRead = false;
+    let continueAfterRead = false;
+    const noteFullHome = (kind: 'overview' | 'continue', snapshot: LibrarySelectionSnapshot) => {
+      if (!awaitingFullHome || snapshot.connection !== 'ready') return;
+      if (kind === 'overview') overviewAfterRead = true;
+      else continueAfterRead = true;
+      if (overviewAfterRead && continueAfterRead) settleInitialHome();
+    };
     let openingProgressSeen = false;
     this.initialReadSettled = new Promise<void>((resolve) => {
       settleInitialRead = () => {
@@ -171,28 +186,51 @@ export class LibraryModel {
       };
     });
     this.#settleInitialRead = settleInitialRead;
+    this.initialHomeSettled = new Promise<void>((resolve) => {
+      settleInitialHome = () => {
+        if (initialHomeSettled) return;
+        initialHomeSettled = true;
+        resolve();
+      };
+    });
+    this.#settleInitialHome = settleInitialHome;
     this.#rootStops.push(
       service.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
         this.#overview = modelSnapshot<LibraryOverviewView>(snapshot);
+        noteFullHome('overview', snapshot);
       }),
       service.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
         this.#continue = modelSnapshot<ContinueView>(snapshot);
+        noteFullHome('continue', snapshot);
       }),
-      service.subscribeSnapshot({ kind: 'devices' }, (snapshot) => {
-        this.#devices = modelSnapshot<DevicesView>(snapshot);
-      }),
+      service.subscribeSnapshot(
+        { kind: 'devices' },
+        (snapshot) => {
+          this.#devices = modelSnapshot<DevicesView>(snapshot);
+        },
+        { readiness: 'background' },
+      ),
       service.subscribeSnapshot({ kind: 'settings' }, (snapshot) => {
         this.#settings = modelSnapshot<SettingsView>(snapshot);
       }),
-      service.subscribeSnapshot({ kind: 'runtime' }, (snapshot) => {
-        this.#runtime = modelSnapshot<RuntimeDiscoveryView>(snapshot);
-      }),
+      service.subscribeSnapshot(
+        { kind: 'runtime' },
+        (snapshot) => {
+          this.#runtime = modelSnapshot<RuntimeDiscoveryView>(snapshot);
+        },
+        { readiness: 'background' },
+      ),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
     const progress = (value: number) => {
       openingProgressSeen = true;
+      if (value < 1) pagedRead = true;
       if (!this.#closed) noteLibraryOpening(this, value);
-      if (value >= 1) settleInitialRead();
+      if (value >= 1) {
+        settleInitialRead();
+        if (pagedRead) awaitingFullHome = true;
+        else settleInitialHome();
+      }
     };
     // Ready can come before the read is complete (the rest of the history follows the first page): the progress ends
     // at 1, or with a failed open or a closed model.
@@ -201,12 +239,19 @@ export class LibraryModel {
       .then((version) => {
         // A complete saved fact store reports no progress: the ready reply is its settled boundary. A paged import
         // reports 0 before ready and 1 only after its remaining history has landed.
-        if (!openingProgressSeen) settleInitialRead();
+        if (!openingProgressSeen) {
+          settleInitialRead();
+          settleInitialHome();
+        }
         return version;
       })
       .catch((error: unknown) => {
         noteLibraryOpening(this, null);
         settleInitialRead();
+        // A failed cached open has no later Home replacement to wait for. A paged open can resume through retry,
+        // so preserve its stronger boundary until that retry publishes authoritative full Home roots.
+        if (pagedRead) awaitingFullHome = true;
+        else settleInitialHome();
         const failure = failureFrom(error);
         if (!this.#closed) {
           this.#openFailure = failure;
@@ -699,7 +744,15 @@ export class LibraryModel {
     return this.#command({ kind: 'retained.services.set', value }, operationId);
   }
 
-  retainHomeContinue(present: boolean, operationId?: string): Promise<LibraryServiceCommandResult> {
+  async retainHomeContinue(
+    present: boolean,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    // Overview and Continue may publish independently while the supervisor is still binding Settings. This
+    // automatic cache hint is derived from those early views, but commands are deliberately unavailable until the
+    // required-root safety boundary is ready. Waiting here leaves shelves visible immediately and also follows a
+    // supervised startup replacement before writing to its authoritative generation.
+    await this.ready;
     return this.#command({ kind: 'retained.home-continue.set', present }, operationId);
   }
 
@@ -1095,6 +1148,7 @@ export class LibraryModel {
     this.#closed = true;
     noteLibraryOpening(this, null);
     this.#settleInitialRead();
+    this.#settleInitialHome();
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();
