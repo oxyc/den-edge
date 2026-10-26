@@ -1946,6 +1946,8 @@ describe('LibraryLogAuthority', () => {
     const household = {
       'den.watchRegion': { value: { string: 'SE' }, at: stamp },
       'den.myServicePicks': { value: { strings: ['337@SE'] }, at: stamp },
+      'den.minReleaseYear': { value: { int: 2201 }, at: stamp },
+      'den.maturityCeiling': { value: { string: 'r' }, at: stamp },
     };
     await authority.command(
       { kind: 'preferences.patch', patch: { watchRegion: 'FI' } },
@@ -1963,6 +1965,8 @@ describe('LibraryLogAuthority', () => {
     ).resolves.toMatchObject({ outcome: 'applied', affected: [{ kind: 'settings' }] });
     const values = log.settings('prefs')!.values;
     expect(values['den.myServicePicks']).toEqual(household['den.myServicePicks']);
+    expect(values['den.minReleaseYear']).toBeUndefined();
+    expect(values['den.maturityCeiling']).toBeUndefined();
     // The region was cleared in the profile before: a decision, so the household's is not given over it.
     expect(values['den.watchRegion']?.value).toBeNull();
     await expect(

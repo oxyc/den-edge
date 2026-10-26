@@ -40,6 +40,18 @@ import {
   type Standing,
   type TitleRef,
 } from './libraryServiceProtocol';
+import {
+  acceptsProfilePreference,
+  PROFILE_GENRE_LIMIT,
+  PROFILE_LANGUAGE_LIMIT,
+  PROFILE_MAX_YEAR,
+  PROFILE_MIN_YEAR,
+  PROFILE_RATING_SOURCES,
+  PROFILE_SERVICE_LIMIT,
+  PROFILE_WARNING_CATEGORIES,
+  isProfileSubtitleLimit,
+} from './profilePreferenceSchema';
+import type { ConfigValue } from './wire';
 
 export type ProtocolDecodeResult<T> =
   { ok: true; value: T } | { ok: false; error: LibraryServiceFailure };
@@ -483,7 +495,7 @@ function legacyClock(value: unknown): value is {
   );
 }
 
-/** A stored `set:prefs` `values` object: bounded, and each member a stamped value den-core decides about. */
+/** A stored `set:prefs` `values` object: bounded and valid under the shared profile preference schema. */
 function storedPreferenceValues(value: unknown): value is StoredPreferenceValues {
   return (
     record(value) &&
@@ -492,12 +504,39 @@ function storedPreferenceValues(value: unknown): value is StoredPreferenceValues
       ([key, stamped]) =>
         boundedText(key, 256) &&
         record(stamped) &&
-        'value' in stamped &&
-        Array.isArray(stamped.at) &&
-        JSON.stringify(stamped).length <= 65_536,
+        exact(stamped, ['value', 'at']) &&
+        configValue(stamped.value) &&
+        acceptsProfilePreference(key, stamped.value) &&
+        libraryStamp(stamped.at),
     )
   );
 }
+
+function configValue(value: unknown): value is ConfigValue | null {
+  if (value === null) return true;
+  if (!record(value)) return false;
+  if (exact(value, ['bool'])) return bool(value.bool);
+  if (exact(value, ['int'])) return Number.isSafeInteger(value.int);
+  if (exact(value, ['string'])) return typeof value.string === 'string';
+  if (exact(value, ['ints']))
+    return list(
+      value.ints,
+      (candidate): candidate is number => Number.isSafeInteger(candidate),
+      256,
+    );
+  return (
+    exact(value, ['strings']) &&
+    list(value.strings, (candidate): candidate is string => typeof candidate === 'string', 256)
+  );
+}
+
+const libraryStamp = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.length === 3 &&
+  integer(value[0]) &&
+  integer(value[1]) &&
+  typeof value[2] === 'string' &&
+  value[2].length <= 256;
 
 function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
   if (
@@ -532,17 +571,22 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
   const services = value.services;
   return (
     (genres === undefined ||
-      (list(genres, (candidate): candidate is number => integer(candidate) && candidate > 0, 256) &&
+      (list(
+        genres,
+        (candidate): candidate is number => integer(candidate) && candidate > 0,
+        PROFILE_GENRE_LIMIT,
+      ) &&
         unique(genres))) &&
     (excludedLanguages === undefined ||
-      (list(excludedLanguages, languageCode, 256) && unique(excludedLanguages))) &&
+      (list(excludedLanguages, languageCode, PROFILE_LANGUAGE_LIMIT) &&
+        unique(excludedLanguages))) &&
     optional(value.hideAnime, bool) &&
     optional(value.hideWatched, bool) &&
     (value.minReleaseYear === undefined ||
       value.minReleaseYear === null ||
       (integer(value.minReleaseYear) &&
-        value.minReleaseYear >= 1800 &&
-        value.minReleaseYear <= 3000)) &&
+        value.minReleaseYear >= PROFILE_MIN_YEAR &&
+        value.minReleaseYear <= PROFILE_MAX_YEAR)) &&
     optional(value.audioLanguage, (candidate): candidate is string | null =>
       nullable(candidate, languageCode),
     ) &&
@@ -557,8 +601,10 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
             languageCode(candidate.language))),
     ) &&
     (shownSubtitleLanguages === undefined ||
-      (list(shownSubtitleLanguages, languageCode, 256) && unique(shownSubtitleLanguages))) &&
-    (value.subtitlesPerLanguage === undefined || integer(value.subtitlesPerLanguage)) &&
+      (list(shownSubtitleLanguages, languageCode, PROFILE_LANGUAGE_LIMIT) &&
+        unique(shownSubtitleLanguages))) &&
+    (value.subtitlesPerLanguage === undefined ||
+      isProfileSubtitleLimit(value.subtitlesPerLanguage)) &&
     optional(value.autoSkipSegments, bool) &&
     optional(value.autoplayTrailers, bool) &&
     (sources === undefined ||
@@ -566,9 +612,16 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
         ((exact(sources, ['kind']) && sources.kind === 'default') ||
           (exact(sources, ['kind', 'values']) &&
             sources.kind === 'values' &&
-            list(sources.values, ratingSource, 4) &&
+            list(sources.values, ratingSource, PROFILE_RATING_SOURCES.size) &&
             unique(sources.values))))) &&
-    (shownWarnings === undefined || (list(shownWarnings, text, 256) && unique(shownWarnings))) &&
+    (shownWarnings === undefined ||
+      (list(
+        shownWarnings,
+        (candidate): candidate is string =>
+          typeof candidate === 'string' && PROFILE_WARNING_CATEGORIES.has(candidate),
+        PROFILE_WARNING_CATEGORIES.size,
+      ) &&
+        unique(shownWarnings))) &&
     optional(value.watchRegion, (candidate): candidate is string | null =>
       nullable(candidate, countryCode),
     ) &&
@@ -577,7 +630,7 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
         ((exact(services, ['kind']) && services.kind === 'default') ||
           (exact(services, ['kind', 'values']) &&
             services.kind === 'values' &&
-            list(services.values, serviceRef, 256) &&
+            list(services.values, serviceRef, PROFILE_SERVICE_LIMIT) &&
             unique(services.values, (service) => `${service.id}@${service.country}`))))) &&
     (value.maturityCeiling === undefined ||
       value.maturityCeiling === null ||
@@ -1476,30 +1529,39 @@ function preferencesView(value: unknown): boolean {
   const shownWarnings = value.shownWarnings;
   const services = value.services;
   return (
-    list(genres, (candidate): candidate is number => integer(candidate) && candidate > 0, 256) &&
+    list(
+      genres,
+      (candidate): candidate is number => integer(candidate) && candidate > 0,
+      PROFILE_GENRE_LIMIT,
+    ) &&
     unique(genres) &&
-    list(excludedLanguages, languageCode, 256) &&
+    list(excludedLanguages, languageCode, PROFILE_LANGUAGE_LIMIT) &&
     unique(excludedLanguages) &&
     bool(value.hideAnime) &&
     bool(value.hideWatched) &&
     (value.minReleaseYear === undefined ||
       (integer(value.minReleaseYear) &&
-        value.minReleaseYear >= 1800 &&
-        value.minReleaseYear <= 3000)) &&
+        value.minReleaseYear >= PROFILE_MIN_YEAR &&
+        value.minReleaseYear <= PROFILE_MAX_YEAR)) &&
     optional(value.audioLanguage, languageCode) &&
     optional(value.subtitleLanguage, languageCode) &&
     optional(value.hasExplicitSubtitlePreference, bool) &&
-    list(shownSubtitleLanguages, languageCode, 256) &&
+    list(shownSubtitleLanguages, languageCode, PROFILE_LANGUAGE_LIMIT) &&
     unique(shownSubtitleLanguages) &&
-    integer(value.subtitlesPerLanguage) &&
+    isProfileSubtitleLimit(value.subtitlesPerLanguage) &&
     bool(value.autoSkipSegments) &&
     bool(value.autoplayTrailers) &&
-    list(sources, ratingSource, 4) &&
+    list(sources, ratingSource, PROFILE_RATING_SOURCES.size) &&
     unique(sources) &&
-    list(shownWarnings, text, 256) &&
+    list(
+      shownWarnings,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && PROFILE_WARNING_CATEGORIES.has(candidate),
+      PROFILE_WARNING_CATEGORIES.size,
+    ) &&
     unique(shownWarnings) &&
     optional(value.watchRegion, countryCode) &&
-    list(services, serviceRef, 256) &&
+    list(services, serviceRef, PROFILE_SERVICE_LIMIT) &&
     unique(services, (service) => `${service.id}@${service.country}`) &&
     bool(value.servicesConfigured) &&
     (value.servicesConfigured || services.length === 0) &&

@@ -16,9 +16,9 @@ const prefsRow: SettingsRow = {
     'den.hideAnime': { value: { bool: true }, at },
     'den.hideWatched': { value: { bool: true }, at },
     'den.minReleaseYear': { value: { int: 1990 }, at },
-    // The same provider in two countries is two picks; the rest is what a malformed one looks like.
+    // The same provider in two countries is two picks; lowercase is normalized as ServicePick does.
     'den.myServicePicks': {
-      value: { strings: ['8@FI', '8@US', '1899@fi', 'nonsense', '0@FI', '8@FIN'] },
+      value: { strings: ['8@FI', '8@US', '1899@fi'] },
       at,
     },
   },
@@ -40,13 +40,20 @@ describe('prefs', () => {
     expect([...prefs.excludedGenres]).toEqual([27]);
     expect([...prefs.excludedLanguages]).toEqual(['hi']);
     expect([prefs.hideAnime, prefs.hideWatched, prefs.minReleaseYear]).toEqual([true, true, 1990]);
-    // Uppercased, and anything that isn't "<id>@<CC>" is dropped rather than guessed at.
+    // Uppercased, while each country remains a separate pick.
     expect(prefs.services).toEqual([
       { id: 8, country: 'FI' },
       { id: 8, country: 'US' },
       { id: 1899, country: 'FI' },
     ]);
     expect(prefs.servicesConfigured).toBe(true);
+    const malformed = {
+      ...prefsRow,
+      values: {
+        'den.myServicePicks': { value: { strings: ['8@FI', 'nonsense'] }, at },
+      },
+    };
+    expect(readPrefs(malformed)).toMatchObject({ services: [], servicesConfigured: false });
     const cleared = { ...prefsRow, values: { 'den.minReleaseYear': { value: null, at } } };
     expect(readPrefs(cleared).minReleaseYear).toBeUndefined();
     expect(readPrefs(undefined)).toEqual({

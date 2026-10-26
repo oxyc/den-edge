@@ -71,7 +71,7 @@ describe('synced prefs', () => {
         'den.maxSubtitlesPerLanguage': { value: { int: 0 }, at },
         'den.autoplayTrailers': { value: { bool: false }, at },
         'den.enabledRatingSources': { value: { strings: [] }, at },
-        'den.watchRegion': { value: { string: 'se' }, at },
+        'den.watchRegion': { value: { string: 'SE' }, at },
         'den.minReleaseYear': { value: null, at },
       }),
     );
@@ -82,6 +82,42 @@ describe('synced prefs', () => {
       ratingSources: [],
       watchRegion: 'SE',
       minReleaseYear: undefined,
+    });
+  });
+
+  it('drops malformed remote profile values as a whole and bounds every local write', () => {
+    expect(
+      readSyncedPrefs(
+        row({
+          'den.maxSubtitlesPerLanguage': { value: { int: 101 }, at },
+          'den.minReleaseYear': { value: { int: 1879 }, at },
+          'den.preferredAudioLanguage': { value: { string: 'EN' }, at },
+          'den.watchRegion': { value: { string: 'fi' }, at },
+          'den.enabledRatingSources': { value: { strings: ['imdb', 'unknown'] }, at },
+          'den.shownWarningCategories': { value: { strings: ['Spoiler', 'invented'] }, at },
+          'den.myServicePicks': { value: { strings: ['8@FI', 'bad'] }, at },
+        }),
+      ),
+    ).toMatchObject({
+      subtitlesPerLanguage: 3,
+      minReleaseYear: undefined,
+      audioLanguage: undefined,
+      watchRegion: undefined,
+      ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+      shownWarnings: [],
+      services: [],
+      servicesConfigured: false,
+    });
+    expect(change.subtitlesPerLanguage(101)).toEqual({
+      'den.maxSubtitlesPerLanguage': { int: 100 },
+    });
+    expect(change.minReleaseYear(2201)).toEqual({ 'den.minReleaseYear': null });
+    expect(change.audioLanguage('EN')).toEqual({ 'den.preferredAudioLanguage': null });
+    expect(change.ratingSources(['imdb', 'unknown'])).toEqual({
+      'den.enabledRatingSources': { strings: ['imdb'] },
+    });
+    expect(change.shownWarnings(['Spoiler', 'invented'])).toEqual({
+      'den.shownWarningCategories': { strings: ['Spoiler'] },
     });
   });
 

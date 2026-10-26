@@ -7,6 +7,19 @@ import { parseServicePicks, type ServicePick } from '../lib/prefs';
 import type { ConfigValue, SettingsRow } from '../lib/wire';
 import { readSubtitlePreference, writeSubtitlePreference } from '../lib/subtitlePreference';
 import type { SubtitlePreference } from '../lib/subtitlePreference';
+import {
+  acceptsProfilePreference,
+  isProfileLanguage,
+  isProfileRegion,
+  isProfileSubtitleLimit,
+  isProfileYear,
+  PROFILE_GENRE_LIMIT,
+  PROFILE_LANGUAGE_LIMIT,
+  PROFILE_MAX_SUBTITLES_PER_LANGUAGE,
+  PROFILE_RATING_SOURCES,
+  PROFILE_SERVICE_LIMIT,
+  PROFILE_WARNING_CATEGORIES,
+} from '../lib/profilePreferenceSchema';
 
 export interface SyncedPrefs {
   excludedGenres: number[];
@@ -50,7 +63,11 @@ export function effectiveServicePicks(
 }
 
 export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
-  const value = (key: string): ConfigValue | null => row?.values[key]?.value ?? null;
+  const rawValue = (key: string): ConfigValue | null => row?.values[key]?.value ?? null;
+  const value = (key: string): ConfigValue | null => {
+    const held = rawValue(key);
+    return acceptsProfilePreference(key, held) ? held : null;
+  };
   const strings = (key: string): string[] | undefined => {
     const v = value(key);
     return v && 'strings' in v ? v.strings : undefined;
@@ -69,7 +86,9 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
   };
   const genres = value('den.excludedGenreIDs');
   const region = string('den.watchRegion');
-  const ceiling = string('den.maturityCeiling');
+  const rawCeiling = rawValue('den.maturityCeiling');
+  const ceiling =
+    rawCeiling && 'string' in rawCeiling && rawCeiling.string ? rawCeiling.string : undefined;
   const sources = strings('den.enabledRatingSources');
   const serviceValue = value('den.myServicePicks');
   const subtitle = readSubtitlePreference(row);
@@ -83,15 +102,13 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
     subtitleLanguage: subtitle.mode === 'language' ? subtitle.language : undefined,
     hasExplicitSubtitlePreference: subtitle.mode !== 'automatic',
     shownSubtitleLanguages: strings('den.shownSubtitleLanguages') ?? [],
-    subtitlesPerLanguage: Math.max(0, int('den.maxSubtitlesPerLanguage') ?? 3),
+    subtitlesPerLanguage: int('den.maxSubtitlesPerLanguage') ?? 3,
     autoSkipSegments: bool('den.autoSkipSegments') ?? false,
     autoplayTrailers: bool('den.autoplayTrailers') ?? true,
     // Unset is every source; an explicit empty list is every source turned off.
-    ratingSources: (sources ?? RATING_SOURCES.map((s) => s.id)).filter((s) =>
-      RATING_SOURCES.some((known) => known.id === s),
-    ),
+    ratingSources: sources ?? RATING_SOURCES.map((s) => s.id),
     shownWarnings: strings('den.shownWarningCategories') ?? [],
-    watchRegion: region && /^[a-z]{2}$/i.test(region) ? region.toUpperCase() : undefined,
+    watchRegion: region,
     services: parseServicePicks(
       serviceValue && 'strings' in serviceValue ? serviceValue.strings : [],
     ),
@@ -326,6 +343,11 @@ const sortedStrings = (values: Iterable<string>): ConfigValue => ({
   strings: [...new Set(values)].sort(),
 });
 
+const profileLanguages = (values: Iterable<string>): ConfigValue =>
+  sortedStrings(
+    [...new Set([...values].filter(isProfileLanguage))].slice(0, PROFILE_LANGUAGE_LIMIT),
+  );
+
 /** One value in, or out of, a set-valued preference. */
 export function toggled<T>(values: readonly T[], value: T, on: boolean): T[] {
   const rest = values.filter((v) => v !== value);
@@ -334,40 +356,52 @@ export function toggled<T>(values: readonly T[], value: T, on: boolean): T[] {
 
 export const change = {
   excludedGenres: (ids: Iterable<number>): PrefChanges => ({
-    'den.excludedGenreIDs': { ints: [...new Set(ids)].sort((a, b) => a - b) },
+    'den.excludedGenreIDs': {
+      ints: [...new Set([...ids].filter((id) => Number.isSafeInteger(id) && id > 0))]
+        .sort((a, b) => a - b)
+        .slice(0, PROFILE_GENRE_LIMIT),
+    },
   }),
   excludedLanguages: (codes: Iterable<string>): PrefChanges => ({
-    'den.excludedLanguages': sortedStrings(codes),
+    'den.excludedLanguages': profileLanguages(codes),
   }),
   hideAnime: (on: boolean): PrefChanges => ({ 'den.hideAnime': { bool: on } }),
   hideWatched: (on: boolean): PrefChanges => ({ 'den.hideWatched': { bool: on } }),
   minReleaseYear: (year: number | undefined): PrefChanges => ({
-    'den.minReleaseYear':
-      year === undefined || !Number.isFinite(year) ? null : { int: Math.trunc(year) },
+    'den.minReleaseYear': isProfileYear(year) ? { int: year } : null,
   }),
   audioLanguage: (code: string | undefined): PrefChanges => ({
-    'den.preferredAudioLanguage': code ? { string: code } : null,
+    'den.preferredAudioLanguage': isProfileLanguage(code) ? { string: code } : null,
   }),
   subtitlePreference: (choice: SubtitlePreference): PrefChanges => writeSubtitlePreference(choice),
   shownSubtitleLanguages: (codes: Iterable<string>): PrefChanges => ({
-    'den.shownSubtitleLanguages': sortedStrings(codes),
+    'den.shownSubtitleLanguages': profileLanguages(codes),
   }),
   subtitlesPerLanguage: (count: number): PrefChanges => ({
     // An int the TV can decode: a fraction or NaN would fail the whole row there.
     'den.maxSubtitlesPerLanguage': {
-      int: Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 3,
+      int: isProfileSubtitleLimit(count)
+        ? count
+        : Number.isFinite(count)
+          ? Math.max(0, Math.min(PROFILE_MAX_SUBTITLES_PER_LANGUAGE, Math.trunc(count)))
+          : 3,
     },
   }),
   autoSkipSegments: (on: boolean): PrefChanges => ({ 'den.autoSkipSegments': { bool: on } }),
   autoplayTrailers: (on: boolean): PrefChanges => ({ 'den.autoplayTrailers': { bool: on } }),
   ratingSources: (ids: Iterable<string>): PrefChanges => ({
-    'den.enabledRatingSources': sortedStrings(ids),
+    'den.enabledRatingSources': sortedStrings(
+      [...ids].filter((id) => PROFILE_RATING_SOURCES.has(id)),
+    ),
   }),
   shownWarnings: (names: Iterable<string>): PrefChanges => ({
-    'den.shownWarningCategories': sortedStrings(names),
+    'den.shownWarningCategories': sortedStrings(
+      [...names].filter((name) => PROFILE_WARNING_CATEGORIES.has(name)),
+    ),
   }),
   watchRegion: (code: string | undefined): PrefChanges => ({
-    'den.watchRegion': code ? { string: code.toUpperCase() } : null,
+    'den.watchRegion':
+      code && isProfileRegion(code.toUpperCase()) ? { string: code.toUpperCase() } : null,
   }),
   maturityCeiling: (ceiling: 'pg13' | 'r' | undefined): PrefChanges => ({
     'den.maturityCeiling': ceiling ? { string: ceiling } : null,
@@ -378,10 +412,16 @@ export const change = {
       strings: [
         ...new Set(
           [...picks]
+            .flatMap((pick): ServicePick[] => {
+              const country = pick.country.toUpperCase();
+              return Number.isSafeInteger(pick.id) && pick.id > 0 && isProfileRegion(country)
+                ? [{ id: pick.id, country }]
+                : [];
+            })
             .sort((a, b) => (a.country < b.country ? -1 : a.country > b.country ? 1 : a.id - b.id))
             .map((p) => `${p.id}@${p.country}`),
         ),
-      ],
+      ].slice(0, PROFILE_SERVICE_LIMIT),
     },
   }),
 };

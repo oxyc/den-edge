@@ -44,6 +44,7 @@ import {
   libraryMetadataTitle,
 } from './libraryMetadata';
 import { FinishedLibraryViewWriter } from './finishedLibraryViewWriter';
+import { validProfilePreferenceValues } from './profilePreferenceSchema';
 import {
   ContinueProjector,
   isAired,
@@ -846,7 +847,10 @@ export class LibraryLogAuthority {
         // Profile seeding only needs the values, but a local-library handoff also uses this full-authority query as
         // its source barrier. Make the snapshot another authority will reopen include every accepted local edit.
         if (this.#options.mode === 'local') await this.#log.settlePersistence();
-        return { kind: 'preferences.raw', values: this.#log.settings('prefs')?.values ?? {} };
+        return {
+          kind: 'preferences.raw',
+          values: validProfilePreferenceValues(this.#log.settings('prefs')?.values ?? {}),
+        };
       case 'retained.services.get': {
         const value = await this.#log.kept<unknown>(RETAINED_SERVICES);
         return {
@@ -2143,9 +2147,10 @@ export class LibraryLogAuthority {
       name: 'prefs',
       values: {},
     };
+    const acceptedHousehold = validProfilePreferenceValues(household as SettingsRow['values']);
     const { values } = syncPolicy<{ values: SettingsRow['values'] }>({
       op: 'profiles_seed_preferences',
-      input: { household, profile: base.values },
+      input: { household: acceptedHousehold, profile: base.values },
     });
     const result = !Object.keys(values).length
       ? this.#unchanged()
@@ -2153,7 +2158,7 @@ export class LibraryLogAuthority {
           { kind: 'settings' },
         ]);
     try {
-      await this.#log.keep(RETAINED_PREFERENCE_SEED, household);
+      await this.#log.keep(RETAINED_PREFERENCE_SEED, acceptedHousehold);
     } catch (error) {
       console.warn('den: the completed preference seed could not be retained', error);
     }

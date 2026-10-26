@@ -1,7 +1,8 @@
 <!-- Playback in this browser through den-remux: the title's release as HLS, played natively where the browser can
      (Safari, and so AirPlay) and through hls.js elsewhere. The browser's own controls do the transport; the bars
      around the video carry what Den adds — the audio language, the next episode, and waiting for a free slot. Starts
-     where the library says, and reports where it got to every minute, on pause, when the page is hidden and on close.
+     where the library says, and reports where it got to every 30 seconds, on pause, when the page is hidden and on
+     close.
      The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
   import type Hls from 'hls.js';
@@ -23,7 +24,7 @@
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
   import type { Episode as EpisodeDetail } from '../lib/detail';
-  import { PlaybackProgressReporter } from '../lib/playbackProgress';
+  import { PLAYBACK_PROGRESS_SAVE_MS, PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     autoSubtitleLanguage,
@@ -230,7 +231,7 @@
 
   type Episode = { season?: number; episode?: number };
 
-  const REPORT_MS = 60_000;
+  const REPORT_MS = PLAYBACK_PROGRESS_SAVE_MS;
   /** How often a paused viewer's "still here" goes out — comfortably under den-remux's own UNATTENDED_IDLE
    * (60s), with room for a missed beat, so a deliberate pause is told apart from a closed tab. */
   const HEARTBEAT_MS = 20_000;
@@ -495,7 +496,10 @@
   let playingEpisode: Episode = untrack(() => ({ season, episode }));
   /** Each episode's positions are written against that episode, whatever the props name by the time they go. */
   const reporterFor = (at: Episode) =>
-    new PlaybackProgressReporter((fraction, seconds) => onprogress(fraction, seconds, at));
+    new PlaybackProgressReporter(
+      (fraction, seconds) => onprogress(fraction, seconds, at),
+      at.season !== undefined && at.episode !== undefined ? 'episode' : 'movie',
+    );
   let progress = reporterFor(playingEpisode);
   /** Where the next session starts: a language switch picks up where the last one was. */
   let startAt: { fraction: number; seconds?: number } | null = null;
@@ -2905,7 +2909,12 @@
     // Between an advance's two sessions the held video still has the outgoing episode's clock, until it is emptied.
     if (!session) return;
     const at = video?.currentTime ?? remoteTime;
-    if (at > 0) progress.report(at, length(), slack);
+    if (at > 0) progress.report(at, length(), slack, { creditsReached: reachedCredits(at) });
+  }
+
+  /** SkipDB calls an outro "credits"; crossing its aligned start is the same completion evidence tvOS uses. */
+  function reachedCredits(at: number): boolean {
+    return segments.some((segment) => segment.kind === 'outro' && at >= segment.start);
   }
 
   function playing() {
@@ -3558,7 +3567,8 @@
     // `totalPlayedSecs`, from the element's own `played` ranges — never summed here.
     lastPosition = at;
     // The first part-way position once playback starts or resumes goes out now, not a minute later.
-    if (session && !(video ? video.paused : remotePaused)) progress.reportStart(at, length());
+    if (session && !(video ? video.paused : remotePaused))
+      progress.reportStart(at, length(), { creditsReached: reachedCredits(at) });
     weighDelivery();
     warmNext(at);
     if (!segments.length) return;
