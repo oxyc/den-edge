@@ -195,9 +195,11 @@ test('an unpaired browser-local library never waits on the profile directory', a
 
   await page.goto(`${ROUTED_FIXTURE}?local`);
 
-  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
+  // These are the profile-mode contract; Home's below-fold catalogue is deliberately independent and can arrive
+  // after shelves plus its bounded 3 s empty-surface fallback (or a useful-content milestone's 1 s quiet period).
   await expect(page.getByText('Opening profile directory…')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Profiles couldn’t be opened' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible({ timeout: 10_000 });
 });
 
 test('capability discovery never exposes or enables the legacy Owner UI', async ({ page }) => {

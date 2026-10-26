@@ -680,9 +680,11 @@ export async function bigHousehold(context, edge, options = {}) {
       .toBeGreaterThan(5_000 * BIG_LIBRARY_SCALE);
     step('moved');
     // The switcher is a presentation-level consequence of the completed move, not a reliable proxy for its progress.
-    // Assert it only after the scale-aware readiness gate above so a busy runner cannot fail while migration is active.
+    // den-edge holding every destination row means the network copy is complete, but the page can still be verifying
+    // those rows and handing the staging session over to the household. Give that client-side half the same
+    // scale-aware room as the copy instead of starting a short, fixed clock at the server-side milestone.
     await expect(page.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible({
-      timeout: 30_000,
+      timeout: 90_000 * BIG_LIBRARY_SCALE,
     });
     step('accepted');
     // A first visit to Home and to the Watchlist (which names the whole history) fills this browser's TMDB cache, so
