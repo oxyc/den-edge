@@ -26,7 +26,7 @@ describe('HistoryDetailRequests', () => {
     const first = requests.take(titles, new Map());
     expect(first).toHaveLength(LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles);
     expect(requests.take(titles, new Map())).toEqual([]);
-    requests.resolved(first);
+    requests.settled();
     const loaded = new Map(first.map((title) => [`tv:${title.id}`, []]));
     expect(requests.take(titles, loaded).map((title) => title.id)).toEqual([49, 50, 51, 52, 53]);
   });
@@ -35,7 +35,7 @@ describe('HistoryDetailRequests', () => {
     const requests = new HistoryDetailRequests();
     const title = tv(9);
     expect(requests.take([title], new Map())).toEqual([title]);
-    requests.failed([title]);
+    requests.settled([title]);
     expect(requests.take([title], new Map())).toEqual([]);
     requests.reset();
     expect(requests.take([title], new Map())).toEqual([title]);
@@ -45,7 +45,7 @@ describe('HistoryDetailRequests', () => {
     const requests = new HistoryDetailRequests();
     const title = tv(9);
     expect(requests.take([title], new Map())).toEqual([title]);
-    requests.resolved([title]);
+    requests.settled();
     expect(requests.take([title], new Map([['tv:9', []]]))).toEqual([]);
   });
 

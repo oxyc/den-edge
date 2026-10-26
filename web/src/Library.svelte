@@ -1955,10 +1955,10 @@
         if (generation !== historyDetailGeneration) return;
         for (const title of requested)
           historyDetails.set(titleKey(title), found.get(titleKey(title)) ?? []);
-        historyDetailRequests.resolved(requested);
+        historyDetailRequests.settled();
       })
       .catch(() => {
-        if (generation === historyDetailGeneration) historyDetailRequests.failed(requested);
+        if (generation === historyDetailGeneration) historyDetailRequests.settled(requested);
       });
   }
 
