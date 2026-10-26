@@ -162,6 +162,9 @@ for (const worker of ['libraryServiceWorker', 'recoveryWorker']) {
   if (!code.includes('randomUUID') || !code.includes('throwIfAborted'))
     throw new Error(`Missing TV runtime compatibility in ${files[0]}`);
 }
+
+if (assets.some((file) => file.includes('libraryServiceSharedWorker')))
+  throw new Error(`${platform}: desktop SharedWorker leaked into the TV build`);
 const manifest = JSON.parse(await readFile(resolve(directory, '.vite/manifest.json'), 'utf8'));
 const fixture = Object.keys(manifest).some((file) => /(?:test\/|test-entry)/.test(file));
 if (fixture !== (process.env.DEN_TV_E2E === '1'))

@@ -178,6 +178,7 @@ export default defineConfig({
     __DEN_TV_API_ORIGIN__: JSON.stringify(''),
     __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(''),
     __DEN_TV_WEB_ORIGIN__: JSON.stringify(''),
+    'import.meta.env.DEN_E2E': JSON.stringify(process.env.DEN_E2E === '1'),
     'import.meta.env.DEN_ALLOCATION_AUDIT': JSON.stringify(
       process.env.DEN_ALLOCATION_AUDIT === '1',
     ),

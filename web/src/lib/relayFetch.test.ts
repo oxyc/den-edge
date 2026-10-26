@@ -6,6 +6,7 @@ import {
   onGrantEnded,
   relayFetch,
   rememberGrant,
+  RelaySession,
   useLibraryCredential,
   useLibraryRelayMembership,
 } from './relayFetch';
@@ -263,4 +264,45 @@ test('takes a Request’s own url and headers', async () => {
   );
   expect(sent(spy)[HEADER]).toBe('abc123:def456');
   expect(sent(spy).a).toBe('b');
+});
+
+test('isolates identical grant ids and memberships between SharedWorker clients', async () => {
+  const spy = stub();
+  const first = new RelaySession();
+  const second = new RelaySession();
+  first.membership({ libraryId: 'first', memberToken: 'member-a' });
+  second.membership({ libraryId: 'second', memberToken: 'member-b' });
+  first.configureGrants([{ gid: GID, secret: 'secret-a' }]);
+  second.configureGrants([{ gid: GID, secret: 'secret-b' }]);
+
+  await first.fetch(`/scout/~${GID}/manifest.json`);
+  expect(sent(spy)[GRANT]).toBe(`${GID}:secret-a`);
+  await second.fetch(`/scout/~${GID}/manifest.json`);
+  expect(sent(spy)[GRANT]).toBe(`${GID}:secret-b`);
+  await first.fetch('/atlas/recommend');
+  expect(sent(spy)[HEADER]).toBe('first:member-a');
+  await second.fetch('/atlas/recommend');
+  expect(sent(spy)[HEADER]).toBe('second:member-b');
+});
+
+test('RelaySession honors the scout named in remux bodies and verifies grant expiry', async () => {
+  const session = new RelaySession();
+  const other = 'deadbeef';
+  session.configureGrants([
+    { gid: GID, secret: 'first' },
+    { gid: other, secret: 'named' },
+  ]);
+  const ended = vi.fn();
+  session.onGrantEnded(ended);
+  const spy = vi.fn(
+    async () => new Response(JSON.stringify({ error: 'grant_expired' }), { status: 410 }),
+  );
+  vi.stubGlobal('fetch', spy);
+
+  await session.fetch('/remux/session', {
+    method: 'POST',
+    body: JSON.stringify({ scout: `https://den.example/scout/~${other}` }),
+  });
+  expect(sent(spy)[GRANT]).toBe(`${other}:named`);
+  expect(ended).toHaveBeenCalledWith(other);
 });
