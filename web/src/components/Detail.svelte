@@ -25,7 +25,7 @@
   import SeasonDownload from './SeasonDownload.svelte';
   import { downloadEpisode } from '../lib/seasonDownloads.svelte';
   import DetailIcon from './DetailIcon.svelte';
-  import ButtonIcon from './ButtonIcon.svelte';
+  import ContinuePlayback from './ContinuePlayback.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
   import { isBlocked } from '../lib/parental';
@@ -971,120 +971,34 @@
               ? target
               : undefined}
           <div class="continue-row">
-            {#if live && ontransport}
-              <div
-                class="remote-player"
-                data-spatial-section
-                aria-label={`Controls for ${live.device ?? 'your TV'}`}
-                aria-busy={transportBusy}
-              >
-                <div class="remote-main">
-                  <div class="remote-heading">
-                    <span class="remote-device" aria-hidden="true"
-                      ><ButtonIcon name="play" filled /></span
-                    >
-                    <a
-                      class="remote-title"
-                      href={titleHref({
-                        ...d.title,
-                        season: coordinate?.season,
-                        episode: coordinate?.episode,
-                        play: true,
-                      })}
-                      onclick={(event) =>
-                        activateLinkInPlace(
-                          event,
-                          () => void transport(transportPlaying ? 'pause' : 'play'),
-                        )}
-                    >
-                      <strong
-                        >{transportPlaying ? 'Playing' : 'Paused'} on {live.device ??
-                          'another device'}</strong
-                      >
-                      {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small
-                        >{/if}
-                    </a>
-                  </div>
-                  <div class="remote-transport">
-                    <button
-                      class="seek"
-                      type="button"
-                      disabled={transportBusy}
-                      aria-label="Skip back 10 seconds"
-                      title="Back 10 seconds"
-                      onclick={() => transport('skip', -10)}
-                    >
-                      <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-                        <path d="M17 13H9v-8M10 13a17 17 0 1 1-2 17" />
-                        <text x="24" y="29">10</text>
-                      </svg></button
-                    >
-                    <button
-                      class="play-pause"
-                      type="button"
-                      disabled={transportBusy}
-                      aria-label={transportPlaying ? 'Pause on TV' : 'Resume on TV'}
-                      title={transportPlaying ? 'Pause' : 'Resume'}
-                      onclick={() => transport(transportPlaying ? 'pause' : 'play')}
-                    >
-                      <ButtonIcon
-                        name={transportPlaying ? 'pause' : 'play'}
-                        filled={!transportPlaying}
-                      />
-                    </button>
-                    <button
-                      class="seek"
-                      type="button"
-                      disabled={transportBusy}
-                      aria-label="Skip forward 10 seconds"
-                      title="Forward 10 seconds"
-                      onclick={() => transport('skip', 10)}
-                    >
-                      <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-                        <path d="M31 13h8v-8M38 13a17 17 0 1 0 2 17" />
-                        <text x="24" y="29">10</text>
-                      </svg></button
-                    >
-                  </div>
-                </div>
-                <div class="remote-timeline">
-                  <span class="resume-track"
-                    ><span style:width={live.fraction ? `${live.fraction * 100}%` : undefined}
-                    ></span></span
-                  >
-                  <span class="remote-clock">{live.clock}</span>
-                </div>
-              </div>
-            {:else}
-              <a
-                class="continue"
-                data-spatial-section
-                href={titleHref({
-                  ...d.title,
-                  season: coordinate?.season,
-                  episode: coordinate?.episode,
-                  play: true,
-                })}
-                onclick={(event) =>
-                  activateLinkInPlace(event, () =>
-                    start(d.title, coordinate?.season, coordinate?.episode),
-                  )}
-              >
-                <DetailIcon name="play" filled /><span
-                  ><strong
-                    >{live
-                      ? `Playing on ${live.device ?? 'another device'}`
-                      : continueLabel}</strong
-                  >
-                  {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
-                  {#if live || (fraction > RESUME_FLOOR && fraction < WATCHED)}<span
-                      class="resume-track"
-                      ><span style:width={`${(live?.fraction ?? fraction) * 100}%`}
-                      ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
-                    >{/if}
-                </span>
-              </a>
-            {/if}
+            <ContinuePlayback
+              href={titleHref({
+                ...d.title,
+                season: coordinate?.season,
+                episode: coordinate?.episode,
+                play: true,
+              })}
+              label={live
+                ? `${ontransport ? (transportPlaying ? 'Playing' : 'Paused') : 'Playing'} on ${live.device ?? 'another device'}`
+                : continueLabel}
+              episode={coordinate}
+              fraction={live
+                ? live.fraction
+                : fraction > RESUME_FLOOR && fraction < WATCHED
+                  ? fraction
+                  : undefined}
+              clock={live?.clock}
+              device={live?.device}
+              playing={transportPlaying}
+              busy={transportBusy}
+              onactivate={(event) =>
+                activateLinkInPlace(event, () =>
+                  live && ontransport
+                    ? void transport(transportPlaying ? 'pause' : 'play')
+                    : start(d.title, coordinate?.season, coordinate?.episode),
+                )}
+              ontransport={live && ontransport ? transport : undefined}
+            />
           </div>
         {/if}
         <div class="hero-actions" data-spatial-section>
@@ -1569,225 +1483,6 @@
     flex-wrap: wrap;
     gap: 14px 24px;
     margin-top: 24px;
-  }
-
-  .continue {
-    display: inline-flex;
-    align-items: center;
-    gap: 16px;
-    min-height: 52px;
-    padding: 4px 0;
-    border: 0;
-    background: none;
-    color: var(--fg);
-    font: inherit;
-    text-align: left;
-    text-decoration: none;
-    cursor: pointer;
-  }
-
-  .continue small {
-    display: block;
-    margin-top: 4px;
-    color: var(--muted);
-  }
-
-  .resume-track {
-    position: relative;
-    display: block;
-    width: 240px;
-    max-width: 100%;
-    height: 4px;
-    margin-top: 10px;
-    border-radius: 4px;
-    background: #fff4;
-  }
-
-  .resume-track > span:first-child {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--fg);
-  }
-
-  /* Out of flow beside the track, as a player's time sits beside its scrubber. */
-  .live-clock {
-    position: absolute;
-    top: 50%;
-    left: calc(100% + 10px);
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    line-height: 1;
-    white-space: nowrap;
-    transform: translateY(-50%);
-  }
-
-  .continue:focus-visible {
-    outline: var(--ring-width) solid var(--focus-ring);
-    outline-offset: 6px;
-    border-radius: 6px;
-  }
-
-  .remote-player {
-    width: min(100%, 460px);
-    padding: 9px 10px 8px;
-    border: 1px solid #fff3;
-    border-radius: 12px;
-    background: #09090dc7;
-    box-shadow:
-      0 10px 28px #0006,
-      inset 0 1px #fff2;
-    backdrop-filter: blur(18px) saturate(130%);
-  }
-
-  .remote-main {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .remote-heading {
-    display: flex;
-    flex: 1 1 auto;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .remote-device {
-    display: grid;
-    width: 26px;
-    height: 26px;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: 50%;
-    background: #fff2;
-
-    --button-icon-size: 13px;
-  }
-
-  .remote-title {
-    min-width: 0;
-    color: inherit;
-    text-decoration: none;
-  }
-
-  .remote-title strong,
-  .remote-title small {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .remote-title small {
-    margin-top: 2px;
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  .remote-title:focus-visible {
-    outline: var(--ring-width) solid var(--focus-ring);
-    outline-offset: 4px;
-    border-radius: 4px;
-  }
-
-  .remote-transport {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 1px;
-  }
-
-  .remote-transport button {
-    display: grid;
-    width: 30px;
-    height: 30px;
-    flex: 0 0 auto;
-    padding: 0;
-    place-items: center;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    color: var(--fg);
-    font: inherit;
-    cursor: pointer;
-    transition:
-      background 120ms ease,
-      color 120ms ease,
-      transform 120ms ease;
-  }
-
-  .remote-transport .seek svg {
-    width: 24px;
-    height: 24px;
-    overflow: visible;
-    fill: none;
-    stroke: currentcolor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 3;
-  }
-
-  .remote-transport .seek text {
-    fill: currentcolor;
-    stroke: none;
-    font-size: 14px;
-    font-weight: 750;
-    text-anchor: middle;
-  }
-
-  .remote-transport .play-pause {
-    width: 34px;
-    height: 34px;
-    background: var(--fg);
-    color: var(--bg);
-    box-shadow: 0 3px 12px #0007;
-
-    --button-icon-size: 16px;
-  }
-
-  .remote-transport button:hover {
-    background: #fff2;
-    transform: scale(1.05);
-  }
-
-  .remote-transport .play-pause:hover {
-    background: #fff;
-  }
-
-  .remote-transport button:focus-visible {
-    outline: var(--ring-width) solid var(--focus-ring);
-    outline-offset: 2px;
-  }
-
-  .remote-transport button:disabled {
-    cursor: wait;
-    opacity: 0.55;
-    transform: none;
-  }
-
-  .remote-timeline {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 5px 2px 0 34px;
-  }
-
-  .remote-timeline .resume-track {
-    width: auto;
-    flex: 1 1 auto;
-    margin: 0;
-  }
-
-  .remote-clock {
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    line-height: 1;
   }
 
   .seasons {

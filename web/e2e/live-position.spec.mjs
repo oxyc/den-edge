@@ -338,6 +338,7 @@ test('a series’ page says which device plays which episode, and keeps controls
     // The seeded resume point was written as the page opened, so its own clock may still be running out.
     await expect(clock).toBeHidden({ timeout: 60_000 });
     await expect(label).toHaveText('Continue Watching');
+    const continueIcon = await block.locator('.lead-icon').boundingBox();
     const projectedResume = await resume.getAttribute('href');
     expect(projectedResume).not.toMatch(/season=1&episode=3&play=1$/);
     const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
@@ -346,6 +347,9 @@ test('a series’ page says which device plays which episode, and keeps controls
     const sentBefore = edge.controls.length;
     const controls = page.getByLabel('Controls for Apple TV');
     await expect(controls).toBeVisible();
+    const remoteIcon = await controls.locator('.lead-icon').boundingBox();
+    expect(remoteIcon.x).toBeCloseTo(continueIcon.x, 0);
+    expect(remoteIcon.y).toBeCloseTo(continueIcon.y, 0);
     const withLive = await boxes();
     const addressBeforeRemotePause = page.url();
     await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
