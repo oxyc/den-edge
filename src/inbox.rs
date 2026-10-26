@@ -54,6 +54,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         "/inbox/append" => method_not_allowed(),
         "/inbox/pending" if req.method() == Method::POST => pending(state, req).await,
         "/inbox/pending" => method_not_allowed(),
+        "/inbox/listening" if req.method() == Method::POST => listening(state, req).await,
+        "/inbox/listening" => method_not_allowed(),
         "/inbox/drain" if req.method() == Method::POST => drain_many(state, req).await,
         "/inbox/drain" if req.method() == Method::GET => {
             if let Some(wait) = drain_budget(state, &crate::handler::client_ip(state, &req), 1) {
@@ -64,6 +66,26 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         "/inbox/drain" => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
+}
+
+/// Whether a receiver currently has a held drain on this queue. The queue key is the credential, just as for
+/// append/pending; the answer exposes no device identity or message. This is deliberately instantaneous: a sender
+/// uses it immediately before a transport command to avoid a stale TV record while another Den TV is playing.
+async fn listening(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(wait) = crate::link::throttled_at(state, &format!("inbox:{ip}"), APPENDS_PER_WINDOW) {
+        return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    }
+    let from_header = header_key(&req);
+    let body = match read_json(req, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(resp) => return *resp,
+    };
+    let key = from_header.as_deref().or_else(|| body.get("inboxKey").and_then(Value::as_str)).unwrap_or("");
+    if !valid_inbox_key(key) {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
+    }
+    json_reply(StatusCode::OK, &json!({ "listening": state.inbox_holds.waiting_on(key) }))
 }
 
 /// Several queues in one request: `{"keys": [...]}` in, `{"queues": [[...], ...]}` out, in the order asked. A TV
@@ -475,6 +497,22 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(answer, json!({ "queues": [[], [{ "sealed": "AAEC" }]] }));
         assert!(drain(&h).await.is_empty(), "and drained");
+    }
+
+    #[tokio::test]
+    async fn listening_names_only_a_queue_with_a_receiver_waiting_on_it() {
+        let h = Harness::new();
+        let check = |key: &str| h.call("POST", "/inbox/listening", Some(json!({ "inboxKey": key })));
+        assert_eq!(check(KEY).await, (StatusCode::OK, json!({ "listening": false })));
+
+        let mut held = Box::pin(held_drain(&h, 20, &[KEY]));
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err(), "the receiver is waiting");
+        assert_eq!(check(KEY).await, (StatusCode::OK, json!({ "listening": true })));
+        assert_eq!(check(OTHER).await, (StatusCode::OK, json!({ "listening": false })));
+
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        tokio::time::timeout(PROMPT, held).await.expect("the receiver took the command");
+        assert_eq!(check(KEY).await, (StatusCode::OK, json!({ "listening": false })));
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ import {
 } from './values';
 import { GUEST_PICKS } from '../lib/services';
 import { selectedDevicesView } from '../lib/librarySelectedSettings';
-import { householdTvs, playOnLabel } from '../lib/householdTvs';
+import { householdTvs, listeningTransportTv, playOnLabel } from '../lib/householdTvs';
 import type { SettingsRow, Stamp } from '../lib/wire';
 
 const at: Stamp = [1000, 0, 'tv01'];
@@ -161,6 +161,33 @@ describe('synced prefs', () => {
     ]);
     expect(playOnLabel(tvs[0]!, [tvs[0]!], 'Resume')).toBe('Resume on TV');
     expect(householdTvs(undefined)).toEqual([]);
+  });
+
+  it('keeps the live writer when awake and otherwise chooses only one unambiguous listening TV', () => {
+    const stale = { id: 'lg' };
+    const apple = { id: 'apple' };
+    const bedroom = { id: 'bedroom' };
+    expect(
+      listeningTransportTv([
+        { tv: stale, listening: false },
+        { tv: apple, listening: true },
+      ]),
+    ).toBe(apple);
+    expect(
+      listeningTransportTv([
+        { tv: stale, listening: true },
+        { tv: apple, listening: true },
+      ]),
+    ).toBe(stale);
+    expect(
+      listeningTransportTv([
+        { tv: stale, listening: false },
+        { tv: apple, listening: true },
+        { tv: bedroom, listening: true },
+      ]),
+    ).toBeUndefined();
+    expect(listeningTransportTv([{ tv: stale, listening: null }])).toBe(stale);
+    expect(listeningTransportTv([{ tv: stale, listening: false }])).toBeUndefined();
   });
 
   it('lists the devices that name themselves, newest first, and lists this one only when stale', () => {

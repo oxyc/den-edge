@@ -302,6 +302,26 @@ export async function stillQueued(
   }
 }
 
+/** Whether this queue has a Den TV waiting on it right now. Null means the check itself failed. */
+export async function tvListening(
+  link: Pick<Link, 'inboxKey'>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean | null> {
+  try {
+    const res = await fetchImpl('/inbox/listening', {
+      signal: AbortSignal.timeout(REQUEST_MS),
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-den-link': link.inboxKey },
+      body: '{}',
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { listening?: unknown };
+    return typeof body.listening === 'boolean' ? body.listening : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface DeviceIdentity {
   name: string;
   deviceId?: string;

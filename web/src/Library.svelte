@@ -31,12 +31,12 @@
     personalRows,
     type RowDef,
   } from './lib/catalog';
-  import { householdQueue, sendToTV, type PlayRequest } from './lib/inbox';
+  import { householdQueue, sendToTV, tvListening, type PlayRequest } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
   import type { Link } from './lib/links.svelte';
-  import { householdTvs } from './lib/householdTvs';
+  import { householdTvs, listeningTransportTv } from './lib/householdTvs';
   import {
     clock as timecode,
     livePosition,
@@ -937,13 +937,27 @@
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
     const live = pageLive;
     const opening = page;
-    const receiver = live?.deviceId
+    const intended = live?.deviceId
       ? tvs.find((candidate) => candidate.id === live.deviceId && candidate.controls)
       : undefined;
-    if (!receiver || !live || !opening) return false;
-    const queue = await householdQueue(receiver.play);
+    if (!intended || !live || !opening) return false;
+    // The latest position can briefly name a TV whose Den app was replaced by another HDMI/input app, while a
+    // second Den TV continues the same title off-screen. Prefer the exact writer when it is listening; otherwise
+    // route to the one awake command-capable receiver. The title/episode guard at that receiver remains decisive.
+    const candidates = [intended, ...tvs.filter((tv) => tv.controls && tv.id !== intended.id)];
+    const probed = await Promise.all(
+      candidates.map(async (tv) => {
+        const queue = await householdQueue(tv.play);
+        return { tv, queue, listening: await tvListening(queue) };
+      }),
+    );
+    const selected = listeningTransportTv(probed);
+    const receiver = selected && probed.find(({ tv }) => tv === selected);
+    if (!receiver) return false;
+    if (selected.id !== intended.id)
+      session.notify(`Controlling ${selected.name}, where Den is open`);
     return Boolean(
-      await sendToTV(queue, {
+      await sendToTV(receiver.queue, {
         type: 'transport',
         action,
         tmdbId: opening.id,

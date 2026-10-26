@@ -299,6 +299,7 @@ fn is_control(route: &str) -> bool {
             | "/link"
             | "/inbox/append"
             | "/inbox/pending"
+            | "/inbox/listening"
             | "/inbox/drain"
             | "/pair/new"
             | "/pair/open"
@@ -849,6 +850,7 @@ impl Face {
             || path == "/inbox/append"
             // "Play on TV" then asks whether the TV has taken it yet, to say so in its toast.
             || path == "/inbox/pending"
+            || path == "/inbox/listening"
             || path == "/inbox/drain";
         // TMDB, the content warnings and the ratings through this origin answer on every name: a browser asks them
         // on the public one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so
@@ -998,6 +1000,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/link" => "/link",
         "/inbox/append" => "/inbox/append",
         "/inbox/pending" => "/inbox/pending",
+        "/inbox/listening" => "/inbox/listening",
         "/inbox/drain" => "/inbox/drain",
         "/assistant/dropbox" => "/assistant/dropbox",
         "/assistant/append" => "/assistant/append",
@@ -1135,6 +1138,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/assistant/tv" | "/assistant/request" => Some(GET),
         "/inbox/append"
         | "/inbox/pending"
+        | "/inbox/listening"
         | "/lib/:id/batch"
         | "/lib/:id/rewrite"
         | "/lib/:id/rewrite/:rid/rows"
@@ -2128,6 +2132,11 @@ pub mod tests {
         assert_ne!(status("d.oxy.fi", "POST", "/inbox/append").await, StatusCode::NOT_FOUND, "Play on TV");
         // Its toast's "has the TV taken it" peek, every two seconds after the send: a 404 left it guessing.
         assert_ne!(status("d.oxy.fi", "POST", "/inbox/pending").await, StatusCode::NOT_FOUND, "the peek");
+        assert_ne!(
+            status("d.oxy.fi", "POST", "/inbox/listening").await,
+            StatusCode::NOT_FOUND,
+            "the live receiver check"
+        );
         // The device API's name, however it is cased: the device routes, and never the app.
         assert_eq!(status("D-Api.Oxy.Fi", "GET", "/").await, StatusCode::NOT_FOUND);
         assert_eq!(status("d-api.oxy.fi", "GET", "/index.html").await, StatusCode::NOT_FOUND);

@@ -90,6 +90,12 @@ impl Holds {
         }
     }
 
+    /// Whether a held request is currently waiting on `key`. Inbox senders use this only after proving possession
+    /// of the queue credential, to choose the Den TV that is actually awake instead of a stale device record.
+    pub fn waiting_on(&self, key: &str) -> bool {
+        crate::lock(&self.state).waiting.get(key).is_some_and(|waiting| !waiting.is_empty())
+    }
+
     /// Remove and wake this owner's current holds before admitting a replacement request. The removed hold's
     /// eventual drop is a no-op, so the replacement can take the same bounded slot immediately.
     pub fn cancel_owner(&self, owner: &str) {
@@ -232,5 +238,16 @@ mod tests {
         assert_eq!(wait(Some("0".into())), None);
         assert_eq!(wait(Some("soon".into())), None);
         assert_eq!(wait(None), None);
+    }
+
+    #[test]
+    fn waiting_on_tracks_a_held_key_until_its_hold_is_dropped() {
+        let holds = Holds::new(8, 8);
+        assert!(!holds.waiting_on("tv"));
+        let held = holds.hold("home", &["tv"]).unwrap();
+        assert!(holds.waiting_on("tv"));
+        assert!(!holds.waiting_on("other"));
+        drop(held);
+        assert!(!holds.waiting_on("tv"));
     }
 }
