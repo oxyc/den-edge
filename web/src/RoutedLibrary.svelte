@@ -51,6 +51,7 @@
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { thisDevice } from './lib/device.svelte';
   import { cleanLabel } from './lib/edge';
+  import { reloadForUpdate, requestReleaseCheck } from './lib/release';
   import { readProfileHint, saveProfileHint, type ProfileHint } from './lib/profileHint';
   import { knownProfileHousehold, rememberProfileHousehold } from './lib/profileHouseholdHint';
   import {
@@ -1558,6 +1559,9 @@
     const status = session.model?.status;
     if (status?.kind === 'moved' && link) links.forgetMoved(link);
   });
+  $effect(() => {
+    if (session.updateRequired) requestReleaseCheck();
+  });
 
   // Concurrent first tabs can create different local keys. Open the winner, merge the losing library through the
   // winner's authority, then publish the new session in one assignment. Losing keys are recorded before any await:
@@ -1678,7 +1682,7 @@
       This library was opened by a newer version of Den. Update Den on this device, then reload to
       continue.
     </p>
-    <button type="button" onclick={() => location.reload()}>Reload Den</button>
+    <button type="button" onclick={() => reloadForUpdate()}>Reload Den</button>
   </section>
 {:else if !optimistic && profileCapability === 'checking'}
   <p class="profile-loading" role="status">Opening profiles…</p>

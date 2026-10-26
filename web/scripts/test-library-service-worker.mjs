@@ -39,6 +39,7 @@ const address = server.address();
 assert(address && typeof address === 'object');
 const origin = `http://127.0.0.1:${address.port}`;
 const workerPath = `/assets/${workerNames[0]}`;
+const sharedWorkerPath = workerPath;
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 let browser;
@@ -46,6 +47,8 @@ try {
   browser = await chromium.launch(executablePath ? { executablePath } : {});
   const context = await browser.newContext();
   const page = await context.newPage();
+  const cdp = await browser.newBrowserCDPSession();
+  await cdp.send('Target.setDiscoverTargets', { discover: true });
   await page.goto(`${origin}/blank.html`);
 
   const local = await page.evaluate(async (workerPath) => {
@@ -172,7 +175,87 @@ try {
     type: 'movie',
     id: 680,
   });
+  const shared = await page.evaluate(async (workerPath) => {
+    const libraryKey = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+    const open = () => {
+      const worker = new globalThis.SharedWorker(workerPath, {
+        type: 'module',
+        name: 'integration-library',
+      });
+      const pending = new Map();
+      const updates = new Map();
+      worker.port.addEventListener('message', (event) => {
+        if (!Array.isArray(event.data)) return;
+        for (const message of event.data) {
+          if (message.type === 'update') updates.set(message.subscriptionId, message.value);
+          const request = message.requestId && pending.get(message.requestId);
+          if (request) {
+            pending.delete(message.requestId);
+            if (message.type === request.expected) request.resolve(message);
+            else request.reject(message);
+          }
+        }
+      });
+      worker.port.start();
+      const send = (message, expected) =>
+        new Promise((resolve, reject) => {
+          pending.set(message.requestId, { resolve, reject, expected });
+          worker.port.postMessage(message);
+        });
+      return { worker, send, updates };
+    };
+    const first = open();
+    let request = 0;
+    let protocol = 0;
+    const message = (body) => ({ protocol, requestId: `shared-${++request}`, ...body });
+    const mismatch = await first.send(
+      message({ type: 'hello', clientId: 'one', libraryKey, wire: 4, mode: 'local' }),
+      'error',
+    );
+    protocol = mismatch.error.expectedProtocol;
+    const readyOne = await first.send(
+      message({ type: 'hello', clientId: 'one', libraryKey, wire: 4, mode: 'local' }),
+      'ready',
+    );
+    const second = open();
+    const readyTwo = await second.send(
+      message({ type: 'hello', clientId: 'two', libraryKey, wire: 4, mode: 'local' }),
+      'ready',
+    );
+    await first.send(
+      message({
+        type: 'command',
+        operationId: 'shared-add',
+        command: { kind: 'watchlist.add', title: { type: 'movie', id: 11 } },
+      }),
+      'command-result',
+    );
+    await second.send(
+      message({ type: 'subscribe', subscriptionId: 'overview', selection: { kind: 'overview' } }),
+      'subscribed',
+    );
+    first.worker.port.postMessage({ type: 'den-library-disconnect', protocol: 1 });
+    second.worker.port.postMessage({ type: 'den-library-disconnect', protocol: 1 });
+    return {
+      sameInstance: readyOne.version.instance === readyTwo.version.instance,
+      overview: second.updates.get('overview'),
+    };
+  }, sharedWorkerPath);
+  assert.equal(shared.sameInstance, true, 'two tabs did not attach to one shared authority');
+  assert.deepEqual(shared.overview.watchlist, [{ type: 'movie', id: 11 }]);
+  const targets = await cdp.send('Target.getTargets');
+  assert.equal(
+    targets.targetInfos.filter(
+      ({ type, url }) => type === 'shared_worker' && url.includes(workerNames[0]),
+    ).length,
+    1,
+    'expected exactly one SharedWorker target for two clients',
+  );
+  await cdp.detach();
   console.log('built library service worker: encrypted local reopen and selectors passed');
+  console.log(
+    'built shared library service worker: two clients shared one authority and selector passed',
+  );
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

@@ -43,8 +43,7 @@ async function start() {
       `This TV is missing Worker, IndexedDB${__DEN_TV_LEGACY_JS_CORE__ ? '' : ' or WebAssembly'} support required by Den.`,
     );
   }
-  // Booting while the app module loads, as the browser's entry does (`main.ts`): an LG reached the Worker only
-  // after the app module had evaluated, 1.75 s in, and the Worker's own load took another 0.9 s behind it.
+  // TVs retain the proven dedicated runtime; SharedWorker code is removed from their build by `__DEN_TV__`.
   startLibraryWorkers(openingWorkers());
   // The application is a separate download. Keep hardware Back/exit available on the starting screen too;
   // waiting for that chunk left an early Back unhandled (also reproducible while holding its request).

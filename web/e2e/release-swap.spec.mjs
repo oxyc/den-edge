@@ -31,11 +31,17 @@ test('a waiting release is put on screen by the next page opened, never mid-visi
 });
 
 // A release can replace the Worker/session lifecycle under an old Home document without making one of its
-// already-loaded chunks fail. The quiet shell probe finds that handoff first; the Continue Watching press then
-// loads the destination as a new document, so no retained route can keep running the superseded lifecycle.
-test('a newer shell puts a Continue Watching destination on the new release', async ({ page }) => {
+// already-loaded chunks fail. The quiet shell probe offers a persistent reload without interrupting playback,
+// editing or same-document navigation; accepting it loads the current route from the new shell.
+test('a newer shell is offered persistently and reloads only when accepted', async ({ page }) => {
   await guardNetwork(page);
   let releaseChecks = 0;
+  let deployed = false;
+  // Production removes the old release's non-retained assets. In dev each source module is a request, so turning
+  // this one into a post-deploy 404 proves the notice renderer was already admitted before the revision check.
+  await page.route('**/src/lib/updateNotice.ts*', (route) =>
+    deployed ? route.fulfill({ status: 404, body: 'old asset gone' }) : route.continue(),
+  );
   await page.route(`${E2E_ORIGIN}/test/router.html`, async (route) => {
     const response = await route.fetch();
     return route.fulfill({
@@ -80,12 +86,21 @@ test('a newer shell puts a Continue Watching destination on the new release', as
       import('/src/lib/diagnosticsReport.ts'),
       import('/src/lib/release.ts'),
     ]);
-    await watchRelease(loadRelease()).check();
+    window.denReleaseWatcher = watchRelease(loadRelease());
   });
+  deployed = true;
+  await page.evaluate(() => window.denReleaseWatcher.check());
 
   expect(releaseChecks).toBe(1);
   expect(await page.evaluate(() => window.denSameDocument)).toBe(true);
+  const notice = page.getByRole('status').filter({ hasText: 'Den was updated' });
+  await expect(notice).toBeVisible();
   await active.getByRole('link', { name: 'Verano azul' }).click();
+  await expect(page).toHaveURL(/\/tv\/6066-verano-azul$/);
+  expect(await page.evaluate(() => window.denSameDocument)).toBe(true);
+  await expect(notice).toBeVisible();
+
+  await notice.getByRole('button', { name: 'Reload' }).click();
   await expect(page.locator('#swapped')).toBeVisible();
   expect(new URL(page.url()).pathname).toBe('/tv/6066-verano-azul');
   expect(await page.evaluate(() => window.denSameDocument)).toBeUndefined();

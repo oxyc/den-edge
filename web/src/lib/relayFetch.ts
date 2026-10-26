@@ -95,6 +95,80 @@ export interface HeldGrant {
   secret: string;
 }
 
+/** Isolated relay authority for one SharedWorker port; no grant or membership crosses tab clients. */
+export class RelaySession {
+  #credential: string | null = null;
+  #libraryId: string | null = null;
+  readonly #grants = new Map<string, string>();
+  #ended?: (gid: string) => void;
+
+  membership(value: LibraryRelayMembership | null): void {
+    this.#credential = value ? `${value.libraryId}:${value.memberToken}` : null;
+    this.#libraryId = value?.libraryId ?? null;
+  }
+
+  configureGrants(grants: readonly HeldGrant[]): void {
+    this.#grants.clear();
+    for (const grant of grants) this.#grants.set(grant.gid, grant.secret);
+  }
+
+  onGrantEnded(listener: (gid: string) => void): void {
+    this.#ended = listener;
+  }
+
+  readonly fetch: typeof fetch = async (input, init) => {
+    const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const url = ours(href);
+    if (!url) return fetch(input, init);
+    let gid = GRANT_BASE.exec(url.pathname)?.[1];
+    if (!gid && OAUTH.test(url.pathname) && !this.#credential)
+      gid = this.#grants.keys().next().value;
+    if (!gid && remuxControl(url.pathname) && typeof init?.body === 'string') {
+      try {
+        const install = (JSON.parse(init.body) as { scout?: unknown }).scout;
+        const named = typeof install === 'string' ? GRANT_INSTALL.exec(install)?.[1] : undefined;
+        if (named && this.#grants.has(named)) gid = named;
+      } catch {
+        // The body names no usable shared install.
+      }
+    }
+    if (!gid && remuxControl(url.pathname) && !this.#credential)
+      gid = this.#grants.keys().next().value;
+    if (gid) {
+      const secret = this.#grants.get(gid);
+      if (!secret) throw new TypeError(`no secret held for grant ${gid}`);
+      const headers = new Headers(
+        init?.headers ?? (input instanceof Request ? input.headers : undefined),
+      );
+      headers.delete(MEMBER_HEADER);
+      headers.set(GRANT_HEADER, `${gid}:${secret}`);
+      const response = await fetch(input, { ...init, headers });
+      if (response.status === 410) {
+        const expired = await response
+          .clone()
+          .json()
+          .then((body: { error?: unknown } | null) => body?.error === 'grant_expired')
+          .catch(() => false);
+        if (expired) this.#ended?.(gid);
+      }
+      return response;
+    }
+    const sensitive =
+      RELAYED.some((path) => url.pathname.startsWith(path)) ||
+      remuxControl(url.pathname) ||
+      OAUTH.test(url.pathname) ||
+      ASSISTANT.test(url.pathname) ||
+      url.pathname === DEN_CONFIGURE_SESSION ||
+      (this.#libraryId !== null && HOST_GRANTS.exec(url.pathname)?.[1] === this.#libraryId);
+    if (!this.#credential || !sensitive) return fetch(input, init);
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    headers.set(MEMBER_HEADER, this.#credential);
+    return fetch(input, { ...init, headers });
+  };
+}
+
 function heldGrants(): HeldGrant[] {
   return [...grantSecrets].map(([gid, secret]) => ({ gid, secret }));
 }

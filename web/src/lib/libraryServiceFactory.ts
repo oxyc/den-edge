@@ -15,6 +15,8 @@ import {
   type LibraryServiceSupervisorOptions,
 } from './libraryServiceSupervisor';
 import { WorkerLibraryServiceTransport } from './libraryServiceWorkerTransport';
+import { AdaptiveLibraryServiceTransport } from './libraryServiceAdaptiveTransport';
+import type { LibraryServiceMultiplexTransport } from './libraryServiceMultiplexTransport';
 import {
   grantEndedElsewhere,
   holdLibraryRelayMembership,
@@ -38,6 +40,12 @@ const productionWorker = () => {
   offerSyncPolicy(worker);
   return worker;
 };
+
+const dedicatedTransport = (): LibraryServiceMultiplexTransport =>
+  new WorkerLibraryServiceTransport(productionWorker());
+
+const productionTransport = (): LibraryServiceMultiplexTransport =>
+  new AdaptiveLibraryServiceTransport(dedicatedTransport);
 
 // The production trace contained four dead generations before the fifth stayed up. Follow that bounded burst,
 // with a short pause between later generations, but never let one request manufacture Workers for 15 seconds.
@@ -98,7 +106,19 @@ export function createWorkerServiceConnection(
   startupTimeoutMs?: number,
   onLibraryOpening?: (opening: Promise<unknown>) => (() => void) | void,
 ): WorkerServiceConnection {
-  const transport = new WorkerLibraryServiceTransport(createWorker());
+  return createServiceConnection(
+    new WorkerLibraryServiceTransport(createWorker()),
+    startupTimeoutMs,
+    onLibraryOpening,
+  );
+}
+
+/** One runtime connection, independent of whether its edge is a Worker port or an in-tab loopback. */
+function createServiceConnection(
+  transport: LibraryServiceMultiplexTransport,
+  startupTimeoutMs?: number,
+  onLibraryOpening?: (opening: Promise<unknown>) => (() => void) | void,
+): WorkerServiceConnection {
   const content = new ContentServiceClient(transport.contentTransport(), undefined, false);
   // The Worker makes the content calls with its own relayFetch, whose grants start empty: it is handed the page's
   // before anything else is asked of it, and again on every change. Worker messages keep their order, so no query
@@ -432,12 +452,14 @@ class SessionContentService implements ContentServiceClientPort {
 export function createWorkerServiceSession(
   options: LibraryServiceFactoryOptions = {},
 ): WorkerServiceSession {
-  const createWorker = options.createWorker ?? productionWorker;
+  const createTransport = options.createWorker
+    ? () => new WorkerLibraryServiceTransport(options.createWorker!())
+    : productionTransport;
   let closed = false;
   const contentFacade: { current?: SessionContentService } = {};
   const connection = (reason: string) => {
-    const created = createWorkerServiceConnection(
-      createWorker,
+    const created = createServiceConnection(
+      createTransport(),
       options.startupTimeoutMs,
       (opening) => {
         contentFacade.current?.bootstrap(opening);

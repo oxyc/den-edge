@@ -201,6 +201,8 @@ export interface ContentAuthorityOptions {
   tmdbFetch?: BriefingFetch;
   providerFetch?: typeof fetch;
   now?: () => number;
+  configureGrants?: (grants: readonly { gid: string; secret: string }[]) => void;
+  onGrantEnded?: (listener: (gid: string) => void) => void;
 }
 
 interface AtlasTitleCursor {
@@ -305,6 +307,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   readonly #tmdbFetch: BriefingFetch;
   readonly #providerFetch: typeof fetch;
   readonly #now: () => number;
+  readonly #configureGrants: (grants: readonly { gid: string; secret: string }[]) => void;
   readonly #flights = new Map<string, Promise<unknown>>();
   readonly #atlasTitleCursors = new Map<string, AtlasTitleCursor>();
   readonly #imports: ContentImportAuthority;
@@ -318,13 +321,14 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     this.#tmdbFetch = options.tmdbFetch ?? tmdbFetch;
     this.#providerFetch = options.providerFetch ?? relayFetch;
     this.#now = options.now ?? Date.now;
+    this.#configureGrants = options.configureGrants ?? useHeldGrants;
     this.#imports = new ContentImportAuthority(() => this.#tmdbKey(), this.#tmdbFetch, this.#now);
     this.#stopThrottle = onTmdbThrottle(({ retryMs }) => {
       for (const listener of this.#statusListeners)
         listener({ kind: 'throttled', provider: 'tmdb', retryAfterMs: retryMs });
     });
     // The page holds the guest's grants and says when one ends; a `grant_expired` met here is told back to it.
-    onGrantEnded((gid) => {
+    (options.onGrantEnded ?? onGrantEnded)((gid) => {
       for (const listener of this.#statusListeners) listener({ kind: 'grant-ended', gid });
     });
   }
@@ -354,7 +358,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     }
     // Likewise the grants: a query sent after them must find them held.
     if (request.kind === 'grants.configure') {
-      useHeldGrants(request.grants);
+      this.#configureGrants(request.grants);
       return { kind: 'grants.configure' };
     }
     await this.#wait(this.credentials.ready?.() ?? Promise.resolve(), signal);
