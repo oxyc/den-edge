@@ -189,25 +189,49 @@ export const historyItemFromDocuments = (
   documents: readonly DocumentRow[],
   now: number,
 ): HistoryItem | undefined => {
-  const projections: HistoryDocumentProjection[] = [];
+  if (!documents.length) return undefined;
+  const ref = documents[0]!.title;
+  const key = titleKey(ref);
+  let title = undefined as
+    Extract<ReturnType<typeof projectDocument>[number], { kind: 'rec' }> | undefined;
   for (const document of documents) {
+    if (titleKey(document.title) !== key) continue;
     if (document.kind === 'title') {
       const [projected] = projectDocument(document, now);
-      if (projected?.kind === 'rec') projections.push({ kind: 'title', title: projected });
+      if (projected?.kind === 'rec') title = projected;
     }
-    if (document.kind !== 'season') continue;
-    const watched: number[] = [];
+  }
+
+  let episodes = 0;
+  let latest: { season: number; episode: number; at: number } | undefined;
+  const reset = title?.episodesReset;
+  for (const document of documents) {
+    if (document.kind !== 'season' || titleKey(document.title) !== key) continue;
     forEachProjectedEpisode(
       document,
       (episode) => {
-        if (episode.progress.value >= WATCHED)
-          watched.push(episode.episode, episode.progress.at[0]);
+        if (episode.progress.value < WATCHED || (reset && episode.progress.at[0] <= reset[0]))
+          return;
+        episodes++;
+        const at = episode.progress.at[0];
+        if (!latest || at > latest.at)
+          latest = { season: episode.season, episode: episode.episode, at };
       },
       now,
     );
-    projections.push(historySeasonProjection(document, watched));
   }
-  return historyItemFromProjections(projections);
+
+  // `watchedAt` is the first watch, so a later status stamp dates a re-watch; imported unknown dates remain zero.
+  const seenAt =
+    title?.status.value === 'watched' ? Math.max(title.watchedAt ?? 0, title.status.at[0], 0) : -1;
+  const watchedAt = Math.max(seenAt, latest ? Math.max(latest.at, 0) : -1);
+  if (watchedAt < 0 || (title?.deleted.value && title.deleted.at[0] >= watchedAt)) return undefined;
+  return {
+    title: { type: ref.type, id: ref.id },
+    watchedAt,
+    ...(latest ? { episode: { season: latest.season, episode: latest.episode } } : {}),
+    episodes,
+  };
 };
 
 /**

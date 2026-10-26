@@ -177,9 +177,11 @@ function facts(
 ): {
   selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>>;
   history: HistoryDocumentProjection | null;
+  reconsiderAt: number | null;
 } {
-  if (!row) return { selected: {}, history: null };
+  if (!row) return { selected: {}, history: null, reconsiderAt: null };
   const now = Date.now();
+  const reconsiderAt = newestSummary(row, now).reconsiderAt ?? null;
   // A season document is only ever Continue's input, so its episodes are folded one at a time instead of held.
   const season = isDocument(row) && row.kind === 'season' && !retainEpisodeProjection ? row : null;
   const rows = season ? [] : projected(row, now);
@@ -234,9 +236,9 @@ function facts(
     selected.continue = {
       schema: LIBRARY_FACT_SCHEMA,
       library: storedLibrary(folded),
-      reconsiderAt: newestSummary(row, now).reconsiderAt ?? null,
+      reconsiderAt,
     };
-  return { selected, history };
+  return { selected, history, reconsiderAt };
 }
 
 interface ImportedHistoryProjection {
@@ -503,13 +505,19 @@ export class LibraryFactStore {
     )
       return;
     const derived = await this.changes(generation, entries, options.retainEpisodeProjection);
-    const importedHistory =
-      !held || held.generation !== generation
-        ? new Map<string, ImportedHistoryProjection>()
-        : !held.complete && this.historyImport?.generation === generation
-          ? new Map(this.historyImport.documents)
+    const retainedHistory =
+      held?.generation === generation &&
+      !held.complete &&
+      this.historyImport?.generation === generation
+        ? this.historyImport.documents
+        : !held || held.generation !== generation
+          ? new Map<string, ImportedHistoryProjection>()
           : null;
-    if (importedHistory)
+    // Only the completing transaction needs a combined snapshot before it commits. Incomplete batches append to the
+    // retained map after their commit succeeds, avoiding a growing Map copy for every 64-document batch.
+    const importedHistory =
+      complete && retainedHistory ? new Map(retainedHistory) : retainedHistory;
+    if (complete && importedHistory)
       for (const entry of entries)
         importedHistory.set(
           entry.k,
@@ -534,11 +542,15 @@ export class LibraryFactStore {
       value: await sealLibraryLocalValue(this.key, manifestName, manifest),
     });
     await this.vault.commit(derived.changes);
-    this.historyImport = complete
-      ? undefined
-      : importedHistory
-        ? { generation, documents: importedHistory }
-        : undefined;
+    if (complete) this.historyImport = undefined;
+    else if (retainedHistory) {
+      for (const entry of entries)
+        retainedHistory.set(
+          entry.k,
+          derived.history.get(entry.k) ?? { projection: null, reconsiderAt: null },
+        );
+      this.historyImport = { generation, documents: retainedHistory };
+    } else this.historyImport = undefined;
     this.historyCache = undefined;
     noteLibraryFactCommit(entries.length);
     this.changed();
@@ -625,9 +637,7 @@ export class LibraryFactStore {
       const selected = derived.selected;
       history.set(entry.k, {
         projection: derived.history,
-        reconsiderAt: entry.row
-          ? (newestSummary(entry.row, Date.now()).reconsiderAt ?? null)
-          : null,
+        reconsiderAt: derived.reconsiderAt,
       });
       for (const capability of [
         'watchlist',
