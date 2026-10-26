@@ -428,6 +428,47 @@ test('large Home shelves publish and extend in viewport-sized tranches', async (
   await page.close();
 });
 
+test('paired Home paints its useful shelf before optional catalogue metadata evaluates', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => {
+    const id = Number(new URL(route.request().url()).pathname.match(/\/movie\/(\d+)$/)?.[1]);
+    return route.fulfill({
+      json: id
+        ? {
+            id,
+            title: `Movie ${id}`,
+            poster_path: '/poster.jpg',
+            release_date: '2026-01-01',
+            genre_ids: [18],
+          }
+        : { page: 1, total_pages: 1, results: [] },
+    });
+  });
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+  let releaseMetadata;
+  const metadataHeld = new Promise((resolve) => (releaseMetadata = resolve));
+  await page.route('**/src/lib/services.ts*', async (route) => {
+    await metadataHeld;
+    await route.continue();
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&many=24&unnamed-many`);
+  const useful = page.getByRole('region', { name: 'Continue Watching', exact: true });
+  await expect(useful.locator('.card').first()).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Trending This Week' })).toHaveCount(0);
+
+  releaseMetadata();
+  await expect(page.getByRole('region', { name: 'Trending This Week' })).toBeAttached();
+});
+
 // Home keeps completed downloads visible until the shared queue removes them. Newest-first queue order
 // deliberately puts the ready and failed items before the active one, so the shelf must group active first.
 test('Home downloads survive completion, order active first, and omit unavailable items', async ({

@@ -8,7 +8,9 @@ import { parseRoute } from './route';
 import {
   startupCounts,
   startupLibraryWorkers,
+  startupLongTaskPhases,
   startupLongTasks,
+  type StartupLongTaskPhase,
   type LibraryWorkerRole,
   type LibraryWorkerStartup,
   startupMilestone,
@@ -212,6 +214,8 @@ export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: Browse
   workerFiles?: FileTally;
   /** The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`. */
   longTasks?: [number, number, number];
+  /** The same tally by a fixed, privacy-safe startup/render phase. */
+  longTaskPhases?: Partial<Record<StartupLongTaskPhase, [number, number, number]>>;
   /**
    * What each library Worker's open did, by the library it serves: whether it drew from saved views, why it opened
    * the whole log after all, and when it asked for den-core. A household with profiles opens two.
@@ -317,6 +321,8 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
   if (workerFiles) report.workerFiles = workerFiles;
   const longTasks = startupLongTasks();
   if (longTasks[0]) report.longTasks = longTasks;
+  const longTaskPhases = Object.fromEntries(startupLongTaskPhases());
+  if (Object.keys(longTaskPhases).length) report.longTaskPhases = longTaskPhases;
   const libraryWorkers = startupLibraryWorkers();
   if (Object.keys(libraryWorkers).length) report.libraryWorkers = libraryWorkers;
   return report;

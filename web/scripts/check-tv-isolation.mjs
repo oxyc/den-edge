@@ -64,7 +64,10 @@ if (process.argv.includes('--capture')) {
   // existing worker artifact. It removes one whole 149 KiB-gzip worker realm for every additional same-library tab
   // and measured about 49% less two-tab worker heap. Allow 6 KiB for that reviewed root-level saving; TV builds
   // compile the broker and transport out, and the initial browser ceiling remains unchanged.
+  // Home startup phase attribution and deferring the service/catalogue implementation add 2.3 KiB to the complete
+  // lazy graph versus their base, while removing 2.5 KiB from the initial graph. Give that reviewed split one KiB
+  // of remaining ceiling; its optional chunk is fetched only after the first personal shelf has painted.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 30720) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 31744) throw new Error('Browser total JS/CSS budget exceeded');
 }

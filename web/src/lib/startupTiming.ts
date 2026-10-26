@@ -165,6 +165,35 @@ function noteLibrary(note: LibraryWorkerStartup): void {
 }
 /** The page's main thread blocked for 50 ms or more at a time (`longtask`): how often, how long in all, the longest. */
 const longTasks = { count: 0, ms: 0, longest: 0 };
+export const STARTUP_LONG_TASK_PHASES = [
+  'bootstrap',
+  'home_shelves',
+  'home_metadata',
+  'home_hero',
+  'other',
+] as const;
+export type StartupLongTaskPhase = (typeof STARTUP_LONG_TASK_PHASES)[number];
+type LongTaskTally = [count: number, milliseconds: number, longest: number];
+const longTaskPhases = new Map<StartupLongTaskPhase, LongTaskTally>();
+const phaseWindows: Array<{
+  phase: Exclude<StartupLongTaskPhase, 'other'>;
+  start: number;
+  end?: number;
+}> = [];
+
+/** Attribute a bounded state transition through its next paint, without titles, ids, routes or URLs. */
+export function startupRenderPhase(phase: Exclude<StartupLongTaskPhase, 'other'>): void {
+  if (inWorker || typeof requestAnimationFrame !== 'function') return;
+  if (phaseWindows.some((window) => window.phase === phase && window.end === undefined)) return;
+  const window = { phase, start: performance.now(), end: undefined as number | undefined };
+  phaseWindows.push(window);
+  if (phaseWindows.length > 32) phaseWindows.shift();
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      window.end = performance.now();
+    }),
+  );
+}
 
 if (channel && !inWorker)
   channel.onmessage = ({ data: message }: MessageEvent<Relayed>) => {
@@ -203,10 +232,26 @@ if (typeof PerformanceObserver === 'function') {
       }),
     );
   if (!inWorker)
-    observe('longtask', ({ duration }) => {
+    observe('longtask', ({ startTime, duration }) => {
       longTasks.count++;
-      longTasks.ms += Math.round(duration);
-      longTasks.longest = Math.max(longTasks.longest, Math.round(duration));
+      const rounded = Math.round(duration);
+      longTasks.ms += rounded;
+      longTasks.longest = Math.max(longTasks.longest, rounded);
+      const ended = startTime + duration;
+      const owner =
+        phaseWindows
+          .map((window) => ({
+            phase: window.phase,
+            overlap:
+              Math.min(ended, window.end ?? performance.now()) - Math.max(startTime, window.start),
+          }))
+          .filter(({ overlap }) => overlap > 0)
+          .sort((left, right) => right.overlap - left.overlap)[0]?.phase ?? 'other';
+      const tally = longTaskPhases.get(owner) ?? [0, 0, 0];
+      tally[0]++;
+      tally[1] += rounded;
+      tally[2] = Math.max(tally[2], rounded);
+      longTaskPhases.set(owner, tally);
     });
 }
 
@@ -231,6 +276,10 @@ export const startupLongTasks = (): [number, number, number] => [
   longTasks.ms,
   longTasks.longest,
 ];
+
+/** Long tasks grouped by the fixed startup phase that caused their task/render flush. */
+export const startupLongTaskPhases = (): ReadonlyMap<StartupLongTaskPhase, LongTaskTally> =>
+  longTaskPhases;
 
 /** A failure reduced to its code and a bounded message; never the request, url or payload behind it. */
 export function startupFailure(error: unknown): string {

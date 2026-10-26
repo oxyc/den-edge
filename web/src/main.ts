@@ -2,7 +2,7 @@
 // application module is preloaded from index.html, so this changes CPU admission rather than adding a network chain.
 import './app.css';
 import { openingLibraryIdentity } from './lib/openingLibraryIdentity';
-import { startupMark } from './lib/startupTiming';
+import { startupMark, startupRenderPhase } from './lib/startupTiming';
 
 startupMark('page boot');
 // Desktop used to fetch and compile its DedicatedWorker beside the app module. Preserve that overlap for a browser
@@ -15,6 +15,7 @@ if (!__DEN_TV__ && !import.meta.env.DEN_E2E) {
       .catch(() => undefined);
 }
 const start = () => {
+  startupRenderPhase('bootstrap');
   startupMark('app module requested');
   void import('./appMain');
 };
