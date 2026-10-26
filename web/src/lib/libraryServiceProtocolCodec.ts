@@ -510,7 +510,7 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
       'hideWatched',
       'minReleaseYear',
       'audioLanguage',
-      'subtitleLanguage',
+      'subtitlePreference',
       'shownSubtitleLanguages',
       'subtitlesPerLanguage',
       'autoSkipSegments',
@@ -546,8 +546,15 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
     optional(value.audioLanguage, (candidate): candidate is string | null =>
       nullable(candidate, languageCode),
     ) &&
-    optional(value.subtitleLanguage, (candidate): candidate is string | null =>
-      nullable(candidate, languageCode),
+    optional(
+      value.subtitlePreference,
+      (candidate): candidate is LibraryPreferencesPatch['subtitlePreference'] =>
+        record(candidate) &&
+        ((exact(candidate, ['mode']) &&
+          (candidate.mode === 'automatic' || candidate.mode === 'off')) ||
+          (exact(candidate, ['mode', 'language']) &&
+            candidate.mode === 'language' &&
+            languageCode(candidate.language))),
     ) &&
     (shownSubtitleLanguages === undefined ||
       (list(shownSubtitleLanguages, languageCode, 256) && unique(shownSubtitleLanguages))) &&
@@ -1448,6 +1455,7 @@ function preferencesView(value: unknown): boolean {
       'minReleaseYear',
       'audioLanguage',
       'subtitleLanguage',
+      'hasExplicitSubtitlePreference',
       'shownSubtitleLanguages',
       'subtitlesPerLanguage',
       'autoSkipSegments',
@@ -1480,6 +1488,7 @@ function preferencesView(value: unknown): boolean {
         value.minReleaseYear <= 3000)) &&
     optional(value.audioLanguage, languageCode) &&
     optional(value.subtitleLanguage, languageCode) &&
+    optional(value.hasExplicitSubtitlePreference, bool) &&
     list(shownSubtitleLanguages, languageCode, 256) &&
     unique(shownSubtitleLanguages) &&
     integer(value.subtitlesPerLanguage) &&

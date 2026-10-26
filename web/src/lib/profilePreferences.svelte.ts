@@ -32,6 +32,7 @@ const personalDefaults = (): PersonalPreferences => ({
   minReleaseYear: undefined,
   audioLanguage: undefined,
   subtitleLanguage: undefined,
+  hasExplicitSubtitlePreference: false,
   shownSubtitleLanguages: [],
   subtitlesPerLanguage: 3,
   autoSkipSegments: false,
@@ -67,6 +68,10 @@ const readPersonal = (value: unknown): PersonalPreferences => {
       typeof stored.subtitleLanguage === 'string'
         ? stored.subtitleLanguage
         : defaults.subtitleLanguage,
+    hasExplicitSubtitlePreference:
+      typeof stored.hasExplicitSubtitlePreference === 'boolean'
+        ? stored.hasExplicitSubtitlePreference
+        : typeof stored.subtitleLanguage === 'string',
     shownSubtitleLanguages:
       strings(stored.shownSubtitleLanguages) ?? defaults.shownSubtitleLanguages,
     subtitlesPerLanguage:
@@ -131,8 +136,11 @@ const applyPersonalPatch = (
   if (patch.hideWatched !== undefined) next.hideWatched = patch.hideWatched;
   if (patch.minReleaseYear !== undefined) next.minReleaseYear = patch.minReleaseYear ?? undefined;
   if (patch.audioLanguage !== undefined) next.audioLanguage = patch.audioLanguage ?? undefined;
-  if (patch.subtitleLanguage !== undefined)
-    next.subtitleLanguage = patch.subtitleLanguage ?? undefined;
+  if (patch.subtitlePreference !== undefined) {
+    next.hasExplicitSubtitlePreference = patch.subtitlePreference.mode !== 'automatic';
+    next.subtitleLanguage =
+      patch.subtitlePreference.mode === 'language' ? patch.subtitlePreference.language : undefined;
+  }
   if (patch.shownSubtitleLanguages) next.shownSubtitleLanguages = [...patch.shownSubtitleLanguages];
   if (patch.subtitlesPerLanguage !== undefined)
     next.subtitlesPerLanguage = patch.subtitlesPerLanguage;

@@ -188,8 +188,8 @@
     subtitles: string[];
     /** Settings › Playback's audio language (ISO 639-1); undefined is each title's original language. */
     audioLanguage?: string;
-    /** Its subtitle language; undefined is off. */
-    subtitleLanguage?: string;
+    /** Its subtitle language; undefined is Automatic, null is explicit Off. */
+    subtitleLanguage?: string | null;
     /** Settings › Content's visible subtitle languages, offered in the picker beside the chosen one. */
     shownSubtitleLanguages?: readonly string[];
     /** Settings › Content's OpenSubtitles rows per language. Zero means all; built-in tracks are never capped. */
@@ -999,7 +999,11 @@
       imdb = found;
     }
     const { audio, subtitleLanguages } = wantedLanguages(
-      { audio: audioLanguage, subtitle: subtitleLanguage, shownSubtitles: shownSubtitleLanguages },
+      {
+        audio: audioLanguage,
+        subtitle: subtitleLanguage ?? undefined,
+        shownSubtitles: shownSubtitleLanguages,
+      },
       title.originalLanguage,
       navigator.languages,
     );

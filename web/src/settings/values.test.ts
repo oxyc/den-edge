@@ -38,6 +38,7 @@ describe('synced prefs', () => {
       minReleaseYear: undefined,
       audioLanguage: undefined,
       subtitleLanguage: undefined,
+      hasExplicitSubtitlePreference: false,
       shownSubtitleLanguages: [],
       subtitlesPerLanguage: 3,
       autoSkipSegments: false,
@@ -110,9 +111,38 @@ describe('synced prefs', () => {
     expect(change.minReleaseYear(Number.NaN)).toEqual({ 'den.minReleaseYear': null });
     expect(change.watchRegion(undefined)).toEqual({ 'den.watchRegion': null });
     expect(change.minReleaseYear(undefined)).toEqual({ 'den.minReleaseYear': null });
-    expect(change.subtitleLanguage(undefined)).toEqual({ 'den.preferredSubtitleLanguage': null });
+    expect(change.subtitlePreference({ mode: 'off' })).toEqual({
+      'den.preferredSubtitleLanguage': null,
+      'den.hasExplicitSubtitlePreference': { bool: true },
+    });
     expect(toggled(['a', 'b'], 'a', false)).toEqual(['b']);
     expect(toggled(['b'], 'a', true)).toEqual(['b', 'a']);
+  });
+
+  it('keeps Automatic, explicit Off, language, and stale-Web Off distinct', () => {
+    expect(readSyncedPrefs(row({}))).toMatchObject({
+      subtitleLanguage: undefined,
+      hasExplicitSubtitlePreference: false,
+    });
+    expect(
+      readSyncedPrefs(
+        row({
+          'den.preferredSubtitleLanguage': { value: null, at },
+          'den.hasExplicitSubtitlePreference': { value: { bool: true }, at },
+        }),
+      ),
+    ).toMatchObject({ subtitleLanguage: undefined, hasExplicitSubtitlePreference: true });
+    expect(
+      readSyncedPrefs(
+        row({
+          'den.preferredSubtitleLanguage': { value: { string: 'sv' }, at },
+          'den.hasExplicitSubtitlePreference': { value: { bool: true }, at },
+        }),
+      ),
+    ).toMatchObject({ subtitleLanguage: 'sv', hasExplicitSubtitlePreference: true });
+    expect(
+      readSyncedPrefs(row({ 'den.preferredSubtitleLanguage': { value: null, at } })),
+    ).toMatchObject({ subtitleLanguage: undefined, hasExplicitSubtitlePreference: true });
   });
 
   it('reads the parental limit, anything but pg13 or r as none', () => {

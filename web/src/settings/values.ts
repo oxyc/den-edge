@@ -5,6 +5,8 @@
 import { RATING_SOURCES } from './catalogs';
 import { parseServicePicks, type ServicePick } from '../lib/prefs';
 import type { ConfigValue, SettingsRow } from '../lib/wire';
+import { readSubtitlePreference, writeSubtitlePreference } from '../lib/subtitlePreference';
+import type { SubtitlePreference } from '../lib/subtitlePreference';
 
 export interface SyncedPrefs {
   excludedGenres: number[];
@@ -16,6 +18,8 @@ export interface SyncedPrefs {
   audioLanguage?: string;
   /** ISO 639-1; undefined is off. */
   subtitleLanguage?: string;
+  /** False is Automatic; true with no language is explicitly Off. */
+  hasExplicitSubtitlePreference: boolean;
   /** Empty shows every language. */
   shownSubtitleLanguages: string[];
   /** 0 keeps every track. */
@@ -68,6 +72,7 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
   const ceiling = string('den.maturityCeiling');
   const sources = strings('den.enabledRatingSources');
   const serviceValue = value('den.myServicePicks');
+  const subtitle = readSubtitlePreference(row);
   return {
     excludedGenres: genres && 'ints' in genres ? genres.ints : [],
     excludedLanguages: strings('den.excludedLanguages') ?? [],
@@ -75,7 +80,8 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
     hideWatched: bool('den.hideWatched') ?? false,
     minReleaseYear: int('den.minReleaseYear'),
     audioLanguage: string('den.preferredAudioLanguage'),
-    subtitleLanguage: string('den.preferredSubtitleLanguage'),
+    subtitleLanguage: subtitle.mode === 'language' ? subtitle.language : undefined,
+    hasExplicitSubtitlePreference: subtitle.mode !== 'automatic',
     shownSubtitleLanguages: strings('den.shownSubtitleLanguages') ?? [],
     subtitlesPerLanguage: Math.max(0, int('den.maxSubtitlesPerLanguage') ?? 3),
     autoSkipSegments: bool('den.autoSkipSegments') ?? false,
@@ -342,9 +348,7 @@ export const change = {
   audioLanguage: (code: string | undefined): PrefChanges => ({
     'den.preferredAudioLanguage': code ? { string: code } : null,
   }),
-  subtitleLanguage: (code: string | undefined): PrefChanges => ({
-    'den.preferredSubtitleLanguage': code ? { string: code } : null,
-  }),
+  subtitlePreference: (choice: SubtitlePreference): PrefChanges => writeSubtitlePreference(choice),
   shownSubtitleLanguages: (codes: Iterable<string>): PrefChanges => ({
     'den.shownSubtitleLanguages': sortedStrings(codes),
   }),

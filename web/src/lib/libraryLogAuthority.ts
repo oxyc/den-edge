@@ -2081,11 +2081,8 @@ export class LibraryLogAuthority {
       Object.assign(changes, preferenceChange.minReleaseYear(patch.minReleaseYear ?? undefined));
     if (patch.audioLanguage !== undefined)
       Object.assign(changes, preferenceChange.audioLanguage(patch.audioLanguage ?? undefined));
-    if (patch.subtitleLanguage !== undefined)
-      Object.assign(
-        changes,
-        preferenceChange.subtitleLanguage(patch.subtitleLanguage ?? undefined),
-      );
+    if (patch.subtitlePreference !== undefined)
+      Object.assign(changes, preferenceChange.subtitlePreference(patch.subtitlePreference));
     if (patch.shownSubtitleLanguages !== undefined)
       Object.assign(changes, preferenceChange.shownSubtitleLanguages(patch.shownSubtitleLanguages));
     if (patch.subtitlesPerLanguage !== undefined)

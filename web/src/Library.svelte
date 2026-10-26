@@ -1354,6 +1354,7 @@
     return {
       audioLanguage: value?.audioLanguage,
       subtitleLanguage: value?.subtitleLanguage,
+      hasExplicitSubtitlePreference: value?.hasExplicitSubtitlePreference ?? false,
       shownSubtitleLanguages: value?.shownSubtitleLanguages ?? [],
       maxSubtitlesPerLanguage: value?.subtitlesPerLanguage ?? 3,
       autoSkipSegments: value?.autoSkipSegments ?? false,
@@ -2433,7 +2434,9 @@
         (install) => !!sharedInstallOf(install) === guestSource,
       )}
       audioLanguage={playbackPrefs.audioLanguage}
-      subtitleLanguage={playbackPrefs.subtitleLanguage}
+      subtitleLanguage={playbackPrefs.hasExplicitSubtitlePreference
+        ? (playbackPrefs.subtitleLanguage ?? null)
+        : undefined}
       shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
       maxSubtitlesPerLanguage={playbackPrefs.maxSubtitlesPerLanguage}
       autoSkip={playbackPrefs.autoSkipSegments}

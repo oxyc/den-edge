@@ -5,6 +5,7 @@ import type {
   ServiceRef,
 } from '../lib/libraryServiceProtocol';
 import type { Immutable } from '../lib/libraryModel.svelte';
+import type { SubtitlePreference } from '../lib/subtitlePreference';
 
 export type SettingsPreferences = Immutable<LibraryPreferences>;
 export type PreferenceChanges = LibraryPreferencesPatch;
@@ -52,8 +53,8 @@ export const preferenceChange = {
   audioLanguage: (audioLanguage: string | undefined): PreferenceChanges => ({
     audioLanguage: audioLanguage || null,
   }),
-  subtitleLanguage: (subtitleLanguage: string | undefined): PreferenceChanges => ({
-    subtitleLanguage: subtitleLanguage || null,
+  subtitlePreference: (subtitlePreference: SubtitlePreference): PreferenceChanges => ({
+    subtitlePreference,
   }),
   shownSubtitleLanguages: (values: Iterable<string>): PreferenceChanges => ({
     shownSubtitleLanguages: [...new Set(values)].sort(),
