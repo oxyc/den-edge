@@ -3,6 +3,7 @@ import { appPath, routeKey as pageRouteKey } from '../lib/navigation';
 import { parseRoute } from '../lib/route';
 import { currentAppPath } from '../lib/runtimeUrl';
 import { SearchScreen } from '../lib/screens.svelte';
+import { beginStartupRenderPhase } from '../lib/startupTiming';
 import { exitTvApp } from './platform';
 import {
   activeDialog,
@@ -21,6 +22,9 @@ const move = (
   direction: Parameters<typeof moveFocus>[0],
   include?: Parameters<typeof moveFocus>[1],
 ) => moveFocus(direction, include, 'auto');
+
+/** A real touch digit, unlike a Magic Remote's coarse pointer, needs Search ready inside its activating tap. */
+export const touchNeedsSearchPreload = (touchPoints: number): boolean => touchPoints > 0;
 
 /* A title page is entered to act on the title. Its primary action is deliberately first in DOM order; when Play is
    unavailable, the first remaining pill is the honest fallback. Scope this to the active retained route so a
@@ -173,21 +177,27 @@ export function installTVNavigation(): () => void {
   // the same useful preload intent. This whole module is absent from the normal browser build.
   let searchPreload: Promise<void> | undefined;
   const preloadSearch = () => {
-    searchPreload ??= SearchScreen.load().then(() => {
-      // The touch contract is meaningful only after its existing coarse-pointer preload has completed. Expose a
-      // one-shot event so the strict browser regression can begin at that boundary without delaying production.
-      document.dispatchEvent(new Event('den:tv-search-preloaded'));
-    });
+    if (!searchPreload) {
+      const loaded = beginStartupRenderPhase('tv_search');
+      searchPreload = SearchScreen.load().then(() => {
+        loaded();
+        // Expose a one-shot event so the strict browser regression can begin at that boundary without delaying
+        // production. Pointer and remote focus intent use this same path.
+        document.dispatchEvent(new Event('den:tv-search-preloaded'));
+      });
+    }
     return searchPreload;
   };
-  if (matchMedia('(pointer: coarse)').matches) void preloadSearch();
-  const searchButton = (event: Event) =>
-    event.target instanceof Element ? event.target.closest('.tv-search-button') : null;
+  // Magic Remote and ordinary TV remotes report a coarse pointer too, but have no software keyboard activation to
+  // preserve. Only an actual touch digit needs Search ready before its first tap; remote focus remains intent.
+  if (touchNeedsSearchPreload(navigator.maxTouchPoints)) void preloadSearch();
+  const searchButton = (target: EventTarget | null) =>
+    target instanceof Element ? target.closest('.tv-search-button') : null;
   const prepareSearch = (event: Event) => {
-    if (searchButton(event)) void preloadSearch();
+    if (searchButton(event.target)) void preloadSearch();
   };
   const focusSearchDuringActivation = (event: Event) => {
-    if (!searchButton(event)) return;
+    if (!searchButton(event.target)) return;
     flushSync();
     document
       .querySelector<HTMLInputElement>('[data-route-page][data-active="true"] .tv-search-input')
@@ -283,6 +293,8 @@ export function installTVNavigation(): () => void {
     pendingRestores.clear();
     window.dispatchEvent(new Event('den:tv-input'));
     let target = event.target instanceof Element ? event.target : null;
+    // Initial focus restoration may land on Search without expressing intent. A real remote press on it does.
+    if (searchButton(target)) void preloadSearch();
     const direction = (
       { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as const
     )[event.key];
@@ -418,6 +430,7 @@ export function installTVNavigation(): () => void {
           ? (candidate: HTMLElement) => !candidate.closest('.tv-bar')
           : undefined;
       if (move(direction, contentOnly)) {
+        if (searchButton(document.activeElement)) void preloadSearch();
         event.preventDefault();
         event.stopImmediatePropagation();
       } else if (direction === 'up' && scrollY > 8) {
@@ -520,7 +533,6 @@ export function installTVNavigation(): () => void {
   document.addEventListener('den:navigate', routeChanged);
   document.addEventListener('click', prepareDetailEntry, true);
   document.addEventListener('focusin', onFocus);
-  document.addEventListener('focusin', prepareSearch);
   document.addEventListener('pointerdown', prepareSearch);
   document.addEventListener('click', focusSearchDuringActivation);
   document.documentElement.classList.add('den-tv');
@@ -532,7 +544,6 @@ export function installTVNavigation(): () => void {
     document.removeEventListener('den:navigate', routeChanged);
     document.removeEventListener('click', prepareDetailEntry, true);
     document.removeEventListener('focusin', onFocus);
-    document.removeEventListener('focusin', prepareSearch);
     document.removeEventListener('pointerdown', prepareSearch);
     document.removeEventListener('click', focusSearchDuringActivation);
     for (const stop of pendingRestores) stop();

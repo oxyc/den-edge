@@ -1,12 +1,19 @@
+import { beginStartupRenderPhase } from './startupTiming';
+
 /** Keep browser toolbar/keyboard height changes from resizing a touch viewport's hero mid-scroll. */
-export function stableViewportHeight(node: HTMLElement) {
+export function stableViewportHeight(node: HTMLElement, fixedViewport = __DEN_TV__) {
+  // Packaged TVs have a fixed viewport and no browser toolbar or software keyboard resizing it. Reading computed
+  // style here only forces a layout over the newly mounted hero, for a value its CSS fallback already supplies.
+  if (fixedViewport) return { destroy() {} };
   const previous = node.style.getPropertyValue('--stable-hero-height');
   let width = window.innerWidth;
   const touchViewport = matchMedia('(pointer: coarse)');
   const measure = () => {
+    const measured = beginStartupRenderPhase('viewport_measure');
     node.style.removeProperty('--stable-hero-height');
     const height = getComputedStyle(node).minHeight;
     node.style.setProperty('--stable-hero-height', height);
+    measured();
   };
   const resized = () => {
     // Rotation and split-view change width. Height-only changes on touch browsers are usually

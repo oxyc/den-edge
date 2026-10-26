@@ -20,7 +20,7 @@ import {
 import { legacyPath } from './lib/route';
 import { currentAppPath } from './lib/runtimeUrl';
 import { isOptionalImportFailure } from './lib/keyboardNavigation';
-import { startupMark } from './lib/startupTiming';
+import { beginStartupRenderPhase, startupMark } from './lib/startupTiming';
 
 // From `app module requested` to here: the application's download, parse and evaluation.
 startupMark('app module evaluated');
@@ -123,9 +123,11 @@ if (phoned) {
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');
 // The built page arrives with the navigation bar already drawn (`shell.ts`); the app's own replaces it.
+const appMounted = beginStartupRenderPhase('app_mount');
 target.replaceChildren();
 mount(App, { target });
 startupMark('app mounted');
+appMounted();
 
 // A tab open since before a release can ask for a chunk den-edge no longer has (its image only ever carries the
 // current build's `/web`), so a newer release is waiting; this reloads onto it at once, whole page or not, when
