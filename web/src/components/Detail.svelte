@@ -125,6 +125,8 @@
       episode?: { season: number; episode: number };
       device?: string;
       deviceId?: string;
+      /** Fresh enough for pause/seek; retained ten-minute leases offer Resume only. */
+      active?: boolean;
       playing: boolean;
       fraction?: number;
     };
@@ -990,6 +992,7 @@
               clock={live?.clock}
               device={live?.device}
               playing={transportPlaying}
+              seekable={live?.active === true}
               busy={transportBusy}
               onactivate={(event) =>
                 activateLinkInPlace(event, () =>

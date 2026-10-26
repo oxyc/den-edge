@@ -10,6 +10,7 @@
     clock,
     device,
     playing = false,
+    seekable = true,
     busy = false,
     onactivate,
     ontransport,
@@ -21,6 +22,8 @@
     clock?: string;
     device?: string;
     playing?: boolean;
+    /** False for a retained ten-minute Resume lease: only Resume is safe until fresh activity returns. */
+    seekable?: boolean;
     busy?: boolean;
     onactivate: (event: MouseEvent) => void;
     ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => void;
@@ -57,19 +60,21 @@
 
   {#if ontransport}
     <div class="remote-transport">
-      <button
-        class="seek"
-        type="button"
-        disabled={busy}
-        aria-label="Skip back 10 seconds"
-        title="Back 10 seconds"
-        onclick={() => ontransport('skip', -10)}
-      >
-        <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-          <path d="M17 13H9v-8M10 13a17 17 0 1 1-2 17" />
-          <text x="24" y="29">10</text>
-        </svg></button
-      >
+      {#if seekable}
+        <button
+          class="seek"
+          type="button"
+          disabled={busy}
+          aria-label="Skip back 10 seconds"
+          title="Back 10 seconds"
+          onclick={() => ontransport('skip', -10)}
+        >
+          <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+            <path d="M17 13H9v-8M10 13a17 17 0 1 1-2 17" />
+            <text x="24" y="29">10</text>
+          </svg></button
+        >
+      {/if}
       <button
         class="play-pause"
         type="button"
@@ -80,19 +85,21 @@
       >
         <ButtonIcon name={playing ? 'pause' : 'play'} filled={!playing} />
       </button>
-      <button
-        class="seek"
-        type="button"
-        disabled={busy}
-        aria-label="Skip forward 10 seconds"
-        title="Forward 10 seconds"
-        onclick={() => ontransport('skip', 10)}
-      >
-        <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-          <path d="M31 13h8v-8M38 13a17 17 0 1 0 2 17" />
-          <text x="24" y="29">10</text>
-        </svg></button
-      >
+      {#if seekable}
+        <button
+          class="seek"
+          type="button"
+          disabled={busy}
+          aria-label="Skip forward 10 seconds"
+          title="Forward 10 seconds"
+          onclick={() => ontransport('skip', 10)}
+        >
+          <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+            <path d="M31 13h8v-8M38 13a17 17 0 1 0 2 17" />
+            <text x="24" y="29">10</text>
+          </svg></button
+        >
+      {/if}
     </div>
   {/if}
 </div>
