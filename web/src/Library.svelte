@@ -2610,8 +2610,8 @@
         <!-- Keep Home scrollable while its optional catalogue code waits behind the first useful paint. Reusing the
              real shelf placeholder preserves geometry without parsing or mounting Browse's loaders. -->
         <div aria-hidden="true" data-pending-catalogue>
-          <PendingPosterRow heading="Browse" />
-          <PendingPosterRow heading="More to explore" />
+          <PendingPosterRow heading="Browse" shelf={false} />
+          <PendingPosterRow heading="More to explore" shelf={false} />
         </div>
       {/if}
     {/if}
