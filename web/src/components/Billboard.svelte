@@ -17,7 +17,7 @@
   import { leavesBillboard, nextSlide, type SlideAction } from '../lib/billboardActions';
   import type { TitleRow } from '../lib/wire';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
-  import type { TitleDetail } from '../lib/detail';
+  import type { TitleHero } from '../lib/detail';
   import { billboardFacts } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import {
@@ -87,7 +87,7 @@
     /** The first slide's details were asked for and have answered (or failed): its text is as drawn as it will be. */
     ondetail?: () => void;
     /** Preserve bounded static copy for this retained lead's next parser-time paint. */
-    onretained?: (title: RecommendedTitle, detail: TitleDetail) => void;
+    onretained?: (title: RecommendedTitle, detail: TitleHero) => void;
     /**
      * Called when the rail reaches another title. Return true after replacing `titles` with that title at index
      * zero; Billboard then snaps the rebased rail to zero without exposing another slide between the two lists.
@@ -163,7 +163,7 @@
   }
 
   // Details arrive per slide and are kept, so coming back to one shows it at once.
-  let known = $state(new Map<string, TitleDetail>());
+  let known = $state(new Map<string, TitleHero>());
 
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight deduplication must not retrigger the effect that schedules lookups.
   const learning = new Set<string>();
@@ -177,12 +177,12 @@
     try {
       const answer = await content
         .query({
-          kind: 'title.detail',
+          kind: 'title.hero',
           title: { type: title.type, id: title.id },
           region: 'US',
         })
         .catch(() => null);
-      const found = answer?.detail.state === 'ready' ? answer.detail.value : null;
+      const found = answer?.hero.state === 'ready' ? answer.hero.value : null;
       if (found) {
         // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Publish one completed immutable map through the existing state assignment.
         known = new Map(known).set(key, found);
@@ -1501,6 +1501,16 @@
     font-size: 15px;
     line-height: 1.4;
     max-block-size: 4.2em;
+  }
+
+  /* A filter rasterizes each text box on older TV engines. The visually equivalent tight text shadow keeps
+     those glyphs in the normal paint path; browsers retain the post-clamp filter treatment above. */
+  :global(.den-tv) h2,
+  :global(.den-tv) .reason,
+  :global(.den-tv) .facts,
+  :global(.den-tv) .overview {
+    filter: none;
+    text-shadow: 0 1px 2px rgb(0 0 0 / 0.8);
   }
 
   .actions {

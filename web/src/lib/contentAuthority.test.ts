@@ -530,6 +530,78 @@ describe('ContentAuthority', () => {
     expect(JSON.stringify(left)).not.toContain('private-tmdb-key');
   });
 
+  it('projects a hero and a full detail from one provider read without shrinking the cached detail', async () => {
+    let answer!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => (answer = resolve));
+    const tmdbFetch = vi.fn(() => pending);
+    const authority = new ContentAuthority(credentials({ tmdb: 'key' }), { tmdbFetch });
+    const signal = new AbortController().signal;
+
+    const hero = authority.query(
+      { kind: 'title.hero', title: { type: 'movie', id: 550 }, region: 'US' },
+      signal,
+    );
+    const full = authority.query(
+      { kind: 'title.detail', title: { type: 'movie', id: 550 }, region: 'us' },
+      signal,
+    );
+    await expect.poll(() => tmdbFetch.mock.calls.length).toBe(1);
+
+    answer(
+      json({
+        id: 550,
+        title: 'Fight Club',
+        release_date: '1999-10-15',
+        overview: 'An insomniac meets a soap maker.',
+        backdrop_path: '/fight.jpg',
+        runtime: 139,
+        genres: [
+          { id: 18, name: 'Drama' },
+          { id: 53, name: 'Thriller' },
+          { id: 35, name: 'Comedy' },
+        ],
+        credits: { cast: [{ id: 1, name: 'Edward Norton' }], crew: [] },
+        recommendations: { results: [] },
+        videos: { results: [] },
+        external_ids: { imdb_id: 'tt0137523' },
+        release_dates: { results: [] },
+        'watch/providers': { results: {} },
+      }),
+    );
+
+    await expect(hero).resolves.toEqual({
+      kind: 'title.hero',
+      hero: {
+        state: 'ready',
+        value: {
+          overview: 'An insomniac meets a soap maker.',
+          backdropPath: '/fight.jpg',
+          runtime: 139,
+          genres: [
+            { id: 18, name: 'Drama' },
+            { id: 53, name: 'Thriller' },
+          ],
+          imdbId: 'tt0137523',
+        },
+      },
+    });
+    await expect(full).resolves.toMatchObject({
+      kind: 'title.detail',
+      detail: {
+        state: 'ready',
+        value: {
+          title: { id: 550, title: 'Fight Club' },
+          genres: [
+            { id: 18, name: 'Drama' },
+            { id: 53, name: 'Thriller' },
+            { id: 35, name: 'Comedy' },
+          ],
+          cast: [{ id: 1, name: 'Edward Norton' }],
+        },
+      },
+    });
+  });
+
   it('distinguishes a confirmed TMDB miss from a retryable provider refusal', async () => {
     const tmdbFetch = vi
       .fn<typeof fetch>()

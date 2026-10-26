@@ -34,7 +34,14 @@
   import { householdQueue, sendToTV, tvListening, type PlayRequest } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
-  import { episodeAfter, isAired, titleKey, type ContinueEntry, type Title } from './lib/library';
+  import {
+    episodeAfter,
+    isAired,
+    titleKey,
+    type ContinueEntry,
+    type Standing,
+    type Title,
+  } from './lib/library';
   import type { Link } from './lib/links.svelte';
   import { householdTvs, listeningTransportTv } from './lib/householdTvs';
   import {
@@ -50,6 +57,7 @@
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
+  import { lastPromiseCache } from './lib/lastPromiseCache';
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
@@ -89,13 +97,14 @@
   import { atlasRows } from './lib/atlasRows';
   import { kidsHomeRows } from './lib/kidsHome';
   import { rankHomeRows, type HomeTasteTitle } from './lib/homeRowRanking';
-  import type { LibraryModelLease } from './lib/libraryModel.svelte';
+  import type { Immutable, LibraryModelLease } from './lib/libraryModel.svelte';
   import type {
     ContinueItem,
     HistoryCursor,
     HistoryFilter,
     HistoryPage,
     HistoryView,
+    RetainedBillboard,
     RetainedBillboardScope,
     TitleRef,
     TitleView,
@@ -314,7 +323,34 @@
 
   const overview = $derived(model?.overview.value);
   // One lookup index per immutable service snapshot; billboard renders and actions never scan the whole library.
-  const overviewTitles = $derived(overview ? new OverviewTitleIndex(overview) : undefined);
+  // TV never renders Billboard's personal action controls, so it must not build their whole-library lookup index.
+  const overviewTitles = $derived(
+    !__DEN_TV__ && overview ? new OverviewTitleIndex(overview) : undefined,
+  );
+  /**
+   * The immutable overview's common page indexes, built once together. Keeping these outside metadata-dependent
+   * derivations prevents each newly named shelf title from rebuilding the whole owned-title set.
+   */
+  const overviewPresentation = $derived.by(() => {
+    const view = overview;
+    // Immutable indexes for one snapshot; the derived value replaces them as a unit.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const owned = new Set<string>();
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const watched = new Set<string>();
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const standings = new Map<string, Standing>();
+    const weighted: Array<{ ref: TitleRef; weight: number; at: number }> = [];
+    if (view) {
+      for (const title of view.owned) owned.add(titleKey(title));
+      for (const title of view.watched) watched.add(titleKey(title));
+      for (const { title, standing } of view.standings)
+        standings.set(titleKey(title), standing === 'in-progress' ? 'inProgress' : standing);
+      for (const { title, weight, updatedAt } of view.weighted)
+        weighted.push({ ref: title, weight, at: updatedAt });
+    }
+    return { owned, watched, standings, weighted };
+  });
   const continueView = $derived(model?.continueWatching.value);
   // Visitor reads the Owner's household policy but never receives the Owner's activity/write model.
   const settings = $derived(session.policy?.settings.value);
@@ -619,48 +655,45 @@
     );
   });
 
-  const displayContinueEntry = (entry: ContinueItem): ContinueEntry[] => {
+  const displayContinueEntry = (entry: ContinueItem): ContinueEntry | undefined => {
     const title = session.displayTitle(entry.title);
     return title
-      ? [
-          {
-            title,
-            fraction: entry.fraction,
-            ...(entry.episode ? { episode: entry.episode } : {}),
-            ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
-            ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
-            ...(entry.liveEpisode === undefined ? {} : { liveEpisode: entry.liveEpisode }),
-            ...(entry.liveFraction === undefined ? {} : { liveFraction: entry.liveFraction }),
-            ...(entry.device === undefined ? {} : { device: entry.device }),
-            ...(entry.deviceId === undefined ? {} : { deviceId: entry.deviceId }),
-          },
-        ]
-      : [];
+      ? {
+          title,
+          fraction: entry.fraction,
+          ...(entry.episode ? { episode: entry.episode } : {}),
+          ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
+          ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
+          ...(entry.liveEpisode === undefined ? {} : { liveEpisode: entry.liveEpisode }),
+          ...(entry.liveFraction === undefined ? {} : { liveFraction: entry.liveFraction }),
+          ...(entry.device === undefined ? {} : { device: entry.device }),
+          ...(entry.deviceId === undefined ? {} : { deviceId: entry.deviceId }),
+        }
+      : undefined;
   };
   // Playback and title actions need every known resume point, including a directly opened title beyond Home's
-  // staged shelf. Only the shelf rendering is prefix-limited.
-  const continueEntries = $derived(
-    profileActivity
-      ? [...profileActivity.continueWatching]
-      : (continueView?.items ?? []).flatMap(displayContinueEntry),
-  );
-  const continueShelfEntries = $derived(
-    profileActivity
-      ? [...profileActivity.continueWatching]
-      : (continueView?.items ?? []).slice(0, continueNameLimit).flatMap(displayContinueEntry),
-  );
+  // staged shelf. Hydrate metadata once per immutable Continue view, then take the shelf's raw-prefix-equivalent
+  // slice from that same pass rather than constructing every visible entry once for playback and again for its row.
+  const continuePresentation = $derived.by(() => {
+    if (profileActivity) {
+      const entries = [...profileActivity.continueWatching];
+      return { entries, shelf: entries };
+    }
+    const displayed = (continueView?.items ?? []).map(displayContinueEntry);
+    const present = (entry: ContinueEntry | undefined): entry is ContinueEntry =>
+      entry !== undefined;
+    return {
+      entries: displayed.filter(present),
+      shelf: displayed.slice(0, continueNameLimit).filter(present),
+    };
+  });
+  const continueEntries = $derived(continuePresentation.entries);
+  const continueShelfEntries = $derived(continuePresentation.shelf);
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
   $effect(() =>
     libraryStandings.set(
-      new Map(
-        profileActivity
-          ? profileActivity.standings
-          : (overview?.standings ?? []).map(({ title, standing }) => [
-              titleKey(title),
-              standing === 'in-progress' ? 'inProgress' : standing,
-            ]),
-      ),
+      profileActivity ? new Map(profileActivity.standings) : overviewPresentation.standings,
     ),
   );
   // And a series poster says how many seasons it has, where the library already holds its layout.
@@ -832,6 +865,7 @@
 
   /** A title's row as last read, for the billboard's Watchlist and Seen. */
   const rowOf = (title: Title) => profileActivity?.row(title) ?? overviewTitles?.row(title);
+  const billboardRowOf = __DEN_TV__ ? undefined : rowOf;
 
   /** A press on a billboard slide: the slide says when it didn't save, so the page doesn't say it again. */
   async function fromSlide(write: Promise<boolean | undefined>) {
@@ -1435,9 +1469,7 @@
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(
-    profileActivity
-      ? new Set(profileActivity.watchedKeys)
-      : new Set((overview?.watched ?? []).map(titleKey)),
+    profileActivity ? new Set(profileActivity.watchedKeys) : overviewPresentation.watched,
   );
   const browseShown = (title: Title) =>
     shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
@@ -1477,13 +1509,7 @@
    * and count full; a watchlisted one is an intention and counts for less; a reaction is the one thing said outright,
    * so it counts for more than either, and a dislike counts against. Ids and weights need no names.
    */
-  const weighted = $derived.by(() => {
-    return (overview?.weighted ?? []).map(({ title, weight, updatedAt }) => ({
-      ref: title,
-      weight,
-      at: updatedAt,
-    }));
-  });
+  const weighted = $derived(overviewPresentation.weighted);
   /**
    * The recent profile facts Home can rank rows against, drawn only from the bounded title tranche Home already
    * named (its shelves and its ranking's seeds). Ranking never wakes dormant history metadata; absent names leave the
@@ -1493,11 +1519,15 @@
   $effect(() => {
     const policyReady = atlasReady;
     const shelvesNamed = shelvesReady && seedsNamed;
+    if (!shelvesNamed || (session.kid && !policyReady)) {
+      homeTaste = [];
+      return;
+    }
     const entries = [...weighted]
       .filter(({ weight }) => Number.isFinite(weight) && weight !== 0)
       .sort((left, right) => right.at - left.at)
       .slice(0, 4);
-    if (!shelvesNamed || !entries.length || (session.kid && !policyReady)) {
+    if (!entries.length) {
       homeTaste = [];
       return;
     }
@@ -1517,7 +1547,7 @@
     return {
       watched: namedSeeds(overview?.seeds.watched ?? []),
       watchlisted: namedSeeds(overview?.seeds.watchlisted ?? []),
-      owned: new Set((overview?.owned ?? []).map(titleKey)),
+      owned: overviewPresentation.owned,
     };
   });
   /**
@@ -1722,6 +1752,26 @@
   const fresh = freshOn();
   /** A restricted profile neither reads nor writes a kept billboard: those rankings are not policy-scoped. */
   const keepsBillboard = () => !session.restricted;
+  type RetainedBillboardRead = Immutable<RetainedBillboard> | null;
+  const retainedBillboardRead = lastPromiseCache<string, RetainedBillboardRead>();
+  const retainedBillboardKey = (scope: RetainedBillboardScope) =>
+    `${scope.kind}:${scope.facet ?? 'all'}:${scope.fresh ? 'fresh' : 'ordinary'}`;
+  /** The first-paint and refreshed-ranking paths ask for the same kept value; share that one Worker read. */
+  function readRetainedBillboard(scope: RetainedBillboardScope): Promise<RetainedBillboardRead> {
+    const key = retainedBillboardKey(scope);
+    return retainedBillboardRead.read(key, () =>
+      model!.ready.then(() => model!.retainedBillboard(scope)),
+    );
+  }
+  function forgetRetainedBillboard(scope: RetainedBillboardScope): void {
+    retainedBillboardRead.forget(retainedBillboardKey(scope));
+  }
+  const retainedTitles = (titles: Immutable<RetainedBillboard['titles']>): RecommendedTitle[] =>
+    [...titles] as RecommendedTitle[];
+  const personalRetainedTitles = (saved: RetainedBillboardRead): RecommendedTitle[] | null =>
+    saved?.kind === 'personal'
+      ? (displayableKept({ at: saved.at, titles: retainedTitles(saved.titles) })?.titles ?? null)
+      : null;
   /** The title on the billboard's screen, which a new ranking leaves in place. */
   let slideShown = $state<Title>();
   /**
@@ -1783,19 +1833,17 @@
       ? { kind: 'personal', facet: type, fresh }
       : { kind: 'shared', facet: type, fresh };
     let current = true;
-    void model.ready
-      .then(() => (current ? model.retainedBillboard(scope) : null))
+    void readRetainedBillboard(scope)
       .then(
         (saved) => {
           if (!current || !saved || featured.length) return;
           if (saved.kind === 'personal') {
             const titles = displayableKept({
               at: saved.at,
-              titles: structuredClone(saved.titles) as RecommendedTitle[],
+              titles: retainedTitles(saved.titles),
             })?.titles;
             if (titles) featured = titles;
-          } else if (saved.titles.length)
-            featured = structuredClone(saved.titles) as RecommendedTitle[];
+          } else if (saved.titles.length) featured = retainedTitles(saved.titles);
         },
         () => {},
       )
@@ -1948,15 +1996,13 @@
         : null;
     const kept =
       model && memberPost && keepsBillboard()
-        ? model.retainedBillboard({ kind: 'personal', facet: type, fresh }).then(
-            (saved) =>
-              saved?.kind === 'personal'
-                ? (displayableKept({
-                    at: saved.at,
-                    titles: structuredClone(saved.titles) as RecommendedTitle[],
-                  })?.titles ?? null)
-                : null,
-            () => null,
+        ? readRetainedBillboard({ kind: 'personal', facet: type, fresh }).then(
+            personalRetainedTitles,
+            () =>
+              readRetainedBillboard({ kind: 'personal', facet: type, fresh }).then(
+                personalRetainedTitles,
+                () => null,
+              ),
           )
         : Promise.resolve(null);
     void kept
@@ -1978,11 +2024,15 @@
             type,
             fresh,
             picked,
-            (kept) =>
-              model.retainBillboard(
-                { kind: 'personal', facet: type, fresh },
-                { kind: 'personal', at: kept.at, titles: kept.titles },
-              ),
+            async (kept) => {
+              const scope: RetainedBillboardScope = { kind: 'personal', facet: type, fresh };
+              await model.retainBillboard(scope, {
+                kind: 'personal',
+                at: kept.at,
+                titles: kept.titles,
+              });
+              forgetRetainedBillboard(scope);
+            },
             keptAt,
           ).catch(warnKeep);
         }
@@ -2017,10 +2067,13 @@
     // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
     // forever, with its stale explanation attached.
     featured = picked;
-    if (model && keepsBillboard())
+    if (model && keepsBillboard()) {
+      const scope: RetainedBillboardScope = { kind: 'shared', facet: type, fresh };
       void model
-        .retainBillboard({ kind: 'shared', facet: type, fresh }, { kind: 'shared', titles: picked })
+        .retainBillboard(scope, { kind: 'shared', titles: picked })
+        .then(() => forgetRetainedBillboard(scope))
         .catch(warnKeep);
+    }
   }
 
   /**
@@ -2364,7 +2417,7 @@
         {reel}
         {routes}
         onplay={playHere && ((title) => playHere(title))}
-        {rowOf}
+        rowOf={billboardRowOf}
         onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
         onseen={(title, on) => fromSlide(setSeen(title, on))}
         ondetail={() => (watchlistLead = true)}
@@ -2413,7 +2466,7 @@
         detail,
       )}
     onplay={playHere && ((title) => playHere(title))}
-    rowOf={model ? rowOf : undefined}
+    rowOf={model ? billboardRowOf : undefined}
     onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
     onseen={(title, on) => fromSlide(setSeen(title, on))}
   />

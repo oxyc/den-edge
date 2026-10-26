@@ -77,6 +77,32 @@ export interface TitleDetail {
   imdbId?: string;
 }
 
+/**
+ * The small part of a title detail that Home's billboard renders. Keeping this projection distinct lets the
+ * Worker retain and coalesce the complete detail while sending neither cast nor the other title-page collections
+ * across the critical-path message boundary.
+ */
+export interface TitleHero {
+  overview?: string;
+  backdropPath?: string;
+  /** Minutes, used by the bounded parser-time copy retained for the next launch. */
+  runtime?: number;
+  /** Billboard renders at most two genres. */
+  genres: NamedFacet<number>[];
+  /** den-reel's title identity for the optional ambient trailer. */
+  imdbId?: string;
+}
+
+export function titleHero(detail: TitleDetail): TitleHero {
+  return {
+    ...(detail.overview === undefined ? {} : { overview: detail.overview }),
+    ...(detail.backdropPath === undefined ? {} : { backdropPath: detail.backdropPath }),
+    ...(detail.runtime === undefined ? {} : { runtime: detail.runtime }),
+    genres: detail.genres.slice(0, 2),
+    ...(detail.imdbId === undefined ? {} : { imdbId: detail.imdbId }),
+  };
+}
+
 export interface Episode {
   number: number;
   name: string;

@@ -393,17 +393,19 @@ describe('a title only a non-atlas source names', () => {
 describe('every direct boundary asks the same check', () => {
   const direct = (id: number): ContentRequest[] => [
     { kind: 'title.detail', title: { type: 'movie', id }, region: 'FI' },
+    { kind: 'title.hero', title: { type: 'movie', id }, region: 'FI' },
     { kind: 'prefetch.detail', title: { type: 'movie', id }, region: 'FI' },
     { kind: 'title.external-id', title: { type: 'movie', id } },
     { kind: 'title.extras', title: { type: 'movie', id }, warningCategories: [] },
     { kind: 'season', title: { type: 'tv', id }, season: 1 },
   ];
 
-  it('refuses an over-age title at detail, prefetch, imdb id (play/sources/remux), extras and seasons', async () => {
+  it('refuses an over-age title at detail, hero, prefetch, imdb id (play/sources/remux), extras and seasons', async () => {
     const w = world();
     const results = await Promise.all(direct(3).map((request) => w.ask(request, KID)));
     expect(results).toMatchObject([
       { detail: { state: 'unavailable', provider: 'atlas', reason: 'refused' } },
+      { hero: { state: 'unavailable', provider: 'atlas', reason: 'refused' } },
       { kind: 'prefetch.detail' },
       { imdbId: { state: 'unavailable', reason: 'refused' } },
       { extras: { ratings: { state: 'unavailable', reason: 'refused' } } },
@@ -422,6 +424,14 @@ describe('every direct boundary asks the same check', () => {
     expect(detail.detail.value.more).toEqual([]);
     const owner = (await world().ask(direct(1)[0]!)) as { detail: { value: { more: unknown[] } } };
     expect(owner.detail.value.more).toHaveLength(1);
+    const hero = (await w.ask(direct(1)[1]!, KID)) as {
+      hero: { state: string; value: Record<string, unknown> };
+    };
+    expect(hero.hero.state).toBe('ready');
+    expect(hero.hero.value).toEqual({
+      genres: [],
+      imdbId: 'tt1234567',
+    });
   });
 
   it('fails closed for a title the store cannot age, and never refuses the unrestricted household', async () => {

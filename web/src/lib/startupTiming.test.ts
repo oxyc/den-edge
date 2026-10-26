@@ -169,4 +169,104 @@ describe('startup timing', () => {
       bootstrap: [1, 80, 80],
     });
   });
+
+  it('gives a nested specific phase an equal-overlap task instead of its broad parent', async () => {
+    let observed!: (list: { getEntries(): PerformanceEntry[] }) => void;
+    vi.stubGlobal(
+      'PerformanceObserver',
+      class {
+        static supportedEntryTypes = ['longtask'];
+        constructor(callback: typeof observed) {
+          observed = callback;
+        }
+        observe() {}
+      },
+    );
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    const { beginStartupRenderPhase, startupLongTaskPhases } = await load();
+    beginStartupRenderPhase('app_import');
+    vi.advanceTimersByTime(100);
+    const started = performance.now();
+    beginStartupRenderPhase('app_mount');
+    vi.advanceTimersByTime(80);
+    observed({
+      getEntries: () => [{ startTime: started, duration: 80 } as PerformanceEntry],
+    });
+
+    expect(Object.fromEntries(startupLongTaskPhases())).toEqual({ app_mount: [1, 80, 80] });
+  });
+
+  it('drains queued observer records before the load report snapshots its totals', async () => {
+    const pending = [{ startTime: performance.now(), duration: 73 } as PerformanceEntry];
+    vi.stubGlobal(
+      'PerformanceObserver',
+      class {
+        static supportedEntryTypes = ['longtask'];
+        constructor(_callback: unknown) {}
+        observe() {}
+        takeRecords() {
+          return pending.splice(0);
+        }
+      },
+    );
+    const { startupLongTaskPhases, startupLongTasks } = await load();
+
+    expect(startupLongTasks()).toEqual([1, 73, 73]);
+    expect(Object.fromEntries(startupLongTaskPhases())).toEqual({ other: [1, 73, 73] });
+    expect(startupLongTasks(), 'a drained record is counted only once').toEqual([1, 73, 73]);
+  });
+
+  it('places every task in one coarse interval between startup milestones', async () => {
+    let observed!: (list: { getEntries(): PerformanceEntry[] }) => void;
+    vi.stubGlobal(
+      'PerformanceObserver',
+      class {
+        static supportedEntryTypes = ['longtask'];
+        constructor(callback: typeof observed) {
+          observed = callback;
+        }
+        observe() {}
+      },
+    );
+    const { startupLongTaskStages, startupMark } = await load();
+    const task = (startTime: number, duration: number) =>
+      ({ startTime, duration }) as PerformanceEntry;
+    observed({ getEntries: () => [task(25, 51)] });
+    vi.advanceTimersByTime(100);
+    startupMark('app module requested');
+    vi.advanceTimersByTime(100);
+    startupMark('app module evaluated');
+    vi.advanceTimersByTime(100);
+    startupMark('app mounted');
+    vi.advanceTimersByTime(200);
+    startupMark('shelves ready');
+    vi.advanceTimersByTime(200);
+    startupMark('billboard detail');
+    vi.advanceTimersByTime(100);
+    startupMark('handover');
+    vi.advanceTimersByTime(100);
+    startupMark('first poster');
+    observed({
+      getEntries: () => [
+        task(125, 52),
+        task(225, 53),
+        task(325, 54),
+        task(525, 55),
+        task(725, 56),
+        task(825, 57),
+        task(925, 58),
+      ],
+    });
+
+    expect(Object.fromEntries(startupLongTaskStages())).toEqual({
+      pre_app: [1, 51, 51],
+      app_import: [1, 52, 52],
+      app_mount: [1, 53, 53],
+      before_shelves: [1, 54, 54],
+      shelves_to_billboard: [1, 55, 55],
+      billboard_to_handover: [1, 56, 56],
+      handover_to_poster: [1, 57, 57],
+      after_poster: [1, 58, 58],
+    });
+  });
 });

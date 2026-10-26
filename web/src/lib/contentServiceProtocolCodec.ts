@@ -410,6 +410,7 @@ function request(value: unknown): value is ContentRequest {
         value.titles.every((candidate) => titleRef(candidate))
       );
     case 'title.detail':
+    case 'title.hero':
     case 'prefetch.detail':
       return (
         exact(value, ['kind', 'title', 'region']) && titleRef(value.title) && region(value.region)
@@ -543,6 +544,8 @@ function result(value: unknown): value is ContentResult {
       );
     case 'title.detail':
       return exact(value, ['kind', 'detail']) && resource(value.detail);
+    case 'title.hero':
+      return exact(value, ['kind', 'hero']) && resource(value.hero);
     case 'title.extras':
       return exact(value, ['kind', 'extras']) && record(value.extras);
     case 'title.external-id':

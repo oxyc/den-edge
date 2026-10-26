@@ -52,6 +52,27 @@ it('validates bounded semantic requests and unversioned content replies', () => 
     decodeContentServiceClientMessage({
       type: 'content-query',
       protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'hero',
+      request: { kind: 'title.hero', title: { type: 'movie', id: 7 }, region: 'US' },
+    }).ok,
+  ).toBe(true);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'hero-extra',
+      request: {
+        kind: 'title.hero',
+        title: { type: 'movie', id: 7 },
+        region: 'US',
+        includeCast: true,
+      },
+    }).ok,
+  ).toBe(false);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
       requestId: 'too-deep',
       request: {
         kind: 'catalog.page',
@@ -123,6 +144,18 @@ it('validates bounded semantic requests and unversioned content replies', () => 
     result: { kind: 'service.regions', regions: [] },
   };
   expect(decodeContentServiceServerMessage(reply)).toEqual({ ok: true, value: reply });
+  const heroReply = {
+    ...reply,
+    requestId: 'hero',
+    result: { kind: 'title.hero', hero: { state: 'ready', value: { genres: [] } } },
+  };
+  expect(decodeContentServiceServerMessage(heroReply)).toEqual({ ok: true, value: heroReply });
+  expect(
+    decodeContentServiceServerMessage({
+      ...heroReply,
+      result: { ...heroReply.result, detail: { state: 'absent' } },
+    }).ok,
+  ).toBe(false);
   expect(decodeContentServiceServerMessage({ ...reply, version: { revision: 1 } }).ok).toBe(false);
 });
 
