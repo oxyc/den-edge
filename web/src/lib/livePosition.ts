@@ -2,19 +2,18 @@
 // when each was written, so a position written recently is one still moving: it is shown counting on from there.
 //
 // The Apple TV writes every three seconds into its own log, but that log reaches den-edge only when the TV syncs:
-// den-edge's request log, with a TV playing, showed its `POST /lib/:id/batch` arriving in bursts about 30 s apart
-// (02:51:58, 02:52:25, 02:52:55, 02:53:18). The TV's code agrees: each 3 s write pushes a 5 s sync debounce back (up
-// to a 60 s cap), and its reconciliation poll syncs after each 25 s held read (den's `LibraryLogSync.scheduleSync`,
-// `RootView.startReconciliationPoll`). So the newest position any reader can see is up to ~30 s old, and a window
-// shorter than that showed the clock for a moment and then lost it until the next burst.
+// each 3 s write pushes a 5 s sync debounce back, so while a title plays the debounce never ends and the TV pushes at
+// its cap, 15 s (den's `LibraryLogSync.maxWait`). With a 60 s cap the TV's `doc.episodes` row reached den-edge about
+// once a minute, longer than LIVE_MS, and the clock and TV controls showed after each push and vanished before the
+// next. So the newest position any reader can see is up to ~15 s old, plus a pull.
 //
 // The TV's 3 s write runs whether or not the player is paused (den's `PlayerView` loop calls `persistProgress`
 // unconditionally — read from its code, not observed): a paused title keeps getting fresh writes at one position.
 // So a write is only playing if its position moved since the previous write seen of the same title.
 
 /**
- * A position written longer ago than this is no longer playing: the device stopped or went away. About 1.5 times
- * the ~30 s between the TV's pushes, so one push arriving late (or a pull just missing it) does not stop the clock.
+ * A position written longer ago than this is no longer playing: the device stopped or went away. Three times the
+ * 15 s between the TV's pushes, so one push arriving late (or a pull just missing it) does not stop the clock.
  * The cost is that a stop on the TV shows here up to this long after its last write.
  */
 export const LIVE_MS = 45_000;
