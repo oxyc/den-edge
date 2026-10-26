@@ -2592,6 +2592,7 @@
           {rows}
           shown={browseShown}
           browseReady={homeBrowseReady}
+          browseIdentity="home"
           showServices
           {services}
           servicePending={serviceDirectoriesAdmitted
@@ -2605,6 +2606,13 @@
           onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
           onServiceIntent={primeService}
         />
+      {:else}
+        <!-- Keep Home scrollable while its optional catalogue code waits behind the first useful paint. Reusing the
+             real shelf placeholder preserves geometry without parsing or mounting Browse's loaders. -->
+        <div aria-hidden="true" data-pending-catalogue>
+          <PendingPosterRow heading="Browse" />
+          <PendingPosterRow heading="More to explore" />
+        </div>
       {/if}
     {/if}
     {#if facet && homeMetadataReady && HomeCatalogue}
@@ -2612,6 +2620,7 @@
         {rows}
         shown={browseShown}
         browseReady
+        browseIdentity={facet}
         showServices={false}
         {services}
         servicePending={0}

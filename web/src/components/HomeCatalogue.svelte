@@ -12,6 +12,7 @@
     rows,
     shown,
     browseReady,
+    browseIdentity,
     showServices,
     services,
     servicePending,
@@ -23,6 +24,7 @@
     shown: (title: Title) => boolean;
     /** Home waits for its visible provider names so catalogue rows load once with their final captions. */
     browseReady: boolean;
+    browseIdentity: string;
     showServices: boolean;
     services: ResolvedService[];
     servicePending: number;
@@ -41,4 +43,4 @@
     onintent={onServiceIntent}
   />
 {/if}
-{#if browseReady}<Browse {rows} {shown} />{/if}
+{#if browseReady}<Browse {rows} {shown} identity={browseIdentity} />{/if}
