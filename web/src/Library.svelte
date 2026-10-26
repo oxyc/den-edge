@@ -49,7 +49,7 @@
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
-  import { startupMarkOnce } from './lib/startupTiming';
+  import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
@@ -64,16 +64,9 @@
   import { warmOnIntent } from './lib/warmOnIntent';
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
-  import {
-    atlasCatalogs,
-    GUEST_PICKS,
-    mergeNewRow,
-    primeServicePage,
-    radarRows,
-    resolvePicks,
-    type AtlasCatalog,
-  } from './lib/services';
-  import { contentServices, type Service } from './settings/services';
+  import { optionalImport } from './lib/keyboardNavigation';
+  import type { AtlasCatalog } from './lib/services';
+  import type { Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
@@ -178,6 +171,49 @@
   /** Series layouts the shelves wait for at once: two rows' worth of cards, most of them already finished series. */
   const SHAPE_TRANCHE = 16;
   let shelvesReady = $state(model === null);
+  let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
+  let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
+  let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
+  $effect(() => {
+    const home = route.page === 'library';
+    if (model && home && !shelvesReady) {
+      homeMetadataReady = false;
+      return;
+    }
+    // Direct browse routes keep their useful TMDB rows while the optional service/catalogue helpers arrive.
+    if (!home) homeMetadataReady = true;
+    let current = true;
+    void (async () => {
+      // Provider/catalogue metadata sits below a paired Home's personal shelf. Let that useful shelf paint before
+      // parsing the optional module and publishing the generic rows; guests and direct browse routes still load it.
+      if (model && home && document.visibilityState === 'visible')
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+      await yieldTask();
+      let catalogue: typeof import('./lib/services');
+      let directories: typeof import('./settings/services');
+      try {
+        [catalogue, directories] = await Promise.all([
+          optionalImport(import('./lib/services')),
+          optionalImport(import('./settings/services')),
+        ]);
+      } catch {
+        // A stale deployment can lose this optional chunk. Keep the base TMDB rows useful without service helpers.
+        // Each request marks its own rejection before appMain's deferred preload handler decides whether to reload.
+        if (current) homeMetadataReady = true;
+        return;
+      }
+      if (!current) return;
+      startupRenderPhase('home_metadata');
+      homeServices = catalogue;
+      directoryServices = directories;
+      homeMetadataReady = true;
+    })();
+    return () => {
+      current = false;
+    };
+  });
   /**
    * The shelves under the top one (`topShelf`) mount a task after it. The flush that readied the shelves
    * mounted the Continue Watching, Downloading and Watchlist cards together: one 81ms task at 4x CPU on d.oxy.fi,
@@ -518,6 +554,7 @@
     const refs = untrack(() => homeNamingRefs!);
     void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
       if (disposed) return;
+      startupRenderPhase('home_shelves');
       shelvesReady = true;
       rankingHomeNamesReady = true;
       startupMarkOnce('shelves ready');
@@ -1411,7 +1448,7 @@
   function primeService(service: Service, country: string) {
     void ServiceScreen.load();
     if (!atlasReady) return;
-    primeServicePage(session.content, service, country, atlas, {
+    homeServices?.primeServicePage(session.content, service, country, atlas, {
       minYear: prefs.minReleaseYear,
       excludedLanguages: prefs.excludedLanguages,
       shown: browseShown,
@@ -1491,9 +1528,10 @@
   let serviceCatalogs = $state.raw<AtlasCatalog[]>([]);
   $effect(() => {
     const here = atlas;
-    if (!here) return;
+    const catalogue = homeServices;
+    if (!here || !catalogue) return;
     let current = true;
-    void atlasCatalogs(session.content).then(
+    void catalogue.atlasCatalogs(session.content).then(
       (listed) => {
         if (current) serviceCatalogs = listed;
       },
@@ -1508,8 +1546,8 @@
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
   const radar = (only?: 'movie' | 'tv') => {
     const content = session.content;
-    return atlas
-      ? radarRows(serviceCatalogs, servicePicks, {
+    return atlas && homeServices
+      ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
           content,
@@ -1563,9 +1601,12 @@
     const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
     const pooled = radar();
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
-    const spine = arrivals
-      ? home.map((row) => (row.id === 'new-releases' ? mergeNewRow(arrivals, row) : row))
-      : home;
+    const spine =
+      arrivals && homeServices
+        ? home.map((row) =>
+            row.id === 'new-releases' ? homeServices!.mergeNewRow(arrivals, row) : row,
+          )
+        : home;
     const coming = pooled.filter((row) => row !== arrivals);
     return rankHomeRows(
       [
@@ -1583,7 +1624,9 @@
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
    */
-  const servicePicks = $derived(prefs.servicesConfigured ? prefs.services : GUEST_PICKS);
+  const servicePicks = $derived(
+    prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
+  );
   /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
   let serviceDirectoriesAdmitted = $state(false);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
@@ -1592,12 +1635,14 @@
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
-    if (!serviceDirectoriesAdmitted) return;
+    const directory = directoryServices;
+    if (!serviceDirectoriesAdmitted || !directory) return;
     for (const { country } of servicePicks) {
       if (askedFor[country]) continue;
       askedFor[country] = true;
       naming++;
-      void contentServices(session.content, country)
+      void directory
+        .contentServices(session.content, country)
         .then(
           (listed) => {
             directories = { ...directories, [country]: listed };
@@ -1612,8 +1657,9 @@
   });
   /** The picks their country's directory can account for, named and ordered by it. */
   const services = $derived(
-    [...new Set(servicePicks.map((pick) => pick.country))].flatMap((country) =>
-      resolvePicks(servicePicks, directories[country] ?? [], country),
+    [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
+      (country) =>
+        homeServices?.resolvePicks(servicePicks, directories[country] ?? [], country) ?? [],
     ),
   );
   /**
@@ -1636,6 +1682,13 @@
    * library already holds.
    */
   let featured = $state.raw<RecommendedTitle[]>([]);
+  let heroAttributed = false;
+  $effect(() => {
+    if (!heroAttributed && featured.length) {
+      heroAttributed = true;
+      startupRenderPhase('home_hero');
+    }
+  });
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );
@@ -2443,21 +2496,23 @@
       <PendingPosterRow heading="Watchlist" />
     {/if}
     {#if !facet}
-      <ServicesRow
-        {services}
-        pending={serviceDirectoriesAdmitted
-          ? naming
-            ? servicePicks.length
-            : 0
-          : servicePicks.length}
-        empty={serviceDirectoriesAdmitted && !naming && !services.length
-          ? 'Services unavailable'
-          : undefined}
-        onvisible={() => (serviceDirectoriesAdmitted = true)}
-        onintent={primeService}
-      />
+      {#if homeMetadataReady}
+        <ServicesRow
+          {services}
+          pending={serviceDirectoriesAdmitted
+            ? naming
+              ? servicePicks.length
+              : 0
+            : servicePicks.length}
+          empty={serviceDirectoriesAdmitted && !naming && !services.length
+            ? 'Services unavailable'
+            : undefined}
+          onvisible={() => (serviceDirectoriesAdmitted = true)}
+          onintent={primeService}
+        />
+      {/if}
     {/if}
-    <Browse {rows} shown={browseShown} />
+    {#if homeMetadataReady}<Browse {rows} shown={browseShown} />{/if}
   {/if}
 {/if}
 

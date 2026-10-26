@@ -6,7 +6,7 @@
 import type { MediaType, Title } from './library';
 import { keepHeroLeadPointer, pointedHeroLeadKey, removeHeroLeadPointer } from './heroLeadPointer';
 import type { Prefs } from './prefs';
-import { GUEST_PICKS } from './services';
+import { GUEST_PICKS } from './servicePicks';
 import type { ContentServiceClientPort } from './contentServiceClient';
 
 /** The billboard fills the viewport and TMDB offers these three bounded backdrop widths. */

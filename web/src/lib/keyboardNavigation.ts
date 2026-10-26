@@ -6,6 +6,15 @@ export const isOptionalImportFailure = (error: unknown) =>
   error !== null &&
   (typeof error === 'object' || typeof error === 'function') &&
   failedImports.has(error);
+export const markOptionalImportFailure = (error: unknown) => {
+  if (error !== null && (typeof error === 'object' || typeof error === 'function'))
+    failedImports.add(error);
+};
+export const optionalImport = <T>(loading: Promise<T>): Promise<T> =>
+  loading.catch((error: unknown) => {
+    markOptionalImportFailure(error);
+    throw error;
+  });
 
 /** Native Tab, activation, editing and component-owned keys work before (and without) this enhancement. */
 export function installKeyboardNavigation(): () => void {
@@ -15,14 +24,12 @@ export function installKeyboardNavigation(): () => void {
   let disposed = false;
   const invalidate = () => intent++;
   const load = () =>
-    (loading ??= import('./spatialNavigation')
+    (loading ??= optionalImport(import('./spatialNavigation'))
       .then((module) => {
         if (!disposed) move = module.moveFocus;
       })
-      .catch((error: unknown) => {
+      .catch(() => {
         // Failure must not disable native Tab/Enter or report an unhandled optional-import rejection.
-        if (error !== null && (typeof error === 'object' || typeof error === 'function'))
-          failedImports.add(error);
         loading = undefined;
       }));
 
