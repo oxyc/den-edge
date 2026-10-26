@@ -101,4 +101,72 @@ describe('startup timing', () => {
     expect(startupFailure(new Error('boom'))).toBe('boom');
     expect(startupFailure('not an error')).toBe('unknown error');
   });
+
+  it('attributes long tasks only to fixed privacy-safe render phases', async () => {
+    let observed!: (list: { getEntries(): PerformanceEntry[] }) => void;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'PerformanceObserver',
+      class {
+        static supportedEntryTypes = ['longtask'];
+        constructor(callback: typeof observed) {
+          observed = callback;
+        }
+        observe() {}
+      },
+    );
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const { startupLongTaskPhases, startupRenderPhase } = await load();
+    const startTime = performance.now();
+    startupRenderPhase('home_shelves');
+    vi.advanceTimersByTime(81);
+    observed({ getEntries: () => [{ startTime, duration: 81 } as PerformanceEntry] });
+    observed({
+      getEntries: () => [{ startTime: startTime - 100, duration: 55 } as PerformanceEntry],
+    });
+
+    expect(Object.fromEntries(startupLongTaskPhases())).toEqual({
+      home_shelves: [1, 81, 81],
+      other: [1, 55, 55],
+    });
+  });
+
+  it('keeps bootstrap open while a separately downloaded application evaluates', async () => {
+    let observed!: (list: { getEntries(): PerformanceEntry[] }) => void;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'PerformanceObserver',
+      class {
+        static supportedEntryTypes = ['longtask'];
+        constructor(callback: typeof observed) {
+          observed = callback;
+        }
+        observe() {}
+      },
+    );
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const { beginStartupRenderPhase, startupLongTaskPhases } = await load();
+    const started = performance.now();
+    const applicationEvaluated = beginStartupRenderPhase('bootstrap');
+
+    vi.advanceTimersByTime(500);
+    observed({
+      getEntries: () => [{ startTime: started + 400, duration: 80 } as PerformanceEntry],
+    });
+    expect(frames).toHaveLength(0);
+
+    applicationEvaluated();
+    expect(frames).toHaveLength(1);
+    frames.shift()!(0);
+    frames.shift()!(0);
+    expect(Object.fromEntries(startupLongTaskPhases())).toEqual({
+      bootstrap: [1, 80, 80],
+    });
+  });
 });

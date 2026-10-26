@@ -53,6 +53,14 @@
   if (openGate)
     (window as unknown as { denTestReleaseLibraryOpen: () => void }).denTestReleaseLibraryOpen =
       releaseOpen;
+  let releaseSettings = () => {};
+  const settingsGate = params.has('hold-settings')
+    ? new Promise<void>((resolve) => (releaseSettings = resolve))
+    : undefined;
+  if (settingsGate)
+    (
+      window as unknown as { denTestReleaseLibrarySettings: () => void }
+    ).denTestReleaseLibrarySettings = releaseSettings;
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
   /** Actions wait until `denTestReleaseWrites()`: a write that takes as long as a slow library takes. */
@@ -410,6 +418,7 @@
       ? 'Library storage timed out while opening IndexedDB'
       : undefined,
     openGate,
+    settingsGate,
     failHistoryDetails: params.has('fail-history-details'),
   });
   (

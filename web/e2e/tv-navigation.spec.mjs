@@ -217,17 +217,21 @@ test('a touch preview opens Search and focuses its editor within the activating 
   try {
     await page.addInitScript(() => {
       window.__tvSearchTouchActivation = null;
-      document.addEventListener('click', (event) => {
-        if (!(event.target instanceof Element) || !event.target.closest('.tv-search-button'))
-          return;
+      window.__tvSearchPreloaded = false;
+      document.addEventListener('den:tv-search-preloaded', () => {
+        window.__tvSearchPreloaded = true;
+      });
+      document.addEventListener('focusin', (event) => {
+        if (!(event.target instanceof Element) || !event.target.matches('.tv-search-input')) return;
         window.__tvSearchTouchActivation = {
-          active: navigator.userActivation.isActive,
-          editorFocused: document.activeElement?.classList.contains('tv-search-input') ?? false,
+          active: navigator.userActivation?.isActive ?? false,
+          editorFocused: document.activeElement === event.target,
         };
       });
     });
     await setup(page);
     await browse(page);
+    await expect.poll(() => page.evaluate(() => window.__tvSearchPreloaded)).toBe(true);
     await page.getByRole('button', { name: 'Search', exact: true }).tap();
     await expect(page).toHaveURL(/\/search/);
     await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();
@@ -238,6 +242,22 @@ test('a touch preview opens Search and focuses its editor within the activating 
   } finally {
     await context.close();
   }
+});
+
+test('TV Search opens when the legacy browser has no userActivation API', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userActivation', {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  await setup(page);
+  await browse(page);
+  expect(await page.evaluate(() => navigator.userActivation)).toBeUndefined();
+
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page).toHaveURL(/\/search/);
+  await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();
 });
 
 test('an iPhone preview scales one complete 1920px TV canvas', async ({ browser, browserName }) => {

@@ -174,6 +174,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #filling = false;
   /** The import title selections join, so they do not start a second full-history read alongside it. */
   #fillingDone?: Promise<boolean>;
+  #cancelFilling?: () => void;
   #refilling?: Promise<void>;
   #refillAgain = false;
   /** A narrow edit's send, until it has come to an end: the whole log opens only after it (`#promote`). */
@@ -203,6 +204,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (filling) {
       this.#filling = true;
       this.#fillingDone = filling.done;
+      this.#cancelFilling = filling.cancel;
       filling.page.committed = () => this.#refill();
       void filling.done.then((complete) => this.#filled(complete));
     }
@@ -269,7 +271,17 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       return structuredClone(pieces.continue!.view);
     }
     if (selection.kind === 'history') {
-      const page = await this.#historyPage({}, undefined, 48);
+      // History needs the complete materialized index. A lazy screen can be acquired from an early Home root while
+      // the newest-first import is still filling; join that one read instead of promoting and reading the whole log
+      // alongside it, then select from the completed index.
+      const filling = this.#fillingDone;
+      let page = await this.#historyPage({}, undefined, 48);
+      if (!page && filling) {
+        const complete = await filling;
+        const full = this.#full as LibraryServiceAuthority | undefined;
+        if (full) return full.select(selection);
+        if (complete) page = await this.#historyPage({}, undefined, 48);
+      }
       if (page) return { kind: 'history', ...page };
     }
     if (selection.kind === 'settings') {
@@ -716,12 +728,14 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#cancelFilling?.();
     this.#cancelTimer();
     this.#cancelReconsider();
     await this.#viewWriter?.close();
     this.#stopFull?.();
     this.#listeners.clear();
     await this.#opening?.catch(() => undefined);
+    await this.#fillingDone?.catch(() => undefined);
     await this.#full?.close?.();
   }
 
@@ -761,7 +775,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
    * and shelves change once rather than with every page.
    */
   #refill(): void {
-    if (this.#closed || this.#full) return;
+    if (this.#closed || this.#full || this.#opening) return;
     if (this.#refilling) {
       this.#refillAgain = true;
       return;
@@ -797,7 +811,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   /** The import has read the whole history, or stopped: every loaded view is read again, or the log takes over. */
   async #filled(complete: boolean): Promise<void> {
     this.#filling = false;
-    if (this.#closed || this.#full) return;
+    if (this.#closed || this.#full || this.#opening) return;
     if (!complete) {
       void this.#promote('import:stopped').catch(() => undefined);
       return;
@@ -1277,9 +1291,14 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     startupLibraryPromoted(reason);
     this.#cancelTimer();
     this.#cancelReconsider();
+    this.#cancelFilling?.();
     const writerStopped = this.#viewWriter?.abort() ?? Promise.resolve();
     // A narrow edit still sending owns its kept work until it has come to an end; the whole log takes it from there.
-    const opening = Promise.all([this.#narrowSending ?? Promise.resolve(), writerStopped])
+    const opening = Promise.all([
+      this.#narrowSending ?? Promise.resolve(),
+      writerStopped,
+      this.#fillingDone ?? Promise.resolve(),
+    ])
       .then(() => this.openFull())
       .then(async (authority) => {
         if (!authority)
@@ -1395,6 +1414,7 @@ class FactImport {
   #registered = false;
   #decrypted = 0;
   readonly #started = performance.now();
+  readonly #abort = new AbortController();
 
   constructor(
     readonly request: LibraryServiceHello,
@@ -1408,6 +1428,7 @@ class FactImport {
     let body: Partial<Record<keyof ChangesPage, unknown>> | null;
     try {
       const response = await this.fetchImpl(`/lib/${this.keys.id}/changes?${query}`, {
+        signal: this.#abort.signal,
         headers: {
           'x-den-library-token': this.keys.token,
           'x-den-wire': String(this.request.wire),
@@ -1515,6 +1536,10 @@ class FactImport {
     noteLibraryDecrypt(this.#decrypted, elapsed);
     noteLibraryFold(this.#decrypted, elapsed);
   }
+
+  cancel(): void {
+    this.#abort.abort();
+  }
 }
 
 type ImportedFacts = {
@@ -1524,7 +1549,7 @@ type ImportedFacts = {
    * A newest-first import answered after its first page: the rest of the history, read on behind it. Settles true
    * once every row is kept, false if the read stopped; `page` is called after each page it keeps meanwhile.
    */
-  filling?: { done: Promise<boolean>; page: { committed: () => void } };
+  filling?: { done: Promise<boolean>; page: { committed: () => void }; cancel: () => void };
 };
 
 /** A first selected open: scan encrypted authority in bounded pages and retain no full-history plaintext graph. */
@@ -1593,6 +1618,61 @@ async function importNewestFirst(
     : await Promise.all(SETTINGS_ROWS.map((name) => rowKey(keys, name)));
   const below = (before: number, limit: number) =>
     reading.page(`before=${before}&limit=${limit}`, generation, (seq) => seq > 0 && seq < before);
+  if (manifest?.floor !== undefined) {
+    // Every committed newest-first batch is a durable, self-contained Home snapshot. A process killed after that
+    // checkpoint used to make the next launch wait for another network page before it could show the facts it
+    // already had. Resume the remaining history behind the authority instead: generation/order validation still
+    // happens before another page is committed, and a changed/stopped source promotes to the full log as before.
+    reading.register(generation!);
+    let profileTopology = manifest.profileTopology;
+    const top = manifest.head;
+    const openedManifest = manifest;
+    const page = { committed: () => {} };
+    const reached = () => progress?.(Math.min(1, Math.max(0, 1 - (floor - 1) / Math.max(1, top))));
+    const keep = async (current: ChangesPage) => {
+      const opened = await reading.facts(current.entries, generation!, false);
+      if (!opened) return false;
+      profileTopology ||= opened.profileTopology;
+      const complete = !current.more || current.entries.length === 0;
+      await reading.commit(
+        generation!,
+        opened.facts,
+        complete,
+        (batch) => {
+          floor = Math.min(floor, ...batch.map((fact) => fact.seq));
+          return { head: top, floor };
+        },
+        { profileTopology },
+        reached,
+      );
+      if (complete) {
+        floor = 1;
+        reached();
+        reading.finished();
+      }
+      return true;
+    };
+    const done = (async () => {
+      let next = below(floor, NEWEST_BACKGROUND_PAGE);
+      for (;;) {
+        const current = await next;
+        if (!current || current.order !== 'desc' || current.generation !== generation) return false;
+        if (current.more && current.entries.length)
+          next = below(current.entries.at(-1)!.seq, NEWEST_BACKGROUND_PAGE);
+        if (!(await keep(current))) return false;
+        page.committed();
+        if (!current.more || !current.entries.length) return true;
+      }
+    })().catch((error: unknown) => {
+      console.warn('den: the rest of the library could not be read', error);
+      return false;
+    });
+    return {
+      store,
+      manifest: openedManifest,
+      filling: { done, page, cancel: () => reading.cancel() },
+    };
+  }
   const [first, settings] = await Promise.all([
     below(floor, NEWEST_BOOTSTRAP_PAGE),
     settingsKeys && reading.page(`keys=${settingsKeys.join(',')}`, generation, (seq) => seq > 0),
@@ -1685,7 +1765,7 @@ async function importNewestFirst(
     console.warn('den: the rest of the library could not be read', error);
     return false;
   });
-  return { store, manifest: opened, filling: { done, page } };
+  return { store, manifest: opened, filling: { done, page, cancel: () => reading.cancel() } };
 }
 
 /** Every row after the import's `head`, oldest first: the whole history before Home is drawn. */

@@ -49,7 +49,7 @@
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
-  import { startupMarkOnce } from './lib/startupTiming';
+  import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
@@ -64,16 +64,9 @@
   import { warmOnIntent } from './lib/warmOnIntent';
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
-  import {
-    atlasCatalogs,
-    GUEST_PICKS,
-    mergeNewRow,
-    primeServicePage,
-    radarRows,
-    resolvePicks,
-    type AtlasCatalog,
-  } from './lib/services';
-  import { contentServices, type Service } from './settings/services';
+  import { optionalImport } from './lib/keyboardNavigation';
+  import type { AtlasCatalog } from './lib/services';
+  import type { Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
@@ -113,7 +106,7 @@
   import KidTitleAccessDialog from './components/KidTitleAccessDialog.svelte';
 
   let {
-    link,
+    link: _link,
     route,
     active,
     session,
@@ -151,6 +144,19 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  // Home roots can paint from the newest import page. Personalized ranking, unlike those shelves, describes the
+  // whole library and must wait until the remaining pages have landed before taking its one snapshot of `weighted`.
+  let initialHomeSettled = $state(model === null);
+  $effect(() => {
+    if (!model) return;
+    let current = true;
+    void model.initialHomeSettled.then(() => {
+      if (current) initialHomeSettled = true;
+    });
+    return () => {
+      current = false;
+    };
+  });
   // The download queue spends household credentials and bandwidth, so only a session that administers the household
   // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page. The
   // queue and the source plugins it searches are the household's, on its control library: an Owner whose activity
@@ -165,6 +171,49 @@
   /** Series layouts the shelves wait for at once: two rows' worth of cards, most of them already finished series. */
   const SHAPE_TRANCHE = 16;
   let shelvesReady = $state(model === null);
+  let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
+  let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
+  let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
+  $effect(() => {
+    const home = route.page === 'library';
+    if (model && home && !shelvesReady) {
+      homeMetadataReady = false;
+      return;
+    }
+    // Direct browse routes keep their useful TMDB rows while the optional service/catalogue helpers arrive.
+    if (!home) homeMetadataReady = true;
+    let current = true;
+    void (async () => {
+      // Provider/catalogue metadata sits below a paired Home's personal shelf. Let that useful shelf paint before
+      // parsing the optional module and publishing the generic rows; guests and direct browse routes still load it.
+      if (model && home && document.visibilityState === 'visible')
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+      await yieldTask();
+      let catalogue: typeof import('./lib/services');
+      let directories: typeof import('./settings/services');
+      try {
+        [catalogue, directories] = await Promise.all([
+          optionalImport(import('./lib/services')),
+          optionalImport(import('./settings/services')),
+        ]);
+      } catch {
+        // A stale deployment can lose this optional chunk. Keep the base TMDB rows useful without service helpers.
+        // Each request marks its own rejection before appMain's deferred preload handler decides whether to reload.
+        if (current) homeMetadataReady = true;
+        return;
+      }
+      if (!current) return;
+      startupRenderPhase('home_metadata');
+      homeServices = catalogue;
+      directoryServices = directories;
+      homeMetadataReady = true;
+    })();
+    return () => {
+      current = false;
+    };
+  });
   /**
    * The shelves under the top one (`topShelf`) mount a task after it. The flush that readied the shelves
    * mounted the Continue Watching, Downloading and Watchlist cards together: one 81ms task at 4x CPU on d.oxy.fi,
@@ -269,6 +318,8 @@
   const continueView = $derived(model?.continueWatching.value);
   // Visitor reads the Owner's household policy but never receives the Owner's activity/write model.
   const settings = $derived(session.policy?.settings.value);
+  /** Neutral defaults are presentation fallbacks, never authority to render or act before policy arrives. */
+  const policyReady = $derived(session.policy === null || settings !== undefined);
   /**
    * Admit enough refs to fill the requested number of cards, while keeping at most one tranche of unanswered
    * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains
@@ -306,10 +357,10 @@
     metadataLimit(overview?.watchlist ?? [], watchlistNames, watchlistCachedPrefix),
   );
   const libraryOpen = $derived(
-    profileActivity !== null || model === null || overview !== undefined,
+    policyReady && (profileActivity !== null || model === null || overview !== undefined),
   );
   const serviceFailed = $derived(
-    !!model && model.connection === 'failed' && model.overview.value === undefined,
+    !!model && model.connection === 'failed' && (!overview || !policyReady),
   );
   const updateRequired = $derived(libraryUpdateRequired(model));
 
@@ -443,6 +494,9 @@
       seedsNamed = model === null;
       return;
     }
+    // A later import page can replace Overview's seed set after the first tranche was named. Close the ranking gate
+    // synchronously so that replacement cannot reuse the previous set's `true` before its own names have landed.
+    seedsNamed = false;
     // After the shelves' own pass, so the shelves' lookups don't queue behind these.
     if (!shelvesReady) return;
     let disposed = false;
@@ -462,6 +516,8 @@
   const homeNamingSet = $derived(homeNamingRefs?.map(titleKey).sort().join(' '));
   const continuePresent = $derived(!!continueView?.items.length);
   const watchlistPresent = $derived(!!overview?.watchlist.length);
+  /** Unlike shelf visibility, ranking closes again while a replacement root's own first-paint titles are named. */
+  let rankingHomeNamesReady = $state(model === null);
   /** What this page last told the Worker to keep about Continue Watching; it is sent again only when that changes. */
   let retainedSent: boolean | undefined;
   $effect(() => {
@@ -484,21 +540,31 @@
     // earlier names nothing, and is never asked again, so Home ranked its worlds without the Kid's history.
     if (!model || homeNamingSet === undefined || (session.kid && !atlasReady)) {
       shelvesReady = model === null;
+      rankingHomeNamesReady = model === null;
       shelfPlan = null;
       return;
     }
     const plan = { continue: continuePresent, watchlist: watchlistPresent };
     let disposed = false;
+    // Overview and Continue can now replace independently. Keep already-painted shelves up, but do not let ranking
+    // reuse the previous roots' naming boundary while this replacement's own titles are still landing.
+    rankingHomeNamesReady = false;
     if (untrack(() => shelfPlan === null)) shelvesReady = false;
     shelfPlan = plan;
     const refs = untrack(() => homeNamingRefs!);
     void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
       if (disposed) return;
+      startupRenderPhase('home_shelves');
       shelvesReady = true;
+      rankingHomeNamesReady = true;
       startupMarkOnce('shelves ready');
       if (retainedSent === plan.continue) return;
       retainedSent = plan.continue;
-      void model.retainHomeContinue(plan.continue).catch(warnKeep);
+      void model.retainHomeContinue(plan.continue).catch((error: unknown) => {
+        // A route/profile replacement may close this model while its required roots are still opening. That old
+        // frame has nothing left to retain and must not manufacture a warning after teardown.
+        if (!disposed) warnKeep(error);
+      });
     });
     return () => {
       disposed = true;
@@ -545,7 +611,12 @@
     const view = overview;
     if (!active || route.page !== 'watchlist' || !view || !history || !watchlistNamed) return;
     if (!watchlistLead && untrack(() => savedTitles.length)) return;
-    void nameLibraryTitles(session, history.items.map(({ title }) => title) as TitleRef[]);
+    const refs = history.items.map(({ title }) => title) as TitleRef[];
+    // Paint the leading cards before asking the rest: one slow provider answer near the page's tail must not keep
+    // every successful title in the Worker's bounded metadata reply off screen.
+    void nameLibraryTitles(session, refs.slice(0, SHELF_TRANCHE)).then(() =>
+      nameLibraryTitles(session, refs.slice(SHELF_TRANCHE)),
+    );
   });
 
   const displayContinueEntry = (entry: ContinueItem): ContinueEntry[] => {
@@ -903,7 +974,7 @@
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
   const play = $derived(
-    tvs.length
+    policyReady && tvs.length
       ? async (tvId: string, title: Title, season?: number, episode?: number) => {
           const tv = tvs.find((candidate) => candidate.id === tvId);
           if (!tv) return;
@@ -983,7 +1054,7 @@
    * refused it.
    */
   const playHere = $derived(
-    scout && (scout.playback || remux !== null)
+    policyReady && scout && (scout.playback || remux !== null)
       ? async (title: Title, season?: number, episode?: number, filename?: string) => {
           const blocked = await playGuard(title, {
             content: session.content,
@@ -1031,6 +1102,7 @@
 
   // Hosted webOS and packaged Tizen TVs take the plays and transport commands any device holding the library sends
   // them (den-spec inbox-v1 §5). An ordinary browser is a controller only and drains neither.
+  let personalizedRankingReady = false;
   $effect(() => {
     if (!__DEN_TV__) return;
     const stop = new AbortController();
@@ -1377,7 +1449,7 @@
   function primeService(service: Service, country: string) {
     void ServiceScreen.load();
     if (!atlasReady) return;
-    primeServicePage(session.content, service, country, atlas, {
+    homeServices?.primeServicePage(session.content, service, country, atlas, {
       minYear: prefs.minReleaseYear,
       excludedLanguages: prefs.excludedLanguages,
       shown: browseShown,
@@ -1457,9 +1529,10 @@
   let serviceCatalogs = $state.raw<AtlasCatalog[]>([]);
   $effect(() => {
     const here = atlas;
-    if (!here) return;
+    const catalogue = homeServices;
+    if (!here || !catalogue) return;
     let current = true;
-    void atlasCatalogs(session.content).then(
+    void catalogue.atlasCatalogs(session.content).then(
       (listed) => {
         if (current) serviceCatalogs = listed;
       },
@@ -1474,8 +1547,8 @@
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
   const radar = (only?: 'movie' | 'tv') => {
     const content = session.content;
-    return atlas
-      ? radarRows(serviceCatalogs, servicePicks, {
+    return atlas && homeServices
+      ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
           content,
@@ -1529,9 +1602,12 @@
     const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
     const pooled = radar();
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
-    const spine = arrivals
-      ? home.map((row) => (row.id === 'new-releases' ? mergeNewRow(arrivals, row) : row))
-      : home;
+    const spine =
+      arrivals && homeServices
+        ? home.map((row) =>
+            row.id === 'new-releases' ? homeServices!.mergeNewRow(arrivals, row) : row,
+          )
+        : home;
     const coming = pooled.filter((row) => row !== arrivals);
     return rankHomeRows(
       [
@@ -1549,7 +1625,9 @@
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
    */
-  const servicePicks = $derived(prefs.servicesConfigured ? prefs.services : GUEST_PICKS);
+  const servicePicks = $derived(
+    prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
+  );
   /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
   let serviceDirectoriesAdmitted = $state(false);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
@@ -1558,12 +1636,14 @@
   /** Countries whose directory is on its way: the Services row holds its room until they answer. */
   let naming = $state(0);
   $effect(() => {
-    if (!serviceDirectoriesAdmitted) return;
+    const directory = directoryServices;
+    if (!serviceDirectoriesAdmitted || !directory) return;
     for (const { country } of servicePicks) {
       if (askedFor[country]) continue;
       askedFor[country] = true;
       naming++;
-      void contentServices(session.content, country)
+      void directory
+        .contentServices(session.content, country)
         .then(
           (listed) => {
             directories = { ...directories, [country]: listed };
@@ -1578,8 +1658,9 @@
   });
   /** The picks their country's directory can account for, named and ordered by it. */
   const services = $derived(
-    [...new Set(servicePicks.map((pick) => pick.country))].flatMap((country) =>
-      resolvePicks(servicePicks, directories[country] ?? [], country),
+    [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
+      (country) =>
+        homeServices?.resolvePicks(servicePicks, directories[country] ?? [], country) ?? [],
     ),
   );
   /**
@@ -1602,6 +1683,13 @@
    * library already holds.
    */
   let featured = $state.raw<RecommendedTitle[]>([]);
+  let heroAttributed = false;
+  $effect(() => {
+    if (!heroAttributed && featured.length) {
+      heroAttributed = true;
+      startupRenderPhase('home_hero');
+    }
+  });
   const heroKey = $derived(
     featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
   );
@@ -1731,7 +1819,7 @@
     // shape, the hide rules, the taste — is read without being watched. Those tick over continuously while the
     // library is named, and watching them had the whole pool rebuilt on every tick: hundreds of repeat requests to
     // atlas for one page load. The one readiness edge matters: ranking before it permanently sent unnamed history.
-    if (
+    const rankingSurface = !(
       route.page === 'title' ||
       route.page === 'person' ||
       route.page === 'search' ||
@@ -1739,11 +1827,25 @@
       route.page === 'watchlist' ||
       route.page === 'downloads' ||
       route.page === 'service'
-    )
-      return;
+    );
     const here = atlas;
     // Its ranking sends the seeds' names, which are named after the shelves' own (`seedsNamed`).
     const named = shelvesReady && seedsNamed;
+    const rankingReady =
+      rankingSurface &&
+      !!here &&
+      policyReady &&
+      libraryOpen &&
+      named &&
+      rankingHomeNamesReady &&
+      initialHomeSettled;
+    if (personalizedRankingReady && !rankingReady) {
+      // A request that captured an earlier root must not publish or retain after any authority gate closes.
+      billboardRun++;
+      stagedFeatured = null;
+    }
+    personalizedRankingReady = rankingReady;
+    if (!rankingSurface) return;
     if (session.kid) {
       const ready = kidHomeReady;
       const available = rankedKidHome.length;
@@ -1761,7 +1863,9 @@
       untrack(() => buildTrending(beginBillboard()));
       return;
     }
-    if (model === null || (libraryOpen && named)) untrack(buildRecommended);
+    // Its library vector is whole-library state, so the remaining first-read pages must also have landed. This does
+    // not hold the shelves or retained hero, both of which deliberately paint from the newest page.
+    if (model === null || rankingReady) untrack(buildRecommended);
   });
 
   async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
@@ -1822,18 +1926,24 @@
     const run = beginBillboard();
     stagedFeatured = null;
     const lookup = lookupTitle;
+    const rankingNames = untrack(() => [
+      ...(homeNamingRefs ?? []),
+      ...(seedNamingRefs ?? []),
+    ]) as TitleRef[];
     const ranked =
       model && overview && memberPost
-        ? recommend(
-            session.content,
-            recommendBody({
-              facet: type,
-              prefs,
-              library: weighted,
-              named: session.displayTitles(),
-              owned: seeds.owned,
-              fresh,
-            }),
+        ? nameLibraryTitles(session, rankingNames).then(() =>
+            recommend(
+              session.content,
+              recommendBody({
+                facet: type,
+                prefs,
+                library: weighted,
+                named: session.displayTitles(),
+                owned: seeds.owned,
+                fresh,
+              }),
+            ),
           )
         : null;
     const kept =
@@ -2122,7 +2232,7 @@
       again.
     </p>
   </section>
-{:else if link && model && !overview && !serviceFailed}
+{:else if model && (!overview || !policyReady) && !serviceFailed}
   <!-- No spinner: a first read from den-edge draws its progress on the navigation bar, and any other open is too
        short to show one. The marker still holds the Router's scroll restore until the library is drawn. -->
   <div data-route-loading></div>
@@ -2387,21 +2497,23 @@
       <PendingPosterRow heading="Watchlist" />
     {/if}
     {#if !facet}
-      <ServicesRow
-        {services}
-        pending={serviceDirectoriesAdmitted
-          ? naming
-            ? servicePicks.length
-            : 0
-          : servicePicks.length}
-        empty={serviceDirectoriesAdmitted && !naming && !services.length
-          ? 'Services unavailable'
-          : undefined}
-        onvisible={() => (serviceDirectoriesAdmitted = true)}
-        onintent={primeService}
-      />
+      {#if homeMetadataReady}
+        <ServicesRow
+          {services}
+          pending={serviceDirectoriesAdmitted
+            ? naming
+              ? servicePicks.length
+              : 0
+            : servicePicks.length}
+          empty={serviceDirectoriesAdmitted && !naming && !services.length
+            ? 'Services unavailable'
+            : undefined}
+          onvisible={() => (serviceDirectoriesAdmitted = true)}
+          onintent={primeService}
+        />
+      {/if}
     {/if}
-    <Browse {rows} shown={browseShown} />
+    {#if homeMetadataReady}<Browse {rows} shown={browseShown} />{/if}
   {/if}
 {/if}
 

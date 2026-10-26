@@ -21,6 +21,7 @@ import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { reuse } from './reuse';
 import { contentServices, matches, type Service } from '../settings/services';
+export { GUEST_PICKS } from './servicePicks';
 
 /**
  * What a visitor with no library sees: the six US services, in TMDB's own US order.
@@ -28,15 +29,6 @@ import { contentServices, matches, type Service } from '../settings/services';
  * Ids are JustWatch's, the same everywhere; the name and the logo are not here, they come from TMDB's directory for
  * the country. A pick the directory does not list simply has no tile, which is what makes this list safe to state.
  */
-export const GUEST_PICKS: readonly ServicePick[] = [
-  { id: 8, country: 'US' }, // Netflix
-  { id: 1899, country: 'US' }, // Max
-  { id: 15, country: 'US' }, // Hulu
-  { id: 337, country: 'US' }, // Disney+
-  { id: 350, country: 'US' }, // Apple TV+
-  { id: 531, country: 'US' }, // Paramount+
-];
-
 /** A pick resolved against its country's directory: the tile's name and logo, and the ids its rows ask for. */
 export interface ResolvedService {
   pick: ServicePick;

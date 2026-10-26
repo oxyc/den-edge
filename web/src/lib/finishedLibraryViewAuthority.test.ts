@@ -860,20 +860,38 @@ it('resumes a newest-first import below the last committed page, and opens the l
   await opened!.authority.close?.();
 
   const resumed = changesEdge(entries, 'generation-newest');
+  let releaseResume!: () => void;
+  const resumeReleased = new Promise<void>((resolve) => (releaseResume = resolve));
+  let resumeAsked = 0;
+  const resumeFetch = vi.fn<typeof fetch>(async (input, init) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.searchParams.has('before')) {
+      resumeAsked++;
+      await resumeReleased;
+    }
+    return resumed.fetchImpl(input, init);
+  });
+  const resumedFull = vi.fn(async () => fullAuthority());
   const reopened = await openFinishedLibraryViewAuthority(
     request,
     vault,
-    vi.fn(async () => fullAuthority()),
+    resumedFull,
     content,
-    resumed.fetchImpl,
+    resumeFetch,
   );
-  // Below the floor the first open kept, without reading the settings again.
+  // The committed newest page is already a safe Home snapshot. Reopening answers from it while the next page is
+  // still on the network, instead of putting the same cold wait on the foreground twice.
+  expect(resumeAsked).toBe(1);
+  await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    watchlist: expect.arrayContaining([{ type: 'movie', id: 1_100 }]),
+  });
+  expect(resumedFull).not.toHaveBeenCalled();
+  releaseResume();
+  // Resume below the durable floor in full background pages, without reading the settings again.
+  await waitFor(() => expect(resumed.requests).toHaveLength(1));
   expect(
     resumed.requests.map((url) => [url.searchParams.get('before'), url.searchParams.get('limit')]),
-  ).toEqual([
-    ['974', '128'],
-    ['846', '1000'],
-  ]);
+  ).toEqual([['974', '1000']]);
   await waitFor(async () =>
     expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
       head: 1_101,
@@ -883,6 +901,98 @@ it('resumes a newest-first import below the last committed page, and opens the l
   await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
     watchlist: expect.arrayContaining([{ type: 'movie', id: 1 }]),
   });
+});
+
+it('stops a resumed import before promotion or close completes', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const entries = await settledLongAgo(1_100);
+  const interrupted = changesEdge(entries, 'generation-promote-resume', {
+    fail: (url) => Number(url.searchParams.get('before') ?? Infinity) < Number.MAX_SAFE_INTEGER,
+  });
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    interrupted.fetchImpl,
+  );
+  await waitFor(async () =>
+    expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
+      complete: false,
+      floor: 974,
+    }),
+  );
+  await first!.authority.close?.();
+
+  let aborted = false;
+  let resumeAsked = false;
+  const resumeFetch = vi.fn<typeof fetch>(async (input, init) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    resumeAsked = true;
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      const stop = () => {
+        aborted = true;
+        reject(new DOMException('stopped', 'AbortError'));
+      };
+      if (signal?.aborted) stop();
+      else signal?.addEventListener('abort', stop, { once: true });
+    });
+  });
+  const openFull = vi.fn(async () => {
+    expect(aborted).toBe(true);
+    return fullAuthority();
+  });
+  const reopened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    resumeFetch,
+  );
+  expect(resumeAsked).toBe(true);
+
+  await expect(
+    reopened!.authority.command(
+      { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
+      'promote-after-resume',
+    ),
+  ).resolves.toMatchObject({ outcome: 'unchanged' });
+  expect(openFull).toHaveBeenCalledOnce();
+  await expect((await LibraryFactStore.open(libraryKey, vault))!.manifest()).resolves.toMatchObject(
+    {
+      complete: false,
+      floor: 974,
+    },
+  );
+  await reopened!.authority.close?.();
+
+  let closeAborted = false;
+  const closeFetch = vi.fn<typeof fetch>(async (input, init) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.pathname.endsWith('/member')) return new Response(null, { status: 204 });
+    return new Promise<Response>((_resolve, reject) => {
+      const stop = () => {
+        closeAborted = true;
+        reject(new DOMException('stopped', 'AbortError'));
+      };
+      if (init?.signal?.aborted) stop();
+      else init?.signal?.addEventListener('abort', stop, { once: true });
+    });
+  });
+  const closeFull = vi.fn(async () => fullAuthority());
+  const closing = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    closeFull,
+    content,
+    closeFetch,
+  );
+  await closing!.authority.close?.();
+  expect(closeAborted).toBe(true);
+  expect(closeFull).not.toHaveBeenCalled();
 });
 
 it('applies one changed document to capability facts without opening unrelated documents', async () => {

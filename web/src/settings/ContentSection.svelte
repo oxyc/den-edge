@@ -24,7 +24,7 @@
     TV_GENRES,
     WARNING_GROUPS,
   } from './catalogs';
-  import { GUEST_PICKS } from '../lib/services';
+  import { GUEST_PICKS } from '../lib/servicePicks';
   import {
     beginServiceDirectoryLoad,
     completeServiceDirectoryLoad,

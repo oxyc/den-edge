@@ -130,7 +130,12 @@ it('bounds a silent startup and Retry replaces the expired Worker', async () => 
   const createWorker = vi
     .fn<() => Worker>()
     .mockReturnValueOnce(first as unknown as Worker)
-    .mockReturnValueOnce(replacement as unknown as Worker);
+    .mockImplementationOnce(() => {
+      // A cold profile bootstrap already has the Owner Worker beside this one. Never make its replacement a third
+      // simultaneously live runtime on the device.
+      expect(first.terminate).toHaveBeenCalledOnce();
+      return replacement as unknown as Worker;
+    });
   const services = createWorkerServiceSession({
     createWorker,
     startupTimeoutMs: 20,

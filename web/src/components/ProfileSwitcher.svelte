@@ -284,32 +284,35 @@
       </div>
     {:else}
       <p class="intro">Choose once. Den opens here next time until you switch again.</p>
-      <div class="profiles" aria-label="Profiles">
+      <div class="profiles" aria-label="Profiles" data-spatial-list="vertical">
         {#each profiles.choices as choice (choice.role === 'visitor' ? 'visitor' : choice.id)}
-          <button
-            class="profile-choice"
-            class:current={choiceKey(choice) === choiceKey(active)}
-            type="button"
-            disabled={switching || profiles.waitsForPin(choice.role)}
-            aria-label={`Use ${choice.name}`}
-            onclick={() => void choose(choice)}
-          >
-            <ProfileAvatar {choice} />
-            <span class="choice-copy">
-              <strong>{choice.name}</strong>
-              <small>
-                {choice.role === 'kid'
-                  ? profiles.preview
-                    ? 'Profile preview · content filtering is not active yet'
-                    : `${choice.policy?.maximumAge ?? 12} and under · unrated hidden`
-                  : choice.role === 'visitor'
-                    ? 'Stays on this browser · activity erased when you switch profiles'
-                    : 'Your library and household settings'}
-              </small>
-            </span>
-            {#if choiceKey(choice) === choiceKey(active)}<span class="current-label">Current</span
-              >{/if}
-          </button>
+          <div data-spatial-item>
+            <button
+              class="profile-choice"
+              class:current={choiceKey(choice) === choiceKey(active)}
+              type="button"
+              disabled={switching || profiles.waitsForPin(choice.role)}
+              aria-label={`Use ${choice.name}`}
+              data-spatial-anchor
+              onclick={() => void choose(choice)}
+            >
+              <ProfileAvatar {choice} />
+              <span class="choice-copy">
+                <strong>{choice.name}</strong>
+                <small>
+                  {choice.role === 'kid'
+                    ? profiles.preview
+                      ? 'Profile preview · content filtering is not active yet'
+                      : `${choice.policy?.maximumAge ?? 12} and under · unrated hidden`
+                    : choice.role === 'visitor'
+                      ? 'Stays on this browser · activity erased when you switch profiles'
+                      : 'Your library and household settings'}
+                </small>
+              </span>
+              {#if choiceKey(choice) === choiceKey(active)}<span class="current-label">Current</span
+                >{/if}
+            </button>
+          </div>
         {/each}
       </div>
       <div class="actions">

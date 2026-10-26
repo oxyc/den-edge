@@ -714,6 +714,35 @@ test('profile control moves from the desktop header to the mobile Settings row',
   await expect(dialog).toBeHidden();
 });
 
+test('TV remote follows profile row order when modal geometry cannot distinguish rows', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  await page.evaluate(async () => {
+    const { installTVNavigation } = await import('/src/tv/navigation.ts');
+    installTVNavigation();
+  });
+
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  const owner = page.getByRole('button', { name: 'Use Owner' });
+  const visitor = page.getByRole('button', { name: 'Use Visitor' });
+  await expect(visitor).toBeEnabled();
+  await expect(owner).toBeFocused();
+
+  // A TV webview can report indistinguishable modal-row rectangles. Ordered spatial-list semantics must still
+  // win over the generic geometry fallback, which would otherwise jump to Done or leave focus where it was.
+  await page.locator('.profile-choice').evaluateAll((choices) => {
+    const row = choices[0].getBoundingClientRect();
+    for (const choice of choices) choice.getBoundingClientRect = () => row;
+  });
+  await page.keyboard.press('ArrowDown');
+  await expect(visitor).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(owner).toBeFocused();
+});
+
 test('Visitor stays active across reload, PIN denial preserves it, and success disposes only its visit', async ({
   page,
 }) => {
