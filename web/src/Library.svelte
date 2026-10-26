@@ -48,6 +48,7 @@
     clock as timecode,
     livePosition,
     recent,
+    resumable,
     sight,
     type Sighting,
   } from './lib/livePosition';
@@ -782,11 +783,11 @@
     const controlling =
       !!entry?.deviceId && tvs.some((tv) => tv.id === entry.deviceId && tv.controls);
     const playingAt = sighting && livePosition(sighting, now);
-    // A paused TV keeps writing the same position. Keep this widget (and its Resume control) while that write is
-    // fresh, but only when identity and capability prove this household can command that exact TV.
+    // A paused TV can be resumed for ten minutes after its last exact position. This does not extend the moving
+    // clock: the listening probe and the receiver's exact-title/episode check still decide whether Resume lands.
     const at =
       playingAt ??
-      (controlling && sighting && recent(sighting, now) ? sighting.seconds : undefined);
+      (controlling && sighting && resumable(sighting, now) ? sighting.seconds : undefined);
     if (!entry || at === undefined) return undefined;
     const positionFraction = entry.liveFraction ?? entry.fraction;
     return {
@@ -794,6 +795,7 @@
       episode: entry.liveEpisode ?? entry.episode,
       device: entry.device,
       deviceId: entry.deviceId,
+      active: !!sighting && recent(sighting, now),
       playing: playingAt !== undefined,
       fraction: positionFraction,
     };
@@ -1053,7 +1055,7 @@
     const intended = live?.deviceId
       ? tvs.find((candidate) => candidate.id === live.deviceId && candidate.controls)
       : undefined;
-    if (!intended || !live || !opening) return false;
+    if (!intended || !live || !opening || (action !== 'play' && !live.active)) return false;
     // The latest position can briefly name a TV whose Den app was replaced by another HDMI/input app, while a
     // second Den TV continues the same title off-screen. Prefer the exact writer when it is listening; otherwise
     // route to the one awake command-capable receiver. The title/episode guard at that receiver remains decisive.
