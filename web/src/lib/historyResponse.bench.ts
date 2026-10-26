@@ -52,6 +52,10 @@ const firstRows = rows.filter((row) => row.kind !== 'set' && firstKeys.has(key(r
 
 const summaryReply = (): HistoryView => ({
   kind: 'history',
+  revision: 'history-benchmark',
+  filter: {},
+  total: TITLES,
+  facets: { all: TITLES, movie: 0, tv: TITLES, years: [] },
   items: watchedHistory(rows, names).map(({ title, at, episode, episodes }) => ({
     title: { type: title.type, id: title.id },
     watchedAt: at,
@@ -76,6 +80,8 @@ const splitReply = (): [HistoryView, Extract<LibraryQueryResult, { kind: 'histor
     summary,
     {
       kind: 'history.episodes',
+      revision: summary.revision,
+      stale: false,
       items: firstTitles.map((title) => ({ title, seen: exact.get(key(title)) ?? [] })),
     },
   ];

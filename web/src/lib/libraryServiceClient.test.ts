@@ -254,6 +254,10 @@ it('correlates history subscriptions with history replacements only', async () =
   });
   const history = {
     kind: 'history' as const,
+    revision: 'history-test',
+    filter: {},
+    total: 1,
+    facets: { all: 1, movie: 1, tv: 0, years: [] },
     items: [{ title: { type: 'movie' as const, id: 7 }, watchedAt: 10, episodes: 0 }],
   };
   transport.emit({

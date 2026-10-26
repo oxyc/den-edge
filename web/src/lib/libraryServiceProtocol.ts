@@ -5,8 +5,8 @@
  * implementation that projects them are private to the service.
  */
 
-/** Version 9 moves exact watched-episode coordinates out of the History subscription into a bounded query. */
-export const LIBRARY_SERVICE_PROTOCOL = 9 as const;
+/** Version 10 makes History a revision-bound, materialized keyset page instead of one whole-library reply. */
+export const LIBRARY_SERVICE_PROTOCOL = 10 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -416,9 +416,33 @@ export interface HistoryItem {
   episodes: number;
 }
 
-export interface HistoryView {
-  kind: 'history';
+export interface HistoryFilter {
+  type?: MediaType;
+  /** Calendar year as rendered by the viewer, or `unknown` for undated imports. */
+  year?: string;
+}
+
+/** Opaque keyset position, valid only for the revision and filter that produced it. */
+export type HistoryCursor = string;
+
+export interface HistoryFacets {
+  all: number;
+  movie: number;
+  tv: number;
+  years: Array<{ year: string; all: number; movie: number; tv: number }>;
+}
+
+export interface HistoryPage {
+  revision: string;
+  filter: HistoryFilter;
+  total: number;
+  facets: HistoryFacets;
   items: HistoryItem[];
+  nextCursor?: HistoryCursor;
+}
+
+export interface HistoryView extends HistoryPage {
+  kind: 'history';
 }
 
 export interface TitleView {
@@ -898,7 +922,18 @@ export type LibraryQuery =
       grantTicket?: string;
     }
   | { kind: 'history.export' }
-  | { kind: 'history.episodes'; titles: Array<TitleRef & { type: 'tv' }> }
+  | {
+      kind: 'history.page';
+      revision: string;
+      filter: HistoryFilter;
+      cursor?: HistoryCursor;
+      limit?: number;
+    }
+  | {
+      kind: 'history.episodes';
+      revision: string;
+      titles: Array<TitleRef & { type: 'tv' }>;
+    }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
   | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean }
@@ -933,6 +968,21 @@ export type LibraryQueryResult =
     }
   | { kind: 'parental-pin.verify'; matches: boolean }
   | {
+      kind: 'history.page';
+      /** A stale or malformed cursor restarts at the first page of the current revision. */
+      restarted: boolean;
+      page: HistoryPage;
+    }
+  | {
+      kind: 'history.episodes';
+      revision: string;
+      stale: boolean;
+      items: Array<{
+        title: TitleRef & { type: 'tv' };
+        seen: Array<{ season: number; episode: number }>;
+      }>;
+    }
+  | {
       kind: 'profile-create.status';
       phase: 'idle' | 'created';
       profile?: string;
@@ -958,13 +1008,6 @@ export type LibraryQueryResult =
           episode: number;
           plays: Array<{ watchedAt: string | null; rewatch: boolean; source: 'den' | 'import' }>;
         }>;
-      }>;
-    }
-  | {
-      kind: 'history.episodes';
-      items: Array<{
-        title: TitleRef & { type: 'tv' };
-        seen: Array<{ season: number; episode: number }>;
       }>;
     }
   | {

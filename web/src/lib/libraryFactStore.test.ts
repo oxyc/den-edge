@@ -6,10 +6,12 @@ import type { DocumentRow, EpisodeRow, Row, TitleRow } from './wire';
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
+  readonly gets: string[] = [];
   failCommit = false;
   commits = 0;
 
   async get(key: string) {
+    this.gets.push(key);
     return this.values.get(key)?.slice();
   }
   async entries(prefix: string) {
@@ -147,6 +149,45 @@ describe('library fact store', () => {
     expect(vault.commits).toBe(commits);
     expect(changes).toBe(0);
     await expect(store.manifest()).resolves.toEqual(before);
+  });
+
+  it('builds the first complete History checkpoint from the import scan without reopening every document', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const seasons = Array.from({ length: 40 }, (_, index): DocumentRow => ({
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: index + 1 },
+      season: 1,
+      seasonReset: null,
+      episodes: {
+        1: {
+          progress: { value: 1, at: [index + 1, 0, 'device'], viewing: 0 },
+          imported: false,
+          plays: { 0: index + 1 },
+          cleared: null,
+        },
+      },
+    }));
+    await store.commitBatch(
+      'generation-a',
+      seasons.length,
+      seasons.map((row, index) => ({
+        k: String(index).padStart(64, '0'),
+        seq: index + 1,
+        value: `ciphertext-${index}`,
+        row,
+      })),
+      false,
+    );
+    vault.gets.length = 0;
+
+    await store.commitBatch('generation-a', seasons.length, [], true);
+
+    expect(vault.gets.filter((key) => key.includes(':document:'))).toEqual([]);
+    await expect(store.history((await store.manifest())!)).resolves.toMatchObject({
+      source: { version: seasons.length },
+    });
   });
 
   it('reduces Watchlist and Continue independently without a watched-history fact', async () => {

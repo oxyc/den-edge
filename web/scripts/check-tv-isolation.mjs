@@ -56,7 +56,11 @@ if (process.argv.includes('--capture')) {
   // TV-only (householdPlays).
   // The compact browser remote adds its transport row and icon styling to the lazy detail graph. Keep that reviewed
   // addition within one further KiB without relaxing the initial graph or TV-only implementation scan above.
+  // Revision-bound History pagination adds one compact encrypted checkpoint/index implementation to the shared
+  // library Worker and a small demand-paging path to the lazy Library screen. Its measured 22.7 KiB total delta
+  // replaces 0.9 MiB whole-history replies at 10k titles and cuts the representative cold path about 4x. Allow the
+  // reviewed 6 KiB increase while keeping the initial graph and TV-only isolation limits unchanged.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 17408) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 24576) throw new Error('Browser total JS/CSS budget exceeded');
 }

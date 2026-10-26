@@ -13,6 +13,21 @@ import {
   sealLibraryLocalValue,
 } from './libraryLocalValue';
 import { noteLibraryFactCommit } from './libraryStartupMetrics';
+import {
+  COMPACT_HISTORY_CHECKPOINT_SCHEMA,
+  historyCheckpointMatches,
+  historyCheckpointSource,
+  restoreHistoryCheckpoint,
+  type CompactHistoryCheckpoint,
+} from './compactHistoryCheckpoint';
+import {
+  HISTORY_INDEX_POLICY,
+  HISTORY_INDEX_SCHEMA,
+  MaterializedHistoryIndex,
+  compareHistoryItems,
+  currentHistoryTimeZone,
+  historyItemFromDocuments,
+} from './historyIndex';
 import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import type { Vault, VaultChange } from './localVault';
 import {
@@ -107,6 +122,7 @@ export interface StoredLibraryDocument {
 
 const generationPart = (generation: string) => encodeURIComponent(generation);
 const manifestName = `${ROOT}:manifest`;
+const historyName = `${ROOT}:history`;
 const namespace = (generation: string) => `${ROOT}:${generationPart(generation)}`;
 const documentName = (generation: string, key: string) =>
   `${namespace(generation)}:document:${key}`;
@@ -285,6 +301,10 @@ export class LibraryFactStore {
   private generation?: string;
   private readonly staleGenerations = new Set<string>();
   private readonly listeners = new Set<() => void>();
+  private historyCache?: {
+    identity: string;
+    value: { checkpoint: CompactHistoryCheckpoint; index: MaterializedHistoryIndex };
+  };
   private constructor(
     readonly libraryId: string,
     private readonly key: CryptoKey,
@@ -303,6 +323,36 @@ export class LibraryFactStore {
     this.profileTopology = opened.profileTopology;
     this.generation = opened.generation;
     return opened;
+  }
+
+  /** The one canonical, timezone-neutral History checkpoint atomically paired with `manifest`. */
+  async history(manifest: LibraryFactManifest): Promise<MaterializedHistoryIndex | null> {
+    if (!manifest.complete) return null;
+    const opened = await this.readHistoryCheckpoint(manifest);
+    if (!opened) return null;
+    if (opened.index.timeZone !== currentHistoryTimeZone()) {
+      const restored = MaterializedHistoryIndex.restore(opened.checkpoint.snapshot);
+      if (!restored) return null;
+      opened.index = restored;
+    }
+    if (opened.index.source.reconsiderAt !== null && Date.now() >= opened.index.source.reconsiderAt)
+      return null;
+    return opened.index;
+  }
+
+  /** Exact document membership for bounded visible-title detail queries. */
+  async historyDocumentsFor(
+    manifest: LibraryFactManifest,
+    title: { type: 'tv'; id: number },
+  ): Promise<StoredLibraryDocument[] | null> {
+    const opened = await this.readHistoryCheckpoint(manifest);
+    if (!opened) return null;
+    const keys = new Map(opened.checkpoint.documents).get(`${title.type}:${title.id}`);
+    if (!keys) return [];
+    const documents = await Promise.all(keys.map((key) => this.document(manifest.generation, key)));
+    return documents.every((document) => document !== null)
+      ? (documents as StoredLibraryDocument[])
+      : null;
   }
 
   /** Tell an owner of derived local state whenever this store's authoritative rows move. */
@@ -401,7 +451,8 @@ export class LibraryFactStore {
       held.head === head &&
       held.complete === complete &&
       held.profileTopology === this.profileTopology &&
-      held.floor === floor
+      held.floor === floor &&
+      (!complete || (await this.history(held)) !== null)
     )
       return;
     const changes = await this.changes(generation, entries, options.retainEpisodeProjection);
@@ -415,12 +466,14 @@ export class LibraryFactStore {
       ...(floor !== undefined ? { floor } : {}),
       newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
     };
+    changes.push(await this.historyCheckpointChange(held, manifest, entries));
     changes.push({
       kind: 'put',
       key: `${this.libraryId}:${manifestName}`,
       value: await sealLibraryLocalValue(this.key, manifestName, manifest),
     });
     await this.vault.commit(changes);
+    this.historyCache = undefined;
     noteLibraryFactCommit(entries.length);
     this.changed();
     if (complete)
@@ -445,11 +498,12 @@ export class LibraryFactStore {
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
     const held = await this.readManifest();
     if (held?.generation === generation) {
-      const manifest = {
+      const manifest: LibraryFactManifest = {
         ...held,
         ...nextIdentity(held, generation, held.head, entries),
         newest: withNewest(held.newest, entries),
       };
+      changes.push(await this.historyCheckpointChange(held, manifest, entries));
       changes.push({
         kind: 'put',
         key: `${this.libraryId}:${manifestName}`,
@@ -457,6 +511,7 @@ export class LibraryFactStore {
       });
     }
     await this.vault.commit(changes);
+    this.historyCache = undefined;
     noteLibraryFactCommit(entries.length);
     this.changed();
   }
@@ -467,6 +522,7 @@ export class LibraryFactStore {
     this.generation = undefined;
     this.profileTopology = false;
     this.staleGenerations.clear();
+    this.historyCache = undefined;
     this.changed();
   }
 
@@ -512,6 +568,157 @@ export class LibraryFactStore {
       }
     }
     return Promise.all(pending);
+  }
+
+  private async readHistoryCheckpoint(manifest: LibraryFactManifest): Promise<{
+    checkpoint: CompactHistoryCheckpoint;
+    index: MaterializedHistoryIndex;
+  } | null> {
+    const identity = `${manifest.generation}\n${manifest.head}\n${manifest.rowsVersion ?? manifest.head}\n${manifest.revision ?? ''}`;
+    if (this.historyCache?.identity === identity) return this.historyCache.value;
+    const bytes = await this.vault.get(`${this.libraryId}:${historyName}`);
+    if (!bytes) return null;
+    try {
+      const value = restoreHistoryCheckpoint(
+        await openLibraryLocalValue(this.key, historyName, bytes),
+        manifest,
+      );
+      if (value) this.historyCache = { identity, value };
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Prepare the checkpoint before the transaction; its put/delete lands atomically with documents and manifest. */
+  private async historyCheckpointChange(
+    held: LibraryFactManifest | null,
+    manifest: LibraryFactManifest,
+    entries: readonly LibraryFactEntry[],
+  ): Promise<VaultChange> {
+    const key = `${this.libraryId}:${historyName}`;
+    if (!manifest.complete) return { kind: 'delete', key };
+
+    const openedPrior =
+      held?.complete && held.generation === manifest.generation
+        ? await this.readHistoryCheckpoint(held)
+        : null;
+    const prior =
+      openedPrior &&
+      openedPrior.index.source.reconsiderAt !== null &&
+      Date.now() >= openedPrior.index.source.reconsiderAt
+        ? null
+        : openedPrior;
+    const incoming = new Map(entries.map((entry) => [entry.k, entry.row]));
+    const documents = new Map<string, Set<string>>();
+    // On the first complete import, retain the documents already opened by the one required membership scan. Reading
+    // and decrypting every document again title-by-title made profile adoption pay two full-library passes before its
+    // startup deadline. Incremental updates still read only the affected titles below.
+    const importedRows = prior ? null : new Map<string, DocumentRow[]>();
+    const affected = new Set<string>();
+    let reconsiderAt = prior?.index.source.reconsiderAt ?? Infinity;
+    const titleOf = (row: Row | null | undefined): string | null =>
+      row && isDocument(row) && (row.kind === 'title' || row.kind === 'season')
+        ? `${row.title.type}:${row.title.id}`
+        : null;
+
+    if (prior) {
+      for (const [title, keys] of prior.checkpoint.documents) documents.set(title, new Set(keys));
+      for (const entry of entries) {
+        const previous = await this.document(manifest.generation, entry.k);
+        const before = titleOf(previous?.row);
+        const after = titleOf(entry.row);
+        if (before) {
+          documents.get(before)?.delete(entry.k);
+          affected.add(before);
+        }
+        if (after) {
+          const keys = documents.get(after) ?? new Set<string>();
+          keys.add(entry.k);
+          documents.set(after, keys);
+          affected.add(after);
+        }
+        if (entry.row) {
+          const deadline = newestSummary(entry.row, Date.now()).reconsiderAt;
+          if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
+        }
+      }
+    } else {
+      // The final import batch builds once. Earlier incomplete batches deliberately had no checkpoint to rewrite.
+      for await (const { key: documentKey, document } of this.documents(manifest.generation)) {
+        if (incoming.has(documentKey)) continue;
+        const title = titleOf(document.row);
+        if (!title) continue;
+        const keys = documents.get(title) ?? new Set<string>();
+        keys.add(documentKey);
+        documents.set(title, keys);
+        const rows = importedRows!.get(title) ?? [];
+        if (document.row && isDocument(document.row)) rows.push(document.row);
+        importedRows!.set(title, rows);
+        const deadline = document.row ? newestSummary(document.row, Date.now()).reconsiderAt : null;
+        if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
+      }
+      for (const entry of entries) {
+        const title = titleOf(entry.row);
+        if (!title) continue;
+        const keys = documents.get(title) ?? new Set<string>();
+        keys.add(entry.k);
+        documents.set(title, keys);
+        const rows = importedRows!.get(title) ?? [];
+        if (entry.row && isDocument(entry.row)) rows.push(entry.row);
+        importedRows!.set(title, rows);
+        const deadline = entry.row ? newestSummary(entry.row, Date.now()).reconsiderAt : null;
+        if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
+      }
+      for (const title of documents.keys()) affected.add(title);
+    }
+
+    for (const [title, keys] of documents) if (!keys.size) documents.delete(title);
+    const items = new Map(
+      (prior?.checkpoint.snapshot.items ?? []).map((item) => [
+        `${item.title.type}:${item.title.id}`,
+        item,
+      ]),
+    );
+    const now = Date.now();
+    for (const title of affected) {
+      const rows = importedRows?.get(title) ?? [];
+      if (!importedRows) {
+        for (const documentKey of documents.get(title) ?? []) {
+          const row = incoming.has(documentKey)
+            ? incoming.get(documentKey)
+            : (await this.document(manifest.generation, documentKey))?.row;
+          if (row && isDocument(row) && (row.kind === 'title' || row.kind === 'season'))
+            rows.push(row);
+        }
+      }
+      const item = historyItemFromDocuments(rows, now);
+      if (item) items.set(title, item);
+      else items.delete(title);
+    }
+    const checkpoint: CompactHistoryCheckpoint = {
+      schema: COMPACT_HISTORY_CHECKPOINT_SCHEMA,
+      snapshot: {
+        schema: HISTORY_INDEX_SCHEMA,
+        policy: HISTORY_INDEX_POLICY,
+        source: historyCheckpointSource(
+          manifest,
+          Number.isFinite(reconsiderAt) ? reconsiderAt : null,
+        ),
+        builtAt: now,
+        items: [...items.values()].sort(compareHistoryItems),
+      },
+      documents: [...documents]
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([title, keys]) => [title, [...keys].sort()]),
+    };
+    if (!historyCheckpointMatches(checkpoint, manifest))
+      throw new Error('History checkpoint source does not match its fact manifest');
+    return {
+      kind: 'put',
+      key,
+      value: await sealLibraryLocalValue(this.key, historyName, checkpoint),
+    };
   }
 
   async *read<T extends TitleFact | ContinueFact | SettingsFact>(

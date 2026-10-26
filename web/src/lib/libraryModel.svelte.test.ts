@@ -139,6 +139,8 @@ class FakeService {
       return {
         result: {
           kind: 'history.episodes',
+          revision: query.revision,
+          stale: false,
           items: query.titles.map((title) => ({
             title,
             seen: [
@@ -227,6 +229,10 @@ const continueValue = (): LibrarySelectionValue => ({
 
 const historyValue = (): LibrarySelectionValue => ({
   kind: 'history',
+  revision: 'history-test',
+  filter: {},
+  total: 1,
+  facets: { all: 1, movie: 1, tv: 0, years: [] },
   items: [{ title: { type: 'movie', id: 2 }, watchedAt: 100, episodes: 0 }],
 });
 
@@ -329,7 +335,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'history' });
   service.publish({ kind: 'history' }, historyValue(), 5);
   expect(history.snapshot.value?.items[0]).toMatchObject({ watchedAt: 100 });
-  await expect(model.historyEpisodes([{ type: 'tv', id: 9 }])).resolves.toEqual(
+  await expect(model.historyEpisodes([{ type: 'tv', id: 9 }], 'history-test')).resolves.toEqual(
     new Map([
       [
         'tv:9',

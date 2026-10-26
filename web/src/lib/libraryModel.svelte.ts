@@ -12,6 +12,9 @@ import type {
   DownloadsView,
   EpisodeRef,
   HistoryView,
+  HistoryFilter,
+  HistoryCursor,
+  HistoryPage,
   HistoryImportItem,
   LibraryApiKeyService,
   LibraryCommand,
@@ -42,6 +45,7 @@ import type {
   SimklView,
   TitleRef,
   TitleView,
+  WatchlistView,
 } from './libraryServiceProtocol';
 import type { LibraryRelayMembership } from './relayFetch';
 import { noteLibraryOpening } from './libraryOpening.svelte';
@@ -108,6 +112,7 @@ type Observation<Kind extends LibraryObservation['kind']> = Extract<
 
 type LeasedView =
   | HistoryView
+  | WatchlistView
   | DownloadsView
   | ConnectionsView
   | SimklView
@@ -129,6 +134,7 @@ export class LibraryModel {
   #openFailure = $state.raw<Immutable<LibraryServiceFailure> | undefined>();
   readonly #rootStops: Array<() => void> = [];
   #history?: SharedSelection<HistoryView>;
+  #watchlist?: SharedSelection<WatchlistView>;
   #downloads?: SharedSelection<DownloadsView>;
   #connections?: SharedSelection<ConnectionsView>;
   #simkl?: SharedSelection<SimklView>;
@@ -235,8 +241,22 @@ export class LibraryModel {
     return this.#history.acquire();
   }
 
+  /** Watchlist titles with already-started series removed by the Worker-owned History index. */
+  watchlist(): LibraryModelLease<WatchlistView> {
+    this.#assertOpen();
+    this.#watchlist ??= new SharedSelection<WatchlistView>(
+      this.service,
+      { kind: 'watchlist' },
+      () => (this.#watchlist = undefined),
+    );
+    return this.#watchlist.acquire();
+  }
+
   /** Exact watched coordinates for the bounded set of History cards currently being drawn. */
-  async historyEpisodes(titles: readonly TitleRef[]): Promise<ReadonlyMap<string, SeenEpisode[]>> {
+  async historyEpisodes(
+    titles: readonly TitleRef[],
+    revision: string,
+  ): Promise<ReadonlyMap<string, SeenEpisode[]> | null> {
     this.#assertOpen();
     const refs = [
       ...new Map(
@@ -246,9 +266,31 @@ export class LibraryModel {
           .map((title) => [titleKey(title), wireTitleRef(title) as TitleRef & { type: 'tv' }]),
       ).values(),
     ];
-    const { result } = await this.service.query({ kind: 'history.episodes', titles: refs });
+    const { result } = await this.service.query({
+      kind: 'history.episodes',
+      revision,
+      titles: refs,
+    });
     if (result.kind !== 'history.episodes') throw wrongQueryResult('history.episodes');
+    if (result.stale || result.revision !== revision) return null;
     return new Map(result.items.map((item) => [titleKey(item.title), item.seen] as const));
+  }
+
+  /** One materialized History page; stale cursors restart explicitly at the current revision. */
+  async historyPage(
+    revision: string,
+    filter: HistoryFilter,
+    cursor?: HistoryCursor,
+  ): Promise<{ page: Immutable<HistoryPage>; restarted: boolean }> {
+    this.#assertOpen();
+    const { result } = await this.service.query({
+      kind: 'history.page',
+      revision,
+      filter,
+      ...(cursor ? { cursor } : {}),
+    });
+    if (result.kind !== 'history.page') throw wrongQueryResult('history.page');
+    return result;
   }
 
   /** Downloads stay lazy because only the Downloads/settings surfaces render the queue. */
@@ -1064,6 +1106,8 @@ export class LibraryModel {
     this.#devices = closedSnapshot(this.#devices);
     this.#history?.close();
     this.#history = undefined;
+    this.#watchlist?.close();
+    this.#watchlist = undefined;
     this.#downloads?.close();
     this.#downloads = undefined;
     this.#connections?.close();
@@ -1161,6 +1205,7 @@ class SharedSelection<View extends LeasedView> {
     service: LibraryModelService,
     selection:
       | { kind: 'history' }
+      | { kind: 'watchlist' }
       | { kind: 'downloads' }
       | { kind: 'connections' }
       | { kind: 'simkl' }

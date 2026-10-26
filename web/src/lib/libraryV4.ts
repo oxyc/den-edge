@@ -65,6 +65,13 @@ export function forEachProjectedEpisode(
   visit: (row: EpisodeRow) => void,
   now: number,
 ): void {
+  // Reuse a projection another consumer already paid for (for example Home immediately before History). Consumers
+  // that arrive first still stream directly and never retain an episode-row array merely to fold it.
+  const known = projected.get(document);
+  if (known && now >= known.at && now < known.reconsiderAt) {
+    for (const row of known.rows) if (row.kind === 'ep') visit(row);
+    return;
+  }
   const season = document.season ?? 0;
   const states = syncPolicy<Record<string, EpisodeState>>({
     op: 'season_state_v4',

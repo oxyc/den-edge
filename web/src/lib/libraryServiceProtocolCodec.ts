@@ -11,6 +11,8 @@ import {
   type DownloadTitleDescriptor,
   type DownloadViewItem,
   type HistoryItem,
+  type HistoryFilter,
+  type HistoryPage,
   type LibraryCommand,
   type LibraryObservation,
   type LibraryPreferencesPatch,
@@ -791,9 +793,21 @@ function query(value: unknown): value is LibraryQuery {
   if (value.kind === 'relay.membership') return exact(value, ['kind']);
   if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
   if (value.kind === 'history.export') return exact(value, ['kind']);
+  if (value.kind === 'history.page')
+    return (
+      exact(value, ['kind', 'revision', 'filter', 'cursor', 'limit']) &&
+      text(value.revision) &&
+      historyFilter(value.filter) &&
+      optional(value.cursor, text) &&
+      optional(
+        value.limit,
+        (candidate): candidate is number => positiveInteger(candidate) && candidate <= 96,
+      )
+    );
   if (value.kind === 'history.episodes')
     return (
-      exact(value, ['kind', 'titles']) &&
+      exact(value, ['kind', 'revision', 'titles']) &&
+      text(value.revision) &&
       list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles) &&
       value.titles.every((title) => title.type === 'tv') &&
       unique(value.titles, titleIdentity)
@@ -1248,6 +1262,54 @@ function historyItem(value: unknown): value is HistoryItem {
   );
 }
 
+const HISTORY_PAGE_KEYS = ['revision', 'filter', 'total', 'facets', 'items', 'nextCursor'] as const;
+
+function historyFilter(value: unknown): value is HistoryFilter {
+  return (
+    record(value) &&
+    exact(value, ['type', 'year']) &&
+    optional(
+      value.type,
+      (candidate): candidate is 'movie' | 'tv' => candidate === 'movie' || candidate === 'tv',
+    ) &&
+    optional(
+      value.year,
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && (candidate === 'unknown' || /^\d{4,6}$/.test(candidate)),
+    )
+  );
+}
+
+function historyPage(value: unknown): value is HistoryPage {
+  if (!record(value)) return false;
+  const facets = value.facets;
+  return (
+    exact(value, [...HISTORY_PAGE_KEYS, 'kind']) &&
+    text(value.revision) &&
+    historyFilter(value.filter) &&
+    integer(value.total) &&
+    record(facets) &&
+    exact(facets, ['all', 'movie', 'tv', 'years']) &&
+    integer(facets.all) &&
+    integer(facets.movie) &&
+    integer(facets.tv) &&
+    list(
+      facets.years,
+      (candidate): candidate is { year: string; all: number; movie: number; tv: number } =>
+        record(candidate) &&
+        exact(candidate, ['year', 'all', 'movie', 'tv']) &&
+        typeof candidate.year === 'string' &&
+        (candidate.year === 'unknown' || /^\d{4,6}$/.test(candidate.year)) &&
+        integer(candidate.all) &&
+        integer(candidate.movie) &&
+        integer(candidate.tv),
+    ) &&
+    list(value.items, historyItem, 96) &&
+    unique(value.items, ({ title }) => titleIdentity(title)) &&
+    optional(value.nextCursor, text)
+  );
+}
+
 function download(value: unknown): value is DownloadViewItem {
   const release = (candidate: unknown): candidate is Omit<DownloadReleaseDescriptor, 'url'> =>
     record(candidate) &&
@@ -1650,11 +1712,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         unique(value.needsShapes, titleIdentity)
       );
     case 'history':
-      return (
-        exact(value, ['kind', 'items']) &&
-        list(value.items, historyItem) &&
-        unique(value.items, ({ title }) => titleIdentity(title))
-      );
+      return exact(value, ['kind', ...HISTORY_PAGE_KEYS]) && historyPage(value);
     case 'title':
       return (
         exact(value, [
@@ -1954,9 +2012,17 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           ),
       )
     );
+  if (value.kind === 'history.page')
+    return (
+      exact(value, ['kind', 'restarted', 'page']) &&
+      bool(value.restarted) &&
+      historyPage(value.page)
+    );
   if (value.kind === 'history.episodes') {
     if (
-      !exact(value, ['kind', 'items']) ||
+      !exact(value, ['kind', 'revision', 'stale', 'items']) ||
+      !text(value.revision) ||
+      !bool(value.stale) ||
       !list(
         value.items,
         (

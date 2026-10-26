@@ -29,6 +29,10 @@ function authority() {
     generation: 'g1',
     select: vi.fn<LibraryServiceAuthority['select']>(async () => ({
       kind: 'history',
+      revision: 'history-test',
+      filter: {},
+      total: 0,
+      facets: { all: 0, movie: 0, tv: 0, years: [] },
       items: [],
     })),
     command: vi.fn<LibraryServiceAuthority['command']>(async () => ({
