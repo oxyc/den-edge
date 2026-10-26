@@ -171,7 +171,10 @@ export function installTVNavigation(): () => void {
   // A phone used to inspect the TV build needs Search mounted before its tap ends: mobile WebKit only starts the
   // software keyboard when the destination input receives focus during that activation. On a TV, remote focus is
   // the same useful preload intent. This whole module is absent from the normal browser build.
-  if (matchMedia('(pointer: coarse)').matches) void SearchScreen.load();
+  // Search is the first control in the TV rail and a touch preview must mount its editor inside the activating
+  // tap. Preload it for every TV session: some touch-capable desktop shells report neither a coarse pointer nor
+  // touch points reliably, and discovering the chunk on pointerdown is too late for mobile keyboard activation.
+  void SearchScreen.load();
   const searchButton = (event: Event) =>
     event.target instanceof Element ? event.target.closest('.tv-search-button') : null;
   const prepareSearch = (event: Event) => {
