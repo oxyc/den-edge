@@ -1593,6 +1593,57 @@ async function importNewestFirst(
     : await Promise.all(SETTINGS_ROWS.map((name) => rowKey(keys, name)));
   const below = (before: number, limit: number) =>
     reading.page(`before=${before}&limit=${limit}`, generation, (seq) => seq > 0 && seq < before);
+  if (manifest?.floor !== undefined) {
+    // Every committed newest-first batch is a durable, self-contained Home snapshot. A process killed after that
+    // checkpoint used to make the next launch wait for another network page before it could show the facts it
+    // already had. Resume the remaining history behind the authority instead: generation/order validation still
+    // happens before another page is committed, and a changed/stopped source promotes to the full log as before.
+    reading.register(generation!);
+    let profileTopology = manifest.profileTopology;
+    const top = manifest.head;
+    const openedManifest = manifest;
+    const page = { committed: () => {} };
+    const reached = () => progress?.(Math.min(1, Math.max(0, 1 - (floor - 1) / Math.max(1, top))));
+    const keep = async (current: ChangesPage) => {
+      const opened = await reading.facts(current.entries, generation!, false);
+      if (!opened) return false;
+      profileTopology ||= opened.profileTopology;
+      const complete = !current.more || current.entries.length === 0;
+      await reading.commit(
+        generation!,
+        opened.facts,
+        complete,
+        (batch) => {
+          floor = Math.min(floor, ...batch.map((fact) => fact.seq));
+          return { head: top, floor };
+        },
+        { profileTopology },
+        reached,
+      );
+      if (complete) {
+        floor = 1;
+        reached();
+        reading.finished();
+      }
+      return true;
+    };
+    const done = (async () => {
+      let next = below(floor, NEWEST_BACKGROUND_PAGE);
+      for (;;) {
+        const current = await next;
+        if (!current || current.order !== 'desc' || current.generation !== generation) return false;
+        if (current.more && current.entries.length)
+          next = below(current.entries.at(-1)!.seq, NEWEST_BACKGROUND_PAGE);
+        if (!(await keep(current))) return false;
+        page.committed();
+        if (!current.more || !current.entries.length) return true;
+      }
+    })().catch((error: unknown) => {
+      console.warn('den: the rest of the library could not be read', error);
+      return false;
+    });
+    return { store, manifest: openedManifest, filling: { done, page } };
+  }
   const [first, settings] = await Promise.all([
     below(floor, NEWEST_BOOTSTRAP_PAGE),
     settingsKeys && reading.page(`keys=${settingsKeys.join(',')}`, generation, (seq) => seq > 0),

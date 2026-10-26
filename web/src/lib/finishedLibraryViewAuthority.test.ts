@@ -860,20 +860,38 @@ it('resumes a newest-first import below the last committed page, and opens the l
   await opened!.authority.close?.();
 
   const resumed = changesEdge(entries, 'generation-newest');
+  let releaseResume!: () => void;
+  const resumeReleased = new Promise<void>((resolve) => (releaseResume = resolve));
+  let resumeAsked = 0;
+  const resumeFetch = vi.fn<typeof fetch>(async (input, init) => {
+    const url = new URL(String(input), 'https://den.test');
+    if (url.searchParams.has('before')) {
+      resumeAsked++;
+      await resumeReleased;
+    }
+    return resumed.fetchImpl(input, init);
+  });
+  const resumedFull = vi.fn(async () => fullAuthority());
   const reopened = await openFinishedLibraryViewAuthority(
     request,
     vault,
-    vi.fn(async () => fullAuthority()),
+    resumedFull,
     content,
-    resumed.fetchImpl,
+    resumeFetch,
   );
-  // Below the floor the first open kept, without reading the settings again.
+  // The committed newest page is already a safe Home snapshot. Reopening answers from it while the next page is
+  // still on the network, instead of putting the same cold wait on the foreground twice.
+  expect(resumeAsked).toBe(1);
+  await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+    watchlist: expect.arrayContaining([{ type: 'movie', id: 1_100 }]),
+  });
+  expect(resumedFull).not.toHaveBeenCalled();
+  releaseResume();
+  // Resume below the durable floor in full background pages, without reading the settings again.
+  await waitFor(() => expect(resumed.requests).toHaveLength(1));
   expect(
     resumed.requests.map((url) => [url.searchParams.get('before'), url.searchParams.get('limit')]),
-  ).toEqual([
-    ['974', '128'],
-    ['846', '1000'],
-  ]);
+  ).toEqual([['974', '1000']]);
   await waitFor(async () =>
     expect(await (await LibraryFactStore.open(libraryKey, vault))!.manifest()).toMatchObject({
       head: 1_101,

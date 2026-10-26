@@ -477,12 +477,16 @@ export function createWorkerServiceSession(
   const activate = (libraryClaimed: boolean, reason: string) => {
     if (closed) throw new Error('Worker service session is closed');
     const previous = active.connection;
+    // A replacement is only installed after the current transport has failed (or its startup was refused). Retire it
+    // before constructing the next generation: on a profile household's first wire-4 -> wire-5 bootstrap the Owner
+    // library is already opening beside it, and constructing first briefly left three Worker runtimes compiling and
+    // importing on the same small TV CPU. `connection()` is synchronous, so this adds no asynchronous gap.
+    previous.close();
     active = {
       connection: connection(`restart: ${reason}`),
       libraryClaimed,
     };
     content.replaced(active.connection.content);
-    previous.close();
     return active.connection;
   };
   const content = new SessionContentService(
