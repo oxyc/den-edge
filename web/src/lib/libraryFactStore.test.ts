@@ -2,11 +2,18 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { ensureSyncPolicy } from './syncLoader';
+import { syncPolicy } from './syncCore';
 import type { DocumentRow, EpisodeRow, Row, TitleRow } from './wire';
+
+vi.mock('./syncCore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./syncCore')>();
+  return { ...actual, syncPolicy: vi.fn(actual.syncPolicy) };
+});
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
   readonly gets: string[] = [];
+  readonly pages: string[] = [];
   failCommit = false;
   commits = 0;
 
@@ -18,6 +25,7 @@ class MemoryVault implements Vault {
     return [...this.values].filter(([key]) => key.startsWith(prefix));
   }
   async page(prefix: string, after: string | undefined, limit: number) {
+    this.pages.push(prefix);
     return [...this.values]
       .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
       .sort(([left], [right]) => left.localeCompare(right))
@@ -151,7 +159,7 @@ describe('library fact store', () => {
     await expect(store.manifest()).resolves.toEqual(before);
   });
 
-  it('builds the first complete History checkpoint from the import scan without reopening every document', async () => {
+  it('derives Continue and the first History checkpoint in one projection pass', async () => {
     const vault = new MemoryVault();
     const store = (await LibraryFactStore.open(libraryKey, vault))!;
     const seasons = Array.from({ length: 40 }, (_, index): DocumentRow => ({
@@ -169,6 +177,8 @@ describe('library fact store', () => {
         },
       },
     }));
+    const policy = vi.mocked(syncPolicy);
+    policy.mockClear();
     await store.commitBatch(
       'generation-a',
       seasons.length,
@@ -181,13 +191,59 @@ describe('library fact store', () => {
       false,
     );
     vault.gets.length = 0;
+    vault.pages.length = 0;
 
     await store.commitBatch('generation-a', seasons.length, [], true);
 
     expect(vault.gets.filter((key) => key.includes(':document:'))).toEqual([]);
+    expect(vault.pages.filter((key) => key.includes(':document:'))).toEqual([]);
+    expect(policy.mock.calls.filter(([request]) => request.op === 'season_state_v4')).toHaveLength(
+      seasons.length,
+    );
     await expect(store.history((await store.manifest())!)).resolves.toMatchObject({
       source: { version: seasons.length },
     });
+  });
+
+  it('rebuilds History from stored authority when an incomplete import resumes in a new instance', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const row: DocumentRow = {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 90 },
+      season: 2,
+      seasonReset: null,
+      episodes: {
+        3: {
+          progress: { value: 1, at: [300, 0, 'device'], viewing: 0 },
+          imported: false,
+          plays: { 0: 300 },
+          cleared: null,
+        },
+      },
+    };
+    await store.commitBatch(
+      'generation-a',
+      1,
+      [{ k: '9'.repeat(64), seq: 1, value: 'ciphertext', row }],
+      false,
+    );
+
+    const resumed = (await LibraryFactStore.open(libraryKey, vault))!;
+    await resumed.manifest();
+    vault.pages.length = 0;
+    await resumed.commitBatch('generation-a', 1, [], true);
+
+    expect(vault.pages.some((prefix) => prefix.includes(':document:'))).toBe(true);
+    expect((await resumed.history((await resumed.manifest())!))?.page()?.items).toEqual([
+      {
+        title: { type: 'tv', id: 90 },
+        watchedAt: 300,
+        episode: { season: 2, episode: 3 },
+        episodes: 1,
+      },
+    ]);
   });
 
   it('reduces Watchlist and Continue independently without a watched-history fact', async () => {

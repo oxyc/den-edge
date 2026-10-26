@@ -1,7 +1,13 @@
 import { beforeAll, expect, test } from 'vitest';
 import { Session } from 'node:inspector/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { WATCHED } from './actions';
 import { watchedHistory } from './history';
+import {
+  historyItemFromDocuments,
+  historyItemFromProjections,
+  historySeasonProjection,
+} from './historyIndex';
 import {
   compactContinueLibrary,
   projectHomeLibraryView,
@@ -173,6 +179,62 @@ test('compact Continue fact for one 1,000-episode authority document', async ({ 
     return streamWork();
   });
   await bench.compare(history, graph, stream);
+});
+
+test('Continue and initial History share one season projection', async () => {
+  if (process.env.DEN_ONE_PASS_HISTORY_AUDIT !== '1') return;
+  const legacy = () =>
+    manySmallSeasons.map((document) => {
+      const summaries = new ContinueSummaries();
+      forEachProjectedEpisode({ ...document }, (episode) => summaries.addEpisode(episode), NOW);
+      return {
+        continue: summaries.compact(),
+        history: historyItemFromDocuments([{ ...document }], NOW),
+      };
+    });
+  const onePass = () =>
+    manySmallSeasons.map((document) => {
+      const source = { ...document };
+      const summaries = new ContinueSummaries();
+      const watched: number[] = [];
+      forEachProjectedEpisode(
+        source,
+        (episode) => {
+          summaries.addEpisode(episode);
+          if (episode.progress.value >= WATCHED)
+            watched.push(episode.episode, episode.progress.at[0]);
+        },
+        NOW,
+      );
+      return {
+        continue: summaries.compact(),
+        history: historyItemFromProjections([historySeasonProjection(source, watched)]),
+      };
+    });
+  expect(onePass()).toEqual(legacy());
+
+  legacy();
+  onePass();
+  const samples = [];
+  for (let repeat = 0; repeat < 3; repeat++)
+    for (const [name, work] of repeat % 2
+      ? ([
+          ['one pass', onePass],
+          ['separate passes', legacy],
+        ] as const)
+      : ([
+          ['separate passes', legacy],
+          ['one pass', onePass],
+        ] as const))
+      samples.push(await allocationSample(name, work));
+  expect(
+    samples.every(({ name, policyRequests }) =>
+      name === 'one pass'
+        ? policyRequests.season_state_v4 === 500
+        : policyRequests.season_state_v4 === 1_000,
+    ),
+  ).toBe(true);
+  console.log(`ONE_PASS_HISTORY ${JSON.stringify(samples)}`);
 });
 
 // A household near the budget fixture's Watchlist Worker (6,132 documents, 13,724 rows): 1,000 movie and 1,000 series
