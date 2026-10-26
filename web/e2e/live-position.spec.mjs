@@ -107,6 +107,9 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
       });
       return route.fulfill({ status: 200, json: { queued: true } });
     });
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 200, json: { listening: true } }),
+    );
     pulls.set(name, []);
     // Registered last, so it answers before the per-page edge `routeLibraryEdge` installs.
     await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
@@ -321,10 +324,10 @@ test('a series’ page says which device plays which episode, and keeps controls
   try {
     await page.locator('.card', { hasText: 'Series 1003' }).click();
     await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
-    const block = page.locator('.hero .continue');
+    const block = page.locator('.hero .continue-row');
     const resume = page.locator('header.hero').getByRole('link', { name: 'Resume', exact: true });
     const label = block.locator('strong');
-    const clock = block.locator('.live-clock');
+    const clock = block.locator('.live-clock, .remote-times span:first-child');
     const heading = page.getByRole('heading', { name: 'Series 1003', level: 1 });
     const actions = page.locator('.hero-actions');
     const boxes = async () => [
@@ -337,16 +340,15 @@ test('a series’ page says which device plays which episode, and keeps controls
     await expect(label).toHaveText('Continue Watching');
     const projectedResume = await resume.getAttribute('href');
     expect(projectedResume).not.toMatch(/season=1&episode=3&play=1$/);
-    const without = await boxes();
-
     const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
     await expect(clock).toHaveText(/^1\d:\d\d$/, { timeout: 40_000 });
     await expect(label).toHaveText('Playing on Apple TV');
     const sentBefore = edge.controls.length;
     const controls = page.getByLabel('Controls for Apple TV');
     await expect(controls).toBeVisible();
+    const withLive = await boxes();
     const addressBeforeRemotePause = page.url();
-    await block.click();
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
     await expect(label).toHaveText('Paused on Apple TV');
     expect(
       page.url(),
@@ -356,7 +358,15 @@ test('a series’ page says which device plays which episode, and keeps controls
     await controls.getByRole('button', { name: 'Resume' }).click();
     await expect(label).toHaveText('Playing on Apple TV');
     await controls.getByRole('button', { name: 'Skip forward 10 seconds' }).click();
-    await expect.poll(() => edge.controls.length).toBe(sentBefore + 4);
+    const scrubber = controls.getByRole('slider', { name: 'Position on Apple TV' });
+    await expect(scrubber).toBeEnabled();
+    await scrubber.evaluate((input) => {
+      input.value = '1400';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    // About 800 seconds forward: two backward-compatible skip commands, each at most ten minutes.
+    await expect.poll(() => edge.controls.length).toBe(sentBefore + 6);
     expect(
       edge.controls
         .slice(sentBefore)
@@ -366,20 +376,20 @@ test('a series’ page says which device plays which episode, and keeps controls
         ),
     ).toBe(true);
     await expect(block.locator('small')).toHaveText('S1 · E3');
-    await expect(block).toHaveAttribute('href', /season=1&episode=3&play=1$/);
+    await expect(block.locator('.remote-title')).toHaveAttribute(
+      'href',
+      /season=1&episode=3&play=1$/,
+    );
     await expect(resume).toHaveAttribute('href', /season=1&episode=3&play=1$/);
-    expect(await boxes(), 'nothing moved as the clock appeared').toEqual(without);
     const samples = await watch(clock, 15_000);
     expect(samples.filter((text) => text === null)).toEqual([]);
     expect(new Set(samples).size, 'the clock ticked').toBeGreaterThan(10);
     for (const width of [393, 1280]) {
       await page.setViewportSize({ width, height: width < 500 ? 852 : 800 });
-      const track = await block.locator('.resume-track').boundingBox();
-      const time = await clock.boundingBox();
-      // Beside the track, on its line, inside the page.
-      expect(time.x).toBeGreaterThan(track.x + track.width);
-      expect(time.x + time.width).toBeLessThanOrEqual(width);
-      expect(time.y + time.height / 2).toBeCloseTo(track.y + track.height / 2, 0);
+      const widget = await controls.boundingBox();
+      expect(widget.x).toBeGreaterThanOrEqual(0);
+      expect(widget.x + widget.width).toBeLessThanOrEqual(width);
+      await expect(scrubber).toBeVisible();
       await page.screenshot({ path: test.info().outputPath(`detail-live-${width}.png`) });
     }
     await page.setViewportSize({ width: 1280, height: 720 });
@@ -400,7 +410,7 @@ test('a series’ page says which device plays which episode, and keeps controls
     expect(page.url(), 'resuming the TV stays on the title page').toBe(addressBeforePrimaryResume);
     const pausedSamples = await watch(clock, 3_000);
     expect(new Set(pausedSamples).size, 'the paused clock stayed frozen').toBe(1);
-    expect(await boxes(), 'nothing moved when playback paused').toEqual(without);
+    expect(await boxes(), 'nothing moved when playback paused').toEqual(withLive);
   } finally {
     await close();
   }

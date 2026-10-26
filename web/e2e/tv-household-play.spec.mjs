@@ -124,14 +124,14 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     });
     expect(queues.has(fresh.inbox)).toBe(false);
     await expect(tv).not.toHaveURL(/\/movie\/1003/);
-    // The household queue and the pairing link's are drained together, in one held request: these TVs are short of
-    // connections. No other queue is asked for.
+    // Playback authority belongs to the household queue alone. A legacy pairing credential may still be retained
+    // for migration, but it is neither asked for nor allowed to carry playback commands.
     const linkInbox = await tv.evaluate(
       () => JSON.parse(localStorage.getItem('den.links') ?? '[]')[0]?.inboxKey,
     );
     expect(linkInbox).toBeTruthy();
-    expect(drains).toContainEqual([fresh.inbox, linkInbox]);
-    expect(drains.flat().every((key) => key === fresh.inbox || key === linkInbox)).toBe(true);
+    expect(drains).toContainEqual([fresh.inbox]);
+    expect(drains.flat().every((key) => key === fresh.inbox)).toBe(true);
 
     await tv.goto(`${E2E_ORIGIN}/settings`);
     await tv.getByRole('button', { name: 'Plugins', exact: true }).click();

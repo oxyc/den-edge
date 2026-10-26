@@ -684,6 +684,8 @@
       deviceId: entry.deviceId,
       playing: playingAt !== undefined,
       fraction: runtime ? Math.min(1, at / runtime) : undefined,
+      seconds: at,
+      duration: runtime || undefined,
     };
   });
 
@@ -956,17 +958,32 @@
     if (!receiver) return false;
     if (selected.id !== intended.id)
       session.notify(`Controlling ${selected.name}, where Den is open`);
-    return Boolean(
-      await sendToTV(receiver.queue, {
+    // Existing TVs admit relative skips of at most ten minutes. A scrubber can cross a whole film, so divide its
+    // one absolute gesture into compatible relative commands; an installed TV need not be upgraded before seeking
+    // works. They retain order in the same queue and each still carries the exact title/episode guard.
+    const remaining = Math.round(offsetSeconds ?? 0);
+    const offsets: (number | undefined)[] =
+      action !== 'skip'
+        ? [undefined]
+        : remaining === 0
+          ? []
+          : Array.from({ length: Math.ceil(Math.abs(remaining) / 600) }, (_, index) => {
+              const moved = index * 600;
+              return Math.sign(remaining) * Math.min(600, Math.abs(remaining) - moved);
+            });
+    for (const offset of offsets) {
+      const sent = await sendToTV(receiver.queue, {
         type: 'transport',
         action,
         tmdbId: opening.id,
         mediaType: opening.type,
         season: live.episode?.season,
         episode: live.episode?.episode,
-        ...(action === 'skip' ? { offsetSeconds } : {}),
-      }),
-    );
+        ...(action === 'skip' ? { offsetSeconds: offset } : {}),
+      });
+      if (!sent) return false;
+    }
+    return true;
   }
 
   /**

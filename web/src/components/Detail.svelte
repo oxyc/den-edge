@@ -52,6 +52,7 @@
   import type { Warning } from '../lib/contentWarnings';
   import type { MenuItem } from '../lib/titleActions';
   import type { HouseholdTv } from '../lib/householdTvs';
+  import { clock as timecode } from '../lib/livePosition';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -127,6 +128,8 @@
       deviceId?: string;
       playing: boolean;
       fraction?: number;
+      seconds: number;
+      duration?: number;
     };
     episodes: Map<string, EpisodeRow>;
     busy: boolean;
@@ -290,6 +293,7 @@
   const notify = toastContext();
   let transportBusy = $state(false);
   let optimisticPlaying = $state<boolean>();
+  let scrubSeconds = $state<number>();
   const transportPlaying = $derived(optimisticPlaying ?? live?.playing ?? false);
   $effect(() => {
     if (optimisticPlaying !== undefined && live?.playing === optimisticPlaying)
@@ -306,6 +310,16 @@
     }
     if (action === 'play') optimisticPlaying = true;
     if (action === 'pause') optimisticPlaying = false;
+  }
+  function previewSeek(event: Event) {
+    scrubSeconds = Number((event.currentTarget as HTMLInputElement).value);
+  }
+  async function commitSeek(event: Event) {
+    const target = Number((event.currentTarget as HTMLInputElement).value);
+    const current = live?.seconds;
+    scrubSeconds = undefined;
+    if (current === undefined || !Number.isFinite(target)) return;
+    await transport('skip', target - current);
   }
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   /**
@@ -971,69 +985,129 @@
               ? target
               : undefined}
           <div class="continue-row">
-            <a
-              class="continue"
-              data-spatial-section
-              href={titleHref({
-                ...d.title,
-                season: coordinate?.season,
-                episode: coordinate?.episode,
-                play: true,
-              })}
-              onclick={(event) =>
-                activateLinkInPlace(event, () =>
-                  live && ontransport
-                    ? void transport(transportPlaying ? 'pause' : 'play')
-                    : start(d.title, coordinate?.season, coordinate?.episode),
-                )}
-            >
-              <DetailIcon name="play" filled /><span
-                ><strong
-                  >{live
-                    ? `${transportPlaying ? 'Playing' : 'Paused'} on ${live.device ?? 'another device'}`
-                    : continueLabel}</strong
-                >
-                {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
-                {#if live || (fraction > RESUME_FLOOR && fraction < WATCHED)}<span
-                    class="resume-track"
-                    ><span style:width={`${(live?.fraction ?? fraction) * 100}%`}
-                    ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
-                  >{/if}
-              </span>
-            </a>
             {#if live && ontransport}
               <div
-                class="remote-controls"
+                class="remote-player"
+                data-spatial-section
                 aria-label={`Controls for ${live.device ?? 'your TV'}`}
                 aria-busy={transportBusy}
               >
-                <button
-                  class="seek"
-                  disabled={transportBusy}
-                  aria-label="Skip back 10 seconds"
-                  title="Back 10 seconds"
-                  onclick={() => transport('skip', -10)}><span aria-hidden="true">−10</span></button
-                >
-                <button
-                  class="play-pause"
-                  disabled={transportBusy}
-                  aria-label={transportPlaying ? 'Pause on TV' : 'Resume on TV'}
-                  title={transportPlaying ? 'Pause' : 'Resume'}
-                  onclick={() => transport(transportPlaying ? 'pause' : 'play')}
-                >
-                  <ButtonIcon
-                    name={transportPlaying ? 'pause' : 'play'}
-                    filled={!transportPlaying}
-                  />
-                </button>
-                <button
-                  class="seek"
-                  disabled={transportBusy}
-                  aria-label="Skip forward 10 seconds"
-                  title="Forward 10 seconds"
-                  onclick={() => transport('skip', 10)}><span aria-hidden="true">+10</span></button
-                >
+                <div class="remote-heading">
+                  <span class="remote-device" aria-hidden="true"
+                    ><ButtonIcon name="play" filled /></span
+                  >
+                  <a
+                    class="remote-title"
+                    href={titleHref({
+                      ...d.title,
+                      season: coordinate?.season,
+                      episode: coordinate?.episode,
+                      play: true,
+                    })}
+                    onclick={(event) =>
+                      activateLinkInPlace(
+                        event,
+                        () => void transport(transportPlaying ? 'pause' : 'play'),
+                      )}
+                  >
+                    <strong
+                      >{transportPlaying ? 'Playing' : 'Paused'} on {live.device ??
+                        'another device'}</strong
+                    >
+                    {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
+                  </a>
+                </div>
+                <div class="remote-transport">
+                  <button
+                    class="seek"
+                    type="button"
+                    disabled={transportBusy}
+                    aria-label="Skip back 10 seconds"
+                    title="Back 10 seconds"
+                    onclick={() => transport('skip', -10)}
+                    ><span aria-hidden="true">−10</span></button
+                  >
+                  <button
+                    class="play-pause"
+                    type="button"
+                    disabled={transportBusy}
+                    aria-label={transportPlaying ? 'Pause on TV' : 'Resume on TV'}
+                    title={transportPlaying ? 'Pause' : 'Resume'}
+                    onclick={() => transport(transportPlaying ? 'pause' : 'play')}
+                  >
+                    <ButtonIcon
+                      name={transportPlaying ? 'pause' : 'play'}
+                      filled={!transportPlaying}
+                    />
+                  </button>
+                  {#if live.duration}
+                    {@const shownSeconds = Math.min(scrubSeconds ?? live.seconds, live.duration)}
+                    <div class="remote-timeline">
+                      <input
+                        class="remote-scrubber"
+                        type="range"
+                        min="0"
+                        max={live.duration}
+                        step="1"
+                        value={shownSeconds}
+                        disabled={transportBusy}
+                        aria-label={`Position on ${live.device ?? 'your TV'}`}
+                        aria-valuetext={`${timecode(shownSeconds)} of ${timecode(live.duration)}`}
+                        style={`--remote-progress: ${(shownSeconds / live.duration) * 100}%`}
+                        oninput={previewSeek}
+                        onchange={commitSeek}
+                      />
+                      <span class="remote-times" aria-hidden="true"
+                        ><span>{timecode(shownSeconds)}</span><span>{timecode(live.duration)}</span
+                        ></span
+                      >
+                    </div>
+                  {:else}
+                    <div class="remote-timeline remote-timeline-static">
+                      <span class="resume-track"><span></span></span>
+                      <span class="remote-times"><span>{live.clock}</span></span>
+                    </div>
+                  {/if}
+                  <button
+                    class="seek"
+                    type="button"
+                    disabled={transportBusy}
+                    aria-label="Skip forward 10 seconds"
+                    title="Forward 10 seconds"
+                    onclick={() => transport('skip', 10)}
+                    ><span aria-hidden="true">+10</span></button
+                  >
+                </div>
               </div>
+            {:else}
+              <a
+                class="continue"
+                data-spatial-section
+                href={titleHref({
+                  ...d.title,
+                  season: coordinate?.season,
+                  episode: coordinate?.episode,
+                  play: true,
+                })}
+                onclick={(event) =>
+                  activateLinkInPlace(event, () =>
+                    start(d.title, coordinate?.season, coordinate?.episode),
+                  )}
+              >
+                <DetailIcon name="play" filled /><span
+                  ><strong
+                    >{live
+                      ? `Playing on ${live.device ?? 'another device'}`
+                      : continueLabel}</strong
+                  >
+                  {#if coordinate}<small>S{coordinate.season} · E{coordinate.episode}</small>{/if}
+                  {#if live || (fraction > RESUME_FLOOR && fraction < WATCHED)}<span
+                      class="resume-track"
+                      ><span style:width={`${(live?.fraction ?? fraction) * 100}%`}
+                      ></span>{#if live}<span class="live-clock">{live.clock}</span>{/if}</span
+                    >{/if}
+                </span>
+              </a>
             {/if}
           </div>
         {/if}
@@ -1580,13 +1654,11 @@
     border-radius: 6px;
   }
 
-  .remote-controls {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    padding: 5px;
+  .remote-player {
+    width: min(100%, 620px);
+    padding: 12px 14px 10px;
     border: 1px solid #fff3;
-    border-radius: 999px;
+    border-radius: 16px;
     background: #09090dc7;
     box-shadow:
       0 10px 28px #0006,
@@ -1594,10 +1666,63 @@
     backdrop-filter: blur(18px) saturate(130%);
   }
 
-  .remote-controls button {
+  .remote-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .remote-device {
     display: grid;
-    width: 44px;
-    height: 44px;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 50%;
+    background: #fff2;
+
+    --button-icon-size: 15px;
+  }
+
+  .remote-title {
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .remote-title strong,
+  .remote-title small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .remote-title small {
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .remote-title:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: 4px;
+    border-radius: 4px;
+  }
+
+  .remote-transport {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .remote-transport button {
+    display: grid;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 auto;
     padding: 0;
     place-items: center;
     border: 0;
@@ -1612,42 +1737,126 @@
       transform 120ms ease;
   }
 
-  .remote-controls .seek {
+  .remote-transport .seek {
     color: #fffd;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 750;
     font-variant-numeric: tabular-nums;
   }
 
-  .remote-controls .play-pause {
-    width: 50px;
-    height: 50px;
-    margin: 0 2px;
+  .remote-transport .play-pause {
+    width: 38px;
+    height: 38px;
     background: var(--fg);
     color: var(--bg);
     box-shadow: 0 3px 12px #0007;
 
-    --button-icon-size: 23px;
+    --button-icon-size: 18px;
   }
 
-  .remote-controls button:hover {
+  .remote-transport button:hover {
     background: #fff2;
     transform: scale(1.05);
   }
 
-  .remote-controls .play-pause:hover {
+  .remote-transport .play-pause:hover {
     background: #fff;
   }
 
-  .remote-controls button:focus-visible {
+  .remote-transport button:focus-visible {
     outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }
 
-  .remote-controls button:disabled {
+  .remote-transport button:disabled {
     cursor: wait;
     opacity: 0.55;
     transform: none;
+  }
+
+  .remote-timeline {
+    display: grid;
+    min-width: 120px;
+    flex: 1 1 260px;
+    gap: 3px;
+  }
+
+  .remote-scrubber {
+    width: 100%;
+    height: 18px;
+    margin: 0;
+    border-radius: 999px;
+    appearance: none;
+    background: linear-gradient(
+      to right,
+      var(--fg) 0 var(--remote-progress),
+      #fff4 var(--remote-progress) 100%
+    );
+    cursor: pointer;
+  }
+
+  .remote-scrubber::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .remote-scrubber::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border: 2px solid #09090d;
+    border-radius: 50%;
+    appearance: none;
+    background: var(--fg);
+    box-shadow: 0 1px 5px #000b;
+  }
+
+  .remote-scrubber::-moz-range-track {
+    height: 4px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .remote-scrubber::-moz-range-progress {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--fg);
+  }
+
+  .remote-scrubber::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: 2px solid #09090d;
+    border-radius: 50%;
+    background: var(--fg);
+    box-shadow: 0 1px 5px #000b;
+  }
+
+  .remote-scrubber:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .remote-scrubber:disabled {
+    cursor: wait;
+    opacity: 0.55;
+  }
+
+  .remote-times {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+
+  .remote-timeline-static .resume-track {
+    width: 100%;
+    margin-top: 0;
   }
 
   .seasons {
