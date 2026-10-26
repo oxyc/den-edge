@@ -611,6 +611,10 @@ export class LibraryFactStore {
         : openedPrior;
     const incoming = new Map(entries.map((entry) => [entry.k, entry.row]));
     const documents = new Map<string, Set<string>>();
+    // On the first complete import, retain the documents already opened by the one required membership scan. Reading
+    // and decrypting every document again title-by-title made profile adoption pay two full-library passes before its
+    // startup deadline. Incremental updates still read only the affected titles below.
+    const importedRows = prior ? null : new Map<string, DocumentRow[]>();
     const affected = new Set<string>();
     let reconsiderAt = prior?.index.source.reconsiderAt ?? Infinity;
     const titleOf = (row: Row | null | undefined): string | null =>
@@ -648,6 +652,9 @@ export class LibraryFactStore {
         const keys = documents.get(title) ?? new Set<string>();
         keys.add(documentKey);
         documents.set(title, keys);
+        const rows = importedRows!.get(title) ?? [];
+        if (document.row && isDocument(document.row)) rows.push(document.row);
+        importedRows!.set(title, rows);
         const deadline = document.row ? newestSummary(document.row, Date.now()).reconsiderAt : null;
         if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
       }
@@ -657,6 +664,9 @@ export class LibraryFactStore {
         const keys = documents.get(title) ?? new Set<string>();
         keys.add(entry.k);
         documents.set(title, keys);
+        const rows = importedRows!.get(title) ?? [];
+        if (entry.row && isDocument(entry.row)) rows.push(entry.row);
+        importedRows!.set(title, rows);
         const deadline = entry.row ? newestSummary(entry.row, Date.now()).reconsiderAt : null;
         if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
       }
@@ -672,13 +682,15 @@ export class LibraryFactStore {
     );
     const now = Date.now();
     for (const title of affected) {
-      const rows: DocumentRow[] = [];
-      for (const documentKey of documents.get(title) ?? []) {
-        const row = incoming.has(documentKey)
-          ? incoming.get(documentKey)
-          : (await this.document(manifest.generation, documentKey))?.row;
-        if (row && isDocument(row) && (row.kind === 'title' || row.kind === 'season'))
-          rows.push(row);
+      const rows = importedRows?.get(title) ?? [];
+      if (!importedRows) {
+        for (const documentKey of documents.get(title) ?? []) {
+          const row = incoming.has(documentKey)
+            ? incoming.get(documentKey)
+            : (await this.document(manifest.generation, documentKey))?.row;
+          if (row && isDocument(row) && (row.kind === 'title' || row.kind === 'season'))
+            rows.push(row);
+        }
       }
       const item = historyItemFromDocuments(rows, now);
       if (item) items.set(title, item);
