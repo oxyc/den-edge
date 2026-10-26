@@ -18,8 +18,11 @@ interface WriteAnswer {
 
 const KEYS = ['den.preferredSubtitleLanguage', 'den.hasExplicitSubtitlePreference'] as const;
 
-/** Read the three-state preference through den-core. A malformed pair fails closed to explicit Off. */
+/** Read the three-state preference. Stored pairs go through den-core; a malformed pair fails closed to explicit Off. */
 export function readSubtitlePreference(row: SettingsRow | undefined): SubtitlePreference {
+  // Absence is the canonical Automatic state. Answer it without the deferred policy module so a cold Settings
+  // surface cannot briefly mistake "den-core is still loading" for the fail-closed explicit-Off state below.
+  if (!row || !KEYS.some((key) => Object.hasOwn(row.values, key))) return { mode: 'automatic' };
   const values: Record<string, ConfigValue | null> = {};
   for (const key of KEYS) {
     if (row && Object.hasOwn(row.values, key)) values[key] = row.values[key]?.value ?? null;
