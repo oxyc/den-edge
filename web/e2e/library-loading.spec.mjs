@@ -462,11 +462,14 @@ test('paired Home paints its useful shelf before optional catalogue metadata eva
 
   await page.goto(`${E2E_ORIGIN}/test/library.html?populated&many=24&unnamed-many`);
   const useful = page.getByRole('region', { name: 'Continue Watching', exact: true });
+  const optional = page.getByRole('region', { name: 'Services', exact: true });
   await expect(useful.locator('.card').first()).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Trending This Week' })).toHaveCount(0);
+  // Services is the first visible surface gated on the held module. A named Browse row may already be attached but
+  // accessibility-hidden by its virtual window, so it is not a reliable synchronization point under shard load.
+  await expect(optional).toHaveCount(0);
 
   releaseMetadata();
-  await expect(page.getByRole('region', { name: 'Trending This Week' })).toBeAttached();
+  await expect(optional).toBeVisible();
 });
 
 test('paired Home keeps its base rows when the optional catalogue chunk is unavailable', async ({
