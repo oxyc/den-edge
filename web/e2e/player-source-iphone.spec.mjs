@@ -83,7 +83,7 @@ async function iphone(browser, locale) {
  * A guest of a host whose Hearth answers playback with `hearth(body)`, the title in `originalLanguage`, and the media
  * of both paths served. Returns every playback request body.
  */
-async function guestPlayer(page, { hearth, originalLanguage }) {
+async function guestPlayer(page, { hearth, originalLanguage, automaticSubtitles = false }) {
   const edge = newEdge();
   await routeGuestEdge(page, edge);
   await routeTmdb(page, (route) => {
@@ -157,6 +157,27 @@ async function guestPlayer(page, { hearth, originalLanguage }) {
       { timeout: 30_000 },
     )
     .toBe(true);
+  if (automaticSubtitles) {
+    const changes = (response) => new URL(response.url()).pathname.endsWith('/changes');
+    const batch = (response) =>
+      response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/batch');
+    await Promise.all([
+      page.waitForResponse(changes, { timeout: 30_000 }),
+      page.goto(`${ORIGIN}/settings`),
+    ]);
+    const subtitleLanguage = page.getByLabel('Subtitle language', { exact: true });
+    await expect(subtitleLanguage).toHaveValue('__off', { timeout: 30_000 });
+    const [saved] = await Promise.all([
+      page.waitForResponse(batch, { timeout: 30_000 }),
+      subtitleLanguage.selectOption('__automatic'),
+    ]);
+    expect(saved.ok()).toBe(true);
+    await expect(subtitleLanguage).toBeEnabled({ timeout: 30_000 });
+    await Promise.all([page.waitForResponse(changes, { timeout: 30_000 }), page.reload()]);
+    await expect(page.getByLabel('Subtitle language', { exact: true })).toHaveValue('__automatic', {
+      timeout: 30_000,
+    });
+  }
   await page.goto(`${ORIGIN}/movie/${TITLE}`);
   const play = page
     .locator('[data-active="true"]')
@@ -189,6 +210,7 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       // Hearth with TorBox: TorBox unless the request rules it out, TorBox alone when asked for it alone.
       const playback = await guestPlayer(page, {
         originalLanguage: 'he',
+        automaticSubtitles: true,
         hearth: (body) => ({ json: body.directFailed ? remuxAnswer : torboxAnswer }),
       });
       // A Hebrew title in a Swedish browser wants Swedish subtitles, which the system player shows only from a
@@ -248,6 +270,7 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       // Hearth with Den Remux only: TorBox alone is refused bare, with no TorBox failure behind it.
       const playback = await guestPlayer(page, {
         originalLanguage: 'he',
+        automaticSubtitles: true,
         hearth: (body) =>
           body.directOnly
             ? { status: 409, json: { error: 'direct_unavailable' } }
