@@ -181,18 +181,35 @@ const phaseWindows: Array<{
   end?: number;
 }> = [];
 
-/** Attribute a bounded state transition through its next paint, without titles, ids, routes or URLs. */
-export function startupRenderPhase(phase: Exclude<StartupLongTaskPhase, 'other'>): void {
-  if (inWorker || typeof requestAnimationFrame !== 'function') return;
-  if (phaseWindows.some((window) => window.phase === phase && window.end === undefined)) return;
+/** Open one fixed, privacy-safe phase and return a close which includes its next paint. */
+export function beginStartupRenderPhase(phase: Exclude<StartupLongTaskPhase, 'other'>): () => void {
+  if (inWorker || typeof requestAnimationFrame !== 'function') return () => {};
+  if (phaseWindows.some((window) => window.phase === phase && window.end === undefined))
+    return () => {};
   const window = { phase, start: performance.now(), end: undefined as number | undefined };
   phaseWindows.push(window);
   if (phaseWindows.length > 32) phaseWindows.shift();
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
+  let closing = false;
+  return () => {
+    if (closing) return;
+    closing = true;
+    // Background pages have no rendering opportunity. Their import evaluation is complete at this point, and
+    // waiting for throttled frames would incorrectly make later work look like bootstrap.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
       window.end = performance.now();
-    }),
-  );
+      return;
+    }
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        window.end = performance.now();
+      }),
+    );
+  };
+}
+
+/** Attribute a bounded synchronous state transition through its next paint. */
+export function startupRenderPhase(phase: Exclude<StartupLongTaskPhase, 'other'>): void {
+  beginStartupRenderPhase(phase)();
 }
 
 if (channel && !inWorker)

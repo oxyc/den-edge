@@ -64,6 +64,7 @@
   import { warmOnIntent } from './lib/warmOnIntent';
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
+  import { optionalImport } from './lib/keyboardNavigation';
   import type { AtlasCatalog } from './lib/services';
   import type { Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
@@ -181,11 +182,12 @@
       let directories: typeof import('./settings/services');
       try {
         [catalogue, directories] = await Promise.all([
-          import('./lib/services'),
-          import('./settings/services'),
+          optionalImport(import('./lib/services')),
+          optionalImport(import('./settings/services')),
         ]);
       } catch {
         // A stale deployment can lose this optional chunk. Keep the base TMDB rows useful without service helpers.
+        // Each request marks its own rejection before appMain's deferred preload handler decides whether to reload.
         if (current) homeMetadataReady = true;
         return;
       }
