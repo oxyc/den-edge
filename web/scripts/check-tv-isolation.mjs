@@ -60,7 +60,11 @@ if (process.argv.includes('--capture')) {
   // library Worker and a small demand-paging path to the lazy Library screen. Its measured 22.7 KiB total delta
   // replaces 0.9 MiB whole-history replies at 10k titles and cuts the representative cold path about 4x. Allow the
   // reviewed 6 KiB increase while keeping the initial graph and TV-only isolation limits unchanged.
+  // Desktop multi-tab ownership adds a 1.8 KiB lazy transport and about 3 KiB of broker/recovery code to the one
+  // existing worker artifact. It removes one whole 149 KiB-gzip worker realm for every additional same-library tab
+  // and measured about 49% less two-tab worker heap. Allow 6 KiB for that reviewed root-level saving; TV builds
+  // compile the broker and transport out, and the initial browser ceiling remains unchanged.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 24576) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 30720) throw new Error('Browser total JS/CSS budget exceeded');
 }

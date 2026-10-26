@@ -12,6 +12,9 @@ export function aggregateLibraryLifecycles(states: readonly Lifecycle[]): Lifecy
 }
 
 /** Durable clock is migration input, not authority identity. The script URL fences releases. */
-export function sharedLibraryIdentity(workerUrl: string, hello: LibraryServiceHello): string {
+export function sharedLibraryIdentity(
+  workerUrl: string,
+  hello: LibraryServiceHello | Pick<LibraryServiceHello, 'libraryKey' | 'mode' | 'wire'>,
+): string {
   return `${workerUrl}\n${JSON.stringify([hello.libraryKey, hello.mode, hello.wire])}`;
 }

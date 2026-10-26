@@ -20,6 +20,67 @@ import {
 } from './libraryServiceProtocol';
 
 type ServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
+type SharedIdentity = Pick<
+  Extract<ServiceClientMessage, { type: 'hello' }>,
+  'libraryKey' | 'mode' | 'wire'
+>;
+const prewarmed = new Map<
+  string,
+  { worker: SharedWorker; timeout: ReturnType<typeof setTimeout> }
+>();
+
+async function sharedWorkerName(identity: SharedIdentity): Promise<string> {
+  const bytes = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(sharedLibraryIdentity(import.meta.url, identity)),
+  );
+  const digest = [...new Uint8Array(bytes)]
+    .slice(0, 12)
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+  return `den-library-${LIBRARY_SHARED_WORKER_PROTOCOL}-${digest}`;
+}
+
+function releasePrewarm(name: string): void {
+  const held = prewarmed.get(name);
+  if (!held) return;
+  prewarmed.delete(name);
+  clearTimeout(held.timeout);
+  try {
+    held.worker.port.postMessage({
+      type: 'den-library-disconnect',
+      protocol: LIBRARY_SHARED_WORKER_PROTOCOL,
+    });
+  } catch {
+    // The speculative realm may have died already. The live transport owns recovery.
+  } finally {
+    held.worker.port.close();
+  }
+}
+
+function extendPrewarm(name: string): void {
+  const held = prewarmed.get(name);
+  if (!held) return;
+  clearTimeout(held.timeout);
+  held.timeout = setTimeout(() => releasePrewarm(name), 30_000);
+}
+
+/** Start the real identity-named realm early; the first production transport adopts it and releases this idle port. */
+export async function prewarmSharedLibraryWorker(identity: SharedIdentity): Promise<void> {
+  try {
+    const name = await sharedWorkerName(identity);
+    if (prewarmed.has(name)) return;
+    const worker = new SharedWorker(new URL('./libraryServiceWorker.ts', import.meta.url), {
+      type: 'module',
+      name,
+    });
+    worker.port.start();
+    const timeout = setTimeout(() => releasePrewarm(name), 30_000);
+    prewarmed.set(name, { worker, timeout });
+  } catch {
+    // The normal transport will use its bounded DedicatedWorker fallback.
+  }
+}
 
 /** One tab's port into the desktop SharedWorker. The domain protocol remains identical to the in-tab transport. */
 export class SharedWorkerLibraryServiceTransport implements LibraryServiceMultiplexTransport {
@@ -39,6 +100,7 @@ export class SharedWorkerLibraryServiceTransport implements LibraryServiceMultip
   #heartbeatAcks = 0;
   #connected = false;
   #authorityReady = false;
+  #workerName?: string;
   #lastLifecycle?: ServiceClientMessage;
   readonly #contentConfiguration = new Map<string, ServiceClientMessage>();
 
@@ -91,20 +153,15 @@ export class SharedWorkerLibraryServiceTransport implements LibraryServiceMultip
 
   close(): void {
     if (this.#closed) return;
-    try {
-      this.#worker?.port.postMessage({
-        type: 'den-library-disconnect',
-        protocol: LIBRARY_SHARED_WORKER_PROTOCOL,
-      });
-    } finally {
-      this.#closed = true;
-      this.#dispose();
-    }
+    this.#disconnect();
+    this.#closed = true;
+    this.#dispose();
   }
 
   readonly #message = (event: MessageEvent<ServerMessage[] | unknown>): void => {
     if (isSharedWorkerConnected(event.data)) {
       this.#connected = true;
+      if (this.#workerName) releasePrewarm(this.#workerName);
       this.#resolveReady();
       if (this.#startupTimer) clearTimeout(this.#startupTimer);
       return;
@@ -165,6 +222,7 @@ export class SharedWorkerLibraryServiceTransport implements LibraryServiceMultip
     if (this.#closed) return;
     const listeners = [...this.#libraryListeners];
     const contentListeners = [...this.#contentListeners];
+    this.#disconnect();
     this.#closed = true;
     this.#rejectReady(new Error(message));
     this.#dispose();
@@ -180,6 +238,17 @@ export class SharedWorkerLibraryServiceTransport implements LibraryServiceMultip
         protocol: CONTENT_SERVICE_PROTOCOL,
         error: { code: 'unavailable', message, retryable: true },
       });
+  }
+
+  #disconnect(): void {
+    try {
+      this.#worker?.port.postMessage({
+        type: 'den-library-disconnect',
+        protocol: LIBRARY_SHARED_WORKER_PROTOCOL,
+      });
+    } catch {
+      // Closing a failed realm is best-effort; the worker lease is the final backstop.
+    }
   }
 
   #dispose(): void {
@@ -266,22 +335,19 @@ export class SharedWorkerLibraryServiceTransport implements LibraryServiceMultip
 
   async #start(hello: Extract<ServiceClientMessage, { type: 'hello' }>): Promise<void> {
     try {
-      const bytes = await crypto.subtle.digest(
-        'SHA-256',
-        // This lazy transport chunk contains the content-hashed worker URL, so its own URL is a release fence.
-        new TextEncoder().encode(sharedLibraryIdentity(import.meta.url, hello)),
-      );
       if (this.#closed) return;
-      const digest = [...new Uint8Array(bytes)]
-        .slice(0, 12)
-        .map((value) => value.toString(16).padStart(2, '0'))
-        .join('');
+      const name = await sharedWorkerName(hello);
+      if (this.#closed) return;
+      // A production connection has started. Move the speculative expiry beyond the bounded handshake so it cannot
+      // close an empty realm while this port's connect event is still queued.
+      extendPrewarm(name);
       const worker = new SharedWorker(new URL('./libraryServiceWorker.ts', import.meta.url), {
         type: 'module',
         // A SharedWorker realm is one library identity. This partitions module globals (relay grants, den-core
         // lifecycle, startup metrics) while tabs on the same library converge on the same canonical runtime.
-        name: `den-library-${LIBRARY_SHARED_WORKER_PROTOCOL}-${digest}`,
+        name,
       });
+      this.#workerName = name;
       this.#worker = worker;
       worker.port.addEventListener('message', this.#message);
       worker.port.addEventListener('messageerror', this.#messageError);

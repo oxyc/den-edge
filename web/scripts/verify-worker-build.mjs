@@ -37,7 +37,7 @@ const workerReferences = (
 ).filter(({ source }) => source.includes(workers[0]));
 if (workerReferences.length !== 2)
   throw new Error(
-    `expected dedicated and lazy shared transports to name ${workers[0]}, found ${workerReferences.length}`,
+    `expected browser entry and lazy shared transport to name ${workers[0]}, found ${workerReferences.length}`,
   );
 if (!workerReferences.some(({ name }) => name.startsWith('libraryServiceSharedWorkerTransport-')))
   throw new Error(`expected the lazy SharedWorker transport to reference ${workers[0]}`);

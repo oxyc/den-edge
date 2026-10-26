@@ -28,6 +28,11 @@ import {
 const IDLE_CLOSE_MS = 5_000;
 const entries = new Map<string, SharedEntry>();
 let realmKey: string | undefined;
+let realmScope: SharedWorkerGlobalScope | undefined;
+let activePorts = 0;
+const closeEmptyRealm = () => {
+  if (realmScope && activePorts === 0 && entries.size === 0) realmScope.close();
+};
 interface Client {
   id: string;
   port: MessagePort;
@@ -37,6 +42,7 @@ interface Client {
   suspended?: boolean;
   content?: ContentServiceCore;
   relay?: RelaySession;
+  disconnect: () => void;
 }
 const entryKey = (hello: LibraryServiceHello) =>
   JSON.stringify([hello.libraryKey, hello.mode, hello.wire]);
@@ -209,6 +215,7 @@ class SharedEntry {
         entries.delete(this.key);
         this.#stop();
         void this.runtime.close();
+        closeEmptyRealm();
       };
       if (this.#openFailure) retire();
       else this.#idle = setTimeout(retire, IDLE_CLOSE_MS);
@@ -263,31 +270,46 @@ class SharedEntry {
     try {
       client.port.postMessage(message);
     } catch {
-      this.detach(client);
+      client.disconnect();
     }
   }
 }
 
 /** Install the multiplexing host in a SharedWorker realm. Kept side-effect free so TV builds erase it. */
 export function installSharedLibraryServiceWorker(scope: SharedWorkerGlobalScope): void {
+  realmScope = scope;
   scope.addEventListener('connect', (event: MessageEvent) => {
     const port = event.ports[0];
     if (!port) return;
+    activePorts++;
+    let released = false;
+    const releasePort = () => {
+      if (released) return;
+      released = true;
+      activePorts--;
+      closeEmptyRealm();
+    };
     const client: Client = {
       id: crypto.randomUUID(),
       port,
       subscriptions: new Set(),
       lastSeen: Date.now(),
+      disconnect: () => {},
     };
     let entry: SharedEntry | undefined;
+    const disconnect = () => {
+      clearInterval(lease);
+      entry?.detach(client);
+      port.removeEventListener('message', receive);
+      port.close();
+      releasePort();
+    };
+    client.disconnect = disconnect;
     const pendingContent: ContentServiceClientMessage[] = [];
     const receive = (event: MessageEvent<unknown>) => {
       client.lastSeen = Date.now();
       if (isSharedWorkerDisconnect(event.data)) {
-        clearInterval(lease);
-        entry?.detach(client);
-        port.removeEventListener('message', receive);
-        port.close();
+        disconnect();
         return;
       }
       if (isSharedWorkerHeartbeat(event.data)) {
@@ -405,11 +427,12 @@ export function installSharedLibraryServiceWorker(scope: SharedWorkerGlobalScope
     const lease = setInterval(() => {
       if (client.suspended) return;
       if (Date.now() - client.lastSeen <= 30 * 60_000) return;
-      clearInterval(lease);
-      entry?.detach(client);
-      port.removeEventListener('message', receive);
-      port.close();
+      disconnect();
     }, 60_000);
-    port.postMessage({ type: 'den-library-connected', protocol: LIBRARY_SHARED_WORKER_PROTOCOL });
+    try {
+      port.postMessage({ type: 'den-library-connected', protocol: LIBRARY_SHARED_WORKER_PROTOCOL });
+    } catch {
+      disconnect();
+    }
   });
 }
