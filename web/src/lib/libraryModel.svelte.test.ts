@@ -18,6 +18,7 @@ import type {
   TitleRef,
 } from './libraryServiceProtocol';
 import type {
+  LibrarySelectionConnection,
   LibrarySelectionSnapshot,
   LibrarySubscriptionOptions,
 } from './libraryServiceSupervisor';
@@ -198,13 +199,18 @@ class FakeService {
     for (const listener of this.statusListeners) listener(status);
   }
 
-  publish(selection: LibrarySelection, value: LibrarySelectionValue, revision: number): void {
+  publish(
+    selection: LibrarySelection,
+    value: LibrarySelectionValue,
+    revision: number,
+    connection: LibrarySelectionConnection = 'ready',
+  ): void {
     const key = JSON.stringify(selection);
     for (const subscription of this.subscriptions)
       if (!subscription.stopped && JSON.stringify(subscription.selection) === key)
         subscription.listener({
           selection: subscription.selection,
-          connection: 'ready',
+          connection,
           value,
           version: version(revision),
         });
@@ -431,6 +437,31 @@ it('distinguishes the first ready page from the settled paged library import', a
   expect(homeSettled).toBe(false);
   service.publish({ kind: 'continue' }, continueValue(), 6);
   await expect(model.initialHomeSettled).resolves.toBeUndefined();
+  model.close();
+});
+
+it('waits for authoritative Home replacements after a paged read reconnects', async () => {
+  const service = new FakeService();
+  service.openProgress = 0;
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  service.opened[0]!.progress?.(1);
+  await expect(model.initialReadSettled).resolves.toBeUndefined();
+  let homeSettled = false;
+  void model.initialHomeSettled.then(() => (homeSettled = true));
+
+  service.publish({ kind: 'overview' }, overviewValue(), 5, 'reconnecting');
+  service.publish({ kind: 'continue' }, continueValue(), 6, 'reconnecting');
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+
+  service.publish({ kind: 'overview' }, overviewValue(), 7);
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'continue' }, continueValue(), 8);
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
+  expect(homeSettled).toBe(true);
   model.close();
 });
 

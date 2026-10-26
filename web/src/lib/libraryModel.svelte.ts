@@ -171,8 +171,8 @@ export class LibraryModel {
     let awaitingFullHome = false;
     let overviewAfterRead = false;
     let continueAfterRead = false;
-    const noteFullHome = (kind: 'overview' | 'continue') => {
-      if (!awaitingFullHome) return;
+    const noteFullHome = (kind: 'overview' | 'continue', snapshot: LibrarySelectionSnapshot) => {
+      if (!awaitingFullHome || snapshot.connection !== 'ready') return;
       if (kind === 'overview') overviewAfterRead = true;
       else continueAfterRead = true;
       if (overviewAfterRead && continueAfterRead) settleInitialHome();
@@ -197,11 +197,11 @@ export class LibraryModel {
     this.#rootStops.push(
       service.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
         this.#overview = modelSnapshot<LibraryOverviewView>(snapshot);
-        noteFullHome('overview');
+        noteFullHome('overview', snapshot);
       }),
       service.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
         this.#continue = modelSnapshot<ContinueView>(snapshot);
-        noteFullHome('continue');
+        noteFullHome('continue', snapshot);
       }),
       service.subscribeSnapshot(
         { kind: 'devices' },
