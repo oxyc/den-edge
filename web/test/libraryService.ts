@@ -53,6 +53,7 @@ class FixtureService {
     private openGate?: Promise<void>,
     private readonly openFailureMessage = 'fixture library service did not start',
     private readonly failHistoryDetails = false,
+    private readonly settingsGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -191,6 +192,7 @@ class FixtureService {
     selection: LibrarySelection,
     listener: (snapshot: LibrarySelectionSnapshot) => void,
   ) {
+    if (selection.kind === 'settings') await this.settingsGate;
     listener({
       selection,
       connection: 'ready',
@@ -232,6 +234,8 @@ export interface FixtureLibraryServiceOptions {
   openGate?: Promise<void>;
   /** Page fixture only: make the lazy History detail query fail so its summary fallback can be exercised. */
   failHistoryDetails?: boolean;
+  /** Page fixture only: let other root snapshots publish while policy Settings stays authoritative-but-held. */
+  settingsGate?: Promise<void>;
 }
 
 /**
@@ -250,6 +254,7 @@ export function fixtureLibraryService({
   openFailureMessage,
   openGate,
   failHistoryDetails,
+  settingsGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -316,6 +321,7 @@ export function fixtureLibraryService({
     openGate,
     openFailureMessage,
     failHistoryDetails,
+    settingsGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {

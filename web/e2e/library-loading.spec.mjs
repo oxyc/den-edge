@@ -86,6 +86,25 @@ test('local library keeps its progressive page visible while startup settles', a
   await page.evaluate(() => window.denTestReleaseLibraryOpen());
 });
 
+test('an early Overview stays fail-closed until policy Settings is authoritative', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { page: 1, results: [] } }));
+
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&hold-settings`);
+  await expect
+    .poll(() => page.evaluate(() => typeof window.denTestReleaseLibrarySettings))
+    .toBe('function');
+  await expect(page.locator('[data-route-loading]')).toHaveCount(1);
+  await expect(page.getByRole('link', { name: /Movie 1001/ })).toHaveCount(0);
+
+  await page.evaluate(() => window.denTestReleaseLibrarySettings());
+  await expect(page.locator('[data-route-loading]')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Services' })).toBeVisible();
+});
+
 for (const local of [false, true]) {
   test(`${local ? 'local' : 'linked'} library startup failure is visible and Retry recovers`, async ({
     page,

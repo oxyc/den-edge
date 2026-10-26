@@ -113,7 +113,7 @@
   import KidTitleAccessDialog from './components/KidTitleAccessDialog.svelte';
 
   let {
-    link,
+    link: _link,
     route,
     active,
     session,
@@ -153,12 +153,12 @@
   const model = untrack(() => session.model);
   // Home roots can paint from the newest import page. Personalized ranking, unlike those shelves, describes the
   // whole library and must wait until the remaining pages have landed before taking its one snapshot of `weighted`.
-  let initialReadSettled = $state(model === null);
+  let initialHomeSettled = $state(model === null);
   $effect(() => {
     if (!model) return;
     let current = true;
-    void model.initialReadSettled.then(() => {
-      if (current) initialReadSettled = true;
+    void model.initialHomeSettled.then(() => {
+      if (current) initialHomeSettled = true;
     });
     return () => {
       current = false;
@@ -282,6 +282,8 @@
   const continueView = $derived(model?.continueWatching.value);
   // Visitor reads the Owner's household policy but never receives the Owner's activity/write model.
   const settings = $derived(session.policy?.settings.value);
+  /** Neutral defaults are presentation fallbacks, never authority to render or act before policy arrives. */
+  const policyReady = $derived(session.policy === null || settings !== undefined);
   /**
    * Admit enough refs to fill the requested number of cards, while keeping at most one tranche of unanswered
    * provider work in flight. A confirmed-missing TMDB record is settled and skipped; a temporary refusal remains
@@ -319,10 +321,10 @@
     metadataLimit(overview?.watchlist ?? [], watchlistNames, watchlistCachedPrefix),
   );
   const libraryOpen = $derived(
-    profileActivity !== null || model === null || overview !== undefined,
+    policyReady && (profileActivity !== null || model === null || overview !== undefined),
   );
   const serviceFailed = $derived(
-    !!model && model.connection === 'failed' && model.overview.value === undefined,
+    !!model && model.connection === 'failed' && (!overview || !policyReady),
   );
   const updateRequired = $derived(libraryUpdateRequired(model));
 
@@ -935,7 +937,7 @@
    * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
   const play = $derived(
-    tvs.length
+    policyReady && tvs.length
       ? async (tvId: string, title: Title, season?: number, episode?: number) => {
           const tv = tvs.find((candidate) => candidate.id === tvId);
           if (!tv) return;
@@ -1015,7 +1017,7 @@
    * refused it.
    */
   const playHere = $derived(
-    scout && (scout.playback || remux !== null)
+    policyReady && scout && (scout.playback || remux !== null)
       ? async (title: Title, season?: number, episode?: number, filename?: string) => {
           const blocked = await playGuard(title, {
             content: session.content,
@@ -1063,6 +1065,7 @@
 
   // Hosted webOS and packaged Tizen TVs take the plays and transport commands any device holding the library sends
   // them (den-spec inbox-v1 §5). An ordinary browser is a controller only and drains neither.
+  let personalizedRankingReady = false;
   $effect(() => {
     if (!__DEN_TV__) return;
     const stop = new AbortController();
@@ -1762,7 +1765,7 @@
     // shape, the hide rules, the taste — is read without being watched. Those tick over continuously while the
     // library is named, and watching them had the whole pool rebuilt on every tick: hundreds of repeat requests to
     // atlas for one page load. The one readiness edge matters: ranking before it permanently sent unnamed history.
-    if (
+    const rankingSurface = !(
       route.page === 'title' ||
       route.page === 'person' ||
       route.page === 'search' ||
@@ -1770,11 +1773,25 @@
       route.page === 'watchlist' ||
       route.page === 'downloads' ||
       route.page === 'service'
-    )
-      return;
+    );
     const here = atlas;
     // Its ranking sends the seeds' names, which are named after the shelves' own (`seedsNamed`).
     const named = shelvesReady && seedsNamed;
+    const rankingReady =
+      rankingSurface &&
+      !!here &&
+      policyReady &&
+      libraryOpen &&
+      named &&
+      rankingHomeNamesReady &&
+      initialHomeSettled;
+    if (personalizedRankingReady && !rankingReady) {
+      // A request that captured an earlier root must not publish or retain after any authority gate closes.
+      billboardRun++;
+      stagedFeatured = null;
+    }
+    personalizedRankingReady = rankingReady;
+    if (!rankingSurface) return;
     if (session.kid) {
       const ready = kidHomeReady;
       const available = rankedKidHome.length;
@@ -1794,8 +1811,7 @@
     }
     // Its library vector is whole-library state, so the remaining first-read pages must also have landed. This does
     // not hold the shelves or retained hero, both of which deliberately paint from the newest page.
-    if (model === null || (libraryOpen && named && rankingHomeNamesReady && initialReadSettled))
-      untrack(buildRecommended);
+    if (model === null || rankingReady) untrack(buildRecommended);
   });
 
   async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
@@ -2162,7 +2178,7 @@
       again.
     </p>
   </section>
-{:else if link && model && !overview && !serviceFailed}
+{:else if model && (!overview || !policyReady) && !serviceFailed}
   <!-- No spinner: a first read from den-edge draws its progress on the navigation bar, and any other open is too
        short to show one. The marker still holds the Router's scroll restore until the library is drawn. -->
   <div data-route-loading></div>

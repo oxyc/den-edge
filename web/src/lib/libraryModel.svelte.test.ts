@@ -421,6 +421,16 @@ it('distinguishes the first ready page from the settled paged library import', a
   service.opened[0]!.progress?.(1);
   await expect(model.initialReadSettled).resolves.toBeUndefined();
   expect(settled).toBe(true);
+
+  let homeSettled = false;
+  void model.initialHomeSettled.then(() => (homeSettled = true));
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'overview' }, overviewValue(), 5);
+  await Promise.resolve();
+  expect(homeSettled).toBe(false);
+  service.publish({ kind: 'continue' }, continueValue(), 6);
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
   model.close();
 });
 
@@ -428,6 +438,7 @@ it('settles a cached first open with no paged import at ready', async () => {
   const model = new LibraryModel(new FakeService(), options);
   await expect(model.ready).resolves.toEqual(version(4));
   await expect(model.initialReadSettled).resolves.toBeUndefined();
+  await expect(model.initialHomeSettled).resolves.toBeUndefined();
   model.close();
 });
 

@@ -145,6 +145,7 @@ export class LibraryModel {
   readonly #stopStatus: () => void;
   readonly #readyWaiters = new Set<() => void>();
   #settleInitialRead = () => {};
+  #settleInitialHome = () => {};
   #closed = false;
 
   /** Settles after Home's roots and the profile-settings safety boundary are authoritative. */
@@ -155,6 +156,8 @@ export class LibraryModel {
    * writes use this later boundary to avoid loading mutation policy into that opening work.
    */
   readonly initialReadSettled: Promise<void>;
+  /** Settles after a paged first read's complete Overview and Continue replacements have been published. */
+  readonly initialHomeSettled: Promise<void>;
 
   constructor(
     readonly service: LibraryModelService,
@@ -162,6 +165,18 @@ export class LibraryModel {
   ) {
     let settleInitialRead!: () => void;
     let initialReadSettled = false;
+    let settleInitialHome!: () => void;
+    let initialHomeSettled = false;
+    let pagedRead = false;
+    let awaitingFullHome = false;
+    let overviewAfterRead = false;
+    let continueAfterRead = false;
+    const noteFullHome = (kind: 'overview' | 'continue') => {
+      if (!awaitingFullHome) return;
+      if (kind === 'overview') overviewAfterRead = true;
+      else continueAfterRead = true;
+      if (overviewAfterRead && continueAfterRead) settleInitialHome();
+    };
     let openingProgressSeen = false;
     this.initialReadSettled = new Promise<void>((resolve) => {
       settleInitialRead = () => {
@@ -171,12 +186,22 @@ export class LibraryModel {
       };
     });
     this.#settleInitialRead = settleInitialRead;
+    this.initialHomeSettled = new Promise<void>((resolve) => {
+      settleInitialHome = () => {
+        if (initialHomeSettled) return;
+        initialHomeSettled = true;
+        resolve();
+      };
+    });
+    this.#settleInitialHome = settleInitialHome;
     this.#rootStops.push(
       service.subscribeSnapshot({ kind: 'overview' }, (snapshot) => {
         this.#overview = modelSnapshot<LibraryOverviewView>(snapshot);
+        noteFullHome('overview');
       }),
       service.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
         this.#continue = modelSnapshot<ContinueView>(snapshot);
+        noteFullHome('continue');
       }),
       service.subscribeSnapshot(
         { kind: 'devices' },
@@ -199,8 +224,13 @@ export class LibraryModel {
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
     const progress = (value: number) => {
       openingProgressSeen = true;
+      if (value < 1) pagedRead = true;
       if (!this.#closed) noteLibraryOpening(this, value);
-      if (value >= 1) settleInitialRead();
+      if (value >= 1) {
+        settleInitialRead();
+        if (pagedRead) awaitingFullHome = true;
+        else settleInitialHome();
+      }
     };
     // Ready can come before the read is complete (the rest of the history follows the first page): the progress ends
     // at 1, or with a failed open or a closed model.
@@ -209,7 +239,10 @@ export class LibraryModel {
       .then((version) => {
         // A complete saved fact store reports no progress: the ready reply is its settled boundary. A paged import
         // reports 0 before ready and 1 only after its remaining history has landed.
-        if (!openingProgressSeen) settleInitialRead();
+        if (!openingProgressSeen) {
+          settleInitialRead();
+          settleInitialHome();
+        }
         return version;
       })
       .catch((error: unknown) => {
@@ -1111,6 +1144,7 @@ export class LibraryModel {
     this.#closed = true;
     noteLibraryOpening(this, null);
     this.#settleInitialRead();
+    this.#settleInitialHome();
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();
