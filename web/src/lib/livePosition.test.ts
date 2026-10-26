@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { clock, LIVE_MS, livePosition, sight } from './livePosition';
+import {
+  clock,
+  LIVE_MS,
+  livePosition,
+  MAX_ACTIVITY_CLOCK_SKEW_MS,
+  REMOTE_RESUME_MS,
+  resumable,
+  sight,
+} from './livePosition';
 
 describe('livePosition', () => {
   const at = 1_000_000;
@@ -21,6 +29,12 @@ describe('livePosition', () => {
     expect(livePosition({ seconds: 60, at: at + 2_000 }, at)).toBe(60);
   });
 
+  it('rejects a write implausibly far in the future', () => {
+    expect(
+      livePosition({ seconds: 60, at: at + MAX_ACTIVITY_CLOCK_SKEW_MS + 1 }, at),
+    ).toBeUndefined();
+  });
+
   // The TV's log reaches den-edge about every 30 s, so the newest write a page sees can be that old already.
   it('keeps counting through the ~30 s between pushes', () => {
     expect(livePosition({ seconds: 1390, at }, at + 38_000)).toBe(1428);
@@ -28,6 +42,22 @@ describe('livePosition', () => {
 
   it('is not playing at a write that left the position where it was', () => {
     expect(livePosition({ seconds: 1390, at, moving: false }, at)).toBeUndefined();
+  });
+});
+
+describe('guarded remote resume', () => {
+  const at = 1_000_000;
+
+  it('retains an exact position through ten minutes, but not beyond it', () => {
+    expect(resumable({ at }, at + REMOTE_RESUME_MS)).toBe(true);
+    expect(resumable({ at }, at + REMOTE_RESUME_MS + 1)).toBe(false);
+  });
+
+  it('accepts ordinary clock skew without trusting a far-future lease', () => {
+    expect(resumable({ at: at + 2_000 }, at)).toBe(true);
+    expect(resumable({ at: at + MAX_ACTIVITY_CLOCK_SKEW_MS }, at)).toBe(true);
+    expect(resumable({ at: at + MAX_ACTIVITY_CLOCK_SKEW_MS + 1 }, at)).toBe(false);
+    expect(resumable({}, at)).toBe(false);
   });
 });
 
