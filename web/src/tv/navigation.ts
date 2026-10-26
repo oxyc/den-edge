@@ -24,7 +24,8 @@ const move = (
 ) => moveFocus(direction, include, 'auto');
 
 /** A real touch digit, unlike a Magic Remote's coarse pointer, needs Search ready inside its activating tap. */
-export const touchNeedsSearchPreload = (touchPoints: number): boolean => touchPoints > 0;
+export const touchNeedsSearchPreload = (touchPoints: number, hasTouchEvents: boolean): boolean =>
+  touchPoints > 0 || hasTouchEvents;
 
 /** Leaving a restored Search focus is not Search intent; arriving on it is handled after spatial movement. */
 export const searchKeyNeedsPreload = (key: string): boolean =>
@@ -187,7 +188,7 @@ export function installTVNavigation(): () => void {
         .then(() => {
           // lazy() resolves failures after marking the screen retryable. Do not pin that failed outer attempt or
           // announce it as ready: the next real Search intent should try the import again.
-          if (!SearchScreen.current) {
+          if (SearchScreen.failed) {
             if (searchPreload === attempt) searchPreload = undefined;
             return;
           }
@@ -202,7 +203,8 @@ export function installTVNavigation(): () => void {
   };
   // Magic Remote and ordinary TV remotes report a coarse pointer too, but have no software keyboard activation to
   // preserve. Only an actual touch digit needs Search ready before its first tap; remote focus remains intent.
-  if (touchNeedsSearchPreload(navigator.maxTouchPoints)) void preloadSearch();
+  if (touchNeedsSearchPreload(navigator.maxTouchPoints, 'ontouchstart' in window))
+    void preloadSearch();
   const searchButton = (target: EventTarget | null) =>
     target instanceof Element ? target.closest('.tv-search-button') : null;
   const prepareSearch = (event: Event) => {
