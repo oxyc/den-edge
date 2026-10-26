@@ -54,10 +54,9 @@ if (process.argv.includes('--capture')) {
   // the browser and the TV builds, so its TV-queue branch (~160 bytes) ships to browsers too, and the lazy graph sat
   // 11 bytes under 15 KiB with it, too close for gzip to agree across machines. The page side of the lane stays
   // TV-only (householdPlays).
-  // The integrated browser remote adds an accessible scrubber, its transport styling and a long-seek compatibility
-  // path to the lazy detail/library graph. Give that reviewed UI 2 KiB without relaxing the initial graph or the
-  // TV-only implementation scan above.
+  // The compact browser remote adds its transport row and icon styling to the lazy detail graph. Keep that reviewed
+  // addition within one further KiB without relaxing the initial graph or TV-only implementation scan above.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 18432) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 17408) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -327,7 +327,7 @@ test('a series’ page says which device plays which episode, and keeps controls
     const block = page.locator('.hero .continue-row');
     const resume = page.locator('header.hero').getByRole('link', { name: 'Resume', exact: true });
     const label = block.locator('strong');
-    const clock = block.locator('.live-clock, .remote-times span:first-child');
+    const clock = block.locator('.live-clock, .remote-clock');
     const heading = page.getByRole('heading', { name: 'Series 1003', level: 1 });
     const actions = page.locator('.hero-actions');
     const boxes = async () => [
@@ -358,15 +358,9 @@ test('a series’ page says which device plays which episode, and keeps controls
     await controls.getByRole('button', { name: 'Resume' }).click();
     await expect(label).toHaveText('Playing on Apple TV');
     await controls.getByRole('button', { name: 'Skip forward 10 seconds' }).click();
-    const scrubber = controls.getByRole('slider', { name: 'Position on Apple TV' });
-    await expect(scrubber).toBeEnabled();
-    await scrubber.evaluate((input) => {
-      input.value = '1400';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    // About 800 seconds forward: two backward-compatible skip commands, each at most ten minutes.
-    await expect.poll(() => edge.controls.length).toBe(sentBefore + 6);
+    await expect(controls.getByRole('slider')).toHaveCount(0);
+    await expect(controls.locator('.resume-track')).toBeVisible();
+    await expect.poll(() => edge.controls.length).toBe(sentBefore + 4);
     expect(
       edge.controls
         .slice(sentBefore)
@@ -389,7 +383,7 @@ test('a series’ page says which device plays which episode, and keeps controls
       const widget = await controls.boundingBox();
       expect(widget.x).toBeGreaterThanOrEqual(0);
       expect(widget.x + widget.width).toBeLessThanOrEqual(width);
-      await expect(scrubber).toBeVisible();
+      await expect(controls.locator('.resume-track')).toBeVisible();
       await page.screenshot({ path: test.info().outputPath(`detail-live-${width}.png`) });
     }
     await page.setViewportSize({ width: 1280, height: 720 });
