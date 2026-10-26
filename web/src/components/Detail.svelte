@@ -25,6 +25,7 @@
   import SeasonDownload from './SeasonDownload.svelte';
   import { downloadEpisode } from '../lib/seasonDownloads.svelte';
   import DetailIcon from './DetailIcon.svelte';
+  import ButtonIcon from './ButtonIcon.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
   import { isBlocked } from '../lib/parental';
@@ -1007,20 +1008,30 @@
                 aria-busy={transportBusy}
               >
                 <button
+                  class="seek"
                   disabled={transportBusy}
                   aria-label="Skip back 10 seconds"
-                  onclick={() => transport('skip', -10)}>−10</button
+                  title="Back 10 seconds"
+                  onclick={() => transport('skip', -10)}><span aria-hidden="true">−10</span></button
                 >
                 <button
+                  class="play-pause"
                   disabled={transportBusy}
+                  aria-label={transportPlaying ? 'Pause on TV' : 'Resume on TV'}
+                  title={transportPlaying ? 'Pause' : 'Resume'}
                   onclick={() => transport(transportPlaying ? 'pause' : 'play')}
                 >
-                  {transportPlaying ? 'Pause' : 'Resume'}
+                  <ButtonIcon
+                    name={transportPlaying ? 'pause' : 'play'}
+                    filled={!transportPlaying}
+                  />
                 </button>
                 <button
+                  class="seek"
                   disabled={transportBusy}
                   aria-label="Skip forward 10 seconds"
-                  onclick={() => transport('skip', 10)}>+10</button
+                  title="Forward 10 seconds"
+                  onclick={() => transport('skip', 10)}><span aria-hidden="true">+10</span></button
                 >
               </div>
             {/if}
@@ -1571,25 +1582,61 @@
 
   .remote-controls {
     display: inline-flex;
-    gap: 8px;
+    align-items: center;
+    gap: 3px;
+    padding: 5px;
+    border: 1px solid #fff3;
+    border-radius: 999px;
+    background: #09090dc7;
+    box-shadow:
+      0 10px 28px #0006,
+      inset 0 1px #fff2;
+    backdrop-filter: blur(18px) saturate(130%);
   }
 
   .remote-controls button {
-    min-width: 54px;
-    min-height: 42px;
-    padding: 0 14px;
-    border: 1px solid #fff4;
-    border-radius: 999px;
-    background: #fff1;
+    display: grid;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
     color: var(--fg);
     font: inherit;
-    font-size: 14px;
-    font-weight: 650;
     cursor: pointer;
+    transition:
+      background 120ms ease,
+      color 120ms ease,
+      transform 120ms ease;
+  }
+
+  .remote-controls .seek {
+    color: #fffd;
+    font-size: 13px;
+    font-weight: 750;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .remote-controls .play-pause {
+    width: 50px;
+    height: 50px;
+    margin: 0 2px;
+    background: var(--fg);
+    color: var(--bg);
+    box-shadow: 0 3px 12px #0007;
+
+    --button-icon-size: 23px;
   }
 
   .remote-controls button:hover {
     background: #fff2;
+    transform: scale(1.05);
+  }
+
+  .remote-controls .play-pause:hover {
+    background: #fff;
   }
 
   .remote-controls button:focus-visible {
@@ -1600,6 +1647,7 @@
   .remote-controls button:disabled {
     cursor: wait;
     opacity: 0.55;
+    transform: none;
   }
 
   .seasons {
