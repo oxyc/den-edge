@@ -7,6 +7,7 @@ import {
   sealMessage,
   sendToTV,
   stillQueued,
+  tvListening,
 } from './inbox';
 import { linkKeys } from './pair';
 import { fromHex, toBase64url } from './wire';
@@ -113,6 +114,29 @@ describe('asking whether a send is still queued', () => {
     expect(await stillQueued(link, 'AAEC', down)).toBeNull();
     const refused = (async () => new Response('{}', { status: 429 })) as typeof fetch;
     expect(await stillQueued(link, 'AAEC', refused)).toBeNull();
+  });
+});
+
+describe('choosing an awake TV', () => {
+  const link = { inboxKey: 'abcdef0123456789' };
+
+  it('asks whether that exact queue has a listening receiver without draining it', async () => {
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      expect(url).toBe('/inbox/listening');
+      expect(init?.method).toBe('POST');
+      expect((init?.headers as Record<string, string>)['x-den-link']).toBe(link.inboxKey);
+      return new Response('{"listening":true}', { status: 200 });
+    }) as typeof fetch;
+    expect(await tvListening(link, fetchImpl)).toBe(true);
+  });
+
+  it('distinguishes an idle receiver from a failed liveness check', async () => {
+    const idle = (async () => new Response('{"listening":false}', { status: 200 })) as typeof fetch;
+    expect(await tvListening(link, idle)).toBe(false);
+    const down = (async () => {
+      throw new TypeError('offline');
+    }) as typeof fetch;
+    expect(await tvListening(link, down)).toBeNull();
   });
 });
 

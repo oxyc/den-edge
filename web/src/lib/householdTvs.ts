@@ -12,6 +12,19 @@ export interface HouseholdTv {
   controls?: boolean;
 }
 
+/** Pick a transport receiver from probes ordered with the playback writer first. */
+export function listeningTransportTv<T>(
+  probed: readonly { tv: T; listening: boolean | null }[],
+): T | undefined {
+  const intended = probed[0];
+  if (intended?.listening) return intended.tv;
+  const awake = probed.filter(({ listening }) => listening);
+  if (awake.length === 1) return awake[0]?.tv;
+  // A backend being rolled out cannot answer the probe yet; retain the exact-device behavior until it can.
+  if (intended && probed.every(({ listening }) => listening === null)) return intended.tv;
+  return undefined;
+}
+
 /**
  * The household's TVs that take plays, the one a play last started on first (`<d>.played`), then the most recently
  * seen. A TV too old to publish a play key isn't one: it cannot take household playback commands.
