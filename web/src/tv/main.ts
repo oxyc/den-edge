@@ -6,7 +6,7 @@ import { installTVNavigation } from './navigation';
 import { registerSamsungKeys } from './platform';
 import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
 import { installTvCssCapabilities } from './cssCapabilities';
-import { startupMark } from '../lib/startupTiming';
+import { beginStartupRenderPhase, startupMark } from '../lib/startupTiming';
 import { openingWorkers, startLibraryWorkers } from '../lib/libraryWorkerStart';
 
 startupMark('page boot');
@@ -48,8 +48,13 @@ async function start() {
   // The application is a separate download. Keep hardware Back/exit available on the starting screen too;
   // waiting for that chunk left an early Back unhandled (also reproducible while holding its request).
   installRemote();
+  const bootstrapFinished = beginStartupRenderPhase('bootstrap');
   startupMark('app module requested');
-  await import('../appMain');
+  try {
+    await import('../appMain');
+  } finally {
+    bootstrapFinished();
+  }
 }
 
 void start().catch((error) => {

@@ -529,6 +529,28 @@ impl LoadEntry {
     }
 }
 
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum StartupLongTaskPhase {
+    Bootstrap,
+    HomeShelves,
+    HomeMetadata,
+    HomeHero,
+    Other,
+}
+
+impl StartupLongTaskPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bootstrap => "bootstrap",
+            Self::HomeShelves => "home_shelves",
+            Self::HomeMetadata => "home_metadata",
+            Self::HomeHero => "home_hero",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoadReport {
@@ -588,6 +610,9 @@ struct LoadReport {
     worker_files: Option<FileSources>,
     /// The page's main thread blocked 50 ms or more at a time: `[count, milliseconds in all, longest]`.
     long_tasks: Option<(u32, u32, u32)>,
+    /// The same totals attributed to fixed page phases; never a title, id, route or URL.
+    #[serde(default)]
+    long_task_phases: std::collections::BTreeMap<StartupLongTaskPhase, (u32, u32, u32)>,
     /// What each library Worker's open did, by the library it serves.
     #[serde(default)]
     library_workers: LibraryWorkers,
@@ -901,6 +926,15 @@ impl LoadReport {
                 count.min(MAX_REQUESTS),
                 ms.min(MAX_NET_MS),
                 longest.min(MAX_MS)
+            ));
+        }
+        for (phase, (count, ms, longest)) in &self.long_task_phases {
+            parts.push(format!(
+                "long_{}:{}/{}ms/max{}ms",
+                phase.as_str(),
+                count.min(&MAX_REQUESTS),
+                ms.min(&MAX_NET_MS),
+                longest.min(&MAX_MS)
             ));
         }
         if self.hidden {
@@ -1628,6 +1662,9 @@ mod tests {
             "directoryMs": 5_000, "handoverMs": 5_300, "workers": 2,
             "net": { "atlas": [1, 86] }, "workerNet": { "lib": [3, 900], "meta": [5, 600] },
             "longTasks": [12, 3_400, 900],
+            "longTaskPhases": {
+                "bootstrap": [3, 1_200, 700], "home_shelves": [2, 480, 300], "other": [7, 1_720, 900]
+            },
             "workerScriptLastMs": 2_700, "workerCoreReadyLastMs": 3_900, "workerReadyLastMs": 4_000,
             "workerLogOpenedLastMs": 5_200,
             "tmdbCache": { "missing": 132, "fresh": 3, "write_failed": 132 },
@@ -1640,7 +1677,8 @@ mod tests {
              capability:3000,bootstrap:3100,w_log_req:3200,w_log:4700,directory:5000,handover:5300,\
              w_script_last:2700,w_core_last:3900,worker_last:4000,w_log_last:5200,workers:2,\
              net_atlas:1/86ms,wnet_lib:3/900ms,wnet_meta:5/600ms,tmdb_fresh:3,tmdb_missing:132,\
-             tmdb_write_failed:132,long:12/3400ms/max900ms"
+             tmdb_write_failed:132,long:12/3400ms/max900ms,long_bootstrap:3/1200ms/max700ms,\
+             long_home_shelves:2/480ms/max300ms,long_other:7/1720ms/max900ms"
         );
     }
 
