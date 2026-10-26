@@ -667,10 +667,6 @@ export async function bigHousehold(context, edge, options = {}) {
       .getByRole('dialog', { name: 'Accept this invite?' })
       .getByRole('button', { name: 'Accept' })
       .click();
-    await expect(page.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible({
-      timeout: 90_000,
-    });
-    step('accepted');
     // The move is done once den-edge holds a library with the whole history in it: as Library v4 documents, one per
     // title, season and delivery document, about 5,100 of them at scale 1.
     await expect
@@ -683,6 +679,12 @@ export async function bigHousehold(context, edge, options = {}) {
       )
       .toBeGreaterThan(5_000 * BIG_LIBRARY_SCALE);
     step('moved');
+    // The switcher is a presentation-level consequence of the completed move, not a reliable proxy for its progress.
+    // Assert it only after the scale-aware readiness gate above so a busy runner cannot fail while migration is active.
+    await expect(page.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible({
+      timeout: 30_000,
+    });
+    step('accepted');
     // A first visit to Home and to the Watchlist (which names the whole history) fills this browser's TMDB cache, so
     // every later load is a returning visit's.
     let lastTmdb = Date.now();
