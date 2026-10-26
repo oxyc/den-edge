@@ -50,11 +50,16 @@ export interface LibrarySelectionSnapshot {
   error?: LibraryServiceFailure;
 }
 
+export interface LibrarySubscriptionOptions {
+  /** Whether this selection must have an authoritative first replacement before `open` may resolve. */
+  readiness?: 'required' | 'background';
+}
+
 interface Subscription {
   selection: LibrarySelection;
   listener: (snapshot: LibrarySelectionSnapshot) => void;
   snapshot: LibrarySelectionSnapshot;
-  /** Registered before open: the model's roots must all replace before the connection is ready. */
+  /** A correctness boundary that must replace before the connection is ready. */
   required: boolean;
   staged?: { token: number; snapshot: LibrarySelectionSnapshot };
   stopClient?: () => void;
@@ -245,6 +250,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   subscribeSnapshot(
     selection: LibrarySelection,
     listener: (snapshot: LibrarySelectionSnapshot) => void,
+    options: LibrarySubscriptionOptions = {},
   ): () => void {
     this.#assertNotClosed();
     const id = ++this.#nextSubscription;
@@ -252,7 +258,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     const subscription: Subscription = {
       selection: structuredClone(selection),
       listener,
-      required: this.#openOptions === undefined,
+      required: this.#openOptions === undefined && options.readiness !== 'background',
       snapshot: {
         selection: structuredClone(selection),
         connection,
@@ -263,7 +269,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     this.#notifySubscription(subscription);
 
     const active = this.#active;
-    if (this.#phase === 'ready' && active)
+    if (
+      active?.version &&
+      (this.#phase === 'ready' || this.#phase === 'connecting' || this.#phase === 'reconnecting')
+    )
       void this.#bindSubscription(id, subscription, active).catch((error: unknown) => {
         if (this.#subscriptions.get(id) !== subscription || active !== this.#active) return;
         const failure = failureFrom(error);
@@ -382,32 +391,28 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
         );
     }
 
-    // A retained route can acquire another selection while the initial Worker replies are still arriving. Drain
-    // every subscription added during that wait before publishing ready; once a pass finds none, JavaScript cannot
-    // interleave another subscriber before the synchronous phase change below.
-    // When each selection's first answer arrived, for the ready mark: the Worker answers them in turn.
+    // Start every current selection together, but let only correctness roots hold the connection open. Home roots can
+    // publish independently on a first connection; background capabilities continue hydrating after `open` resolves.
+    // A replacement connection stays staged until its correctness roots agree on one generation, preserving the
+    // reconnect handoff that keeps stale views usable without ever mixing generations at the transition boundary.
     const bindingStarted = performance.now();
     const answered: string[] = [];
-    for (;;) {
-      const unbound = [...this.#subscriptions].filter(
-        ([, subscription]) => subscription.attemptedToken !== active.token,
-      );
-      if (!unbound.length) break;
-      await Promise.all(
-        unbound.map(async ([id, subscription]) => {
-          try {
-            await this.#bindSubscription(id, subscription, active);
-            answered.push(
-              `${subscription.selection.kind} ${Math.round(performance.now() - bindingStarted)}ms`,
-            );
-          } catch (error) {
-            if (subscription.required) throw error;
-            if (this.#active !== active || this.#subscriptions.get(id) !== subscription) return;
-            this.#replaceSnapshot(subscription, 'failed', failureFrom(error));
-          }
-        }),
-      );
+    const required: Promise<void>[] = [];
+    for (const [id, subscription] of this.#subscriptions) {
+      if (subscription.attemptedToken === active.token) continue;
+      const binding = this.#bindSubscription(id, subscription, active).then(() => {
+        answered.push(
+          `${subscription.selection.kind} ${Math.round(performance.now() - bindingStarted)}ms`,
+        );
+      });
+      if (subscription.required) required.push(binding);
+      else
+        void binding.catch((error: unknown) => {
+          if (this.#active !== active || this.#subscriptions.get(id) !== subscription) return;
+          this.#replaceSnapshot(subscription, 'failed', failureFrom(error));
+        });
     }
+    await Promise.all(required);
     if (this.#active !== active || active.failure)
       throw new LibraryServiceError(
         active.failure ?? {
@@ -422,8 +427,8 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     this.#version = readyVersion;
     this.#failure = undefined;
     this.#automaticRestartsLeft = this.#maxAutomaticRestarts;
-    // Initial Worker replies can arrive in separate page tasks. Keep their complete replacement snapshots private
-    // until every subscription is bound, then expose the connection in one synchronous publication turn.
+    // On reconnect, publish the replacements that have arrived in one synchronous turn. Background selections still
+    // in flight keep their previous value until their own authoritative replacement arrives.
     for (const subscription of this.#subscriptions.values()) {
       if (subscription.staged?.token !== active.token) continue;
       subscription.snapshot = subscription.staged.snapshot;
@@ -432,7 +437,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     }
     startupMark(
       'supervisor ready',
-      `${this.#subscriptions.size} subscriptions bound: ${answered.join(', ')}`,
+      `${required.length} required subscriptions bound: ${answered.join(', ')}`,
     );
     this.#emitStatus({ kind: 'ready', version: readyVersion });
     return readyVersion;
@@ -458,7 +463,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
         value,
         version,
       };
-      if (this.#phase === 'ready') {
+      if (this.#phase === 'ready' || this.#phase === 'connecting') {
         subscription.snapshot = snapshot;
         this.#notifySubscription(subscription);
       } else subscription.staged = { token: active.token, snapshot };

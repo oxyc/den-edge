@@ -147,7 +147,7 @@ export class LibraryModel {
   #settleInitialRead = () => {};
   #closed = false;
 
-  /** Settles only after the service and its Home-critical root replacements are ready. */
+  /** Settles after Home's roots and the profile-settings safety boundary are authoritative. */
   readonly ready: Promise<LibraryVersion>;
   /**
    * Settles once the first remote read has finished filling the local fact store. `ready` may resolve after its
@@ -178,15 +178,23 @@ export class LibraryModel {
       service.subscribeSnapshot({ kind: 'continue' }, (snapshot) => {
         this.#continue = modelSnapshot<ContinueView>(snapshot);
       }),
-      service.subscribeSnapshot({ kind: 'devices' }, (snapshot) => {
-        this.#devices = modelSnapshot<DevicesView>(snapshot);
-      }),
+      service.subscribeSnapshot(
+        { kind: 'devices' },
+        (snapshot) => {
+          this.#devices = modelSnapshot<DevicesView>(snapshot);
+        },
+        { readiness: 'background' },
+      ),
       service.subscribeSnapshot({ kind: 'settings' }, (snapshot) => {
         this.#settings = modelSnapshot<SettingsView>(snapshot);
       }),
-      service.subscribeSnapshot({ kind: 'runtime' }, (snapshot) => {
-        this.#runtime = modelSnapshot<RuntimeDiscoveryView>(snapshot);
-      }),
+      service.subscribeSnapshot(
+        { kind: 'runtime' },
+        (snapshot) => {
+          this.#runtime = modelSnapshot<RuntimeDiscoveryView>(snapshot);
+        },
+        { readiness: 'background' },
+      ),
     );
     this.#stopStatus = service.onStatus((status) => this.#receiveStatus(status));
     const progress = (value: number) => {

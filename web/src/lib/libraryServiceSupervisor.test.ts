@@ -649,7 +649,7 @@ it('reports the newest initial replacement version as the ready version', async 
   supervisor.close();
 });
 
-it('publishes staggered initial Worker replacements together once the connection is complete', async () => {
+it('publishes staggered initial Worker replacements independently', async () => {
   const client = new StaggeredSubscriptionClient();
   const supervisor = new LibraryServiceSupervisor(() => client);
   const events: string[] = [];
@@ -666,7 +666,7 @@ it('publishes staggered initial Worker replacements together once the connection
 
   client.releaseSubscriptions[0]!();
   await Promise.resolve();
-  expect(events).toEqual([]);
+  expect(events).toEqual(['overview']);
 
   client.releaseSubscriptions[1]!();
   await expect(opening).resolves.toEqual(client.version(1));
@@ -674,7 +674,7 @@ it('publishes staggered initial Worker replacements together once the connection
   supervisor.close();
 });
 
-it('binds History and Connections acquired while initial Worker replacements are still arriving', async () => {
+it('does not make lazy selections acquired during open hold readiness', async () => {
   const client = new StaggeredSubscriptionClient();
   const supervisor = new LibraryServiceSupervisor(() => client);
   const events: string[] = [];
@@ -695,18 +695,102 @@ it('binds History and Connections acquired while initial Worker replacements are
       );
     }
   });
-  client.releaseSubscriptions[0]!();
+  supervisor.onStatus((status) => events.push(`status:${status.kind}`));
   await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(3));
   expect(events).toEqual([]);
 
+  client.releaseSubscriptions[0]!();
+  await expect(opening).resolves.toEqual(client.version(1));
+  expect(events).toEqual(['overview', 'status:ready']);
+
   client.releaseSubscriptions[1]!();
   client.releaseSubscriptions[2]!();
-  await expect(opening).resolves.toEqual(client.version(1));
+  await Promise.resolve();
   expect(events).toEqual([
     'overview',
+    'status:ready',
     'history:history',
     'connections:Living Room TV:Living Room TV',
   ]);
+  supervisor.close();
+});
+
+it('hands over after Home and Settings while background capabilities keep hydrating', async () => {
+  const client = new StaggeredSubscriptionClient();
+  const supervisor = new LibraryServiceSupervisor(() => client);
+  const events: string[] = [];
+  const snapshot = (kind: string) => (value: { connection: string }) => {
+    if (value.connection === 'ready') events.push(kind);
+  };
+  supervisor.subscribeSnapshot({ kind: 'overview' }, snapshot('overview'));
+  supervisor.subscribeSnapshot({ kind: 'continue' }, snapshot('continue'));
+  supervisor.subscribeSnapshot({ kind: 'settings' }, snapshot('settings'));
+  supervisor.subscribeSnapshot({ kind: 'devices' }, snapshot('devices'), {
+    readiness: 'background',
+  });
+  supervisor.subscribeSnapshot({ kind: 'runtime' }, snapshot('runtime'), {
+    readiness: 'background',
+  });
+  supervisor.onStatus((status) => events.push(`status:${status.kind}`));
+
+  let opened = false;
+  const opening = supervisor.open(openOptions).then((version) => {
+    opened = true;
+    return version;
+  });
+  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(5));
+
+  client.releaseSubscriptions[0]!();
+  client.releaseSubscriptions[1]!();
+  await Promise.resolve();
+  expect(events).toEqual(['overview', 'continue']);
+  expect(opened).toBe(false);
+
+  client.releaseSubscriptions[2]!();
+  await expect(opening).resolves.toEqual(client.version(1));
+  expect(events).toEqual(['overview', 'continue', 'settings', 'status:ready']);
+
+  client.releaseSubscriptions[3]!();
+  client.releaseSubscriptions[4]!();
+  await Promise.resolve();
+  expect(events).toEqual([
+    'overview',
+    'continue',
+    'settings',
+    'status:ready',
+    'devices',
+    'runtime',
+  ]);
+  supervisor.close();
+});
+
+it('keeps a replacement generation staged until its required roots agree', async () => {
+  const first = new FakeClient();
+  const second = new StaggeredSubscriptionClient();
+  second.instance = 'worker-2';
+  const clients = [first, second];
+  const supervisor = new LibraryServiceSupervisor(() => clients.shift()!);
+  const replacements: string[] = [];
+  const receive =
+    (kind: string) => (snapshot: { connection: string; version?: LibraryVersion }) => {
+      if (snapshot.connection === 'ready')
+        replacements.push(`${kind}:${snapshot.version?.instance}`);
+    };
+  supervisor.subscribeSnapshot({ kind: 'overview' }, receive('overview'));
+  supervisor.subscribeSnapshot({ kind: 'continue' }, receive('continue'));
+  await supervisor.open(openOptions);
+  expect(replacements).toEqual(['overview:worker-1', 'continue:worker-1']);
+
+  first.fail(unavailable('worker crashed'));
+  await vi.waitFor(() => expect(second.releaseSubscriptions).toHaveLength(2));
+  replacements.length = 0;
+  second.releaseSubscriptions[0]!();
+  await Promise.resolve();
+  expect(replacements).toEqual([]);
+
+  second.releaseSubscriptions[1]!();
+  await vi.waitFor(() => expect(replacements).toHaveLength(2));
+  expect(replacements).toEqual(['overview:worker-2', 'continue:worker-2']);
   supervisor.close();
 });
 

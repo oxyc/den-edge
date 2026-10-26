@@ -17,12 +17,16 @@ import type {
   LibraryVersion,
   TitleRef,
 } from './libraryServiceProtocol';
-import type { LibrarySelectionSnapshot } from './libraryServiceSupervisor';
+import type {
+  LibrarySelectionSnapshot,
+  LibrarySubscriptionOptions,
+} from './libraryServiceSupervisor';
 
 type Subscription = {
   selection: LibrarySelection;
   listener: (snapshot: LibrarySelectionSnapshot) => void;
   stopped: boolean;
+  options: LibrarySubscriptionOptions;
 };
 
 const version = (revision: number): LibraryVersion => ({
@@ -175,8 +179,9 @@ class FakeService {
   subscribeSnapshot(
     selection: LibrarySelection,
     listener: (snapshot: LibrarySelectionSnapshot) => void,
+    options: LibrarySubscriptionOptions = {},
   ): () => void {
-    const subscription = { selection, listener, stopped: false };
+    const subscription = { selection, listener, stopped: false, options };
     this.subscriptions.push(subscription);
     listener({ selection, connection: 'connecting' });
     return () => {
@@ -313,6 +318,15 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
     { kind: 'devices' },
     { kind: 'settings' },
     { kind: 'runtime' },
+  ]);
+  expect(
+    service.subscriptions.map(({ selection, options }) => [selection.kind, options.readiness]),
+  ).toEqual([
+    ['overview', undefined],
+    ['continue', undefined],
+    ['devices', 'background'],
+    ['settings', undefined],
+    ['runtime', 'background'],
   ]);
   await expect(model.ready).resolves.toEqual(version(4));
 
