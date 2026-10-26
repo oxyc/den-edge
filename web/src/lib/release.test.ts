@@ -86,7 +86,7 @@ describe('a waiting release', () => {
 });
 
 describe('watching the shell release', () => {
-  it('marks another release for the next navigation without moving the current page', async () => {
+  it('offers another release without taking over the current page or its next navigation', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'new' } }));
@@ -96,10 +96,10 @@ describe('watching the shell release', () => {
     await expect(watcher.check()).resolves.toBe(true);
     expect(fetchImpl).toHaveBeenCalledWith('/__den/release', { cache: 'no-store' });
     expect(at.went).toEqual([]);
-    expect(release.swapOnNavigation('/tv/6066-verano-azul', at)).toBe(true);
-    expect(at.went).toEqual([
-      expect.stringMatching(/^assign https:\/\/den\.test\/tv\/6066-verano-azul\?den-retry=/),
-    ]);
+    // A routine deploy is offered persistently; unlike a missing chunk it never takes over navigation.
+    expect(release.swapOnNavigation('/tv/6066-verano-azul', at)).toBe(false);
+    expect(at.went).toEqual([]);
+    watcher.close();
   });
 
   it('coalesces probes, retries an offline check, and stops probing once a replacement is known', async () => {
@@ -122,6 +122,7 @@ describe('watching the shell release', () => {
     await expect(watcher.check()).resolves.toBe(true);
     await expect(watcher.check()).resolves.toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+    watcher.close();
   });
 
   it('does not guess when the page-loaded release could not be read', async () => {
@@ -129,10 +130,101 @@ describe('watching the shell release', () => {
     const watcher = release.watchRelease(Promise.resolve(undefined), fetchImpl);
     await expect(watcher.check()).resolves.toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
+    watcher.close();
+  });
+
+  it('shares a deployed revision with other tabs without another network request', async () => {
+    const channels: FakeChannel[] = [];
+    class FakeChannel {
+      onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+      constructor(readonly name: string) {
+        channels.push(this);
+      }
+      postMessage(message: unknown) {
+        for (const channel of channels)
+          if (channel !== this && channel.name === this.name)
+            channel.onmessage?.({ data: message } as MessageEvent<unknown>);
+      }
+      close() {}
+    }
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { BroadcastChannel: FakeChannel }));
+    try {
+      const firstFetch = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'new' } }));
+      const secondFetch = vi.fn<typeof fetch>();
+      const first = release.watchRelease(Promise.resolve('old'), firstFetch);
+      const second = release.watchRelease(Promise.resolve('old'), secondFetch);
+
+      await expect(first.check()).resolves.toBe(true);
+      await Promise.resolve();
+      await expect(second.check()).resolves.toBe(true);
+      expect(secondFetch).not.toHaveBeenCalled();
+      first.close();
+      second.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a network discovery when BroadcastChannel is blocked or breaks', async () => {
+    class BrokenChannel {
+      onmessage = null;
+      postMessage() {
+        throw new Error('blocked');
+      }
+      close() {
+        throw new Error('blocked');
+      }
+    }
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { BroadcastChannel: BrokenChannel }));
+    try {
+      const watcher = release.watchRelease(
+        Promise.resolve('old'),
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'new' } })),
+      );
+      await expect(watcher.check()).resolves.toBe(true);
+      expect(() => watcher.close()).not.toThrow();
+
+      const ConstructorBlocked = class {
+        constructor() {
+          throw new Error('blocked');
+        }
+      };
+      Object.assign(window, { BroadcastChannel: ConstructorBlocked });
+      const withoutChannel = release.watchRelease(
+        Promise.resolve('old'),
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response(null, { headers: { 'x-den-release': 'newer' } })),
+      );
+      await expect(withoutChannel.check()).resolves.toBe(true);
+      withoutChannel.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
 describe('a chunk failing to load', () => {
+  it('always honors an explicit update reload, even inside the recovery guard', () => {
+    const kept = new Map([['den.reloadedAt', String(Date.now())]]);
+    vi.stubGlobal('sessionStorage', {
+      getItem: (key: string) => kept.get(key) ?? null,
+      setItem: (key: string, value: string) => void kept.set(key, value),
+    });
+    try {
+      release.pageLeaving();
+      const page = hiddenPage();
+      release.reloadForUpdate(page.page);
+      expect(page.at.went).toEqual([expect.stringMatching(AGAIN)]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('reloads at once when nothing on screen would be lost — never waiting for a navigation', () => {
     const idle = hiddenPage();
     expect(release.recoverChunkFailure(idle.page)).toBe(true);

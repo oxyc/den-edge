@@ -7,8 +7,23 @@
 // never at once: reloading as soon as the chunk failed threw a person browsing Home back to the top of a fresh
 // page right after a deploy.
 
+import { showUpdateNotice } from './updateNotice';
+
 let waiting = false;
 let leaving = false;
+
+/** Public page-lifecycle signal for code which discovers a protocol fence. */
+export const CHECK_RELEASE_EVENT = 'den:check-release';
+
+function announceUpdate(): void {
+  if (!__DEN_TV__ && typeof document !== 'undefined') showUpdateNotice(reloadForUpdate);
+}
+
+/** Ask the page-level release watcher to check now (for example after a wire/protocol fence). */
+export function requestReleaseCheck(): void {
+  if (!__DEN_TV__ && typeof window !== 'undefined')
+    window.dispatchEvent(new Event(CHECK_RELEASE_EVENT));
+}
 
 /**
  * The page is being navigated away from (`beforeunload`, which fires before the browser cancels its loads). WebKit
@@ -44,6 +59,8 @@ export function isLeaving(): boolean {
 interface ReleaseWatcher {
   /** True once this page has learned that den-edge serves another release. */
   check(): Promise<boolean>;
+  /** Release the cross-tab channel, used by tests and non-page owners. */
+  close(): void;
 }
 
 /**
@@ -57,6 +74,29 @@ export function watchRelease(
 ): ReleaseWatcher {
   let checking: Promise<boolean> | undefined;
   let found = false;
+  let channel: BroadcastChannel | undefined;
+
+  const discover = () => {
+    if (found) return;
+    found = true;
+    announceUpdate();
+  };
+
+  // A single tab pays for the network probe; every other open tab learns the exact deployed shell revision at
+  // once. Unsupported/partitioned BroadcastChannel implementations simply retain their own focus/idle probes.
+  if (!__DEN_TV__ && typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    try {
+      channel = new window.BroadcastChannel('den.release.v1');
+      channel.onmessage = (event: MessageEvent<unknown>) => {
+        if (typeof event.data !== 'string') return;
+        void loaded.then((original) => {
+          if (original && event.data !== original) discover();
+        });
+      };
+    } catch {
+      channel = undefined;
+    }
+  }
 
   return {
     check() {
@@ -71,8 +111,12 @@ export function watchRelease(
           const response = await fetchImpl('/__den/release', { cache: 'no-store' });
           const current = response.headers.get('x-den-release');
           if (!current || current === original) return false;
-          found = true;
-          releaseWaiting();
+          discover();
+          try {
+            channel?.postMessage(current);
+          } catch {
+            // A blocked/broken channel does not undo the network answer this tab already has.
+          }
           return true;
         } catch {
           // Offline is not evidence of another release. The next scheduled/online check can try again.
@@ -83,12 +127,21 @@ export function watchRelease(
       });
       return checking;
     },
+    close() {
+      try {
+        channel?.close();
+      } catch {
+        // Closing is only resource cleanup; a hostile implementation cannot change the result.
+      }
+      channel = undefined;
+    },
   };
 }
 
 /** A missing chunk found a newer release; the page moves onto it at the next chance it gets. */
 export function releaseWaiting(): void {
   waiting = true;
+  announceUpdate();
 }
 
 /**
@@ -103,6 +156,11 @@ function pastSharedCache(href: string, base?: string): string {
   const url = new URL(href, base);
   url.searchParams.set('den-retry', Date.now().toString(36));
   return url.href;
+}
+
+/** A person's explicit acceptance: always leave now, independent of recovery's loop/leaving guards. */
+export function reloadForUpdate(page: Pick<Page, 'location'> = window): void {
+  page.location.replace(pastSharedCache(page.location.href));
 }
 
 /**

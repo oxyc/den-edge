@@ -13,6 +13,7 @@ import {
   pageLeaving,
   pageStayed,
   recoverChunkFailure,
+  CHECK_RELEASE_EVENT,
   swapWhileHidden,
   watchRelease,
 } from './lib/release';
@@ -30,7 +31,7 @@ const release = watchRelease(loadRelease());
 
 // Learn about a replacement before this release discovers it by asking for a chunk that no longer exists. The
 // check is deliberately off the navigation path: ordinary route changes stay instant, and once a replacement is
-// found the existing safe handoff below puts it on screen while idle/hidden or on the next page the person opens.
+// found a persistent, opt-in notice appears. Only the missing-chunk recovery below ever swaps automatically.
 const RELEASE_CHECK_MS = 60_000;
 let newerRelease = false;
 const checkRelease = () => {
@@ -40,13 +41,23 @@ const checkRelease = () => {
     newerRelease = true;
     clearInterval(releaseCheckTimer);
     window.removeEventListener('online', checkRelease);
-    if (document.hidden) swapWhileHidden();
   });
 };
+
+const checkWhileIdle = () => {
+  if (document.hidden) return;
+  if ('requestIdleCallback' in window)
+    window.requestIdleCallback(checkRelease, { timeout: 10_000 });
+  else setTimeout(checkRelease, 0);
+};
 const releaseCheckTimer = setInterval(() => {
-  if (!document.hidden) checkRelease();
+  checkWhileIdle();
 }, RELEASE_CHECK_MS);
 window.addEventListener('online', checkRelease);
+if (!__DEN_TV__) {
+  window.addEventListener('focus', checkRelease);
+  window.addEventListener(CHECK_RELEASE_EVENT, checkRelease);
+}
 
 // den-edge's own request log sees nothing past the page load that reached it: an uncaught error or an unhandled
 // rejection anywhere in the app today just sits in the browser console, for nobody to read (den-edge#262).
@@ -124,7 +135,12 @@ startupMark('app mounted');
 // cancelling it makes Vite's import resolve to `undefined` rather than reject (`handlePreloadError` in Vite 8),
 // and whatever asked for it then never learns it failed.
 window.addEventListener('beforeunload', pageLeaving);
-window.addEventListener('pageshow', pageStayed);
+if (__DEN_TV__) window.addEventListener('pageshow', pageStayed);
+else
+  window.addEventListener('pageshow', (event) => {
+    pageStayed();
+    if (event.persisted) checkRelease();
+  });
 window.addEventListener('vite:preloadError', (event) => {
   const error = (event as Event & { payload?: unknown }).payload;
   // Vite dispatches before rejecting the import. Let its catch identify optional enhancement failures before
