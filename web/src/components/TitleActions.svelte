@@ -31,6 +31,7 @@
     onplay,
     tvs = [],
     onplayhere,
+    primaryPlay,
     playHref,
     onsources,
     away = false,
@@ -62,6 +63,11 @@
     tvs?: readonly HouseholdTv[];
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
+    /**
+     * A live destination which should keep the main Play/Resume press. For example, a title paused on the TV
+     * resumes that exact player; playing in this browser remains an explicit alternate.
+     */
+    primaryPlay?: { label: string; onselect: () => void; tv?: string };
     /** A real address for the same in-app playback, including its episode coordinate. */
     playHref?: string;
     /** Open sources for the same movie or episode as the primary Play action. */
@@ -171,9 +177,17 @@
   /** "Play on TV", or one "Play on <name>" per TV, the one used last first. */
   const onTv = $derived(
     onplay
-      ? tvs.map((tv) => ({ label: playOnLabel(tv, tvs, playLabel), onselect: () => onplay(tv.id) }))
+      ? tvs.map((tv) => ({
+          id: tv.id,
+          label: playOnLabel(tv, tvs, playLabel),
+          onselect: () => onplay(tv.id),
+        }))
       : [],
   );
+  const primaryAlternates = $derived([
+    ...(onplayhere ? [{ label: `${playLabel} here`, onselect: onplayhere }] : []),
+    ...onTv.filter((tv) => tv.id !== primaryPlay?.tv),
+  ]);
   const opinionIcon = (value: Reaction | null) =>
     value === 'dislike' ? 'thumb-down' : value === 'like' ? 'thumb-up' : 'heart';
 </script>
@@ -193,6 +207,28 @@
     <p class="restricted" role="status">
       {@render lock()}<span>Blocked by parental controls</span>
     </p>
+  {:else if primaryPlay}
+    {#if primaryAlternates.length}
+      <SplitButton
+        icon="tv"
+        label={primaryPlay.label}
+        onclick={primaryPlay.onselect}
+        alternateIcon="play"
+        alternates={primaryAlternates}
+        menuId="play-destinations"
+        busy={externallyBusy()}
+      />
+    {:else}
+      <Button
+        variant="primary"
+        size="large"
+        class="main-action"
+        icon="tv"
+        label={primaryPlay.label}
+        busy={externallyBusy()}
+        onclick={primaryPlay.onselect}
+      />
+    {/if}
   {:else if onplayhere}
     {#if onTv.length}
       <SplitButton
