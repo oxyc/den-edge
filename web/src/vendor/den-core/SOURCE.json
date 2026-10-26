@@ -5,7 +5,7 @@
   "rust": "1.95.0",
   "uniffi": "0.32.2",
   "wasmBindgen": "0.2.129",
-  "sourceDigest": "08ba87f5eeaa45df640d600d0b6b0ac2a0d3a51cc8ce60cde0ce4d8f7d83716c",
+  "sourceDigest": "e082ded6c50f9d2a5ef239e4282902ca9e59c8ca47887523653253ee60536b1f",
   "sources": {
     "Cargo.lock": "af37a67c544e5b70027df1a9b9295b3f1a28a730536befd0a1d157170201d2ef",
     "Cargo.toml": "78a42b11e94599d79e1890c0b277fde883a64ed0598cf50a36db961160b76348",
@@ -65,7 +65,7 @@
     "crates/den-sync/tests/assistant.rs": "f59dc73740321cee5dbf0d6a24041c58e6e7204c57e27c21c77dbc8941e9ab05",
     "crates/den-sync/tests/conformance.rs": "ed6d79d809039e16ddc09a79ae9bff1ca1382034663c877957e4fc5dc8ea9212",
     "crates/den-sync/tests/delivery_memory.rs": "976e2a28ffaaafc9cc6db659bd30fa29d072ff8dd3b43293d32d00c45ade1618",
-    "crates/den-sync/tests/fixtures/merge-v2.json": "8dbbbb681be4e68e1a7fd2badb33643d46d8f4568ca74514d5afa1e67ffa04a9",
+    "crates/den-sync/tests/fixtures/merge-v2.json": "9701cdd3df8f550c06e899d9eebb8bab15b9709cac9f350b0ffaecb4f8982726",
     "crates/den-sync/tests/fixtures/policy-v1.json": "fd80dd3f3200dbc095f776db9fc6e187ce9867243f4ac23dcdafc634548aa309",
     "crates/den-sync/tests/fixtures/policy-v4.json": "76becadad69257a0cad59fbe28091470ffd1b85180c6c42471e1c901ee99612d",
     "crates/den-sync/tests/fixtures/preferences-v1.json": "4d68be79fc210c918b014d320afbcd9f86ddd1b78e96d035679d7cac545e8415",
