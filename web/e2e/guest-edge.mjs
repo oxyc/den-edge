@@ -245,6 +245,15 @@ async function routeLibraries(page, edge, origin) {
 
 /** A browser of the guest's, pointed at `edge` and with every other request refused. */
 export async function routeGuestEdge(page, edge, origin = E2E_ORIGIN) {
+  // Playwright's page routes do not own a SharedWorker target, so its fetches would escape this in-memory edge and
+  // could reach live metadata. These guest behavior specs deliberately take the production DedicatedWorker fallback;
+  // the built-worker and Adaptive multi-context suites exercise SharedWorker itself.
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, 'SharedWorker', {
+      configurable: true,
+      value: undefined,
+    });
+  });
   await guardNetwork(page);
   // The app's own pages and assets are the dev server's; any other call this origin could answer is "not here",
   // unless a route below says otherwise (they are registered later, so they win).
