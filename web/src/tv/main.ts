@@ -49,10 +49,12 @@ async function start() {
   // waiting for that chunk left an early Back unhandled (also reproducible while holding its request).
   installRemote();
   const bootstrapFinished = beginStartupRenderPhase('bootstrap');
+  const importFinished = beginStartupRenderPhase('app_import');
   startupMark('app module requested');
   try {
     await import('../appMain');
   } finally {
+    importFinished();
     bootstrapFinished();
   }
 }

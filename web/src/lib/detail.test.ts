@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCollection, parseDetail, parsePerson, parseSeason } from './detail';
+import { parseCollection, parseDetail, parsePerson, parseSeason, titleHero } from './detail';
 
 const movie = {
   title: 'Arrival',
@@ -81,6 +81,32 @@ describe('title pages', () => {
     const detail = parseDetail({ type: 'movie', id: 1 }, long)!;
     expect(detail.cast).toHaveLength(45);
     expect(detail.cast[44]).toMatchObject({ id: 144 });
+  });
+
+  it('projects only the bounded fields the billboard needs without changing the full detail', () => {
+    const detail = parseDetail(
+      { type: 'movie', id: 1 },
+      {
+        ...movie,
+        genres: [...movie.genres, { id: 9648, name: 'Mystery' }],
+        external_ids: { imdb_id: 'tt2543164' },
+      },
+    )!;
+
+    expect(titleHero(detail)).toEqual({
+      overview: 'A linguist is recruited.',
+      backdropPath: '/b.jpg',
+      runtime: 116,
+      genres: [
+        { id: 18, name: 'Drama' },
+        { id: 878, name: 'Science Fiction' },
+      ],
+      imdbId: 'tt2543164',
+    });
+    expect(detail.genres).toHaveLength(3);
+    expect(detail).toHaveProperty('cast');
+    expect(titleHero(detail)).not.toHaveProperty('cast');
+    expect(titleHero(detail)).not.toHaveProperty('title');
   });
 
   it('refuses a title TMDB gives no name', () => {

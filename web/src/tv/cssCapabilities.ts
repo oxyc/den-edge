@@ -1,3 +1,5 @@
+import { beginStartupRenderPhase } from '../lib/startupTiming';
+
 export function supportsSelector(selector: string): boolean {
   try {
     return CSS.supports(`selector(${selector})`);
@@ -25,6 +27,7 @@ export function supportsFlexGap(): boolean {
  * CSS, and modern LG/Samsung builds pay only these startup checks rather than carrying platform branches.
  */
 export function installTvCssCapabilities(): () => void {
+  const measured = beginStartupRenderPhase('tv_css');
   const root = document.documentElement;
   const grid = CSS.supports('display', 'grid');
   const flexGap = supportsFlexGap();
@@ -36,6 +39,7 @@ export function installTvCssCapabilities(): () => void {
   root.classList.toggle('tv-no-flex-gap', !flexGap && !grid);
   root.classList.toggle('tv-no-focus-within', !focusWithin);
   root.classList.toggle('tv-no-custom-properties', !customProperties);
+  measured();
 
   if (focusWithin) return () => {};
 

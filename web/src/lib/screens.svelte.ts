@@ -2,6 +2,7 @@
 // loads when a route asks for it, and all of them once Home has painted, so opening one rarely waits.
 
 import type { Component } from 'svelte';
+import { beginStartupRenderPhase, startupMilestone } from './startupTiming';
 
 /** A component loaded on first use and kept, so every page that shows it after that renders it at once. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- any component, whose own props type flows through
@@ -59,6 +60,8 @@ let preloading = false;
 type NetworkHint = { saveData?: boolean; effectiveType?: string };
 type LoadableScreen = { load(): Promise<void> };
 type IdleScheduler = (task: () => void) => void;
+type StartupMilestone = (event: string) => number | undefined;
+type Timer = (task: () => void, milliseconds: number) => unknown;
 
 /** Slow or metered links get chunks from intent only; speculative work must not compete with the page. */
 export function permitsScreenPreload(connection?: NetworkHint): boolean {
@@ -79,10 +82,34 @@ export function preloadInIdle(
     const batch = batches[nextBatch++];
     if (!batch) return;
     schedule(() => {
-      void Promise.allSettled(batch.map((screen) => screen.load())).then(next);
+      const loaded = beginStartupRenderPhase('screen_preload');
+      void Promise.allSettled(batch.map((screen) => screen.load())).then(() => {
+        loaded();
+        next();
+      });
     });
   };
   next();
+}
+
+/** A timer is not idle: old engines wait until useful startup content has drawn before speculative parsing. */
+export function scheduleAfterStartupContent(
+  task: () => void,
+  milestone: StartupMilestone = startupMilestone,
+  now: () => number = () => performance.now(),
+  later: Timer = (next, milliseconds) => setTimeout(next, milliseconds),
+): void {
+  const waitingSince = now();
+  const afterFirstContent = () => {
+    if (
+      milestone('first poster') !== undefined ||
+      milestone('episodes shown') !== undefined ||
+      now() - waitingSince >= 5_000
+    )
+      later(task, 1_000);
+    else later(afterFirstContent, 250);
+  };
+  afterFirstContent();
 }
 
 /** Common next screens, fetched in small idle slices on a fast connection after the hero has painted. */
@@ -94,7 +121,12 @@ export function preloadScreens(): void {
   const idle: IdleScheduler = (task) => {
     const schedule = () => {
       if (typeof requestIdleCallback === 'function') requestIdleCallback(task, { timeout: 2500 });
-      else setTimeout(task, 1000);
+      else {
+        // A timer is not an idle period. In particular, old LG Chromium fired this one while Home's first posters
+        // were decoding and then parsed Detail and Search on their critical path. Wait for content to draw; an
+        // empty or failed Home still admits the enhancement after a bounded delay.
+        scheduleAfterStartupContent(task);
+      }
     };
     // Offline the chunks are out of reach; they are fetched when the browser is back rather than never.
     if (navigator.onLine) schedule();

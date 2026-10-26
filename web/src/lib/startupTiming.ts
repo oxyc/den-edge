@@ -167,6 +167,12 @@ function noteLibrary(note: LibraryWorkerStartup): void {
 const longTasks = { count: 0, ms: 0, longest: 0 };
 export const STARTUP_LONG_TASK_PHASES = [
   'bootstrap',
+  'app_import',
+  'app_mount',
+  'screen_preload',
+  'tv_css',
+  'tv_search',
+  'viewport_measure',
   'home_shelves',
   'home_metadata',
   'home_hero',
@@ -174,7 +180,11 @@ export const STARTUP_LONG_TASK_PHASES = [
 ] as const;
 export type StartupLongTaskPhase = (typeof STARTUP_LONG_TASK_PHASES)[number];
 type LongTaskTally = [count: number, milliseconds: number, longest: number];
+type LongTaskEntry = { start: number; rounded: number };
 const longTaskPhases = new Map<StartupLongTaskPhase, LongTaskTally>();
+const longTaskEntries: LongTaskEntry[] = [];
+// A 180-second report can contain at most 3,600 non-overlapping 50ms tasks; keep the stage dimension complete.
+const MAX_LONG_TASK_ENTRIES = 4_096;
 const phaseWindows: Array<{
   phase: Exclude<StartupLongTaskPhase, 'other'>;
   start: number;
@@ -231,14 +241,44 @@ if (channel && !inWorker)
 const observe = (type: string, each: (entry: PerformanceEntry) => void) => {
   try {
     if (!PerformanceObserver.supportedEntryTypes?.includes(type)) return;
-    new PerformanceObserver((list) => list.getEntries().forEach(each)).observe({
+    const observer = new PerformanceObserver((list) => list.getEntries().forEach(each));
+    observer.observe({
       type,
       buffered: true,
     });
+    return observer;
   } catch {
     // An engine without this entry type reports without it.
   }
 };
+let longTaskObserver: PerformanceObserver | undefined;
+const noteLongTask = ({ startTime, duration }: PerformanceEntry) => {
+  longTasks.count++;
+  const rounded = Math.round(duration);
+  longTasks.ms += rounded;
+  longTasks.longest = Math.max(longTasks.longest, rounded);
+  if (longTaskEntries.length < MAX_LONG_TASK_ENTRIES)
+    longTaskEntries.push({ start: startTime, rounded });
+  const ended = startTime + duration;
+  const owner =
+    phaseWindows
+      .map((window) => ({
+        phase: window.phase,
+        start: window.start,
+        overlap:
+          Math.min(ended, window.end ?? performance.now()) - Math.max(startTime, window.start),
+      }))
+      .filter(({ overlap }) => overlap > 0)
+      // Prefer the phase covering most of the task. A nested, more specific phase wins an exact tie.
+      .sort((left, right) => right.overlap - left.overlap || right.start - left.start)[0]?.phase ??
+    'other';
+  const tally = longTaskPhases.get(owner) ?? [0, 0, 0];
+  tally[0]++;
+  tally[1] += rounded;
+  tally[2] = Math.max(tally[2], rounded);
+  longTaskPhases.set(owner, tally);
+};
+
 if (typeof PerformanceObserver === 'function') {
   if (channel && inWorker)
     observe('resource', (entry) =>
@@ -248,28 +288,12 @@ if (typeof PerformanceObserver === 'function') {
         ...resourceOf(entry as PerformanceResourceTiming & { deliveryType?: string }),
       }),
     );
-  if (!inWorker)
-    observe('longtask', ({ startTime, duration }) => {
-      longTasks.count++;
-      const rounded = Math.round(duration);
-      longTasks.ms += rounded;
-      longTasks.longest = Math.max(longTasks.longest, rounded);
-      const ended = startTime + duration;
-      const owner =
-        phaseWindows
-          .map((window) => ({
-            phase: window.phase,
-            overlap:
-              Math.min(ended, window.end ?? performance.now()) - Math.max(startTime, window.start),
-          }))
-          .filter(({ overlap }) => overlap > 0)
-          .sort((left, right) => right.overlap - left.overlap)[0]?.phase ?? 'other';
-      const tally = longTaskPhases.get(owner) ?? [0, 0, 0];
-      tally[0]++;
-      tally[1] += rounded;
-      tally[2] = Math.max(tally[2], rounded);
-      longTaskPhases.set(owner, tally);
-    });
+  if (!inWorker) longTaskObserver = observe('longtask', noteLongTask);
+}
+
+/** Include records queued by the browser but not yet delivered to the observer callback. */
+function drainLongTasks(): void {
+  longTaskObserver?.takeRecords?.().forEach(noteLongTask);
 }
 
 /** The page's Workers' finished requests so far. */
@@ -288,15 +312,58 @@ export const startupCounts = (): ReadonlyMap<string, number> => counts;
 export const startupMilestoneLast = (event: string): number | undefined => lasts.get(event);
 
 /** The page's long tasks so far: `[count, milliseconds in all, longest]`. */
-export const startupLongTasks = (): [number, number, number] => [
-  longTasks.count,
-  longTasks.ms,
-  longTasks.longest,
-];
+export const startupLongTasks = (): [number, number, number] => {
+  drainLongTasks();
+  return [longTasks.count, longTasks.ms, longTasks.longest];
+};
 
 /** Long tasks grouped by the fixed startup phase that caused their task/render flush. */
-export const startupLongTaskPhases = (): ReadonlyMap<StartupLongTaskPhase, LongTaskTally> =>
-  longTaskPhases;
+export const startupLongTaskPhases = (): ReadonlyMap<StartupLongTaskPhase, LongTaskTally> => {
+  drainLongTasks();
+  return longTaskPhases;
+};
+
+export const STARTUP_LONG_TASK_STAGES = [
+  'pre_app',
+  'app_import',
+  'app_mount',
+  'before_shelves',
+  'shelves_to_billboard',
+  'billboard_to_handover',
+  'handover_to_poster',
+  'after_poster',
+] as const;
+export type StartupLongTaskStage = (typeof STARTUP_LONG_TASK_STAGES)[number];
+
+/**
+ * Every long task in exactly one coarse milestone interval. Unlike render phases, these cover the whole load, so
+ * an unattributed `other` task still says where it blocked without carrying a route, title or other personal data.
+ */
+export function startupLongTaskStages(): ReadonlyMap<StartupLongTaskStage, LongTaskTally> {
+  drainLongTasks();
+  const boundaries: Array<[number | undefined, StartupLongTaskStage]> = [
+    [firsts.get('app module requested'), 'app_import'],
+    [firsts.get('app module evaluated'), 'app_mount'],
+    [firsts.get('app mounted'), 'before_shelves'],
+    [firsts.get('shelves ready'), 'shelves_to_billboard'],
+    [firsts.get('billboard detail'), 'billboard_to_handover'],
+    [firsts.get('handover'), 'handover_to_poster'],
+    [firsts.get('first poster'), 'after_poster'],
+  ];
+  const stages = new Map<StartupLongTaskStage, LongTaskTally>();
+  for (const entry of longTaskEntries) {
+    let stage: StartupLongTaskStage = 'pre_app';
+    for (const [at, next] of boundaries) {
+      if (at !== undefined && entry.start >= at) stage = next;
+    }
+    const tally = stages.get(stage) ?? [0, 0, 0];
+    tally[0]++;
+    tally[1] += entry.rounded;
+    tally[2] = Math.max(tally[2], entry.rounded);
+    stages.set(stage, tally);
+  }
+  return stages;
+}
 
 /** A failure reduced to its code and a bounded message; never the request, url or payload behind it. */
 export function startupFailure(error: unknown): string {

@@ -7,6 +7,7 @@ import {
   permitsScreenPreload,
   PlayerScreen,
   preloadInIdle,
+  scheduleAfterStartupContent,
   ServiceScreen,
   SettingsScreen,
   WatchlistScreen,
@@ -89,5 +90,48 @@ describe('screen preloading', () => {
     idle.shift()?.();
     await Promise.resolve();
     expect(loaded).toEqual(['detail', 'search', 'person']);
+  });
+
+  it('does not turn a non-idle old-browser timer into first-paint preload work', () => {
+    let now = 0;
+    const milestones: { poster?: number } = {};
+    const scheduled: Array<{ task: () => void; after: number }> = [];
+    const loaded: number[] = [];
+    scheduleAfterStartupContent(
+      () => loaded.push(now),
+      (event) => (event === 'first poster' ? milestones.poster : undefined),
+      () => now,
+      (task, after) => scheduled.push({ task, after }),
+    );
+
+    expect(scheduled.map(({ after }) => after)).toEqual([250]);
+    now = 250;
+    scheduled.shift()!.task();
+    expect(loaded).toEqual([]);
+    milestones.poster = now;
+    scheduled.shift()!.task();
+    expect(scheduled.map(({ after }) => after)).toEqual([1_000]);
+    now += 1_000;
+    scheduled.shift()!.task();
+    expect(loaded).toEqual([1_250]);
+  });
+
+  it('eventually admits speculative screens when startup has no poster', () => {
+    let now = 0;
+    const scheduled: Array<{ task: () => void; after: number }> = [];
+    let loaded = false;
+    scheduleAfterStartupContent(
+      () => (loaded = true),
+      () => undefined,
+      () => now,
+      (task, after) => scheduled.push({ task, after }),
+    );
+    while (now < 5_000) {
+      now += 250;
+      scheduled.shift()!.task();
+    }
+    expect(scheduled.map(({ after }) => after)).toEqual([1_000]);
+    scheduled.shift()!.task();
+    expect(loaded).toBe(true);
   });
 });

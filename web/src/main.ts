@@ -16,8 +16,13 @@ if (!__DEN_TV__ && !import.meta.env.DEN_E2E) {
 }
 const start = () => {
   const bootstrapFinished = beginStartupRenderPhase('bootstrap');
+  const importFinished = beginStartupRenderPhase('app_import');
   startupMark('app module requested');
-  void import('./appMain').then(bootstrapFinished, bootstrapFinished);
+  const finished = () => {
+    importFinished();
+    bootstrapFinished();
+  };
+  void import('./appMain').then(finished, finished);
 };
 const retainedHero = document.querySelector(
   '[data-den-early-billboard]:not([hidden]) [data-den-early-backdrop][data-path]',
