@@ -1584,7 +1584,9 @@
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
   const radar = (only?: 'movie' | 'tv') => {
     const content = session.content;
-    return atlas && homeServices
+    // Home publishes its ordinary TMDB/recipe rows without waiting for provider discovery. Its provider rows join
+    // only once their captions are final; direct Movies/Series routes retain their existing eager behavior.
+    return atlas && homeServices && (route.page !== 'library' || providerRowsReady)
       ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
@@ -1717,26 +1719,25 @@
         homeServices?.resolvePicks(servicePicks, directories[country] ?? [], country) ?? [],
     ),
   );
-  // Decide once. Atlas discovery can finish after the component chunk; a reactive boolean would otherwise mount
-  // Browse, revoke it when provider rows appear, and mount it again after their display names arrive.
+  // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
+  // Atlas row ids join it below only when their provider captions are final.
   let homeBrowseReady = $state(false);
   $effect(() => {
     if (homeBrowseReady || !homeServicesSettled) return;
-    const noProviderRows =
-      session.kid ||
-      (atlasReady && (!atlas || !servicePicks.length)) ||
-      (serviceDirectoriesAdmitted && directoryServicesFailed);
-    const providerNamesSettled =
-      atlasReady &&
-      !!atlas &&
-      serviceDirectoriesAdmitted &&
-      !!directoryServices &&
-      naming === 0 &&
-      servicePicks.every(({ country }) => askedFor[country]);
-    if (!noProviderRows && !providerNamesSettled) return;
     startupRenderPhase('home_metadata');
     homeBrowseReady = true;
   });
+  const providerRowsReady = $derived(
+    session.kid ||
+      (atlasReady && (!atlas || !servicePicks.length)) ||
+      (serviceDirectoriesAdmitted && directoryServicesFailed) ||
+      (atlasReady &&
+        !!atlas &&
+        serviceDirectoriesAdmitted &&
+        !!directoryServices &&
+        naming === 0 &&
+        servicePicks.every(({ country }) => askedFor[country])),
+  );
   /**
    * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
    * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
