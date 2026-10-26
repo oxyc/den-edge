@@ -174,6 +174,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #filling = false;
   /** The import title selections join, so they do not start a second full-history read alongside it. */
   #fillingDone?: Promise<boolean>;
+  #cancelFilling?: () => void;
   #refilling?: Promise<void>;
   #refillAgain = false;
   /** A narrow edit's send, until it has come to an end: the whole log opens only after it (`#promote`). */
@@ -203,6 +204,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (filling) {
       this.#filling = true;
       this.#fillingDone = filling.done;
+      this.#cancelFilling = filling.cancel;
       filling.page.committed = () => this.#refill();
       void filling.done.then((complete) => this.#filled(complete));
     }
@@ -716,12 +718,14 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#cancelFilling?.();
     this.#cancelTimer();
     this.#cancelReconsider();
     await this.#viewWriter?.close();
     this.#stopFull?.();
     this.#listeners.clear();
     await this.#opening?.catch(() => undefined);
+    await this.#fillingDone?.catch(() => undefined);
     await this.#full?.close?.();
   }
 
@@ -761,7 +765,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
    * and shelves change once rather than with every page.
    */
   #refill(): void {
-    if (this.#closed || this.#full) return;
+    if (this.#closed || this.#full || this.#opening) return;
     if (this.#refilling) {
       this.#refillAgain = true;
       return;
@@ -797,7 +801,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   /** The import has read the whole history, or stopped: every loaded view is read again, or the log takes over. */
   async #filled(complete: boolean): Promise<void> {
     this.#filling = false;
-    if (this.#closed || this.#full) return;
+    if (this.#closed || this.#full || this.#opening) return;
     if (!complete) {
       void this.#promote('import:stopped').catch(() => undefined);
       return;
@@ -1277,9 +1281,14 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     startupLibraryPromoted(reason);
     this.#cancelTimer();
     this.#cancelReconsider();
+    this.#cancelFilling?.();
     const writerStopped = this.#viewWriter?.abort() ?? Promise.resolve();
     // A narrow edit still sending owns its kept work until it has come to an end; the whole log takes it from there.
-    const opening = Promise.all([this.#narrowSending ?? Promise.resolve(), writerStopped])
+    const opening = Promise.all([
+      this.#narrowSending ?? Promise.resolve(),
+      writerStopped,
+      this.#fillingDone ?? Promise.resolve(),
+    ])
       .then(() => this.openFull())
       .then(async (authority) => {
         if (!authority)
@@ -1395,6 +1404,7 @@ class FactImport {
   #registered = false;
   #decrypted = 0;
   readonly #started = performance.now();
+  readonly #abort = new AbortController();
 
   constructor(
     readonly request: LibraryServiceHello,
@@ -1408,6 +1418,7 @@ class FactImport {
     let body: Partial<Record<keyof ChangesPage, unknown>> | null;
     try {
       const response = await this.fetchImpl(`/lib/${this.keys.id}/changes?${query}`, {
+        signal: this.#abort.signal,
         headers: {
           'x-den-library-token': this.keys.token,
           'x-den-wire': String(this.request.wire),
@@ -1515,6 +1526,10 @@ class FactImport {
     noteLibraryDecrypt(this.#decrypted, elapsed);
     noteLibraryFold(this.#decrypted, elapsed);
   }
+
+  cancel(): void {
+    this.#abort.abort();
+  }
 }
 
 type ImportedFacts = {
@@ -1524,7 +1539,7 @@ type ImportedFacts = {
    * A newest-first import answered after its first page: the rest of the history, read on behind it. Settles true
    * once every row is kept, false if the read stopped; `page` is called after each page it keeps meanwhile.
    */
-  filling?: { done: Promise<boolean>; page: { committed: () => void } };
+  filling?: { done: Promise<boolean>; page: { committed: () => void }; cancel: () => void };
 };
 
 /** A first selected open: scan encrypted authority in bounded pages and retain no full-history plaintext graph. */
@@ -1642,7 +1657,11 @@ async function importNewestFirst(
       console.warn('den: the rest of the library could not be read', error);
       return false;
     });
-    return { store, manifest: openedManifest, filling: { done, page } };
+    return {
+      store,
+      manifest: openedManifest,
+      filling: { done, page, cancel: () => reading.cancel() },
+    };
   }
   const [first, settings] = await Promise.all([
     below(floor, NEWEST_BOOTSTRAP_PAGE),
@@ -1736,7 +1755,7 @@ async function importNewestFirst(
     console.warn('den: the rest of the library could not be read', error);
     return false;
   });
-  return { store, manifest: opened, filling: { done, page } };
+  return { store, manifest: opened, filling: { done, page, cancel: () => reading.cancel() } };
 }
 
 /** Every row after the import's `head`, oldest first: the whole history before Home is drawn. */
