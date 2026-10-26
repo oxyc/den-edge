@@ -9,6 +9,9 @@ let early: Worker[] = [];
 /** A new library Worker, its den-core still to be offered (`offerSyncPolicy`). */
 export function newLibraryWorker(): Worker {
   // Created here, which may be well before a session takes it (`worker created`).
+  // Vite rewrites this module URL to the exact content-hashed Worker belonging to this page build. Protocol changes
+  // still bump `LIBRARY_SERVICE_PROTOCOL`, so an abnormal cross-build pair is refused instead of silently rendering
+  // one build's view semantics in the other.
   startupMarkOnce('library worker started');
   return new Worker(new URL('./libraryServiceWorker.ts', import.meta.url), {
     type: 'module',

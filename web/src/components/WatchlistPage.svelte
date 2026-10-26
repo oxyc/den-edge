@@ -7,6 +7,7 @@
     UNKNOWN_YEAR,
     airedEpisodes,
     seenAired,
+    withoutSeenEpisodes,
     watchedView,
     type SeenEpisode,
     type WatchedEntry,
@@ -28,7 +29,9 @@
     onyear,
     shapes,
     seen,
+    seenCounts,
     failure = null,
+    ondetails,
     ondismiss,
     onremove,
     onseen,
@@ -46,7 +49,11 @@
     shapes: ReadonlyMap<string, Shape>;
     /** Each series' seen episodes, by `type:id`. */
     seen: ReadonlyMap<string, readonly SeenEpisode[]>;
+    /** Every series' watched count, available before exact coordinates for visible cards arrive. */
+    seenCounts: ReadonlyMap<string, number>;
     failure?: string | null;
+    /** Ask the library for exact watched coordinates for cards entering the drawn window. */
+    ondetails?: (titles: Title[]) => void;
     /** Off Continue Watching until it's played again; absent where nothing can be written (a guest). */
     ondismiss?: (title: Title) => void;
     /** Out of the library, as the TV's Remove does. */
@@ -78,7 +85,7 @@
   const key = (title: Title) => `${title.type}:${title.id}`;
   // A series with an episode seen is under way: it's in Continue Watching or Watched, so the watchlist doesn't also
   // offer to mark it watched.
-  const listed = $derived(saved.filter((t) => !seen.get(key(t))?.length));
+  const listed = $derived(withoutSeenEpisodes(saved, seenCounts));
   const savedShown = $derived(savedKind ? listed.filter((t) => t.type === savedKind) : listed);
   /**
    * How much of the watchlist is drawn: `STEP` cards, then another `STEP` after each yield, until all of it. Drawn in
@@ -108,6 +115,15 @@
       label: `${y.year === UNKNOWN_YEAR ? 'Unknown' : y.year} (${y.count})`,
     })),
   ]);
+
+  $effect(() => {
+    ondetails?.(
+      shown
+        .slice(0, count)
+        .map((entry) => entry.title)
+        .filter((title) => title.type === 'tv'),
+    );
+  });
 
   // Observed again after each step: one step that doesn't reach past the screen — a very wide one — fires nothing
   // more on its own, so the list would stop there.
@@ -149,13 +165,20 @@
 
   /** A series' seen episodes against those aired — "4 of 10 episodes" — and how far that is; none before any is seen. */
   function progressOf(title: Title): { text: string; fraction?: number } | undefined {
-    const episodes = title.type === 'tv' ? seen.get(key(title)) : undefined;
-    if (!episodes?.length) return undefined;
-    const shape = shapes.get(key(title));
-    const counted = seenAired(episodes, shape);
-    const aired = shape ? airedEpisodes(shape) : 0;
-    if (!aired)
+    if (title.type !== 'tv') return undefined;
+    const identity = key(title);
+    const shape = shapes.get(identity);
+    const exact = seen.get(identity);
+    // A summary count cannot say how many are aired: it may include specials, unaired episodes, or coordinates absent
+    // from the current shape. Show its truthful total without a denominator/bar until exact coordinates arrive.
+    if (exact === undefined) {
+      const counted = seenCounts.get(identity) ?? 0;
       return counted ? { text: `${counted} episode${counted === 1 ? '' : 's'}` } : undefined;
+    }
+    const counted = seenAired(exact, shape);
+    if (!counted) return undefined;
+    const aired = shape ? airedEpisodes(shape) : 0;
+    if (!aired) return { text: `${counted} episode${counted === 1 ? '' : 's'}` };
     return { text: `${counted} of ${aired} episodes`, fraction: counted / aired };
   }
 

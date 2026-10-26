@@ -6,6 +6,11 @@ import { WATCHED } from './actions';
 import { isAired, titleKey, type MediaType, type Shape, type Title } from './library';
 import type { Row, TitleRow } from './wire';
 
+// Vitest exposes imports through tracked getters. Bind these hot-loop constants once so the benchmark measures the
+// projection itself; production also avoids repeated module-namespace lookups on older engines.
+const historyTitleKey = titleKey;
+const watchedProgress = WATCHED;
+
 export interface WatchedEntry {
   title: Title;
   /**
@@ -24,15 +29,23 @@ export interface SeenEpisode {
   episode: number;
 }
 
+/** A saved series with watched episodes belongs under Continue/Watched, not in the unstarted Watchlist grid. */
+export function withoutSeenEpisodes<T extends { type: MediaType; id: number }>(
+  titles: readonly T[],
+  seenCounts: ReadonlyMap<string, number>,
+): T[] {
+  return titles.filter((title) => !(seenCounts.get(historyTitleKey(title)) ?? 0));
+}
+
 interface SeenSeries {
   latest: SeenEpisode & { at: number };
-  seen: SeenEpisode[];
+  count: number;
 }
 
 function titleRows(rows: Row[]): Map<string, TitleRow> {
   const titles = new Map<string, TitleRow>();
   for (const row of rows) {
-    if (row.kind === 'rec') titles.set(titleKey(row.title), row);
+    if (row.kind === 'rec') titles.set(historyTitleKey(row.title), row);
   }
   return titles;
 }
@@ -41,16 +54,16 @@ function titleRows(rows: Row[]): Map<string, TitleRow> {
 function seenSeries(rows: Row[], titles: Map<string, TitleRow>): Map<string, SeenSeries> {
   const series = new Map<string, SeenSeries>();
   for (const row of rows) {
-    if (row.kind !== 'ep' || row.progress.value < WATCHED) continue;
-    const key = titleKey(row.title);
+    if (row.kind !== 'ep' || row.progress.value < watchedProgress) continue;
+    const key = historyTitleKey(row.title);
     const at = row.progress.at[0];
     const reset = titles.get(key)?.episodesReset;
     if (reset && at <= reset[0]) continue;
     const found = series.get(key);
     const episode = { season: row.season, episode: row.episode };
-    if (!found) series.set(key, { latest: { ...episode, at }, seen: [episode] });
+    if (!found) series.set(key, { latest: { ...episode, at }, count: 1 });
     else {
-      found.seen.push(episode);
+      found.count++;
       if (at > found.latest.at) found.latest = { ...episode, at };
     }
   }
@@ -59,9 +72,36 @@ function seenSeries(rows: Row[], titles: Map<string, TitleRow>): Map<string, See
 
 /** The episodes seen of each series, by `type:id`. */
 export function seenEpisodes(rows: Row[]): Map<string, SeenEpisode[]> {
-  return new Map(
-    [...seenSeries(rows, titleRows(rows))].map(([key, found]) => [key, found.seen] as const),
-  );
+  return seenEpisodesFor(rows);
+}
+
+/**
+ * Exact watched episode coordinates for only the requested series. History's all-title summary deliberately does
+ * not retain or transfer these arrays; the visible cards ask for them in bounded batches instead.
+ */
+export function seenEpisodesFor(
+  rows: Row[],
+  requested?: ReadonlySet<string>,
+): Map<string, SeenEpisode[]> {
+  const titles = new Map<string, TitleRow>();
+  for (const row of rows) {
+    if (row.kind !== 'rec') continue;
+    const key = historyTitleKey(row.title);
+    if (!requested || requested.has(key)) titles.set(key, row);
+  }
+  const seen = new Map<string, SeenEpisode[]>();
+  for (const row of rows) {
+    if (row.kind !== 'ep' || row.progress.value < watchedProgress) continue;
+    const key = historyTitleKey(row.title);
+    if (requested && !requested.has(key)) continue;
+    const reset = titles.get(key)?.episodesReset;
+    if (reset && row.progress.at[0] <= reset[0]) continue;
+    const episode = { season: row.season, episode: row.episode };
+    const found = seen.get(key);
+    if (found) found.push(episode);
+    else seen.set(key, [episode]);
+  }
+  return seen;
 }
 
 /** How many regular-season episodes have aired — what "4 of 10 episodes" counts to (SeriesProgress.airedEpisodes). */
@@ -112,11 +152,13 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
       title,
       at,
       episode: episodes && { season: episodes.latest.season, episode: episodes.latest.episode },
-      episodes: episodes?.seen.length ?? 0,
+      episodes: episodes?.count ?? 0,
     });
   }
   // A watch with no time sorts after every dated one, as `at` 0 already does.
-  return entries.sort((a, b) => b.at - a.at || titleKey(a.title).localeCompare(titleKey(b.title)));
+  return entries.sort(
+    (a, b) => b.at - a.at || historyTitleKey(a.title).localeCompare(historyTitleKey(b.title)),
+  );
 }
 
 /** A watch the library has no time for is filed under this year. */

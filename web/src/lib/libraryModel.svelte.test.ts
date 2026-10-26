@@ -135,6 +135,20 @@ class FakeService {
         },
         version: version(6),
       };
+    if (query.kind === 'history.episodes')
+      return {
+        result: {
+          kind: 'history.episodes',
+          items: query.titles.map((title) => ({
+            title,
+            seen: [
+              { season: 1, episode: 1 },
+              { season: 1, episode: 2 },
+            ],
+          })),
+        },
+        version: version(6),
+      };
     if (query.kind !== 'playback.prepare') throw new Error('unsupported query in fake service');
     return {
       result: {
@@ -315,6 +329,17 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'history' });
   service.publish({ kind: 'history' }, historyValue(), 5);
   expect(history.snapshot.value?.items[0]).toMatchObject({ watchedAt: 100 });
+  await expect(model.historyEpisodes([{ type: 'tv', id: 9 }])).resolves.toEqual(
+    new Map([
+      [
+        'tv:9',
+        [
+          { season: 1, episode: 1 },
+          { season: 1, episode: 2 },
+        ],
+      ],
+    ]),
+  );
   history.release();
   expect(service.subscriptions.at(-1)?.stopped).toBe(true);
 

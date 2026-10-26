@@ -158,7 +158,7 @@ it('rejects malformed input and replaces a malformed dispatcher batch', async ()
     close() {},
   });
 
-  scope.emit({ ...hello('wrong-version'), protocol: 99 });
+  scope.emit({ ...hello('wrong-version'), protocol: LIBRARY_SERVICE_PROTOCOL - 1 });
   await expect.poll(() => scope.posted.length).toBe(1);
   expect(scope.posted[0]).toMatchObject([
     {

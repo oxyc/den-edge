@@ -2,6 +2,7 @@
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
@@ -9,7 +10,8 @@
   import PendingPosterRow from './components/PendingPosterRow.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import WindowedPosterRow from './components/WindowedPosterRow.svelte';
-  import type { SeenEpisode, WatchedEntry } from './lib/history';
+  import { withoutSeenEpisodes, type SeenEpisode, type WatchedEntry } from './lib/history';
+  import { HistoryDetailRequests } from './lib/historyDetailRequests';
   import {
     DetailScreen,
     DownloadsScreen,
@@ -1927,22 +1929,61 @@
         : [];
     });
   });
+
+  let historyDetailGeneration = 0;
+  const historyDetails = new SvelteMap<string, SeenEpisode[]>();
+  const historyDetailRequests = new HistoryDetailRequests();
+  function resetHistoryDetails(_snapshot: unknown) {
+    // A replacement History snapshot may change any series' reset boundary. Exact coordinates from its predecessor
+    // must never survive it; visible cards will refill their bounded batch.
+    historyDetailGeneration++;
+    historyDetailRequests.reset();
+    historyDetails.clear();
+  }
+  // Reset before child render effects can request the replacement snapshot's visible cards. A normal post-render
+  // effect can advance the generation after a fast detail reply and discard that valid reply indefinitely.
+  $effect.pre(() => resetHistoryDetails(historyLease?.snapshot.value));
+
+  function requestHistoryDetails(titles: Title[]) {
+    if (!model || profileActivity) return;
+    const requested = historyDetailRequests.take(titles, historyDetails);
+    if (!requested.length) return;
+    const generation = historyDetailGeneration;
+    void model
+      .historyEpisodes(requested)
+      .then((found) => {
+        if (generation !== historyDetailGeneration) return;
+        for (const title of requested)
+          historyDetails.set(titleKey(title), found.get(titleKey(title)) ?? []);
+        historyDetailRequests.resolved(requested);
+      })
+      .catch(() => {
+        if (generation === historyDetailGeneration) historyDetailRequests.failed(requested);
+      });
+  }
+
   const seenOfSeries = $derived.by(() => {
     if (route.page !== 'watchlist') return new Map<string, SeenEpisode[]>();
     if (profileActivity) return new Map(profileActivity.seenEpisodes());
+    return historyDetails;
+  });
+  const seenCounts = $derived.by(() => {
+    if (profileActivity)
+      return new Map(
+        [...profileActivity.seenEpisodes()].map(
+          ([key, episodes]) => [key, episodes.length] as const,
+        ),
+      );
     return new Map(
       (historyLease?.snapshot.value?.items ?? []).flatMap((entry) =>
-        entry.title.type === 'tv'
-          ? [[titleKey(entry.title), structuredClone(entry.seen ?? [])] as const]
-          : [],
+        entry.title.type === 'tv' ? [[titleKey(entry.title), entry.episodes] as const] : [],
       ),
     );
   });
   const savedCounts = $derived.by(() => {
     const counts = { all: 0, movie: 0, tv: 0 };
     const saved = profileActivity ? profileActivity.watchlist : (overview?.watchlist ?? []);
-    for (const ref of saved) {
-      if (seenOfSeries.get(titleKey(ref))?.length) continue;
+    for (const ref of withoutSeenEpisodes(saved, seenCounts)) {
       counts.all++;
       counts[ref.type]++;
     }
@@ -2169,6 +2210,8 @@
       onyear={(year) => navigate(watchlistHref(year))}
       shapes={session.shapes}
       seen={seenOfSeries}
+      {seenCounts}
+      ondetails={requestHistoryDetails}
       {failure}
       ondismiss={(title) => void dismiss(title)}
       onremove={(title) => void toggleWatchlist(title, false)}

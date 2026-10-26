@@ -1,7 +1,7 @@
 import { beforeAll, expect, test } from 'vitest';
 import { Session } from 'node:inspector/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { seenEpisodes, watchedHistory } from './history';
+import { watchedHistory } from './history';
 import {
   compactContinueLibrary,
   projectHomeLibraryView,
@@ -227,7 +227,7 @@ test('Home and History in one library Worker', async () => {
   // `rows` is `LibraryLog.rows()`; History reads it as `LibraryLogAuthority.#history` does.
   const rows = (stored: Row[]) =>
     stored.flatMap((row) => (isDocument(row) ? projectDocument(row, NOW) : [row]));
-  const history = (held: Row[]) => [seenEpisodes(held), watchedHistory(held, new Map())];
+  const history = (held: Row[]) => watchedHistory(held, new Map());
   // Before: History asked for Home's view, which folded the whole `rows()` projection.
   const foldedHome = (held: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), held), held);
   const work = {

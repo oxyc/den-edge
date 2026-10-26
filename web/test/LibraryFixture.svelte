@@ -3,6 +3,7 @@
   // page reads them back from. Without them, pressing Remove or Mark watched threw and the page said
   // "Couldn't save that" — so the actions a test most wants to press were the ones it could not.
   import { onMount } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import Library from '../src/Library.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import '../src/app.css';
@@ -22,10 +23,12 @@
     type VisitorProfileSession,
   } from '../src/lib/visitorProfileSession.svelte';
   import { trackerEvent } from '../src/lib/trackerEvents';
+  import { applyOps, opsFor } from '../src/lib/libraryV4';
   import type { LibraryLog } from '../src/lib/log';
   import { fixtureLibraryService } from './libraryService';
   import {
     rowName,
+    type DocumentRow,
     type EpisodeRow,
     type Row,
     type SettingsRow,
@@ -180,7 +183,23 @@
           ...(route.page === 'watchlist'
             ? [
                 addToWatchlist(blankTitle({ type: 'tv', id: 2001 }, 3), [3, 0, 'test']),
-                markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 2, 4), true, [9000, 0, 'test']),
+                ...(params.has('history-overflow')
+                  ? Array.from({ length: 15 }, (_, index) => {
+                      const season = index < 8 ? 1 : 2;
+                      const episode = index < 8 ? index + 1 : index - 7;
+                      return markEpisode(
+                        blankEpisode({ type: 'tv', id: 2002 }, season, episode),
+                        true,
+                        [9000 + index, 0, 'test'],
+                      );
+                    })
+                  : [
+                      markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 2, 4), true, [
+                        9000,
+                        0,
+                        'test',
+                      ]),
+                    ]),
                 ...years,
               ]
             : []),
@@ -206,10 +225,57 @@
       : [],
   );
 
+  let rowsVersion = 1;
+
+  function validFixtureDevices(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      if (
+        value.length === 3 &&
+        typeof value[0] === 'number' &&
+        typeof value[1] === 'number' &&
+        typeof value[2] === 'string' &&
+        (value[0] !== 0 || value[1] !== 0)
+      )
+        return [value[0], value[1], 'aaaaaaaaaaaaaaaa'];
+      return value.map(validFixtureDevices);
+    }
+    if (value && typeof value === 'object')
+      return Object.fromEntries(
+        Object.entries(value).map(([key, held]) => [key, validFixtureDevices(held)]),
+      );
+    return value;
+  }
+
+  /** Project this v2 fixture's mutable rows into the v4 document surface production LibraryLog exposes. */
+  function documents(): { seq: number; document: DocumentRow }[] {
+    const held = new SvelteMap<string, DocumentRow>();
+    for (const row of stored) {
+      const edits =
+        row.kind === 'rec'
+          ? opsFor(
+              row.resume.value === 0
+                ? { ...blankTitle(row.title, row.addedAt), resume: row.resume }
+                : blankTitle(row.title, row.addedAt),
+              row,
+            )
+          : row.kind === 'ep'
+            ? opsFor(blankEpisode(row.title, row.season, row.episode), row)
+            : [];
+      const valid = edits.map((edit) => ({
+        ...edit,
+        write: validFixtureDevices(edit.write) as Record<string, unknown>,
+      }));
+      for (const document of applyOps(valid, (name) => held.get(name)))
+        held.set(rowName(document), document);
+    }
+    return [...held.values()].map((document, index) => ({ seq: index + 1, document }));
+  }
+
   /** The row under its own name, replacing what was there: the same identity the real log keys rows by. */
   function put(row: Row) {
     const name = rowName(row);
     stored = [...stored.filter((held) => rowName(held) !== name), row];
+    rowsVersion++;
   }
 
   const holds = (row: Row, ref: { type: string; id: number }) =>
@@ -284,6 +350,10 @@
             : undefined,
     refresh: async () => false,
     rows: () => stored,
+    get rowsVersion() {
+      return rowsVersion;
+    },
+    documents,
     seqOf: () => 0,
     newestStamp: () => [1, 0, 'test'],
     kept: async (name: string) => {
@@ -340,7 +410,11 @@
       ? 'Library storage timed out while opening IndexedDB'
       : undefined,
     openGate,
+    failHistoryDetails: params.has('fail-history-details'),
   });
+  (
+    window as unknown as { denTestHistoryDetails: typeof library.historyDetails }
+  ).denTestHistoryDetails = library.historyDetails;
   publish = () => library.publish();
   if (homeDownloads) {
     library.coordinator.answers.set(homeDownloadRows[0].name, {
@@ -366,6 +440,7 @@
             row.kind !== 'set' ||
             !homeDownloadRows.slice(0, 2).some((download) => download.name === row.name),
         );
+        rowsVersion++;
         publish();
       };
   }

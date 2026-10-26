@@ -182,7 +182,12 @@ for (const width of [393, 1280]) {
         'Movie 1004',
         'Movie 1003',
       ]);
-      // A series counts its seen episodes against those aired so far (8 + 6 of season 2's 10).
+      // Exact coordinates arrive lazily and count the seen episode against those aired so far: 8 episodes plus 6 of
+      // season 2's 10. Reaching this text also proves the fixture's v4 document query completed.
+      await expect
+        .poll(() => page.evaluate(() => window.denTestHistoryDetails.lastItems))
+        .toContainEqual({ id: 2002, seen: 1 });
+      expect(await page.evaluate(() => window.denTestHistoryDetails.failures)).toBe(0);
       await expect(watched.locator('.caption').first()).toContainText('1 of 14 episodes');
       // Nothing on the page scrolls sideways.
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
@@ -237,6 +242,9 @@ for (const width of [393, 1280]) {
       // was the last one there, so the section goes with it.
       await press(watchlist, 'Series 2001', 'Mark watched Series 2001');
       await expect(watchlist).toHaveCount(0);
+      await expect
+        .poll(() => page.evaluate(() => window.denTestHistoryDetails.lastItems))
+        .toContainEqual({ id: 2001, seen: 14 });
       await expect(watched.getByRole('link', { name: /Series 2001/ })).toContainText(
         '14 of 14 episodes',
       );
@@ -263,3 +271,25 @@ for (const width of [393, 1280]) {
     }
   });
 }
+
+test('Watched falls back to a truthful total without an aired fraction when exact details fail', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await openWatchlist(browser, 393, '&fail-history-details&history-overflow');
+    const watched = page.getByRole('region', { name: 'Watched', exact: true });
+    const series = watched.locator('.framed').filter({ hasText: 'Series 2002' });
+    // Fifteen seen coordinates exceed the 14 aired in the stand-in shape. A summary cannot classify them, so it must
+    // neither claim "15 of 14" nor draw a greater-than-100% bar while the exact query is unavailable.
+    await expect(series.locator('.caption')).toContainText('15 episodes');
+    await expect(series.locator('.caption')).not.toContainText('of 14');
+    await expect(series.locator('.progress')).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => window.denTestHistoryDetails.failures))
+      .toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.denTestHistoryDetails.successes)).toBe(0);
+  } finally {
+    await browser.close();
+  }
+});
