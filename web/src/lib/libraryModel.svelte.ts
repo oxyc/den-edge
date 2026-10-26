@@ -707,7 +707,15 @@ export class LibraryModel {
     return this.#command({ kind: 'retained.services.set', value }, operationId);
   }
 
-  retainHomeContinue(present: boolean, operationId?: string): Promise<LibraryServiceCommandResult> {
+  async retainHomeContinue(
+    present: boolean,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    // Overview and Continue may publish independently while the supervisor is still binding Settings. This
+    // automatic cache hint is derived from those early views, but commands are deliberately unavailable until the
+    // required-root safety boundary is ready. Waiting here leaves shelves visible immediately and also follows a
+    // supervised startup replacement before writing to its authoritative generation.
+    await this.ready;
     return this.#command({ kind: 'retained.home-continue.set', present }, operationId);
   }
 

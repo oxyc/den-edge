@@ -151,6 +151,19 @@
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
+  // Home roots can paint from the newest import page. Personalized ranking, unlike those shelves, describes the
+  // whole library and must wait until the remaining pages have landed before taking its one snapshot of `weighted`.
+  let initialReadSettled = $state(model === null);
+  $effect(() => {
+    if (!model) return;
+    let current = true;
+    void model.initialReadSettled.then(() => {
+      if (current) initialReadSettled = true;
+    });
+    return () => {
+      current = false;
+    };
+  });
   // The download queue spends household credentials and bandwidth, so only a session that administers the household
   // is given a model to read or change it with; Kid and Visitor never reach `enqueueDownload` from this page. The
   // queue and the source plugins it searches are the household's, on its control library: an Owner whose activity
@@ -443,6 +456,9 @@
       seedsNamed = model === null;
       return;
     }
+    // A later import page can replace Overview's seed set after the first tranche was named. Close the ranking gate
+    // synchronously so that replacement cannot reuse the previous set's `true` before its own names have landed.
+    seedsNamed = false;
     // After the shelves' own pass, so the shelves' lookups don't queue behind these.
     if (!shelvesReady) return;
     let disposed = false;
@@ -462,6 +478,8 @@
   const homeNamingSet = $derived(homeNamingRefs?.map(titleKey).sort().join(' '));
   const continuePresent = $derived(!!continueView?.items.length);
   const watchlistPresent = $derived(!!overview?.watchlist.length);
+  /** Unlike shelf visibility, ranking closes again while a replacement root's own first-paint titles are named. */
+  let rankingHomeNamesReady = $state(model === null);
   /** What this page last told the Worker to keep about Continue Watching; it is sent again only when that changes. */
   let retainedSent: boolean | undefined;
   $effect(() => {
@@ -484,21 +502,30 @@
     // earlier names nothing, and is never asked again, so Home ranked its worlds without the Kid's history.
     if (!model || homeNamingSet === undefined || (session.kid && !atlasReady)) {
       shelvesReady = model === null;
+      rankingHomeNamesReady = model === null;
       shelfPlan = null;
       return;
     }
     const plan = { continue: continuePresent, watchlist: watchlistPresent };
     let disposed = false;
+    // Overview and Continue can now replace independently. Keep already-painted shelves up, but do not let ranking
+    // reuse the previous roots' naming boundary while this replacement's own titles are still landing.
+    rankingHomeNamesReady = false;
     if (untrack(() => shelfPlan === null)) shelvesReady = false;
     shelfPlan = plan;
     const refs = untrack(() => homeNamingRefs!);
     void nameLibraryTitles(session, refs as TitleRef[]).finally(() => {
       if (disposed) return;
       shelvesReady = true;
+      rankingHomeNamesReady = true;
       startupMarkOnce('shelves ready');
       if (retainedSent === plan.continue) return;
       retainedSent = plan.continue;
-      void model.retainHomeContinue(plan.continue).catch(warnKeep);
+      void model.retainHomeContinue(plan.continue).catch((error: unknown) => {
+        // A route/profile replacement may close this model while its required roots are still opening. That old
+        // frame has nothing left to retain and must not manufacture a warning after teardown.
+        if (!disposed) warnKeep(error);
+      });
     });
     return () => {
       disposed = true;
@@ -545,7 +572,12 @@
     const view = overview;
     if (!active || route.page !== 'watchlist' || !view || !history || !watchlistNamed) return;
     if (!watchlistLead && untrack(() => savedTitles.length)) return;
-    void nameLibraryTitles(session, history.items.map(({ title }) => title) as TitleRef[]);
+    const refs = history.items.map(({ title }) => title) as TitleRef[];
+    // Paint the leading cards before asking the rest: one slow provider answer near the page's tail must not keep
+    // every successful title in the Worker's bounded metadata reply off screen.
+    void nameLibraryTitles(session, refs.slice(0, SHELF_TRANCHE)).then(() =>
+      nameLibraryTitles(session, refs.slice(SHELF_TRANCHE)),
+    );
   });
 
   const displayContinueEntry = (entry: ContinueItem): ContinueEntry[] => {
@@ -1760,7 +1792,10 @@
       untrack(() => buildTrending(beginBillboard()));
       return;
     }
-    if (model === null || (libraryOpen && named)) untrack(buildRecommended);
+    // Its library vector is whole-library state, so the remaining first-read pages must also have landed. This does
+    // not hold the shelves or retained hero, both of which deliberately paint from the newest page.
+    if (model === null || (libraryOpen && named && rankingHomeNamesReady && initialReadSettled))
+      untrack(buildRecommended);
   });
 
   async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
@@ -1821,18 +1856,24 @@
     const run = beginBillboard();
     stagedFeatured = null;
     const lookup = lookupTitle;
+    const rankingNames = untrack(() => [
+      ...(homeNamingRefs ?? []),
+      ...(seedNamingRefs ?? []),
+    ]) as TitleRef[];
     const ranked =
       model && overview && memberPost
-        ? recommend(
-            session.content,
-            recommendBody({
-              facet: type,
-              prefs,
-              library: weighted,
-              named: session.displayTitles(),
-              owned: seeds.owned,
-              fresh,
-            }),
+        ? nameLibraryTitles(session, rankingNames).then(() =>
+            recommend(
+              session.content,
+              recommendBody({
+                facet: type,
+                prefs,
+                library: weighted,
+                named: session.displayTitles(),
+                owned: seeds.owned,
+                fresh,
+              }),
+            ),
           )
         : null;
     const kept =

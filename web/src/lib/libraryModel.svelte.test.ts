@@ -480,6 +480,64 @@ it('exposes named discovery and retained-Home operations without a generic cache
   model.close();
 });
 
+it('keeps an early Home snapshot without issuing its command before required roots are ready', async () => {
+  let finishOpen!: () => void;
+  class OpeningService extends FakeService {
+    override open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+      this.opened.push(options);
+      this.subscriptionsSeenAtOpen = this.subscriptions.map(({ selection }) => selection);
+      // The incremental supervisor can publish these Home roots before its Settings boundary resolves.
+      this.publish({ kind: 'overview' }, overviewValue(), 1);
+      this.publish({ kind: 'continue' }, continueValue(), 2);
+      return new Promise((resolve) => {
+        finishOpen = () => {
+          this.publish({ kind: 'settings' }, settingsValue(), 3);
+          this.status({ kind: 'ready', version: version(3) });
+          resolve(version(3));
+        };
+      });
+    }
+  }
+
+  const service = new OpeningService();
+  const model = new LibraryModel(service, options);
+  const keeping = model.retainHomeContinue(true, 'early-home');
+
+  await Promise.resolve();
+  expect(model.overview.value).toMatchObject({ kind: 'overview' });
+  expect(model.continueWatching.value).toMatchObject({ kind: 'continue' });
+  expect(service.commands).toEqual([]);
+
+  finishOpen();
+  await expect(keeping).resolves.toMatchObject({ outcome: 'applied' });
+  expect(service.commands).toContainEqual({
+    command: { kind: 'retained.home-continue.set', present: true },
+    operationId: 'early-home',
+  });
+  model.close();
+});
+
+it('does not keep an early Home snapshot after its model closes', async () => {
+  let finishOpen!: () => void;
+  class OpeningService extends FakeService {
+    override open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
+      this.opened.push(options);
+      return new Promise((resolve) => {
+        finishOpen = () => resolve(version(1));
+      });
+    }
+  }
+
+  const service = new OpeningService();
+  const model = new LibraryModel(service, options);
+  const keeping = model.retainHomeContinue(true, 'closed-home');
+
+  model.close();
+  finishOpen();
+  await expect(keeping).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  expect(service.commands).toEqual([]);
+});
+
 it('asks a retained read again once the service is back, not answers it as nothing kept', async () => {
   let refusals = 2;
   class ReconnectingService extends FakeService {

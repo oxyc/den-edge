@@ -674,7 +674,7 @@ it('publishes staggered initial Worker replacements independently', async () => 
   supervisor.close();
 });
 
-it('does not make lazy selections acquired during open hold readiness', async () => {
+it('starts lazy selections acquired during open after the required-root handoff', async () => {
   const client = new StaggeredSubscriptionClient();
   const supervisor = new LibraryServiceSupervisor(() => client);
   const events: string[] = [];
@@ -696,12 +696,14 @@ it('does not make lazy selections acquired during open hold readiness', async ()
     }
   });
   supervisor.onStatus((status) => events.push(`status:${status.kind}`));
-  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(3));
+  await Promise.resolve();
+  expect(client.releaseSubscriptions).toHaveLength(1);
   expect(events).toEqual([]);
 
   client.releaseSubscriptions[0]!();
   await expect(opening).resolves.toEqual(client.version(1));
   expect(events).toEqual(['overview', 'status:ready']);
+  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(3));
 
   client.releaseSubscriptions[1]!();
   client.releaseSubscriptions[2]!();

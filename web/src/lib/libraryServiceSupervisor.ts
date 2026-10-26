@@ -269,10 +269,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     this.#notifySubscription(subscription);
 
     const active = this.#active;
-    if (
-      active?.version &&
-      (this.#phase === 'ready' || this.#phase === 'connecting' || this.#phase === 'reconnecting')
-    )
+    // A selection acquired from an incrementally published root must not inspect a first-page fact import as if it
+    // were the complete library. Start it once the required-root boundary has handed over; subscriptions already
+    // present when a connection starts are launched together by #connectOnce (and staged on reconnect).
+    if (active?.version && this.#phase === 'ready')
       void this.#bindSubscription(id, subscription, active).catch((error: unknown) => {
         if (this.#subscriptions.get(id) !== subscription || active !== this.#active) return;
         const failure = failureFrom(error);
@@ -398,7 +398,9 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     const bindingStarted = performance.now();
     const answered: string[] = [];
     const required: Promise<void>[] = [];
-    for (const [id, subscription] of this.#subscriptions) {
+    // Freeze this set: publishing one of these roots can mount a lazy screen subscription. That new selection is
+    // deliberately started only after the required-root boundary below, rather than against an opening fact store.
+    for (const [id, subscription] of [...this.#subscriptions]) {
       if (subscription.attemptedToken === active.token) continue;
       const binding = this.#bindSubscription(id, subscription, active).then(() => {
         answered.push(
@@ -440,6 +442,16 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
       `${required.length} required subscriptions bound: ${answered.join(', ')}`,
     );
     this.#emitStatus({ kind: 'ready', version: readyVersion });
+    // Roots may have mounted lazy selections while they published independently. None of those selections holds
+    // readiness, but every one is now bound to this authoritative generation (unless it was already launched as a
+    // background root above).
+    for (const [id, subscription] of [...this.#subscriptions]) {
+      if (subscription.attemptedToken === active.token) continue;
+      void this.#bindSubscription(id, subscription, active).catch((error: unknown) => {
+        if (this.#subscriptions.get(id) !== subscription || active !== this.#active) return;
+        this.#replaceSnapshot(subscription, 'failed', failureFrom(error));
+      });
+    }
     return readyVersion;
   }
 
