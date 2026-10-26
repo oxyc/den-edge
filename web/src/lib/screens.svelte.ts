@@ -3,6 +3,7 @@
 
 import type { Component } from 'svelte';
 import { beginStartupRenderPhase, startupMilestone } from './startupTiming';
+import { scheduleAfterStartupMilestone } from './startupScheduling';
 
 /** A component loaded on first use and kept, so every page that shows it after that renders it at once. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- any component, whose own props type flows through
@@ -99,17 +100,14 @@ export function scheduleAfterStartupContent(
   now: () => number = () => performance.now(),
   later: Timer = (next, milliseconds) => setTimeout(next, milliseconds),
 ): void {
-  const waitingSince = now();
-  const afterFirstContent = () => {
-    if (
-      milestone('first poster') !== undefined ||
-      milestone('episodes shown') !== undefined ||
-      now() - waitingSince >= 5_000
-    )
-      later(task, 1_000);
-    else later(afterFirstContent, 250);
-  };
-  afterFirstContent();
+  scheduleAfterStartupMilestone(
+    task,
+    ['first poster', 'episodes shown'],
+    {},
+    milestone,
+    now,
+    later,
+  );
 }
 
 /** Common next screens, fetched in small idle slices on a fast connection after the hero has painted. */

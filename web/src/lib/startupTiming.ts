@@ -262,6 +262,9 @@ const noteLongTask = ({ startTime, duration }: PerformanceEntry) => {
   const ended = startTime + duration;
   const owner =
     phaseWindows
+      // The Long Tasks API cannot split one browser task. A phase opened partway through it must not claim the
+      // whole duration (for example, TV capability setup used to claim the entire entry-module evaluation).
+      .filter((window) => window.start <= startTime)
       .map((window) => ({
         phase: window.phase,
         start: window.start,

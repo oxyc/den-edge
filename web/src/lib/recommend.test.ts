@@ -713,24 +713,29 @@ describe('recommendationReason', () => {
 
 describe('nameSlides', () => {
   it('keeps atlas order, names known titles, and drops what TMDB cannot name', async () => {
-    const looked: string[] = [];
+    const batches: string[][] = [];
     const titles = await nameSlides(
       [
         { type: 'movie', id: 2, imdbId: 'tt2' },
         { type: 'tv', id: 1 },
         { type: 'movie', id: 9 },
+        { type: 'movie', id: 2 },
         { type: 'movie', id: 1 },
       ],
       new Map([['movie:1', film(1)]]),
-      async (ref) => {
-        looked.push(`${ref.type}:${ref.id}`);
-        return ref.id === 9 ? null : { ...film(ref.id), type: ref.type };
+      async (refs) => {
+        batches.push(refs.map((ref) => `${ref.type}:${ref.id}`));
+        return refs.flatMap((ref) => (ref.id === 9 ? [] : [{ ...film(ref.id), type: ref.type }]));
       },
-      2,
     );
-    expect(titles.map((t) => `${t.type}:${t.id}`)).toEqual(['movie:2', 'tv:1', 'movie:1']);
+    expect(titles.map((t) => `${t.type}:${t.id}`)).toEqual([
+      'movie:2',
+      'tv:1',
+      'movie:2',
+      'movie:1',
+    ]);
     expect(titles[0]!.imdbId).toBe('tt2');
-    expect(looked.sort()).toEqual(['movie:2', 'movie:9', 'tv:1']);
+    expect(batches).toEqual([['movie:2', 'tv:1', 'movie:9']]);
   });
 
   it('carries why through naming', async () => {
@@ -738,8 +743,7 @@ describe('nameSlides', () => {
     const titles = await nameSlides(
       [{ type: 'movie', id: 1, why }],
       new Map([['movie:1', film(1)]]),
-      async () => null,
-      1,
+      async () => [],
     );
     expect(titles).toEqual([{ ...film(1), imdbId: undefined, why }]);
   });

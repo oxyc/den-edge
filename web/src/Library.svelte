@@ -4,7 +4,6 @@
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Billboard from './components/Billboard.svelte';
-  import Browse from './components/Browse.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
   import { viewHeadline } from './lib/downloadStatus';
   import PendingPosterRow from './components/PendingPosterRow.svelte';
@@ -73,10 +72,10 @@
   import { warmOnIntent } from './lib/warmOnIntent';
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
+  import { scheduleAfterStartupMilestone } from './lib/startupScheduling';
   import { optionalImport } from './lib/keyboardNavigation';
   import type { AtlasCatalog } from './lib/services';
   import type { Service } from './settings/services';
-  import ServicesRow from './components/ServicesRow.svelte';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
@@ -145,7 +144,6 @@
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
-  const LOOKUPS = 6;
   /** Slides of everyone's billboard named for an empty library: atlas names them by id, each a TMDB lookup. */
   const EVERYONE_NAMED = 20;
   /** Let the hero's loaded image reach a paint before background provider synchronization starts. */
@@ -183,7 +181,11 @@
   let shelvesReady = $state(model === null);
   let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
   let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
+  let homeServicesSettled = $state(false);
   let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
+  let HomeCatalogue = $state.raw<typeof import('./components/HomeCatalogue.svelte').default | null>(
+    null,
+  );
   $effect(() => {
     const home = route.page === 'library';
     if (model && home && !shelvesReady) {
@@ -192,33 +194,39 @@
     }
     // Direct browse routes keep their useful TMDB rows while the optional service/catalogue helpers arrive.
     if (!home) homeMetadataReady = true;
+    if (homeServicesSettled && untrack(() => HomeCatalogue)) {
+      homeMetadataReady = true;
+      return;
+    }
     let current = true;
     void (async () => {
-      // Provider/catalogue metadata sits below a paired Home's personal shelf. Let that useful shelf paint before
-      // parsing the optional module and publishing the generic rows; guests and direct browse routes still load it.
+      // Provider/catalogue metadata sits below every personal shelf. On paired Home, keep its parsing and the two
+      // Browse rows it mounts out of the hero and first-poster path. The bounded fallback in this scheduler also
+      // admits a Home with neither a poster nor hero detail; guests and direct browse routes still load it immediately.
       if (model && home && document.visibilityState === 'visible')
         await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          scheduleAfterStartupMilestone(resolve, ['first poster', 'billboard detail'], {
+            timeoutMs: 3_000,
+            fallbackDelayMs: 0,
+          }),
         );
+      if (!current) return;
       await yieldTask();
-      let catalogue: typeof import('./lib/services');
-      let directories: typeof import('./settings/services');
-      try {
-        [catalogue, directories] = await Promise.all([
-          optionalImport(import('./lib/services')),
-          optionalImport(import('./settings/services')),
-        ]);
-      } catch {
-        // A stale deployment can lose this optional chunk. Keep the base TMDB rows useful without service helpers.
-        // Each request marks its own rejection before appMain's deferred preload handler decides whether to reload.
-        if (current) homeMetadataReady = true;
-        return;
-      }
+      // The component is primary content on Movies/Series, so its raw import keeps Vite's stale-chunk recovery
+      // active. Service enrichment is optional and starts alongside it without holding that base catalogue.
+      const catalogueLoading = optionalImport(import('./lib/services')).catch(() => null);
+      const component = await import('./components/HomeCatalogue.svelte').catch(() => null);
       if (!current) return;
       startupRenderPhase('home_metadata');
-      homeServices = catalogue;
-      directoryServices = directories;
+      if (component) HomeCatalogue = component.default;
       homeMetadataReady = true;
+      const catalogue = await catalogueLoading;
+      if (current) {
+        if (catalogue) homeServices = catalogue;
+        // GUEST_PICKS are supplied by this chunk. Do not briefly mount Browse against an empty placeholder and then
+        // tear it down again while those defaults and their provider directories arrive.
+        homeServicesSettled = true;
+      }
     })();
     return () => {
       current = false;
@@ -1579,7 +1587,9 @@
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
   const radar = (only?: 'movie' | 'tv') => {
     const content = session.content;
-    return atlas && homeServices
+    // Home publishes its ordinary TMDB/recipe rows without waiting for provider discovery. Its provider rows join
+    // only once their captions are final; direct Movies/Series routes retain their existing eager behavior.
+    return atlas && homeServices && (route.page !== 'library' || providerRowsReady)
       ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
           names: serviceNames,
@@ -1662,6 +1672,23 @@
   );
   /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
   let serviceDirectoriesAdmitted = $state(false);
+  let directoryServicesFailed = $state(false);
+  $effect(() => {
+    if (!serviceDirectoriesAdmitted || directoryServices) return;
+    let current = true;
+    void optionalImport(import('./settings/services')).then(
+      (directory) => {
+        if (current) directoryServices = directory;
+      },
+      () => {
+        // A stale optional chunk is retried on the next full page visit; the row remains unavailable meanwhile.
+        if (current) directoryServicesFailed = true;
+      },
+    );
+    return () => {
+      current = false;
+    };
+  });
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
   let directories = $state.raw<Record<string, Service[]>>({});
@@ -1694,6 +1721,25 @@
       (country) =>
         homeServices?.resolvePicks(servicePicks, directories[country] ?? [], country) ?? [],
     ),
+  );
+  // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
+  // Atlas row ids join it below only when their provider captions are final.
+  let homeBrowseReady = $state(false);
+  $effect(() => {
+    if (homeBrowseReady || !homeServicesSettled) return;
+    startupRenderPhase('home_metadata');
+    homeBrowseReady = true;
+  });
+  const providerRowsReady = $derived(
+    session.kid ||
+      (atlasReady && (!atlas || !servicePicks.length)) ||
+      (serviceDirectoriesAdmitted && directoryServicesFailed) ||
+      (atlasReady &&
+        !!atlas &&
+        serviceDirectoriesAdmitted &&
+        !!directoryServices &&
+        naming === 0 &&
+        servicePicks.every(({ country }) => askedFor[country])),
   );
   /**
    * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
@@ -1918,9 +1964,8 @@
     if (model === null || rankingReady) untrack(buildRecommended);
   });
 
-  async function lookupTitle(ref: { type: 'movie' | 'tv'; id: number }): Promise<Title | null> {
-    const answer = await session.content.query({ kind: 'titles', titles: [ref] });
-    return answer.titles[0] ?? null;
+  async function lookupTitles(refs: { type: 'movie' | 'tv'; id: number }[]): Promise<Title[]> {
+    return (await session.content.query({ kind: 'titles', titles: refs })).titles;
   }
 
   /** A Kid's hero comes from the same policy-bound worlds that make up the shelves, never shared trending. */
@@ -1952,8 +1997,7 @@
       const picked = await nameSlides(
         candidates.slice(0, EVERYONE_NAMED).map(({ type, id, imdbId }) => ({ type, id, imdbId })),
         new Map(),
-        lookupTitle,
-        LOOKUPS,
+        lookupTitles,
       );
       if (run === billboardRun) featured = picked;
     })()
@@ -1975,25 +2019,19 @@
     const type = facet;
     const run = beginBillboard();
     stagedFeatured = null;
-    const lookup = lookupTitle;
-    const rankingNames = untrack(() => [
-      ...(homeNamingRefs ?? []),
-      ...(seedNamingRefs ?? []),
-    ]) as TitleRef[];
+    const lookup = lookupTitles;
     const ranked =
       model && overview && memberPost
-        ? nameLibraryTitles(session, rankingNames).then(() =>
-            recommend(
-              session.content,
-              recommendBody({
-                facet: type,
-                prefs,
-                library: weighted,
-                named: session.displayTitles(),
-                owned: seeds.owned,
-                fresh,
-              }),
-            ),
+        ? recommend(
+            session.content,
+            recommendBody({
+              facet: type,
+              prefs,
+              library: weighted,
+              named: session.displayTitles(),
+              owned: seeds.owned,
+              fresh,
+            }),
           )
         : null;
     const kept =
@@ -2016,7 +2054,7 @@
         const slides = await ranked;
         if (run !== billboardRun || !slides?.length) return;
         const known = new Map(featured.map((title) => [titleKey(title), title] as const));
-        const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
+        const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup);
         if (run !== billboardRun || !picked.length) return;
         stageFeatured(picked, !!personal);
         if (model && keepsBillboard()) {
@@ -2054,13 +2092,13 @@
       await buildTrending(run);
       return;
     }
-    const lookup = lookupTitle;
-    const first = await nameSlides(shared.slice(0, 1), new Map(), lookup, 1);
+    const lookup = lookupTitles;
+    const first = await nameSlides(shared.slice(0, 1), new Map(), lookup);
     if (run !== billboardRun) return;
     // A member's kept billboard stays up while the rest is named. A guest's generic fallback gives way at once.
     if (first.length && (!libraryOpen || !featured.length)) featured = first;
     const known = new Map(first.map((title) => [titleKey(title), title] as const));
-    const picked = await nameSlides(shared.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
+    const picked = await nameSlides(shared.slice(0, EVERYONE_NAMED), known, lookup);
     if (run !== billboardRun) return;
     if (!picked.length) {
       await buildTrending(run);
@@ -2552,23 +2590,47 @@
       <PendingPosterRow heading="Watchlist" />
     {/if}
     {#if !facet}
-      {#if homeMetadataReady}
-        <ServicesRow
+      {#if homeMetadataReady && HomeCatalogue}
+        <HomeCatalogue
+          {rows}
+          shown={browseShown}
+          browseReady={homeBrowseReady}
+          browseIdentity="home"
+          showServices
           {services}
-          pending={serviceDirectoriesAdmitted
+          servicePending={serviceDirectoriesAdmitted
             ? naming
               ? servicePicks.length
               : 0
             : servicePicks.length}
-          empty={serviceDirectoriesAdmitted && !naming && !services.length
+          serviceEmpty={serviceDirectoriesAdmitted && !naming && !services.length
             ? 'Services unavailable'
             : undefined}
-          onvisible={() => (serviceDirectoriesAdmitted = true)}
-          onintent={primeService}
+          onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
+          onServiceIntent={primeService}
         />
+      {:else}
+        <!-- Keep Home scrollable while its optional catalogue code waits behind the first useful paint. Reusing the
+             real shelf placeholder preserves geometry without parsing or mounting Browse's loaders. -->
+        <div aria-hidden="true" data-pending-catalogue>
+          <PendingPosterRow heading="Browse" shelf={false} />
+          <PendingPosterRow heading="More to explore" shelf={false} />
+        </div>
       {/if}
     {/if}
-    {#if homeMetadataReady}<Browse {rows} shown={browseShown} />{/if}
+    {#if facet && homeMetadataReady && HomeCatalogue}
+      <HomeCatalogue
+        {rows}
+        shown={browseShown}
+        browseReady
+        browseIdentity={facet}
+        showServices={false}
+        {services}
+        servicePending={0}
+        onServiceVisible={() => {}}
+        onServiceIntent={primeService}
+      />
+    {/if}
   {/if}
 {/if}
 

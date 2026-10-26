@@ -2,10 +2,14 @@
 <script lang="ts">
   import PosterRow from './PosterRow.svelte';
 
-  let { heading, count = 6 }: { heading: string; count?: number } = $props();
+  let {
+    heading,
+    count = 6,
+    shelf = true,
+  }: { heading: string; count?: number; shelf?: boolean } = $props();
 </script>
 
-<div class="windowed" data-pending-shelf={heading} aria-busy="true">
+<div class="windowed" data-pending-shelf={shelf ? heading : undefined} aria-busy="true">
   <PosterRow {heading}>
     {#each { length: count } as _, index (index)}
       <span class="skeleton" aria-hidden="true"></span>

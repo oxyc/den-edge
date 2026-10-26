@@ -12,6 +12,7 @@
     rows,
     shown,
     build = 0,
+    identity,
   }: {
     rows: RowDef[];
     shown: (title: Title) => boolean;
@@ -20,6 +21,8 @@
      * height with `BrowseRow`'s placeholders, while the screen keeps how far down it has shown.
      */
     build?: number;
+    /** A stable screen identity lets rows join an existing catalogue without collapsing how far it has expanded. */
+    identity?: string;
   } = $props();
 
   // Two rows establish the page. More arrive close to the viewport instead of mounting a whole catalogue
@@ -30,7 +33,7 @@
   const page = pageVisibility();
 
   // A different screen starts from the top again; the same rows rebuilt (after a write, say) keep their place.
-  const signature = $derived(rows.map((r) => r.id).join('\n'));
+  const signature = $derived(identity ?? rows.map((r) => r.id).join('\n'));
   $effect(() => {
     void signature;
     count = STEP;
