@@ -5,9 +5,8 @@
   import { untrack, type Snippet } from 'svelte';
   import {
     UNKNOWN_YEAR,
-    airedEpisodes,
     compareHistoryTitleKeys,
-    seenAired,
+    episodeHistoryTally,
     watchedView,
     type SeenEpisode,
     type WatchedEntry,
@@ -291,11 +290,12 @@
       const counted = seenCounts.get(identity) ?? 0;
       return counted ? { text: `${counted} episode${counted === 1 ? '' : 's'}` } : undefined;
     }
-    const counted = seenAired(exact, shape);
+    const tally = episodeHistoryTally(exact, shape);
+    const counted = tally.watchedEpisodes;
     if (!counted) return undefined;
-    const aired = shape ? airedEpisodes(shape) : 0;
-    if (!aired) return { text: `${counted} episode${counted === 1 ? '' : 's'}` };
-    return { text: `${counted} of ${aired} episodes`, fraction: counted / aired };
+    const total = tally.totalEpisodes;
+    if (!total) return { text: `${counted} episode${counted === 1 ? '' : 's'}` };
+    return { text: `${counted} of ${total} episodes`, fraction: counted / total };
   }
 
   function resumeCaption(entry: ContinueEntry): string | undefined {
@@ -304,9 +304,11 @@
   }
 
   function watchedCaption(entry: WatchedEntry): string | undefined {
+    const regularEpisode =
+      entry.episode?.season && entry.episode.season > 0 ? entry.episode : undefined;
     const parts = [
       progressOf(entry.title)?.text ??
-        (entry.episode ? `S${entry.episode.season} · E${entry.episode.episode}` : undefined),
+        (regularEpisode ? `S${regularEpisode.season} · E${regularEpisode.episode}` : undefined),
       entry.at > 0 ? day.format(new Date(entry.at)) : undefined,
     ].filter(Boolean);
     return parts.length ? parts.join(' · ') : undefined;

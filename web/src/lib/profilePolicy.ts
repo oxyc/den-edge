@@ -36,6 +36,7 @@ const isolatedPreferences = (household: {
   minReleaseYear: undefined,
   audioLanguage: undefined,
   subtitleLanguage: undefined,
+  hasExplicitSubtitlePreference: false,
   shownSubtitleLanguages: [],
   subtitlesPerLanguage: 3,
   autoSkipSegments: false,

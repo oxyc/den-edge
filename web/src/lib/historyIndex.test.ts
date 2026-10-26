@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { watchedHistory } from './history';
-import { MaterializedHistoryIndex, type HistoryIndexSource } from './historyIndex';
+import {
+  historyItemFromProjections,
+  historySeasonProjection,
+  MaterializedHistoryIndex,
+  type HistoryIndexSource,
+} from './historyIndex';
 import { titleKey, type Title } from './library';
 import { projectDocument } from './libraryV4';
 import type { HistoryItem } from './libraryServiceProtocol';
@@ -212,6 +217,47 @@ describe('materialized History index', () => {
     expect(index.page()!.items).toMatchObject([
       { title: ref, episodes: 1, episode: { season: 1, episode: 2 }, watchedAt: 3_000 },
     ]);
+  });
+
+  it('dates history with Specials without counting or selecting them as regular episodes', () => {
+    const specialsDocuments = series(10, [{ season: 0, episode: 2, watchedAt: 3_000 }]);
+    const specialsOnly = new MaterializedHistoryIndex(
+      source('generation-specials', 1),
+      specialsDocuments,
+      4_000,
+    );
+    const expectedSpecials = {
+      title: { type: 'tv' as const, id: 10 },
+      watchedAt: 3_000,
+      episodes: 0,
+    };
+    expect(specialsOnly.page()!.items).toEqual([expectedSpecials]);
+    expect(
+      historyItemFromProjections([historySeasonProjection(specialsDocuments[1]!, [2, 3_000])]),
+    ).toEqual(expectedSpecials);
+
+    const mixedDocuments = series(10, [
+      { season: 1, episode: 3, watchedAt: 2_000 },
+      { season: 0, episode: 2, watchedAt: 3_000 },
+    ]);
+    const expectedMixed = {
+      title: { type: 'tv' as const, id: 10 },
+      watchedAt: 3_000,
+      episode: { season: 1, episode: 3 },
+      episodes: 1,
+    };
+    const mixed = new MaterializedHistoryIndex(
+      source('generation-specials', 2),
+      mixedDocuments,
+      4_000,
+    );
+    expect(mixed.page()!.items).toEqual([expectedMixed]);
+    expect(
+      historyItemFromProjections([
+        historySeasonProjection(mixedDocuments[1]!, [3, 2_000]),
+        historySeasonProjection(mixedDocuments[2]!, [2, 3_000]),
+      ]),
+    ).toEqual(expectedMixed);
   });
 
   it('binds otherwise identical pages to the source generation', () => {

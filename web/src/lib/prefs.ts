@@ -6,6 +6,7 @@ import { RATING_SOURCES } from '../settings/catalogs';
 import { isDirectMatch } from './search';
 import type { ConfigValue, SettingsRow } from './wire';
 import { localHost } from './localNetwork';
+import { acceptsProfilePreference } from './profilePreferenceSchema';
 
 /** A streaming service the viewer has, in one country: the same provider in two countries is two picks. */
 export interface ServicePick {
@@ -32,7 +33,10 @@ export interface Prefs {
 const ANIMATION = 16;
 
 export function readPrefs(row: SettingsRow | undefined): Prefs {
-  const value = (key: string): ConfigValue | null => row?.values[key]?.value ?? null;
+  const value = (key: string): ConfigValue | null => {
+    const held = row?.values[key]?.value ?? null;
+    return acceptsProfilePreference(key, held) ? held : null;
+  };
   const ints = (key: string) => {
     const v = value(key);
     return v && 'ints' in v ? v.ints : [];
@@ -63,10 +67,10 @@ export function readPrefs(row: SettingsRow | undefined): Prefs {
 /** `den.myServicePicks` (`"<id>@<CC>"`), uppercased; anything else is dropped rather than guessed at. */
 export function parseServicePicks(picks: readonly string[]): ServicePick[] {
   return picks.flatMap((pick): ServicePick[] => {
-    const [id, country] = pick.split('@');
-    const numeric = Number(id);
-    const code = (country ?? '').toUpperCase();
-    return Number.isInteger(numeric) && numeric > 0 && /^[A-Z]{2}$/.test(code)
+    const match = /^(\d+)@([A-Za-z]{2})$/.exec(pick);
+    const numeric = Number(match?.[1]);
+    const code = (match?.[2] ?? '').toUpperCase();
+    return Number.isSafeInteger(numeric) && numeric > 0 && /^[A-Z]{2}$/.test(code)
       ? [{ id: numeric, country: code }]
       : [];
   });
@@ -165,12 +169,15 @@ export function readDetailPrefs(
   row: SettingsRow | undefined,
   locale = globalThis.navigator?.language ?? 'en-US',
 ) {
-  const get = (key: string) => row?.values[key]?.value;
+  const get = (key: string) => {
+    const held = row?.values[key]?.value ?? null;
+    return acceptsProfilePreference(key, held) ? held : undefined;
+  };
   const enabled = get('den.enabledRatingSources');
   const country = get('den.watchRegion');
   const autoplay = get('den.autoplayTrailers');
   const warnings = get('den.shownWarningCategories');
-  const limit = get('den.maturityCeiling');
+  const limit = row?.values['den.maturityCeiling']?.value;
   const ceiling: 'pg13' | 'r' | undefined =
     limit && 'string' in limit && (limit.string === 'pg13' || limit.string === 'r')
       ? limit.string
@@ -181,18 +188,13 @@ export function readDetailPrefs(
   } catch {
     /* malformed browser locale */
   }
-  const region =
-    country && 'string' in country && /^[a-z]{2}$/i.test(country.string)
-      ? country.string.toUpperCase()
-      : fallback;
+  const region = country && 'string' in country ? country.string : fallback;
   return {
     region,
     /** The household's parental ceiling, as the TV reads it (`den.maturityCeiling`); undefined is no limit. */
     ceiling,
     ratingSources:
-      enabled && 'strings' in enabled
-        ? enabled.strings.filter((s) => RATING_SOURCES.some((known) => known.id === s))
-        : RATING_SOURCES.map((s) => s.id),
+      enabled && 'strings' in enabled ? enabled.strings : RATING_SOURCES.map((s) => s.id),
     warningCategories: warnings && 'strings' in warnings ? warnings.strings : [],
     autoplay: !(autoplay && 'bool' in autoplay && !autoplay.bool),
   };

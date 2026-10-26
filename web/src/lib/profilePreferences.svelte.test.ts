@@ -39,6 +39,7 @@ const ownerPreferences: LibraryPreferences = {
   minReleaseYear: 1999,
   audioLanguage: 'sv',
   subtitleLanguage: 'fi',
+  hasExplicitSubtitlePreference: true,
   shownSubtitleLanguages: ['sv'],
   subtitlesPerLanguage: 1,
   autoSkipSegments: true,
@@ -128,7 +129,7 @@ describe('preview profile preferences', () => {
       activity,
     );
     await Promise.all([
-      first.patch({ subtitleLanguage: 'es' }),
+      first.patch({ subtitlePreference: { mode: 'language', language: 'es' } }),
       anotherTab.patch({ autoplayTrailers: false }),
     ]);
 

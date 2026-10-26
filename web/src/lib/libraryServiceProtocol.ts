@@ -297,7 +297,7 @@ export interface LibraryPreferencesPatch {
   hideWatched?: boolean;
   minReleaseYear?: number | null;
   audioLanguage?: string | null;
-  subtitleLanguage?: string | null;
+  subtitlePreference?: import('./subtitlePreference').SubtitlePreference;
   shownSubtitleLanguages?: string[];
   subtitlesPerLanguage?: number;
   autoSkipSegments?: boolean;
@@ -552,6 +552,7 @@ export interface LibraryPreferences {
   minReleaseYear?: number;
   audioLanguage?: string;
   subtitleLanguage?: string;
+  hasExplicitSubtitlePreference?: boolean;
   shownSubtitleLanguages: string[];
   subtitlesPerLanguage: number;
   autoSkipSegments: boolean;

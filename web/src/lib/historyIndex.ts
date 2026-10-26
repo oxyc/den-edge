@@ -14,7 +14,7 @@ import type {
 import type { DocumentRow, TitleRow } from './wire';
 
 /** Changing projection or ordering semantics must invalidate every cursor. */
-export const HISTORY_INDEX_POLICY = 1;
+export const HISTORY_INDEX_POLICY = 2;
 export const HISTORY_INDEX_SCHEMA = 1;
 
 const DEFAULT_LIMIT = 48;
@@ -80,6 +80,7 @@ export const historyItemFromProjections = (
 
   let episodes = 0;
   let latest: { season: number; episode: number; at: number } | undefined;
+  let latestWatchedAt: number | undefined;
   const reset = title?.episodesReset;
   for (const projection of projections) {
     if (projection.kind !== 'season' || titleKey(projection.title) !== key) continue;
@@ -87,6 +88,8 @@ export const historyItemFromProjections = (
       const episode = projection.watched[index]!;
       const at = projection.watched[index + 1]!;
       if (reset && at <= reset[0]) continue;
+      latestWatchedAt = Math.max(latestWatchedAt ?? -Infinity, at);
+      if (projection.season <= 0) continue;
       episodes++;
       if (!latest || at > latest.at) latest = { season: projection.season, episode, at };
     }
@@ -94,7 +97,10 @@ export const historyItemFromProjections = (
 
   const seenAt =
     title?.status.value === 'watched' ? Math.max(title.watchedAt ?? 0, title.status.at[0], 0) : -1;
-  const watchedAt = Math.max(seenAt, latest ? Math.max(latest.at, 0) : -1);
+  const watchedAt = Math.max(
+    seenAt,
+    latestWatchedAt === undefined ? -1 : Math.max(latestWatchedAt, 0),
+  );
   if (watchedAt < 0 || (title?.deleted.value && title.deleted.at[0] >= watchedAt)) return undefined;
   return {
     title: { type: ref.type, id: ref.id },
@@ -204,6 +210,7 @@ export const historyItemFromDocuments = (
 
   let episodes = 0;
   let latest: { season: number; episode: number; at: number } | undefined;
+  let latestWatchedAt: number | undefined;
   const reset = title?.episodesReset;
   for (const document of documents) {
     if (document.kind !== 'season' || titleKey(document.title) !== key) continue;
@@ -212,6 +219,8 @@ export const historyItemFromDocuments = (
       (episode) => {
         if (episode.progress.value < WATCHED || (reset && episode.progress.at[0] <= reset[0]))
           return;
+        latestWatchedAt = Math.max(latestWatchedAt ?? -Infinity, episode.progress.at[0]);
+        if (episode.season <= 0) return;
         episodes++;
         const at = episode.progress.at[0];
         if (!latest || at > latest.at)
@@ -224,7 +233,10 @@ export const historyItemFromDocuments = (
   // `watchedAt` is the first watch, so a later status stamp dates a re-watch; imported unknown dates remain zero.
   const seenAt =
     title?.status.value === 'watched' ? Math.max(title.watchedAt ?? 0, title.status.at[0], 0) : -1;
-  const watchedAt = Math.max(seenAt, latest ? Math.max(latest.at, 0) : -1);
+  const watchedAt = Math.max(
+    seenAt,
+    latestWatchedAt === undefined ? -1 : Math.max(latestWatchedAt, 0),
+  );
   if (watchedAt < 0 || (title?.deleted.value && title.deleted.at[0] >= watchedAt)) return undefined;
   return {
     title: { type: ref.type, id: ref.id },
