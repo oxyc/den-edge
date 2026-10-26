@@ -40,7 +40,7 @@ const workerReferences = (
 const expectedReferences = process.env.DEN_E2E === '1' ? 1 : 2;
 if (workerReferences.length !== expectedReferences)
   throw new Error(
-    `expected ${expectedReferences} browser worker reference(s) to name ${workers[0]}, found ${workerReferences.length}`,
+    `expected ${expectedReferences === 1 ? 'browser entry' : 'browser entry and lazy shared transport'} to name ${workers[0]}, found ${workerReferences.length}`,
   );
 if (
   process.env.DEN_E2E !== '1' &&

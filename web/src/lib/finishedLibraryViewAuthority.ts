@@ -1559,7 +1559,12 @@ async function importLibraryFacts(
   };
   try {
     const imported = await read();
-    if (imported?.filling) void imported.filling.done.finally(ended);
+    if (imported?.filling)
+      void imported.filling.done
+        .then((complete) => {
+          if (!complete) imported.store.discardIncompleteHistoryDerivation();
+        })
+        .finally(ended);
     else ended();
     return imported;
   } catch (error) {
