@@ -522,7 +522,9 @@ test('paired Home keeps its base rows when the optional catalogue chunk is unava
   await expect(
     page.getByRole('region', { name: 'Continue Watching', exact: true }).locator('.card').first(),
   ).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Trending This Week' })).toBeAttached();
+  // Personal recommendations can place Trending outside Browse's virtual accessibility window. Its section still
+  // proves the base TMDB rows were published; use the DOM contract rather than a role query that excludes it there.
+  await expect(page.locator('section[aria-label="Trending This Week"]')).toBeAttached();
   expect(new URL(page.url()).searchParams.has('den-retry')).toBe(false);
 });
 
