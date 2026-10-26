@@ -1,3 +1,5 @@
+import { beginStartupRenderPhase } from '../lib/startupTiming';
+
 export function supportsSelector(selector: string): boolean {
   try {
     return CSS.supports(`selector(${selector})`);
@@ -67,4 +69,3 @@ export function installTvCssCapabilities(): () => void {
     for (const element of focusedAncestors) element.classList.remove('tv-focus-within');
   };
 }
-import { beginStartupRenderPhase } from '../lib/startupTiming';

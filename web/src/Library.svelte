@@ -332,8 +332,12 @@
    */
   const overviewPresentation = $derived.by(() => {
     const view = overview;
+    // Immutable indexes for one snapshot; the derived value replaces them as a unit.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const owned = new Set<string>();
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const watched = new Set<string>();
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const standings = new Map<string, Standing>();
     const weighted: Array<{ ref: TitleRef; weight: number; at: number }> = [];
     if (view) {
