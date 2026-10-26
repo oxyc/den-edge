@@ -1,7 +1,7 @@
 import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
 import type { Warning } from './contentWarnings';
-import type { PersonDetail, TitleDetail, Episode, FilmCredit } from './detail';
+import type { PersonDetail, TitleDetail, TitleHero, Episode, FilmCredit } from './detail';
 import type { Ratings } from './detailPresentation';
 import type { TitleFacts } from './titleFacts';
 import type { recommendBody, Slide } from './recommend';
@@ -18,9 +18,10 @@ import type {
  * per-query `policy`: a Worker from the earlier build, which would ignore it and answer unrestricted, is refused.
  * Version 6 added the Atlas-owned Kid Home catalogue and its policy-bound rows. Version 7 carries the catalogue's
  * optional affinity references so the page can order every row for the active profile without preloading it.
- * Version 8 carries the active Kid's exact-title approvals with every restricted content query.
+ * Version 8 carries the active Kid's exact-title approvals with every restricted content query. Version 9 adds
+ * the compact billboard projection; an earlier Worker must not silently reject that new critical-path query.
  */
-export const CONTENT_SERVICE_PROTOCOL = 8 as const;
+export const CONTENT_SERVICE_PROTOCOL = 9 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -210,6 +211,7 @@ export type ContentRequest =
   | { kind: 'grants.configure'; grants: { gid: string; secret: string }[] }
   | { kind: 'titles'; titles: ContentTitleRef[] }
   | { kind: 'title.detail'; title: ContentTitleRef; region: string }
+  | { kind: 'title.hero'; title: ContentTitleRef; region: string }
   | { kind: 'title.extras'; title: ContentTitleRef; warningCategories: string[] }
   | { kind: 'title.external-id'; title: ContentTitleRef }
   /** The one shared age check every boundary (detail, trailer, play, download, cast...) asks. */
@@ -311,6 +313,7 @@ export type ContentResult =
   | { kind: 'grants.configure' }
   | { kind: 'titles'; titles: Title[]; retryable: ContentTitleRef[] }
   | { kind: 'title.detail'; detail: OptionalContent<TitleDetail> }
+  | { kind: 'title.hero'; hero: OptionalContent<TitleHero> }
   | { kind: 'title.extras'; extras: ContentTitleExtras }
   | { kind: 'title.external-id'; imdbId: OptionalContent<string> }
   /** The asked titles the policy establishes, in the order asked. */

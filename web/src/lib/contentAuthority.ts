@@ -32,6 +32,7 @@ import {
   parseFilmography,
   parsePerson,
   parseSeason,
+  titleHero,
   type Episode,
   type TitleDetail,
 } from './detail';
@@ -419,6 +420,19 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
             failsClosed(policy) && detail.state === 'ready'
               ? { state: 'ready', value: { ...detail.value, more: [] } }
               : detail,
+        };
+      }
+      case 'title.hero': {
+        if (!(await this.#allowed(request.title, policy, signal)))
+          return { kind: 'title.hero', hero: REFUSED };
+        const detail = optional(
+          await this.#wait(this.detail(request.title, request.region), signal),
+          'tmdb',
+        );
+        return {
+          kind: 'title.hero',
+          hero:
+            detail.state === 'ready' ? { state: 'ready', value: titleHero(detail.value) } : detail,
         };
       }
       case 'prefetch.detail':
