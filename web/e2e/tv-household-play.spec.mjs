@@ -24,11 +24,11 @@ function seal(playKey, message, sentAt = Date.now()) {
   return { inbox, sealed };
 }
 
-/** den-edge's `/inbox/drain`, in memory: each named queue is handed over and emptied. */
-async function routeInbox(page, queues, drained) {
+/** den-edge's `/inbox/drain`, in memory: each named queue is handed over and emptied. `drains` gets each request's keys. */
+async function routeInbox(page, queues, drains) {
   await page.route(`${E2E_ORIGIN}/inbox/drain**`, async (route) => {
     const { keys = [] } = JSON.parse(route.request().postData() ?? '{}');
-    drained.push(...keys);
+    drains.push(keys);
     await route.fulfill({
       json: {
         queues: keys.map((key) => {
@@ -70,9 +70,9 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
   try {
     const tv = await context.newPage();
     const queues = new Map();
-    const drained = [];
+    const drains = [];
     await routeGuestEdge(tv, edge);
-    await routeInbox(tv, queues, drained);
+    await routeInbox(tv, queues, drains);
     // A playback service, so a play can start once the TV has a source plugin.
     await tv.route('**/routes', (route) =>
       route.fulfill({ json: { remux: [{ url: `${E2E_ORIGIN}/remux` }] } }),
@@ -124,7 +124,14 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     });
     expect(queues.has(fresh.inbox)).toBe(false);
     await expect(tv).not.toHaveURL(/\/movie\/1003/);
-    expect(new Set(drained)).toEqual(new Set([fresh.inbox]));
+    // The household queue and the pairing link's are drained together, in one held request: these TVs are short of
+    // connections. No other queue is asked for.
+    const linkInbox = await tv.evaluate(
+      () => JSON.parse(localStorage.getItem('den.links') ?? '[]')[0]?.inboxKey,
+    );
+    expect(linkInbox).toBeTruthy();
+    expect(drains).toContainEqual([fresh.inbox, linkInbox]);
+    expect(drains.flat().every((key) => key === fresh.inbox || key === linkInbox)).toBe(true);
 
     await tv.goto(`${E2E_ORIGIN}/settings`);
     await tv.getByRole('button', { name: 'Plugins', exact: true }).click();

@@ -964,11 +964,13 @@ export class LibraryModel {
   async applyAssistant(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     connection?: AssistantConnection,
+    tv?: { awakeSince: number },
   ) {
     const { result } = await this.task({
       kind: 'assistant.apply',
       messages: messages.map(({ seq, sealed }) => ({ seq, sealed })),
       ...(connection ? { connection } : {}),
+      ...(tv ? { tv } : {}),
     });
     if (result.kind !== 'assistant.apply') throw wrongQueryResult('assistant apply');
     return result;

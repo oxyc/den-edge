@@ -1,7 +1,46 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { currentPlayKey, playKeyFor, receivePlays } from './householdPlays';
+import { readFileSync } from 'node:fs';
+import {
+  currentPlayKey,
+  laneId,
+  laneQueue,
+  playKeyFor,
+  receiveTv,
+  startPlay,
+  startPlaysWith,
+} from './householdPlays';
 import { linkKeys, sealMessage, type PlayRequest } from './inbox';
-import { fromBase64url } from './wire';
+import { fromBase64url, fromHex, toBase64url } from './wire';
+
+// den-spec, checked out at the repository root; the Apple TV and den-mcp derive the same lane.
+const wake = JSON.parse(
+  readFileSync(new URL('../../../spec/vectors/wake-controller-v1.json', import.meta.url), 'utf8'),
+) as { assistant: { householdPlayKey: string; laneId: string } };
+
+describe("a TV's assistant lane", () => {
+  it("derives from its play key as den-spec's vector says", async () => {
+    const playKey = toBase64url(fromHex(wake.assistant.householdPlayKey));
+    expect(await laneId(playKey)).toBe(wake.assistant.laneId);
+  });
+
+  it('is drained by that id, under the TV’s name', async () => {
+    const playKey = toBase64url(fromHex(wake.assistant.householdPlayKey));
+    expect(await laneQueue(playKey, 'Living room LG')).toEqual({
+      query: `queue=tv&tv=${wake.assistant.laneId}`,
+      body: '{"name":"Living room LG"}',
+      key: `.tv.${wake.assistant.laneId}`,
+    });
+  });
+
+  it('starts a play through the page that registered, and through none once it has gone', async () => {
+    const started: string[] = [];
+    const unregister = startPlaysWith(async (play) => void started.push(play.title));
+    expect(await startPlay({ tmdbId: 550, mediaType: 'movie', title: 'Fight Club' })).toBe(true);
+    unregister();
+    expect(await startPlay({ tmdbId: 550, mediaType: 'movie', title: 'Again' })).toBe(false);
+    expect(started).toEqual(['Fight Club']);
+  });
+});
 
 function memoryStorage(): Storage {
   const items = new Map<string, string>();
@@ -75,14 +114,16 @@ describe('receiving household plays', () => {
     const stop = new AbortController();
     const started: PlayRequest[] = [];
     const stale: PlayRequest[] = [];
-    await receivePlays(
+    await receiveTv(
       {
         play: async (request) => {
           started.push(request);
           stop.abort();
         },
         stale: (request) => stale.push(request),
+        transport: () => undefined,
       },
+      () => null,
       stop.signal,
       storage,
     );

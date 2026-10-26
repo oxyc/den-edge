@@ -50,7 +50,11 @@ if (process.argv.includes('--capture')) {
   // pairing path shared by browser Settings and the packaged clients; TV-only implementation is rejected above.
   // The ceiling rose from 11 KiB to 15 KiB once the lazy graph was at the old limit and playback-source recovery
   // and the debrid status notice no longer fit; it still fails any change that grows the lazy graph by kilobytes.
+  // It rose again to 16 KiB for the TV's assistant lane (assistant-v1 §16): the library worker is one bundle shared by
+  // the browser and the TV builds, so its TV-queue branch (~160 bytes) ships to browsers too, and the lazy graph sat
+  // 11 bytes under 15 KiB with it, too close for gzip to agree across machines. The page side of the lane stays
+  // TV-only (householdPlays).
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 15360) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 16384) throw new Error('Browser total JS/CSS budget exceeded');
 }

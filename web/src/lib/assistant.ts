@@ -1,7 +1,8 @@
 // Assistant writes (den-spec wire/assistant-v1.md): an assistant connected through den-mcp seals requests to change
 // the library into den-edge's queue; this browser, while a member's library is open here, drains them, has the
 // library service open and check each one with den-core, applies the accepted ones through the same path a tap
-// takes, and acknowledges them. den-edge holds only the drop-box public key and opaque requests.
+// takes, and acknowledges them. den-edge holds only the drop-box public key and opaque requests. An LG or Samsung TV
+// also drains its own lane of the TV queue (§16), whose plays it starts rather than applies.
 
 import { exclusive } from './exclusive';
 import { listConnections } from './oauth';
@@ -49,6 +50,9 @@ export type ApplyResult =
       outcome: 'accepted';
       op: string;
       title: { type: 'movie' | 'tv'; id: number };
+      /** A play's episode (§16), when it names one. */
+      season?: number;
+      episode?: number;
       detail: string;
     }
   | { seq: number; outcome: 'rejected'; reason: string };
@@ -78,16 +82,32 @@ export async function putDropbox(
   }
 }
 
+/**
+ * A queue other than the library's: a TV's lane of the TV queue (§16), described by the TV-only code that drains it
+ * (`householdPlays.laneQueue`) so none of it ships to a browser.
+ */
+export interface OtherQueue {
+  /** Its query parameters, without `wait`. */
+  query: string;
+  /** The drain's JSON body. */
+  body: string;
+  /** Appended to the drain's lock name. */
+  key: string;
+}
+
 /** Every waiting request, oldest first; null when den-edge refused or could not be reached. */
 export async function drainQueue(
   wait: number,
   signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
+  queue?: OtherQueue,
 ): Promise<QueuedRequest[] | null> {
+  const query = [queue?.query, wait > 0 ? `wait=${wait}` : ''].filter(Boolean).join('&');
   try {
-    const res = await fetchImpl(`/assistant/drain${wait > 0 ? `?wait=${wait}` : ''}`, {
+    const res = await fetchImpl(`/assistant/drain${query ? `?${query}` : ''}`, {
       method: 'POST',
       cache: 'no-store',
+      ...(queue ? { headers: { 'content-type': 'application/json' }, body: queue.body } : {}),
       signal: AbortSignal.any([signal, AbortSignal.timeout(DRAIN_MS)]),
     });
     if (!res.ok) return null;
@@ -106,9 +126,10 @@ export async function drainQueue(
 export async function ackQueue(
   upTo: number,
   fetchImpl: typeof fetch = relayFetch,
+  queue?: OtherQueue,
 ): Promise<boolean> {
   try {
-    const res = await fetchImpl('/assistant/ack', {
+    const res = await fetchImpl(`/assistant/ack${queue ? `?${queue.query}` : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ upTo }),
@@ -151,6 +172,8 @@ export function publishWhileOpen(
 
 export interface DrainLoop {
   libraryId: string;
+  /** Drain this queue instead of the library's: a TV's lane (§16). */
+  queue?: OtherQueue;
   /** Opens, checks and applies a drain's requests in the library service. */
   apply: (messages: QueuedRequest[]) => Promise<ApplyOutcome>;
   /** Told of each applied request, for the page's quiet toast. */
@@ -171,7 +194,9 @@ const pause = (ms: number, signal: AbortSignal) =>
  * safe — the applied row refuses a request applied already — so the lock only saves the work twice.
  */
 export function drainWhileOpen(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  return exclusive(`den.assistant.drain.${loop.libraryId}`, () => drainLoop(loop, signal));
+  return exclusive(`den.assistant.drain.${loop.libraryId}${loop.queue?.key ?? ''}`, () =>
+    drainLoop(loop, signal),
+  );
 }
 
 async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
@@ -182,7 +207,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
   let wait = 0;
   while (!signal.aborted) {
     const started = Date.now();
-    const messages = await drainQueue(wait, signal, fetchImpl);
+    const messages = await drainQueue(wait, signal, fetchImpl, loop.queue);
     if (signal.aborted) return;
     if (messages === null) {
       await sleep(BACKOFF_MS, signal);
@@ -196,7 +221,9 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       await sleep(BACKOFF_MS, signal);
       continue;
     }
+    // The library queue's drain gives den-edge the drop-box key; a lane's leaves that to it.
     if (
+      !loop.queue &&
       outcome.dropbox &&
       outcome.dropbox.public !== put &&
       (await putDropbox(outcome.dropbox, fetchImpl))
@@ -207,7 +234,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       // The reason, never the request: it is the household's, and a refusal is no error of this page's.
       else console.info(`den: an assistant request was refused (${result.reason})`);
     }
-    if (outcome.ack !== null) await ackQueue(outcome.ack, fetchImpl);
+    if (outcome.ack !== null) await ackQueue(outcome.ack, fetchImpl, loop.queue);
     // An empty answer may come early (den-edge was busy, or the hold was refused), and requests left unacknowledged
     // come straight back: never drain again at once.
     const last = messages.at(-1)?.seq;

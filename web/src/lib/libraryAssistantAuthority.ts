@@ -161,7 +161,7 @@ type Accept = {
   grant: string;
   id: string;
   at: number;
-  op: (typeof OPS)[number];
+  op: (typeof OPS)[number] | 'play' | 'play_trailer';
   args: {
     title: TitleRef;
     value?: boolean | 'dislike' | 'like' | 'love' | null;
@@ -790,17 +790,24 @@ export class LibraryAssistantAuthority {
   }
 
   /**
-   * Den Web drains only the library's queue: a play found there is refused (`wrong_queue`), never applied here. A
-   * lent household's connection opens it (its library id, drop-box key, grants and play rows); what was applied is
-   * always this library's own row.
+   * A browser drains only the library's queue: a play found there is refused (`wrong_queue`), never applied here. An
+   * LG or Samsung TV also drains its lane of the TV queue (`tv`), where only a play is accepted, and only one sent
+   * after the TV last woke (§16). A lent household's connection opens either (its library id, drop-box key, grants and
+   * play rows); what was applied is always this library's own row.
    */
-  #open(sealed: string, records: AssistantRecords, lent: AssistantConnection | null): Opened {
+  #open(
+    sealed: string,
+    records: AssistantRecords,
+    lent: AssistantConnection | null,
+    tv: { awakeSince: number } | null,
+  ): Opened {
     return assistantPolicy<Opened>({
       op: 'assistant_open',
       library: lent?.member.libraryId ?? this.port.libraryId,
       device: this.port.device,
       sealed,
-      queue: 'library',
+      queue: tv ? 'tv' : 'library',
+      ...(tv ? { awakeSince: tv.awakeSince } : {}),
       assistant: this.#row(DROPBOX_ROW, lent),
       grants: this.#row(GRANTS_ROW, lent),
       play: this.#row(PLAY_ROW, lent),
@@ -820,10 +827,14 @@ export class LibraryAssistantAuthority {
    *
    * `lent`: a split household's connection, whose queue this is; each accepted request is performed on this
    * library, Owner's, which assistant activity targets (profiles-v1 §4), and recorded in its applied row.
+   *
+   * `tv`: a drain of this TV's lane (§16). An accepted play changes nothing in the library: it is recorded as applied,
+   * so a replay is refused, and handed back for the page to start through the same path as the TV's own Play.
    */
   async apply(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     lent: AssistantConnection | null = null,
+    tv: { awakeSince: number } | null = null,
   ): Promise<{
     results: AssistantApplied[];
     ack: number | null;
@@ -837,7 +848,7 @@ export class LibraryAssistantAuthority {
     let records = await this.#load();
     const order = messages
       .map((message) => {
-        const opened = this.#open(message.sealed, records, lent);
+        const opened = this.#open(message.sealed, records, lent, tv);
         return { ...message, at: 'accept' in opened ? opened.accept.at : null };
       })
       // A refused request has no `at` to learn and changes nothing: those go first, by `seq`.
@@ -848,7 +859,7 @@ export class LibraryAssistantAuthority {
     let held = Infinity;
     for (const [index, { seq, sealed }] of order.entries()) {
       // Opened again: an earlier request in this drain may have changed what this one is checked against.
-      const opened = this.#open(sealed, records, lent);
+      const opened = this.#open(sealed, records, lent, tv);
       if ('reject' in opened) {
         if (opened.reject === 'from_future') {
           held = Math.min(held, seq);
@@ -865,8 +876,10 @@ export class LibraryAssistantAuthority {
         // In this device's applied set before its batch is sent (§6 *Performing*).
         records = await this.#remember({ applied: { [accept.setting]: accept.value } });
         affected.push(
-          ...(await this.port.ride(APPLIED_ROW, { [accept.setting]: accept.value }, () =>
-            this.#perform(accept),
+          ...(await this.port.ride(APPLIED_ROW, { [accept.setting]: accept.value }, async () =>
+            accept.op === 'play' || accept.op === 'play_trailer'
+              ? []
+              : this.#perform(accept as Accept & { op: (typeof OPS)[number] }),
           )),
         );
       } catch (error) {
@@ -877,11 +890,13 @@ export class LibraryAssistantAuthority {
         held = Math.min(held, ...order.slice(index).map((m) => m.seq));
         break;
       }
+      const { season, episode } = accept.args;
       results.push({
         seq,
         outcome: 'accepted',
         op: accept.op,
         title: { type: accept.args.title.type, id: accept.args.title.id },
+        ...(accept.op === 'play' ? { season, episode } : {}),
         detail: describe(accept),
       });
     }
@@ -895,7 +910,7 @@ export class LibraryAssistantAuthority {
     };
   }
 
-  async #perform(accept: Accept): Promise<LibrarySelectionScope[]> {
+  async #perform(accept: Accept & { op: (typeof OPS)[number] }): Promise<LibrarySelectionScope[]> {
     const { title, value, season, episode } = accept.args;
     const operationId = `assistant:${accept.id}`;
     const run = async (command: LibraryCommand, id = operationId) =>
@@ -986,6 +1001,10 @@ function describe({ op, args }: Accept): string {
         ? ` season ${args.season} of`
         : '';
   switch (op) {
+    // A play is started by the TV, never announced as a change to the library.
+    case 'play':
+    case 'play_trailer':
+      return 'started %s';
     case 'watchlist_add':
       return 'added %s to your watchlist';
     case 'watchlist_remove':

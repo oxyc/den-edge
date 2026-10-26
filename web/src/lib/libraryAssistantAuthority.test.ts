@@ -456,6 +456,51 @@ test('a play found in the library queue is refused there and acknowledged, never
   expect(outcome.ack).toBe(7);
 });
 
+/** den-core's case `name` (§16): a request on the TV queue, sealed with the vectors' keys for their library and `now`. */
+const tvCase = (name: string) =>
+  policyCases.cases.find((c: { name: string }) => c.name === `assistant_open: ${name}`) as {
+    request: { sealed: string; awakeSince: number };
+  };
+
+test('a TV accepts a play on its lane, records it as applied, changes nothing else, and refuses it replayed', async () => {
+  const shared = await consented();
+  const { authority, commands } = device(shared, []);
+  const { request } = tvCase('an episode played on the TV');
+  const tv = { awakeSince: request.awakeSince };
+  const outcome = await authority.apply([{ seq: 4, sealed: request.sealed }], null, tv);
+  expect(outcome.results).toEqual([
+    {
+      seq: 4,
+      outcome: 'accepted',
+      op: 'play',
+      title: { type: 'tv', id: 1399 },
+      season: 1,
+      episode: 2,
+      detail: 'started %s',
+    },
+  ]);
+  expect(outcome.ack).toBe(4);
+  // Playing writes nothing to the library but the applied entry: the page starts it.
+  expect(commands).toEqual([]);
+  expect(shared.batches).toEqual([
+    { settings: [`${APPLIED_ROW}:6713a8b33cad6b3901ffd1777962892c`], effect: false },
+  ]);
+  const again = await authority.apply([{ seq: 5, sealed: request.sealed }], null, tv);
+  expect(again.results).toEqual([{ seq: 5, outcome: 'rejected', reason: expect.any(String) }]);
+  expect(again.ack).toBe(5);
+});
+
+test('a TV refuses a play sent before it last woke, and acknowledges it', async () => {
+  const shared = await consented();
+  const { authority } = device(shared, []);
+  const { request } = tvCase('a play made while the TV slept');
+  const outcome = await authority.apply([{ seq: 6, sealed: request.sealed }], null, {
+    awakeSince: request.awakeSince,
+  });
+  expect(outcome.results).toEqual([{ seq: 6, outcome: 'rejected', reason: 'stale' }]);
+  expect(outcome.ack).toBe(6);
+});
+
 test('a read-only consent writes no play record: playing is part of the consent to change the library', async () => {
   const shared = library();
   const { authority } = device(shared, [seed('other'), seed('limited')]);

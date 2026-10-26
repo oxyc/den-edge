@@ -64,124 +64,94 @@ async function drainRequest(
   }
 }
 
-export type TvInboxMessage =
-  | {
-      type: 'play';
-      tmdbId: number;
-      mediaType: 'movie' | 'tv';
-      title: string;
-      season?: number;
-      episode?: number;
-      sentAt: number;
-    }
-  | {
-      type: 'transport';
-      action: 'play' | 'pause' | 'skip';
-      tmdbId: number;
-      mediaType: 'movie' | 'tv';
-      season?: number;
-      episode?: number;
-      offsetSeconds?: number;
-      sentAt: number;
-    };
-
-/** Drain commands for a paired webOS/Tizen receiver. Unknown authenticated messages remain for their own feature
- * only in meaning, not in storage: the inbox is single-use, as it is on Apple TV. */
-export async function receiveTvMessages(
-  link: Pick<Link, 'inboxKey' | 'linkKey'>,
-  fetchImpl: typeof fetch = fetch,
-  now = Date.now(),
-  storage: Storage | undefined = globalThis.localStorage,
-): Promise<TvInboxMessage[]> {
-  try {
-    const body = (await drainRequest(
-      fetchImpl,
-      { headers: { 'x-den-link': link.inboxKey } },
-      '/inbox/drain?wait=25',
-    )) as { messages?: unknown } | null;
-    if (!Array.isArray(body?.messages)) return [];
-    const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
-    const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
-    const opened: TvInboxMessage[] = [];
-    for (const entry of body.messages as { sealed?: unknown }[]) {
-      if (typeof entry?.sealed !== 'string') continue;
-      try {
-        const combined = fromBase64url(entry.sealed);
-        if (combined.length < 28) continue;
-        const plain = await crypto.subtle.decrypt(
-          { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
-          key,
-          combined.slice(12),
-        );
-        const envelope = JSON.parse(new TextDecoder().decode(plain)) as {
-          id?: unknown;
-          sentAt?: unknown;
-          message?: Record<string, unknown>;
-        };
-        const sentAt = envelope.sentAt;
-        const age = typeof sentAt === 'number' ? now - sentAt : Number.POSITIVE_INFINITY;
-        if (
-          typeof envelope.id !== 'string' ||
-          !/^[0-9a-f]{32}$/.test(envelope.id) ||
-          typeof sentAt !== 'number' ||
-          !Number.isFinite(sentAt) ||
-          age > SEAL_WINDOW ||
-          age < -SEAL_AHEAD ||
-          !admit(envelope.id, now, storage)
-        )
-          continue;
-        const message = tvMessage(envelope.message, sentAt);
-        if (message) opened.push(message);
-      } catch {
-        // One malformed or differently keyed entry cannot poison the rest of the drained queue.
-      }
-    }
-    return opened;
-  } catch {
-    return [];
-  }
+/** A transport command for the paired TV's player, from the browser that paired it. */
+export interface TransportCommand {
+  action: 'play' | 'pause' | 'skip';
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  season?: number;
+  episode?: number;
+  offsetSeconds?: number;
+  sentAt: number;
 }
 
-function tvMessage(
-  message: Record<string, unknown> | undefined,
+/**
+ * The authentic messages among a drained queue's, sealed under `enc` (§3): each opened, its envelope checked and its
+ * id admitted once. Anything else counts for nothing — den-edge could have written it — and one malformed or
+ * differently keyed entry does not cost the rest of the queue theirs.
+ */
+async function openQueue(
+  messages: unknown,
+  enc: Bytes,
+  now: number,
+  storage: Storage | undefined,
+): Promise<{ sentAt: number; message: Record<string, unknown> }[]> {
+  if (!Array.isArray(messages)) return [];
+  const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
+  const opened: { sentAt: number; message: Record<string, unknown> }[] = [];
+  for (const entry of messages as { sealed?: unknown }[]) {
+    if (typeof entry?.sealed !== 'string') continue;
+    try {
+      const combined = fromBase64url(entry.sealed);
+      if (combined.length < 28) continue;
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
+        key,
+        combined.slice(12),
+      );
+      const { id, sentAt, message } = JSON.parse(new TextDecoder().decode(plain)) as {
+        id?: unknown;
+        sentAt?: unknown;
+        message?: unknown;
+      };
+      const age = typeof sentAt === 'number' && Number.isFinite(sentAt) ? now - sentAt : NaN;
+      if (
+        typeof id === 'string' &&
+        /^[0-9a-f]{32}$/.test(id) &&
+        age <= SEAL_WINDOW &&
+        age >= -SEAL_AHEAD &&
+        message !== null &&
+        typeof message === 'object' &&
+        admit(id, now, storage)
+      )
+        opened.push({ sentAt: sentAt as number, message: message as Record<string, unknown> });
+    } catch {
+      // Not sealed under this key, or not a message.
+    }
+  }
+  return opened;
+}
+
+function transportCommand(
+  message: Record<string, unknown>,
   sentAt: number,
-): TvInboxMessage | null {
-  if (!message) return null;
-  const { type, tmdbId, mediaType, season, episode } = message;
+): TransportCommand | null {
+  const { type, action, tmdbId, mediaType, season, episode, offsetSeconds } = message;
   if (
-    !Number.isInteger(tmdbId) ||
+    type !== 'transport' ||
+    (action !== 'play' && action !== 'pause' && action !== 'skip') ||
+    !count(tmdbId) ||
     (mediaType !== 'movie' && mediaType !== 'tv') ||
-    (season !== undefined && !Number.isInteger(season)) ||
-    (episode !== undefined && !Number.isInteger(episode))
+    (season !== undefined && !count(season)) ||
+    (episode !== undefined && !count(episode))
   )
     return null;
-  const medium = mediaType as 'movie' | 'tv';
-  const target = {
-    tmdbId: tmdbId as number,
-    mediaType: medium,
-    ...(season === undefined ? {} : { season: season as number }),
-    ...(episode === undefined ? {} : { episode: episode as number }),
-    sentAt,
-  };
-  if (type === 'play')
-    return typeof message.title === 'string' && message.title
-      ? { type, ...target, title: message.title }
-      : null;
-  if (type !== 'transport' || !['play', 'pause', 'skip'].includes(String(message.action)))
-    return null;
-  const action = message.action as 'play' | 'pause' | 'skip';
-  const offset = message.offsetSeconds;
   if (
-    action === 'skip' &&
-    (typeof offset !== 'number' || !Number.isFinite(offset) || Math.abs(offset) > 600)
+    action === 'skip'
+      ? typeof offsetSeconds !== 'number' ||
+        !Number.isFinite(offsetSeconds) ||
+        Math.abs(offsetSeconds) > 600
+      : offsetSeconds !== undefined
   )
     return null;
-  if (action !== 'skip' && offset !== undefined) return null;
   return {
-    type,
     action,
-    ...target,
-    ...(action === 'skip' ? { offsetSeconds: offset as number } : {}),
+    tmdbId,
+    mediaType,
+    ...(season === undefined ? {} : { season }),
+    ...(episode === undefined ? {} : { episode }),
+    ...(action === 'skip' ? { offsetSeconds: offsetSeconds as number } : {}),
+    sentAt,
   };
 }
 
@@ -474,13 +444,44 @@ export const PLAY_FRESHNESS = 120_000;
 const count = (value: unknown): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= 0;
 
+function playRequest(message: Record<string, unknown>): PlayRequest | null {
+  const { type, tmdbId, mediaType, title, season, episode } = message;
+  if (
+    type !== 'play' ||
+    !count(tmdbId) ||
+    (mediaType !== 'movie' && mediaType !== 'tv') ||
+    typeof title !== 'string' ||
+    (season !== undefined && !count(season)) ||
+    (episode !== undefined && !count(episode))
+  )
+    return null;
+  return {
+    tmdbId,
+    mediaType,
+    title: title.slice(0, 256),
+    ...(season === undefined ? {} : { season }),
+    ...(episode === undefined ? {} : { episode }),
+  };
+}
+
+/** What one drain of a TV's queues held. */
+export interface TvDrain {
+  /** Plays to start now, from the household queue. */
+  fresh: PlayRequest[];
+  /** Plays that waited too long to start. */
+  stale: PlayRequest[];
+  /** Transport commands from the browser that paired this TV. */
+  transport: TransportCommand[];
+}
+
 /**
- * Drain this TV's household queue (inbox-v1 §5) under its play key, held up to `wait` seconds for a message to land:
- * the plays to start now, and those that waited too long to. Everything that is not an authentic `play` is dropped,
- * as is an id already applied. Null when den-edge refused the drain or could not be reached.
+ * Drain this TV's queues in one request, held up to `wait` seconds for a message to land (§3): its household queue
+ * (§5), under `playKey`, and the queue of the link that paired it, under `link`. A play comes only through the
+ * household queue and that queue takes nothing else; the link brings transport commands for the player. Everything
+ * else is dropped, as is an id already taken. Null when den-edge refused the drain or could not be reached.
  */
-export async function drainPlays(
-  playKey: string,
+export async function drainTv(
+  { playKey, link }: { playKey?: string; link?: Pick<Link, 'inboxKey' | 'linkKey'> },
   {
     wait,
     fetchImpl = fetch,
@@ -492,8 +493,16 @@ export async function drainPlays(
     now?: () => number;
     storage?: Storage | undefined;
   } = {},
-): Promise<{ fresh: PlayRequest[]; stale: PlayRequest[] } | null> {
-  const { inbox, enc } = await linkKeys(fromBase64url(playKey) as Bytes);
+): Promise<TvDrain | null> {
+  const household = playKey ? await linkKeys(fromBase64url(playKey) as Bytes) : null;
+  const paired = link
+    ? {
+        inbox: link.inboxKey,
+        enc: (await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)))).enc,
+      }
+    : null;
+  const keys = [household?.inbox, paired?.inbox].filter((key): key is string => !!key);
+  if (!keys.length) return { fresh: [], stale: [], transport: [] };
   let body: { queues?: unknown } | null;
   try {
     body = (await drainRequest(
@@ -501,59 +510,31 @@ export async function drainPlays(
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ keys: [inbox] }),
+        body: JSON.stringify({ keys }),
       },
       wait ? `/inbox/drain?wait=${wait}` : '/inbox/drain',
     )) as { queues?: unknown } | null;
   } catch {
     return null;
   }
-  const messages = Array.isArray(body?.queues) ? (body.queues[0] as unknown) : null;
-  if (!Array.isArray(messages)) return null;
-  const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
-  const drained = { fresh: [] as PlayRequest[], stale: [] as PlayRequest[] };
+  if (!Array.isArray(body?.queues) || body.queues.length !== keys.length) return null;
   const at = now();
-  for (const entry of messages as { sealed?: unknown }[]) {
-    if (typeof entry?.sealed !== 'string') continue;
-    try {
-      const combined = fromBase64url(entry.sealed);
-      if (combined.length < 28) continue;
-      const plain = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
-        key,
-        combined.slice(12),
-      );
-      const { id, sentAt, message } = JSON.parse(new TextDecoder().decode(plain)) as {
-        id?: unknown;
-        sentAt?: unknown;
-        message?: Record<string, unknown>;
-      };
-      const age = typeof sentAt === 'number' && Number.isFinite(sentAt) ? at - sentAt : NaN;
-      if (
-        typeof id !== 'string' ||
-        !/^[0-9a-f]{32}$/.test(id) ||
-        !(age <= SEAL_WINDOW && age >= -SEAL_AHEAD) ||
-        // The household queue takes nothing but a play (inbox-v1 §5).
-        message?.type !== 'play' ||
-        !count(message.tmdbId) ||
-        (message.mediaType !== 'movie' && message.mediaType !== 'tv') ||
-        typeof message.title !== 'string' ||
-        (message.season !== undefined && !count(message.season)) ||
-        (message.episode !== undefined && !count(message.episode)) ||
-        !admit(id, at, storage)
-      )
-        continue;
-      const play: PlayRequest = {
-        tmdbId: message.tmdbId,
-        mediaType: message.mediaType,
-        title: message.title.slice(0, 256),
-        ...(message.season !== undefined ? { season: message.season as number } : {}),
-        ...(message.episode !== undefined ? { episode: message.episode as number } : {}),
-      };
-      (Math.abs(age) <= PLAY_FRESHNESS ? drained.fresh : drained.stale).push(play);
-    } catch {
-      // Not sealed under this TV's play key, or not a message: den-edge could have written it, so it counts for nothing.
+  const drained: TvDrain = { fresh: [], stale: [], transport: [] };
+  if (household)
+    for (const { sentAt, message } of await openQueue(body.queues[0], household.enc, at, storage)) {
+      const play = playRequest(message);
+      if (play)
+        (Math.abs(at - sentAt) <= PLAY_FRESHNESS ? drained.fresh : drained.stale).push(play);
     }
-  }
+  if (paired)
+    for (const { sentAt, message } of await openQueue(
+      body.queues.at(-1),
+      paired.enc,
+      at,
+      storage,
+    )) {
+      const command = transportCommand(message, sentAt);
+      if (command) drained.transport.push(command);
+    }
   return drained;
 }
