@@ -32,7 +32,8 @@ import {
   type DownloadRaceEntry,
   type DownloadRelease,
 } from './downloadRows';
-import { seenEpisodesFor, watchedHistory } from './history';
+import { seenEpisodesFor } from './history';
+import { MaterializedHistoryIndex, type HistoryIndexSource } from './historyIndex';
 import { projectDocument } from './libraryV4';
 import { titleCoordinates, titleView } from './titleView';
 import { continueItems, projectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
@@ -49,7 +50,6 @@ import {
   titleKey,
   type Shape,
   type Standing as ProjectedStanding,
-  type Title,
 } from './library';
 import {
   LIBRARY_SERVICE_WIRE_LIMITS,
@@ -142,6 +142,7 @@ import {
 } from '../settings/values';
 import {
   compareStamps,
+  rowName,
   type ConfigValue,
   type DocumentRow,
   type EpisodeRow,
@@ -366,6 +367,7 @@ export class LibraryLogAuthority {
   #projection?: { rows: Row[]; home: HomeLibraryView };
   /** Compact one-pass index of authoritative documents; exact episode arrays are still projected only on demand. */
   #historyDocuments?: { version: number; byTitle: Map<string, DocumentRow[]> };
+  #historyIndex?: MaterializedHistoryIndex;
   #projectionTimer?: ReturnType<typeof setTimeout>;
   #projectionDeadline = Infinity;
   #closed = false;
@@ -571,7 +573,13 @@ export class LibraryLogAuthority {
         return this.#overview();
       case 'watchlist': {
         const overview = this.#overview();
-        return { kind: 'watchlist', titles: overview.watchlist };
+        const history = this.#materializedHistory();
+        return {
+          kind: 'watchlist',
+          titles: overview.watchlist.filter(
+            (title) => title.type !== 'tv' || history.episodeCount(title) === 0,
+          ),
+        };
       }
       case 'recommendations': {
         const { kind: _kind, watchlist: _watchlist, ...recommendations } = this.#overview();
@@ -611,7 +619,9 @@ export class LibraryLogAuthority {
     this.#writable();
     await ensureDeferredSyncPolicy();
     try {
-      return await this.#command(command, operationId);
+      const result = await this.#command(command, operationId);
+      if (result.outcome === 'applied') this.#updateHistoryIndex(result.affected, command);
+      return result;
     } finally {
       this.#scheduleProjectionReconsideration();
     }
@@ -749,6 +759,9 @@ export class LibraryLogAuthority {
       case 'history.export':
         return this.#administration().historyExport();
       case 'history.episodes': {
+        const index = this.#materializedHistory();
+        if (query.revision !== index.revision)
+          return { kind: 'history.episodes', revision: index.revision, stale: true, items: [] };
         const requested = new Set(query.titles.map(titleKey));
         const documents = this.#historyDocumentsByTitle();
         const now = Date.now();
@@ -760,10 +773,24 @@ export class LibraryLogAuthority {
         const seen = seenEpisodesFor(rows, requested);
         return {
           kind: 'history.episodes',
+          revision: index.revision,
+          stale: false,
           items: query.titles.map((title) => ({
             title,
             seen: seen.get(titleKey(title)) ?? [],
           })),
+        };
+      }
+      case 'history.page': {
+        const index = this.#materializedHistory();
+        const current = query.revision === index.revision;
+        const page = current
+          ? index.page(query.filter, query.cursor, query.limit)
+          : index.page(query.filter, undefined, query.limit);
+        return {
+          kind: 'history.page',
+          restarted: !current || page === null,
+          page: page ?? index.page(query.filter, undefined, query.limit)!,
         };
       }
       case 'library.metadata':
@@ -1481,22 +1508,44 @@ export class LibraryLogAuthority {
   #history(): Extract<LibrarySelectionValue, { kind: 'history' }> {
     // Not Home's view: History reads the rows themselves, but its listeners still need the future-stamp deadline.
     this.#scheduleProjectionReconsideration();
-    const rows = this.#log.rows();
-    const names = new Map<string, Title>();
-    for (const row of rows) {
-      if (row.kind !== 'rec' && row.kind !== 'ep') continue;
-      const key = titleKey(row.title);
-      if (!names.has(key)) names.set(key, { ...row.title, title: key });
-    }
+    const index = this.#materializedHistory();
+    return { kind: 'history', ...index.page()! };
+  }
+
+  #historySource(): HistoryIndexSource {
+    const summary = this.#log.currentSummary();
     return {
-      kind: 'history',
-      items: watchedHistory(rows, names).map(({ title, at, episode, episodes }) => ({
-        title: { type: title.type, id: title.id },
-        watchedAt: at,
-        ...(episode ? { episode } : {}),
-        episodes,
-      })),
+      generation: this.generation,
+      version: this.#log.rowsVersion,
+      revision: `${this.#log.logHead}:${JSON.stringify(summary.stamp)}`,
+      reconsiderAt: Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
     };
+  }
+
+  #materializedHistory(): MaterializedHistoryIndex {
+    const source = this.#historySource();
+    if (this.#historyIndex?.hasSource(source)) return this.#historyIndex;
+    const documents = [...this.#historyDocumentsByTitle().values()].flat();
+    this.#historyIndex = new MaterializedHistoryIndex(source, documents, Date.now());
+    return this.#historyIndex;
+  }
+
+  /** Keep a foreground edit O(one title) once History has been materialized. */
+  #updateHistoryIndex(
+    affected: readonly LibraryAffectedSelection[],
+    command: LibraryCommand,
+  ): void {
+    if (!this.#historyIndex || !affected.some(({ kind }) => kind === 'history')) return;
+    const titles = new Map<string, TitleRef>();
+    for (const scope of affected)
+      if (scope.kind === 'title') titles.set(titleKey(scope.title), scope.title);
+    if (titles.size !== 1 || affected.some(({ kind }) => kind === 'all')) {
+      this.#historyIndex = undefined;
+      return;
+    }
+    const title = [...titles.values()][0]!;
+    const documents = this.#refreshHistoryDocuments(title, command);
+    this.#historyIndex.update(title, documents, this.#historySource());
   }
 
   #historyDocumentsByTitle(): ReadonlyMap<string, DocumentRow[]> {
@@ -1512,6 +1561,26 @@ export class LibraryLogAuthority {
     }
     this.#historyDocuments = { version, byTitle };
     return byTitle;
+  }
+
+  #refreshHistoryDocuments(title: TitleRef, command: LibraryCommand): DocumentRow[] {
+    const key = titleKey(title);
+    const current = this.#historyDocuments?.byTitle ?? new Map<string, DocumentRow[]>();
+    const names = new Set((current.get(key) ?? []).map(rowName));
+    names.add(`title:${title.type}:${title.id}`);
+    if (title.type === 'tv') {
+      if (command.kind === 'episode-watched.set')
+        names.add(`season:tv:${title.id}:${command.episode.season}`);
+      if (command.kind === 'season-watched.set')
+        names.add(`season:tv:${title.id}:${command.season}`);
+      if (command.kind === 'progress.record' && command.episode)
+        names.add(`season:tv:${title.id}:${command.episode.season}`);
+    }
+    const documents = [...names].flatMap((name) => this.#log.documentNamed(name) ?? []);
+    if (documents.length) current.set(key, documents);
+    else current.delete(key);
+    this.#historyDocuments = { version: this.#log.rowsVersion, byTitle: current };
+    return documents;
   }
 
   async #settings(): Promise<Extract<LibrarySelectionValue, { kind: 'settings' }>> {

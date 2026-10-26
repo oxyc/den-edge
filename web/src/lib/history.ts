@@ -11,6 +11,10 @@ import type { Row, TitleRow } from './wire';
 const historyTitleKey = titleKey;
 const watchedProgress = WATCHED;
 
+/** Locale-independent tie break: cursors and persisted ordering must compare the same on every device. */
+export const compareHistoryTitleKeys = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 export interface WatchedEntry {
   title: Title;
   /**
@@ -157,7 +161,8 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
   }
   // A watch with no time sorts after every dated one, as `at` 0 already does.
   return entries.sort(
-    (a, b) => b.at - a.at || historyTitleKey(a.title).localeCompare(historyTitleKey(b.title)),
+    (a, b) =>
+      b.at - a.at || compareHistoryTitleKeys(historyTitleKey(a.title), historyTitleKey(b.title)),
   );
 }
 

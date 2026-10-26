@@ -1222,10 +1222,12 @@ describe('LibraryLog', () => {
     const changed = await rowKey(keys, 'title:movie:2');
     const library = written.filter((key) => !key.includes(':runtime:'));
     expect(library.filter((key) => key.includes(':library-facts.v1:'))).not.toEqual([]);
-    // The changed document, the finished-view marker, and the store's manifest, which takes its newest stamp in.
+    // The changed document, compact History checkpoint, finished-view marker, and manifest land atomically. No other
+    // authoritative document is rewritten.
     for (const key of library)
       expect(
         key.endsWith(':local-authority.v1') ||
+          key.endsWith(':library-facts.v1:history') ||
           key.endsWith(':library-facts.v1:manifest') ||
           key.endsWith(changed),
         key,

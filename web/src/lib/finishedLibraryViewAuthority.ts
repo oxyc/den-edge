@@ -20,6 +20,8 @@ import type { Vault } from './localVault';
 import type { ContentReader } from './contentAuthority';
 import type {
   AssistantConnection,
+  HistoryCursor,
+  HistoryFilter,
   LibraryCommand,
   LibraryObservation,
   LibraryQueryResult,
@@ -70,6 +72,8 @@ import {
   libraryMetadataTitle,
 } from './libraryMetadata';
 import { ContinueProjector, titleKey, type Shape } from './library';
+import { seenEpisodesFor } from './history';
+import { projectDocument } from './libraryV4';
 import type { HomeLibraryView } from './homeLibraryView';
 import {
   factContinue,
@@ -84,6 +88,7 @@ import {
   openEntry,
   rowKey,
   wellFormed,
+  type DocumentRow,
   type LibraryKeys,
   type Row,
   type SettingsRow,
@@ -242,7 +247,16 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (selection.kind === 'watchlist') {
       if (!(await this.#loadCapabilities(['watchlist'])))
         return (await this.#promote('cache:watchlist')).select(selection);
-      return { kind: 'watchlist', titles: structuredClone(pieces.watchlist!.titles) };
+      const titles = pieces.watchlist!.titles;
+      const started = await this.#historyStartedSeries(
+        titles.filter((title): title is TitleRef & { type: 'tv' } => title.type === 'tv'),
+      );
+      if (!started) return (await this.#promote('cache:watchlist')).select(selection);
+      const hidden = new Set(started.map(titleKey));
+      return {
+        kind: 'watchlist',
+        titles: structuredClone(titles.filter((title) => !hidden.has(titleKey(title)))),
+      };
     }
     if (selection.kind === 'recommendations') {
       if (!(await this.#loadCapabilities(['recommendations'])))
@@ -253,6 +267,10 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       if (!(await this.#loadContinue()))
         return (await this.#promote('cache:continue')).select(selection);
       return structuredClone(pieces.continue!.view);
+    }
+    if (selection.kind === 'history') {
+      const page = await this.#historyPage({}, undefined, 48);
+      if (page) return { kind: 'history', ...page };
     }
     if (selection.kind === 'settings') {
       if (!(await this.#loadCapabilities(['settings'])))
@@ -444,6 +462,30 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     return result;
   }
   query: LibraryServiceAuthority['query'] = async (query) => {
+    if (!this.#full && query.kind === 'history.episodes') {
+      const current = await this.#historyPage({}, undefined, 1);
+      if (current && current.revision !== query.revision)
+        return { kind: 'history.episodes', revision: current.revision, stale: true, items: [] };
+      const items = current
+        ? await this.#historyEpisodesFromFacts(query.titles, current.revision)
+        : null;
+      if (items)
+        return {
+          kind: 'history.episodes',
+          revision: current!.revision,
+          stale: false,
+          items,
+        };
+      if (current)
+        return { kind: 'history.episodes', revision: current.revision, stale: true, items: [] };
+    }
+    if (!this.#full && query.kind === 'history.page') {
+      const current = await this.#historyPage(query.filter, query.cursor, query.limit);
+      if (current && current.revision === query.revision)
+        return { kind: 'history.page', restarted: false, page: current };
+      const restarted = await this.#historyPage(query.filter, undefined, query.limit);
+      if (restarted) return { kind: 'history.page', restarted: true, page: restarted };
+    }
     if (!this.#full && query.kind === 'relay.membership')
       return {
         kind: 'relay.membership',
@@ -489,6 +531,85 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (!this.#full && query.kind === 'library.metadata') return this.#metadata(query.titles);
     return (await this.#promote(`query:${query.kind}`)).query(query);
   };
+
+  async #historyPage(filter: HistoryFilter, cursor?: HistoryCursor, limit?: number) {
+    if (!this.factStore) return null;
+    try {
+      const manifest = await this.factStore.manifest();
+      if (
+        !manifest?.complete ||
+        manifest.generation !== this.cached.identity.generation ||
+        manifest.head !== this.cached.identity.head ||
+        (manifest.rowsVersion ?? manifest.head) !== this.cached.identity.rowsVersion
+      )
+        return null;
+      return (await this.factStore.history(manifest))?.page(filter, cursor, limit) ?? null;
+    } catch (error) {
+      console.warn('den: the materialized History index could not be opened', error);
+      return null;
+    }
+  }
+
+  async #historyStartedSeries(titles: ReadonlyArray<TitleRef & { type: 'tv' }>) {
+    if (!this.factStore) return null;
+    try {
+      const manifest = await this.factStore.manifest();
+      if (
+        !manifest?.complete ||
+        manifest.generation !== this.cached.identity.generation ||
+        manifest.head !== this.cached.identity.head ||
+        (manifest.rowsVersion ?? manifest.head) !== this.cached.identity.rowsVersion
+      )
+        return null;
+      const index = await this.factStore.history(manifest);
+      if (!index) return null;
+      return titles.filter((title) => index.episodeCount(title) > 0);
+    } catch (error) {
+      console.warn('den: the materialized History membership could not be opened', error);
+      return null;
+    }
+  }
+
+  async #historyEpisodesFromFacts(
+    titles: ReadonlyArray<TitleRef & { type: 'tv' }>,
+    revision: string,
+  ) {
+    if (!this.factStore) return null;
+    const requested = new Set(titles.map(titleKey));
+    const documents: DocumentRow[] = [];
+    try {
+      const manifest = await this.factStore.manifest();
+      if (!manifest?.complete || (await this.factStore.history(manifest))?.revision !== revision)
+        return null;
+      for (const title of titles) {
+        const held = await this.factStore.historyDocumentsFor(manifest, title);
+        if (!held) return null;
+        for (const stored of held) {
+          if (!stored.row || !wellFormed(stored.row) || !('title' in stored.row)) return null;
+          if (stored.row.kind === 'title' || stored.row.kind === 'season')
+            documents.push(stored.row);
+        }
+      }
+      const after = await this.factStore.manifest();
+      if (
+        !after ||
+        after.generation !== manifest.generation ||
+        after.head !== manifest.head ||
+        (after.rowsVersion ?? after.head) !== (manifest.rowsVersion ?? manifest.head) ||
+        after.revision !== manifest.revision
+      )
+        return null;
+      if (documents.length) await ensureSyncPolicy();
+      const seen = seenEpisodesFor(
+        documents.flatMap((document) => projectDocument(document)),
+        requested,
+      );
+      return titles.map((title) => ({ title, seen: seen.get(titleKey(title)) ?? [] }));
+    } catch (error) {
+      console.warn('den: exact History details could not be read from library facts', error);
+      return null;
+    }
+  }
   task: LibraryServiceAuthority['task'] = async (task, operationId) => {
     // Deciding what to publish reads the whole library; until this device's publication is due, nothing is.
     if (task.kind === 'assistant.publish' && !this.#full && (await this.#publicationCurrent()))

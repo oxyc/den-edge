@@ -359,17 +359,18 @@ describe('LibraryLogAuthority', () => {
         const op = String(request.op);
         if (op === 'title_state' || op === 'season_state_v4') calls[op] = (calls[op] ?? 0) + 1;
       }
+      const revision = values.find((value) => value.kind === 'history')?.revision ?? 'missing';
       const details = kinds.includes('history')
-        ? await opened.query({ kind: 'history.episodes', titles: [series] })
+        ? await opened.query({ kind: 'history.episodes', revision, titles: [series] })
         : null;
       if (kinds.includes('history'))
-        await opened.query({ kind: 'history.episodes', titles: [series] });
+        await opened.query({ kind: 'history.episodes', revision, titles: [series] });
       await opened.close();
       return {
         values,
         calls,
         details,
-        detailRowsCalls: rows.mock.calls.length - kinds.filter((kind) => kind === 'history').length,
+        detailRowsCalls: rows.mock.calls.length,
         detailDocumentScans: documents.mock.calls.length,
       };
     };
@@ -395,6 +396,8 @@ describe('LibraryLogAuthority', () => {
     });
     expect(history.details).toEqual({
       kind: 'history.episodes',
+      revision: expect.any(String),
+      stale: false,
       items: [
         {
           title: series,

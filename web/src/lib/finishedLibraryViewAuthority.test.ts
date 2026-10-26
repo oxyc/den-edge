@@ -14,7 +14,7 @@ import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { LIBRARY_SERVICE_PROTOCOL, type LibraryServiceHello } from './libraryServiceProtocol';
 import type { LibraryServiceAuthority } from './libraryServiceCore';
-import { deriveKeys, seal, type SettingsRow, type TitleRow } from './wire';
+import { deriveKeys, seal, type DocumentRow, type SettingsRow, type TitleRow } from './wire';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { RETAINED_PREFERENCE_SEED } from './libraryRetainedViews';
 import { ensureSyncPolicy } from './syncLoader';
@@ -183,7 +183,15 @@ function fullAuthority(): LibraryServiceAuthority {
   return {
     generation: 'generation-a',
     async select(selection) {
-      if (selection.kind === 'history') return { kind: 'history', items: [] };
+      if (selection.kind === 'history')
+        return {
+          kind: 'history',
+          revision: 'history-test',
+          filter: {},
+          total: 0,
+          facets: { all: 0, movie: 0, tv: 0, years: [] },
+          items: [],
+        };
       if (selection.kind === 'continue') return { kind: 'continue', items: [], needsShapes: [] };
       throw new Error(`unexpected ${selection.kind}`);
     },
@@ -257,8 +265,101 @@ it('opens completed capability facts without a monolithic snapshot or finished-v
     watchlist: [{ type: 'movie', id: 77 }],
   });
   expect(openFull).not.toHaveBeenCalled();
-  await opened!.authority.select({ kind: 'history' });
-  expect(openFull).toHaveBeenCalledOnce();
+  await expect(opened!.authority.select({ kind: 'history' })).resolves.toMatchObject({
+    kind: 'history',
+    items: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
+it('serves exact History episode details from bounded checkpoint membership without promotion', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const title = { type: 'tv' as const, id: 88 };
+  const documents: DocumentRow[] = [
+    {
+      format: 4,
+      kind: 'title',
+      title,
+      status: { value: 'watchlist', at: [1, 0, 'device'] },
+      addedAt: 1,
+    },
+    {
+      format: 4,
+      kind: 'season',
+      title,
+      season: 1,
+      seasonReset: null,
+      episodes: {
+        1: {
+          progress: { value: 1, at: [2_000, 0, 'device'], viewing: 0 },
+          imported: false,
+          plays: { 0: 2_000 },
+          cleared: null,
+        },
+      },
+    },
+  ];
+  const encrypted = await Promise.all(documents.map((row) => seal(keys, row)));
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    12,
+    encrypted.map(({ k, v }, index) => ({ k, value: v, seq: 11 + index, row: documents[index]! })),
+    true,
+  );
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+  const history = await opened!.authority.select({ kind: 'history' });
+  expect(history).toMatchObject({
+    kind: 'history',
+    items: [{ title, episodes: 1 }],
+  });
+  if (history.kind !== 'history') throw new Error('expected History');
+
+  await expect(
+    opened!.authority.query({
+      kind: 'history.episodes',
+      revision: history.revision,
+      titles: [title],
+    }),
+  ).resolves.toEqual({
+    kind: 'history.episodes',
+    revision: history.revision,
+    stale: false,
+    items: [{ title, seen: [{ season: 1, episode: 1 }] }],
+  });
+  await expect(
+    opened!.authority.query({
+      kind: 'history.episodes',
+      revision: history.revision,
+      titles: [{ type: 'tv', id: 999 }],
+    }),
+  ).resolves.toEqual({
+    kind: 'history.episodes',
+    revision: history.revision,
+    stale: false,
+    items: [{ title: { type: 'tv', id: 999 }, seen: [] }],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+
+  // Losing a member document makes details stale; it must not silently scan/promote the full log.
+  const documentKey = [...vault.values.keys()].find((stored) => stored.endsWith(encrypted[1]!.k))!;
+  vault.values.delete(documentKey);
+  await expect(
+    opened!.authority.query({
+      kind: 'history.episodes',
+      revision: history.revision,
+      titles: [title],
+    }),
+  ).resolves.toEqual({
+    kind: 'history.episodes',
+    revision: history.revision,
+    stale: true,
+    items: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
 });
 
 /**
@@ -1417,6 +1518,10 @@ it('promotes an unsupported view to the authoritative document path', async () =
   const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
   await expect(opened!.authority.select({ kind: 'history' })).resolves.toEqual({
     kind: 'history',
+    revision: 'history-test',
+    filter: {},
+    total: 0,
+    facets: { all: 0, movie: 0, tv: 0, years: [] },
     items: [],
   });
   expect(openFull).toHaveBeenCalledOnce();

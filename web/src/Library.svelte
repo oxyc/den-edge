@@ -99,10 +99,14 @@
   import type { LibraryModelLease } from './lib/libraryModel.svelte';
   import type {
     ContinueItem,
+    HistoryCursor,
+    HistoryFilter,
+    HistoryPage,
     HistoryView,
     RetainedBillboardScope,
     TitleRef,
     TitleView,
+    WatchlistView,
   } from './lib/libraryServiceProtocol';
   import { OverviewTitleIndex, titleViewRows } from './lib/libraryViewPresentation';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
@@ -310,6 +314,7 @@
   const updateRequired = $derived(libraryUpdateRequired(model));
 
   let historyLease = $state.raw<LibraryModelLease<HistoryView>>();
+  let watchlistLease = $state.raw<LibraryModelLease<WatchlistView>>();
   let titleLease = $state.raw<LibraryModelLease<TitleView>>();
   let downloadsLease = $state.raw<ReturnType<NonNullable<typeof model>['downloads']>>();
 
@@ -340,10 +345,14 @@
   $effect(() => {
     if (!model || route.page !== 'watchlist' || !historyAsked) return;
     const lease = model.history();
+    const savedLease = model.watchlist();
     historyLease = lease;
+    watchlistLease = savedLease;
     return () => {
       lease.release();
+      savedLease.release();
       if (historyLease === lease) historyLease = undefined;
+      if (watchlistLease === savedLease) watchlistLease = undefined;
     };
   });
   // The household's device list, which names the TVs a play can go to (`householdTvs`).
@@ -1943,6 +1952,36 @@
     });
   });
 
+  type DisplayHistoryPage = Omit<HistoryPage, 'items'> & { items: WatchedEntry[] };
+  const displayHistoryPage = (page: HistoryPage): DisplayHistoryPage => ({
+    ...page,
+    items: page.items.flatMap((entry): WatchedEntry[] => {
+      const title = session.displayTitle(entry.title);
+      return title
+        ? [
+            {
+              title,
+              at: entry.watchedAt,
+              ...(entry.episode ? { episode: entry.episode } : {}),
+              episodes: entry.episodes,
+            },
+          ]
+        : [];
+    }),
+  });
+
+  async function requestHistoryPage(
+    filter: HistoryFilter,
+    cursor?: HistoryCursor,
+    revision?: string,
+  ): Promise<DisplayHistoryPage | null> {
+    const snapshot = historyLease?.snapshot.value;
+    if (!model || !snapshot || profileActivity) return null;
+    const { page } = await model.historyPage(revision ?? snapshot.revision, filter, cursor);
+    await nameLibraryTitles(session, page.items.map(({ title }) => title) as TitleRef[]);
+    return displayHistoryPage(page as HistoryPage);
+  }
+
   let historyDetailGeneration = 0;
   const historyDetails = new SvelteMap<string, SeenEpisode[]>();
   const historyDetailRequests = new HistoryDetailRequests();
@@ -1957,15 +1996,17 @@
   // effect can advance the generation after a fast detail reply and discard that valid reply indefinitely.
   $effect.pre(() => resetHistoryDetails(historyLease?.snapshot.value));
 
-  function requestHistoryDetails(titles: Title[]) {
+  function requestHistoryDetails(titles: Title[], revision?: string) {
     if (!model || profileActivity) return;
+    const requestedRevision = revision ?? historyLease?.snapshot.value?.revision;
+    if (!requestedRevision) return;
     const requested = historyDetailRequests.take(titles, historyDetails);
     if (!requested.length) return;
     const generation = historyDetailGeneration;
     void model
-      .historyEpisodes(requested)
+      .historyEpisodes(requested, requestedRevision)
       .then((found) => {
-        if (generation !== historyDetailGeneration) return;
+        if (generation !== historyDetailGeneration || !found) return;
         for (const title of requested)
           historyDetails.set(titleKey(title), found.get(titleKey(title)) ?? []);
         historyDetailRequests.settled();
@@ -1987,16 +2028,19 @@
           ([key, episodes]) => [key, episodes.length] as const,
         ),
       );
-    return new Map(
+    const counts = new Map(
       (historyLease?.snapshot.value?.items ?? []).flatMap((entry) =>
         entry.title.type === 'tv' ? [[titleKey(entry.title), entry.episodes] as const] : [],
       ),
     );
+    return counts;
   });
   const savedCounts = $derived.by(() => {
     const counts = { all: 0, movie: 0, tv: 0 };
-    const saved = profileActivity ? profileActivity.watchlist : (overview?.watchlist ?? []);
-    for (const ref of withoutSeenEpisodes(saved, seenCounts)) {
+    const saved = profileActivity
+      ? withoutSeenEpisodes(profileActivity.watchlist, seenCounts)
+      : (watchlistLease?.snapshot.value?.titles ?? overview?.watchlist ?? []);
+    for (const ref of saved) {
       counts.all++;
       counts[ref.type]++;
     }
@@ -2004,9 +2048,9 @@
   });
   const savedTitles = $derived(
     profileActivity
-      ? [...profileActivity.watchlist]
+      ? withoutSeenEpisodes(profileActivity.watchlist, seenCounts)
       : (route.page === 'watchlist'
-          ? (overview?.watchlist ?? [])
+          ? (watchlistLease?.snapshot.value?.titles ?? overview?.watchlist ?? [])
           : (overview?.watchlist ?? []).slice(0, watchlistNameLimit)
         ).flatMap((ref) => session.displayTitle(ref) ?? []),
   );
@@ -2221,6 +2265,10 @@
       saved={savedTitles}
       {savedCounts}
       {history}
+      historyPage={historyLease?.snapshot.value
+        ? displayHistoryPage(historyLease.snapshot.value as unknown as HistoryPage)
+        : undefined}
+      onhistorypage={model && !profileActivity ? requestHistoryPage : undefined}
       year={watchedYear}
       onyear={(year) => navigate(watchlistHref(year))}
       shapes={session.shapes}

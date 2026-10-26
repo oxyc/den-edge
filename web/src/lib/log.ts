@@ -2571,6 +2571,12 @@ export class LibraryLog {
     );
   }
 
+  /** One exact document for a derived per-title index; avoids enumerating the whole library after a local edit. */
+  documentNamed(name: string): DocumentRow | undefined {
+    const row = this.entries.get(name)?.row;
+    return row && isDocument(row) ? row : undefined;
+  }
+
   /** The den-core-validated directory, when this library is already a profile-aware household. */
   profileDirectory(): ProfileDirectoryDocument | null {
     return this.profileDirectoryEntry?.document ?? null;

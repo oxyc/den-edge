@@ -467,6 +467,10 @@ const selectionValue = (selection: LibrarySelection, instance: string): LibraryS
   if (selection.kind === 'history')
     return {
       kind: 'history',
+      revision: `history-${instance}`,
+      filter: {},
+      total: 1,
+      facets: { all: 1, movie: 1, tv: 0, years: [] },
       items: [
         {
           title: { type: 'movie', id: 680 },

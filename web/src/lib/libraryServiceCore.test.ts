@@ -353,6 +353,10 @@ describe('LibraryServiceCore', () => {
         if (selection.kind === 'history')
           return {
             kind: 'history',
+            revision: `history-${watched ? 2 : 1}`,
+            filter: {},
+            total: watched ? 1 : 0,
+            facets: { all: watched ? 1 : 0, movie: watched ? 1 : 0, tv: 0, years: [] },
             items: watched ? [{ title, watchedAt: 10, episodes: 0 }] : [],
           };
         if (selection.kind === 'title')

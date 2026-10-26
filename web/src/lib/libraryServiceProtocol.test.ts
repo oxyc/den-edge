@@ -7,6 +7,13 @@ import { LIBRARY_SERVICE_PROTOCOL, LIBRARY_SERVICE_WIRE_LIMITS } from './library
 
 const version = { instance: 'worker-1', generation: 'generation-3', revision: 14 };
 const libraryKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+const historyPage = (items: unknown[]) => ({
+  revision: 'history-test',
+  filter: {},
+  total: items.length,
+  facets: { all: items.length, movie: 0, tv: items.length, years: [] },
+  items,
+});
 
 describe('library service client protocol', () => {
   it('bounds lazy History episode-coordinate requests and replies', () => {
@@ -15,7 +22,7 @@ describe('library service client protocol', () => {
         type: 'query',
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'history-details',
-        query: { kind: 'history.episodes', titles },
+        query: { kind: 'history.episodes', revision: 'history-test', titles },
       });
     expect(query([{ type: 'tv', id: 42 }])).toMatchObject({ ok: true });
     expect(query([{ type: 'movie', id: 42 }])).toMatchObject({ ok: false });
@@ -34,7 +41,12 @@ describe('library service client protocol', () => {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'history-details',
         version,
-        result: { kind: 'history.episodes', items },
+        result: {
+          kind: 'history.episodes',
+          revision: 'history-test',
+          stale: false,
+          items,
+        },
       });
     expect(
       reply([
@@ -1024,14 +1036,14 @@ describe('library service server protocol', () => {
         version: { ...version, revision: 16 },
         value: {
           kind: 'history',
-          items: [
+          ...historyPage([
             {
               title: { type: 'tv', id: 42 },
               watchedAt: 1_800_000_000_000,
               episode: { season: 2, episode: 3 },
               episodes: 11,
             },
-          ],
+          ]),
         },
       }),
     ).toMatchObject({ ok: true, value: { value: { kind: 'history' } } });
@@ -1128,14 +1140,14 @@ describe('library service server protocol', () => {
         version,
         value: {
           kind: 'history',
-          items: [
+          ...historyPage([
             {
               title: { type: 'movie', id: 9 },
               watchedAt: 100,
               episodes: 0,
               stamp: [100, 0, 'device'],
             },
-          ],
+          ]),
         },
       }),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });

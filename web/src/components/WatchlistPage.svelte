@@ -6,13 +6,14 @@
   import {
     UNKNOWN_YEAR,
     airedEpisodes,
+    compareHistoryTitleKeys,
     seenAired,
-    withoutSeenEpisodes,
     watchedView,
     type SeenEpisode,
     type WatchedEntry,
   } from '../lib/history';
   import type { ContinueEntry, MediaType, Shape, Title } from '../lib/library';
+  import type { HistoryCursor, HistoryFacets, HistoryFilter } from '../lib/libraryServiceProtocol';
   import { titleHref } from '../lib/route';
   import { yieldTask } from '../lib/taskYield';
   import Select from '../settings/Select.svelte';
@@ -25,6 +26,8 @@
     saved,
     savedCounts,
     history,
+    historyPage,
+    onhistorypage,
     year,
     onyear,
     shapes,
@@ -41,6 +44,12 @@
     /** Library-owned counts stay truthful while metadata for individual cards is still arriving or absent. */
     savedCounts: { all: number; movie: number; tv: number };
     history: WatchedEntry[];
+    historyPage?: DisplayHistoryPage;
+    onhistorypage?: (
+      filter: HistoryFilter,
+      cursor?: HistoryCursor,
+      revision?: string,
+    ) => Promise<DisplayHistoryPage | null>;
     /** The year Watched shows (`watchedYear`), or undefined for every year. */
     year?: string;
     /** Another year picked; undefined for every year. */
@@ -53,7 +62,7 @@
     seenCounts: ReadonlyMap<string, number>;
     failure?: string | null;
     /** Ask the library for exact watched coordinates for cards entering the drawn window. */
-    ondetails?: (titles: Title[]) => void;
+    ondetails?: (titles: Title[], revision?: string) => void;
     /** Off Continue Watching until it's played again; absent where nothing can be written (a guest). */
     ondismiss?: (title: Title) => void;
     /** Out of the library, as the TV's Remove does. */
@@ -61,6 +70,15 @@
     /** Seen or not, as the title page's Seen button does it: a series with every aired episode. */
     onseen?: (title: Title, seen: boolean) => void;
   } = $props();
+
+  type DisplayHistoryPage = {
+    revision: string;
+    filter: HistoryFilter;
+    total: number;
+    facets: HistoryFacets;
+    items: WatchedEntry[];
+    nextCursor?: HistoryCursor;
+  };
 
   type Control = {
     label: string;
@@ -77,6 +95,9 @@
   let count = $state(STEP);
   let bottom = $state<HTMLElement>();
   let kind = $state<MediaType | null>(null);
+  let requestedPage = $state.raw<DisplayHistoryPage | null>(null);
+  let requestedFilterKey = $state('');
+  let pageLoading = false;
   /** The same three tabs over the watchlist. It was two headed sections, which read as two different things. */
   let savedKind = $state<MediaType | null>(null);
   /** The control waiting for its second press, by control and title, and the question it asks. */
@@ -85,7 +106,7 @@
   const key = (title: Title) => `${title.type}:${title.id}`;
   // A series with an episode seen is under way: it's in Continue Watching or Watched, so the watchlist doesn't also
   // offer to mark it watched.
-  const listed = $derived(withoutSeenEpisodes(saved, seenCounts));
+  const listed = $derived(saved);
   const savedShown = $derived(savedKind ? listed.filter((t) => t.type === savedKind) : listed);
   /**
    * How much of the watchlist is drawn: `STEP` cards, then another `STEP` after each yield, until all of it. Drawn in
@@ -106,32 +127,125 @@
       live = false;
     };
   });
+  const remoteFilter = $derived<HistoryFilter>({
+    ...(kind ? { type: kind } : {}),
+    ...(year ? { year } : {}),
+  });
+  const remoteFilterKey = $derived(`${remoteFilter.type ?? 'all'}:${remoteFilter.year ?? 'all'}`);
+  const remote = $derived(
+    onhistorypage && requestedFilterKey === remoteFilterKey
+      ? (requestedPage ?? undefined)
+      : undefined,
+  );
   const view = $derived(watchedView(history, kind, year));
-  const shown = $derived(view.shown);
+  const shown = $derived(onhistorypage ? (remote?.items ?? []) : view.shown);
+  const filteredTotal = $derived.by(() => {
+    const facets = historyPage?.facets;
+    if (!facets) return shown.length;
+    if (!year) return facets[kind ?? 'all'];
+    return facets.years.find((candidate) => candidate.year === year)?.[kind ?? 'all'] ?? 0;
+  });
+  const shownTotal = $derived(remote?.total ?? filteredTotal);
+  const facetYears = $derived(
+    (() => {
+      const values =
+        historyPage?.facets.years.map(({ year: filed, all, movie, tv }) => ({
+          year: filed,
+          count: kind ? (kind === 'movie' ? movie : tv) : all,
+        })) ?? [];
+      if (year && !values.some((candidate) => candidate.year === year))
+        values.push({ year, count: 0 });
+      const rank = (filed: string) => (filed === UNKNOWN_YEAR ? -Infinity : Number(filed));
+      return values.sort((left, right) => rank(right.year) - rank(left.year));
+    })(),
+  );
   const yearOptions = $derived([
     { value: '', label: 'All years' },
-    ...view.years.map((y) => ({
-      value: y.year,
-      label: `${y.year === UNKNOWN_YEAR ? 'Unknown' : y.year} (${y.count})`,
-    })),
+    ...(historyPage ? facetYears.filter((y) => y.count || y.year === year) : view.years).map(
+      (y) => ({
+        value: y.year,
+        label: `${y.year === UNKNOWN_YEAR ? 'Unknown' : y.year} (${y.count})`,
+      }),
+    ),
   ]);
+
+  $effect(() => {
+    const load = onhistorypage;
+    const base = historyPage;
+    const selectedFilter = remoteFilterKey;
+    if (!load || !base) return;
+    let current = true;
+    requestedFilterKey = selectedFilter;
+    if (selectedFilter === 'all:all') {
+      const previous = requestedPage;
+      if (previous?.revision === base.revision) {
+        const first = new Set(base.items.map((entry) => key(entry.title)));
+        requestedPage = {
+          ...base,
+          items: [
+            ...base.items,
+            ...previous.items.filter((entry) => !first.has(key(entry.title))),
+          ].sort(
+            (left, right) =>
+              right.at - left.at || compareHistoryTitleKeys(key(left.title), key(right.title)),
+          ),
+          nextCursor: previous.nextCursor,
+        };
+      } else requestedPage = base;
+      return;
+    }
+    requestedPage = null;
+    pageLoading = true;
+    void load(remoteFilter)
+      .then(
+        (page) => {
+          if (current) requestedPage = page;
+        },
+        () => {},
+      )
+      .finally(() => {
+        if (current) pageLoading = false;
+      });
+    return () => {
+      current = false;
+    };
+  });
 
   $effect(() => {
     ondetails?.(
       shown
-        .slice(0, count)
+        .slice(0, remote ? shown.length : count)
         .map((entry) => entry.title)
         .filter((title) => title.type === 'tv'),
+      remote?.revision,
     );
   });
 
   // Observed again after each step: one step that doesn't reach past the screen — a very wide one — fires nothing
   // more on its own, so the list would stop there.
   $effect(() => {
-    if (!bottom || count >= shown.length) return;
+    if (!bottom || (!remote?.nextCursor && count >= shown.length)) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting)) count += STEP;
+        if (!entries.some((e) => e.isIntersecting)) return;
+        if (!remote?.nextCursor || !onhistorypage) {
+          count += STEP;
+          return;
+        }
+        if (pageLoading) return;
+        pageLoading = true;
+        const previous = remote;
+        void onhistorypage(remoteFilter, previous.nextCursor, previous.revision)
+          .then((page) => {
+            if (!page) return;
+            requestedPage =
+              page.revision === previous.revision &&
+              `${page.filter.type ?? 'all'}:${page.filter.year ?? 'all'}` === remoteFilterKey
+                ? { ...page, items: [...previous.items, ...page.items] }
+                : page;
+          })
+          .catch(() => {})
+          .finally(() => (pageLoading = false));
       },
       { rootMargin: '800px 0px' },
     );
@@ -150,7 +264,7 @@
   /** The drawn part of the history, by the month it was watched in; a watch with no time goes under Earlier. */
   const months = $derived.by(() => {
     const groups: { key: string; label: string; entries: WatchedEntry[] }[] = [];
-    for (const entry of shown.slice(0, count)) {
+    for (const entry of shown.slice(0, remote ? shown.length : count)) {
       const date = new Date(entry.at);
       const [month, label] =
         entry.at > 0
@@ -301,7 +415,7 @@
 {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
 <p class="visually-hidden" aria-live="polite">{confirming?.question ?? ''}</p>
 
-{#if !resume.length && !saved.length && !history.length}
+{#if !resume.length && !saved.length && !(historyPage?.facets.all ?? history.length)}
   <p class="note">
     Nothing here yet. Add titles to your watchlist from their page, and what you watch on the TV or
     here shows up as you go.
@@ -352,10 +466,10 @@
   </section>
 {/if}
 
-{#if history.length && savedDrawn >= savedShown.length}
+{#if (historyPage?.facets.all ?? history.length) && savedDrawn >= savedShown.length}
   <section aria-label="Watched">
     <div class="heading">
-      <h2>Watched <span class="count">{shown.length}</span></h2>
+      <h2>Watched <span class="count">{shownTotal}</span></h2>
       <div class="filters">
         <Select
           label="Year watched"
