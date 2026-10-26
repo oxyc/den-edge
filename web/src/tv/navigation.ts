@@ -26,6 +26,10 @@ const move = (
 /** A real touch digit, unlike a Magic Remote's coarse pointer, needs Search ready inside its activating tap. */
 export const touchNeedsSearchPreload = (touchPoints: number): boolean => touchPoints > 0;
 
+/** Leaving a restored Search focus is not Search intent; arriving on it is handled after spatial movement. */
+export const searchKeyNeedsPreload = (key: string): boolean =>
+  !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Escape', 'Backspace'].includes(key);
+
 /* A title page is entered to act on the title. Its primary action is deliberately first in DOM order; when Play is
    unavailable, the first remaining pill is the honest fallback. Scope this to the active retained route so a
    previous title page cannot take focus while the new one is mounting. */
@@ -179,12 +183,20 @@ export function installTVNavigation(): () => void {
   const preloadSearch = () => {
     if (!searchPreload) {
       const loaded = beginStartupRenderPhase('tv_search');
-      searchPreload = SearchScreen.load().then(() => {
-        loaded();
-        // Expose a one-shot event so the strict browser regression can begin at that boundary without delaying
-        // production. Pointer and remote focus intent use this same path.
-        document.dispatchEvent(new Event('den:tv-search-preloaded'));
-      });
+      const attempt = SearchScreen.load()
+        .then(() => {
+          // lazy() resolves failures after marking the screen retryable. Do not pin that failed outer attempt or
+          // announce it as ready: the next real Search intent should try the import again.
+          if (!SearchScreen.current) {
+            if (searchPreload === attempt) searchPreload = undefined;
+            return;
+          }
+          // Expose a one-shot event so the strict browser regression can begin at that boundary without delaying
+          // production. Pointer and remote focus intent use this same path.
+          document.dispatchEvent(new Event('den:tv-search-preloaded'));
+        })
+        .finally(loaded);
+      searchPreload = attempt;
     }
     return searchPreload;
   };
@@ -293,11 +305,12 @@ export function installTVNavigation(): () => void {
     pendingRestores.clear();
     window.dispatchEvent(new Event('den:tv-input'));
     let target = event.target instanceof Element ? event.target : null;
-    // Initial focus restoration may land on Search without expressing intent. A real remote press on it does.
-    if (searchButton(target)) void preloadSearch();
     const direction = (
       { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as const
     )[event.key];
+    // Initial focus restoration may land on Search without expressing intent. Activation does; an arrow leaving
+    // it does not. Moving onto Search is admitted after spatial navigation below.
+    if (searchButton(target) && searchKeyNeedsPreload(event.key)) void preloadSearch();
     // A live shelf publication can replace the focused node between remote presses. The browser then targets the
     // next key at body; spatialNavigation's generic cold-start fallback is Search, so a following Select appeared
     // to open Search at random. Recover the route's remembered semantic control first and apply this same direction

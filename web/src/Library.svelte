@@ -57,6 +57,7 @@
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
+  import { lastPromiseCache } from './lib/lastPromiseCache';
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
@@ -1751,25 +1752,18 @@
   /** A restricted profile neither reads nor writes a kept billboard: those rankings are not policy-scoped. */
   const keepsBillboard = () => !session.restricted;
   type RetainedBillboardRead = Immutable<RetainedBillboard> | null;
-  let retainedBillboardRead: { key: string; promise: Promise<RetainedBillboardRead> } | undefined;
+  const retainedBillboardRead = lastPromiseCache<string, RetainedBillboardRead>();
   const retainedBillboardKey = (scope: RetainedBillboardScope) =>
     `${scope.kind}:${scope.facet ?? 'all'}:${scope.fresh ? 'fresh' : 'ordinary'}`;
   /** The first-paint and refreshed-ranking paths ask for the same kept value; share that one Worker read. */
   function readRetainedBillboard(scope: RetainedBillboardScope): Promise<RetainedBillboardRead> {
     const key = retainedBillboardKey(scope);
-    if (retainedBillboardRead?.key === key) return retainedBillboardRead.promise;
-    const promise = model!.ready.then(() => model!.retainedBillboard(scope));
-    retainedBillboardRead = { key, promise };
-    // A valid absent answer is worth sharing for this visit. A failed transport is not: a later refresh keeps the
-    // previous behavior of making one fresh attempt rather than pinning the failure in this page-side cache.
-    void promise.catch(() => {
-      if (retainedBillboardRead?.promise === promise) retainedBillboardRead = undefined;
-    });
-    return promise;
+    return retainedBillboardRead.read(key, () =>
+      model!.ready.then(() => model!.retainedBillboard(scope)),
+    );
   }
   function forgetRetainedBillboard(scope: RetainedBillboardScope): void {
-    if (retainedBillboardRead?.key === retainedBillboardKey(scope))
-      retainedBillboardRead = undefined;
+    retainedBillboardRead.forget(retainedBillboardKey(scope));
   }
   const retainedTitles = (titles: Immutable<RetainedBillboard['titles']>): RecommendedTitle[] =>
     [...titles] as RecommendedTitle[];
