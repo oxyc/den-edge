@@ -11,6 +11,7 @@
   let {
     rows,
     shown,
+    browseReady,
     showServices,
     services,
     servicePending,
@@ -20,6 +21,8 @@
   }: {
     rows: RowDef[];
     shown: (title: Title) => boolean;
+    /** Home waits for its visible provider names so catalogue rows load once with their final captions. */
+    browseReady: boolean;
     showServices: boolean;
     services: ResolvedService[];
     servicePending: number;
@@ -38,4 +41,4 @@
     onintent={onServiceIntent}
   />
 {/if}
-<Browse {rows} {shown} />
+{#if browseReady}<Browse {rows} {shown} />{/if}

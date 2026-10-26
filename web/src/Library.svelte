@@ -180,6 +180,7 @@
   let shelvesReady = $state(model === null);
   let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
   let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
+  let homeServicesSettled = $state(false);
   let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
   let HomeCatalogue = $state.raw<typeof import('./components/HomeCatalogue.svelte').default | null>(
     null,
@@ -192,7 +193,7 @@
     }
     // Direct browse routes keep their useful TMDB rows while the optional service/catalogue helpers arrive.
     if (!home) homeMetadataReady = true;
-    if (homeServices && untrack(() => HomeCatalogue)) {
+    if (homeServicesSettled && untrack(() => HomeCatalogue)) {
       homeMetadataReady = true;
       return;
     }
@@ -203,7 +204,10 @@
       // admits a Home with neither a poster nor hero detail; guests and direct browse routes still load it immediately.
       if (model && home && document.visibilityState === 'visible')
         await new Promise<void>((resolve) =>
-          scheduleAfterStartupMilestone(resolve, ['first poster', 'billboard detail']),
+          scheduleAfterStartupMilestone(resolve, ['first poster', 'billboard detail'], {
+            timeoutMs: 3_000,
+            fallbackDelayMs: 0,
+          }),
         );
       if (!current) return;
       await yieldTask();
@@ -216,7 +220,12 @@
       if (component) HomeCatalogue = component.default;
       homeMetadataReady = true;
       const catalogue = await catalogueLoading;
-      if (current && catalogue) homeServices = catalogue;
+      if (current) {
+        if (catalogue) homeServices = catalogue;
+        // GUEST_PICKS are supplied by this chunk. Do not briefly mount Browse against an empty placeholder and then
+        // tear it down again while those defaults and their provider directories arrive.
+        homeServicesSettled = true;
+      }
     })();
     return () => {
       current = false;
@@ -1658,6 +1667,7 @@
   );
   /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
   let serviceDirectoriesAdmitted = $state(false);
+  let directoryServicesFailed = $state(false);
   $effect(() => {
     if (!serviceDirectoriesAdmitted || directoryServices) return;
     let current = true;
@@ -1667,6 +1677,7 @@
       },
       () => {
         // A stale optional chunk is retried on the next full page visit; the row remains unavailable meanwhile.
+        if (current) directoryServicesFailed = true;
       },
     );
     return () => {
@@ -1706,6 +1717,26 @@
         homeServices?.resolvePicks(servicePicks, directories[country] ?? [], country) ?? [],
     ),
   );
+  // Decide once. Atlas discovery can finish after the component chunk; a reactive boolean would otherwise mount
+  // Browse, revoke it when provider rows appear, and mount it again after their display names arrive.
+  let homeBrowseReady = $state(false);
+  $effect(() => {
+    if (homeBrowseReady || !homeServicesSettled) return;
+    const noProviderRows =
+      session.kid ||
+      (atlasReady && (!atlas || !servicePicks.length)) ||
+      (serviceDirectoriesAdmitted && directoryServicesFailed);
+    const providerNamesSettled =
+      atlasReady &&
+      !!atlas &&
+      serviceDirectoriesAdmitted &&
+      !!directoryServices &&
+      naming === 0 &&
+      servicePicks.every(({ country }) => askedFor[country]);
+    if (!noProviderRows && !providerNamesSettled) return;
+    startupRenderPhase('home_metadata');
+    homeBrowseReady = true;
+  });
   /**
    * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
    * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
@@ -2559,6 +2590,7 @@
         <HomeCatalogue
           {rows}
           shown={browseShown}
+          browseReady={homeBrowseReady}
           showServices
           {services}
           servicePending={serviceDirectoriesAdmitted
@@ -2578,6 +2610,7 @@
       <HomeCatalogue
         {rows}
         shown={browseShown}
+        browseReady
         showServices={false}
         {services}
         servicePending={0}

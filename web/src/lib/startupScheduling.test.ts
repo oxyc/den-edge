@@ -48,4 +48,24 @@ describe('startup milestone scheduling', () => {
     }
     expect(now).toBe(500);
   });
+
+  it('does not add the useful-content quiet delay after the fallback deadline', () => {
+    let now = 0;
+    const scheduled: Array<{ task: () => void; after: number }> = [];
+    const ran: number[] = [];
+    scheduleAfterStartupMilestone(
+      () => ran.push(now),
+      ['never'],
+      { timeoutMs: 500, delayMs: 1_000, fallbackDelayMs: 0, pollMs: 250 },
+      () => undefined,
+      () => now,
+      (task, after) => scheduled.push({ task, after }),
+    );
+    while (!ran.length) {
+      const next = scheduled.shift()!;
+      now += next.after;
+      next.task();
+    }
+    expect(now).toBe(500);
+  });
 });
