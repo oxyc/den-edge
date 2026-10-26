@@ -379,6 +379,16 @@ test('a series’ page says which device plays which episode, and keeps controls
     playing.pause();
     await expect(label).toHaveText('Paused on Apple TV', { timeout: 20_000 });
     await expect(controls.getByRole('button', { name: 'Resume' })).toBeVisible();
+    const controlsBeforePrimaryResume = edge.controls.length;
+    const addressBeforePrimaryResume = page.url();
+    const remoteResume = page.getByRole('button', { name: 'Resume on Apple TV', exact: true });
+    const moreWays = page.getByRole('button', { name: 'More ways to resume on apple tv' });
+    await moreWays.click();
+    await expect(page.getByRole('menuitem', { name: 'Resume here', exact: true })).toBeVisible();
+    await moreWays.click();
+    await remoteResume.click();
+    await expect.poll(() => edge.controls.length).toBe(controlsBeforePrimaryResume + 1);
+    expect(page.url(), 'resuming the TV stays on the title page').toBe(addressBeforePrimaryResume);
     const pausedSamples = await watch(clock, 3_000);
     expect(new Set(pausedSamples).size, 'the paused clock stayed frozen').toBe(1);
     expect(await boxes(), 'nothing moved when playback paused').toEqual(without);

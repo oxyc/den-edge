@@ -1053,6 +1053,13 @@
               ? (tv) => onplay(tv, d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
             {tvs}
+            primaryPlay={live && !transportPlaying && ontransport
+              ? {
+                  label: `Resume on ${live.device ?? 'TV'}`,
+                  onselect: () => void transport('play'),
+                  tv: live.deviceId,
+                }
+              : undefined}
             onplayhere={onplayhere
               ? () => onplayhere(d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
