@@ -689,24 +689,25 @@ export function displayableKept(
 
 /**
  * The slides as titles to draw, in atlas's order. A title one of the offered lists already named is taken from there;
- * the rest — atlas's own lists name titles by id — are looked up, `lookups` at a time. One TMDB can't name is left
- * out rather than drawn blank.
+ * the rest — atlas's own lists name titles by id — are sent in one bounded batch whose content authority owns the
+ * lookup concurrency. One TMDB can't name is left out rather than drawn blank.
  */
 export async function nameSlides(
   slides: Slide[],
   known: Map<string, Title>,
-  lookup: (ref: { type: MediaType; id: number }) => Promise<Title | null>,
-  lookups: number,
+  lookup: (refs: { type: MediaType; id: number }[]) => Promise<Title[]>,
 ): Promise<RecommendedTitle[]> {
-  const named = new Map<string, Title>();
-  const queue = slides.filter((slide) => !known.has(`${slide.type}:${slide.id}`));
-  const work = async () => {
-    for (let next = queue.shift(); next; next = queue.shift()) {
-      const title = await lookup({ type: next.type, id: next.id }).catch(() => null);
-      if (title) named.set(`${next.type}:${next.id}`, title);
-    }
-  };
-  await Promise.all(Array.from({ length: lookups }, work));
+  const missing = [
+    ...new Map(
+      slides
+        .filter((slide) => !known.has(`${slide.type}:${slide.id}`))
+        .map(({ type, id }) => [`${type}:${id}`, { type, id }] as const),
+    ).values(),
+  ];
+  const looked = missing.length ? await lookup(missing) : [];
+  const named = new Map<string, Title>(
+    looked.map((title) => [`${title.type}:${title.id}`, title] as const),
+  );
   return slides.flatMap((slide) => {
     const key = `${slide.type}:${slide.id}`;
     const title = known.get(key) ?? named.get(key);

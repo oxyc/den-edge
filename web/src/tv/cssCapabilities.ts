@@ -22,6 +22,14 @@ export function supportsFlexGap(): boolean {
   return supported;
 }
 
+/** Preserve the old-TV spacing policy without measuring flex layout on the Grid-capable supported tiers. */
+export function needsLegacyGapFallback(
+  grid: boolean,
+  flexGap: () => boolean = supportsFlexGap,
+): boolean {
+  return !grid && !flexGap();
+}
+
 /**
  * Capability classes keep old-engine fallbacks in the TV stylesheet. Components retain ordinary standards-based
  * CSS, and modern LG/Samsung builds pay only these startup checks rather than carrying platform branches.
@@ -30,13 +38,13 @@ export function installTvCssCapabilities(): () => void {
   const measured = beginStartupRenderPhase('tv_css');
   const root = document.documentElement;
   const grid = CSS.supports('display', 'grid');
-  const flexGap = supportsFlexGap();
+  const needsGapFallback = needsLegacyGapFallback(grid);
   const focusWithin = supportsSelector(':focus-within');
   const customProperties = CSS.supports('--den-css-vars', '1');
   root.classList.toggle('tv-no-grid', !grid);
   // Only without Grid too: the flex-gap fallbacks target containers that are grids elsewhere, and an engine with Grid
   // (Chromium 69 on Tizen 5.5) honours their grid `gap`, so a margin would add to it.
-  root.classList.toggle('tv-no-flex-gap', !flexGap && !grid);
+  root.classList.toggle('tv-no-flex-gap', needsGapFallback);
   root.classList.toggle('tv-no-focus-within', !focusWithin);
   root.classList.toggle('tv-no-custom-properties', !customProperties);
   measured();

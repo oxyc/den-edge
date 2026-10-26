@@ -196,6 +196,31 @@ describe('startup timing', () => {
     expect(Object.fromEntries(startupLongTaskPhases())).toEqual({ app_mount: [1, 80, 80] });
   });
 
+  it('does not charge a whole long task to a phase that began partway through it', async () => {
+    let observed!: (list: { getEntries(): PerformanceEntry[] }) => void;
+    vi.stubGlobal(
+      'PerformanceObserver',
+      class {
+        static supportedEntryTypes = ['longtask'];
+        constructor(callback: typeof observed) {
+          observed = callback;
+        }
+        observe() {}
+      },
+    );
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    const { beginStartupRenderPhase, startupLongTaskPhases } = await load();
+    const started = performance.now();
+    vi.advanceTimersByTime(100);
+    beginStartupRenderPhase('tv_css');
+    vi.advanceTimersByTime(100);
+    observed({
+      getEntries: () => [{ startTime: started, duration: 200 } as PerformanceEntry],
+    });
+
+    expect(Object.fromEntries(startupLongTaskPhases())).toEqual({ other: [1, 200, 200] });
+  });
+
   it('drains queued observer records before the load report snapshots its totals', async () => {
     const pending = [{ startTime: performance.now(), duration: 73 } as PerformanceEntry];
     vi.stubGlobal(
