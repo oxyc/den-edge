@@ -2,11 +2,18 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { LibraryFactStore } from './libraryFactStore';
 import type { Vault, VaultChange } from './localVault';
 import { ensureSyncPolicy } from './syncLoader';
+import { syncPolicy } from './syncCore';
 import type { DocumentRow, EpisodeRow, Row, TitleRow } from './wire';
+
+vi.mock('./syncCore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./syncCore')>();
+  return { ...actual, syncPolicy: vi.fn(actual.syncPolicy) };
+});
 
 class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
   readonly gets: string[] = [];
+  readonly pages: string[] = [];
   failCommit = false;
   commits = 0;
 
@@ -18,6 +25,7 @@ class MemoryVault implements Vault {
     return [...this.values].filter(([key]) => key.startsWith(prefix));
   }
   async page(prefix: string, after: string | undefined, limit: number) {
+    this.pages.push(prefix);
     return [...this.values]
       .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
       .sort(([left], [right]) => left.localeCompare(right))
@@ -151,7 +159,7 @@ describe('library fact store', () => {
     await expect(store.manifest()).resolves.toEqual(before);
   });
 
-  it('builds the first complete History checkpoint from the import scan without reopening every document', async () => {
+  it('derives Continue and the first History checkpoint in one projection pass', async () => {
     const vault = new MemoryVault();
     const store = (await LibraryFactStore.open(libraryKey, vault))!;
     const seasons = Array.from({ length: 40 }, (_, index): DocumentRow => ({
@@ -169,6 +177,8 @@ describe('library fact store', () => {
         },
       },
     }));
+    const policy = vi.mocked(syncPolicy);
+    policy.mockClear();
     await store.commitBatch(
       'generation-a',
       seasons.length,
@@ -181,13 +191,147 @@ describe('library fact store', () => {
       false,
     );
     vault.gets.length = 0;
+    vault.pages.length = 0;
 
     await store.commitBatch('generation-a', seasons.length, [], true);
 
     expect(vault.gets.filter((key) => key.includes(':document:'))).toEqual([]);
+    expect(vault.pages.filter((key) => key.includes(':document:'))).toEqual([]);
+    expect(policy.mock.calls.filter(([request]) => request.op === 'season_state_v4')).toHaveLength(
+      seasons.length,
+    );
     await expect(store.history((await store.manifest())!)).resolves.toMatchObject({
       source: { version: seasons.length },
     });
+  });
+
+  it('rebuilds History from stored authority when an incomplete import resumes in a new instance', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const row: DocumentRow = {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 90 },
+      season: 2,
+      seasonReset: null,
+      episodes: {
+        3: {
+          progress: { value: 1, at: [300, 0, 'device'], viewing: 0 },
+          imported: false,
+          plays: { 0: 300 },
+          cleared: null,
+        },
+      },
+    };
+    await store.commitBatch(
+      'generation-a',
+      1,
+      [{ k: '9'.repeat(64), seq: 1, value: 'ciphertext', row }],
+      false,
+    );
+
+    const resumed = (await LibraryFactStore.open(libraryKey, vault))!;
+    await resumed.manifest();
+    vault.pages.length = 0;
+    await resumed.commitBatch('generation-a', 1, [], true);
+
+    expect(vault.pages.some((prefix) => prefix.includes(':document:'))).toBe(true);
+    expect((await resumed.history((await resumed.manifest())!))?.page()?.items).toEqual([
+      {
+        title: { type: 'tv', id: 90 },
+        watchedAt: 300,
+        episode: { season: 2, episode: 3 },
+        episodes: 1,
+      },
+    ]);
+  });
+
+  it('appends import derivations after commit without copying the growing map', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const document = (id: number, at: number): DocumentRow => ({
+      format: 4,
+      kind: 'title',
+      title: { type: 'movie', id },
+      status: { value: 'watched', at: [at, 0, 'device'] },
+      addedAt: at,
+    });
+    const entry = (id: number) => ({
+      k: String(id).padStart(64, '0'),
+      seq: id,
+      value: `ciphertext-${id}`,
+      row: document(id, id * 100),
+    });
+    const retained = () =>
+      (
+        store as unknown as {
+          historyImport?: { documents: Map<string, unknown> };
+        }
+      ).historyImport?.documents;
+
+    await store.commitBatch('generation-a', 1, [entry(1)], false);
+    const first = retained();
+    expect(first?.size).toBe(1);
+    await store.commitBatch('generation-a', 2, [entry(2)], false);
+    expect(retained()).toBe(first);
+    expect(first?.size).toBe(2);
+
+    vault.failCommit = true;
+    await expect(store.commitBatch('generation-a', 3, [entry(3)], false)).rejects.toThrow(
+      'interrupted',
+    );
+    expect(retained()).toBe(first);
+    expect(first?.size).toBe(2);
+    vault.failCommit = false;
+
+    await store.commitBatch('generation-a', 3, [entry(3)], true);
+    expect(retained()).toBeUndefined();
+    expect((await store.history((await store.manifest())!))?.page()?.items).toHaveLength(3);
+  });
+
+  it('keeps the projection-time reconsider deadline when the clock crosses it during commit', async () => {
+    const now = 1_800_000_000_000;
+    const believableAt = now + 5_000;
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(now)
+      .mockReturnValue(believableAt + 1);
+    try {
+      const vault = new MemoryVault();
+      const store = (await LibraryFactStore.open(libraryKey, vault))!;
+      const row: DocumentRow = {
+        format: 4,
+        kind: 'season',
+        title: { type: 'tv', id: 91 },
+        season: 1,
+        seasonReset: null,
+        episodes: {
+          1: {
+            progress: {
+              value: 1,
+              at: [now + 86_400_000 + 5_000, 0, 'future'],
+              viewing: 0,
+            },
+            imported: false,
+            plays: { 0: now + 86_400_000 + 5_000 },
+            cleared: null,
+          },
+        },
+      };
+      await store.commitBatch(
+        'generation-a',
+        1,
+        [{ k: '8'.repeat(64), seq: 1, value: 'ciphertext', row }],
+        true,
+      );
+      clock.mockReturnValue(now);
+
+      const history = await store.history((await store.manifest())!);
+      expect(history?.source.reconsiderAt).toBe(believableAt);
+      expect(history?.page()?.items).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('reduces Watchlist and Continue independently without a watched-history fact', async () => {

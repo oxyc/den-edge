@@ -26,8 +26,12 @@ import {
   MaterializedHistoryIndex,
   compareHistoryItems,
   currentHistoryTimeZone,
+  historyItemFromProjections,
   historyItemFromDocuments,
+  historySeasonProjection,
+  type HistoryDocumentProjection,
 } from './historyIndex';
+import { WATCHED } from './actions';
 import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import type { Vault, VaultChange } from './localVault';
 import {
@@ -150,23 +154,58 @@ function projected(row: Row, now: number): Row[] {
   return isDocument(row) && row.kind !== 'delivery' ? projectDocument(row, now) : [row];
 }
 
-function continueOfSeason(season: DocumentRow, now: number): Library {
+function continueAndHistoryOfSeason(
+  season: DocumentRow,
+  now: number,
+): { library: Library; history: HistoryDocumentProjection } {
   const summaries = new ContinueSummaries();
-  forEachProjectedEpisode(season, (episode) => summaries.addEpisode(episode), now);
-  return summaries.compact();
+  const watched: number[] = [];
+  forEachProjectedEpisode(
+    season,
+    (episode) => {
+      summaries.addEpisode(episode);
+      if (episode.progress.value >= WATCHED) watched.push(episode.episode, episode.progress.at[0]);
+    },
+    now,
+  );
+  return { library: summaries.compact(), history: historySeasonProjection(season, watched) };
 }
 
 function facts(
   row: Row | null,
   retainEpisodeProjection = false,
-): Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> {
-  if (!row) return {};
+): {
+  selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>>;
+  history: HistoryDocumentProjection | null;
+  reconsiderAt: number | null;
+} {
+  if (!row) return { selected: {}, history: null, reconsiderAt: null };
   const now = Date.now();
+  const reconsiderAt = newestSummary(row, now).reconsiderAt ?? null;
   // A season document is only ever Continue's input, so its episodes are folded one at a time instead of held.
   const season = isDocument(row) && row.kind === 'season' && !retainEpisodeProjection ? row : null;
   const rows = season ? [] : projected(row, now);
   const library = applyLog(emptyLibrary(), rows);
-  const folded = season ? continueOfSeason(season, now) : compactContinueLibrary(library);
+  const seasonFacts = season ? continueAndHistoryOfSeason(season, now) : null;
+  const folded = seasonFacts?.library ?? compactContinueLibrary(library);
+  const projectedTitle = rows.find((candidate): candidate is TitleRow => candidate.kind === 'rec');
+  const retainedSeason =
+    isDocument(row) && row.kind === 'season'
+      ? historySeasonProjection(
+          row,
+          rows.flatMap((candidate) =>
+            candidate.kind === 'ep' && candidate.progress.value >= WATCHED
+              ? [candidate.episode, candidate.progress.at[0]]
+              : [],
+          ),
+        )
+      : null;
+  const history =
+    seasonFacts?.history ??
+    retainedSeason ??
+    (projectedTitle && isDocument(row) && row.kind === 'title'
+      ? { kind: 'title', title: projectedTitle }
+      : null);
   const selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>> =
     {};
   for (const setting of rows.filter(
@@ -182,7 +221,7 @@ function facts(
     if (setting.name === 'plugins' || setting.name === 'addresses') selected.runtime = fact;
     if (setting.name === 'devices') selected.devices = fact;
   }
-  const title = rows.find((candidate): candidate is TitleRow => candidate.kind === 'rec');
+  const title = projectedTitle;
   if (title) {
     const fact = { schema: LIBRARY_FACT_SCHEMA, title, library: storedLibrary(library) } as const;
     if (!title.deleted.value && title.status.value === 'watchlist') selected.watchlist = fact;
@@ -197,9 +236,14 @@ function facts(
     selected.continue = {
       schema: LIBRARY_FACT_SCHEMA,
       library: storedLibrary(folded),
-      reconsiderAt: newestSummary(row, now).reconsiderAt ?? null,
+      reconsiderAt,
     };
-  return selected;
+  return { selected, history, reconsiderAt };
+}
+
+interface ImportedHistoryProjection {
+  projection: HistoryDocumentProjection | null;
+  reconsiderAt: number | null;
 }
 
 const validManifest = (value: unknown): value is LibraryFactManifest => {
@@ -304,6 +348,11 @@ export class LibraryFactStore {
   private historyCache?: {
     identity: string;
     value: { checkpoint: CompactHistoryCheckpoint; index: MaterializedHistoryIndex };
+  };
+  /** Complete only while this instance performs an uninterrupted first import; never authoritative or persisted. */
+  private historyImport?: {
+    generation: string;
+    documents: Map<string, ImportedHistoryProjection>;
   };
   private constructor(
     readonly libraryId: string,
@@ -455,7 +504,25 @@ export class LibraryFactStore {
       (!complete || (await this.history(held)) !== null)
     )
       return;
-    const changes = await this.changes(generation, entries, options.retainEpisodeProjection);
+    const derived = await this.changes(generation, entries, options.retainEpisodeProjection);
+    const retainedHistory =
+      held?.generation === generation &&
+      !held.complete &&
+      this.historyImport?.generation === generation
+        ? this.historyImport.documents
+        : !held || held.generation !== generation
+          ? new Map<string, ImportedHistoryProjection>()
+          : null;
+    // Only the completing transaction needs a combined snapshot before it commits. Incomplete batches append to the
+    // retained map after their commit succeeds, avoiding a growing Map copy for every 64-document batch.
+    const importedHistory =
+      complete && retainedHistory ? new Map(retainedHistory) : retainedHistory;
+    if (complete && importedHistory)
+      for (const entry of entries)
+        importedHistory.set(
+          entry.k,
+          derived.history.get(entry.k) ?? { projection: null, reconsiderAt: null },
+        );
     const manifest: LibraryFactManifest = {
       schema: LIBRARY_FACT_SCHEMA,
       generation,
@@ -466,13 +533,24 @@ export class LibraryFactStore {
       ...(floor !== undefined ? { floor } : {}),
       newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
     };
-    changes.push(await this.historyCheckpointChange(held, manifest, entries));
-    changes.push({
+    derived.changes.push(
+      await this.historyCheckpointChange(held, manifest, entries, importedHistory),
+    );
+    derived.changes.push({
       kind: 'put',
       key: `${this.libraryId}:${manifestName}`,
       value: await sealLibraryLocalValue(this.key, manifestName, manifest),
     });
-    await this.vault.commit(changes);
+    await this.vault.commit(derived.changes);
+    if (complete) this.historyImport = undefined;
+    else if (retainedHistory) {
+      for (const entry of entries)
+        retainedHistory.set(
+          entry.k,
+          derived.history.get(entry.k) ?? { projection: null, reconsiderAt: null },
+        );
+      this.historyImport = { generation, documents: retainedHistory };
+    } else this.historyImport = undefined;
     this.historyCache = undefined;
     noteLibraryFactCommit(entries.length);
     this.changed();
@@ -494,7 +572,7 @@ export class LibraryFactStore {
   async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation || !entries.length) return;
-    const changes = await this.changes(generation, entries, true);
+    const derived = await this.changes(generation, entries, true);
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
     const held = await this.readManifest();
     if (held?.generation === generation) {
@@ -503,15 +581,16 @@ export class LibraryFactStore {
         ...nextIdentity(held, generation, held.head, entries),
         newest: withNewest(held.newest, entries),
       };
-      changes.push(await this.historyCheckpointChange(held, manifest, entries));
-      changes.push({
+      derived.changes.push(await this.historyCheckpointChange(held, manifest, entries));
+      derived.changes.push({
         kind: 'put',
         key: `${this.libraryId}:${manifestName}`,
         value: await sealLibraryLocalValue(this.key, manifestName, manifest),
       });
     }
-    await this.vault.commit(changes);
+    await this.vault.commit(derived.changes);
     this.historyCache = undefined;
+    this.historyImport = undefined;
     noteLibraryFactCommit(entries.length);
     this.changed();
   }
@@ -523,7 +602,13 @@ export class LibraryFactStore {
     this.profileTopology = false;
     this.staleGenerations.clear();
     this.historyCache = undefined;
+    this.historyImport = undefined;
     this.changed();
+  }
+
+  /** Release disposable one-pass import state when its owner gives up before reaching a complete manifest. */
+  discardIncompleteHistoryDerivation(): void {
+    this.historyImport = undefined;
   }
 
   /** Each entry's document and facts, sealed. */
@@ -531,9 +616,13 @@ export class LibraryFactStore {
     generation: string,
     entries: readonly LibraryFactEntry[],
     retainEpisodeProjection = false,
-  ): Promise<VaultChange[]> {
+  ): Promise<{
+    changes: VaultChange[];
+    history: Map<string, ImportedHistoryProjection>;
+  }> {
     // Every value of the batch is sealed at once: WebCrypto runs them off the thread, as many at a time as it can.
     const pending: Array<Promise<VaultChange>> = [];
+    const history = new Map<string, ImportedHistoryProjection>();
     for (const entry of entries) {
       const document = documentName(generation, entry.k);
       pending.push(
@@ -544,7 +633,12 @@ export class LibraryFactStore {
           row: entry.row,
         }).then((value) => ({ kind: 'put', key: `${this.libraryId}:${document}`, value })),
       );
-      const selected = facts(entry.row, retainEpisodeProjection);
+      const derived = facts(entry.row, retainEpisodeProjection);
+      const selected = derived.selected;
+      history.set(entry.k, {
+        projection: derived.history,
+        reconsiderAt: derived.reconsiderAt,
+      });
       for (const capability of [
         'watchlist',
         'continue',
@@ -567,7 +661,7 @@ export class LibraryFactStore {
         );
       }
     }
-    return Promise.all(pending);
+    return { changes: await Promise.all(pending), history };
   }
 
   private async readHistoryCheckpoint(manifest: LibraryFactManifest): Promise<{
@@ -595,6 +689,7 @@ export class LibraryFactStore {
     held: LibraryFactManifest | null,
     manifest: LibraryFactManifest,
     entries: readonly LibraryFactEntry[],
+    importedHistory: Map<string, ImportedHistoryProjection> | null = null,
   ): Promise<VaultChange> {
     const key = `${this.libraryId}:${historyName}`;
     if (!manifest.complete) return { kind: 'delete', key };
@@ -615,6 +710,8 @@ export class LibraryFactStore {
     // and decrypting every document again title-by-title made profile adoption pay two full-library passes before its
     // startup deadline. Incremental updates still read only the affected titles below.
     const importedRows = prior ? null : new Map<string, DocumentRow[]>();
+    const importedProjections =
+      !prior && importedHistory ? new Map<string, HistoryDocumentProjection[]>() : null;
     const affected = new Set<string>();
     let reconsiderAt = prior?.index.source.reconsiderAt ?? Infinity;
     const titleOf = (row: Row | null | undefined): string | null =>
@@ -645,30 +742,56 @@ export class LibraryFactStore {
       }
     } else {
       // The final import batch builds once. Earlier incomplete batches deliberately had no checkpoint to rewrite.
-      for await (const { key: documentKey, document } of this.documents(manifest.generation)) {
-        if (incoming.has(documentKey)) continue;
-        const title = titleOf(document.row);
-        if (!title) continue;
-        const keys = documents.get(title) ?? new Set<string>();
-        keys.add(documentKey);
-        documents.set(title, keys);
-        const rows = importedRows!.get(title) ?? [];
-        if (document.row && isDocument(document.row)) rows.push(document.row);
-        importedRows!.set(title, rows);
-        const deadline = document.row ? newestSummary(document.row, Date.now()).reconsiderAt : null;
-        if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
-      }
-      for (const entry of entries) {
-        const title = titleOf(entry.row);
-        if (!title) continue;
-        const keys = documents.get(title) ?? new Set<string>();
-        keys.add(entry.k);
-        documents.set(title, keys);
-        const rows = importedRows!.get(title) ?? [];
-        if (entry.row && isDocument(entry.row)) rows.push(entry.row);
-        importedRows!.set(title, rows);
-        const deadline = entry.row ? newestSummary(entry.row, Date.now()).reconsiderAt : null;
-        if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
+      if (importedProjections) {
+        // Match the old scan's order: committed document keys first, then replacements in this final batch.
+        const ordered = [
+          ...[...importedHistory!].filter(([documentKey]) => !incoming.has(documentKey)).sort(),
+          ...entries.flatMap((entry) => {
+            const held = importedHistory!.get(entry.k);
+            return held ? ([[entry.k, held]] as Array<[string, ImportedHistoryProjection]>) : [];
+          }),
+        ];
+        for (const [documentKey, held] of ordered) {
+          const projection = held.projection;
+          if (!projection) continue;
+          const ref = projection.kind === 'title' ? projection.title.title : projection.title;
+          const title = `${ref.type}:${ref.id}`;
+          const keys = documents.get(title) ?? new Set<string>();
+          keys.add(documentKey);
+          documents.set(title, keys);
+          const projections = importedProjections.get(title) ?? [];
+          projections.push(projection);
+          importedProjections.set(title, projections);
+          if (held.reconsiderAt != null) reconsiderAt = Math.min(reconsiderAt, held.reconsiderAt);
+        }
+      } else {
+        for await (const { key: documentKey, document } of this.documents(manifest.generation)) {
+          if (incoming.has(documentKey)) continue;
+          const title = titleOf(document.row);
+          if (!title) continue;
+          const keys = documents.get(title) ?? new Set<string>();
+          keys.add(documentKey);
+          documents.set(title, keys);
+          const rows = importedRows!.get(title) ?? [];
+          if (document.row && isDocument(document.row)) rows.push(document.row);
+          importedRows!.set(title, rows);
+          const deadline = document.row
+            ? newestSummary(document.row, Date.now()).reconsiderAt
+            : null;
+          if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
+        }
+        for (const entry of entries) {
+          const title = titleOf(entry.row);
+          if (!title) continue;
+          const keys = documents.get(title) ?? new Set<string>();
+          keys.add(entry.k);
+          documents.set(title, keys);
+          const rows = importedRows!.get(title) ?? [];
+          if (entry.row && isDocument(entry.row)) rows.push(entry.row);
+          importedRows!.set(title, rows);
+          const deadline = entry.row ? newestSummary(entry.row, Date.now()).reconsiderAt : null;
+          if (deadline != null) reconsiderAt = Math.min(reconsiderAt, deadline);
+        }
       }
       for (const title of documents.keys()) affected.add(title);
     }
@@ -692,7 +815,9 @@ export class LibraryFactStore {
             rows.push(row);
         }
       }
-      const item = historyItemFromDocuments(rows, now);
+      const item = importedProjections
+        ? historyItemFromProjections(importedProjections.get(title) ?? [])
+        : historyItemFromDocuments(rows, now);
       if (item) items.set(title, item);
       else items.delete(title);
     }

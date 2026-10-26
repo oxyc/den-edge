@@ -11,7 +11,7 @@ import type {
   MediaType,
   TitleRef,
 } from './libraryServiceProtocol';
-import type { DocumentRow } from './wire';
+import type { DocumentRow, TitleRow } from './wire';
 
 /** Changing projection or ordering semantics must invalidate every cursor. */
 export const HISTORY_INDEX_POLICY = 1;
@@ -39,6 +39,70 @@ export interface HistoryIndexSnapshot {
   /** Canonical sorted entries only; filter buckets are cheap to reconstruct and are never duplicated on disk. */
   items: HistoryItem[];
 }
+
+/**
+ * The History-only result of projecting one authority document. Initial imports keep these small values just until
+ * their first checkpoint is committed, so Continue and History can consume the same den-core projection without
+ * retaining the document or its full episode-row graph.
+ */
+export type HistoryDocumentProjection =
+  | { kind: 'title'; title: TitleRow }
+  | {
+      kind: 'season';
+      title: DocumentRow['title'];
+      season: number;
+      /** Interleaved episode number and watched timestamp, avoiding one retained object per watched episode. */
+      watched: number[];
+    };
+
+export const historySeasonProjection = (
+  document: DocumentRow,
+  watched: number[],
+): HistoryDocumentProjection => ({
+  kind: 'season',
+  title: document.title,
+  season: document.season ?? 0,
+  watched,
+});
+
+/** The same title summary as `historyItemFromDocuments`, from already-projected per-document values. */
+export const historyItemFromProjections = (
+  projections: readonly HistoryDocumentProjection[],
+): HistoryItem | undefined => {
+  if (!projections.length) return undefined;
+  const ref =
+    projections[0]!.kind === 'title' ? projections[0]!.title.title : projections[0]!.title;
+  const key = titleKey(ref);
+  let title: TitleRow | undefined;
+  for (const projection of projections)
+    if (projection.kind === 'title' && titleKey(projection.title.title) === key)
+      title = projection.title;
+
+  let episodes = 0;
+  let latest: { season: number; episode: number; at: number } | undefined;
+  const reset = title?.episodesReset;
+  for (const projection of projections) {
+    if (projection.kind !== 'season' || titleKey(projection.title) !== key) continue;
+    for (let index = 0; index < projection.watched.length; index += 2) {
+      const episode = projection.watched[index]!;
+      const at = projection.watched[index + 1]!;
+      if (reset && at <= reset[0]) continue;
+      episodes++;
+      if (!latest || at > latest.at) latest = { season: projection.season, episode, at };
+    }
+  }
+
+  const seenAt =
+    title?.status.value === 'watched' ? Math.max(title.watchedAt ?? 0, title.status.at[0], 0) : -1;
+  const watchedAt = Math.max(seenAt, latest ? Math.max(latest.at, 0) : -1);
+  if (watchedAt < 0 || (title?.deleted.value && title.deleted.at[0] >= watchedAt)) return undefined;
+  return {
+    title: { type: ref.type, id: ref.id },
+    watchedAt,
+    ...(latest ? { episode: { season: latest.season, episode: latest.episode } } : {}),
+    episodes,
+  };
+};
 
 export const currentHistoryTimeZone = (): string =>
   Intl.DateTimeFormat().resolvedOptions().timeZone || `offset:${new Date().getTimezoneOffset()}`;
