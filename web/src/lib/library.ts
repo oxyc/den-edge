@@ -388,10 +388,11 @@ type Flag = NonNullable<Library['flags']> extends Map<string, infer F> ? F : nev
 
 /**
  * Three summaries per series, because the policy asks three different questions of them and conflating any
- * two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), how
- * far the series is actually finished (the furthest FINISHED mark, which is not the same episode), and how
- * far a timeless bit says it was watched. Watching E1–E4 and then opening E5 for two seconds leaves the
- * newest mark on E5 below the floor, and reading that alone drops a series being actively watched.
+ * two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), where
+ * the viewer last finished (the latest FINISHED mark, which is not the same episode, nor the furthest: a rewatch
+ * continues from itself), and how far a timeless bit says it was watched. Watching E1–E4 and then opening E5 for
+ * two seconds leaves the newest mark on E5 below the floor, and reading that alone drops a series being actively
+ * watched.
  *
  * Maps keep first-insertion order, which is the order series first appeared in.
  */
@@ -411,7 +412,13 @@ export class ContinueSummaries {
     const current = this.latest.get(key);
     if (!current || mark.updatedAt > current.updatedAt) this.latest.set(key, mark);
     const front = this.finished.get(key);
-    if (mark.fraction >= WATCHED && (!front || ahead(mark, front))) this.finished.set(key, mark);
+    if (
+      mark.fraction >= WATCHED &&
+      (!front ||
+        mark.updatedAt > front.updatedAt ||
+        (mark.updatedAt === front.updatedAt && ahead(mark, front)))
+    )
+      this.finished.set(key, mark);
   }
 
   addFlag(flag: Flag): void {
@@ -823,6 +830,8 @@ function continueCandidates(
   const { latest, finished, flagged } = new ContinueSummaries(library);
   const position = (at?: { season: number; episode: number }) =>
     at ? { season: at.season, episode: at.episode } : null;
+  const finishedAt = (at?: Mark) =>
+    at ? { season: at.season, episode: at.episode, at: at.updatedAt } : null;
 
   // A series known only through a flag has no time behind it, so it has no place in an order built on when
   // things were watched: it sorts last among the series rather than claiming the top.
@@ -848,7 +857,7 @@ function continueCandidates(
             at: mark.updatedAt,
           }
         : null,
-      finished: position(finished.get(key)),
+      finished: finishedAt(finished.get(key)),
       flag: position(flagged.get(key)),
       seasons: [...(shape?.counts ?? new Map())].map(([season, episodes]) => ({
         season,

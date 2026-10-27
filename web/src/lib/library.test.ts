@@ -530,6 +530,35 @@ describe("the TV's rows", () => {
     ).toEqual([['tv:9', { season: 1, episode: 5 }]]);
   });
 
+  it('continues a rewatch from itself, not from a later episode an autoplay finished', () => {
+    // An autoplay ran on through S2E2 unwatched; the viewer went back to S2E1.
+    const jordskott = (rewatch: number): Library => ({
+      records: [record('tv', 9, 'inProgress')],
+      marks: [mark(9, 2, 2, 1, 2_000), mark(9, 2, 1, rewatch, 3_000)],
+      flags: new Map(),
+      shapes: new Map([
+        [
+          'tv:9',
+          {
+            counts: new Map([
+              [1, 10],
+              [2, 6],
+            ]),
+          },
+        ],
+      ]),
+      dismissed: new Map(),
+    });
+    expect(
+      continueWatching(jordskott(0.3)).map((e) => [e.episode, e.fraction]),
+      'the rewatch in progress resumes',
+    ).toEqual([[{ season: 2, episode: 1 }, 0.3]]);
+    expect(
+      continueWatching(jordskott(1)).map((e) => e.episode),
+      'then the episode after it',
+    ).toEqual([{ season: 2, episode: 2 }]);
+  });
+
   it('keeps a TV live position when Continue Watching already offers another episode', () => {
     const finished = mark(9, 1, 4, 1, 1_700_000_000_000);
     const playing: Library = {
