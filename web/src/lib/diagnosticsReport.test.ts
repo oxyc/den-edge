@@ -187,7 +187,7 @@ describe('sendPageError', () => {
     expect(fetchImpl).toHaveBeenCalledWith('/playback/page-error', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(report),
+      body: JSON.stringify({ ...report, platform: 'web' }),
       keepalive: true,
     });
   });
@@ -296,11 +296,17 @@ describe('sendPlaybackOutcome and sendCastReport', () => {
   it('prefers sendBeacon, which outruns the unload it may be reporting on', () => {
     const fetchImpl = vi.fn();
     sendPlaybackOutcome(outcome, fetchImpl);
-    expect(sendBeacon).toHaveBeenCalledWith('/playback/outcome', JSON.stringify(outcome));
+    expect(sendBeacon).toHaveBeenCalledWith(
+      '/playback/outcome',
+      JSON.stringify({ ...outcome, platform: 'web' }),
+    );
     expect(fetchImpl).not.toHaveBeenCalled();
 
     sendCastReport(cast, fetchImpl);
-    expect(sendBeacon).toHaveBeenCalledWith('/playback/cast', JSON.stringify(cast));
+    expect(sendBeacon).toHaveBeenCalledWith(
+      '/playback/cast',
+      JSON.stringify({ ...cast, platform: 'web' }),
+    );
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -312,7 +318,7 @@ describe('sendPlaybackOutcome and sendCastReport', () => {
     expect(fetchImpl).toHaveBeenCalledWith('/playback/outcome', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(outcome),
+      body: JSON.stringify({ ...outcome, platform: 'web' }),
       keepalive: true,
     });
   });
@@ -335,7 +341,7 @@ describe('sendPlaybackRoute', () => {
     expect(fetchImpl).toHaveBeenCalledWith('/playback/route', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(report),
+      body: JSON.stringify({ ...report, platform: 'web' }),
       keepalive: true,
     });
   });

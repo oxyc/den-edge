@@ -80,7 +80,7 @@ describe('sendStartupReport', () => {
     expect(fetchImpl).toHaveBeenCalledWith('/playback/startup', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(report),
+      body: JSON.stringify({ ...report, platform: 'web' }),
       keepalive: true,
     });
   });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  browserMemoryOf,
   deviceOf,
   entryOf,
   fileTally,
@@ -7,6 +8,7 @@ import {
   loadSettled,
   MILESTONES,
   netTally,
+  platformOf,
 } from './loadReport';
 
 const IPHONE_SAFARI =
@@ -43,6 +45,42 @@ describe('deviceOf', () => {
   it('names a TV a TV, not the desktop or tablet its browser otherwise reads as', () => {
     expect(deviceOf(LG_WEBOS)).toEqual({ device: 'tv', engine: 'blink' });
     expect(deviceOf(ANDROID_TV_SHELL)).toEqual({ device: 'tv', engine: 'blink' });
+  });
+});
+
+describe('platformOf', () => {
+  it('separates Apple mobile and every TV shell from ordinary web', () => {
+    expect(platformOf(IPHONE_SAFARI, 0, 'browser')).toBe('ios');
+    expect(platformOf(IPAD_DESKTOP_MODE, 5, 'browser')).toBe('ipados');
+    expect(platformOf(LG_WEBOS, 0, 'browser')).toBe('webos');
+    expect(platformOf(ANDROID_TV_SHELL, 0, 'browser')).toBe('android_tv');
+    expect(platformOf(MAC_CHROME, 0, 'browser')).toBe('web');
+  });
+
+  it('trusts the build identity for LG and Samsung packages', () => {
+    expect(platformOf(MAC_CHROME, 0, 'webos')).toBe('webos');
+    expect(platformOf(MAC_CHROME, 0, 'tizen')).toBe('tizen');
+  });
+});
+
+describe('browserMemoryOf', () => {
+  it('rounds Chromium heap counters to bounded-size megabyte fields', () => {
+    const performance = {
+      memory: {
+        usedJSHeapSize: 12.6 * 1_048_576,
+        totalJSHeapSize: 20.2 * 1_048_576,
+        jsHeapSizeLimit: 512 * 1_048_576,
+      },
+    } as unknown as Performance;
+    expect(browserMemoryOf(performance)).toEqual({
+      jsHeapUsedMb: 13,
+      jsHeapTotalMb: 20,
+      jsHeapLimitMb: 512,
+    });
+  });
+
+  it('is absent where the engine exposes no trustworthy heap counters', () => {
+    expect(browserMemoryOf({} as Performance)).toBeUndefined();
   });
 });
 

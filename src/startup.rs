@@ -6,7 +6,7 @@
 //! free-text line in the log. The one thing that reaches `eprintln!` (`StartupTag`, `handler.rs`) is the join of
 //! those typed fields back into text, so nothing freeform from the body ever does.
 
-use crate::diagnostics::Identity;
+use crate::diagnostics::{ClientPlatform, Identity};
 use crate::handler::{client_ip, error, json_reply, read_json, retry_after, StartupTag};
 use crate::AppState;
 use axum::body::Body;
@@ -46,6 +46,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
+    platform: Option<ClientPlatform>,
     session_ms: u32,
     resolve_ms: Option<u32>,
     open_ms: Option<u32>,
@@ -155,6 +156,9 @@ impl Report {
             format!("player:{}", self.player.as_str()),
             format!("route:{}", self.route.as_str()),
         ];
+        if let Some(platform) = self.platform {
+            parts.push(format!("platform:{}", platform.as_str()));
+        }
         if let Some(v) = self.bytes_loaded {
             parts.push(format!("bytes:{}", v.min(MAX_BYTES)));
         }
@@ -181,6 +185,7 @@ mod tests {
 
     fn report() -> Report {
         Report {
+            platform: None,
             session_ms: 1234,
             resolve_ms: Some(56),
             open_ms: Some(200),
