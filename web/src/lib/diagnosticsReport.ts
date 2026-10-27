@@ -411,6 +411,10 @@ export interface PlaybackOutcomeReport extends IdentityFields {
   delivery?: 'remux' | 'direct';
   /** The session named a home-network playlist to try first. */
   lanOffered?: boolean;
+  /** `[count, total ms, longest ms]` of seeks, each from `seeking` to `seeked`; absent with none. */
+  seeks?: [number, number, number];
+  /** Frames the browser dropped, where it counts them. */
+  droppedFrames?: number;
 }
 
 /** `sendBeacon` first (`beacon`): a session's outcome is as likely to be sent from a page hiding or unloading as

@@ -1106,6 +1106,8 @@ enum PerformanceStage {
     Ended,
     Background,
     Warning,
+    /// Main-thread stalls while one screen was showing, sent as it was left.
+    Stalls,
 }
 impl PerformanceStage {
     fn as_str(&self) -> &'static str {
@@ -1118,6 +1120,7 @@ impl PerformanceStage {
             Self::Ended => "ended",
             Self::Background => "background",
             Self::Warning => "warning",
+            Self::Stalls => "stalls",
         }
     }
 }
@@ -1158,6 +1161,8 @@ enum PerformanceOutcome {
     ThroughputLimited,
     ReconnectProne,
     Error,
+    /// Left before a single frame with no failure on screen: the viewer gave up waiting.
+    Abandoned,
 }
 impl PerformanceOutcome {
     fn as_str(&self) -> &'static str {
@@ -1166,8 +1171,123 @@ impl PerformanceOutcome {
             Self::ThroughputLimited => "throughput_limited",
             Self::ReconnectProne => "reconnect_prone",
             Self::Error => "error",
+            Self::Abandoned => "abandoned",
         }
     }
+}
+
+/// Why a playback session ended on an error, from the player's own closed set.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PerformanceFailure {
+    NoSource,
+    SourceUnreachable,
+    NothingQueued,
+    ListExpired,
+    RateLimited,
+    ServiceRefused,
+    EngineUnavailable,
+    Other,
+}
+impl PerformanceFailure {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoSource => "no_source",
+            Self::SourceUnreachable => "source_unreachable",
+            Self::NothingQueued => "nothing_queued",
+            Self::ListExpired => "list_expired",
+            Self::RateLimited => "rate_limited",
+            Self::ServiceRefused => "service_refused",
+            Self::EngineUnavailable => "engine_unavailable",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PerformanceDecode {
+    Hardware,
+    Software,
+}
+impl PerformanceDecode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hardware => "hardware",
+            Self::Software => "software",
+        }
+    }
+}
+
+/// What a playback event knows: the first frame's breakdown, or a session's health as it ends. Durations in
+/// milliseconds.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PerformancePlayback {
+    outcome: Option<PerformanceOutcome>,
+    failure: Option<PerformanceFailure>,
+    decode: Option<PerformanceDecode>,
+    cached: Option<bool>,
+    /// Sources opened, fallbacks included.
+    attempts: Option<u32>,
+    /// Waiting for the debrid to have the release.
+    wait_ms: Option<u32>,
+    /// The engine opening the source that played, to its first frame.
+    open_ms: Option<u32>,
+    underruns: Option<u32>,
+    reconnects: Option<u32>,
+    seconds: Option<u32>,
+    /// Time spent with the buffer run dry.
+    rebuffer_ms: Option<u32>,
+    min_buffer_ms: Option<u32>,
+    min_throughput_mbps: Option<u32>,
+    dropped_frames: Option<u32>,
+    max_drift_ms: Option<u32>,
+    /// `[count, total milliseconds, longest milliseconds]`.
+    seeks: Option<(u32, u32, u32)>,
+}
+
+impl PerformancePlayback {
+    fn push_tags(&self, parts: &mut Vec<String>) {
+        if let Some(outcome) = &self.outcome {
+            parts.push(format!("outcome:{}", outcome.as_str()));
+        }
+        if let Some(failure) = &self.failure {
+            parts.push(format!("failure:{}", failure.as_str()));
+        }
+        if let Some(decode) = &self.decode {
+            parts.push(format!("decode:{}", decode.as_str()));
+        }
+        if let Some(cached) = self.cached {
+            parts.push(format!("cached:{}", u8::from(cached)));
+        }
+        for (name, value, cap) in [
+            ("attempts", self.attempts, 1_000),
+            // A debrid fetch and a whole session's rebuffering can each run past `MAX_MS`.
+            ("waitMs", self.wait_ms, MAX_NET_MS),
+            ("openMs", self.open_ms, MAX_MS),
+            ("underruns", self.underruns, 10_000),
+            ("reconnects", self.reconnects, 10_000),
+            ("seconds", self.seconds, MAX_SECS),
+            ("rebufferMs", self.rebuffer_ms, MAX_NET_MS),
+            ("minBufferMs", self.min_buffer_ms, MAX_MS),
+            ("minMbps", self.min_throughput_mbps, 100_000),
+            ("dropped", self.dropped_frames, 1_000_000),
+            ("maxDriftMs", self.max_drift_ms, MAX_MS),
+        ] {
+            if let Some(value) = value {
+                parts.push(format!("{name}:{}", value.min(cap)));
+            }
+        }
+        if let Some(seeks) = self.seeks {
+            parts.push(count_total_longest("seeks", seeks));
+        }
+    }
+}
+
+/// `name:count/totalms/maxlongestms`, each part capped: a stall or seek summary as the log line carries it.
+fn count_total_longest(name: &str, (count, total, longest): (u32, u32, u32)) -> String {
+    format!("{name}:{}/{}ms/max{}ms", count.min(MAX_REQUESTS), total.min(MAX_NET_MS), longest.min(MAX_MS))
 }
 
 #[derive(Deserialize)]
@@ -1189,13 +1309,11 @@ struct PerformanceReport {
     stage: PerformanceStage,
     route: Option<PerformanceRoute>,
     duration_ms: Option<u32>,
-    /// `[count, total milliseconds, longest milliseconds]`, accumulated since the preceding event.
+    /// `[count, total milliseconds, longest milliseconds]` on a `stalls` event: the screen in `route` while they
+    /// happened.
     stalls: Option<(u32, u32, u32)>,
     memory: NativeMemory,
-    outcome: Option<PerformanceOutcome>,
-    underruns: Option<u32>,
-    reconnects: Option<u32>,
-    seconds: Option<u32>,
+    playback: Option<PerformancePlayback>,
 }
 
 impl PerformanceReport {
@@ -1211,13 +1329,8 @@ impl PerformanceReport {
         if let Some(ms) = self.duration_ms {
             parts.push(format!("duration:{}", ms.min(MAX_MS)));
         }
-        if let Some((count, total, longest)) = self.stalls {
-            parts.push(format!(
-                "stalls:{}/{}ms/max{}ms",
-                count.min(MAX_REQUESTS),
-                total.min(MAX_NET_MS),
-                longest.min(MAX_MS)
-            ));
+        if let Some(stalls) = self.stalls {
+            parts.push(count_total_longest("stalls", stalls));
         }
         let memory = &self.memory;
         for (name, value) in [
@@ -1231,17 +1344,8 @@ impl PerformanceReport {
             }
         }
         parts.push(format!("memoryWarnings:{}", memory.warnings.min(10_000)));
-        if let Some(outcome) = &self.outcome {
-            parts.push(format!("outcome:{}", outcome.as_str()));
-        }
-        if let Some(value) = self.underruns {
-            parts.push(format!("underruns:{}", value.min(10_000)));
-        }
-        if let Some(value) = self.reconnects {
-            parts.push(format!("reconnects:{}", value.min(10_000)));
-        }
-        if let Some(value) = self.seconds {
-            parts.push(format!("seconds:{}", value.min(MAX_SECS)));
+        if let Some(playback) = &self.playback {
+            playback.push_tags(&mut parts);
         }
         if let Some(release) = &self.release {
             parts.push(format!("release:{}", release.0));
@@ -1657,6 +1761,10 @@ struct PlaybackOutcomeReport {
     delivery: Option<Delivery>,
     #[serde(default)]
     lan_offered: bool,
+    /// `[count, total milliseconds, longest milliseconds]` of seeks; absent with none.
+    seeks: Option<(u32, u32, u32)>,
+    /// Frames the browser dropped, where it counts them.
+    dropped_frames: Option<u32>,
 }
 
 impl PlaybackOutcomeReport {
@@ -1708,6 +1816,12 @@ impl PlaybackOutcomeReport {
         }
         if self.lan_offered {
             parts.push("lanOffered:1".to_owned());
+        }
+        if let Some(seeks) = self.seeks {
+            parts.push(count_total_longest("seeks", seeks));
+        }
+        if let Some(dropped) = self.dropped_frames {
+            parts.push(format!("dropped:{}", dropped.min(1_000_000)));
         }
         parts.join(",")
     }
@@ -1944,22 +2058,43 @@ mod tests {
 
     #[test]
     fn a_native_performance_event_is_typed_bounded_and_identity_free() {
+        // The event `PerformanceAuditTests.eventShape` (den's DenKit) encodes, field for field.
         let report: PerformanceReport = serde_json::from_value(serde_json::json!({
             "platform": "apple_tv", "release": "1.2.3+45", "journey": "playback", "stage": "ended",
-            "route": "player", "durationMs": 9500, "stalls": [2, 800, 600],
+            "route": "player", "durationMs": 9500,
             "memory": { "residentMb": 210, "footprintMb": 260, "peakResidentMb": 300,
                 "availableMb": 420, "warnings": 1 },
-            "outcome": "throughput_limited", "underruns": 3, "reconnects": 1, "seconds": 600
+            "playback": { "outcome": "error", "failure": "no_source", "decode": "software", "cached": false,
+                "attempts": 3, "waitMs": 4000, "openMs": 1200, "rebufferMs": 800, "seeks": [2, 900, 600] }
         }))
         .unwrap();
-        assert_eq!(report.tag(), "platform:apple_tv,journey:playback,stage:ended,route:player,duration:9500,\
-            stalls:2/800ms/max600ms,rss:210MB,footprint:260MB,peakRss:300MB,available:420MB,\
-            memoryWarnings:1,outcome:throughput_limited,underruns:3,reconnects:1,seconds:600,release:1.2.3+45");
-        assert!(serde_json::from_value::<PerformanceReport>(serde_json::json!({
-            "platform": "apple_tv", "journey": "launch", "stage": "settled",
-            "memory": { "warnings": 0 }, "title": "must not parse"
+        assert_eq!(
+            report.tag(),
+            "platform:apple_tv,journey:playback,stage:ended,route:player,duration:9500,rss:210MB,footprint:260MB,\
+             peakRss:300MB,available:420MB,memoryWarnings:1,outcome:error,failure:no_source,decode:software,\
+             cached:0,attempts:3,waitMs:4000,openMs:1200,rebufferMs:800,seeks:2/900ms/max600ms,release:1.2.3+45"
+        );
+        for refused in [
+            serde_json::json!({ "platform": "apple_tv", "journey": "launch", "stage": "settled",
+                "memory": { "warnings": 0 }, "title": "must not parse" }),
+            serde_json::json!({ "platform": "apple_tv", "journey": "playback", "stage": "ended",
+                "memory": { "warnings": 0 }, "playback": { "url": "must not parse" } }),
+        ] {
+            assert!(serde_json::from_value::<PerformanceReport>(refused).is_err());
+        }
+    }
+
+    #[test]
+    fn a_native_stalls_event_names_the_screen_they_happened_on() {
+        let report: PerformanceReport = serde_json::from_value(serde_json::json!({
+            "platform": "apple_tv", "journey": "navigation", "stage": "stalls", "route": "home",
+            "stalls": [2, 420, 300], "memory": { "warnings": 0 }
         }))
-        .is_err());
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "platform:apple_tv,journey:navigation,stage:stalls,route:home,stalls:2/420ms/max300ms,memoryWarnings:0"
+        );
     }
 
     #[test]
@@ -2191,6 +2326,15 @@ mod tests {
             report.tag(true),
             "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:finished,secondsPlayed:1200"
         );
+    }
+
+    #[test]
+    fn playback_outcome_carries_its_seeks_and_dropped_frames() {
+        let mut body = outcome();
+        body["seeks"] = serde_json::json!([2, 1020, 900]);
+        body["droppedFrames"] = serde_json::json!(14);
+        let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+        assert!(report.tag(false).ends_with(",seeks:2/1020ms/max900ms,dropped:14"), "{}", report.tag(false));
     }
 
     /// The 2026-10-17 failure, as it should have read: a Hearth session played in the cast page, which refused its

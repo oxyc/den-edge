@@ -130,6 +130,20 @@ export class PlaybackRecorder {
   private open: { stall: Stall; since: number } | undefined;
   private errors: PlaybackStats['errors'] = [];
   private idleLowMs = 0;
+  /** `[count, total ms, longest ms]` of seeks, each from `seeking` to `seeked`. */
+  private seekTimes: [number, number, number] = [0, 0, 0];
+
+  /** A seek took `ms` to land. */
+  seeked(ms: number) {
+    if (!(ms >= 0)) return;
+    const [count, total, longest] = this.seekTimes;
+    this.seekTimes = [count + 1, total + Math.round(ms), Math.max(longest, Math.round(ms))];
+  }
+
+  /** `[count, total ms, longest ms]` of the seeks so far; absent before the first. */
+  get seeks(): [number, number, number] | undefined {
+    return this.seekTimes[0] > 0 ? [...this.seekTimes] : undefined;
+  }
 
   constructor(
     readonly engine: PlaybackStats['engine'],
@@ -395,8 +409,14 @@ export interface Watcher {
   stop(): void;
   /** Count a report sent to this session from elsewhere, against den-remux's MAX_REPORTS. */
   spent(): void;
-  /** `stallCount` and `stalledMs` so far, for den-edge's own one-shot outcome report — never den-remux's. */
-  stats(): { stallCount: number; stalledMs: number };
+  /** `stallCount` and `stalledMs` so far, with the seeks and dropped frames, for den-edge's own one-shot outcome
+   * report — never den-remux's. */
+  stats(): {
+    stallCount: number;
+    stalledMs: number;
+    seeks?: [number, number, number];
+    droppedFrames?: number;
+  };
 }
 
 /** Record a session's playback into reports (`ReportSchedule`). Nothing here waits on or retries a send. */
@@ -484,7 +504,14 @@ export function watchPlayback(options: WatchOptions): Watcher {
   on('stalled', () => {
     if (!video.paused && video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) stall('wait');
   });
+  /** When the seek under way began; a scrub's next `seeking` restarts it, so each landing is timed once. */
+  let seekingSince: number | undefined;
+  on('seeking', () => {
+    seekingSince = now();
+  });
   on('seeked', () => {
+    if (seekingSince !== undefined) recorder.seeked(now() - seekingSince);
+    seekingSince = undefined;
     frames = {
       count: video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1,
       at: video.currentTime,
@@ -569,6 +596,10 @@ export function watchPlayback(options: WatchOptions): Watcher {
       listening.abort();
     },
     spent: () => schedule.spent(),
-    stats: () => recorder.liveStalls(now()),
+    stats: () => ({
+      ...recorder.liveStalls(now()),
+      seeks: recorder.seeks,
+      droppedFrames: live().droppedFrames ?? undefined,
+    }),
   };
 }
