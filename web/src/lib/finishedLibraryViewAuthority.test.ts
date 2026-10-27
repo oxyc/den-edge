@@ -1388,6 +1388,140 @@ it('keeps the views a facts visit read, once Continue has its layouts, and the n
   }
 });
 
+it('keeps a series offered by its next episode in Continue when another device writes while the page is open', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const series = { type: 'tv' as const, id: 62097 };
+  const yesterday: [number, number, string] = [Date.now() - 86_400_000, 0, 'tv'];
+  const watched = {
+    progress: { value: 1, at: yesterday, viewing: 0 },
+    imported: false,
+    plays: { 0: yesterday[0] },
+    cleared: null,
+  };
+  const season = (number: number, episodes: Record<number, unknown>) => ({
+    format: 4,
+    kind: 'season',
+    title: series,
+    season: number,
+    seasonReset: null,
+    episodes,
+  });
+  // S1E10, S2E1 and S2E2 watched: Continue offers S2E3, which needs the series' layout.
+  const rows = [
+    {
+      format: 4,
+      kind: 'title',
+      title: series,
+      status: { value: 'inProgress', at: yesterday },
+      addedAt: yesterday[0],
+    },
+    season(1, { 10: watched }),
+    season(2, { 1: watched, 2: watched }),
+  ] as unknown as Parameters<typeof seal>[1][];
+  const entries = await Promise.all(
+    rows.map(async (row, index) => {
+      const sealed = await seal(keys, row);
+      return { k: sealed.k, seq: 10 + index, value: sealed.v, row };
+    }),
+  );
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch('generation-a', 12, entries, true);
+  const named = {
+    title: vi.fn(async () => ({
+      kind: 'found' as const,
+      value: {
+        title: { ...series, title: 'Jordskott' },
+        shape: {
+          counts: new Map([
+            [1, 10],
+            [2, 6],
+          ]),
+        },
+      },
+    })),
+  };
+  const next = { season: 2, episode: 3 };
+
+  // A first visit learns the layout and keeps views drawn with it.
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    named,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.query({ kind: 'library.metadata', titles: [series] });
+  await expect(first!.authority.select({ kind: 'continue' })).resolves.toMatchObject({
+    items: [{ title: series, episode: next }],
+  });
+  await waitFor(() =>
+    expect(readFinishedLibraryViews(libraryKey, vault, ['continue'])).resolves.toMatchObject({
+      pieces: { continue: { view: { items: [{ title: series }] } } },
+    }),
+  );
+  await first!.authority.close?.();
+
+  // The TV rewatches S2E1 and writes its position: S2E2 stays the furthest finished.
+  const rewatch = season(2, {
+    1: {
+      progress: { value: 0.317, at: [Date.now(), 0, 'tv'], viewing: 1, seconds: 1121 },
+      imported: false,
+      plays: { 0: yesterday[0] },
+      cleared: null,
+    },
+    2: watched,
+  }) as unknown as Parameters<typeof seal>[1];
+  const written = await seal(keys, rewatch);
+  expect(written.k).toBe(entries[2]!.k);
+  let served = false;
+  const fetchImpl = vi.fn<typeof fetch>(async () => {
+    const page = served
+      ? { generation: 'generation-a', head: 13, more: false, entries: [] }
+      : {
+          generation: 'generation-a',
+          head: 13,
+          more: false,
+          entries: [{ k: written.k, seq: 13, v: written.v }],
+        };
+    served = true;
+    return new Response(JSON.stringify(page), { status: 200 });
+  });
+
+  // The next visit draws the kept views, names the row (its layout matches what was kept), then pulls the TV's write.
+  const openFull = vi.fn(async () => fullAuthority());
+  const second = await openFinishedLibraryViewAuthority(request, vault, openFull, named, fetchImpl);
+  for (const kind of roots) await second!.authority.select({ kind });
+  await second!.authority.query({ kind: 'library.metadata', titles: [series] });
+  const changed = vi.fn();
+  second!.authority.listen?.(changed);
+  await second!.authority.observe({
+    kind: 'lifecycle',
+    visible: true,
+    online: true,
+    playbackActive: false,
+  });
+  await waitFor(() =>
+    expect(changed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'changed',
+        affected: expect.arrayContaining([{ kind: 'continue' }]),
+      }),
+    ),
+  );
+  // The page already holds this series' name and layout, so it does not ask again: the authority must keep them.
+  await expect(second!.authority.select({ kind: 'continue' })).resolves.toMatchObject({
+    items: [
+      { title: series, episode: next, liveEpisode: { season: 2, episode: 1 }, seconds: 1121 },
+    ],
+    needsShapes: [],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+  await second!.authority.close?.();
+});
+
 it('keeps no views while the history is still read, and keeps them once it is whole', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();

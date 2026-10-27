@@ -1116,7 +1116,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       else if (previous !== undefined && (!shape || libraryMetadataShapeDigest(shape) !== previous))
         layoutChange = 'mismatch';
     }
-    if (layoutChange && this.factStore && this.#factHome) {
+    // Every layout answered here is kept, even one that matches the kept views: a later fact projection (another
+    // device's write, a refill) reads Continue from these alone, and the page never asks again for a series it has
+    // already named. Kept only for a matching layout's next projection, it dropped every series offered by its next
+    // episode as soon as any write arrived.
+    if (this.factStore)
       for (const { shape } of found) {
         if (!shape) continue;
         this.#factShapes.set(`${shape.title.type}:${shape.title.id}`, {
@@ -1124,6 +1128,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           ...(shape.lastAired ? { lastAired: shape.lastAired } : {}),
         });
       }
+    if (layoutChange && this.factStore && this.#factHome) {
       this.cached.pieces.continue = {
         view: factContinue(
           this.#factHome,
