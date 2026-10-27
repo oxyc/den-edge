@@ -1464,12 +1464,12 @@ it('keeps a series offered by its next episode in Continue when another device w
   );
   await first!.authority.close?.();
 
-  // The TV rewatches S2E1 and writes its position: S2E2 stays the furthest finished.
+  // The TV rewatches S2E1 to the end: Continue moves on to S2E2, which again needs the layout.
   const rewatch = season(2, {
     1: {
-      progress: { value: 0.317, at: [Date.now(), 0, 'tv'], viewing: 1, seconds: 1121 },
+      progress: { value: 1, at: [Date.now(), 0, 'tv'], viewing: 1 },
       imported: false,
-      plays: { 0: yesterday[0] },
+      plays: { 0: yesterday[0], 1: Date.now() },
       cleared: null,
     },
     2: watched,
@@ -1513,9 +1513,7 @@ it('keeps a series offered by its next episode in Continue when another device w
   );
   // The page already holds this series' name and layout, so it does not ask again: the authority must keep them.
   await expect(second!.authority.select({ kind: 'continue' })).resolves.toMatchObject({
-    items: [
-      { title: series, episode: next, liveEpisode: { season: 2, episode: 1 }, seconds: 1121 },
-    ],
+    items: [{ title: series, episode: { season: 2, episode: 2 } }],
     needsShapes: [],
   });
   expect(openFull).not.toHaveBeenCalled();
