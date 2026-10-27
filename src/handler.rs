@@ -187,6 +187,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("field", resp.extensions().get::<ReportField>().map(|s| s.0.as_str())),
             ("pageErr", resp.extensions().get::<PageErrorTag>().map(|s| s.0.as_str())),
             ("load", resp.extensions().get::<LoadTag>().map(|s| s.0.as_str())),
+            ("perf", resp.extensions().get::<PerformanceTag>().map(|s| s.0.as_str())),
             ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
             ("playbackRoute", resp.extensions().get::<PlaybackRouteTag>().map(|s| s.0.as_str())),
             ("cast", resp.extensions().get::<CastTag>().map(|s| s.0.as_str())),
@@ -443,6 +444,10 @@ pub struct PageErrorTag(pub String);
 #[derive(Clone)]
 pub struct LoadTag(pub String);
 
+/// A native client's identity-free performance boundary (`diagnostics.rs`).
+#[derive(Clone)]
+pub struct PerformanceTag(pub String);
+
 /// The field a refused report failed on (`diagnostics.rs`): a name of a few letters, never its value.
 #[derive(Clone)]
 pub struct ReportField(pub String);
@@ -683,6 +688,9 @@ async fn dispatch(
     if path == "/playback/load" {
         return Box::pin(crate::diagnostics::handle_load(state, req)).await;
     }
+    if path == "/performance/event" {
+        return Box::pin(crate::diagnostics::handle_performance(state, req)).await;
+    }
     if path == "/playback/outcome" {
         return Box::pin(crate::diagnostics::handle_playback_outcome(state, req)).await;
     }
@@ -865,6 +873,7 @@ impl Face {
             || path == "/playback/startup"
             || path == "/playback/page-error"
             || path == "/playback/load"
+            || path == "/performance/event"
             || path == "/playback/outcome"
             || path == "/playback/route"
             || path == "/playback/cast"
@@ -1068,6 +1077,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/playback/startup" => "/playback/startup",
         "/playback/page-error" => "/playback/page-error",
         "/playback/load" => "/playback/load",
+        "/performance/event" => "/performance/event",
         "/playback/outcome" => "/playback/outcome",
         "/playback/route" => "/playback/route",
         "/playback/cast" => "/playback/cast",
@@ -1152,6 +1162,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/playback/startup"
         | "/playback/page-error"
         | "/playback/load"
+        | "/performance/event"
         | "/playback/outcome"
         | "/playback/route"
         | "/playback/cast" => Some(POST),
@@ -1178,6 +1189,7 @@ fn body_cap(route: &str) -> usize {
         "/playback/startup"
         | "/playback/page-error"
         | "/playback/load"
+        | "/performance/event"
         | "/playback/outcome"
         | "/playback/route"
         | "/playback/cast" => 2048,
@@ -1528,6 +1540,7 @@ pub mod tests {
         for route in [
             "/playback/page-error",
             "/playback/load",
+            "/performance/event",
             "/playback/outcome",
             "/playback/route",
             "/playback/cast",

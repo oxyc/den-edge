@@ -197,6 +197,15 @@ describe('PlaybackRecorder', () => {
     });
   });
 
+  it('summarises seeks as count, total and longest, and has none before the first', () => {
+    const recorder = new PlaybackRecorder('hls.js', 'x');
+    expect(recorder.seeks).toBeUndefined();
+    recorder.seeked(120.4);
+    recorder.seeked(-1);
+    recorder.seeked(900);
+    expect(recorder.seeks).toEqual([2, 1_020, 900]);
+  });
+
   it('sums the playing time spent idling on a low buffer', () => {
     const recorder = new PlaybackRecorder('hls.js', 'x');
     recorder.idleLow(250.4);

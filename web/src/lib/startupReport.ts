@@ -5,6 +5,7 @@
 // by den-edge's own `LOG_IDENTITY` switch, never asked here — the identity fields (`diagnosticsReport.ts`).
 
 import { reportUrl, type IdentityFields } from './diagnosticsReport';
+import { currentClientPlatform } from './clientPlatform';
 
 export interface ServerTiming {
   resolveMs?: number;
@@ -80,7 +81,7 @@ export function sendStartupReport(report: StartupReport, fetchImpl: typeof fetch
   void fetchImpl(reportUrl('/playback/startup'), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(report),
+    body: JSON.stringify({ ...report, platform: currentClientPlatform() }),
     keepalive: true,
   }).catch(() => undefined);
 }

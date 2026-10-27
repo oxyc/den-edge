@@ -4045,6 +4045,8 @@
         castFailReason: castFailed ? castFailReason : undefined,
         delivery: session ? (session.external ? 'direct' : 'remux') : undefined,
         lanOffered: session?.lanPlaylist !== undefined || undefined,
+        seeks: stats?.seeks,
+        droppedFrames: stats?.droppedFrames,
       });
     }
     if (castFunnel) {

@@ -4,6 +4,7 @@
 // never a title, an id, a URL or anything a person typed.
 
 import { currentRelease, reportUrl } from './diagnosticsReport';
+import { clientPlatformOf, type ClientPlatform } from './clientPlatform';
 import { parseRoute } from './route';
 import {
   startupCounts,
@@ -31,6 +32,14 @@ const CHECK_MS = 1_000;
 export type LoadRoute = 'home' | 'movies' | 'series' | 'watchlist' | 'title' | 'settings' | 'other';
 export type DeviceClass = 'phone' | 'tablet' | 'desktop' | 'tv';
 export type BrowserEngine = 'webkit' | 'blink' | 'gecko' | 'other';
+export type { ClientPlatform } from './clientPlatform';
+
+/** Chromium's non-standard heap counters. Absent on Safari and many TV engines. */
+export interface BrowserMemory {
+  jsHeapUsedMb: number;
+  jsHeapTotalMb: number;
+  jsHeapLimitMb: number;
+}
 
 /**
  * The milestones a report carries, by the `startupMark` event that sets each, in the order a load reaches them. A
@@ -201,7 +210,12 @@ export function fileTally(entries: readonly FileTiming[]): FileTally | undefined
 /** How the page was entered; `swap` is Den's own load onto a newer release (`release.ts`, under `den-retry`). */
 export type LoadEntry = 'navigate' | 'reload' | 'back_forward' | 'swap';
 
-export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: BrowserEngine } & {
+export type LoadReport = {
+  route: LoadRoute;
+  device: DeviceClass;
+  engine: BrowserEngine;
+  platform: ClientPlatform;
+} & {
   -readonly [K in keyof typeof MILESTONES | keyof typeof LAST_MILESTONES]?: number;
 } & {
   tmdbCache?: Partial<Record<TmdbCacheOutcome, number>>;
@@ -220,6 +234,8 @@ export type LoadReport = { route: LoadRoute; device: DeviceClass; engine: Browse
   longTaskPhases?: Partial<Record<StartupLongTaskPhase, [number, number, number]>>;
   /** Every long task in one privacy-safe interval between existing startup milestones. */
   longTaskStages?: Partial<Record<StartupLongTaskStage, [number, number, number]>>;
+  /** A settled-load snapshot, only where the browser exposes its non-standard JS heap counters. */
+  memory?: BrowserMemory;
   /**
    * What each library Worker's open did, by the library it serves: whether it drew from saved views, why it opened
    * the whole log after all, and when it asked for den-core. A household with profiles opens two.
@@ -282,10 +298,43 @@ export function deviceOf(
   return { device, engine };
 }
 
+/** Build identity wins for packaged/hosted TV builds; user-agent detection covers the ordinary web build. */
+export function platformOf(
+  userAgent: string,
+  touchPoints = 0,
+  builtPlatform: 'browser' | 'webos' | 'tizen' = __DEN_TV_PLATFORM__,
+): ClientPlatform {
+  return clientPlatformOf(userAgent, touchPoints, builtPlatform);
+}
+
+export function browserMemoryOf(
+  performanceImpl: Performance = performance,
+): BrowserMemory | undefined {
+  const memory = (
+    performanceImpl as Performance & {
+      memory?: { usedJSHeapSize?: number; totalJSHeapSize?: number; jsHeapSizeLimit?: number };
+    }
+  ).memory;
+  if (
+    !memory ||
+    !Number.isFinite(memory.usedJSHeapSize) ||
+    !Number.isFinite(memory.totalJSHeapSize) ||
+    !Number.isFinite(memory.jsHeapSizeLimit)
+  )
+    return undefined;
+  const mb = (bytes: number | undefined) => Math.max(0, Math.round((bytes ?? 0) / 1_048_576));
+  return {
+    jsHeapUsedMb: mb(memory.usedJSHeapSize),
+    jsHeapTotalMb: mb(memory.totalJSHeapSize),
+    jsHeapLimitMb: mb(memory.jsHeapSizeLimit),
+  };
+}
+
 export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
   const report: LoadReport = {
     route,
     ...deviceOf(navigator.userAgent, navigator.maxTouchPoints ?? 0),
+    platform: platformOf(navigator.userAgent, navigator.maxTouchPoints ?? 0),
     workers: startupWorkers(),
   };
   for (const [field, event] of Object.entries(MILESTONES) as [keyof typeof MILESTONES, string][]) {
@@ -329,6 +378,8 @@ export function buildLoadReport(route: LoadRoute, hidden: boolean): LoadReport {
   if (Object.keys(longTaskPhases).length) report.longTaskPhases = longTaskPhases;
   const longTaskStages = Object.fromEntries(startupLongTaskStages());
   if (Object.keys(longTaskStages).length) report.longTaskStages = longTaskStages;
+  const memory = browserMemoryOf();
+  if (memory) report.memory = memory;
   const libraryWorkers = startupLibraryWorkers();
   if (Object.keys(libraryWorkers).length) report.libraryWorkers = libraryWorkers;
   return report;

@@ -6,6 +6,7 @@
 
 import { parseRoute, type Route } from './route';
 import { apiUrl } from './runtimeUrl';
+import { currentClientPlatform } from './clientPlatform';
 
 // ---- The release this page is running (den-edge's `x-den-release` on the shell, `web.rs`'s `release()`) ----
 
@@ -60,10 +61,11 @@ export function reportUrl(path: string): string {
 }
 
 function post(url: string, body: unknown, fetchImpl: typeof fetch): void {
+  const reported = { ...(body as Record<string, unknown>), platform: currentClientPlatform() };
   void fetchImpl(reportUrl(url), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(reported),
     keepalive: true,
   }).catch(() => undefined);
 }
@@ -75,7 +77,10 @@ function post(url: string, body: unknown, fetchImpl: typeof fetch): void {
  * concern for a body this shape).
  */
 function beacon(url: string, body: unknown, fetchImpl: typeof fetch): void {
-  const text = JSON.stringify(body);
+  const text = JSON.stringify({
+    ...(body as Record<string, unknown>),
+    platform: currentClientPlatform(),
+  });
   if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(reportUrl(url), text)) return;
   post(url, body, fetchImpl);
 }
@@ -406,6 +411,10 @@ export interface PlaybackOutcomeReport extends IdentityFields {
   delivery?: 'remux' | 'direct';
   /** The session named a home-network playlist to try first. */
   lanOffered?: boolean;
+  /** `[count, total ms, longest ms]` of seeks, each from `seeking` to `seeked`; absent with none. */
+  seeks?: [number, number, number];
+  /** Frames the browser dropped, where it counts them. */
+  droppedFrames?: number;
 }
 
 /** `sendBeacon` first (`beacon`): a session's outcome is as likely to be sent from a page hiding or unloading as
