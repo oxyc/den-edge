@@ -1300,6 +1300,38 @@ struct NativeMemory {
     warnings: u32,
 }
 
+/// How one screen drew while it showed, from the app's display-link frame monitor: frames delivered, frames
+/// missed, the time late frames ran past one frame budget, the longest frame, and the time measured.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PerformanceFrames {
+    delivered: u32,
+    missed: u32,
+    hitch_ms: u32,
+    longest_ms: u32,
+    visible_ms: u32,
+}
+
+/// About 46 hours of frames at 60 Hz.
+const MAX_FRAMES: u32 = 10_000_000;
+
+impl PerformanceFrames {
+    fn push_tags(&self, parts: &mut Vec<String>) {
+        let hitch_ms = self.hitch_ms.min(MAX_NET_MS);
+        let visible_ms = self.visible_ms.min(MAX_NET_MS);
+        parts.push(format!("frames:{}", self.delivered.min(MAX_FRAMES)));
+        parts.push(format!("missedFrames:{}", self.missed.min(MAX_FRAMES)));
+        parts.push(format!("hitchMs:{hitch_ms}"));
+        parts.push(format!("longestFrameMs:{}", self.longest_ms.min(MAX_MS)));
+        parts.push(format!("visibleMs:{visible_ms}"));
+        // Apple's hitch ratio: hitch milliseconds per second on screen.
+        if visible_ms > 0 {
+            let ratio = f64::from(hitch_ms) * 1000.0 / f64::from(visible_ms);
+            parts.push(format!("hitchRatio:{ratio:.1}"));
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PerformanceReport {
@@ -1312,6 +1344,8 @@ struct PerformanceReport {
     /// `[count, total milliseconds, longest milliseconds]` on a `stalls` event: the screen in `route` while they
     /// happened.
     stalls: Option<(u32, u32, u32)>,
+    /// On a `stalls` event: how the screen in `route` drew.
+    frames: Option<PerformanceFrames>,
     memory: NativeMemory,
     playback: Option<PerformancePlayback>,
 }
@@ -1331,6 +1365,9 @@ impl PerformanceReport {
         }
         if let Some(stalls) = self.stalls {
             parts.push(count_total_longest("stalls", stalls));
+        }
+        if let Some(frames) = &self.frames {
+            frames.push_tags(&mut parts);
         }
         let memory = &self.memory;
         for (name, value) in [
@@ -2095,6 +2132,41 @@ mod tests {
             report.tag(),
             "platform:apple_tv,journey:navigation,stage:stalls,route:home,stalls:2/420ms/max300ms,memoryWarnings:0"
         );
+    }
+
+    #[test]
+    fn a_native_stalls_event_carries_how_the_screen_drew_bounded() {
+        // The `frames` object `PerformanceAuditTests.framesWireShape` (den's DenKit) encodes, field for field.
+        let report: PerformanceReport = serde_json::from_value(serde_json::json!({
+            "platform": "apple_tv", "journey": "navigation", "stage": "stalls", "route": "home",
+            "frames": { "delivered": 600, "missed": 3, "hitchMs": 50, "longestMs": 67, "visibleMs": 10000 },
+            "memory": { "warnings": 0 }
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "platform:apple_tv,journey:navigation,stage:stalls,route:home,frames:600,missedFrames:3,hitchMs:50,\
+             longestFrameMs:67,visibleMs:10000,hitchRatio:5.0,memoryWarnings:0"
+        );
+        let huge: PerformanceReport = serde_json::from_value(serde_json::json!({
+            "platform": "apple_tv", "journey": "navigation", "stage": "stalls", "route": "title",
+            "frames": { "delivered": u32::MAX, "missed": u32::MAX, "hitchMs": u32::MAX, "longestMs": u32::MAX,
+                "visibleMs": 0 },
+            "memory": { "warnings": 0 }
+        }))
+        .unwrap();
+        assert_eq!(
+            huge.tag(),
+            "platform:apple_tv,journey:navigation,stage:stalls,route:title,frames:10000000,missedFrames:10000000,\
+             hitchMs:36000000,longestFrameMs:600000,visibleMs:0,memoryWarnings:0",
+            "every count is capped, and no ratio without a denominator"
+        );
+        let unknown = serde_json::from_value::<PerformanceReport>(serde_json::json!({
+            "platform": "apple_tv", "journey": "navigation", "stage": "stalls",
+            "frames": { "delivered": 1, "missed": 0, "hitchMs": 0, "longestMs": 17, "visibleMs": 17, "screen": "x" },
+            "memory": { "warnings": 0 }
+        }));
+        assert!(unknown.is_err(), "the frames object is closed like the rest of the event");
     }
 
     #[test]
