@@ -1257,6 +1257,7 @@
           visible: !document.hidden,
           online: navigator.onLine,
           playbackActive: current.live,
+          playerOpen: current.playerOpen,
         })
         .catch(() => {});
     };
@@ -1317,6 +1318,7 @@
   $effect(() => {
     const current = session;
     void current.live;
+    void current.playerOpen;
     const model = current.model;
     if (!model) return;
     void model.ready
@@ -1325,6 +1327,7 @@
           visible: !document.hidden,
           online: navigator.onLine,
           playbackActive: current.live,
+          playerOpen: current.playerOpen,
         }),
       )
       .catch(() => {});

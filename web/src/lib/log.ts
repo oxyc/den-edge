@@ -2724,12 +2724,35 @@ export class LibraryLog {
    * this browser holds: a row arrived, the log was reset, or kept work reached den-edge. A poll that finds nothing
    * new is false, so what is built from the library is not rebuilt on every 30-second refresh.
    */
-  async refresh(waitSeconds = 0): Promise<boolean> {
-    return (await this.pass(waitSeconds)).changed;
+  async refresh(waitSeconds = 0, stopWaiting?: AbortSignal): Promise<boolean> {
+    if (waitSeconds > 0) await this.awaitChange(waitSeconds, stopWaiting);
+    return (await this.pass()).changed;
+  }
+
+  /**
+   * Wait, up to `waitSeconds`, for den-edge to hold something past this browser's head: a held `/changes` read whose
+   * answer is only a signal. It stays off the write lane — a pass is serialized with writes, and one held there kept
+   * every edit made meanwhile waiting with it — so the read that follows is an ordinary one. `stop` ends the wait
+   * early.
+   */
+  private async awaitChange(waitSeconds: number, stop?: AbortSignal): Promise<void> {
+    if (this.offline || stop?.aborted) return;
+    const wait = Math.max(0, Math.min(25, Math.floor(waitSeconds)));
+    try {
+      const res = await this.send(
+        `/lib/${this.keys.id}/changes?since=${this.head}&limit=1&wait=${wait}`,
+        { headers: this.headers(), ...(stop ? { signal: stop } : {}) },
+        true,
+        wait * 1000 + REQUEST_MS,
+      );
+      await res.body?.cancel();
+    } catch {
+      // The pass that follows meets the same failure and reports it.
+    }
   }
 
   /** One `refresh` pass: whether it changed what this browser holds, and whether it read the log to its head. */
-  private async pass(waitSeconds = 0): Promise<{ changed: boolean; reachedHead: boolean }> {
+  private async pass(): Promise<{ changed: boolean; reachedHead: boolean }> {
     // Nothing else writes a library kept only here but another tab, whose rows each save takes up (`takeKept`).
     if (this.offline) return { changed: false, reachedHead: false };
     const generationsBefore = this.generationChanges;
@@ -2738,9 +2761,8 @@ export class LibraryLog {
     const run = this.writes.then(async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
-          const wait = Math.max(0, Math.min(25, Math.floor(waitSeconds)));
           const res = await this.send(
-            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000${wait ? `&wait=${wait}` : ''}`,
+            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
             { headers: this.headers() },
           );
           if (res.status === 410) this.moved = true;
@@ -3937,21 +3959,25 @@ export class LibraryLog {
   /**
    * A request to den-edge that gives up when it has not started answering after `REQUEST_MS`, or when its body then
    * stops arriving for as long. The body is read through here, so a stall fails the read even where aborting the
-   * request would not end it.
+   * request would not end it. A held read starts answering only when its hold ends: `answerMs` covers the hold.
    */
   private async send(
     path: string,
     init: RequestInit = {},
     observeHousehold = true,
+    answerMs = REQUEST_MS,
   ): Promise<Response> {
     const controller = new AbortController();
     const timedOut = () => new DOMException('den-edge stopped answering', 'TimeoutError');
-    const deadline = setTimeout(() => controller.abort(timedOut()), REQUEST_MS);
+    const deadline = setTimeout(() => controller.abort(timedOut()), answerMs);
+    const stop = () => controller.abort(init.signal?.reason);
+    init.signal?.addEventListener('abort', stop, { once: true });
     let res: Response;
     try {
       res = await this.fetchImpl(path, { ...init, signal: controller.signal });
     } finally {
       clearTimeout(deadline);
+      init.signal?.removeEventListener('abort', stop);
     }
     // Candidate profile libraries remain wire 4. Their headers must never change the household log's wire state.
     if (observeHousehold) await this.observeProtocol(res);

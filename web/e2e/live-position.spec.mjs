@@ -43,6 +43,8 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   let head = 0;
   const headers = { 'x-den-generation': generation, 'x-den-wire-min': '4' };
   const pulls = new Map();
+  /** The `wait` each page's pulls asked den-edge to hold for, in order (0: none). */
+  const waits = new Map();
   const arrivals = [];
   const controls = [];
   let deviceWrote = 0;
@@ -111,6 +113,7 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
       route.fulfill({ status: 200, json: { listening: true } }),
     );
     pulls.set(name, []);
+    waits.set(name, []);
     // Registered last, so it answers before the per-page edge `routeLibraryEdge` installs.
     await page.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
       const request = route.request();
@@ -119,6 +122,7 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
         return route.fulfill({ status: 200, headers });
       if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
         pulls.get(name).push(Date.now());
+        waits.get(name).push(Number(url.searchParams.get('wait') ?? 0));
         const since = Number(url.searchParams.get('since') ?? 0);
         // The device reads its own log, pushed or not; this page reads only what has reached den-edge.
         const visible = () => new Map([...rows, ...(name === 'device' ? unpushed : [])]);
@@ -175,6 +179,7 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   return {
     route,
     pulls,
+    waits,
     arrivals,
     controls,
     close: () => {
@@ -432,6 +437,79 @@ test('a title paused on another device stops its clock at the next write that di
     const paused = Date.now();
     await expect(clock).toBeHidden({ timeout: 20_000 });
     console.log(`clock gone ${Date.now() - paused} ms after the pause`);
+  } finally {
+    await close();
+  }
+});
+
+test('this browser’s own playback never pulls the library faster; another device’s does', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const { edge, play, close } = await openWithDevice(browser, page);
+  // Another tab of this browser: the same stamp device as the page, so its writes are this device's own playback.
+  const own = await page.context().newPage();
+  let timer;
+  try {
+    await edge.route(own, 'own');
+    await own.goto(`${FIXTURE}?writer`);
+    await own.getByRole('status').filter({ hasText: 'Writer ready' }).waitFor({ timeout: 15_000 });
+    const started = Date.now();
+    const write = () =>
+      own.evaluate(
+        ([title, seconds]) => window.fixturePlay(title, seconds),
+        [PLAYED, 600 + Math.floor((Date.now() - started) / 1000)],
+      );
+    await write();
+    timer = setInterval(() => void write().catch(() => {}), WRITE_EVERY_MS);
+    // The page has its own playback on Home (the clock shows it) and goes on holding its idle read.
+    await expect(homeClock(page)).toBeVisible({ timeout: 40_000 });
+    const from = edge.waits.get('page').length;
+    await page.waitForTimeout(15_000);
+    const waits = edge.waits.get('page').slice(from);
+    console.log(`page pulls' wait while this browser plays: ${waits.join(' ')}`);
+    expect(waits.length, 'the page went on reading').toBeGreaterThan(0);
+    expect(
+      waits.filter((wait) => wait === 5),
+      'no live-playback pulls',
+    ).toEqual([]);
+    clearInterval(timer);
+
+    // Another device playing: the page does pull at the live cadence.
+    play({ type: 'movie', id: 1004 }, 300);
+    await expect
+      .poll(() => edge.waits.get('page').slice(from).includes(5), { timeout: 60_000 })
+      .toBe(true);
+  } finally {
+    clearInterval(timer);
+    await own.close();
+    await close();
+  }
+});
+
+test('the library is not maintained under this page’s player, and catches up when it closes', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const { edge, close } = await openWithDevice(browser, page);
+  try {
+    await page.locator('.card', { hasText: 'Series 1003' }).click();
+    const resume = page.locator('header.hero').getByRole('link', { name: 'Resume', exact: true });
+    await resume.click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    // Whatever read was under way when it opened ends; then nothing more is read.
+    await page.waitForTimeout(3_000);
+    const before = edge.pulls.get('page').length;
+    await page.waitForTimeout(35_000);
+    expect(edge.pulls.get('page').length, 'reads while the player was open').toBe(before);
+
+    await page.getByRole('dialog').getByRole('button', { name: 'Close' }).click();
+    await expect(page.getByRole('dialog')).toBeHidden();
+    await expect
+      .poll(() => edge.pulls.get('page').length, { timeout: 5_000 })
+      .toBeGreaterThan(before);
   } finally {
     await close();
   }

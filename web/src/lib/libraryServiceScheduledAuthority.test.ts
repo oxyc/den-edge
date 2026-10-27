@@ -3,6 +3,9 @@ import type { LibraryObservation } from './libraryServiceProtocol';
 import type { LibraryAuthorityEvent, LibraryServiceAuthority } from './libraryServiceCore';
 import {
   ACTIVE_PLAYBACK_REFRESH_MS,
+  HELD_AFTER_MS,
+  HELD_SPACING_MS,
+  HELD_WAIT_SECONDS,
   ScheduledLibraryServiceAuthority,
   VISIBLE_REFRESH_MS,
   type LibraryMaintenance,
@@ -135,18 +138,101 @@ describe('ScheduledLibraryServiceAuthority', () => {
       { kind: 'status', status: { kind: 'ready' } },
     ]);
 
-    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS - 1);
-    expect(work.run).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
+    // A pass that found a change reads again a second later; one that found nothing, early, waits the cadence.
+    await vi.advanceTimersByTimeAsync(HELD_SPACING_MS);
     expect(work.run).toHaveBeenCalledTimes(2);
-
-    await scheduled.observe(lifecycle({ playbackActive: true }));
-    await vi.advanceTimersByTimeAsync(ACTIVE_PLAYBACK_REFRESH_MS - 1);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS - 1);
     expect(work.run).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(work.run).toHaveBeenCalledTimes(3);
-    expect(work.run).toHaveBeenLastCalledWith({ waitSeconds: 5 });
 
+    await scheduled.observe(lifecycle({ playbackActive: true }));
+    await vi.advanceTimersByTimeAsync(ACTIVE_PLAYBACK_REFRESH_MS - 1);
+    expect(work.run).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(work.run).toHaveBeenCalledTimes(4);
+    expect(work.run).toHaveBeenLastCalledWith(expect.objectContaining({ waitSeconds: 5 }));
+
+    await scheduled.close();
+  });
+
+  /** A maintenance pass whose read den-edge holds until `answer` is called, as `/changes?wait=` does. */
+  function heldMaintenance() {
+    const pending: Array<{
+      options?: Parameters<LibraryMaintenance['run']>[0];
+      answer: (changed: boolean) => void;
+    }> = [];
+    const run = vi.fn<LibraryMaintenance['run']>(
+      (options) =>
+        new Promise((resolve) => {
+          const answer = (changed: boolean) => resolve({ changed, status: { kind: 'ready' } });
+          options?.stopWaiting?.addEventListener('abort', () => answer(false));
+          pending.push({ options, answer });
+        }),
+    );
+    return { port: { mode: 'online', run } satisfies LibraryMaintenance, run, pending };
+  }
+
+  it('holds an idle visible read and reads again at once after a held answer, like the TV’s HeldPoll', async () => {
+    vi.useFakeTimers();
+    const work = heldMaintenance();
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port);
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledOnce();
+    expect(work.pending[0]!.options?.waitSeconds).toBe(HELD_WAIT_SECONDS);
+
+    // Held the whole 25 seconds and answered empty: the next read starts at once.
+    await vi.advanceTimersByTimeAsync(HELD_WAIT_SECONDS * 1000);
+    work.pending[0]!.answer(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(2);
+
+    // A change answered at once: the next read follows a second after the last began, not in a spin.
+    work.pending[1]!.answer(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(HELD_SPACING_MS);
+    expect(work.run).toHaveBeenCalledTimes(3);
+
+    // Empty and early (den-edge held nothing): the plain cadence, so the loop never spins.
+    await vi.advanceTimersByTimeAsync(HELD_AFTER_MS - 1_000);
+    work.pending[2]!.answer(false);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS - HELD_AFTER_MS);
+    expect(work.run).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(HELD_AFTER_MS);
+    expect(work.run).toHaveBeenCalledTimes(4);
+
+    // Hidden: the held read is let go, and nothing more is read until the page is back.
+    await scheduled.observe(lifecycle({ visible: false }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.pending[3]!.options?.stopWaiting?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 3);
+    expect(work.run).toHaveBeenCalledTimes(4);
+    await scheduled.close();
+  });
+
+  it('pauses maintenance under the page’s own player and catches up when it closes', async () => {
+    vi.useFakeTimers();
+    const work = maintenance();
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port);
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(1);
+
+    await scheduled.observe(lifecycle({ playerOpen: true }));
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 4);
+    expect(work.run, 'no refresh or compaction while the player is open').toHaveBeenCalledTimes(1);
+    // Another device playing meanwhile does not wake it either: nothing under the player shows it.
+    await scheduled.observe(lifecycle({ playerOpen: true, playbackActive: true }));
+    await vi.advanceTimersByTimeAsync(ACTIVE_PLAYBACK_REFRESH_MS * 4);
+    expect(work.run).toHaveBeenCalledTimes(1);
+
+    await scheduled.observe(lifecycle({ playbackActive: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledTimes(2);
     await scheduled.close();
   });
 

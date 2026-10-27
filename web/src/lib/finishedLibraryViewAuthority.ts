@@ -17,6 +17,7 @@ import {
 } from './libraryLocalAuthority';
 import { readEncryptedLibraryValue, writeEncryptedLibraryValue } from './libraryLocalValue';
 import type { Vault } from './localVault';
+import { storedClockDevice } from './clockStore';
 import type { ContentReader } from './contentAuthority';
 import type {
   AssistantConnection,
@@ -158,6 +159,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   #factHomeComplete = false;
   /** The `devices` row Continue's items name their device from, read with `#factHome`. */
   #factDevices?: SettingsRow;
+  /** This browser's stamp device, which marks the Continue items it wrote (`here`). */
+  #self?: string;
   /** Series shapes the page observed, by title: a title's view needs its episodes, and a promotion is told them. */
   readonly #titleShapes = new Map<
     string,
@@ -687,7 +690,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (this.#full) return this.#full.observe(observation);
     if (observation.kind === 'lifecycle') {
       this.#lifecycle = structuredClone(observation);
-      if (observation.visible && observation.online) this.#schedule(0);
+      if (observation.visible && observation.online && !observation.playerOpen) this.#schedule(0);
       else this.#cancelTimer();
       return { outcome: 'unchanged' as const, affected: [] };
     }
@@ -851,7 +854,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       this.#full ||
       this.#filling ||
       !this.#lifecycle?.visible ||
-      !this.#lifecycle.online
+      !this.#lifecycle.online ||
+      // Under this page's own player, as the scheduled authority does.
+      this.#lifecycle.playerOpen
     )
       return;
     this.#timer = setTimeout(() => {
@@ -1135,6 +1140,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           this.#factShapes,
           this.#factProjector,
           this.#factDevices,
+          this.#self,
         ),
         layouts: {
           ...cached.layouts,
@@ -1228,8 +1234,15 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         this.#factDevices = (
           await this.factStore.settings(this.cached.identity.generation, 'devices')
         ).find((row) => row.name === 'devices');
+        this.#self ??= await storedClockDevice(this.vault);
         this.cached.pieces.continue = {
-          view: factContinue(home, this.#factShapes, this.#factProjector, this.#factDevices),
+          view: factContinue(
+            home,
+            this.#factShapes,
+            this.#factProjector,
+            this.#factDevices,
+            this.#self,
+          ),
           layouts: Object.fromEntries(
             [...this.#factShapes].map(([key, shape]) => [
               key,
