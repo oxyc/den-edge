@@ -227,3 +227,57 @@ it('runs independent reads concurrently and aborts only the requested operation'
   ]);
   await core.close();
 });
+
+it('hands each improving answer to the asking page before the finished one, and none after a cancel', async () => {
+  const hits = (name: string) => ({
+    kind: 'search' as const,
+    hits: [{ kind: 'title' as const, title: { type: 'movie' as const, id: 1, title: name } }],
+  });
+  let improve: (partial: ContentResult) => void = () => {};
+  let finish: (result: ContentResult) => void = () => {};
+  const core = new ContentServiceCore({
+    query(_request, _signal, _policy, progress) {
+      improve = progress!;
+      return new Promise<ContentResult>((resolve) => (finish = resolve));
+    },
+  });
+  // Core → codec → client, as the Worker host wires them.
+  const transport = new FakeTransport();
+  transport.send = (message) => {
+    void core.dispatch(message).then((replies) => replies.forEach((m) => transport.receive(m)));
+  };
+  core.listen((messages) =>
+    messages.forEach((message) => {
+      const decoded = decodeContentServiceServerMessage(message);
+      expect(decoded.ok).toBe(true);
+      transport.receive(message);
+    }),
+  );
+  const client = new ContentServiceClient(transport, 'page');
+  const seen: string[] = [];
+  const answer = client.query({ kind: 'search', query: 'one' }, undefined, undefined, (partial) =>
+    seen.push(partial.hits[0]!.kind === 'title' ? partial.hits[0]!.title.title : ''),
+  );
+  await Promise.resolve();
+  improve(hits('named'));
+  improve(hits('pictured'));
+  finish(hits('finished'));
+  await expect(answer).resolves.toEqual(hits('finished'));
+  expect(seen).toEqual(['named', 'pictured']);
+
+  const controller = new AbortController();
+  const late: unknown[] = [];
+  const cancelled = client.query(
+    { kind: 'search', query: 'two' },
+    controller.signal,
+    undefined,
+    (partial) => late.push(partial),
+  );
+  await Promise.resolve();
+  controller.abort();
+  await expect(cancelled).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  improve(hits('typed past'));
+  expect(late).toEqual([]);
+  client.close();
+  await core.close();
+});

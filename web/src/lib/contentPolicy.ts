@@ -149,8 +149,13 @@ export class PolicedContent implements ContentServiceClientPort {
   async query<Request extends ContentRequest>(
     request: Request,
     signal?: AbortSignal,
+    _policy?: ContentPolicy,
+    onProgress?: (partial: ContentResultFor<Request>) => void,
   ): Promise<ContentResultFor<Request>> {
-    return this.inner.query(request, signal, await this.policy());
+    const policy = await this.policy();
+    return onProgress
+      ? this.inner.query(request, signal, policy, onProgress)
+      : this.inner.query(request, signal, policy);
   }
 
   onStatus(listener: (status: ContentServiceStatusValue) => void): () => void {

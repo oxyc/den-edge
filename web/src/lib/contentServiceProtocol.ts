@@ -265,7 +265,8 @@ export interface ContentTitleExtras {
 }
 
 export type ContentSearchHit =
-  | { kind: 'title'; title: Title }
+  /** `awaiting`: shown before its poster was looked for, so its name shows rather than a blank card. */
+  | { kind: 'title'; title: Title; awaiting?: true }
   | {
       kind: 'person';
       person: { id: number; name: string; profilePath?: string; knownFor?: string[] };
@@ -409,6 +410,16 @@ export interface ContentServiceQueryResult extends ContentServerMessage {
   result: ContentResult;
 }
 
+/**
+ * An answer that is still improving (search's grid as each poster lands). Zero or more come before the request's one
+ * `content-result`, which replaces them; a cancelled request sends none after its cancel.
+ */
+export interface ContentServiceQueryProgress extends ContentServerMessage {
+  type: 'content-progress';
+  requestId: string;
+  result: ContentResult;
+}
+
 export interface ContentServiceErrorMessage extends ContentServerMessage {
   type: 'content-error';
   requestId?: string;
@@ -421,7 +432,10 @@ export interface ContentServiceStatus extends ContentServerMessage {
 }
 
 export type ContentServiceServerMessage =
-  ContentServiceQueryResult | ContentServiceErrorMessage | ContentServiceStatus;
+  | ContentServiceQueryResult
+  | ContentServiceQueryProgress
+  | ContentServiceErrorMessage
+  | ContentServiceStatus;
 
 export function isContentServiceClientMessage(input: unknown): boolean {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
@@ -432,5 +446,10 @@ export function isContentServiceClientMessage(input: unknown): boolean {
 export function isContentServiceServerMessage(input: unknown): boolean {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
   const type = (input as { type?: unknown }).type;
-  return type === 'content-result' || type === 'content-error' || type === 'content-status';
+  return (
+    type === 'content-result' ||
+    type === 'content-progress' ||
+    type === 'content-error' ||
+    type === 'content-status'
+  );
 }

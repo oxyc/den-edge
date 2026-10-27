@@ -41,7 +41,7 @@
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
   import { FACET, fansOf, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
-  import { awaitingPicture, type Hit } from '../lib/search';
+  import type { Hit } from '../lib/search';
   import { rememberSearch } from '../lib/recentSearches';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
 
@@ -275,21 +275,43 @@
     // At once, on every letter: a wait here only added its own 300 ms to every search. The one before this letter's
     // is told it has been typed past, so it asks TMDB nothing more.
     const typedPast = new AbortController();
+    const visible = (found: Hit[]) =>
+      found.filter(
+        (hit) =>
+          hit.kind === 'person' ||
+          !isHidden(hit.title, rules, {
+            ignoringYearFloor: true,
+            requirePoster: !hit.awaiting,
+            // Typing a name is an explicit request: a direct match still shows past the hidden-language and
+            // hidden-genre filters (never past the adult flag or the parental ceiling, enforced elsewhere).
+            query: text,
+          }),
+      );
+    // The grid as it improves — named at once, then each poster as it lands — one repaint per frame at most.
+    let improving: Hit[] | null = null;
+    let frame = 0;
+    const paint = () => {
+      frame = 0;
+      if (!current || !improving) return;
+      hits = visible(improving);
+      improving = null;
+      pending = false;
+    };
     const timer = setTimeout(async () => {
       try {
-        const result = await content.query({ kind: 'search', query: text }, typedPast.signal);
-        if (!current) return;
-        hits = result.hits.filter(
-          (hit) =>
-            hit.kind === 'person' ||
-            !isHidden(hit.title, rules, {
-              ignoringYearFloor: true,
-              requirePoster: !awaitingPicture(hit.title),
-              // Typing a name is an explicit request: a direct match still shows past the hidden-language and
-              // hidden-genre filters (never past the adult flag or the parental ceiling, enforced elsewhere).
-              query: text,
-            }),
+        const result = await content.query(
+          { kind: 'search', query: text },
+          typedPast.signal,
+          undefined,
+          (partial) => {
+            if (!current) return;
+            improving = partial.hits;
+            frame ||= requestAnimationFrame(paint);
+          },
         );
+        if (!current) return;
+        improving = null;
+        hits = visible(result.hits);
         pending = false;
       } catch {
         if (current) {
@@ -304,6 +326,7 @@
       current = false;
       typedPast.abort();
       clearTimeout(timer);
+      if (frame) cancelAnimationFrame(frame);
     };
   });
 
