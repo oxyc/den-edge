@@ -56,6 +56,8 @@ function rememberRegion(identity: ProfileIdentity, region: string | undefined): 
 export class ProfileSession {
   readonly shapes = new SvelteMap<string, Shape>();
   live = $state(false);
+  /** This browser's player is open: the library service pauses its maintenance meanwhile. */
+  playerOpen = $state(false);
   toast = $state<string | null>(null);
   undo = $state<{ label: string; run: () => void } | null>(null);
   /** The page has drawn what it opened for (`foregroundReady`): optional background work may start. */

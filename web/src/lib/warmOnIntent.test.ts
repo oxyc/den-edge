@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { warmHls } from './hlsLoader';
-import { forgetWarmOnIntent, warmOnIntent } from './warmOnIntent';
+import { forgetWarmOnIntent, warmLink, warmOnIntent } from './warmOnIntent';
 
 vi.mock('./hlsLoader', () => ({ warmHls: vi.fn() }));
 
@@ -99,6 +99,17 @@ describe('warmOnIntent', () => {
     stale();
     press(on, '/movie/42-the-movie');
     expect(warms).toBe(1);
+  });
+
+  it('warms a link a remote rested on as a press would, with the same de-duplication', () => {
+    const warmed: unknown[] = [];
+    const on = new EventTarget();
+    warmOnIntent((ref) => warmed.push(ref), on);
+    warmLink('/movie/42-the-movie');
+    press(on, '/movie/42-the-movie');
+    warmLink('/settings');
+    expect(warmed).toEqual([{ type: 'movie', id: 42 }]);
+    expect(warmHls).toHaveBeenCalledOnce();
   });
 
   it('stops when the caller still in force tears down', () => {

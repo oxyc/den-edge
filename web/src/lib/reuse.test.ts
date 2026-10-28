@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { forgetReused, reuse, REUSE_MS } from './reuse';
+import { forgetReused, reuse, reusedCount, REUSE_MS } from './reuse';
 
 beforeEach(forgetReused);
 
@@ -61,5 +61,17 @@ describe('reuse', () => {
     expect(await third).toBe('whole');
     expect(await reuse('q', make, { now: 3, keep }), 'a kept answer is shared').toBe('whole');
     expect(asked).toBe(2);
+  });
+
+  it('lets go of answers past the window, however many questions a session asks', async () => {
+    for (let n = 0; n < 100; n++) await reuse(`row ${n}`, async () => n, { now: n });
+    expect(reusedCount()).toBe(100);
+    // An hour on, one more question: only it is held.
+    await reuse('later', async () => 'later', { now: 60 * 60_000 });
+    expect(reusedCount()).toBe(1);
+    // One asked again within the window keeps its place; the others still expire around it.
+    await reuse('a', async () => 'a', { now: 60 * 60_000 + 1 });
+    await reuse('later', async () => 'again', { now: 60 * 60_000 + REUSE_MS });
+    expect(reusedCount()).toBe(2);
   });
 });

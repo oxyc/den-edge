@@ -502,3 +502,52 @@ describe('every direct boundary asks the same check', () => {
     expect(spy).toHaveBeenCalledWith({ kind: 'title.eligibility', allowed: asked });
   });
 });
+
+describe('repeat searches', () => {
+  /** An atlas that names one pictured title per query, so a search asks nothing of TMDB. */
+  const searching = (gate?: Promise<void>) =>
+    world((url) => {
+      const q = /\/index\/query\.json\?q=([^&]+)/.exec(url)?.[1];
+      if (!q) return undefined;
+      const answer = () =>
+        json({
+          people: [],
+          hits: [{ type: 'movie', id: 1, title: decodeURIComponent(q), posterPath: '/p.jpg' }],
+        });
+      // The world's fetch awaits what this returns; a held answer is a slow atlas.
+      return (gate ? gate.then(answer) : answer()) as unknown as Response;
+    });
+  const queried = (w: World) => w.atlas.filter((url) => url.includes('/index/query.json')).length;
+
+  it('answers a query asked again from the last answer, per policy, and forgets the least recent past 40', async () => {
+    const w = searching();
+    const heist = await w.ask({ kind: 'search', query: 'heist' });
+    await w.ask({ kind: 'search', query: 'heis' });
+    // Backspacing back to "heist" asks atlas nothing.
+    await expect(w.ask({ kind: 'search', query: 'heist' })).resolves.toEqual(heist);
+    expect(queried(w)).toBe(2);
+    // A Kid's search is never answered from an Owner's.
+    await w.ask({ kind: 'search', query: 'heist' }, KID);
+    expect(queried(w)).toBe(3);
+    for (let n = 0; n < 40; n++) await w.ask({ kind: 'search', query: `film ${n}` });
+    expect(queried(w)).toBe(43);
+    await w.ask({ kind: 'search', query: 'heis' });
+    expect(queried(w), 'the least recently asked was forgotten').toBe(44);
+  });
+
+  it('keeps no answer of a search typed past, and none after the atlas changes', async () => {
+    let release = () => {};
+    const w = searching(new Promise((resolve) => (release = resolve)));
+    const typedPast = new AbortController();
+    const asking = w.authority.query({ kind: 'search', query: 'heist' }, typedPast.signal);
+    await vi.waitFor(() => expect(queried(w)).toBe(1));
+    typedPast.abort();
+    release();
+    await asking.catch(() => {});
+    await w.ask({ kind: 'search', query: 'heist' });
+    expect(queried(w)).toBe(2);
+    await w.ask({ kind: 'sources.configure', atlas: '/atlas' });
+    await w.ask({ kind: 'search', query: 'heist' });
+    expect(queried(w)).toBe(3);
+  });
+});

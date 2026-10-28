@@ -16,6 +16,7 @@ import {
 } from './libraryLocalAuthority';
 import { readEncryptedLibraryValue } from './libraryLocalValue';
 import type { Vault } from './localVault';
+import { storedClockDevice } from './clockStore';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
 import { libraryMetadataShapeDigest } from './libraryMetadata';
 import { ContinueProjector, type Shape } from './library';
@@ -65,9 +66,15 @@ export const factContinue = (
   shapes: ReadonlyMap<string, Shape>,
   projector: ContinueProjector,
   devices: SettingsRow | undefined,
+  self?: string,
 ): Extract<LibrarySelectionValue, { kind: 'continue' }> => ({
   kind: 'continue',
-  items: continueItems(projector, { ...home.continueLibrary, shapes: new Map(shapes) }, devices),
+  items: continueItems(
+    projector,
+    { ...home.continueLibrary, shapes: new Map(shapes) },
+    devices,
+    self,
+  ),
   needsShapes: home.requiredShapeRefs.filter((key) => !shapes.has(key)).map(factRef),
 });
 
@@ -251,6 +258,7 @@ export class FinishedLibraryViewWriter {
       shapes,
       this.#projector,
       deviceRows.find((row) => row.name === 'devices'),
+      await storedClockDevice(this.vault),
     );
     if (continued.needsShapes.length) return;
     const required = new Set(selected.view.requiredShapeRefs);

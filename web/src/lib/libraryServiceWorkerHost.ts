@@ -88,7 +88,10 @@ export class LibraryServiceWorkerHost {
     scope.addEventListener('message', this.#receive);
     this.#stopListening = [
       dispatcher.listen((messages) => this.#publishLibrary(messages)),
-      ...(content ? [content.listen((messages) => this.#publishContent(messages))] : []),
+      // A request's progress names it: a malformed one fails that request, never every request in flight.
+      ...(content
+        ? [content.listen((messages) => this.#publishContent(messages, requestIdOf(messages[0])))]
+        : []),
     ];
   }
 

@@ -23,7 +23,9 @@ export interface Person {
   knownFor?: string[];
 }
 
-export type Hit = { kind: 'title'; title: Title } | { kind: 'person'; person: Person };
+/** `awaiting`: a title the content worker sent before its poster was looked for (`awaitingPicture` on the wire). */
+export type Hit =
+  { kind: 'title'; title: Title; awaiting?: true } | { kind: 'person'; person: Person };
 
 export interface FacetAnswer {
   /** What atlas read in the query; null when it names no facet. */

@@ -1212,10 +1212,11 @@ function observation(value: unknown): value is LibraryObservation {
     }
     case 'lifecycle':
       return (
-        exact(value, ['kind', 'visible', 'online', 'playbackActive']) &&
+        exact(value, ['kind', 'visible', 'online', 'playbackActive', 'playerOpen']) &&
         bool(value.visible) &&
         bool(value.online) &&
-        bool(value.playbackActive)
+        bool(value.playbackActive) &&
+        (value.playerOpen === undefined || bool(value.playerOpen))
       );
     case 'foreground-ready':
       return exact(value, ['kind']);
@@ -1261,8 +1262,10 @@ function continueItem(value: unknown): value is ContinueItem {
       'liveFraction',
       'device',
       'deviceId',
+      'here',
     ]) &&
     titleRef(value.title) &&
+    (value.here === undefined || value.here === true) &&
     finite(value.fraction) &&
     value.fraction >= 0 &&
     value.fraction <= 1 &&

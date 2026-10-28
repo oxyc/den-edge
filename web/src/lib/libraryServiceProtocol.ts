@@ -397,6 +397,8 @@ export interface ContinueItem {
   device?: string;
   /** Stable stamp-device id of the writer. */
   deviceId?: string;
+  /** The writer is this device (its stamp device is the library service's own). */
+  here?: true;
 }
 
 export interface ContinueView {
@@ -1051,7 +1053,10 @@ export type LibraryObservation =
       kind: 'lifecycle';
       visible: boolean;
       online: boolean;
+      /** Something plays on another device: pull sooner, so its live position and controls keep up. */
       playbackActive: boolean;
+      /** This page's own player is open: maintenance waits until it closes. */
+      playerOpen?: boolean;
     }
   /** One-way session milestone: optional provider/download work may now use the network. */
   | { kind: 'foreground-ready' };

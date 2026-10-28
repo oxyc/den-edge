@@ -1,17 +1,28 @@
 // The library's standing for every title (`standings`), shared with every poster on the page. Set by the open
 // library as it changes; a guest's, or a page with no library, marks nothing.
 
+import { untrack } from 'svelte';
+import { SvelteMap } from 'svelte/reactivity';
 import { titleKey, type Shape, type Standing } from './library';
 
+/**
+ * Per title: a poster reads only its own title's entry, and a change to the library touches only the entries that
+ * changed, so marking one title watched re-derives one card rather than every card on the page.
+ */
 class LibraryStandings {
-  #by = $state.raw(new Map<string, Standing>());
+  readonly #by = new SvelteMap<string, Standing>();
 
   of(title: { type: string; id: number }): Standing | undefined {
     return this.#by.get(titleKey(title));
   }
 
-  set(by: Map<string, Standing>): void {
-    this.#by = by;
+  set(by: ReadonlyMap<string, Standing>): void {
+    // Read untracked: the effect that hands the map over must not come to depend on every title it wrote.
+    untrack(() => {
+      for (const key of this.#by.keys()) if (!by.has(key)) this.#by.delete(key);
+      for (const [key, standing] of by)
+        if (this.#by.get(key) !== standing) this.#by.set(key, standing);
+    });
   }
 }
 
