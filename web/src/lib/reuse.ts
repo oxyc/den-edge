@@ -7,7 +7,16 @@
 /** How long an answer is shared. Charts and directories change daily at most; a visit is minutes. */
 export const REUSE_MS = 5 * 60_000;
 
+/** Oldest first: each answer is set anew when it is made, so the expired ones are always at the front. */
 const held = new Map<string, { at: number; value: Promise<unknown> }>();
+
+/** Drop the answers past `REUSE_MS`, so a long session holds only its last five minutes of questions. */
+function sweep(now: number): void {
+  for (const [key, kept] of held) {
+    if (now - kept.at < REUSE_MS) return;
+    held.delete(key);
+  }
+}
 
 /**
  * `make()`'s promise, shared by every caller asking under `key` within `REUSE_MS`. A failure is not kept: the next
@@ -19,9 +28,11 @@ export function reuse<T>(
   make: () => Promise<T>,
   { now = Date.now(), keep }: { now?: number; keep?: (value: T) => boolean } = {},
 ): Promise<T> {
+  sweep(now);
   const kept = held.get(key);
   if (kept && now - kept.at < REUSE_MS) return kept.value as Promise<T>;
   const value = make();
+  held.delete(key);
   held.set(key, { at: now, value });
   const forget = () => {
     if (held.get(key)?.value === value) held.delete(key);
@@ -30,6 +41,11 @@ export function reuse<T>(
     if (keep && !keep(answer)) forget();
   }, forget);
   return value;
+}
+
+/** How many answers are held: for tests. */
+export function reusedCount(): number {
+  return held.size;
 }
 
 /** Forget everything shared: for tests, which ask the same questions of different fakes. */
