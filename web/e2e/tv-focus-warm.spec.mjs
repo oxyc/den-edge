@@ -56,15 +56,20 @@ test('a poster the remote rests on fetches its details; one it passes does not',
   const row = page.getByRole('region', { name: 'Mind-Bending' });
   const card = (id) => row.getByRole('link', { name: new RegExp(`Movie ${id}`) });
   await expect(card(2004)).toBeAttached({ timeout: 30_000 });
+  // The page's clock from here on: each card is focused for exactly 100 ms of it, however slowly this machine runs
+  // the steps between, so the dwell is measured by the test rather than by the runner's load.
+  await page.clock.install();
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
   await card(2001).focus();
   // Along the row quickly, as a held arrow key does, to rest on the last card.
   const focusedKey = () =>
     page.evaluate(() => document.activeElement?.getAttribute('data-tv-focus-key'));
   for (let step = 0; step < 6 && (await focusedKey()) !== 'movie:2004'; step++) {
     await page.keyboard.press('ArrowRight');
-    await page.waitForTimeout(100);
+    await page.clock.runFor(100);
   }
   await expect(card(2004)).toBeFocused();
+  await page.clock.runFor(1_000);
   await expect.poll(() => detailed.includes(2004), { timeout: 5_000 }).toBe(true);
   expect(
     detailed.filter((id) => id !== 2004),
