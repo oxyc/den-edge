@@ -77,7 +77,11 @@ if (process.argv.includes('--capture')) {
   // The atomic profile-preference boundary and explicit three-state subtitle contract add 2.8 KiB to the complete
   // graph versus their merged base. Allow three KiB for that reviewed validation/core bridge while retaining the
   // original baseline and the tighter, independently measured initial-graph ceiling.
+  // Performance parity with tvOS (den#443) adds 1.4 KiB to the complete graph versus main (0.8 KiB of it initial):
+  // search answers streamed to the page with a repeat-search cache, a held idle library read that stays off the write
+  // lane and pauses under the player, the TV's focus-dwell warm, per-title standings, and the per-screen stalls report.
+  // Allow two KiB for that reviewed work; the initial ceiling and the TV-only scan are unchanged.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 38912) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 40960) throw new Error('Browser total JS/CSS budget exceeded');
 }
