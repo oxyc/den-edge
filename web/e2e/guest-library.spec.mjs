@@ -111,6 +111,44 @@ test('accepting an invite starts the guest’s library with the watchlist alread
   });
 });
 
+test('a page opened while the invite moves the library stays open when the move finishes', async () => {
+  const edge = newEdge();
+  await browserOf(edge, async (_browser, open) => {
+    const laptop = await open();
+    await laptop.goto(`${E2E_ORIGIN}/`);
+    await laptop.getByRole('button', { name: 'Look around instead' }).click();
+    await laptop.goto(`${E2E_ORIGIN}/movie/1002`);
+    const watchlist = laptop.getByRole('button', { name: 'Watchlist', exact: true });
+    await watchlist.click();
+    await expect(watchlist).not.toHaveAttribute('data-saving', 'true');
+    // The move waits on the grant's reservation, held here until the guest has gone on to another page.
+    let reserving = false;
+    let release;
+    const reserved = new Promise((resolve) => (release = resolve));
+    await laptop.route(`${E2E_ORIGIN}/grant/library`, async (route) => {
+      reserving = true;
+      await reserved;
+      await route.fallback();
+    });
+    await laptop.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
+    await laptop
+      .getByRole('dialog', { name: 'Accept this invite?' })
+      .getByRole('button', { name: 'Accept' })
+      .click();
+    await expect.poll(() => reserving, { timeout: 30_000 }).toBe(true);
+    await laptop.getByRole('link', { name: 'Settings', exact: true }).click();
+    await expect(laptop.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+
+    release();
+    await expect
+      .poll(async () => (await stored(laptop, 'den.links'))?.[0]?.guest, { timeout: 30_000 })
+      .toBe(true);
+    // The library moved under the same viewer: not a profile switch, so nothing sends the guest Home.
+    await expect(laptop.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+    expect(new URL(laptop.url()).pathname).toBe('/settings');
+  });
+});
+
 test('a TV camera link opens the exact shared-grant confirmation without keeping its code in the URL', async () => {
   const edge = newEdge({ devices: 2 });
   await browserOf(edge, async (_browser, open) => {
