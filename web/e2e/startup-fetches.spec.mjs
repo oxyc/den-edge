@@ -16,7 +16,10 @@ const kinds = {
   profiles: (url) => url.pathname === '/capabilities/profiles',
 };
 
-/** Load `path` and count what it fetches until the profile switcher is up and three seconds have been quiet. */
+/**
+ * Load `path` and count what it fetches: once the profile switcher is up and every kind has been fetched (the deferred
+ * den-core compile starts after first paint, later on a busy machine), three more seconds catch any second fetch.
+ */
 async function countedLoad(page, path) {
   const seen = Object.fromEntries(Object.keys(kinds).map((kind) => [kind, []]));
   const count = (request) => {
@@ -29,6 +32,9 @@ async function countedLoad(page, path) {
   await expect(page.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible({
     timeout: 30_000,
   });
+  await expect
+    .poll(() => Object.values(seen).every((list) => list.length > 0), { timeout: 30_000 })
+    .toBe(true);
   await page.waitForTimeout(3_000);
   page.context().off('request', count);
   return seen;
