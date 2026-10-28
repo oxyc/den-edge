@@ -461,6 +461,8 @@ test('a promised-Blob clipboard refusal cannot strand a failed pairing', async (
 });
 
 test('hardware Back leaves recovery editing, then closes its Settings row', async ({ page }) => {
+  // Focus restoration gives up after its own 1.5 s timer (`tv/navigation.ts`): the test moves the clock past it.
+  await page.clock.install();
   await setupSeries(page);
   await page.goto(`${E2E_ORIGIN}/settings`);
 
@@ -479,7 +481,7 @@ test('hardware Back leaves recovery editing, then closes its Settings row', asyn
 
   await numericBack(page, 461);
   await expect(recoveryRow).toHaveAttribute('aria-expanded', 'false');
-  await page.waitForTimeout(1_600);
+  await page.clock.runFor(1_600);
   await expect(recoveryRow).toBeFocused();
 });
 
