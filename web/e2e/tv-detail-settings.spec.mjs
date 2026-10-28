@@ -231,9 +231,12 @@ test('opening a TV detail focuses Play and keeps a saved Watchlist visually seco
     .getByRole('link', { name: 'Home', exact: true });
   await home.focus();
   await page.keyboard.press('Enter');
+  // A windowed shelf holds a title as a transparent placeholder link until the row is placed, then replaces it with
+  // the card. Select the card the remote lands on, not the placeholder that is about to leave the page.
   const card = page
     .getByRole('region', { name: 'Watchlist', exact: true })
-    .getByRole('link', { name: /Remote Series/ });
+    .getByRole('link', { name: /Remote Series/ })
+    .and(page.locator('.card'));
   await expect(card).toBeVisible({ timeout: 30_000 });
   await card.focus();
   await page.keyboard.press('Enter');

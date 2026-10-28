@@ -317,10 +317,11 @@ export function installTVNavigation(): () => void {
     // next key at body; spatialNavigation's generic cold-start fallback is Search, so a following Select appeared
     // to open Search at random. Recover the route's remembered semantic control first and apply this same direction
     // to its replacement. This also covers any other progressively replaced control, not one shelf exception.
-    if (direction && document.activeElement === document.body) {
+    // Select is recovered the same way: aimed at body it activates nothing, so the press was lost.
+    let recovered: HTMLElement | undefined;
+    if ((direction || event.key === 'Enter') && document.activeElement === document.body) {
       const selector = memory.get(locationKey);
       const root: ParentNode = activeModal() ?? document;
-      let recovered: HTMLElement | undefined;
       if (selector) {
         try {
           recovered = Array.from(root.querySelectorAll<HTMLElement>(selector)).find((element) =>
@@ -338,6 +339,12 @@ export function installTVNavigation(): () => void {
     }
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
+    // The browser already chose body as this press's target, so its own activation would do nothing.
+    if (recovered && event.key === 'Enter' && !isEditable(recovered)) {
+      event.preventDefault();
+      recovered.click();
+      return;
+    }
     if (
       event.key === 'Enter' &&
       target instanceof HTMLInputElement &&

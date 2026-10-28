@@ -110,3 +110,19 @@ test('a direction press recovers a control replaced by a live publication before
   await expect(movies).toBeFocused();
   await expect(page).not.toHaveURL(/\/search/);
 });
+
+test('a Select press activates a control replaced by a live publication', async ({ page }) => {
+  await routeGuestEdge(page, newEdge());
+  await page.goto(E2E_ORIGIN);
+  await page.getByRole('button', { name: 'Look around instead' }).click();
+  const movies = page
+    .getByRole('navigation', { name: 'Main navigation' })
+    .getByRole('link', { name: 'Movies', exact: true });
+  await movies.focus();
+  await expect(movies).toBeFocused();
+  await movies.evaluate((node) => node.replaceWith(node.cloneNode(true)));
+  await expect(page.locator('body')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/movies$/);
+  await expect(movies).toBeFocused();
+});
