@@ -33,7 +33,14 @@ let last = '';
 
 function pressed(event: Event) {
   const target = event.target as Element | null;
-  const href = target?.closest?.('a[href]')?.getAttribute('href');
+  warmLink(target?.closest?.('a[href]')?.getAttribute('href'));
+}
+
+/**
+ * Warm the title a link leads to, as a press on it would. A TV remote has no press before the click: a card it has
+ * rested on (`PosterCard`'s focus dwell) is its intent.
+ */
+export function warmLink(href: string | null | undefined): void {
   if (!href) return;
   const route = parseRoute(href);
   if (route.page !== 'title') return;
