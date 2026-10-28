@@ -340,7 +340,9 @@ export function installTVNavigation(): () => void {
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
     // The browser already chose body as this press's target, so its own activation would do nothing.
-    if (recovered && event.key === 'Enter' && !isEditable(recovered)) {
+    // An editor keeps its own Select handling below (the first press starts editing).
+    const recoveredEditor: boolean = isEditable(recovered ?? null);
+    if (recovered && event.key === 'Enter' && !recoveredEditor) {
       event.preventDefault();
       recovered.click();
       return;
