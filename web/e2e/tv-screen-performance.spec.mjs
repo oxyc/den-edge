@@ -55,8 +55,18 @@ test('a screen that stalled is reported once as it is left, with its frames', as
     route: 'home',
     memory: { warnings: 0 },
   });
-  expect(event.stalls[0]).toBeGreaterThanOrEqual(1);
-  expect(event.stalls[2]).toBeGreaterThanOrEqual(250);
+  // The frame meter sees the block on every engine: one frame ran its whole length.
   expect(event.frames.delivered).toBeGreaterThan(0);
   expect(event.frames.longestMs).toBeGreaterThanOrEqual(250);
+  // The stall itself is named only where the engine reports long work (Long Animation Frames or `longtask`):
+  // Chromium does; WebKit has neither, and its event carries the frames alone.
+  const reportsStalls = await page.evaluate(() =>
+    ['long-animation-frame', 'longtask'].some((type) =>
+      PerformanceObserver.supportedEntryTypes.includes(type),
+    ),
+  );
+  if (reportsStalls) {
+    expect(event.stalls[0]).toBeGreaterThanOrEqual(1);
+    expect(event.stalls[2]).toBeGreaterThanOrEqual(250);
+  } else expect(event).not.toHaveProperty('stalls');
 });
