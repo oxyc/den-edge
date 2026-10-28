@@ -301,7 +301,31 @@ async function linkingContexts(browser, { expired = false, write = false, read =
   const joiner = await browser.newContext();
   await host.route('**/*', relay);
   await joiner.route('**/*', relay);
+  await pumpPairingPolls([host, joiner]);
   return { host, joiner, sent, steps, stepsAtApproval };
+}
+
+/** `pair.ts`: each side asks the relay for the other's message once a second. */
+const PAIR_POLL_MS = 1_000;
+
+/**
+ * Both browsers poll the pairing relay on their own one-second timer. Their clocks are installed and moved on a poll
+ * at a time, in the background, for as long as the contexts are open, instead of the test waiting the polls out.
+ */
+async function pumpPairingPolls(contexts) {
+  for (const context of contexts) await context.clock.install();
+  void (async () => {
+    try {
+      for (;;) {
+        // runFor, not fastForward: every frame in the second is run, so no page sees a one-second stalled frame.
+        for (const context of contexts) await context.clock.runFor(PAIR_POLL_MS);
+        // A turn for the relay's answers to the polls just made, before the next ones are due.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } catch {
+      // A context closed: the test is over.
+    }
+  })();
 }
 
 /** Link the consent page's browser to the host's library through the dialog's link screen. */

@@ -150,6 +150,9 @@ const remuxAnswer = {
  * The player playing a title through Hearth, TorBox's managed HLS in the page. `castAnswer` is what Hearth answers
  * the request made for a receiver.
  */
+/** How long the player gives a session moved to the cast page to start playing, shortened for these tests. */
+const CAST_PLAY_MS = 1_500;
+
 async function open({
   castAnswer,
   initialAnswer = {
@@ -158,6 +161,7 @@ async function open({
   },
   hang = false,
   subtitle = false,
+  clock = false,
 }) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -241,9 +245,10 @@ async function open({
   const query = new URLSearchParams({
     playback: '/den/config/playback',
     castDiscoveryMs: '5000',
-    castPlayMs: '1500',
+    castPlayMs: String(CAST_PLAY_MS),
   });
   if (subtitle) query.set('subtitleLanguage', 'en');
+  if (clock) await page.clock.install();
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };
 }
@@ -392,13 +397,15 @@ test('a receiver that never starts is reported as a Cast session failure, not an
       release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 },
     },
     hang: true,
+    // The wait for the receiver to start is the player's own timer (`castPlayMs`): the test moves the clock past it.
+    clock: true,
   });
   try {
     await playingPast(page, 2);
     await chooseReceiver(page, asked);
     await expect.poll(() => castLoads(page)).toHaveLength(1);
     // Past the (shortened) wait for the receiver to start, then closed: the visit's cast report goes.
-    await page.waitForTimeout(2_500);
+    await page.clock.fastForward(CAST_PLAY_MS);
     await revealPlayerControls(page);
     await page.getByRole('button', { name: 'Close' }).click();
     await expect.poll(() => asked.castReports).toHaveLength(1);
