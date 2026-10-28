@@ -353,10 +353,12 @@ for (const [name, browserType, available] of [
 
       // Episode 1 is written as finished; episode 2's own position as episode 2, never over episode 1.
       await expect.poll(() => progressOf(page, 1)).toMatchObject({ value: 1, seconds: 60 });
-      await pageVideo(page).evaluate((v) => v.pause());
+      // Awaited while it plays: no position under the accidental-start floor (2% of this minute, 1.2 s) is ever
+      // written, so pausing just past a second can leave nothing to write. The first one past it goes out at once.
       await expect
         .poll(async () => (await progressOf(page, 2))?.seconds ?? 0, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(1);
+      await pageVideo(page).evaluate((v) => v.pause());
       expect((await progressOf(page, 2)).value).toBeLessThan(0.5);
       expect(await progressOf(page, 1)).toMatchObject({ value: 1, seconds: 60 });
     } finally {
