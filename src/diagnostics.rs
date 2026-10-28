@@ -2170,6 +2170,24 @@ mod tests {
     }
 
     #[test]
+    fn a_web_stalls_event_is_the_native_one_with_its_own_platform() {
+        // What `web/src/lib/screenPerformance.ts` sends from a TV's browser as it leaves a screen.
+        let report: PerformanceReport = serde_json::from_value(serde_json::json!({
+            "platform": "webos", "release": "0123abcd", "journey": "navigation", "stage": "stalls",
+            "route": "home", "stalls": [1, 300, 300],
+            "frames": { "delivered": 90, "missed": 18, "hitchMs": 290, "longestMs": 310, "visibleMs": 1800 },
+            "memory": { "warnings": 0 }
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(),
+            "platform:webos,journey:navigation,stage:stalls,route:home,stalls:1/300ms/max300ms,frames:90,\
+             missedFrames:18,hitchMs:290,longestFrameMs:310,visibleMs:1800,hitchRatio:161.1,memoryWarnings:0,\
+             release:0123abcd"
+        );
+    }
+
+    #[test]
     fn a_load_report_carries_the_first_import_and_the_page_requests_by_kind() {
         let report: LoadReport = serde_json::from_value(serde_json::json!({
             "route": "home", "device": "tv", "engine": "blink", "importStartMs": 900, "importMs": 118_000,
