@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ContentImportAuthority } from './contentImportAuthority';
 
 describe('ContentImportAuthority', () => {
@@ -13,21 +13,30 @@ describe('ContentImportAuthority', () => {
       }
       return Response.json({ results: [{ id: 1, name: 'Friends' }] });
     }) as typeof fetch;
-    const authority = new ContentImportAuthority(() => 'private-key', fetchImpl);
-    const started = Date.now();
-    const results = await authority.resolve(
-      [
-        { id: 'a', kind: 'search', media: 'tv', query: 'Friends' },
-        { id: 'b', kind: 'search', media: 'tv', query: 'Friends' },
-      ],
-      new AbortController().signal,
-    );
+    // The pause and the back-off are the authority's own timers: they run on a fake clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const authority = new ContentImportAuthority(() => 'private-key', fetchImpl);
+      const pending = authority.resolve(
+        [
+          { id: 'a', kind: 'search', media: 'tv', query: 'Friends' },
+          { id: 'b', kind: 'search', media: 'tv', query: 'Friends' },
+        ],
+        new AbortController().signal,
+      );
+      // The refused lookup asks again only after its first back-off (2 s), which outlasts the 1 s it was told.
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(asked, 'nothing is asked again before the wait is over').toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      const results = await pending;
 
-    expect(results.map(({ value }) => value)).toEqual([
-      { kind: 'search', hits: [{ type: 'tv', id: 1, name: 'Friends' }] },
-      { kind: 'search', hits: [{ type: 'tv', id: 1, name: 'Friends' }] },
-    ]);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+      expect(results.map(({ value }) => value)).toEqual([
+        { kind: 'search', hits: [{ type: 'tv', id: 1, name: 'Friends' }] },
+        { kind: 'search', hits: [{ type: 'tv', id: 1, name: 'Friends' }] },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(asked).toHaveLength(3);
     expect(asked.every((url) => url.includes('api_key=private-key'))).toBe(true);
   });

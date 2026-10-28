@@ -3,6 +3,8 @@ import type { FragmentLoaderContext, HlsConfig, LoaderConfiguration, LoaderStats
 import { Link, OUTAGE_MS, resumingLoader, wasInterrupted } from './resumingLoader';
 
 const SEGMENT = Uint8Array.from({ length: 64 }, (_, n) => n);
+/** The loader's own wait before it asks again after a break (`BACKOFF_MS[0]`): run out on a fake clock. */
+const FIRST_BACKOFF_MS = 500;
 const ETAG = '"run-1"';
 
 /** A body that sends `bytes` and then breaks, as a connection that drops mid-transfer does. */
@@ -87,6 +89,7 @@ describe('resumingLoader', () => {
   });
 
   it('asks for the rest of a broken segment with its ETag, and joins the two', async () => {
+    vi.useFakeTimers();
     const asked = fetching([
       () =>
         new Response(breaking(SEGMENT.slice(0, 20)), {
@@ -107,6 +110,7 @@ describe('resumingLoader', () => {
     const seen: boolean[] = [];
     link.subscribe((down) => seen.push(down));
     const { result } = load(link);
+    await vi.advanceTimersByTimeAsync(FIRST_BACKOFF_MS);
     const got = await result;
     expect(asked).toEqual([
       { range: null, ifRange: null },
@@ -120,6 +124,7 @@ describe('resumingLoader', () => {
   });
 
   it('takes the whole segment again when den-remux answers the range with all of it', async () => {
+    vi.useFakeTimers();
     fetching([
       () =>
         new Response(breaking(SEGMENT.slice(0, 20)), {
@@ -130,11 +135,13 @@ describe('resumingLoader', () => {
       () => whole({ etag: '"run-2"' }),
     ]);
     const { result } = load(new Link(new EventTarget() as unknown as Window));
+    await vi.advanceTimersByTimeAsync(FIRST_BACKOFF_MS);
     const got = await result;
     expect(got.ok && new Uint8Array(got.data)).toEqual(SEGMENT);
   });
 
   it('asks a den-remux that names no ETag for the whole segment, never a range', async () => {
+    vi.useFakeTimers();
     const asked = fetching([
       () =>
         new Response(breaking(SEGMENT.slice(0, 20)), {
@@ -144,6 +151,7 @@ describe('resumingLoader', () => {
       () => whole({}),
     ]);
     const { result } = load(new Link(new EventTarget() as unknown as Window));
+    await vi.advanceTimersByTimeAsync(FIRST_BACKOFF_MS);
     const got = await result;
     expect(asked[1]).toEqual({ range: null, ifRange: null });
     expect(got.ok && new Uint8Array(got.data)).toEqual(SEGMENT);

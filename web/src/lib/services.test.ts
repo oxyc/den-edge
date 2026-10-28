@@ -25,7 +25,14 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 
 // The same questions are asked of a different fake in each test; nothing may be answered from the last one.
 beforeEach(forgetReused);
-afterEach(() => forgetLibraryCredential());
+afterEach(() => {
+  vi.useRealTimers();
+  forgetLibraryCredential();
+});
+
+/** Rating observations are gathered on titleMetadata's own timer (`FLUSH_MS`) before they are sent. */
+const GATHER_MS = 250;
+const gatherOnFakeClock = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
 /** The nth of a list, or a failure that says what was missing rather than a TypeError further down. */
 function at<T>(list: readonly T[], index: number): T {
@@ -258,6 +265,7 @@ describe('atlas rows', () => {
   });
 
   it('keeps and publishes Atlas JustWatch IMDb ratings with their source', async () => {
+    gatherOnFakeClock();
     useLibraryCredential({ id: 'a', member: 'b' });
     const writes: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
@@ -290,17 +298,17 @@ describe('atlas rows', () => {
     expect(await at(rows, 0).load(1)).toMatchObject([
       { id: 550, rating: 7.4, ratingSource: 'justwatch-imdb' },
     ]);
-    await vi.waitFor(() =>
-      expect(writes.map((body) => JSON.parse(body))).toEqual([
-        {
-          entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
-        },
-      ]),
-    );
+    await vi.advanceTimersByTimeAsync(GATHER_MS);
+    expect(writes.map((body) => JSON.parse(body))).toEqual([
+      {
+        entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
+      },
+    ]);
   });
 
   // Under a rolling upgrade an older den-edge may still say it kept a relayed chart itself. Do not write it twice.
   it('sends nothing back for a chart an older den-edge says it kept itself', async () => {
+    gatherOnFakeClock();
     useLibraryCredential({ id: 'a', member: 'b' });
     const writes: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
@@ -322,7 +330,7 @@ describe('atlas rows', () => {
       { content: fixtureContent(), fetchImpl },
     );
     expect(await at(rows, 0).load(1)).toMatchObject([{ id: 550, rating: 7.4 }]);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await vi.advanceTimersByTimeAsync(GATHER_MS * 4);
     expect(writes).toEqual([]);
   });
 
@@ -871,6 +879,7 @@ describe('radarRows', () => {
   });
 
   it('keeps and publishes ratings received by a pooled Atlas chart', async () => {
+    gatherOnFakeClock();
     useLibraryCredential({ id: 'a', member: 'b' });
     const writes: unknown[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
@@ -890,13 +899,12 @@ describe('radarRows', () => {
       0,
     ).load(1);
     expect(titles).toMatchObject([{ id: 7, rating: 7.4, ratingSource: 'justwatch-imdb' }]);
-    await vi.waitFor(() =>
-      expect(writes).toEqual([
-        {
-          entries: [{ type: 'movie', id: 7, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
-        },
-      ]),
-    );
+    await vi.advanceTimersByTimeAsync(GATHER_MS);
+    expect(writes).toEqual([
+      {
+        entries: [{ type: 'movie', id: 7, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
+      },
+    ]);
   });
 
   it('names a title both services carry once, and says both', async () => {
