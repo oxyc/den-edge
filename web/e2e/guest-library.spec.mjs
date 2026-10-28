@@ -149,6 +149,47 @@ test('a page opened while the invite moves the library stays open when the move 
   });
 });
 
+test('an invite accepted before this browser’s library has opened still moves it at once', async () => {
+  const edge = newEdge();
+  await browserOf(edge, async (_browser, open) => {
+    const laptop = await open();
+    await laptop.goto(`${E2E_ORIGIN}/`);
+    await laptop.getByRole('button', { name: 'Look around instead' }).click();
+    await laptop.goto(`${E2E_ORIGIN}/movie/1002`);
+    const watchlist = laptop.getByRole('button', { name: 'Watchlist', exact: true });
+    await watchlist.click();
+    await expect(watchlist).not.toHaveAttribute('data-saving', 'true');
+    // This browser's own library opens in the page's first library Worker. It is held until the invited library has
+    // asked den-edge for its rows, so the move starts while the library it moves is still opening.
+    let release;
+    const invitedOpened = new Promise((resolve) => (release = resolve));
+    await laptop.route(`${E2E_ORIGIN}/lib/**`, async (route) => {
+      release();
+      await route.fallback();
+    });
+    let first = true;
+    // The Worker's entry module only, as the dev server (`.ts`) and a build (`-<hash>.js`) name it.
+    const workerEntry = (url) => /\/libraryServiceWorker(?:\.ts|-[\w-]+\.js)$/.test(url.pathname);
+    await laptop.route(workerEntry, async (route) => {
+      if (first) {
+        first = false;
+        await invitedOpened;
+      }
+      await route.fallback();
+    });
+    await laptop.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
+    await laptop
+      .getByRole('dialog', { name: 'Accept this invite?' })
+      .getByRole('button', { name: 'Accept' })
+      .click();
+    // A move that gave up would be tried again only after 30 s; this one finishes on its first try.
+    await expect
+      .poll(async () => (await stored(laptop, 'den.links'))?.[0]?.guest, { timeout: 15_000 })
+      .toBe(true);
+    await expect.poll(() => [...edge.libraries.values()][0]?.rows.size ?? 0).toBeGreaterThan(0);
+  });
+});
+
 test('a TV camera link opens the exact shared-grant confirmation without keeping its code in the URL', async () => {
   const edge = newEdge({ devices: 2 });
   await browserOf(edge, async (_browser, open) => {

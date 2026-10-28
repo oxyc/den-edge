@@ -90,8 +90,9 @@ async function setupSeries(page, { linked = false, playback = false } = {}) {
     await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
     await expect.poll(() => edge.libraries.size, { timeout: 30_000 }).toBe(1);
     await expect.poll(() => [...edge.libraries.values()][0]?.rows.size ?? 0).toBeGreaterThan(0);
-    // The relay sees the upload before the page commits its new identity and resets to Home. Do not navigate
-    // during that handover; the saved title on the linked Home surface is the user-visible completion boundary.
+    // The relay sees the upload before the page commits its new identity and redraws in the linked library. Do
+    // not navigate during that handover; the saved title on the linked Home surface is the user-visible completion
+    // boundary.
     await expect
       .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('den.links') ?? '[]').length))
       .toBe(1);

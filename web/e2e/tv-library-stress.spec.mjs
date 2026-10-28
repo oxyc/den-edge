@@ -260,8 +260,8 @@ async function savedLibraryJourney(page, testInfo, count) {
 
   // Creating the relay library is not the end of the handover: the browser still has to migrate its local rows,
   // switch sessions and reopen them from the relay. The relay sees the upload before the page commits the new
-  // library (`den.links`) and resets to Home, and a document navigation in that interval cancels the move: the next
-  // document restarts it, and its session switch lands on Home under the title page being saved. Wait for the commit
+  // library (`den.links`), and a document navigation in that interval cancels the move: the next document restarts
+  // it, and its session switch redraws the title page being saved in the other library. Wait for the commit
   // before navigating, then for the migrated row, which proves the new library is open and contains the first real
   // write, before seeding the rest through detail pages.
   await expect
