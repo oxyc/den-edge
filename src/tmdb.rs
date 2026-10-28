@@ -2527,7 +2527,11 @@ fn answer(body: Bytes, policy: &str, how: &'static str, modified: SystemTime, as
         headers.insert(header::CACHE_CONTROL, value);
     }
     headers.insert("x-den-tmdb", HeaderValue::from_static(how));
-    crate::cache::validated(resp, &body, Some(modified), asked)
+    headers.insert(header::ETAG, crate::cache::tag(&body));
+    if let Ok(value) = HeaderValue::from_str(&crate::cache::http_date(modified)) {
+        headers.insert(header::LAST_MODIFIED, value);
+    }
+    negotiated(resp, asked)
 }
 
 fn answer_prepared(
@@ -2546,8 +2550,104 @@ fn answer_prepared(
                 response.headers_mut().insert(header::CACHE_CONTROL, value);
             }
             response.headers_mut().insert("x-den-tmdb", HeaderValue::from_static(how));
-            crate::cache::revalidate(response, asked)
+            negotiated(response, asked)
         }
+    }
+}
+
+/// Below this, gzip saves less than its own framing.
+const GZIP_MIN_BYTES: u64 = 1024;
+
+/// `response` gzipped when the caller takes gzip, then checked against the copy the caller holds.
+///
+/// Serving a kept answer costs the box about a millisecond; sending it is what takes the time. Measured on the LAN on
+/// 2026-10-28, the 40 details a TV search asks for came to 1.07 MB, 26 KB each, and a `GET` of one took 8–9 ms longer
+/// than a `HEAD` of it. Gzipped at the fastest level they come to 147 KB, a seventh. A TV on plain http on the LAN
+/// gets six HTTP/1.1 connections to this origin, so the bytes, not the number of questions, set how long a search
+/// waits for its details.
+///
+/// The gzip answer is a representation of its own, so it has a tag of its own (RFC 9110 §8.8.3): the identity tag
+/// with `-gzip` added inside the quotes, which a client holding the gzip copy names back to be told 304.
+fn negotiated(mut response: Response, asked: &HeaderMap) -> Response {
+    let length = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<u64>().ok())
+        .or_else(|| http_body::Body::size_hint(response.body()).exact());
+    if response.status() != StatusCode::OK || length.is_some_and(|length| length < GZIP_MIN_BYTES) {
+        return crate::cache::revalidate(response, asked);
+    }
+    response.headers_mut().append(header::VARY, HeaderValue::from_static("accept-encoding"));
+    let (_, gzip, identity) = crate::web::encodings(asked);
+    if gzip == 0 || gzip < identity {
+        return crate::cache::revalidate(response, asked);
+    }
+    let headers = response.headers_mut();
+    let tagged = headers
+        .get(header::ETAG)
+        .and_then(|tag| tag.to_str().ok()?.strip_suffix('"').map(|tag| format!("{tag}-gzip\"")))
+        .and_then(|tag| HeaderValue::from_str(&tag).ok());
+    match tagged {
+        Some(tag) => headers.insert(header::ETAG, tag),
+        None => headers.remove(header::ETAG),
+    };
+    headers.remove(header::CONTENT_LENGTH);
+    headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let response = crate::cache::revalidate(response, asked);
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    response.map(|body| {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        Body::new(Gzipped { inner: body, encoder: Some(encoder) })
+    })
+}
+
+/// A body gzipped as it is sent, a frame at a time: what is held is the encoder and the frame in hand, never the
+/// whole answer, and a large one costs a frame's compression per poll rather than all of it at once.
+struct Gzipped {
+    inner: Body,
+    encoder: Option<flate2::write::GzEncoder<Vec<u8>>>,
+}
+
+impl http_body::Body for Gzipped {
+    type Data = Bytes;
+    type Error = axum::BoxError;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        use std::io::Write as _;
+        use std::task::Poll;
+        let this = &mut *self;
+        loop {
+            let Some(encoder) = this.encoder.as_mut() else { return Poll::Ready(None) };
+            match std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_frame(cx)) {
+                Some(Ok(frame)) => {
+                    let Ok(data) = frame.into_data() else { continue };
+                    encoder.write_all(&data)?;
+                    let out = std::mem::take(encoder.get_mut());
+                    if !out.is_empty() {
+                        return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from(out)))));
+                    }
+                }
+                Some(Err(error)) => {
+                    this.encoder = None;
+                    return Poll::Ready(Some(Err(error.into())));
+                }
+                None => {
+                    let out = this.encoder.take().map(|encoder| encoder.finish()).transpose()?;
+                    return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from(
+                        out.unwrap_or_default(),
+                    )))));
+                }
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.encoder.is_none()
     }
 }
 
@@ -2978,6 +3078,57 @@ mod tests {
         let resp = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
         let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
         assert!(policy.ends_with(", stale-while-revalidate=3600, stale-if-error=86400"), "{policy}");
+    }
+
+    /// A caller that takes gzip is sent the kept answer gzipped, under a tag of its own that it can revalidate with;
+    /// one that does not is sent the bytes as they are kept. An answer too small to be worth it is never gzipped.
+    #[tokio::test]
+    async fn a_kept_answer_is_gzipped_for_a_caller_that_takes_it() {
+        let cache = temp_dir();
+        let h = lending(&cache, None);
+        let kept = format!(
+            r#"{{"page":1,"results":[{}]}}"#,
+            vec![r#"{"id":550,"title":"Fight Club"}"#; 64].join(",")
+        );
+        write(&cache_path(&cache, &cache_key("/3/trending/all/week", None)), &Bytes::from(kept.clone()))
+            .await;
+        let bytes =
+            |resp: Response| async move { axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap() };
+
+        let plain = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
+        assert!(!plain.headers().contains_key(header::CONTENT_ENCODING));
+        assert!(plain.headers().get_all(header::VARY).iter().any(|v| v == "accept-encoding"));
+        let tag = plain.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_eq!(bytes(plain).await, kept.as_bytes());
+
+        let zipped =
+            h.send("GET", "/tmdb/3/trending/all/week", None, &[("accept-encoding", "gzip, br")]).await;
+        assert_eq!(zipped.status(), StatusCode::OK);
+        assert_eq!(zipped.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(zipped.headers()["x-den-tmdb"], "hit");
+        let gzip_tag = zipped.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_eq!(gzip_tag, format!("{}-gzip\"", tag.trim_end_matches('"')));
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes(zipped).await[..]), &mut text)
+            .unwrap();
+        assert_eq!(text, kept);
+
+        let held = [("accept-encoding", "gzip"), ("if-none-match", gzip_tag.as_str())];
+        let again = h.send("GET", "/tmdb/3/trending/all/week", None, &held).await;
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(again.headers()[header::ETAG], gzip_tag.as_str());
+        // The gzip tag does not name the identity bytes.
+        let other = h.send("GET", "/tmdb/3/trending/all/week", None, &[("if-none-match", &gzip_tag)]).await;
+        assert_eq!(other.status(), StatusCode::OK);
+        assert!(!other.headers().contains_key(header::CONTENT_ENCODING));
+
+        write(
+            &cache_path(&cache, &cache_key("/3/genre/movie/list", None)),
+            &Bytes::from_static(b"{\"genres\":[]}"),
+        )
+        .await;
+        let small = h.send("GET", "/tmdb/3/genre/movie/list", None, &[("accept-encoding", "gzip")]).await;
+        assert!(!small.headers().contains_key(header::CONTENT_ENCODING));
     }
 
     /// A stale list used to hold the page while TMDB was asked. It is served at once now, and asked again behind
