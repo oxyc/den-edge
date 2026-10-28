@@ -8,7 +8,20 @@ it('keeps shared maintenance active while any attached tab needs it', () => {
       { kind: 'lifecycle', visible: false, online: true, playbackActive: false },
       { kind: 'lifecycle', visible: true, online: false, playbackActive: true },
     ]),
-  ).toEqual({ kind: 'lifecycle', visible: true, online: true, playbackActive: true });
+  ).toEqual({
+    kind: 'lifecycle',
+    visible: true,
+    online: true,
+    playbackActive: true,
+    playerOpen: false,
+  });
+});
+
+it('pauses shared maintenance under a player only while no other visible tab is browsing', () => {
+  const tab = (visible: boolean, playerOpen: boolean) =>
+    ({ kind: 'lifecycle', visible, online: true, playbackActive: false, playerOpen }) as const;
+  expect(aggregateLibraryLifecycles([tab(true, true), tab(false, false)]).playerOpen).toBe(true);
+  expect(aggregateLibraryLifecycles([tab(true, true), tab(true, false)]).playerOpen).toBe(false);
 });
 
 it('shares evolving legacy clock seeds but fences a different release URL', () => {

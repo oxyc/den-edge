@@ -3,11 +3,14 @@ import type { LibraryObservation, LibraryServiceHello } from './libraryServicePr
 type Lifecycle = Extract<LibraryObservation, { kind: 'lifecycle' }>;
 
 export function aggregateLibraryLifecycles(states: readonly Lifecycle[]): Lifecycle {
+  const visible = states.filter((state) => state.visible);
   return {
     kind: 'lifecycle',
-    visible: states.some((state) => state.visible),
+    visible: visible.length > 0,
     online: states.some((state) => state.online),
     playbackActive: states.some((state) => state.playbackActive),
+    // Maintenance waits only while every tab on screen is a player: another tab still being browsed needs it.
+    playerOpen: visible.length > 0 && visible.every((state) => state.playerOpen),
   };
 }
 

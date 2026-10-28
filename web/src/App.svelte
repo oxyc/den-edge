@@ -14,6 +14,7 @@
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
+  import { meterScreens, screenOf } from './lib/screenPerformance';
   import { parseRoute, type Explore, type PeopleView, type TitleSeason } from './lib/route';
   import {
     ConnectDialogScreen,
@@ -154,6 +155,10 @@
   $effect(() => {
     document.title = tabName() ?? pageTitle(route);
   });
+  // How each screen drew, reported as it is left when it stalled or dropped frames.
+  const screens = meterScreens();
+  $effect(() => screens.enter(screenOf(route)));
+  onMount(() => () => screens.stop());
 </script>
 
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->

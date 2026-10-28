@@ -480,3 +480,30 @@ it('is materially smaller than the representative projection graph it describes'
 
   expect(proofBytes).toBeLessThan(graphBytes / 4);
 });
+
+it('marks the Continue items this device wrote, so its own playback is not read as another device’s', () => {
+  const mark = (id: number, by: string) => ({
+    type: 'tv' as const,
+    id,
+    season: 1,
+    episode: 1,
+    fraction: 0.5,
+    seconds: 60,
+    updatedAt: 1_000 + id,
+    updatedBy: by,
+    title: '',
+    voteAverage: 0,
+  });
+  const library: Library = {
+    records: [],
+    marks: [mark(1, 'aaaaaaaaaaaaaaaa'), mark(2, 'bbbbbbbbbbbbbbbb')],
+    flags: new Map(),
+    shapes: new Map([1, 2].map((id) => [`tv:${id}`, { counts: new Map([[1, 3]]) }] as const)),
+    dismissed: new Map(),
+  };
+  const items = continueItems(new ContinueProjector(), library, undefined, 'bbbbbbbbbbbbbbbb');
+  expect(items.map(({ title, deviceId, here }) => ({ id: title.id, deviceId, here }))).toEqual([
+    { id: 2, deviceId: 'bbbbbbbbbbbbbbbb', here: true },
+    { id: 1, deviceId: 'aaaaaaaaaaaaaaaa', here: undefined },
+  ]);
+});

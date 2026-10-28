@@ -23,6 +23,7 @@ import type {
   ContentProvider,
   ContentRequest,
   ContentResult as ServiceContentResult,
+  ContentSearchHit,
   ContentServiceStatusValue,
   OptionalContent,
 } from './contentServiceProtocol';
@@ -61,7 +62,7 @@ import {
 import { reuse } from './reuse';
 import { parseRecommendationSlides } from './recommend';
 import { discoverParams } from './catalog';
-import { searchStream, type Hit } from './search';
+import { awaitingPicture, searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
 import { parseKidsHomeCatalogue } from './kidsHome';
 import { ContentImportAuthority } from './contentImportAuthority';
@@ -84,6 +85,8 @@ import {
 
 const TMDB = 'https://api.themoviedb.org/3';
 const MAX_ATLAS_TITLE_CURSORS = 64;
+/** The TV's repeat-search cache size (`SearchResultsCache`). */
+const SEARCH_CACHE_LIMIT = 40;
 
 /**
  * Row and chart answers whose poster fill den-edge did not answer (a `429` or a failure). They are handed to whoever
@@ -311,6 +314,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   readonly #configureGrants: (grants: readonly { gid: string; secret: string }[]) => void;
   readonly #flights = new Map<string, Promise<unknown>>();
   readonly #atlasTitleCursors = new Map<string, AtlasTitleCursor>();
+  /** Finished searches by atlas, policy and query, least recently asked first: backspacing asks nothing again. */
+  readonly #searches = new Map<string, ContentSearchHit[]>();
   readonly #imports: ContentImportAuthority;
   readonly #statusListeners = new Set<(status: ContentServiceStatusValue) => void>();
   readonly #stopThrottle: () => void;
@@ -343,22 +348,26 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     this.#stopThrottle();
     this.#statusListeners.clear();
     this.#atlasTitleCursors.clear();
+    this.#searches.clear();
   }
 
   async query(
     request: ContentRequest,
     signal: AbortSignal,
     policy?: ContentPolicy,
+    progress?: (partial: ServiceContentResult) => void,
   ): Promise<ServiceContentResult> {
     // Source discovery is ordering-sensitive: configure synchronously before any later query can observe the old
     // source, even while paired credentials are still opening.
     if (request.kind === 'sources.configure') {
       this.#atlasTitleCursors.clear();
+      this.#searches.clear();
       this.credentials.configureAtlas?.(request.atlas);
       return { kind: 'sources.configure' };
     }
     // Likewise the grants: a query sent after them must find them held.
     if (request.kind === 'grants.configure') {
+      this.#searches.clear();
       this.#configureGrants(request.grants);
       return { kind: 'grants.configure' };
     }
@@ -486,11 +495,23 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           titles: await this.#wait(this.#catalog(request.catalog, request.page), signal),
         };
       case 'search': {
-        let hits: Hit[] = [];
         const atlas = this.credentials.atlas?.() ?? null;
         const restricted = failsClosed(policy);
         // Without atlas a fail-closed search has no eligibility evidence, so it finds nothing rather than TMDB's.
-        if (restricted && !atlas) return { kind: 'search', hits };
+        if (restricted && !atlas) return { kind: 'search', hits: [] };
+        // People are not titles, and their pages list a TMDB filmography; a fail-closed search finds titles only.
+        // A title still waiting for its poster says so on the wire: the page shows its name meanwhile.
+        const wire = (batch: Hit[]): ContentSearchHit[] =>
+          (restricted ? batch.filter((hit) => hit.kind === 'title') : batch).map((hit) =>
+            hit.kind === 'title' && awaitingPicture(hit.title) ? { ...hit, awaiting: true } : hit,
+          );
+        const key = JSON.stringify([atlas, policyKey(policy), request.query]);
+        const cached = this.#searches.get(key);
+        if (cached) {
+          this.#searches.delete(key);
+          this.#searches.set(key, cached);
+          return { kind: 'search', hits: cached };
+        }
         const sources = searchSources(
           this.#tmdbKey(),
           policedAtlasFetch(
@@ -501,12 +522,22 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           atlas,
           !restricted,
         );
-        for await (const batch of searchStream(request.query, sources, signal)) hits = batch;
-        // People are not titles, and their pages list a TMDB filmography; a fail-closed search finds titles only.
-        return {
-          kind: 'search',
-          hits: restricted ? hits.filter((hit) => hit.kind === 'title') : hits,
-        };
+        // Every batch goes to the page as it is made — the grid named at once, then each poster as it lands — and the
+        // last is the finished answer.
+        let hits: Hit[] = [];
+        for await (const batch of searchStream(request.query, sources, signal)) {
+          hits = batch;
+          if (!signal.aborted) progress?.({ kind: 'search', hits: wire(batch) });
+        }
+        const answer = wire(hits);
+        // Kept only when finished — one typed past has its pictures cut short — and found: an empty answer may be an
+        // outage, which must not outlast itself.
+        if (!signal.aborted && answer.length) {
+          this.#searches.set(key, answer);
+          if (this.#searches.size > SEARCH_CACHE_LIMIT)
+            this.#searches.delete(this.#searches.keys().next().value!);
+        }
+        return { kind: 'search', hits: answer };
       }
       case 'collection': {
         // A TMDB collection is another TMDB-only title list; a fail-closed profile's franchise is atlas'.

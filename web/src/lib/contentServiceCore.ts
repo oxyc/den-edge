@@ -14,6 +14,8 @@ export interface ContentServiceAuthority {
     request: ContentRequest,
     signal: AbortSignal,
     policy?: ContentPolicy,
+    /** An answer that is still improving; the returned result is the finished one. */
+    progress?: (partial: ContentResult) => void,
   ): Promise<ContentResult>;
   listen?(listener: (status: ContentServiceStatusValue) => void): () => void;
   close?(): void | Promise<void>;
@@ -118,7 +120,17 @@ export class ContentServiceCore {
     const controller = new AbortController();
     this.#requests.set(requestId, controller);
     try {
-      const result = await this.authority.query(request, controller.signal, policy);
+      const result = await this.authority.query(request, controller.signal, policy, (partial) => {
+        if (controller.signal.aborted || partial.kind !== request.kind) return;
+        this.#publish([
+          {
+            type: 'content-progress',
+            protocol: CONTENT_SERVICE_PROTOCOL,
+            requestId,
+            result: partial,
+          },
+        ]);
+      });
       if (result.kind !== request.kind)
         throw new ContentServiceFault({
           code: 'internal',

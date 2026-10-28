@@ -1489,6 +1489,7 @@ export class LibraryLogAuthority {
         this.#continueProjector,
         { ...home.continueLibrary, shapes },
         this.#log.settings('devices'),
+        this.#clock.device,
       ),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
     };

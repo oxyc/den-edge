@@ -188,6 +188,7 @@ class SessionContentService implements ContentServiceClientPort {
     request: Request,
     signal?: AbortSignal,
     policy?: ContentPolicy,
+    onProgress?: (partial: ContentResultFor<Request>) => void,
   ): Promise<ContentResultFor<Request>> {
     if (this.#closed)
       throw new ContentServiceError({
@@ -235,7 +236,15 @@ class SessionContentService implements ContentServiceClientPort {
           );
         if (request.kind === 'sources.configure')
           return { kind: 'sources.configure' } as ContentResultFor<Request>;
-        return await this.#query(client, request, signal, policy, recoverUntil, recoveryFailure);
+        return await this.#query(
+          client,
+          request,
+          signal,
+          policy,
+          onProgress,
+          recoverUntil,
+          recoveryFailure,
+        );
       } catch (error) {
         const replacedWhilePending = this.current() !== client;
         const cancelledByReplacement =
@@ -419,10 +428,11 @@ class SessionContentService implements ContentServiceClientPort {
     request: Request,
     signal: AbortSignal | undefined,
     policy: ContentPolicy | undefined,
+    onProgress: ((partial: ContentResultFor<Request>) => void) | undefined,
     until?: number,
     timeoutError?: unknown,
   ): Promise<ContentResultFor<Request>> {
-    if (until === undefined) return client.query(request, signal, policy);
+    if (until === undefined) return client.query(request, signal, policy, onProgress);
     const remaining = until - performance.now();
     if (remaining <= 0) throw timeoutError;
     const controller = new AbortController();
@@ -434,7 +444,7 @@ class SessionContentService implements ContentServiceClientPort {
       controller.abort();
     }, remaining);
     try {
-      return await client.query(request, controller.signal, policy);
+      return await client.query(request, controller.signal, policy, onProgress);
     } catch (error) {
       if (timedOut) throw timeoutError;
       throw error;

@@ -24,6 +24,8 @@ export interface ContentServiceClientPort {
     signal?: AbortSignal,
     /** The asking profile's policy. A profile's own port (`ProfileSession.content`) always supplies it. */
     policy?: ContentPolicy,
+    /** Each improving answer before the finished one (search's grid as posters land). */
+    onProgress?: (partial: ContentResultFor<Request>) => void,
   ): Promise<ContentResultFor<Request>>;
   onStatus(listener: (status: ContentServiceStatusValue) => void): () => void;
 }
@@ -32,6 +34,7 @@ interface Pending {
   request: ContentRequest;
   resolve: (result: ContentResult) => void;
   reject: (error: ContentServiceError) => void;
+  progress?: (partial: ContentResult) => void;
   stopAbort?: () => void;
 }
 
@@ -98,6 +101,7 @@ export class ContentServiceClient {
     request: Request,
     signal?: AbortSignal,
     policy?: ContentPolicy,
+    onProgress?: (partial: ContentResultFor<Request>) => void,
   ): Promise<ContentResultFor<Request>> {
     this.#assertOpen();
     if (signal?.aborted) return Promise.reject(cancelled());
@@ -107,6 +111,9 @@ export class ContentServiceClient {
         request,
         resolve: (result) => resolve(result as ContentResultFor<Request>),
         reject,
+        ...(onProgress
+          ? { progress: (partial) => onProgress(partial as ContentResultFor<Request>) }
+          : {}),
       };
       if (signal) {
         const abort = () => {
@@ -183,6 +190,15 @@ export class ContentServiceClient {
     if (!requestId) return;
     const pending = this.#pending.get(requestId);
     if (!pending) return;
+    if (message.type === 'content-progress') {
+      if (message.result.kind === pending.request.kind)
+        try {
+          pending.progress?.(message.result);
+        } catch (error) {
+          console.error('den: a content progress listener failed', error);
+        }
+      return;
+    }
     this.#pending.delete(requestId);
     pending.stopAbort?.();
     if (message.type === 'content-error') {

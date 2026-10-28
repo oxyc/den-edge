@@ -208,6 +208,42 @@ it('refuses an invalid content request to its requester alone', async () => {
   await host.close();
 });
 
+it('posts a request’s progress, and fails only that request when its progress is malformed', async () => {
+  const scope = new FakeScope();
+  let publish!: (messages: ContentServiceServerMessage[]) => void;
+  const host = new LibraryServiceWorkerHost(
+    scope,
+    { dispatch: vi.fn(), listen: () => () => {}, close() {} },
+    {
+      dispatch: vi.fn(async () => []),
+      listen(listener) {
+        publish = listener;
+        return () => {};
+      },
+      close() {},
+    },
+  );
+  const progress = {
+    type: 'content-progress' as const,
+    protocol: CONTENT_SERVICE_PROTOCOL,
+    requestId: 'search',
+    result: { kind: 'search' as const, hits: [] },
+  };
+  publish([progress]);
+  publish([{ ...progress, result: { kind: 'search', hits: 'none' } } as never]);
+  expect(scope.posted).toEqual([
+    [progress],
+    [
+      expect.objectContaining({
+        type: 'content-error',
+        requestId: 'search',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ],
+  ]);
+  await host.close();
+});
+
 it('stops accepting and publishing work before closing the dispatcher', async () => {
   const scope = new FakeScope();
   let release!: () => void;

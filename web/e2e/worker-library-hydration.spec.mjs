@@ -1292,17 +1292,24 @@ test('a hidden paired library suspends background retries and resumes without a 
   });
   await routes(page, metadata);
   await page.goto(`${FIXTURE}?seed&lifecycle`);
-  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible();
+  // Seeding opens a cold Worker library: measured 4–7 s beside three other workers, 18 s when the dev server has not
+  // yet compiled the Worker. The 5 s default refused it on main as well; the other seeds here allow 15 s.
+  await expect(page.getByRole('status').filter({ hasText: 'Worker library seeded' })).toBeVisible({
+    timeout: 30_000,
+  });
 
   await page.goto(`${FIXTURE}?view=settings&online&lifecycle`);
-  await expect.poll(() => metadata.recoveryRequests).toBe(1);
+  // The same cold open again, to Settings' Recovery check: 7–9 s beside three other workers, on main as here.
+  await expect.poll(() => metadata.recoveryRequests, { timeout: 30_000 }).toBe(1);
   expect([...metadata.recoveryMembers]).toEqual([...metadata.members]);
   const hidden = { changes: metadata.changeRequests, recovery: metadata.recoveryRequests };
   await page.waitForTimeout(1_000);
   expect({ changes: metadata.changeRequests, recovery: metadata.recoveryRequests }).toEqual(hidden);
 
   await page.evaluate(() => window.fixtureVisibility(false));
-  await expect.poll(() => metadata.changeRequests).toBeGreaterThan(hidden.changes);
+  // Shown again, the library reads at once: a held read of `/changes` (which this edge answers without holding),
+  // then the ordinary read after it. An early empty answer was not held, so the next waits the plain cadence.
+  await expect.poll(() => metadata.changeRequests).toBe(hidden.changes + 2);
   const visible = { changes: metadata.changeRequests, recovery: metadata.recoveryRequests };
   await page.waitForTimeout(1_000);
   expect({ changes: metadata.changeRequests, recovery: metadata.recoveryRequests }).toEqual(

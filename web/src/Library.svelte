@@ -677,6 +677,7 @@
           ...(entry.liveFraction === undefined ? {} : { liveFraction: entry.liveFraction }),
           ...(entry.device === undefined ? {} : { device: entry.device }),
           ...(entry.deviceId === undefined ? {} : { deviceId: entry.deviceId }),
+          ...(entry.here ? { here: true as const } : {}),
         }
       : undefined;
   };
@@ -741,10 +742,22 @@
     sightings = next;
     return next;
   });
-  // A paused title keeps the fast pull too: its player is still open, and playing again should show soon.
+  // A paused title keeps the fast pull too: its player is still open, and playing again should show soon. This
+  // device's own playback is not one: its writes are already here, and the pull would only race its player.
+  const playingElsewhere = $derived(
+    continueEntries.some((entry) => {
+      const sighting = !entry.here && sighted.get(titleKey(entry.title));
+      return !!sighting && recent(sighting, now);
+    }),
+  );
   const playingAnywhere = $derived([...sighted.values()].some((sighting) => recent(sighting, now)));
+  // While this browser's player is open the library service pauses its maintenance, as the TV pauses its polls.
   $effect(() => {
-    session.live = playingAnywhere || playOnTv.active;
+    session.playerOpen = playing !== null;
+  });
+  $effect(() => () => (session.playerOpen = false));
+  $effect(() => {
+    session.live = playingElsewhere || playOnTv.active;
     if (!playingAnywhere || !foreground) return;
     // Four times a second, not once: the clock's seconds don't line up with this timer's, so a one-second tick that
     // lands a little late skips a second and the next shows it twice.

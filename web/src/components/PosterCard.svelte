@@ -19,6 +19,7 @@
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { AVAILABILITY_AHEAD, ROW_NEAR } from './PosterRow.svelte';
   import { notePressed } from '../lib/detail';
+  import { warmLink } from '../lib/warmOnIntent';
   import { contentServiceContext } from '../lib/contentContext';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import { titleCaption, type Title } from '../lib/library';
@@ -180,6 +181,24 @@
   function drop(event: PointerEvent) {
     if (event.type === 'pointerleave' && event.pointerType !== 'mouse') return;
     clearTimeout(warming);
+  }
+  /**
+   * A TV remote has no hover and no press before the click: focus resting on a card for `FOCUS_DWELL_MS` is the same
+   * intent, and warms the details and the trailer as a press does. Moving on drops it, so focus running along a row
+   * under a held arrow key fetches nothing.
+   */
+  const FOCUS_DWELL_MS = 400;
+  function dwell() {
+    if (!__DEN_TV__ || !href) return;
+    const link = href;
+    clearTimeout(warming);
+    warming = setTimeout(() => {
+      void content.query({ kind: 'prefetch.detail', title, region: 'US' }).catch(() => undefined);
+      warmLink(link);
+    }, FOCUS_DWELL_MS);
+  }
+  function undwell() {
+    if (__DEN_TV__) clearTimeout(warming);
   }
 
   /**
@@ -355,6 +374,8 @@
       onclick={cardClick}
       onkeydown={cardKeydown}
       oncontextmenu={cardContextMenu}
+      onfocus={dwell}
+      onfocusout={undwell}
       onpointerenter={(event) => intend(event, 100)}
       onpointerdown={(event) => {
         intend(event, 60);

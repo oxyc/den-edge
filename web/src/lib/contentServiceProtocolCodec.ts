@@ -696,7 +696,7 @@ export function decodeContentServiceServerMessage(
     return { ok: false, error: failure('invalid-request', 'content reply must be an object') };
   const mismatch = protocol(input);
   if (mismatch) return { ok: false, error: mismatch };
-  if (input.type === 'content-result') {
+  if (input.type === 'content-result' || input.type === 'content-progress') {
     if (
       !exact(input, ['type', 'protocol', 'requestId', 'result']) ||
       !text(input.requestId, 256) ||

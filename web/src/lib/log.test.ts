@@ -1391,6 +1391,46 @@ describe('LibraryLog', () => {
     expect(asked[1]).toContain('&wait=5');
   });
 
+  it('keeps an edit made during a held refresh off the hold, and the refresh still reads what arrived', async () => {
+    const server = await edge([row(1)]);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const fetchImpl: typeof fetch = async (input, init) => {
+      // den-edge holds `wait=` until something is written, here until the test says so.
+      if (String(input).includes('wait=')) await held;
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl))!;
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+
+    const refreshing = log.refresh(25);
+    await expect(
+      Promise.race([
+        log.write(row(2)).then(() => 'saved'),
+        new Promise((resolve) => setTimeout(() => resolve('held behind the read'), 1_000)),
+      ]),
+    ).resolves.toBe('saved');
+    await tv.write(row(3));
+    release();
+    expect(await refreshing, "the TV's write").toBe(true);
+    expect(log.title({ type: 'movie', id: 3 })).toBeDefined();
+  });
+
+  it('ends a held refresh early when told to stop waiting', async () => {
+    const server = await edge([row(1)]);
+    const fetchImpl: typeof fetch = (input, init) =>
+      String(input).includes('wait=')
+        ? new Promise((_, reject) =>
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)),
+          )
+        : server.fetchImpl(input, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl))!;
+    const stop = new AbortController();
+    const refreshing = log.refresh(25, stop.signal);
+    stop.abort();
+    await expect(refreshing).resolves.toBe(false);
+  });
+
   /**
    * A refresh that read one page and failed on the next keeps the rows of the first, and said nothing: the next one,
    * finding only this browser's own write, said nothing either, and the TV's rows were never drawn.

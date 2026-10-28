@@ -86,6 +86,11 @@ const encode = (state: StoredClock): Uint8Array => utf8.encode(JSON.stringify(st
 
 const randomDevice = () => hex(globalThis.crypto.getRandomValues(new Uint8Array(8)));
 
+/** This browser's stamp device as its clock has stored it, without opening the clock; none before its first open. */
+export async function storedClockDevice(vault: Vault): Promise<string | undefined> {
+  return decode(await vault.get(CLOCK_STORE_KEY))?.device;
+}
+
 /**
  * Opens the service's clock. Durable state always wins; `legacy` is an import seed used only if that state is absent
  * or invalid. Operations on the returned instance are serialized and the queue remains usable after a failed write.

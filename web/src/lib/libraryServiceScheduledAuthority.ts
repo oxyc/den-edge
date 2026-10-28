@@ -10,6 +10,16 @@ import { deliverSimklWithClock } from './simklDelivery';
 
 export const ACTIVE_PLAYBACK_REFRESH_MS = 5_000;
 export const VISIBLE_REFRESH_MS = 30_000;
+/**
+ * An idle visible page holds its read (`/changes?wait=`, den-edge's maximum) and reads again at once after a held
+ * answer, so a change made elsewhere shows within moments: the TV's `HeldPoll`. An answer that came back early and
+ * empty was not held (a den-edge without `wait`, a cap on held reads, a failure) and waits `VISIBLE_REFRESH_MS`, so the
+ * loop never spins; one that found a change waits `HELD_SPACING_MS`, so a change that keeps answering at once costs a
+ * request a second.
+ */
+export const HELD_WAIT_SECONDS = 25;
+export const HELD_AFTER_MS = (HELD_WAIT_SECONDS / 2) * 1000;
+export const HELD_SPACING_MS = 1_000;
 
 export interface LibraryMaintenanceResult {
   changed: boolean;
@@ -19,7 +29,11 @@ export interface LibraryMaintenanceResult {
 /** The scheduler depends on one semantic maintenance operation, not LibraryLog internals. */
 export interface LibraryMaintenance {
   readonly mode: 'online' | 'local';
-  run(options?: { waitSeconds?: number }): Promise<LibraryMaintenanceResult>;
+  /** `waitSeconds` holds the read until something changes; `stopWaiting` ends that hold early. */
+  run(options?: {
+    waitSeconds?: number;
+    stopWaiting?: AbortSignal;
+  }): Promise<LibraryMaintenanceResult>;
 }
 
 /** Optional provider work run by the same authority scheduler after foreground content is released. */
@@ -62,6 +76,8 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   };
   #timer?: ReturnType<typeof setTimeout>;
   #running?: Promise<void>;
+  /** Ends the running maintenance's held read early. */
+  #holding?: AbortController;
   #deliveryRunning?: Promise<void>;
   #deliveryPending = false;
   #deliveryWaitsForMaintenance = false;
@@ -123,6 +139,8 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#lifecycle = structuredClone(observation);
     const eligible = this.#eligible();
     if (!eligible) {
+      // A held read waits no longer for a page that is hidden or under its player.
+      this.#holding?.abort();
       this.#deliveryEpoch++;
       this.#cancelTimer();
       this.#deliveryWaitsForMaintenance = false;
@@ -140,6 +158,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#holding?.abort();
     this.#deliveryEpoch++;
     this.#cancelTimer();
     this.#deliveryWaitsForMaintenance = false;
@@ -152,7 +171,9 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
   }
 
   #eligible(): boolean {
-    if (this.#halted || !this.#lifecycle.visible) return false;
+    // Under the page's own player nothing is drawn from the library, and a refresh or compaction only competes with
+    // the stream; the pass when it closes catches up, as the TV's polls do (`RootView`).
+    if (this.#halted || !this.#lifecycle.visible || this.#lifecycle.playerOpen) return false;
     return this.maintenance.mode === 'local' || this.#lifecycle.online;
   }
 
@@ -186,16 +207,35 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#timer = undefined;
   }
 
+  /** When to read again after a read that found a change or not and took `read` ms, the whole pass `elapsed` ms. */
+  #nextDelay(changed: boolean, read: number, elapsed: number): number {
+    if (this.#lifecycle.playbackActive) return Math.max(0, this.#interval() - elapsed);
+    const held = changed
+      ? Math.max(0, HELD_SPACING_MS - elapsed)
+      : read >= HELD_AFTER_MS
+        ? 0
+        : Math.max(0, VISIBLE_REFRESH_MS - elapsed);
+    return Math.min(held, Math.max(0, this.#interval() - elapsed));
+  }
+
   #run(): Promise<void> {
     if (this.#running) return this.#running;
     const started = this.#now();
+    let changed = false;
+    let read = 0;
+    const holding = new AbortController();
+    this.#holding = holding;
     const running = (async () => {
       try {
-        const result = await this.maintenance.run(
-          this.#lifecycle.playbackActive
-            ? { waitSeconds: ACTIVE_PLAYBACK_REFRESH_MS / 1000 }
-            : undefined,
-        );
+        const result = await this.maintenance.run({
+          waitSeconds: this.#lifecycle.playbackActive
+            ? ACTIVE_PLAYBACK_REFRESH_MS / 1000
+            : HELD_WAIT_SECONDS,
+          stopWaiting: holding.signal,
+        });
+        // Only maintenance is timed: the background work after it must not pass for a held answer.
+        read = this.#now() - started;
+        changed = result.changed;
         if (this.#closed) return;
         if (result.changed) this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
         if (!sameStatus(this.#lastStatus, result.status)) {
@@ -231,12 +271,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#running = running;
     void running.finally(() => {
       if (this.#running === running) this.#running = undefined;
+      if (this.#holding === holding) this.#holding = undefined;
       this.#deliveryWaitsForMaintenance = false;
       this.#requestDelivery();
-      if (!this.#closed && this.#eligible() && this.maintenance.mode === 'online') {
-        const elapsed = Math.max(0, this.#now() - started);
-        this.#schedule(Math.max(0, this.#interval() - elapsed));
-      }
+      if (!this.#closed && this.#eligible() && this.maintenance.mode === 'online')
+        this.#schedule(this.#nextDelay(changed, read, Math.max(0, this.#now() - started)));
     });
     return running;
   }
@@ -310,7 +349,8 @@ export function libraryLogMaintenance(
   return {
     mode,
     async run(options) {
-      let changed = mode === 'online' ? await log.refresh(options?.waitSeconds) : false;
+      let changed =
+        mode === 'online' ? await log.refresh(options?.waitSeconds, options?.stopWaiting) : false;
       if (log.moved) return { changed, status: logStatus(log) };
       if (mode === 'online') changed = (await log.compact()) || changed;
       return { changed, status: logStatus(log) };

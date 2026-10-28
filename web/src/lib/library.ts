@@ -199,10 +199,15 @@ export interface ContinueEntry {
   device?: string;
   /** The stable id of the device that wrote `seconds`; transport controls use identity, never its label. */
   deviceId?: string;
+  /** This device wrote `seconds`: its own playback, never a reason to pull the library faster. */
+  here?: true;
 }
 
 /** A Continue Watching decision before the title's late TMDB display fields are laid over it. */
-export interface ContinueCandidate extends Omit<ContinueEntry, 'title' | 'device' | 'deviceId'> {
+export interface ContinueCandidate extends Omit<
+  ContinueEntry,
+  'title' | 'device' | 'deviceId' | 'here'
+> {
   ref: Pick<Title, 'type' | 'id'>;
   /** The stamp device id that wrote `seconds`, which the library service names (`device`). */
   by?: string;

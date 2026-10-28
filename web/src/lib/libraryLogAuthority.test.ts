@@ -1776,6 +1776,8 @@ describe('LibraryLogAuthority', () => {
         {
           title: movie,
           deviceId: '0123456789abcdef',
+          // Written through this authority, so by this device's own clock.
+          here: true,
           fraction: 0.4,
           seconds: 240,
           updatedAt: expect.any(Number),

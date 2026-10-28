@@ -161,12 +161,14 @@ export function selectHomeLibraryViewFromFold(
 
 /**
  * Continue Watching's items as `projector` decides them, each naming the device it was last watched on from the
- * library's `devices` row: the one projection of them the whole log and the fact store both answer with.
+ * library's `devices` row: the one projection of them the whole log and the fact store both answer with. `self` is this
+ * device's stamp id, where known: its own writes are marked `here`.
  */
 export function continueItems(
   projector: ContinueProjector,
   library: Library,
   devices: SettingsRow | undefined,
+  self?: string,
 ): Extract<LibrarySelectionValue, { kind: 'continue' }>['items'] {
   return projector
     .project(library)
@@ -182,6 +184,7 @@ export function continueItems(
         ...(liveFraction !== undefined ? { liveFraction } : {}),
         ...(device ? { device } : {}),
         ...(by ? { deviceId: by } : {}),
+        ...(by && by === self ? { here: true as const } : {}),
       };
     });
 }
