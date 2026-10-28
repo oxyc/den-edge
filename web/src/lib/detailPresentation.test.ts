@@ -22,8 +22,12 @@ import {
   seriesSeenOverride,
   titleFacts,
 } from './detailPresentation';
+import { blankEpisode } from './actions';
+import { applyLog, ContinueProjector, emptyLibrary } from './library';
+import { titleViewRows } from './libraryViewPresentation';
 import { readDetailPrefs } from './prefs';
-import type { EpisodeRow, TitleRow } from './wire';
+import { titleView } from './titleView';
+import type { EpisodeRow, Stamp, TitleRow } from './wire';
 
 const ref = { type: 'tv' as const, id: 1 };
 const detail = (extra: object = {}) =>
@@ -133,46 +137,80 @@ describe('detail presentation', () => {
       0,
     );
   });
-  it('counts only aired regular episodes and resumes the latest played episode, not an old gap', () => {
+  it('counts only aired regular episodes, honouring a reset', () => {
     const episodes = new Map([
       ['1:2', ep(1, 2, 1, 5)],
       ['2:1', ep(2, 1, 0.4, 20)],
       ['0:1', ep(0, 1, 1, 30)],
     ]);
-    expect(seriesPresentation(detail(), episodes)).toMatchObject({
-      total: 4,
-      watched: 1,
+    expect(seriesPresentation(detail(), episodes)).toMatchObject({ total: 4, watched: 1 });
+    expect(seriesPresentation(detail(), episodes, row(40))).toMatchObject({ watched: 0 });
+  });
+  it("plays the series' Continue Watching entry, and otherwise starts from the first aired episode", () => {
+    expect(
+      seriesPresentation(detail(), new Map(), undefined, {
+        episode: { season: 2, episode: 1 },
+        fraction: 0.4,
+      }),
+    ).toMatchObject({
       target: { season: 2, episode: 1 },
       kind: 'resume',
       fraction: 0.4,
       initialSeason: 2,
     });
-    expect(seriesPresentation(detail(), episodes, row(40))).toMatchObject({
-      watched: 0,
+    expect(
+      seriesPresentation(detail(), new Map(), undefined, {
+        episode: { season: 2, episode: 1 },
+        fraction: 0,
+      }),
+    ).toMatchObject({ target: { season: 2, episode: 1 }, kind: 'next', fraction: 0 });
+    // Finished, caught up, dismissed or never started: nothing on the row, so Play starts at the beginning.
+    expect(seriesPresentation(detail(), new Map([['1:3', ep(1, 3, 1)]]))).toMatchObject({
       target: { season: 1, episode: 1 },
       kind: 'start',
+      fraction: 0,
     });
-  });
-  it('advances across seasons, never plays an unaired next episode and restarts after the aired finale', () => {
-    expect(seriesPresentation(detail(), new Map([['1:3', ep(1, 3, 0.95)]]))).toMatchObject({
-      target: { season: 2, episode: 1 },
-      kind: 'next',
-    });
-    expect(
-      seriesPresentation(
-        detail(),
-        new Map([
-          ['1:1', ep(1, 1, 1)],
-          ['1:2', ep(1, 2, 1)],
-          ['1:3', ep(1, 3, 1)],
-          ['2:1', ep(2, 1, 1)],
-        ]),
-      ),
-    ).toMatchObject({ target: { season: 1, episode: 1 }, kind: 'start' });
     expect(seriesPresentation(detail({ first_air_date: '2099-01-01' }), new Map())).toMatchObject({
       total: 0,
       target: undefined,
     });
+  });
+  it('offers the episode Home offers: a rewatch in progress resumes, not the one after the furthest finished', () => {
+    // E1–E4 finished earlier; E1 is being rewatched now, part-way in. One series row per episode, as the TV writes.
+    const series = { type: 'tv' as const, id: 1 };
+    const episode = (number: number, value: number, at: number, seconds?: number) => ({
+      ...blankEpisode(series, 1, number),
+      progress: { value, at: [at, 0, 'tv'] as Stamp, viewing: 1, ...(seconds ? { seconds } : {}) },
+    });
+    const rows = [
+      episode(2, 1, 2_000),
+      episode(3, 1, 3_000),
+      episode(4, 1, 4_000),
+      episode(1, 0.45, 10_000, 1_670),
+    ];
+    const shape = { counts: new Map([[1, 10]]) };
+
+    // Home: the library's Continue Watching projection.
+    const library = applyLog({ ...emptyLibrary(), shapes: new Map([['tv:1', shape]]) }, rows);
+    const home = new ContinueProjector().project(library).find((c) => c.ref.id === series.id);
+    expect(home).toMatchObject({ episode: { season: 1, episode: 1 }, fraction: 0.45 });
+
+    // The title page: the library's view of the title, read through the page's own presentation.
+    const byEpisode = new Map(rows.map((r) => [r.episode, r]));
+    const view = titleView(series, undefined, (_, number) => byEpisode.get(number), shape);
+    const page = titleViewRows({ ...series, title: 'The Morning Show' }, view);
+    const presented = seriesPresentation(
+      parseDetail(series, {
+        name: 'The Morning Show',
+        first_air_date: '2019-11-01',
+        seasons: [{ season_number: 1, episode_count: 10 }],
+        last_episode_to_air: { season_number: 1, episode_number: 10 },
+      })!,
+      page.episodes,
+      page.row,
+      home,
+    );
+    expect(presented).toMatchObject({ target: home!.episode, kind: 'resume', fraction: 0.45 });
   });
   it('selects regional certification and streaming providers and puts directors before the cast', () => {
     const d = parseDetail(

@@ -122,6 +122,7 @@
           {routes}
           {row}
           {episodes}
+          continued={{ episode: { season: 1, episode: 1 }, fraction: 0.4 }}
           busy={false}
           failure={null}
           notice={null}

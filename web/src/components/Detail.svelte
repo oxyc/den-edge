@@ -13,7 +13,7 @@
     type Ratings,
   } from '../lib/detailPresentation';
   import { RESUME_FLOOR, WATCHED } from '../lib/actions';
-  import type { MediaType, Title } from '../lib/library';
+  import type { ContinueEntry, MediaType, Title } from '../lib/library';
   import type { EpisodeRow, TitleRow } from '../lib/wire';
   import PersonCard from './PersonCard.svelte';
   import PosterRow from './PosterRow.svelte';
@@ -69,6 +69,7 @@
     row,
     live,
     episodes,
+    continued,
     busy,
     failure,
     notice,
@@ -131,6 +132,8 @@
       fraction?: number;
     };
     episodes: Map<string, EpisodeRow>;
+    /** This series' Continue Watching entry, as Home's row shows it: what Play resumes or starts next. */
+    continued?: Pick<ContinueEntry, 'episode' | 'fraction'>;
     busy: boolean;
     failure: string | null;
     notice: string | null;
@@ -382,7 +385,7 @@
   const openingSeason = (d: TitleDetail, asked: number | undefined) =>
     asked !== undefined && d.seasons.some((s) => s.number === asked)
       ? asked
-      : untrack(() => seriesPresentation(d, episodes, row).initialSeason);
+      : untrack(() => seriesPresentation(d, episodes, row, continued).initialSeason);
   let seasonEpisodes = $state.raw<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
   let seasonLoading = $state(false);
@@ -603,7 +606,7 @@
     active && detail?.title.title ? named(detail.title.title, detail.title.year) : null,
   );
 
-  const series = $derived(detail ? seriesPresentation(detail, episodes, row) : null);
+  const series = $derived(detail ? seriesPresentation(detail, episodes, row, continued) : null);
   const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
   const target = $derived(ref.type === 'tv' ? series?.target : undefined);
   // A fresh position from another device is more specific than Continue Watching's projected target. The latter

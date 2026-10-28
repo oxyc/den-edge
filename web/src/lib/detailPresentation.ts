@@ -1,6 +1,6 @@
-import { RESUME_FLOOR, WATCHED } from './actions';
+import { WATCHED } from './actions';
 import type { Episode, TitleDetail } from './detail';
-import type { Title } from './library';
+import type { ContinueEntry, Title } from './library';
 import { compareStamps, type EpisodeRow, type TitleRow } from './wire';
 
 /** TMDB dates are calendar days, not UTC instants: midnight UTC displays yesterday in the Americas. */
@@ -147,10 +147,16 @@ export function episodeProgress(episode: EpisodeRow | undefined, row?: TitleRow)
   return Math.max(0, Math.min(1, episode.progress.value));
 }
 
+/**
+ * A series page's counts and its Play target. The target is not decided here: it is the series' Continue Watching
+ * entry (`continued`), the one Home's row shows, so the title page and Home cannot offer different episodes. A series
+ * with no entry (not started, finished, caught up, dismissed) starts from its first aired episode.
+ */
 export function seriesPresentation(
   d: TitleDetail,
   episodes: Map<string, EpisodeRow>,
   row?: TitleRow,
+  continued?: Pick<ContinueEntry, 'episode' | 'fraction'>,
 ) {
   const regular = d.seasons.filter((s) => s.number > 0);
   const aired = (s: number, e: number) =>
@@ -166,44 +172,21 @@ export function seriesPresentation(
   const progress = (c: { season: number; episode: number }) =>
     episodeProgress(episodes.get(`${c.season}:${c.episode}`), row);
   const watched = coords.filter((c) => progress(c) >= WATCHED).length;
-  const latest = [...episodes.values()]
-    .filter(
-      (e) =>
-        progress(e) > RESUME_FLOOR &&
-        coords.some((c) => c.season === e.season && c.episode === e.episode),
-    )
-    .sort(
-      (a, b) =>
-        compareStamps(b.progress.at, a.progress.at) || b.season - a.season || b.episode - a.episode,
-    )[0];
-  const first = coords[0];
-  let target = first;
-  let fraction = 0;
-  let kind: 'start' | 'resume' | 'next' = 'start';
-  if (latest) {
-    if (progress(latest) < WATCHED) {
-      target = { season: latest.season, episode: latest.episode };
-      fraction = progress(latest);
-      kind = 'resume';
-    } else {
-      const next =
-        coords[
-          coords.findIndex((c) => c.season === latest.season && c.episode === latest.episode) + 1
-        ];
-      if (next) {
-        target = next;
-        kind = 'next';
-      }
-    }
-  }
+  const episode = continued?.episode;
+  // den-core answers `resume` with the fraction to resume from and `next` with 0.
+  const kind: 'start' | 'resume' | 'next' = episode
+    ? continued.fraction > 0
+      ? 'resume'
+      : 'next'
+    : 'start';
   return {
     aired: coords,
     total: coords.length,
     watched,
-    target,
-    fraction,
+    target: episode ? { season: episode.season, episode: episode.episode } : coords[0],
+    fraction: episode ? continued.fraction : 0,
     kind,
-    initialSeason: latest?.season ?? d.seasons[0]?.number ?? null,
+    initialSeason: episode?.season ?? d.seasons[0]?.number ?? null,
   };
 }
 
