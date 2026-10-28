@@ -40,6 +40,8 @@ async function openTitle(page, { pendingStatus = 200, pendingBody = { queued: tr
   await page.route('**/inbox/pending', (r) =>
     r.fulfill({ status: pendingStatus, json: pendingBody }),
   );
+  // The hint delay, den-edge peeks and the toast's hold are the page's own timers: the test moves its clock.
+  await page.clock.install();
   await page.goto(
     `${E2E_ORIGIN}/test/library.html?populated&page=title&type=movie&id=1001&link-host=tv`,
   );
@@ -49,6 +51,19 @@ async function openTitle(page, { pendingStatus = 200, pendingBody = { queued: tr
 
 const toast = (page) => page.locator('p.library-status.toast');
 const play = (page) => page.getByRole('button', { name: /on TV$/ });
+
+/** `playOnTv.svelte.ts`: den-edge is peeked every PEEK_MS; HINT_MS without word adds the hint. */
+const PEEK_MS = 2_000;
+const HINT_MS = 10_000;
+/** `profileSession.svelte.ts`: how long a passing toast stays. */
+const TOAST_MS = 6_000;
+
+/** Moves the page's clock past `ms`, then lets the den-edge peek that fired there be answered and read. */
+async function passTime(page, ms) {
+  const peeked = page.waitForResponse('**/inbox/pending');
+  await page.clock.fastForward(ms);
+  await peeked;
+}
 
 test('toast walks Sending → Sent → the hint → Playing, then dismisses', async () => {
   const browser = await chromium.launch({
@@ -63,12 +78,16 @@ test('toast walks Sending → Sent → the hint → Playing, then dismisses', as
     expect(appends).toHaveLength(1);
     expect(Object.keys(appends[0])).toEqual(['sealed']);
 
+    // Not before the hint delay.
+    await passTime(page, HINT_MS - PEEK_MS);
+    await expect(toast(page)).toHaveText('Sent to Living Room TV…');
+
     // No word from den-edge within the hint delay: the toast gains the hint and stays up rather than clearing.
+    await passTime(page, PEEK_MS);
     await expect(toast(page)).toHaveText(
       'Sent to Living Room TV… Den needs to be open on Living Room TV.',
-      { timeout: 15_000 },
     );
-    await page.waitForTimeout(500);
+    await passTime(page, TOAST_MS);
     await expect(toast(page)).toBeVisible();
 
     // The TV opens Den and starts it: a fresh position for the title, exactly what the library pull would carry.
@@ -76,7 +95,8 @@ test('toast walks Sending → Sent → the hint → Playing, then dismisses', as
     await expect(toast(page)).toHaveText('Playing on Living Room TV');
 
     // And then it dismisses, like any other passing toast.
-    await expect(toast(page)).toHaveCount(0, { timeout: 8_000 });
+    await page.clock.fastForward(TOAST_MS);
+    await expect(toast(page)).toHaveCount(0);
   } finally {
     await browser.close();
   }
@@ -91,8 +111,10 @@ test('skips the hint once den-edge says the TV already took it', async () => {
     await openTitle(page, { pendingBody: { queued: false } });
     await play(page).click();
     await expect(toast(page)).toHaveText('Sent to Living Room TV…');
-    // Past the hint delay, with den-edge having said it is gone from the queue — no hint, no false alarm.
-    await page.waitForTimeout(10_500);
+    // Past the hint delay, with den-edge having said it is gone from the queue — no hint, no false alarm. A second
+    // peek past it is answered too, so the first one's answer has been read before the toast is.
+    await passTime(page, HINT_MS + 500);
+    await passTime(page, PEEK_MS);
     await expect(toast(page)).toHaveText('Sent to Living Room TV…');
   } finally {
     await browser.close();

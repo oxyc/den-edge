@@ -788,10 +788,16 @@ describe('LibraryLogAuthority', () => {
         derivedWrites.push(key);
       return put(key, value);
     };
-    const watchlist = await open();
-    await watchlist.select({ kind: 'overview' });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await watchlist.close();
+    // The views writer gathers on its own timer (250 ms): a fake clock runs it out rather than a guess at real time.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const watchlist = await open();
+      await watchlist.select({ kind: 'overview' });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await watchlist.close();
+    } finally {
+      vi.useRealTimers();
+    }
     await expect(readFinishedLibraryViews(KEY, vault, [...all])).resolves.toMatchObject({
       identity: { authorityRevision: written.identity.authorityRevision },
     });

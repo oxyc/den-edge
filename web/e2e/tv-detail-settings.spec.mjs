@@ -231,9 +231,12 @@ test('opening a TV detail focuses Play and keeps a saved Watchlist visually seco
     .getByRole('link', { name: 'Home', exact: true });
   await home.focus();
   await page.keyboard.press('Enter');
+  // A windowed shelf holds a title as a transparent placeholder link until the row is placed, then replaces it with
+  // the card. Select the card the remote lands on, not the placeholder that is about to leave the page.
   const card = page
     .getByRole('region', { name: 'Watchlist', exact: true })
-    .getByRole('link', { name: /Remote Series/ });
+    .getByRole('link', { name: /Remote Series/ })
+    .and(page.locator('.card'));
   await expect(card).toBeVisible({ timeout: 30_000 });
   await card.focus();
   await page.keyboard.press('Enter');
@@ -458,6 +461,8 @@ test('a promised-Blob clipboard refusal cannot strand a failed pairing', async (
 });
 
 test('hardware Back leaves recovery editing, then closes its Settings row', async ({ page }) => {
+  // Focus restoration gives up after its own 1.5 s timer (`tv/navigation.ts`): the test moves the clock past it.
+  await page.clock.install();
   await setupSeries(page);
   await page.goto(`${E2E_ORIGIN}/settings`);
 
@@ -476,7 +481,7 @@ test('hardware Back leaves recovery editing, then closes its Settings row', asyn
 
   await numericBack(page, 461);
   await expect(recoveryRow).toHaveAttribute('aria-expanded', 'false');
-  await page.waitForTimeout(1_600);
+  await page.clock.runFor(1_600);
   await expect(recoveryRow).toBeFocused();
 });
 

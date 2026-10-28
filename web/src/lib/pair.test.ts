@@ -245,9 +245,10 @@ describe('hosting a pairing', () => {
   /** Both sides at once, as two browsers are: the host shows a code, the joiner types it. */
   async function pairThem(allow: (joiner: string) => Promise<boolean>, fetchImpl = fakeEdge()) {
     const libraryKey = new Uint8Array(32).fill(7);
-    // A poll that yields to the timers, not a no-op: the two sides take turns here as two browsers do, and a
-    // side that never yields spends its whole ten minutes of polls before the other writes a thing.
-    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 1));
+    // A poll that yields a turn of the event loop, not a no-op: the two sides take turns here as two browsers do, and
+    // a side that never yields spends its whole ten minutes of polls before the other writes a thing. No wall-clock
+    // time passes: a refused joiner polls out its session's ten minutes without the test waiting them.
+    const wait = () => new Promise<void>((resolve) => setImmediate(resolve));
     let give: (code: string) => void = () => undefined;
     const code = new Promise<string>((resolve) => (give = resolve));
     const hosted = pair.host({
@@ -320,7 +321,7 @@ describe('hosting a pairing', () => {
 describe('TV-initiated pairing', () => {
   it('lets a scanned phone give its library and guest ticket to the waiting TV', async () => {
     const fetchImpl = fakeEdge();
-    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 1));
+    const wait = () => new Promise<void>((resolve) => setImmediate(resolve));
     const libraryKey = new Uint8Array(32).fill(9);
     const ticket = '1234abcd.ABCDEFGHJKLMNPQRSTUVWX';
     let show: (code: string) => void = () => undefined;

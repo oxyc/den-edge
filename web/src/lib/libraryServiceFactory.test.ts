@@ -706,6 +706,19 @@ it('does not replace a live Worker when one content request cannot be cloned', a
 });
 
 it('stops replaying content after four transport replacements when every generation dies', async () => {
+  // Each replacement waits out the session's own back-off first: a fake clock runs it, step by step.
+  vi.useFakeTimers();
+  try {
+    await everyGenerationDies();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+/** The session's waits before each content replacement (`CONTENT_RECOVERY_BACKOFF_MS`). */
+const RECOVERY_BACKOFF_MS = [0, 100, 250, 500];
+
+async function everyGenerationDies() {
   const workers = Array.from({ length: 6 }, () => new FakeWorker());
   const createWorker = vi.fn<() => Worker>();
   for (const worker of workers) createWorker.mockReturnValueOnce(worker as unknown as Worker);
@@ -729,18 +742,22 @@ it('stops replaying content after four transport replacements when every generat
 
   for (let generation = 0; generation < 5; generation += 1) {
     const current = workers[generation]!;
-    await expect
-      .poll(() =>
-        current.posted.some(
-          (message) =>
-            message.type === 'content-query' && message.request.kind === 'service.regions',
-        ),
-      )
-      .toBe(true);
+    const replayed = () =>
+      current.posted.some(
+        (message) => message.type === 'content-query' && message.request.kind === 'service.regions',
+      );
+    const backoff = generation ? RECOVERY_BACKOFF_MS[generation - 1]! : 0;
+    if (backoff) {
+      await vi.advanceTimersByTimeAsync(backoff - 1);
+      expect(replayed(), 'no replay before its back-off').toBe(false);
+    }
+    await vi.advanceTimersByTimeAsync(backoff ? 1 : 0);
+    expect(replayed()).toBe(true);
     current.fail(`worker ${generation + 1} failed`);
     if (generation === 4) break;
     const next = workers[generation + 1]!;
-    await expect.poll(() => next.posted.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(next.posted).toHaveLength(1);
     const hello = next.posted[0];
     if (hello?.type !== 'hello') throw new Error('replacement hello was not sent');
     next.emit([
@@ -765,14 +782,15 @@ it('stops replaying content after four transport replacements when every generat
   // The library supervisor independently keeps its authority healthy, but the exhausted content operation must not
   // follow it into a sixth generation or turn that health recovery into an unbounded query replay.
   const sixth = workers[5]!;
-  await expect.poll(() => sixth.posted.length).toBe(1);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(sixth.posted).toHaveLength(1);
   expect(createWorker).toHaveBeenCalledTimes(6);
   expect(sixth.posted[0]).toMatchObject({ type: 'hello' });
   expect(sixth.posted).not.toContainEqual(
     expect.objectContaining({ type: 'content-query', request: { kind: 'service.regions' } }),
   );
   services.close();
-});
+}
 
 it('cancels promptly while a transport replacement is reopening the paired library', async () => {
   const first = new FakeWorker();

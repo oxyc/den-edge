@@ -1,8 +1,18 @@
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 import { rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
 
-afterEach(() => forgetLibraryCredential());
+/** Observations wait this long to be gathered before they are sent (`FLUSH_MS`). */
+const GATHER_MS = 250;
+
+// The gathering window and a 429's pause are titleMetadata's own timers: they run on a fake clock.
+beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] }));
+afterEach(async () => {
+  // Nothing a test queued may carry a fake timer's handle into the next test's clock.
+  await vi.runAllTimersAsync();
+  vi.useRealTimers();
+  forgetLibraryCredential();
+});
 
 const film = (id: number, rating: number) => ({
   type: 'movie' as const,
@@ -26,7 +36,8 @@ test('publishes Atlas JustWatch IMDb ratings with distinct provenance', async ()
   useLibraryCredential({ id: 'a', member: 'b' });
   const { bodies, fetchImpl, calls } = edge();
   rememberAtlasMetadata([film(550, 7.4)], fetchImpl);
-  await vi.waitFor(() => expect(calls).toHaveBeenCalledOnce());
+  await vi.advanceTimersByTimeAsync(GATHER_MS);
+  expect(calls).toHaveBeenCalledOnce();
   expect(calls.mock.calls[0]?.[0]).toBe('/metadata/title');
   expect(bodies).toEqual([
     { entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }] },
@@ -36,7 +47,7 @@ test('publishes Atlas JustWatch IMDb ratings with distinct provenance', async ()
 test('publishes observations only for a paired browser', async () => {
   const { fetchImpl, calls } = edge();
   rememberAtlasMetadata([film(550, 7.4)], fetchImpl);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await vi.advanceTimersByTimeAsync(GATHER_MS * 4);
   expect(calls).not.toHaveBeenCalled();
 });
 
@@ -49,7 +60,8 @@ test('gathers a page of observations into one request, keeping the newest', asyn
   const { bodies, fetchImpl, calls } = edge();
   rememberAtlasMetadata([film(1, 6.1), film(2, 7.2)], fetchImpl);
   rememberAtlasMetadata([film(1, 6.5)], fetchImpl);
-  await vi.waitFor(() => expect(calls).toHaveBeenCalledOnce());
+  await vi.advanceTimersByTimeAsync(GATHER_MS);
+  expect(calls).toHaveBeenCalledOnce();
   expect(bodies[0]!.entries).toEqual([
     { type: 'movie', id: 1, source: 'justwatch-imdb', fields: { rating: 6.5 } },
     { type: 'movie', id: 2, source: 'justwatch-imdb', fields: { rating: 7.2 } },
@@ -63,18 +75,24 @@ test('sends no more than den-edge takes in one request', async () => {
     Array.from({ length: 150 }, (_, i) => film(i + 1, 7)),
     fetchImpl,
   );
-  await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(2));
+  await vi.runAllTimersAsync();
+  expect(calls).toHaveBeenCalledTimes(2);
   expect(bodies.map((b) => b.entries.length)).toEqual([100, 50]);
 });
 
 /** A refusal for now is waited out, and what it carried is sent again rather than lost. */
 test('waits out a 429 as told and sends the same observations again', async () => {
   useLibraryCredential({ id: 'a', member: 'b' });
+  // The module keeps the pause it was told. Counted from the epoch, it is long over for every later test's clock.
+  vi.setSystemTime(0);
   const { bodies, fetchImpl, calls } = edge([429, { 'retry-after': '1' }]);
-  const started = Date.now();
   rememberAtlasMetadata([film(550, 7.4)], fetchImpl);
-  await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(2), { timeout: 3_000 });
-  expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+  await vi.advanceTimersByTimeAsync(GATHER_MS);
+  expect(calls).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(calls, 'nothing goes before the second it was told').toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(calls).toHaveBeenCalledTimes(2);
   expect(bodies[1]).toEqual(bodies[0]);
 });
 
@@ -86,13 +104,15 @@ test('stops after a 401 until the credential changes', async () => {
   useLibraryCredential({ id: 'a', member: 'b' });
   const { fetchImpl, calls } = edge([401]);
   rememberAtlasMetadata([film(1, 7)], fetchImpl);
-  await vi.waitFor(() => expect(calls).toHaveBeenCalledOnce());
+  await vi.advanceTimersByTimeAsync(GATHER_MS);
+  expect(calls).toHaveBeenCalledOnce();
   rememberAtlasMetadata([film(2, 7)], fetchImpl);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await vi.advanceTimersByTimeAsync(GATHER_MS * 4);
   expect(calls).toHaveBeenCalledOnce();
   useLibraryCredential({ id: 'a', member: 'c' });
   rememberAtlasMetadata([film(3, 7)], fetchImpl);
-  await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(2));
+  await vi.advanceTimersByTimeAsync(GATHER_MS);
+  expect(calls).toHaveBeenCalledTimes(2);
 });
 
 test('hydrates missing fields without replacing fresher local card metadata', async () => {

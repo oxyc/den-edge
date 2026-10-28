@@ -2,12 +2,13 @@ import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
-async function open(browser, { width = 1280, hasTouch = false } = {}) {
+async function open(browser, { width = 1280, hasTouch = false, clock = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch });
   await guardNetwork(page);
   // A pointer resting on a card, or a finger pressing it, prefetches the title's details 60-100ms later
   // (`PosterCard` `intend`), so any test that hovers or presses one asks TMDB for it.
   await routeTmdb(page, (r) => r.fulfill({ status: 404, json: {} }));
+  if (clock) await page.clock.install();
   await page.goto(`${E2E_ORIGIN}/test/poster-menu.html`);
   return page;
 }
@@ -258,14 +259,17 @@ test('mobile: a long-press opens the sheet and the card does not navigate; a swi
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
   try {
-    const page = await open(browser, { width: 390, hasTouch: true });
+    // The long press is PosterCard's own 500 ms timer: the test holds the page's clock and moves it.
+    const page = await open(browser, { width: 390, hasTouch: true, clock: true });
     const library = page.getByRole('region', { name: 'Library' });
     const card = library.getByRole('link', { name: 'Movie 101' });
     const box = await card.boundingBox();
     const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
 
     // A long press: down, held past 500ms with no real movement, then released.
     await page.mouse.move(center.x, center.y);
+    await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
     await page.evaluate(({ x, y }) => {
       const target = document.elementFromPoint(x, y);
       target?.dispatchEvent(
@@ -277,8 +281,10 @@ test('mobile: a long-press opens the sheet and the card does not navigate; a swi
         }),
       );
     }, center);
-    await page.waitForTimeout(600);
-    const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
+    await page.clock.runFor(499);
+    await expect(menu, 'not before the press has lasted 500 ms').toHaveCount(0);
+    await page.clock.runFor(1);
+    await page.clock.resume();
     await expect(menu).toBeVisible();
     await expect(page).toHaveURL(/poster-menu\.html$/);
     await page.keyboard.press('Escape');
@@ -303,7 +309,7 @@ test('mobile: a long-press opens the sheet and the card does not navigate; a swi
         }),
       );
     }, center);
-    await page.waitForTimeout(600);
+    await page.clock.fastForward(600);
     await expect(menu).toBeHidden();
     await expect(page).toHaveURL(/poster-menu\.html$/);
   } finally {
