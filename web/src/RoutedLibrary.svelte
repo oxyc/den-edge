@@ -856,7 +856,9 @@
     if (!session.local || !source || !sourceKey) return false;
     const destination = open(key, false);
     try {
-      await destination.model!.ready;
+      // An invite can be accepted before the library kept here has opened; asked then, it answers "not ready" and the
+      // move waits for the next try.
+      await Promise.all([destination.model!.ready, source.ready]);
       // A title edit made from finished views answers while its narrow document send is still settling. A query that
       // needs the full authority waits for that send and folds it into the source log before anything can copy it.
       await source.rawPreferences();
@@ -893,6 +895,8 @@
           // Cancel a queued convergence open before publishing the linked destination.
           convergence++;
           clearTimeout(convergenceRetry);
+          // The same viewer goes on in the linked library: not a profile switch, so the page they are on stays open.
+          routedProfile = profileSessionKey(destination.identity, destination.policyKey);
           libraryIdentity = key;
           session = destination;
           return true;
@@ -1610,6 +1614,8 @@
         try {
           await next.model!.ready;
           if (!current || !alive || run !== convergence) return next.close();
+          // Another tab's copy of this browser's own library: the same viewer, so the route stays.
+          routedProfile = profileSessionKey(next.identity, next.policyKey);
           libraryIdentity = nextKey;
           session = next;
           await drain(next, nextKey);

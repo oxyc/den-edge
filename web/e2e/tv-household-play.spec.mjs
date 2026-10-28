@@ -59,7 +59,16 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     .getByRole('dialog', { name: 'Accept this invite?' })
     .getByRole('button', { name: 'Accept', exact: true })
     .click();
-  await expect.poll(() => edge.libraries.size, { timeout: 30_000 }).toBe(1);
+  // den-edge has the library from the move's first write, but this browser holds it only once the move is verified
+  // and it switches over; a code got from Settings before then belongs to the library being left.
+  await expect
+    .poll(
+      () =>
+        host.evaluate(() => JSON.parse(localStorage.getItem('den.links') ?? 'null')?.[0]?.guest),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+  expect(edge.libraries.size).toBe(1);
   await host.goto(`${E2E_ORIGIN}/settings`);
   await host.getByRole('button', { name: /Linked devices/ }).click();
   const devices = host.getByRole('region', { name: 'Linked devices' });
