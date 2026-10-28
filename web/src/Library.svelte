@@ -791,15 +791,20 @@
   };
   /** The household's TVs that take playback commands, the one used last first. */
   const tvs = $derived(householdTvs(householdModel?.devices.value?.devices));
+  /** The open title's Continue Watching entry: the one Home's row shows, which the title page plays from too. */
+  const pageContinue = $derived.by(() => {
+    const opening = page;
+    return (
+      opening &&
+      continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id)
+    );
+  });
   /**
    * The open title's clock, as its Continue Watching card shows it, which episode for a series, the device it plays
    * on, and how far in.
    */
   const pageLive = $derived.by(() => {
-    const opening = page;
-    const entry =
-      opening &&
-      continueEntries.find(({ title }) => title.type === opening.type && title.id === opening.id);
+    const entry = pageContinue;
     const sighting = entry && sighted.get(titleKey(entry.title));
     const controlling =
       !!entry?.deviceId && tvs.some((tv) => tv.id === entry.deviceId && tv.controls);
@@ -2377,6 +2382,7 @@
       ? transport
       : undefined}
     episodes={pageEpisodes}
+    continued={pageContinue || undefined}
     seed={pageSeed}
     still={pageStill}
     {busy}
