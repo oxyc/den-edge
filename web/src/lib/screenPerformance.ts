@@ -6,6 +6,7 @@
 
 import { currentRelease, reportUrl } from './diagnosticsReport';
 import { currentClientPlatform } from './clientPlatform';
+import { retryAfterMs } from './retryAfter';
 import type { Route } from './route';
 
 /** The screens den-edge's `PerformanceRoute` names. */
@@ -148,26 +149,129 @@ export class StallLedger {
   }
 }
 
-/** `sendBeacon` first: a screen is often left by the page hiding or unloading. */
-export function sendScreenStalls(screen: ScreenStalls, fetchImpl: typeof fetch = fetch): void {
-  const release = currentRelease();
-  const body = JSON.stringify({
-    platform: currentClientPlatform(),
-    ...(release ? { release } : {}),
-    journey: 'navigation',
-    stage: 'stalls',
-    ...screen,
-    // A browser has no memory warnings; the field is required of every event.
-    memory: { warnings: 0 },
-  });
-  const url = reportUrl('/performance/event');
-  if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(url, body)) return;
-  void fetchImpl(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body,
-    keepalive: true,
-  }).catch(() => undefined);
+function combined(first: ScreenStalls | undefined, second: ScreenStalls): ScreenStalls {
+  if (!first) return second;
+  const stalls =
+    first.stalls || second.stalls
+      ? ([
+          (first.stalls?.[0] ?? 0) + (second.stalls?.[0] ?? 0),
+          (first.stalls?.[1] ?? 0) + (second.stalls?.[1] ?? 0),
+          Math.max(first.stalls?.[2] ?? 0, second.stalls?.[2] ?? 0),
+        ] as [number, number, number])
+      : undefined;
+  const frames =
+    first.frames || second.frames
+      ? {
+          delivered: (first.frames?.delivered ?? 0) + (second.frames?.delivered ?? 0),
+          missed: (first.frames?.missed ?? 0) + (second.frames?.missed ?? 0),
+          hitchMs: (first.frames?.hitchMs ?? 0) + (second.frames?.hitchMs ?? 0),
+          longestMs: Math.max(first.frames?.longestMs ?? 0, second.frames?.longestMs ?? 0),
+          visibleMs: (first.frames?.visibleMs ?? 0) + (second.frames?.visibleMs ?? 0),
+        }
+      : undefined;
+  return { route: second.route, ...(stalls ? { stalls } : {}), ...(frames ? { frames } : {}) };
+}
+
+const BATCH_MS = 1_000;
+const REPORTS_PER_MINUTE = 12;
+
+/**
+ * One page's bounded performance transport. Repeated visits to the same screen are folded together, at most one
+ * event leaves per batch interval, and a refusal keeps the folded event until the server's Retry-After has passed.
+ */
+export class ScreenReportBatcher {
+  readonly #pending = new Map<ScreenRoute, ScreenStalls>();
+  readonly #sentAt: number[] = [];
+  #retryAt = 0;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #sending = false;
+
+  constructor(
+    // Keep the browser fetch receiver: storing an unbound host function on this class and calling it as a method
+    // gives older TV engines the batcher as `this`, which they reject as an illegal invocation.
+    private readonly fetchImpl: typeof fetch = fetch.bind(globalThis),
+    private readonly now: () => number = Date.now,
+    private readonly schedules = true,
+    private readonly cap = REPORTS_PER_MINUTE,
+  ) {}
+
+  enqueue(screen: ScreenStalls): void {
+    this.#pending.set(screen.route, combined(this.#pending.get(screen.route), screen));
+    this.#arm(BATCH_MS);
+  }
+
+  /** Send one folded route when its local allowance and the server permit it. */
+  async flush(): Promise<boolean> {
+    if (this.#sending || !this.#pending.size) return false;
+    const now = this.now();
+    while (this.#sentAt[0] !== undefined && this.#sentAt[0] <= now - 60_000) this.#sentAt.shift();
+    const localWait = this.#sentAt.length >= this.cap ? this.#sentAt[0]! + 60_000 - now : 0;
+    const wait = Math.max(0, this.#retryAt - now, localWait);
+    if (wait > 0) {
+      this.#arm(wait);
+      return false;
+    }
+
+    const next = this.#pending.entries().next().value as [ScreenRoute, ScreenStalls] | undefined;
+    if (!next) return false;
+    const [route, screen] = next;
+    this.#pending.delete(route);
+    this.#sentAt.push(now);
+    this.#sending = true;
+    try {
+      const release = currentRelease();
+      const response = await this.fetchImpl(reportUrl('/performance/event'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          platform: currentClientPlatform(),
+          ...(release ? { release } : {}),
+          journey: 'navigation',
+          stage: 'stalls',
+          ...screen,
+          memory: { warnings: 0 },
+        }),
+        keepalive: true,
+      });
+      if (response.status === 429) {
+        this.#pending.set(route, combined(this.#pending.get(route), screen));
+        this.#retryAt = this.now() + retryAfterMs(response, 60_000, this.now);
+      }
+    } catch {
+      // Diagnostics never interfere with the page. A network failure is not retried into a later session.
+    } finally {
+      this.#sending = false;
+      if (this.#pending.size) this.#arm(BATCH_MS);
+    }
+    return true;
+  }
+
+  get pending(): number {
+    return this.#pending.size;
+  }
+
+  #arm(delay: number): void {
+    if (!this.schedules || this.#timer !== undefined) return;
+    this.#timer = setTimeout(
+      () => {
+        this.#timer = undefined;
+        void this.flush();
+      },
+      Math.max(0, delay),
+    );
+  }
+}
+
+const screenReports = new ScreenReportBatcher();
+
+/** Queue a troubled screen into the page's bounded, folding transport. */
+export function sendScreenStalls(screen: ScreenStalls): void {
+  screenReports.enqueue(screen);
+}
+
+/** Flush promptly when the document may be leaving; the request itself uses `keepalive`. */
+export function flushScreenStalls(): Promise<boolean> {
+  return screenReports.flush();
 }
 
 /** A display's frame interval; a faster one only under-counts hitches. */
@@ -224,6 +328,7 @@ export function meterScreens(send: (screen: ScreenStalls) => void = sendScreenSt
       ledger.drew(meter.drain());
       // The page may never come back to leave this screen: what it stalled so far goes now.
       flushed(ledger.flush());
+      void flushScreenStalls();
     }
     run();
   };
@@ -236,6 +341,9 @@ export function meterScreens(send: (screen: ScreenStalls) => void = sendScreenSt
       run();
     },
     stop() {
+      ledger.drew(meter.drain());
+      flushed(ledger.flush());
+      void flushScreenStalls();
       observer?.disconnect();
       document.removeEventListener('visibilitychange', hidden);
       if (frame) cancelAnimationFrame(frame);

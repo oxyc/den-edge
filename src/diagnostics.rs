@@ -37,6 +37,10 @@ async fn intake<T: DeserializeOwned>(
         return Err(Box::new(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait)));
     }
     let value = read_json(req, MAX_BODY_BYTES).await?;
+    decode_report(value)
+}
+
+fn decode_report<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, Box<Response>> {
     serde_json::from_value::<T>(value.clone()).map_err(|_| {
         let mut resp = json_reply(StatusCode::BAD_REQUEST, &error("invalid_report"));
         if let Some(field) = refused_field::<T>(&value) {
@@ -1074,6 +1078,11 @@ pub async fn handle_load(state: &Arc<AppState>, req: Request) -> Response {
 // later audits compare them without confusing JS heap with native process memory.
 
 const PERFORMANCE_BUCKET: &str = "performance";
+const PERFORMANCE_RAW_BUCKET: &str = "performance-raw";
+/// Accepted events have room for several devices behind one address and for a genuinely troubled navigation.
+const PERFORMANCE_PER_MINUTE: u32 = 60;
+/// Reading and rejecting a bounded body is cheap, but hostile junk still has a finite ceiling of its own.
+const PERFORMANCE_RAW_PER_MINUTE: u32 = 240;
 const MAX_MEMORY_MB: u64 = 1_048_576;
 
 #[derive(Deserialize)]
@@ -1392,10 +1401,30 @@ impl PerformanceReport {
 }
 
 pub async fn handle_performance(state: &Arc<AppState>, req: Request) -> Response {
-    let report: PerformanceReport = match intake(state, req, PERFORMANCE_BUCKET).await {
+    let ip = client_ip(state, &req);
+    if let Some(wait) = crate::link::throttled_per_minute(
+        state,
+        &format!("{PERFORMANCE_RAW_BUCKET}:{ip}"),
+        PERFORMANCE_RAW_PER_MINUTE,
+    ) {
+        return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    }
+    let value = match read_json(req, MAX_BODY_BYTES).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    // Invalid bodies never spend the accepted-event allowance. The raw gate above bounds the parsing work.
+    let report: PerformanceReport = match decode_report(value) {
         Ok(report) => report,
         Err(response) => return *response,
     };
+    if let Some(wait) = crate::link::throttled_per_minute(
+        state,
+        &format!("{PERFORMANCE_BUCKET}:{ip}"),
+        PERFORMANCE_PER_MINUTE,
+    ) {
+        return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    }
     accepted(report.tag(), |response, tag| {
         response.extensions_mut().insert(PerformanceTag(tag));
     })
@@ -1990,6 +2019,49 @@ pub async fn handle_cast(state: &Arc<AppState>, req: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handler::tests::{body_json, Harness};
+
+    fn performance_event() -> serde_json::Value {
+        serde_json::json!({
+            "platform": "web", "journey": "navigation", "stage": "stalls", "route": "home",
+            "stalls": [1, 80, 80], "memory": { "warnings": 0 }
+        })
+    }
+
+    #[tokio::test]
+    async fn invalid_performance_reports_do_not_spend_the_accepted_allowance() {
+        let h = Harness::new();
+        for _ in 0..PERFORMANCE_PER_MINUTE {
+            assert_eq!(
+                h.call("POST", "/performance/event", Some(serde_json::json!({ "junk": true }))).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for _ in 0..PERFORMANCE_PER_MINUTE {
+            assert_eq!(
+                h.call("POST", "/performance/event", Some(performance_event())).await.0,
+                StatusCode::NO_CONTENT
+            );
+        }
+        let refused = h.send("POST", "/performance/event", Some(performance_event().to_string()), &[]).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body_json(refused).await, serde_json::json!({ "error": "rate_limited" }));
+    }
+
+    #[tokio::test]
+    async fn malformed_performance_traffic_has_a_separate_ceiling() {
+        let h = Harness::new();
+        for _ in 0..PERFORMANCE_RAW_PER_MINUTE {
+            assert_eq!(
+                h.call("POST", "/performance/event", Some(serde_json::json!({ "junk": true }))).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            h.call("POST", "/performance/event", Some(serde_json::json!({ "junk": true }))).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 
     #[test]
     fn page_error_tag_names_every_field() {
