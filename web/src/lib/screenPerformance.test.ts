@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FrameMeter, screenOf, StallLedger } from './screenPerformance';
+import { FrameMeter, screenOf, ScreenReportBatcher, StallLedger } from './screenPerformance';
 
 describe('FrameMeter', () => {
   it('counts a frame three budgets late as two missed, and its time past one budget as hitch', () => {
@@ -54,5 +54,65 @@ describe('StallLedger', () => {
     expect(screenOf({ page: 'title', type: 'movie', id: 7, play: true })).toBe('player');
     expect(screenOf({ page: 'search', query: 'heist' })).toBe('search');
     expect(screenOf({ page: 'person', id: 3 })).toBe('other');
+  });
+});
+
+describe('ScreenReportBatcher', () => {
+  it('folds repeated visits to one route into one bounded report', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const send = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 204 });
+    };
+    const reports = new ScreenReportBatcher(send as typeof fetch, () => 1_000, false);
+    reports.enqueue({ route: 'home', stalls: [1, 80, 80] });
+    reports.enqueue({
+      route: 'home',
+      stalls: [2, 150, 100],
+      frames: { delivered: 60, missed: 3, hitchMs: 50, longestMs: 67, visibleMs: 1_000 },
+    });
+    expect(reports.pending).toBe(1);
+    expect(await reports.flush()).toBe(true);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({
+      route: 'home',
+      stalls: [3, 230, 100],
+      frames: { delivered: 60, missed: 3, hitchMs: 50, longestMs: 67, visibleMs: 1_000 },
+    });
+  });
+
+  it('keeps a refused batch and waits out Retry-After', async () => {
+    let now = 1_000;
+    const calls: number[] = [];
+    const send = async () => {
+      calls.push(now);
+      return calls.length === 1
+        ? new Response(null, { status: 429, headers: { 'retry-after': '2' } })
+        : new Response(null, { status: 204 });
+    };
+    const reports = new ScreenReportBatcher(send as typeof fetch, () => now, false);
+    reports.enqueue({ route: 'title', stalls: [1, 90, 90] });
+    expect(await reports.flush()).toBe(true);
+    expect(reports.pending).toBe(1);
+    now = 2_999;
+    expect(await reports.flush()).toBe(false);
+    now = 3_000;
+    expect(await reports.flush()).toBe(true);
+    expect(calls).toEqual([1_000, 3_000]);
+  });
+
+  it('caps one page independently of the server allowance', async () => {
+    let now = 0;
+    const send = async () => new Response(null, { status: 204 });
+    const reports = new ScreenReportBatcher(send as typeof fetch, () => now, false, 2);
+    reports.enqueue({ route: 'home', stalls: [1, 80, 80] });
+    reports.enqueue({ route: 'title', stalls: [1, 80, 80] });
+    reports.enqueue({ route: 'search', stalls: [1, 80, 80] });
+    expect(await reports.flush()).toBe(true);
+    expect(await reports.flush()).toBe(true);
+    expect(await reports.flush()).toBe(false);
+    expect(reports.pending).toBe(1);
+    now = 60_000;
+    expect(await reports.flush()).toBe(true);
   });
 });
