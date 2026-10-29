@@ -1484,6 +1484,33 @@
     });
   });
 
+  // Managed playback can finish after this page is gone. Make its household drop-box available, then keep the
+  // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
+  $effect(() => {
+    const current = session;
+    return whileNeeded(session.foregrounded, ({ drainPlaybackReceiptsOnce }, work, signal) => {
+      void (async () => {
+        try {
+          const dropbox = await (work.household ?? work.model).ensurePlaybackReceipts();
+          if (!dropbox) return;
+        } catch (error) {
+          console.warn('den: playback receipt key could not be published', error);
+          return;
+        }
+        if (signal.aborted || current !== session) return;
+        await drainPlaybackReceiptsOnce(
+          {
+            libraryId: work.libraryId,
+            apply: async (messages) =>
+              work.model.applyPlaybackReceipts(messages, await work.lend()),
+            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+          },
+          signal,
+        );
+      })();
+    });
+  });
+
   // An LG or Samsung TV also drains its own lane of the assistant's TV queue (den-spec assistant-v1 §16), so an
   // assistant can play on it by name. The lane derives from the TV's play key, made at check-in, so it starts once
   // that key exists. An accepted play starts through the page's own Play (`householdPlays.startPlay`).

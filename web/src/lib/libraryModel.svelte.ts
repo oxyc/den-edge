@@ -1096,6 +1096,27 @@ export class LibraryModel {
     return result;
   }
 
+  async ensurePlaybackReceipts() {
+    const { result } = await this.task({ kind: 'assistant.receipts.ensure' });
+    if (result.kind !== 'assistant.receipts.ensure')
+      throw wrongQueryResult('playback receipts ensure');
+    return result.dropbox;
+  }
+
+  async applyPlaybackReceipts(
+    messages: ReadonlyArray<{ seq: number; sealed: string }>,
+    connection?: AssistantConnection,
+  ) {
+    const { result } = await this.task({
+      kind: 'assistant.receipts.apply',
+      messages: messages.map(({ seq, sealed }) => ({ seq, sealed })),
+      ...(connection ? { connection } : {}),
+    });
+    if (result.kind !== 'assistant.receipts.apply')
+      throw wrongQueryResult('playback receipts apply');
+    return result;
+  }
+
   sealPairingHandover(handoverKey: string, host: string, linkKey?: string, grantTicket?: string) {
     this.#assertOpen();
     return this.service.query({

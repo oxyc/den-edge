@@ -1000,11 +1000,27 @@ async fn relay_with(
     let playback_path = crate::handler::den_playback_path(req.uri().path());
     let playback = playback_path && method == Method::POST;
     let playback_probe = playback_path && method == Method::OPTIONS;
+    let receipt_end =
+        playback_receipt_path(req.uri().path()) && matches!(method, Method::POST | Method::DELETE);
+    let receipt_library = if playback && grant.is_none() {
+        let claim = member_claim(&req);
+        if crate::library::is_household_member(state, claim.as_deref()).await {
+            claim.and_then(|claim| claim.split_once(':').map(|(library, _)| library.to_owned()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if (playback || playback_probe) && !state.den_playback_enabled {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     let cancel = method == Method::DELETE && scout_cancel(req.uri().path(), req.uri().query());
-    if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !playback_probe && !cancel {
+    if !matches!(method, Method::GET | Method::HEAD | Method::POST)
+        && !playback_probe
+        && !cancel
+        && !receipt_end
+    {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
     // On the public web name, Scout and the combined Den addon answer only to a device that holds a household
@@ -1044,7 +1060,8 @@ async fn relay_with(
     let member_only = grant.is_none()
         && matches!(face, crate::handler::Face::Web | crate::handler::Face::Tv)
         && (scout || den || remux)
-        && !den_install_manifest(&method, req.uri().path());
+        && !den_install_manifest(&method, req.uri().path())
+        && !receipt_end;
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -1274,7 +1291,7 @@ async fn relay_with(
     } else {
         None
     };
-    let limit = if subtitle_resync == Some(SubtitleResyncRoute::Align) {
+    let limit = if receipt_end || subtitle_resync == Some(SubtitleResyncRoute::Align) {
         1024
     } else if subtitle_resync == Some(SubtitleResyncRoute::Staged) {
         0
@@ -1440,6 +1457,23 @@ async fn relay_with(
     } else {
         None
     };
+    let receipt = if let Some(library) = receipt_library.as_deref() {
+        match crate::playback_receipts::authorize(
+            state,
+            library,
+            idempotency.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(rid),
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                eprintln!("playback receipt authorization: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let opened = if regrant { StatusCode::OK } else { StatusCode::CREATED };
     // A public session's successful answer must be collected so the listener can be opened and the JSON amended.
     // Reserve that bounded work before den-remux is asked to create anything; refusing afterwards could strand a
@@ -1504,6 +1538,14 @@ async fn relay_with(
     }
     if public_playback {
         out = out.header("x-den-managed-playback", "1").header("x-den-playback-finalization", "1");
+    }
+    if let Some(receipt) = receipt {
+        out = out
+            .header("x-den-receipt-library", receipt.library)
+            .header("x-den-receipt-kid", receipt.kid)
+            .header("x-den-receipt-public", receipt.public)
+            .header("x-den-receipt-id", receipt.id)
+            .header("x-den-receipt-token", receipt.token);
     }
     if let Some(key) = idempotency {
         out = out.header("idempotency-key", key);
@@ -1836,6 +1878,14 @@ async fn relay_with(
         playback || guest_configure,
         scope,
     )
+}
+
+fn playback_receipt_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/den/_receipt/") else { return false };
+    let token = rest.strip_suffix("/end").unwrap_or(rest);
+    token.len() == 43
+        && !token.contains('/')
+        && token.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 /// The browser's answer: `body` with the addon's status and only those of its headers that may cross.
@@ -2997,6 +3047,15 @@ mod tests {
         assert_eq!(super::service_name("/atlas/~guest123/recommend"), "atlas");
         assert_eq!(super::service_name("/"), "relay");
         assert_eq!(super::service_name(""), "relay");
+    }
+
+    #[test]
+    fn only_exact_playback_receipt_capabilities_cross_the_relay() {
+        let token = "A".repeat(43);
+        assert!(super::playback_receipt_path(&format!("/den/_receipt/{token}")));
+        assert!(super::playback_receipt_path(&format!("/den/_receipt/{token}/end")));
+        assert!(!super::playback_receipt_path(&format!("/den/_receipt/{token}/other")));
+        assert!(!super::playback_receipt_path(&format!("/den/_receipt/{}", "A".repeat(42))));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { privateLanHost, privateLanRemuxPlaylist } from '../../src/lib/localNetwork';
 
 const PLAYLIST = /^\/remux\/s\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}\/master\.m3u8$/;
+const RECEIPT = /^\/den\/_receipt\/[A-Za-z0-9_-]{43}$/;
 const DNS_NAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$/;
 
 /** An IP literal, or a dotted DNS name. No zone is named here: the sender is public, and the parent origin is checked. */
@@ -66,6 +67,26 @@ export function denLifecycleMedia(playing: PlayingMedia | undefined): string | n
   // An HTTPS sender does not fetch a private HTTP media capability. The parent page already reached the local
   // Remux control plane and owns this session's heartbeat, report, and end requests.
   if (!playing || playing.external) return null;
-  if (playing.lifecycleUrl && signedMedia(playing.lifecycleUrl)) return playing.lifecycleUrl;
+  if (
+    playing.lifecycleUrl &&
+    (signedMedia(playing.lifecycleUrl) || receiptLifecycle(playing.lifecycleUrl))
+  )
+    return playing.lifecycleUrl;
   return !lanHttpMedia(playing.url) ? playing.url : null;
+}
+
+function receiptLifecycle(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      !url.hash &&
+      !url.search &&
+      RECEIPT.test(url.pathname)
+    );
+  } catch {
+    return false;
+  }
 }

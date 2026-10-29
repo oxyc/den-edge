@@ -78,6 +78,10 @@ describe('Cast media lifecycle ownership during replacements', () => {
     ...lanRemux,
     lifecycleUrl: `https://media.example${path}`,
   };
+  const receipt = {
+    ...lanRemux,
+    lifecycleUrl: `https://media.example/den/_receipt/${'A'.repeat(43)}`,
+  };
 
   it('does not turn the old managed URL into a Den endpoint while Remux is preparing', () => {
     const playing = direct;
@@ -99,5 +103,18 @@ describe('Cast media lifecycle ownership during replacements', () => {
 
   it('uses HTTPS lifecycle control while the receiver reads the LAN HTTP alias', () => {
     expect(denLifecycleMedia(publicControlledLanRemux)).toBe(publicControlledLanRemux.lifecycleUrl);
+  });
+
+  it('accepts only an exact HTTPS receipt lifecycle capability', () => {
+    expect(denLifecycleMedia(receipt)).toBe(receipt.lifecycleUrl);
+    expect(
+      denLifecycleMedia({ ...receipt, lifecycleUrl: receipt.lifecycleUrl + '?leak=1' }),
+    ).toBeNull();
+    expect(
+      denLifecycleMedia({
+        ...receipt,
+        lifecycleUrl: receipt.lifecycleUrl.replace('https:', 'http:'),
+      }),
+    ).toBeNull();
   });
 });

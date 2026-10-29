@@ -717,6 +717,12 @@ export type LibraryTask =
   | { kind: 'assistant.publish'; connection?: AssistantConnection }
   /** The grants whose connection den-edge still lists, kept from expiring (at most daily). */
   | { kind: 'assistant.renew'; grants: string[] }
+  | { kind: 'assistant.receipts.ensure' }
+  | {
+      kind: 'assistant.receipts.apply';
+      messages: Array<{ seq: number; sealed: string }>;
+      connection?: AssistantConnection;
+    }
   /**
    * A drain of den-edge's assistant queue, opened, checked and applied in `seq` order. `connection`: a split
    * household's, whose queue it is; Owner's library applies it.
@@ -857,6 +863,8 @@ export type LibraryTaskResult =
   | { kind: 'assistant.revoke'; outcome: 'revoked' | 'absent' }
   | { kind: 'assistant.publish'; published: number }
   | { kind: 'assistant.renew'; renewed: number }
+  | { kind: 'assistant.receipts.ensure'; dropbox: { kid: string; public: string } | null }
+  | { kind: 'assistant.receipts.apply'; ack: number | null; applied: number }
   | {
       kind: 'assistant.apply';
       results: AssistantApplied[];

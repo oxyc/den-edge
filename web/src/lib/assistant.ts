@@ -141,6 +141,62 @@ export async function ackQueue(
   }
 }
 
+async function drainPlaybackReceipts(
+  wait: number,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch,
+): Promise<QueuedRequest[] | null> {
+  try {
+    const response = await fetchImpl(`/playback/receipts/drain${wait ? `?wait=${wait}` : ''}`, {
+      method: 'POST',
+      cache: 'no-store',
+      signal: AbortSignal.any([signal, AbortSignal.timeout(DRAIN_MS)]),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { messages?: unknown };
+    if (!Array.isArray(body.messages)) return null;
+    return body.messages.flatMap((message: { seq?: unknown; sealed?: unknown }) =>
+      Number.isSafeInteger(message.seq) && typeof message.sealed === 'string'
+        ? [{ seq: message.seq as number, sealed: message.sealed }]
+        : [],
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function ackPlaybackReceipts(upTo: number, fetchImpl: typeof fetch): Promise<boolean> {
+  try {
+    const response = await fetchImpl('/playback/receipts/ack', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ upTo }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Drain opaque Hearth completion receipts once after the library's foreground sync. */
+export function drainPlaybackReceiptsOnce(
+  loop: {
+    libraryId: string;
+    apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null }>;
+    fetchImpl?: typeof fetch;
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
+    const fetchImpl = loop.fetchImpl ?? relayFetch;
+    const messages = await drainPlaybackReceipts(0, signal, fetchImpl);
+    if (signal.aborted || messages === null || !messages.length) return;
+    const result = await loop.apply(messages);
+    if (result.ack !== null) await ackPlaybackReceipts(result.ack, fetchImpl);
+  });
+}
+
 /** How often the publisher asks the library service whether a projection is due (§15: it debounces and heartbeats). */
 const PUBLISH_TICK_MS = 30_000;
 

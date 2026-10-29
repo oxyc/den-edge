@@ -208,6 +208,22 @@ test('a drop-box key den-edge did not take stops the consent before any grant is
   expect(shared.rows.get(GRANTS_ROW)).toBeUndefined();
 });
 
+test('receipt catch-up publishes an existing drop-box but never creates one in the background', async () => {
+  const empty = library();
+  const absent = device(empty, [seed('dropbox')]);
+  expect(await absent.authority.ensureDropbox(false)).toBeNull();
+  expect(empty.rows.get(DROPBOX_ROW)).toBeUndefined();
+  expect(absent.put).not.toHaveBeenCalled();
+
+  const shared = await consented();
+  const existing = device(shared, []);
+  expect(await existing.authority.ensureDropbox(false)).toEqual({
+    kid: fixed.keys.dropbox!.kid,
+    public: fixed.keys.dropbox!.public,
+  });
+  expect(existing.put).toHaveBeenCalledOnce();
+});
+
 test('an accepted request is the tap, at the request’s own time, recorded in the same batch, and refused again', async () => {
   const shared = await consented();
   const { authority, commands, records } = device(shared, []);

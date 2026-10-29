@@ -1053,6 +1053,7 @@
         : undefined;
     const request: Want = {
       imdb,
+      title: { type: title.type, id: title.id },
       season,
       episode,
       scout: scout.install,
@@ -2289,6 +2290,7 @@
                 measure: publicMaxBitrate === undefined,
                 lanProven:
                   castMode && lanProbe?.base === current.lanBase && lanProbe?.answer === true,
+                lifecycleUrl: current.control?.end,
               }),
           mode: castMode ? 'cast' : 'browser',
           title: title.title,
@@ -3940,6 +3942,19 @@
     if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
   }
 
+  function terminalEvidence() {
+    const total = length();
+    const at = video?.currentTime ?? lastPosition ?? started ?? remoteTime;
+    if (!Number.isFinite(at) || !Number.isFinite(total) || total <= 0) return undefined;
+    const durationSeconds = Math.max(1, Math.floor(total));
+    const positionSeconds = Math.min(durationSeconds, Math.max(0, Math.floor(at)));
+    return {
+      positionSeconds,
+      durationSeconds,
+      completed: reachedNaturalEnd || reachedCredits(at) || (total > 0 && at / total >= WATCHED),
+    };
+  }
+
   /** End the session held now, carrying where it got to (`carryPosition`), with nothing left playing it. */
   function letGo() {
     const current = session;
@@ -3953,7 +3968,7 @@
       avplay?.destroy();
       avplay = undefined;
     }
-    endSession(current);
+    endSession(current, undefined, terminalEvidence());
     session = null;
   }
 
@@ -3988,7 +4003,7 @@
     hls?.destroy();
     hls = undefined;
     // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
-    if (session && !casting) endSession(session);
+    if (session && !casting) endSession(session, undefined, terminalEvidence());
   }
 
   /**
