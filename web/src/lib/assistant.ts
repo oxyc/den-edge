@@ -101,10 +101,11 @@ export async function drainQueue(
   signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
   queue?: OtherQueue,
+  endpoint = 'assistant',
 ): Promise<QueuedRequest[] | null> {
   const query = [queue?.query, wait > 0 ? `wait=${wait}` : ''].filter(Boolean).join('&');
   try {
-    const res = await fetchImpl(`/assistant/drain${query ? `?${query}` : ''}`, {
+    const res = await fetchImpl(`/${endpoint}/drain${query ? `?${query}` : ''}`, {
       method: 'POST',
       cache: 'no-store',
       ...(queue ? { headers: { 'content-type': 'application/json' }, body: queue.body } : {}),
@@ -127,53 +128,16 @@ export async function ackQueue(
   upTo: number,
   fetchImpl: typeof fetch = relayFetch,
   queue?: OtherQueue,
+  endpoint = 'assistant',
 ): Promise<boolean> {
   try {
-    const res = await fetchImpl(`/assistant/ack${queue ? `?${queue.query}` : ''}`, {
+    const res = await fetchImpl(`/${endpoint}/ack${queue ? `?${queue.query}` : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ upTo }),
       signal: AbortSignal.timeout(15_000),
     });
     return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function drainPlaybackReceipts(
-  wait: number,
-  signal: AbortSignal,
-  fetchImpl: typeof fetch,
-): Promise<QueuedRequest[] | null> {
-  try {
-    const response = await fetchImpl(`/playback/receipts/drain${wait ? `?wait=${wait}` : ''}`, {
-      method: 'POST',
-      cache: 'no-store',
-      signal: AbortSignal.any([signal, AbortSignal.timeout(DRAIN_MS)]),
-    });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { messages?: unknown };
-    if (!Array.isArray(body.messages)) return null;
-    return body.messages.flatMap((message: { seq?: unknown; sealed?: unknown }) =>
-      Number.isSafeInteger(message.seq) && typeof message.sealed === 'string'
-        ? [{ seq: message.seq as number, sealed: message.sealed }]
-        : [],
-    );
-  } catch {
-    return null;
-  }
-}
-
-async function ackPlaybackReceipts(upTo: number, fetchImpl: typeof fetch): Promise<boolean> {
-  try {
-    const response = await fetchImpl('/playback/receipts/ack', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ upTo }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    return response.ok;
   } catch {
     return false;
   }
@@ -190,10 +154,10 @@ export function drainPlaybackReceiptsOnce(
 ): Promise<void> {
   return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
     const fetchImpl = loop.fetchImpl ?? relayFetch;
-    const messages = await drainPlaybackReceipts(0, signal, fetchImpl);
+    const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
     if (signal.aborted || messages === null || !messages.length) return;
     const result = await loop.apply(messages);
-    if (result.ack !== null) await ackPlaybackReceipts(result.ack, fetchImpl);
+    if (result.ack !== null) await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
   });
 }
 

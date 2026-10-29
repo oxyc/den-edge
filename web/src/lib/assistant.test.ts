@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import {
+  drainPlaybackReceiptsOnce,
   drainWhileOpen,
   type ApplyOutcome,
   type OtherQueue,
@@ -164,4 +165,29 @@ test('a library service that fails to apply backs off and acknowledges nothing',
   expect(sleeps).toContain(60_000);
   expect(calls.some((c) => c.path === '/assistant/ack')).toBe(false);
   warn.mockRestore();
+});
+
+test('playback receipts share the queue transport but use their own one-shot routes', async () => {
+  const calls: Array<{ path: string; body?: unknown }> = [];
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({
+      path: String(input),
+      body: init?.body ? JSON.parse(init.body as string) : undefined,
+    });
+    return String(input).endsWith('/drain')
+      ? Response.json({ messages: [{ seq: 7, sealed: 'receipt' }] })
+      : Response.json({ removed: 1 });
+  }) as unknown as typeof fetch;
+  const apply = vi.fn(async () => ({ ack: 7 }));
+
+  await drainPlaybackReceiptsOnce(
+    { libraryId: 'lib', apply, fetchImpl },
+    new AbortController().signal,
+  );
+
+  expect(apply).toHaveBeenCalledWith([{ seq: 7, sealed: 'receipt' }]);
+  expect(calls).toEqual([
+    { path: '/playback/receipts/drain', body: undefined },
+    { path: '/playback/receipts/ack', body: { upTo: 7 } },
+  ]);
 });

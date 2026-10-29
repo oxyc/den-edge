@@ -953,9 +953,9 @@ export class LibraryAssistantAuthority {
     await ensureAssistantPolicy();
     await this.port.refresh();
     let records = await this.#load();
-    let held = Infinity;
+    let ack: number | null = null;
     let applied = 0;
-    for (const [index, message] of messages.entries()) {
+    for (const message of messages) {
       const opened = assistantPolicy<OpenedReceipt>({
         op: 'playback_receipt_open',
         library: lent?.member.libraryId ?? this.port.libraryId,
@@ -967,7 +967,10 @@ export class LibraryAssistantAuthority {
         now: this.port.now(),
       });
       if ('reject' in opened) {
-        if (opened.reject === 'from_future') held = Math.min(held, message.seq);
+        // The queue is in `seq` order. A not-yet-valid receipt holds it at this point; permanent rejects are safe
+        // to acknowledge so they cannot pin every later completion forever.
+        if (opened.reject === 'from_future') break;
+        ack = message.seq;
         continue;
       }
       const accept = opened.accept;
@@ -1002,14 +1005,13 @@ export class LibraryAssistantAuthority {
         // between them reads the shared row on the next pass, while keeping it first could lose the effect.
         records = await this.#remember({ receiptApplied: { [accept.setting]: accept.value } });
         applied += 1;
+        ack = message.seq;
       } catch (error) {
         console.warn('den: a playback receipt could not be applied yet', error);
-        held = Math.min(held, ...messages.slice(index).map(({ seq }) => seq));
         break;
       }
     }
-    const handled = messages.map(({ seq }) => seq).filter((seq) => seq < held);
-    return { ack: handled.length ? Math.max(...handled) : null, applied };
+    return { ack, applied };
   }
 
   async #perform(accept: Accept & { op: (typeof OPS)[number] }): Promise<LibrarySelectionScope[]> {
