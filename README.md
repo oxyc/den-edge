@@ -29,6 +29,8 @@ survive reboots, though a major firmware update can occasionally require reinsta
 | `POST /pair/open` `{nameplate}` | the joining device gets `{sid}`, once; `409` already opened, `410` unknown or expired |
 | `PUT`/`GET /pair/{sid}/{a–d}` `{m}` | the four CPace messages, each written once; `202` until written, `410` once the session is over |
 | `DELETE /pair/{sid}` | either side ends a pairing |
+| `POST /playback/receipts/callback` `{sealed}` | a short-lived, one-use capability created for authenticated managed playback. Hearth posts only den-spec playback-receipt ciphertext; the same ciphertext may be retried, while a different second value is refused. The capability, not a library credential, is the bearer authorization |
+| `POST /playback/receipts/drain` / `POST /playback/receipts/ack` | a household member drains its bounded encrypted completion-receipt queue and acknowledges receipt ids after applying them. Edge never receives playback titles, positions or completion state in plaintext; see [den-spec playback receipts v1](https://github.com/oxyc/den-spec/blob/main/wire/playback-receipts-v1.md) |
 | `DELETE /link` | unlinking: the link's inbox, plugins and settings are erased |
 | `POST /inbox/append` `{sealed}` | a paired device's sealed message for the TV ([den-spec inbox v1](https://github.com/oxyc/den-spec/blob/main/wire/inbox-v1.md)), kept as it came; a readable one is refused |
 | `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied. An unknown or expired queue is `{messages: []}` like an empty one: a queue exists only while messages wait, so there is no way to tell a dead key from a quiet one |

@@ -41,6 +41,8 @@ interface Media {
   terminal?: boolean;
   /** Externally managed media has no Den lifecycle endpoint; this URL is the only capability handed to Cast. */
   external?: boolean;
+  /** Hearth's opaque terminal lifecycle capability. */
+  lifecycleUrl?: string;
   /**
    * The player outside reached `lanUrl` itself. A receiver on that network fetches it as that page did; this frame's
    * own check may be refused by the browser's Local Network Access for a cross-origin frame, so it is not asked.
@@ -191,6 +193,9 @@ const RECONNECTING = 'Reconnecting…';
  * sent. The player outside can't do either for a session on the public address — its page may not connect there.
  */
 let playing: PlayingMedia | undefined;
+let lastPosition = 0;
+let lastDuration = 0;
+let naturallyFinished = false;
 /** How long a measured load waits for the player to say play on, before it plays on regardless. */
 const CONTINUE_WAIT_MS = 5_000;
 /** The measured load waiting for the player's `den-continue`. */
@@ -259,8 +264,22 @@ function endPlaying(): void {
   const lifecycle = denLifecycleMedia(playing);
   playing = undefined;
   if (!lifecycle) return;
-  const url = lifecycle.replace(/\/master\.m3u8$/, '');
-  void fetch(url, { method: 'DELETE', keepalive: true }).catch((error: unknown) =>
+  const base = lifecycle.replace(/\/master\.m3u8$/, '');
+  const receipt = /\/den\/_receipt\/[A-Za-z0-9_-]{43}$/.test(new URL(base).pathname);
+  const target = receipt ? `${base}/end` : base;
+  const init: RequestInit = receipt
+    ? {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          positionSeconds: Math.max(0, Math.round(lastPosition)),
+          durationSeconds: Math.max(1, Math.round(lastDuration)),
+          completed: naturallyFinished,
+        }),
+        keepalive: true,
+      }
+    : { method: 'DELETE', keepalive: true };
+  void fetch(target, init).catch((error: unknown) =>
     // It ends on its own once idle; this only says why it lingered.
     console.warn('ending the session failed:', error),
   );
@@ -320,8 +339,13 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   playing = {
     url,
     external: media.external === true,
-    ...(url !== media.url && !media.external ? { lifecycleUrl: media.url } : {}),
+    ...(!media.external && (media.lifecycleUrl || url !== media.url)
+      ? { lifecycleUrl: media.lifecycleUrl ?? media.url }
+      : {}),
   };
+  lastPosition = Math.max(0, media.currentTime ?? 0);
+  lastDuration = 0;
+  naturallyFinished = false;
   const start = Math.max(0, media.currentTime ?? 0);
   // The player's own rule (`nativeHls`): Chrome claims HLS too, but hls.js plays there, and only hls.js rides out a
   // dropped connection with `resumingLoader`.
@@ -552,7 +576,9 @@ async function loadCast(): Promise<void> {
   const requested = {
     url,
     external: media.external === true,
-    ...(url !== media.url && !media.external ? { lifecycleUrl: media.url } : {}),
+    ...(!media.external && (media.lifecycleUrl || url !== media.url)
+      ? { lifecycleUrl: media.lifecycleUrl ?? media.url }
+      : {}),
   };
   const info = new chrome.media.MediaInfo(url, 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
@@ -679,6 +705,8 @@ function initializeCast(): boolean {
   remoteController = controller;
   controller.addEventListener(cast.RemotePlayerEventType.ANY_CHANGE, () => {
     if (!castStarted || !remotePlayer) return;
+    lastPosition = Math.max(0, remotePlayer.currentTime);
+    lastDuration = Math.max(0, remotePlayer.duration);
     tell('den-progress', {
       currentTime: remotePlayer.currentTime,
       duration: remotePlayer.duration,
@@ -699,8 +727,10 @@ function initializeCast(): boolean {
     if (action === 'replaced') return;
     replacingCast = false;
     castStarted = false;
-    if (action === 'finished') tell('den-ended');
-    else if (action === 'error') {
+    if (action === 'finished') {
+      naturallyFinished = true;
+      tell('den-ended');
+    } else if (action === 'error') {
       if (castErrorAction(current?.media.terminal === true) === 'stop-receiver')
         castContext?.endCurrentSession(true);
       fail('Chromecast could not continue playback');
@@ -935,14 +965,19 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   }
 });
 
-video.addEventListener('timeupdate', () =>
+video.addEventListener('timeupdate', () => {
+  lastPosition = Math.max(0, video.currentTime);
+  if (Number.isFinite(video.duration)) lastDuration = Math.max(0, video.duration);
   tell('den-progress', {
     currentTime: video.currentTime,
     duration: Number.isFinite(video.duration) ? video.duration : undefined,
     paused: video.paused,
-  }),
-);
-video.addEventListener('ended', () => tell('den-ended'));
+  });
+});
+video.addEventListener('ended', () => {
+  naturallyFinished = true;
+  tell('den-ended');
+});
 video.addEventListener('error', () =>
   fail(video.error?.message || 'Playback failed', video.error?.code ?? 0),
 );

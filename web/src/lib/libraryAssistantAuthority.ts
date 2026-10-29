@@ -22,6 +22,7 @@ import type { ConfigValue, Row, SettingsRow, Stamp } from './wire';
 export const DROPBOX_ROW = 'assistant';
 export const GRANTS_ROW = 'assistant-grants';
 export const APPLIED_ROW = 'assistant-applied';
+export const PLAYBACK_RECEIPTS_APPLIED_ROW = 'playback-receipts-applied';
 /** Read records (§15): each connection that may read, by its grant id, with its read key. */
 export const READ_ROW = 'assistant-read';
 /** Play records (§16): each connection that may play on the TV, by its grant id. Only a TV applies a play. */
@@ -71,6 +72,7 @@ export interface DropboxKey {
 export interface AssistantRecords {
   revoked: string[];
   applied: Record<string, ConfigValue>;
+  receiptApplied?: Record<string, ConfigValue>;
   renewedAt: number;
   dropped: string[];
   /** What this device last published (§15), so a page opened later neither builds nor sends it again. */
@@ -89,7 +91,13 @@ export interface Publication {
   layouts: Record<string, SeriesLayout>;
 }
 
-const EMPTY: AssistantRecords = { revoked: [], applied: {}, renewedAt: 0, dropped: [] };
+const EMPTY: AssistantRecords = {
+  revoked: [],
+  applied: {},
+  receiptApplied: {},
+  renewedAt: 0,
+  dropped: [],
+};
 
 /** A read record in these states has its projection dropped (§15); `newer` is left to a client that reads it. */
 const DEAD = new Set(['revoked', 'expired', 'malformed']);
@@ -201,6 +209,8 @@ function readRecords(value: AssistantRecords | null | undefined): AssistantRecor
       value.applied && typeof value.applied === 'object' && !Array.isArray(value.applied)
         ? value.applied
         : {},
+    receiptApplied:
+      value.receiptApplied && typeof value.receiptApplied === 'object' ? value.receiptApplied : {},
     renewedAt: typeof value.renewedAt === 'number' ? value.renewedAt : 0,
     dropped: Array.isArray(value.dropped)
       ? value.dropped.filter((id) => typeof id === 'string')
@@ -361,12 +371,14 @@ export class LibraryAssistantAuthority {
       const held = await this.#load();
       const revoked = [...new Set([...held.revoked, ...(update.revoked ?? [])])].sort();
       const applied = { ...held.applied, ...(update.applied ?? {}) };
+      const receiptApplied = { ...held.receiptApplied, ...(update.receiptApplied ?? {}) };
       for (const id of update.prune ?? []) delete applied[id];
       // The last publication is replaced whole: it is what was last built and sent, not a set that grows.
       const publication = update.publication ?? held.publication;
       const next: AssistantRecords = {
         revoked,
         applied,
+        receiptApplied,
         renewedAt: Math.max(held.renewedAt, update.renewedAt ?? 0),
         dropped: [...new Set([...held.dropped, ...(update.dropped ?? [])])].sort(),
         ...(publication ? { publication } : {}),
@@ -384,6 +396,25 @@ export class LibraryAssistantAuthority {
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
   dropbox(lent: AssistantConnection | null = null): DropboxKey | null {
     return dropboxKey(this.#row(DROPBOX_ROW, lent));
+  }
+
+  /** Lazily make and publish the household key managed-playback receipts seal to. */
+  async ensureDropbox(create = true): Promise<DropboxKey | null> {
+    await ensureAssistantPolicy();
+    await this.port.refresh();
+    let dropbox = this.dropbox();
+    if (!dropbox && create) {
+      const made = assistantPolicy<DropboxKey & { setting: string; value: ConfigValue }>({
+        op: 'assistant_keygen_dropbox',
+        random: this.port.random(),
+      });
+      await this.port.patch(DROPBOX_ROW, { [made.setting]: made.value });
+      dropbox = this.dropbox();
+    }
+    if (!dropbox) return null;
+    if (!(await this.port.putDropbox(dropbox)))
+      throw new Error('den-edge did not take the library’s drop-box key');
+    return dropbox;
   }
 
   #list(records: AssistantRecords, lent: AssistantConnection | null = null): AssistantGrantList {
@@ -448,18 +479,8 @@ export class LibraryAssistantAuthority {
   }
 
   async #writeGrant(client: string): Promise<{ grant: string; key: string }> {
-    let dropbox = this.dropbox();
-    if (!dropbox) {
-      const made = assistantPolicy<DropboxKey & { setting: string; value: ConfigValue }>({
-        op: 'assistant_keygen_dropbox',
-        random: this.port.random(),
-      });
-      // Written first: den-edge is given the public half only once every device can open what is sealed to it.
-      await this.port.patch(DROPBOX_ROW, { [made.setting]: made.value });
-      dropbox = this.dropbox();
-    }
-    if (!dropbox || !(await this.port.putDropbox(dropbox)))
-      throw new Error('den-edge did not take the library’s drop-box key');
+    if (!(await this.ensureDropbox()))
+      throw new Error('the assistant drop-box key could not be made');
     const now = this.port.now();
     const grant = assistantPolicy<{
       grant: string;
@@ -908,6 +929,87 @@ export class LibraryAssistantAuthority {
       dropbox: this.dropbox(lent),
       affected,
     };
+  }
+
+  /** Open and apply Hearth's opaque completion receipts through the ordinary progress command. */
+  async applyPlaybackReceipts(
+    messages: ReadonlyArray<{ seq: number; sealed: string }>,
+    lent: AssistantConnection | null = null,
+  ): Promise<{ ack: number | null; applied: number }> {
+    type OpenedReceipt =
+      | {
+          accept: {
+            id: string;
+            title: TitleRef;
+            season?: number;
+            episode?: number;
+            endedAt: number;
+            write: { kind: 'progress'; value: number; seconds: number; at: Stamp };
+            setting: string;
+            value: ConfigValue;
+          };
+        }
+      | { reject: string };
+    await ensureAssistantPolicy();
+    await this.port.refresh();
+    let records = await this.#load();
+    let held = Infinity;
+    let applied = 0;
+    for (const [index, message] of messages.entries()) {
+      const opened = assistantPolicy<OpenedReceipt>({
+        op: 'playback_receipt_open',
+        library: lent?.member.libraryId ?? this.port.libraryId,
+        device: this.port.device,
+        sealed: message.sealed,
+        assistant: this.#row(DROPBOX_ROW, lent),
+        applied: this.#row(PLAYBACK_RECEIPTS_APPLIED_ROW),
+        localApplied: records.receiptApplied ?? {},
+        now: this.port.now(),
+      });
+      if ('reject' in opened) {
+        if (opened.reject === 'from_future') held = Math.min(held, message.seq);
+        continue;
+      }
+      const accept = opened.accept;
+      try {
+        await this.port.ride(
+          PLAYBACK_RECEIPTS_APPLIED_ROW,
+          { [accept.setting]: accept.value },
+          async () => {
+            const episode =
+              accept.season !== undefined && accept.episode !== undefined
+                ? {
+                    ...(accept.title as TitleRef & { type: 'tv' }),
+                    season: accept.season,
+                    episode: accept.episode,
+                  }
+                : undefined;
+            await this.port.command(
+              {
+                kind: 'progress.record',
+                title: accept.title,
+                ...(episode ? { episode } : {}),
+                fraction: accept.write.value,
+                seconds: accept.write.seconds,
+                observedAt: accept.endedAt,
+              },
+              `playback-receipt:${accept.id}`,
+              accept.write.at,
+            );
+          },
+        );
+        // The effect and shared replay row landed together. Keep the local replay record afterwards; a crash
+        // between them reads the shared row on the next pass, while keeping it first could lose the effect.
+        records = await this.#remember({ receiptApplied: { [accept.setting]: accept.value } });
+        applied += 1;
+      } catch (error) {
+        console.warn('den: a playback receipt could not be applied yet', error);
+        held = Math.min(held, ...messages.slice(index).map(({ seq }) => seq));
+        break;
+      }
+    }
+    const handled = messages.map(({ seq }) => seq).filter((seq) => seq < held);
+    return { ack: handled.length ? Math.max(...handled) : null, applied };
   }
 
   async #perform(accept: Accept & { op: (typeof OPS)[number] }): Promise<LibrarySelectionScope[]> {

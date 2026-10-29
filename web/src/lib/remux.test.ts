@@ -1340,6 +1340,30 @@ describe('endSession', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('posts bounded terminal evidence to direct playback’s opaque Hearth lifecycle', () => {
+    const calls: [string, RequestInit | undefined][] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push([String(input), init]);
+      return new Response(null, { status: 204 });
+    };
+    endSession(
+      { ...session, external: true, control: { end: '/den/_receipt/' + 'A'.repeat(43) } },
+      fetchImpl,
+      { positionSeconds: 120, durationSeconds: 600, completed: false },
+    );
+    expect(calls).toEqual([
+      [
+        '/den/_receipt/' + 'A'.repeat(43) + '/end',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ positionSeconds: 120, durationSeconds: 600, completed: false }),
+          keepalive: true,
+        },
+      ],
+    ]);
+  });
+
   describe('with a working sendBeacon', () => {
     let sendBeacon: ReturnType<typeof vi.fn>;
 

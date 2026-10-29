@@ -65,7 +65,7 @@ const HOST_GRANTS = /^\/lib\/([0-9a-f]+)\/grants(?:\/|$)/;
  */
 const OAUTH = /^\/oauth\/(?:request\/[0-9a-f]{32}\/approve|connections(?:\/[0-9a-f]{32})?)$/;
 /** Assistant writes' member routes (`assistant.rs`): the drop-box key, and draining and acknowledging the queue. */
-const ASSISTANT = /^\/assistant\/(?:dropbox|drain|ack)$/;
+const ASSISTANT = /^(?:\/assistant\/(?:dropbox|drain|ack)|\/playback\/receipts\/(?:drain|ack))$/;
 /** Establishes a short-lived HttpOnly session for the owner's real Hearth setup document. */
 const DEN_CONFIGURE_SESSION = '/grant/den-configure';
 

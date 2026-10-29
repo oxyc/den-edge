@@ -22,6 +22,7 @@ mod metrics;
 mod mmap;
 mod oauth;
 mod pair;
+mod playback_receipts;
 mod ratings;
 mod recovery;
 mod relay;

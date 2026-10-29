@@ -226,13 +226,20 @@ struct Entry {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Dropbox {
-    pk: String,
-    kid: String,
+pub(crate) struct Dropbox {
+    pub(crate) pk: String,
+    pub(crate) kid: String,
 }
 
 fn dropbox_key(library: &str) -> String {
     format!("d:{library}")
+}
+
+pub(crate) async fn published_dropbox(state: &AppState, library: &str) -> std::io::Result<Option<Dropbox>> {
+    match state.store.get(NS, &dropbox_key(library)).await? {
+        Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(std::io::Error::other),
+        None => Ok(None),
+    }
 }
 
 pub fn is_path(path: &str) -> bool {
@@ -758,6 +765,7 @@ pub async fn delete_library(state: &AppState, library: &str) -> std::io::Result<
         state.assistant_holds.wake(&lane.hold(library));
     }
     state.store.delete(NS, &dropbox_key(library)).await?;
+    crate::playback_receipts::delete_library_locked(state, library).await?;
     crate::controller::delete_library(state, library).await?;
     Ok(())
 }

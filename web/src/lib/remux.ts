@@ -145,6 +145,8 @@ export interface AudioTrack {
 
 export interface Want {
   imdb: string;
+  /** Library identity used only by Hearth's encrypted completion receipt; never forwarded to a provider. */
+  title?: { type: 'movie' | 'tv'; id: number };
   season?: number;
   episode?: number;
   /** Scout's install URL from the library. */
@@ -1109,14 +1111,35 @@ export function playedInCastPage(session: Session): boolean {
  * den-remux's `/end` is the beacon-compatible twin of its `DELETE`; the keepalive `DELETE` remains the fallback
  * for a browser with no `sendBeacon` (or whose call to it failed outright).
  */
-export function endSession(session: Session, fetchImpl: typeof fetch = fetch): void {
+export interface TerminalEvidence {
+  positionSeconds: number;
+  durationSeconds: number;
+  completed: boolean;
+}
+
+export function endSession(
+  session: Session,
+  fetchImpl: typeof fetch = fetch,
+  evidence?: TerminalEvidence,
+): void {
   if (session.external) {
     session.dispose?.();
-    return;
+    if (!session.control?.end) return;
   }
   if (playedInCastPage(session)) return;
   const base = session.control?.end ?? session.playlist.replace(/\/master\.m3u8$/, '');
-  if (globalThis.navigator?.sendBeacon?.(`${base}/end`, '')) return;
+  const body = evidence ? JSON.stringify(evidence) : '';
+  const beaconBody = evidence ? new Blob([body], { type: 'application/json' }) : body;
+  if (globalThis.navigator?.sendBeacon?.(`${base}/end`, beaconBody)) return;
+  if (evidence) {
+    void fetchImpl(`${base}/end`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+      keepalive: true,
+    }).catch(() => undefined);
+    return;
+  }
   void fetchImpl(base, {
     method: 'DELETE',
     keepalive: true,

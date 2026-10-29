@@ -337,6 +337,9 @@ fn is_control(route: &str) -> bool {
             | "/assistant/ack"
             | "/assistant/tv"
             | "/assistant/request"
+            | "/playback/receipts/callback"
+            | "/playback/receipts/drain"
+            | "/playback/receipts/ack"
             | "/wake/controllers"
             | "/wake/poll"
             | "/wake/targets"
@@ -482,6 +485,7 @@ fn den_route(path: &str) -> &'static str {
         "configure" => return "configure",
         "config-key" => return "config-key",
         "validate" => return "validate",
+        "_receipt" => return "playback/receipt",
         _ => {}
     }
     match tail.split('/').next().unwrap_or("") {
@@ -709,6 +713,9 @@ async fn dispatch(
     if crate::assistant::is_path(&path) {
         return Box::pin(crate::assistant::handle(state, req)).await;
     }
+    if crate::playback_receipts::is_path(&path) {
+        return Box::pin(crate::playback_receipts::handle(state, req)).await;
+    }
     if crate::controller::is_path(&path) {
         return Box::pin(crate::controller::handle(state, req)).await;
     }
@@ -847,10 +854,12 @@ impl Face {
                 || path == "/metrics"
                 || crate::recovery::is_path(path)
                 || crate::assistant::is_path(path)
+                || crate::playback_receipts::is_path(path)
                 || crate::controller::is_path(path);
         // Recovery codes are made and redeemed mostly in the web app (den-spec `wire/recovery-code.md`). The web app
         // also keeps a library's assistant drop-box key here and drains its requests while it is open.
         let web_app_calls = crate::assistant::is_path(path)
+            || crate::playback_receipts::is_path(path)
             || path.starts_with("/pair/")
             || path.starts_with("/lib/")
             || path.starts_with("/grant/")
@@ -1016,6 +1025,9 @@ pub fn route_label(path: &str) -> &'static str {
         "/assistant/drain" => "/assistant/drain",
         "/assistant/ack" => "/assistant/ack",
         "/assistant/tv" => "/assistant/tv",
+        "/playback/receipts/callback" => "/playback/receipts/callback",
+        "/playback/receipts/drain" => "/playback/receipts/drain",
+        "/playback/receipts/ack" => "/playback/receipts/ack",
         "/wake/controllers" => "/wake/controllers",
         p if p.starts_with("/wake/controllers/") => "/wake/controllers/:id",
         "/wake/poll" => "/wake/poll",
@@ -1139,9 +1151,14 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/changes"
         | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" | "/assistant/dropbox" => Some(GET_PUT),
-        "/assistant/append" | "/assistant/drain" | "/assistant/ack" | "/wake/controllers" | "/wake/poll" => {
-            Some(POST)
-        }
+        "/assistant/append"
+        | "/assistant/drain"
+        | "/assistant/ack"
+        | "/playback/receipts/callback"
+        | "/playback/receipts/drain"
+        | "/playback/receipts/ack"
+        | "/wake/controllers"
+        | "/wake/poll" => Some(POST),
         "/wake/targets" => Some(GET),
         "/wake/controllers/:id" => Some(DELETE),
         "/assistant/projection" => Some(&[Method::GET, Method::PUT, Method::DELETE]),
@@ -1198,6 +1215,9 @@ fn body_cap(route: &str) -> usize {
         "/assistant/dropbox" | "/assistant/drain" | "/assistant/ack" => crate::assistant::DROPBOX_BODY_BYTES,
         "/assistant/append" => crate::assistant::APPEND_BODY_BYTES,
         "/assistant/projection" => crate::assistant::PROJECTION_BODY_BYTES,
+        "/playback/receipts/callback" | "/playback/receipts/drain" | "/playback/receipts/ack" => {
+            crate::playback_receipts::BODY_BYTES
+        }
         "/wake/controllers" | "/wake/poll" => crate::controller::BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }

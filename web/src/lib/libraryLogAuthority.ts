@@ -1319,6 +1319,21 @@ export class LibraryLogAuthority {
           result: { kind: 'assistant.renew', renewed: await this.#assistant.renew(task.grants) },
           affected: [{ kind: 'settings' }],
         };
+      case 'assistant.receipts.ensure':
+        return {
+          result: {
+            kind: 'assistant.receipts.ensure',
+            dropbox: await this.#assistant.ensureDropbox(false),
+          },
+          affected: [],
+        };
+      case 'assistant.receipts.apply': {
+        const result = await this.#assistant.applyPlaybackReceipts(
+          task.messages,
+          task.connection ?? null,
+        );
+        return { result: { kind: 'assistant.receipts.apply', ...result }, affected: [] };
+      }
       case 'assistant.apply': {
         const { results, ack, dropbox, affected } = await this.#assistant.apply(
           task.messages,
