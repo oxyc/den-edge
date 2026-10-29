@@ -118,14 +118,6 @@ const sameIdentity = (
   left.recommendationVersion === right.recommendationVersion &&
   left.reconsiderAt === right.reconsiderAt;
 
-/** The `LIBRARY_LOCAL_AUTHORITY` marker a hit compares kept views against (`openFinishedLibraryViewAuthority`). */
-const authorityMarker = ({
-  generation,
-  head,
-  authorityRevision,
-  rowsVersion,
-}: FinishedLibraryViews['identity']) => ({ generation, head, authorityRevision, rowsVersion });
-
 const rawLibraryKey = (encoded: string): Uint8Array<ArrayBuffer> | null => {
   try {
     const raw = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
@@ -1891,27 +1883,20 @@ export async function openFinishedLibraryViewAuthority(
       // A newest-first import answers with its first page, the rest of the history read on behind it.
       factsReady = !!factManifest?.complete || !!filling;
     }
-    const expected =
-      factManifest && cached
-        ? authorityMarker(factViewIdentity(keys.id, factManifest, cached.identity.reconsiderAt))
-        : cached
-          ? authorityMarker(cached.identity)
-          : null;
-    const classic =
-      markerMatchesCache &&
-      (!durableFacts || !!factManifest) &&
-      !!expected &&
-      validLibraryLocalAuthorityIdentity(localIdentity) &&
-      localIdentity.generation === expected.generation &&
-      localIdentity.head === expected.head &&
-      localIdentity.authorityRevision === expected.authorityRevision &&
-      localIdentity.rowsVersion === expected.rowsVersion &&
-      localIdentity.generation === cached.identity.generation &&
-      localIdentity.head === cached.identity.head &&
-      localIdentity.authorityRevision === cached.identity.authorityRevision &&
-      localIdentity.rowsVersion === cached.identity.rowsVersion &&
-      cached.identity.policyVersion === FINISHED_LIBRARY_POLICY &&
-      cached.identity.recommendationVersion === FINISHED_LIBRARY_RECOMMENDATIONS;
+    // A completed fact store may be ahead of the views when the previous page was stopped after committing a
+    // remote delta but before its background writer published the corresponding projections. The views and their
+    // marker are still one authenticated snapshot: draw them immediately, then let `#reconcileFacts` apply the
+    // small server delta and replace only the loaded pieces. Requiring the fact manifest's exact revision here made
+    // that harmless interruption turn every next launch into a facts projection of the whole Home surface.
+    const factsCoverCache =
+      !durableFacts ||
+      (!!factManifest &&
+        factManifest.complete &&
+        !!cached &&
+        factManifest.generation === cached.identity.generation &&
+        factManifest.head >= cached.identity.head &&
+        (factManifest.rowsVersion ?? factManifest.head) >= cached.identity.rowsVersion);
+    const classic = markerMatchesCache && factsCoverCache;
     if (!classic && !factsReady) return null;
     const selected: FinishedLibraryViews = classic
       ? cached!
@@ -1933,7 +1918,8 @@ export async function openFinishedLibraryViewAuthority(
         fetchImpl,
         factsReady &&
           factManifest!.generation === selected.identity.generation &&
-          factManifest!.head === selected.identity.head
+          factManifest!.head >= selected.identity.head &&
+          (factManifest!.rowsVersion ?? factManifest!.head) >= selected.identity.rowsVersion
           ? factStore!
           : null,
         !classic,

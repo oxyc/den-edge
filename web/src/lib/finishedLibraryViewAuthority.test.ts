@@ -1640,6 +1640,99 @@ it('catches kept views up from facts when den-edge moved on, and keeps the new o
   }
 });
 
+it('draws kept views before catching up when facts committed past them on the previous visit', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const old = factTitle('watchlist', 10);
+  const before = await seal(keys, old);
+  const changed = factTitle('watched', 20);
+  const after = await seal(keys, changed);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    12,
+    [{ k: before.k, seq: 12, value: before.v, row: old }],
+    true,
+  );
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.close?.();
+  await expect(readFinishedLibraryViews(libraryKey, vault, [])).resolves.toMatchObject({
+    identity: { head: 12 },
+  });
+
+  // The previous Worker received and committed the remote write, then was killed before its delayed view writer
+  // published. This was the physical-TV restart case: the exact fact revision is newer, but the old view and its
+  // authority marker are still an atomic, usable base.
+  await facts.commitBatch(
+    'generation-a',
+    13,
+    [{ k: after.k, seq: 13, value: after.v, row: changed }],
+    true,
+  );
+  const fetchImpl = vi.fn<typeof fetch>(
+    async () =>
+      new Response(
+        JSON.stringify({
+          generation: 'generation-a',
+          head: 13,
+          more: false,
+          entries: [{ k: after.k, seq: 13, v: after.v }],
+        }),
+        { status: 200 },
+      ),
+  );
+  const project = vi.spyOn(ContinueProjector.prototype, 'project');
+  try {
+    const openFull = vi.fn(async () => fullAuthority());
+    const reopened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    expect(reopened?.views).toBe('saved');
+    for (const kind of roots) await reopened!.authority.select({ kind });
+    await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      watchlist: [{ type: 'movie', id: 77 }],
+    });
+    expect(project).not.toHaveBeenCalled();
+
+    const events = vi.fn();
+    reopened!.authority.listen?.(events);
+    await reopened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await waitFor(() =>
+      expect(events).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'changed',
+          affected: expect.arrayContaining([{ kind: 'continue' }, { kind: 'overview' }]),
+        }),
+      ),
+    );
+    await expect(reopened!.authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      watchlist: [],
+      watched: [{ type: 'movie', id: 77 }],
+    });
+    expect(openFull).not.toHaveBeenCalled();
+    await reopened!.authority.close?.();
+  } finally {
+    project.mockRestore();
+  }
+});
+
 it('reads Continue again from facts at the same head when the kept one is past its reconsider time', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
