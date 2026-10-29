@@ -218,6 +218,6 @@
   main {
     max-width: var(--page-max);
     margin: 0 auto;
-    padding: var(--bar-space) var(--gutter) calc(32px + env(safe-area-inset-bottom));
+    padding: var(--bar-space) var(--gutter) var(--page-bottom-space);
   }
 </style>

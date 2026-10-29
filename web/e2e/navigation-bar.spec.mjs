@@ -62,11 +62,22 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
       const bar = await page.locator('header.bar').boundingBox();
       expect(bar).toMatchObject({ x: 16, width: width - 32 });
       expect(
+        Math.abs(bar.y + bar.height - (800 - 12)),
+        `phone bar is not pinned above the bottom inset at ${width}px`,
+      ).toBeLessThanOrEqual(2);
+      expect(
         await page.evaluate(() =>
           getComputedStyle(document.documentElement).getPropertyValue('--page-max').trim(),
         ),
       ).toBe('100%');
     }
+    // The smallest current iPad viewport uses the compact controls but keeps the tablet bar at the top.
+    await page.setViewportSize({ width: 744, height: 900 });
+    await page.evaluate(() =>
+      document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/search' } })),
+    );
+    await expect(back).toBeHidden();
+    expect((await page.locator('header.bar').boundingBox()).y).toBe(12);
     // Tablet widths, on search with Back showing: every tab stays inside the bar and the field has room to type.
     for (const width of [760, 820, 1099]) {
       await page.setViewportSize({ width, height: 800 });
@@ -74,6 +85,8 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
         document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/search' } })),
       );
       await expect(back).toBeVisible();
+      const bar = await page.locator('header.bar').boundingBox();
+      expect(bar.y, `tablet bar moved away from the top at ${width}px`).toBe(12);
       const fit = await page.evaluate(() => {
         const bar = document.querySelector('header.bar').getBoundingClientRect();
         const tabs = [...document.querySelectorAll('nav[aria-label="Main navigation"] a')]
