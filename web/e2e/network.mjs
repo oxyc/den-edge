@@ -17,9 +17,9 @@ test.afterEach(() => {
  * mocks nothing the app requests, and the guard below reports the real calls as unmocked. Both shapes are
  * registered so a spec keeps saying what it means: "when the app asks TMDB, answer this".
  */
-export async function routeTmdb(page, handler) {
-  await page.route('https://api.themoviedb.org/**', handler);
-  await page.route('**/tmdb/3/**', handler);
+export async function routeTmdb(target, handler) {
+  await target.route('https://api.themoviedb.org/**', handler);
+  await target.route('**/tmdb/3/**', handler);
 }
 
 /**
@@ -40,9 +40,10 @@ export async function routeHostGrantList(page, { libraryId, memberToken, grants 
 }
 
 /** `origin` is where the page is served from: the dev server's address, or a name a spec points at it. */
-export async function guardNetwork(page, origin = E2E_ORIGIN) {
+export async function guardNetwork(target, origin = E2E_ORIGIN) {
   // Page-specific fixture mocks take precedence over this context-level fallback.
-  await page.context().route('**/*', (route) => {
+  const context = typeof target.context === 'function' ? target.context() : target;
+  await context.route('**/*', (route) => {
     // A browser-internal reference (WebKit's own native `<video controls>` generates a run of these for its
     // scrubber's thumbnails), never a request this origin or any fixture answers: Node's URL parses blob:'s
     // opaque path as the whole `blob:<origin>/<id>` string, which looks like neither `origin` nor one of the
@@ -98,7 +99,10 @@ export async function guardNetwork(page, origin = E2E_ORIGIN) {
         headers: { 'cache-control': 'no-store' },
         json: { error: 'not_found' },
       });
-    const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
+    const source =
+      /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico|worker-network-fixture\.)/.test(
+        url.pathname,
+      );
     if (url.origin === origin && source) return route.continue();
     unexpected.push(route.request().method() + ' ' + url.origin + url.pathname);
     return route.abort('blockedbyclient');
