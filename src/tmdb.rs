@@ -14,7 +14,7 @@
 //! TMDB's terms are what set the ceiling: cached content may be kept for six months, so nothing here outlives
 //! that, and the attribution the app already shows is what licenses the rest.
 
-use crate::handler::{error, raw_json, read_json, retry_after};
+use crate::handler::{error, raw_json, retry_after};
 use crate::metrics::{
     ByteAdmission, BytePool, CacheAccess, CacheStore, Provider, ProviderUpstream, TmdbPrepared,
 };
@@ -26,7 +26,6 @@ use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -137,9 +136,6 @@ const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// A paired household gets room to name a large library; an anonymous visitor gets enough to browse.
 const GUEST_PER_WINDOW: u32 = 120;
 const MEMBER_PER_WINDOW: u32 = 600;
-const BATCH_TITLES: usize = 40;
-const BATCH_BODY_BYTES: usize = 16 * 1024;
-const BATCH_ANSWER_BYTES: usize = 16 * 1024 * 1024;
 /// Questions a minute that link previews (`ask`) may send to TMDB, from everyone together. Every app-shell request
 /// for `/movie/<id>` or `/person/<id>` builds a preview, unauthenticated and with no per-address limit of its own,
 /// so any id not yet kept cost a unit of the household's budget — and the budget is unlimited unless
@@ -1227,9 +1223,6 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             .body(Body::empty())
             .unwrap_or_default();
     }
-    if req.uri().path() == "/tmdb/batch" {
-        return batch(state, req, key, rid).await;
-    }
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
@@ -1398,96 +1391,6 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             }
         }
     }
-}
-
-#[derive(Deserialize)]
-struct BatchRequest {
-    titles: Vec<BatchTitle>,
-}
-
-#[derive(Clone, Deserialize)]
-struct BatchTitle {
-    #[serde(rename = "type")]
-    kind: String,
-    id: u32,
-}
-
-/// One screen's poster-card details in one exchange. Each title still goes through the exact detail cache,
-/// freshness, member allowance and upstream budget as an ordinary `/tmdb/3/{type}/{id}` request; only the client
-/// round trips are collapsed. Partial answers are explicit so one absent/refused title never hides the rest.
-async fn batch(state: &Arc<AppState>, req: Request, key: &str, rid: &str) -> Response {
-    if req.method() != Method::POST {
-        return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
-    }
-    let ip = crate::handler::client_ip(state, &req);
-    let member = req.headers().get(crate::library::MEMBER_HEADER).cloned();
-    let parsed = match read_json(req, BATCH_BODY_BYTES).await {
-        Ok(value) => serde_json::from_value::<BatchRequest>(value).ok(),
-        Err(response) => return *response,
-    };
-    let Some(parsed) = parsed else { return json(StatusCode::BAD_REQUEST, "bad_request") };
-    if parsed.titles.is_empty() || parsed.titles.len() > BATCH_TITLES {
-        return json(StatusCode::BAD_REQUEST, "invalid_batch");
-    }
-    let mut unique = std::collections::HashSet::new();
-    if parsed.titles.iter().any(|title| {
-        title.id == 0
-            || !matches!(title.kind.as_str(), "movie" | "tv")
-            || !unique.insert((title.kind.clone(), title.id))
-    }) {
-        return json(StatusCode::BAD_REQUEST, "invalid_batch");
-    }
-
-    let mut tasks = tokio::task::JoinSet::new();
-    for (index, title) in parsed.titles.into_iter().enumerate() {
-        let state = Arc::clone(state);
-        let ip = ip.clone();
-        let key = key.to_owned();
-        let rid = rid.to_owned();
-        let member = member.clone();
-        tasks.spawn(async move {
-            let appends = if title.kind == "movie" {
-                "release_dates,watch/providers"
-            } else {
-                "content_ratings,watch/providers,external_ids"
-            };
-            let path = format!("/3/{}/{}", title.kind, title.id);
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("append_to_response", appends)
-                .finish();
-            let detail = Detail::of(&path, Some(&query), state.tmdb_cache_dir.as_deref());
-            let mut asked = HeaderMap::new();
-            if let Some(member) = member {
-                asked.insert(crate::library::MEMBER_HEADER, member);
-            }
-            let response = match detail {
-                Some(detail) => detail_answer(&state, &ip, &asked, &detail, &key, &rid).await,
-                None => json(StatusCode::BAD_REQUEST, "invalid_batch"),
-            };
-            let status = response.status().as_u16();
-            let body = axum::body::to_bytes(response.into_body(), MAX_ANSWER_BYTES)
-                .await
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or(serde_json::Value::Null);
-            (index, serde_json::json!({ "type": title.kind, "id": title.id, "status": status, "body": body }))
-        });
-    }
-    let mut results = vec![serde_json::Value::Null; unique.len()];
-    while let Some(answer) = tasks.join_next().await {
-        let Ok((index, value)) = answer else { return json(StatusCode::BAD_GATEWAY, "batch_failed") };
-        results[index] = value;
-    }
-    let value = serde_json::json!({ "results": results });
-    let Ok(bytes) = serde_json::to_vec(&value) else {
-        return json(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed");
-    };
-    if bytes.len() > BATCH_ANSWER_BYTES {
-        return json(StatusCode::PAYLOAD_TOO_LARGE, "batch_too_large");
-    }
-    let mut response = raw_json(StatusCode::OK, Body::from(bytes), false);
-    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
 }
 
 /// The refusal for a question that has to go to TMDB once this address's allowance is spent; `None` to ask.
@@ -2825,68 +2728,6 @@ mod tests {
         assert_eq!(h.send("GET", "/tmdb/warm", None, &[]).await.status(), StatusCode::METHOD_NOT_ALLOWED);
         let posted = h.send("POST", "/tmdb/3/movie/550", None, &[]).await;
         assert_eq!(posted.status(), StatusCode::METHOD_NOT_ALLOWED);
-    }
-
-    #[tokio::test]
-    async fn one_screen_of_title_details_is_one_ordered_partial_answer() {
-        let dir = crate::handler::tests::temp_dir();
-        let cache = dir.join("tmdb");
-        let h = crate::handler::tests::Harness::in_dir_with(dir, |state| {
-            state.tmdb_key = Some("household".into());
-            state.tmdb_cache_dir = Some(cache.clone());
-        });
-        for (kind, id, appends, title) in [
-            ("movie", 550, "release_dates,watch/providers", "Fight Club"),
-            ("tv", 1399, "content_ratings,watch/providers,external_ids", "Game of Thrones"),
-        ] {
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("append_to_response", appends)
-                .finish();
-            let file = cache_path(&cache, &cache_key(&format!("/3/{kind}/{id}"), Some(&query)));
-            write(&file, &Bytes::from(serde_json::json!({ "id": id, "title": title }).to_string())).await;
-        }
-
-        let response = h
-            .send(
-                "POST",
-                "/tmdb/batch",
-                Some(r#"{"titles":[{"type":"tv","id":1399},{"type":"movie","id":550},{"type":"movie","id":999999999}]}"#.into()),
-                &[],
-            )
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        let body = axum::body::to_bytes(response.into_body(), BATCH_ANSWER_BYTES).await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["results"][0]["body"]["title"], "Game of Thrones");
-        assert_eq!(body["results"][1]["body"]["title"], "Fight Club");
-        assert_eq!(body["results"][2]["id"], 999999999);
-        assert_ne!(body["results"][2]["status"], 200, "one miss is explicit without dropping the hits");
-    }
-
-    #[tokio::test]
-    async fn a_title_detail_batch_is_bounded_and_well_formed() {
-        let mut titles = Vec::new();
-        for id in 1..=41 {
-            titles.push(serde_json::json!({ "type": "movie", "id": id }));
-        }
-        let h = crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
-            state.tmdb_key = Some("household".into());
-        });
-        let (status, body) =
-            h.call("POST", "/tmdb/batch", Some(serde_json::json!({ "titles": titles }))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_batch");
-
-        let (status, body) = h
-            .call(
-                "POST",
-                "/tmdb/batch",
-                Some(serde_json::json!({ "titles": [{ "type": "person", "id": 1 }] })),
-            )
-            .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_batch");
     }
 
     /// A refused key, a rate limit and an outage were each a bare 502 with nothing in the log; a 429's own wait was
