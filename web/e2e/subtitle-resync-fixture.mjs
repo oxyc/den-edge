@@ -101,6 +101,10 @@ async function fixture(page, platform, { fail = false, held = false, hashMatch =
   if (platform === 'browser')
     await page.addStyleTag({ path: fileURLToPath(new URL('../src/app.css', import.meta.url)) });
   const video = page.locator('.player video');
+  // This fixture exercises subtitle replacement, not autoplay. Under a loaded CI shard Chromium can leave the
+  // otherwise-ready muted fixture at its initial frame, so explicitly start the test clock before measuring that
+  // re-sync preserves it. Awaiting play synchronizes on media readiness without a sleep or a longer timeout.
+  if (!samsung) await video.evaluate((element) => element.play());
   await expect.poll(() => video.evaluate((el) => el.currentTime)).toBeGreaterThan(0);
   const menu = page.getByRole('button', { name: /^Subtitles:/ });
   // The saved language preference must resolve to the concrete first candidate without a manual menu pick.
