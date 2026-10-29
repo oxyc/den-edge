@@ -1068,7 +1068,6 @@ pub fn route_label(path: &str) -> &'static str {
         "/recovery/open" => "/recovery/open",
         "/recovery/timing" => "/recovery/timing",
         "/tmdb/warm" => "/tmdb/warm",
-        "/tmdb/batch" => "/tmdb/batch",
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
         "/metadata/title" => "/metadata/title",
@@ -1159,7 +1158,6 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/pair/new"
         | "/pair/open" => Some(POST),
         "/metadata/title/query"
-        | "/tmdb/batch"
         | "/tmdb/warm"
         | "/playback/startup"
         | "/playback/page-error"
