@@ -320,7 +320,7 @@ function profileReplayHarness() {
     },
   };
   const source = (
-    profileFixture.migrationDirectoryConstructorCases as Array<{
+    profileFixture.initialDirectoryConstructorCases as Array<{
       expect?: { directory: unknown };
     }>
   )[0]!.expect!.directory;

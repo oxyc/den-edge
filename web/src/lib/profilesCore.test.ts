@@ -33,9 +33,9 @@ describe('persistent profiles den-core boundary', () => {
 
   it('constructs the committed directory through the neutral operation', () => {
     const constructed = profilesConstructDirectory(
-      fixture.migrationDirectoryConstructorInput as Record<string, unknown>,
+      fixture.initialDirectoryConstructorInput as Record<string, unknown>,
     );
-    const expected = fixture.migrationDirectoryConstructorCases[0]!.expect!;
+    const expected = fixture.initialDirectoryConstructorCases[0]!.expect!;
     // JavaScript preserves a parsed negative zero while RFC 8785 canonicalizes it to zero.
     expect(constructed.directory).toEqual(JSON.parse(JSON.stringify(expected.directory)));
     expect(constructed.jcs).toBe(expected.jcs);

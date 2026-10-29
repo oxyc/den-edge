@@ -44,7 +44,7 @@ class MemoryVault implements ProfileKidCreateVault {
 }
 
 function ownerDirectory(): ProfileDirectoryDocument {
-  const cases = fixture.migrationDirectoryConstructorCases as Array<{
+  const cases = fixture.initialDirectoryConstructorCases as Array<{
     expect?: { directory: unknown };
   }>;
   return validateStoredProfileDirectory(structuredClone(cases[0]!.expect!.directory));
