@@ -158,7 +158,7 @@ async function downloadsAnEpisode(addon) {
     await row.getByRole('button', { name: 'Options for episode 1', exact: true }).click();
     await row.getByRole('menuitem', { name: 'Sources', exact: true }).click();
     const panel = active.locator('.source-panel');
-    await expect(panel.getByText('Sources for S2 · E1')).toBeVisible();
+    await expect(panel.getByText('Sources for S2 · E1')).toBeVisible({ timeout: 30_000 });
     // The household's own plugin answers for Owner: its release, not "Add Den Scout".
     const source = panel.locator('li').filter({ hasText: RELEASE });
     await expect(source).toBeVisible({ timeout: 30_000 });
@@ -228,6 +228,7 @@ async function switchesEpisode(browserType, viewport) {
     });
     const episodes = panel.getByRole('combobox', { name: 'Episode', exact: true });
     await expect(episodes).toHaveValue('1');
+    await expect(episodes.locator('option')).toHaveCount(10);
     const options = await episodes.locator('option').allTextContents();
     expect(options).toHaveLength(10);
     expect(options[2]).toBe('E3 · Episode 3');

@@ -22,7 +22,7 @@ export class LocalizedContent implements ContentServiceClientPort {
   ): Promise<ContentResultFor<Request>> {
     const language = this.language();
     // Keep English byte-for-byte on the established request path. The Worker already treats absence as English,
-    // so the default profile pays no clone/allocation and sends no additional structured-clone member.
+    // so the default request pays no clone/allocation and sends no additional structured-clone member.
     const localized = language === 'en' ? request : { ...request, interfaceLanguage: language };
     return this.inner.query(localized, signal, policy, onProgress) as Promise<
       ContentResultFor<Request>

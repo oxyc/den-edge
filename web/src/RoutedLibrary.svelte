@@ -233,7 +233,9 @@
     untrack(() => open(libraryIdentity, !link && !ownHousehold && libraryIdentity !== null)),
   );
   $effect(() => {
-    void setInterfaceLanguage(session.interfaceLanguage);
+    const language = session.interfaceLanguage;
+    session.presentIn(language);
+    void setInterfaceLanguage(language);
   });
   let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);

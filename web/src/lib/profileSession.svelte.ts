@@ -65,7 +65,9 @@ export class ProfileSession {
   /** The page has drawn what it opened for (`foregroundReady`): optional background work may start. */
   foregrounded = $state(false);
   readonly #content: ContentServiceClientPort;
-  #localizedContent?: ContentServiceClientPort;
+  readonly #localizedContent: ContentServiceClientPort;
+  #contentPort = $state.raw<ContentServiceClientPort | null>(null);
+  #requestLanguage: InterfaceLanguage = 'en';
   #region?: Promise<string | undefined>;
   readonly #displays = new SvelteMap<string, Title>();
   readonly #missing = new SvelteSet<string>();
@@ -109,6 +111,8 @@ export class ProfileSession {
         )
       : null;
     this.#content = policed ?? household.content;
+    this.#localizedContent = new LocalizedContent(this.#content, () => this.#requestLanguage);
+    this.#contentPort = this.#content;
   }
 
   /**
@@ -147,18 +151,25 @@ export class ProfileSession {
   }
 
   /**
-   * Every content query this profile makes runs under its policy: the page, the Worker and atlas all see the same
-   * one. An unrestricted profile (the legacy household, an Owner with no ceiling) uses the household port as-is.
+   * Every query runs under this profile's policy. Non-English presentation then adds its locale at the final page
+   * boundary; English retains the underlying port identity and recovery path.
    */
   get content(): ContentServiceClientPort {
-    if (this.interfaceLanguage === 'en') return this.#content;
-    return (this.#localizedContent ??= new LocalizedContent(
-      this.#content,
-      () => this.interfaceLanguage,
-    ));
+    return this.#contentPort ?? this.#content;
   }
 
-  /** Resolved once by the settings projection; the closure lets a saved language affect the next content request. */
+  /**
+   * Move presentation-dependent reads to the selected locale only when that locale actually changes. English keeps
+   * the native session port (and its recovery/deduplication identity); resolving an undecided preference to English
+   * therefore invalidates no content consumer and repeats no request.
+   */
+  presentIn(language: InterfaceLanguage): void {
+    this.#requestLanguage = language;
+    const content = language === 'en' ? this.#content : this.#localizedContent;
+    if (this.#contentPort !== content) this.#contentPort = content;
+  }
+
+  /** Resolved by the settings projection; a saved language affects the next content request. */
   get interfaceLanguage(): InterfaceLanguage {
     const selected =
       this.preferences?.value?.interfaceLanguage ??

@@ -209,7 +209,9 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
       const context = await iphone(browser, 'sv-SE');
       const page = await context.newPage();
       const operations = await mockHearth(page);
-      await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=he`);
+      await page.goto(
+        `${ORIGIN}/test/player.html?playback=managed&originalLanguage=he&interfaceLanguage=sv`,
+      );
       await playing(page);
       expect(operations).toHaveLength(1);
       expect(operations[0].player).toBe('native');
@@ -386,11 +388,13 @@ test('switching a chosen TorBox built-in to Remux keeps that language and lists 
 test('hls.js shows the subtitle it picks itself on a TorBox stream, not only names it', async () => {
   const browser = await launchChromium();
   try {
-    // A Swedish browser and a Hebrew title: Swedish, picked without being asked.
+    // A Swedish interface and a Hebrew title: Swedish, picked without being asked.
     const context = await browser.newContext({ locale: 'sv-SE' });
     const page = await context.newPage();
     const operations = await mockHearth(page);
-    await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=he`);
+    await page.goto(
+      `${ORIGIN}/test/player.html?playback=managed&originalLanguage=he&interfaceLanguage=sv`,
+    );
     await playing(page);
     const menu = page.getByRole('button', { name: /^Subtitles:/ });
     await expect(menu).toBeVisible();
