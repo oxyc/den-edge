@@ -2689,7 +2689,7 @@
       interfaceLanguage={playbackPrefs.interfaceLanguage}
       subtitleLanguage={playbackPrefs.hasExplicitSubtitlePreference
         ? (playbackPrefs.subtitleLanguage ?? null)
-        : playbackPrefs.interfaceLanguage}
+        : undefined}
       shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
       maxSubtitlesPerLanguage={playbackPrefs.maxSubtitlesPerLanguage}
       autoSkip={playbackPrefs.autoSkipSegments}

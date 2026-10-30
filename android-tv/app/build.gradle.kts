@@ -65,6 +65,14 @@ android {
         buildConfig = true
     }
 
+    bundle {
+        language {
+            // The launcher can switch its small native error surface to Den's profile language.
+            // Keep all three tiny resource sets in the base install so that works offline too.
+            enableSplit = false
+        }
+    }
+
     lint {
         abortOnError = true
         checkReleaseBuilds = true

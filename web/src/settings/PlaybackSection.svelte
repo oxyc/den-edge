@@ -51,7 +51,7 @@
   >
     {#snippet control()}
       <Select
-        labelledby="audio-language-label"
+        label={i18n.text('settings.audioLanguage')}
         value={prefs.audioLanguage ?? ''}
         options={[{ value: '', label: i18n.text('settings.original') }, ...languages]}
         {disabled}
@@ -66,7 +66,7 @@
   >
     {#snippet control()}
       <Select
-        labelledby="subtitle-language-label"
+        label={i18n.text('settings.subtitleLanguage')}
         value={prefs.hasExplicitSubtitlePreference
           ? (prefs.subtitleLanguage ?? '__off')
           : '__automatic'}

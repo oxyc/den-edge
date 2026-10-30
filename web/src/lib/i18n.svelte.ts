@@ -1,8 +1,8 @@
 import { ENGLISH_MESSAGES, type MessageCatalog, type MessageId } from './messages/en';
-import { interfaceLocale, type InterfaceLanguage } from './interfaceLanguage';
+import type { InterfaceLanguage } from './interfaceLanguage';
 import { ensureIntl } from './intlSupport';
 
-/** Non-reactive bounded-by-language cache: catalog/formatter insertion must never invalidate a view. */
+/** Non-reactive bounded-by-language cache: catalog insertion must never invalidate a view. */
 class StableCache<Key, Value> {
   readonly #values: Map<Key, Value>;
   constructor(entries: readonly (readonly [Key, Value])[] = []) {
@@ -38,13 +38,16 @@ async function catalog(language: InterfaceLanguage): Promise<MessageCatalog> {
 /** Atomically publishes a compiled catalog. English takes no dynamic import or catalog allocation. */
 export async function setInterfaceLanguage(language: InterfaceLanguage): Promise<void> {
   if (state.language === language && pendingLanguage === null) {
-    await ensureIntl(language);
+    if (__DEN_TV_PLATFORM__ === 'tizen') await ensureIntl(language);
     if (typeof document !== 'undefined') document.documentElement.lang = language;
     return;
   }
   const request = ++requested;
   pendingLanguage = language;
-  const [, next] = await Promise.all([ensureIntl(language), catalog(language)]);
+  const next =
+    __DEN_TV_PLATFORM__ === 'tizen'
+      ? (await Promise.all([ensureIntl(language), catalog(language)]))[1]
+      : await catalog(language);
   if (request !== requested) return;
   pendingLanguage = null;
   state = { language, catalog: next, generation: state.generation + 1 };
@@ -55,11 +58,6 @@ export async function setInterfaceLanguage(language: InterfaceLanguage): Promise
   }
 }
 
-const formatters = new StableCache<
-  string,
-  Intl.NumberFormat | Intl.DateTimeFormat | Intl.Collator
->();
-
 export const i18n = {
   get language(): InterfaceLanguage {
     return state.language;
@@ -69,32 +67,5 @@ export const i18n = {
   },
   text(id: MessageId): string {
     return state.catalog[id] ?? ENGLISH_MESSAGES[id];
-  },
-  number(options: Intl.NumberFormatOptions = {}): Intl.NumberFormat {
-    const key = `number:${state.language}:${JSON.stringify(options)}`;
-    let formatter = formatters.get(key) as Intl.NumberFormat | undefined;
-    if (!formatter) {
-      formatter = new Intl.NumberFormat(interfaceLocale(state.language), options);
-      formatters.set(key, formatter);
-    }
-    return formatter;
-  },
-  date(options: Intl.DateTimeFormatOptions = {}): Intl.DateTimeFormat {
-    const key = `date:${state.language}:${JSON.stringify(options)}`;
-    let formatter = formatters.get(key) as Intl.DateTimeFormat | undefined;
-    if (!formatter) {
-      formatter = new Intl.DateTimeFormat(interfaceLocale(state.language), options);
-      formatters.set(key, formatter);
-    }
-    return formatter;
-  },
-  collator(options: Intl.CollatorOptions = {}): Intl.Collator {
-    const key = `collator:${state.language}:${JSON.stringify(options)}`;
-    let formatter = formatters.get(key) as Intl.Collator | undefined;
-    if (!formatter) {
-      formatter = new Intl.Collator(interfaceLocale(state.language), options);
-      formatters.set(key, formatter);
-    }
-    return formatter;
   },
 };

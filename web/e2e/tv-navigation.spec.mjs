@@ -352,13 +352,16 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
 
-  const audioLanguage = page.getByRole('combobox', { name: 'Audio language', exact: true });
-  await expect(audioLanguage).toBeVisible({ timeout: 30_000 });
-  await expect(audioLanguage).toBeEnabled();
+  const interfaceLanguage = page.getByRole('combobox', {
+    name: 'Interface language',
+    exact: true,
+  });
+  await expect(interfaceLanguage).toBeVisible({ timeout: 30_000 });
+  await expect(interfaceLanguage).toBeEnabled();
   // The selected page-level navigation item enters the first declared Settings section at its representative
   // control, regardless of row height or which later row happens to share its x coordinate.
   await expect(settings).toBeFocused();
-  await remoteTo(page, audioLanguage, ['ArrowDown'], 2);
+  await remoteTo(page, interfaceLanguage, ['ArrowDown'], 2);
   await page.keyboard.press('ArrowLeft');
   const contentSection = page.getByRole('link', { name: 'Content', exact: true });
   await remoteTo(page, contentSection, ['ArrowDown'], 2);

@@ -20,6 +20,10 @@ const ready = new Map<InterfaceLanguage, Promise<void>>();
 
 /** Probe requested-locale resolution once; native-capable engines never import a polyfill chunk. */
 export function ensureIntl(language: InterfaceLanguage): Promise<void> {
+  // Browser, Android WebView and webOS use their engine-native Intl. Only Samsung's older
+  // installed engines need Den's pinned fallback; keeping this compile-time branch here also
+  // keeps the polyfill modules out of every non-Tizen production bundle.
+  if (__DEN_TV_PLATFORM__ !== 'tizen') return Promise.resolve();
   let pending = ready.get(language);
   if (pending) return pending;
   pending = (async () => {

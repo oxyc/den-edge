@@ -84,7 +84,11 @@ if (process.argv.includes('--capture')) {
   // Encrypted playback receipts add one foreground-only drain to the shared assistant chunk and progress authority.
   // After sharing its HTTP queue machinery, the complete lazy graph is 220 bytes over the previous ceiling while
   // the initial graph remains 11.6 KiB smaller than baseline. Allow one KiB without changing the initial limit.
+  // Multilingual presentation adds two independently lazy message catalogs and the profile/content language seam.
+  // Its complete graph is 4.3 KiB above its parent, while the English initial graph is 1.9 KiB smaller; Tizen's
+  // conditional Intl fallback is compiled out of this browser build. Allow four KiB for those opt-in catalogs and
+  // keep the independently enforced initial ceiling unchanged so English startup cannot spend this allowance.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
-  if (totalDelta > 41984) throw new Error('Browser total JS/CSS budget exceeded');
+  if (totalDelta > 46080) throw new Error('Browser total JS/CSS budget exceeded');
 }

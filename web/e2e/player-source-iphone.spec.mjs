@@ -165,7 +165,7 @@ async function guestPlayer(page, { hearth, originalLanguage, automaticSubtitles 
       page.waitForResponse(changes, { timeout: 30_000 }),
       page.goto(`${ORIGIN}/settings`),
     ]);
-    const subtitleLanguage = page.getByLabel('Subtitle language', { exact: true });
+    const subtitleLanguage = page.locator('#subtitle-language select');
     await expect(subtitleLanguage).toBeEnabled({ timeout: 30_000 });
     // Establish a real explicit preference first. A fresh library is already Automatic, so choosing Automatic from
     // a transient fail-closed Off rendering can correctly be a no-op and must not be used as proof of persistence.
@@ -181,8 +181,15 @@ async function guestPlayer(page, { hearth, originalLanguage, automaticSubtitles 
     ]);
     expect(saved.ok()).toBe(true);
     await expect(subtitleLanguage).toBeEnabled({ timeout: 30_000 });
+    const interfaceLanguage = page.locator('#interface-language select');
+    const [localized] = await Promise.all([
+      page.waitForResponse(batch, { timeout: 30_000 }),
+      interfaceLanguage.selectOption('sv'),
+    ]);
+    expect(localized.ok()).toBe(true);
+    await expect(interfaceLanguage).toBeEnabled({ timeout: 30_000 });
     await Promise.all([page.waitForResponse(changes, { timeout: 30_000 }), page.reload()]);
-    await expect(page.getByLabel('Subtitle language', { exact: true })).toHaveValue('__automatic', {
+    await expect(page.locator('#subtitle-language select')).toHaveValue('__automatic', {
       timeout: 30_000,
     });
   }
