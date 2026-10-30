@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { onMount } from 'svelte';
   import { profilePinInput } from '../lib/profilePin';
 
@@ -40,7 +41,7 @@
 </script>
 
 <div class="pin-entry">
-  <label for={id}>{label}</label>
+  <label for={id}>{i18n.phrase(label)}</label>
   <div class="pin-control" class:invalid>
     <input
       bind:this={input}

@@ -162,11 +162,65 @@ const statusPill = document.querySelector<HTMLElement>('#status')!;
 const profile = document.querySelector<HTMLSelectElement>('#profile')!;
 const castOptions = document.querySelector<HTMLElement>('.cast-options')!;
 const choose = document.querySelector<HTMLButtonElement>('#choose')!;
+type InterfaceLanguage = 'en' | 'es' | 'sv';
+let interfaceLanguage: InterfaceLanguage = 'en';
+const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
+  es: {
+    'Choose your Chromecast': 'Elige tu Chromecast',
+    'Cast options': 'Opciones de transmisión',
+    Receiver: 'Receptor',
+    'Cast to a TV': 'Transmitir a un televisor',
+    'Reconnecting…': 'Reconectando…',
+    'Playing on this device': 'Reproduciendo en este dispositivo',
+    'This browser cannot play HLS': 'Este navegador no puede reproducir HLS',
+    'Chromecast could not load this release': 'Chromecast no pudo cargar esta versión',
+    'Chromecast could not continue playback': 'Chromecast no pudo continuar la reproducción',
+    'Playback failed': 'La reproducción falló',
+    'Invalid media URL': 'URL multimedia no válida',
+  },
+  sv: {
+    'Choose your Chromecast': 'Välj din Chromecast',
+    'Cast options': 'Cast-alternativ',
+    Receiver: 'Mottagare',
+    'Cast to a TV': 'Casta till en tv',
+    'Reconnecting…': 'Ansluter igen…',
+    'Playing on this device': 'Spelar på den här enheten',
+    'This browser cannot play HLS': 'Den här webbläsaren kan inte spela HLS',
+    'Chromecast could not load this release': 'Chromecast kunde inte läsa in den här versionen',
+    'Chromecast could not continue playback': 'Chromecast kunde inte fortsätta uppspelningen',
+    'Playback failed': 'Uppspelningen misslyckades',
+    'Invalid media URL': 'Ogiltig medie-URL',
+  },
+};
+const text = (english: string): string =>
+  interfaceLanguage === 'en' ? english : (COPY[interfaceLanguage][english] ?? english);
+function applyInterfaceLanguage(language: unknown): void {
+  if (language !== 'en' && language !== 'es' && language !== 'sv') return;
+  interfaceLanguage = language;
+  document.documentElement.lang = language;
+  document.querySelector('#choose-label')!.textContent = text('Choose your Chromecast');
+  const options = document.querySelector<HTMLElement>('#cast-options-label')!;
+  options.title = text('Cast options');
+  options.setAttribute('aria-label', text('Cast options'));
+  document.querySelector('#receiver-label')!.textContent = text('Receiver');
+  const launcher = document.querySelector<HTMLElement>('google-cast-launcher');
+  launcher?.setAttribute('aria-label', text('Cast to a TV'));
+  if (launcher) launcher.title = text('Cast to a TV');
+}
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
 function setStatus(text: string): void {
-  statusPill.textContent = text;
+  statusPill.textContent = text ? translateStatus(text) : '';
   statusPill.hidden = !statusShown(text);
+}
+function translateStatus(source: string): string {
+  if (source.startsWith('Casting to '))
+    return interfaceLanguage === 'es'
+      ? `Transmitiendo a ${source.slice('Casting to '.length)}`
+      : interfaceLanguage === 'sv'
+        ? `Castar till ${source.slice('Casting to '.length)}`
+        : source;
+  return text(source);
 }
 const parents = new Set(
   (import.meta.env.VITE_DEN_PARENT_ORIGINS ?? 'https://d.oxy.fi')
@@ -260,7 +314,7 @@ function fail(message: string, code = 0, owner: PlayingMedia | undefined = playi
     watcher?.spent();
     sendReport(reportUrlOf(lifecycle), reportBody(code, message));
   }
-  tell('den-error', { message });
+  tell('den-error', { message: translateStatus(message) });
 }
 
 /** End the session this page played, so it stops holding den-remux and the media listener open. */
@@ -311,7 +365,7 @@ function stopLocal(): void {
   clearInterval(linkWatch);
   link?.dispose();
   link = undefined;
-  if (statusPill.textContent === RECONNECTING) setStatus('');
+  if (statusPill.textContent === text(RECONNECTING)) setStatus('');
 }
 
 /**
@@ -323,7 +377,7 @@ function watchLink(connection: Link): void {
   const show = () => {
     const buffered = video.buffered;
     const ahead = buffered.length ? buffered.end(buffered.length - 1) - video.currentTime : 0;
-    const shown = statusPill.textContent === RECONNECTING;
+    const shown = statusPill.textContent === text(RECONNECTING);
     if (connection.down && ahead < 0.5 && !shown) setStatus(RECONNECTING);
     else if ((!connection.down || ahead >= 0.5) && shown) setStatus('');
   };
@@ -801,8 +855,8 @@ async function castFrameworkLoaded(): Promise<boolean> {
  */
 function addCastLauncher(): void {
   const launcher = document.createElement('google-cast-launcher');
-  launcher.setAttribute('aria-label', 'Cast to a TV');
-  launcher.title = 'Cast to a TV';
+  launcher.setAttribute('aria-label', text('Cast to a TV'));
+  launcher.title = text('Cast to a TV');
   castOptions.before(launcher);
 }
 
@@ -833,6 +887,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
   const message = event.data as Partial<LoadMessage>;
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
+  applyInterfaceLanguage(message.media.interfaceLanguage);
   if (
     (message.media.external ? !managedMedia(message.media.url) : !signedMedia(message.media.url)) ||
     (message.media.subtitleIndex !== undefined &&
@@ -848,7 +903,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     (message.media.subtitleTrack !== undefined && !validSubtitleTrack(message.media.subtitleTrack))
   ) {
     event.source?.postMessage(
-      { type: 'den-error', id: message.id, message: 'Invalid media URL' },
+      { type: 'den-error', id: message.id, message: text('Invalid media URL') },
       {
         targetOrigin: event.origin,
       },
@@ -915,7 +970,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 /** The player asks whether a receiver is on the network, with nothing to load yet. */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
-  if ((event.data as { type?: string }).type !== 'den-discover') return;
+  const message = event.data as { type?: string; interfaceLanguage?: unknown };
+  if (message.type !== 'den-discover') return;
+  applyInterfaceLanguage(message.interfaceLanguage);
   parentOrigin = event.origin;
   announceDevices();
 });
@@ -923,7 +980,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 /** The player offers casting: this page shows the one button that can open Chrome's device list. */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
-  if ((event.data as { type?: string }).type !== 'den-choose' || !castContext) return;
+  const message = event.data as { type?: string; interfaceLanguage?: unknown };
+  if (message.type !== 'den-choose' || !castContext) return;
+  applyInterfaceLanguage(message.interfaceLanguage);
   parentOrigin = event.origin;
   document.documentElement.classList.add('choosing');
   choose.hidden = false;

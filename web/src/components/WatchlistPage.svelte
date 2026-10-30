@@ -2,6 +2,7 @@
      row builds it, the watchlist under the same three tabs Watched uses, everything watched as one long list, newest first,
      grouped by month and drawn a screenful at a time as you scroll, or one year of it. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { untrack, type Snippet } from 'svelte';
   import {
     UNKNOWN_YEAR,
@@ -416,7 +417,7 @@
   <!-- The library's other list: what the debrid is fetching for it, from any device. -->
   <a class="aside" href="/downloads">Downloads ›</a>
 </div>
-{#if failure}<p class="failure" role="alert">{failure}</p>{/if}
+{#if failure}<p class="failure" role="alert">{i18n.phrase(failure)}</p>{/if}
 <p class="visually-hidden" aria-live="polite">{confirming?.question ?? ''}</p>
 
 {#if !resume.length && !saved.length && !(historyPage?.facets.all ?? history.length)}

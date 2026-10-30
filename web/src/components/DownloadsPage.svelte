@@ -12,6 +12,7 @@
   import { viewHeadline } from '../lib/downloadStatus';
   import type { Title } from '../lib/library';
   import { titleHref } from '../lib/route';
+  import { i18n } from '../lib/i18n.svelte';
 
   let { model, active = true }: { model?: LibraryModel; active?: boolean } = $props();
   let lease = $state<LibraryModelLease<import('../lib/libraryServiceProtocol').DownloadsView>>();
@@ -122,14 +123,14 @@
 
 <h1>Downloads</h1>
 <p class="note">Your debrid fetches these — you can close Den, they keep going.</p>
-{#if message}<p class="note" role="status">{message}</p>{/if}
+{#if message}<p class="note" role="status">{i18n.phrase(message)}</p>{/if}
 
 {#if !list.length}
   <p class="note">No downloads yet. Download a title from its Sources to see it here.</p>
 {:else}
   {#each groups as group (group.title)}
     <section>
-      <h2>{group.title}</h2>
+      <h2>{i18n.phrase(group.title)}</h2>
       <ul class="grid" data-spatial-grid>
         {#each group.items as row (row.download.content)}
           {@const { download, title } = row}

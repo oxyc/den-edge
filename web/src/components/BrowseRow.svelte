@@ -2,6 +2,7 @@
      first page loads when the row nears the screen, and the next when you scroll to its end. A row that turns out
      empty hides itself. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { onDestroy, tick } from 'svelte';
   import type { RowDef } from '../lib/catalog';
   import {
@@ -262,8 +263,8 @@
   class:gone={done && !pager.failed && visible.length === 0}
 >
   <PosterRow
-    heading={row.title}
-    ariaLabel={row.ariaLabel}
+    heading={i18n.phrase(row.title)}
+    ariaLabel={row.ariaLabel ? i18n.phrase(row.ariaLabel) : undefined}
     headingLink={row.headingLink}
     aside={row.aside}
     active={rowNear}

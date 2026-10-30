@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
 
   let {
@@ -26,11 +27,15 @@
 <!-- A native select, so a phone opens its own picker and a screen reader reads a pop-up button. It lies unseen over the
      chip that shows the choice, as the opinion picker does (`TitleActions.svelte`). -->
 <div class="pick {className}" class:round>
-  <span aria-hidden="true">{text}</span>
+  <span aria-hidden="true">{i18n.phrase(text)}</span>
   <ButtonIcon name="chevron" />
-  <select aria-label={label} {value} onchange={(event) => onchange(event.currentTarget.value)}>
+  <select
+    aria-label={i18n.phrase(label)}
+    {value}
+    onchange={(event) => onchange(event.currentTarget.value)}
+  >
     {#each options as option (option.value)}
-      <option value={option.value}>{option.label}</option>
+      <option value={option.value}>{i18n.phrase(option.label)}</option>
     {/each}
   </select>
 </div>

@@ -17,6 +17,7 @@
   import { DownloadSourceLoader } from '../lib/downloadSourceLoader';
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { i18n } from '../lib/i18n.svelte';
   let {
     imdb,
     season,
@@ -334,7 +335,7 @@
     This {season === undefined ? 'movie' : 'episode'} needs a download before it’s ready to play here.
   </p>{/if}
 {#if summary}<p class="readiness" data-title-downloads>{summary}</p>{/if}
-{#if message}<p class="readiness" role="status">{message}</p>{/if}
+{#if message}<p class="readiness" role="status">{i18n.phrase(message)}</p>{/if}
 
 <style>
   .source-accordion {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import ChipSelect from './ChipSelect.svelte';
 
   let {
@@ -106,7 +107,7 @@
       class="tabs"
       class:many={tabs.length > 6}
       role="tablist"
-      aria-label={label}
+      aria-label={i18n.phrase(label)}
       bind:this={row}
     >
       {#each tabs as tab, i (tab.value)}
@@ -118,7 +119,7 @@
           aria-selected={value === tab.value}
           tabindex={value === tab.value ? 0 : -1}
           class:on={value === tab.value}
-          onkeydown={(e) => keyboard(e, i)}>{tab.label}</a
+          onkeydown={(e) => keyboard(e, i)}>{i18n.phrase(tab.label)}</a
         >
       {/each}
     </div>

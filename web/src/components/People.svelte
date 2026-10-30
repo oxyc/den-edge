@@ -5,6 +5,7 @@
      Text typed in the bar's search field here (`q=`) offers traits and facets by name, as Explore's Browse row does,
      and the people it names. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
   import ExploreTabs from './ExploreTabs.svelte';
@@ -524,7 +525,7 @@
           </div>
         {/if}
         <Picks picks={picked} onremove={(id) => pick(id)} onclear={clearAll} />
-        <p class="status" role="status">{status}</p>
+        <p class="status" role="status">{i18n.phrase(status)}</p>
         {#if typing}
           <!-- Picking one turns the text into it, as on Explore: the text goes, the pick stays. -->
           <FacetSuggestions

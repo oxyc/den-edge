@@ -357,11 +357,63 @@ test('interface language translates routes and actions and survives a reload', a
   await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Buscar', exact: true })).toBeVisible();
 
+  // A lazily loaded route must use the selected catalog too; this is the journey that previously left page copy
+  // such as Downloads in English even though the navigation had changed.
+  await page.goto(`${E2E_ORIGIN}/downloads`);
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });
+  await expect(page.getByRole('heading', { name: 'Descargas', level: 1 })).toBeVisible();
+
   await page.getByRole('link', { name: 'Inicio', exact: true }).click();
   await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+  await page.addInitScript(() => {
+    window.__denPaintedEnglishShell = false;
+    const inspect = () => {
+      const shell = document.querySelector('#app > .bar-anchor');
+      if (shell?.textContent?.includes('Home') && getComputedStyle(shell).visibility !== 'hidden')
+        window.__denPaintedEnglishShell = true;
+      if (document.readyState !== 'complete') requestAnimationFrame(inspect);
+    };
+    requestAnimationFrame(inspect);
+  });
+  const warmCatalogRequests = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (
+      path.includes('/messages/es') ||
+      path.includes('/phrases/es') ||
+      /\/assets\/es-[^/]+\.js$/.test(path)
+    )
+      warmCatalogRequests.push(path);
+  });
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });
   await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.__denPaintedEnglishShell)).toBe(false);
+  expect(warmCatalogRequests).toEqual([]);
+
+  // A release with changed translations paints the last complete catalog first, then replaces it from the new
+  // hashed module. This exercises the stale-while-revalidate branch without coupling the test to a build hash.
+  await page.evaluate(() => {
+    const key = 'den.translations.v1.es';
+    const cached = JSON.parse(localStorage.getItem(key));
+    cached.revision = 'previous-release';
+    cached.messages['nav.home'] = 'Inicio anterior';
+    localStorage.setItem(key, JSON.stringify(cached));
+  });
+  await page.addInitScript(() => {
+    window.__denPaintedStaleCatalog = false;
+    const observer = new MutationObserver(() => {
+      if (document.body?.textContent?.includes('Inicio anterior'))
+        window.__denPaintedStaleCatalog = true;
+    });
+    observer.observe(document, { childList: true, subtree: true });
+  });
+  warmCatalogRequests.length = 0;
+  await page.reload();
+  await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.__denPaintedStaleCatalog)).toBe(true);
+  expect(warmCatalogRequests.length).toBeGreaterThan(0);
+
   await page.getByRole('link', { name: 'Ajustes', exact: true }).click();
   const restored = page.locator('#interface-language select');
   await expect(restored).toHaveValue('es', { timeout: 30_000 });

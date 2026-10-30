@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type { Warning } from '../lib/contentWarnings';
   let { warnings = undefined }: { warnings?: Warning[] } = $props();
@@ -91,7 +92,7 @@
         </button>
       </div>
       <ul>
-        {#each warnings as warning (warning.id)}<li>{warning.label}</li>{/each}
+        {#each warnings as warning (warning.id)}<li>{i18n.phrase(warning.label)}</li>{/each}
       </ul>
       <!-- The wording doesthedogdie's API terms require wherever their data shows (§6), word for word. -->
       <a href="https://www.doesthedogdie.com" target="_blank" rel="noopener noreferrer"

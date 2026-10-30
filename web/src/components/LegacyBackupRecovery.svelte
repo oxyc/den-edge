@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import Confirm from '../settings/Confirm.svelte';
 
   let { message, ondiscard }: { message: string; ondiscard: () => void } = $props();
 </script>
 
 <div class="library-status" role="alert">
-  <p>{message}</p>
+  <p>{i18n.phrase(message)}</p>
   <Confirm
     label="Start with an empty library…"
     question="Discard this old backup?"

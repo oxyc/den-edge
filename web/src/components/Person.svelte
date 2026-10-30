@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import Loading from './Loading.svelte';
   import Button from './Button.svelte';
   import PosterCard from './PosterCard.svelte';
@@ -171,7 +172,7 @@
       {:else}
         {#each groups as group (group.id)}
           <section class="role" aria-labelledby={`${panel}-${group.id}`}>
-            <h3 id={`${panel}-${group.id}`}>{group.label}</h3>
+            <h3 id={`${panel}-${group.id}`}>{i18n.phrase(group.label)}</h3>
             <div class="films" data-spatial-grid>
               {#each group.films.slice(0, counts[group.id] ?? 20) as c (`${c.title.type}:${c.title.id}`)}
                 <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),

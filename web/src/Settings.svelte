@@ -340,7 +340,7 @@
       <ExpandAll label={i18n.text('settings.title')} />
     </div>
     <SettingsNav variant="bar" sections={__DEN_TV_LEGACY_JS_CORE__ ? viewerSections : undefined} />
-    {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
+    {#if failure}<p class="banner bad" role="alert">{i18n.phrase(failure)}</p>{/if}
     {#if !ready}
       <div
         class:bad={!!loadError}

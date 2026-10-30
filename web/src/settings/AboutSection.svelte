@@ -1,6 +1,7 @@
 <!-- Settings › About, as on the TV: the Terms of Use and the credits the data's terms ask for — Den's own
      sources first, then each addon's, as its manifest names them (den-spec attribution-v1). -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { linkParts, type Credit } from './credits';
@@ -14,7 +15,7 @@
   } = $props();
 
   /** `TermsView`, word for word. */
-  const TERMS = [
+  const TERMS: readonly (readonly [string, string])[] = [
     [
       'Den is a neutral media player.',
       'Den plays your own media servers (Jellyfin / Plex) and discovers titles via TMDB. It ships no content and no sources of its own.',
@@ -55,8 +56,8 @@
 <SettingsSection id="about" title="About">
   <SettingRow id="terms" label="Terms of Use">
     {#each TERMS as [heading, body] (heading)}
-      <h3>{heading}</h3>
-      <p class="term">{body}</p>
+      <h3>{i18n.phrase(heading)}</h3>
+      <p class="term">{i18n.phrase(body)}</p>
     {/each}
   </SettingRow>
 </SettingsSection>

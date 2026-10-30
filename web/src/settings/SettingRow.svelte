@@ -3,6 +3,7 @@
      control of its own (a switch, a select) takes it as `control`. Whether it's open is kept with every other row's
      (`rows`), so its section's and the page's "Expand all" reach it. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { getContext, type Snippet } from 'svelte';
   import { rows, SECTION } from './rows.svelte';
 
@@ -48,9 +49,9 @@
       onclick={() => rows.toggle(id)}
     >
       <span class="label"
-        >{label}{#if detail}<small>{detail}</small>{/if}</span
+        >{i18n.phrase(label)}{#if detail}<small>{i18n.phrase(detail)}</small>{/if}</span
       >
-      {#if value}<span class="value">{value}</span>{/if}
+      {#if value}<span class="value">{i18n.phrase(value)}</span>{/if}
       <svg class="chevron" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
         <path d="m9 6 6 6-6 6" />
       </svg>
@@ -61,7 +62,7 @@
       class="panel"
       id="{id}-panel"
       role="region"
-      aria-label={label}
+      aria-label={i18n.phrase(label)}
       hidden={!open}
       onkeydown={(event) => {
         if (event.key !== 'Escape' || event.defaultPrevented) return;
@@ -74,9 +75,10 @@
   {:else}
     <div class="row static" data-spatial-anchor>
       <span class="label" id="{id}-label"
-        >{label}{#if detail}<small>{detail}</small>{/if}</span
+        >{i18n.phrase(label)}{#if detail}<small>{i18n.phrase(detail)}</small>{/if}</span
       >
-      {#if control}{@render control()}{:else if value}<span class="value">{value}</span>{/if}
+      {#if control}{@render control()}{:else if value}<span class="value">{i18n.phrase(value)}</span
+        >{/if}
     </div>
   {/if}
 </div>

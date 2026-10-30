@@ -25,6 +25,7 @@ import {
   readLocalInterfaceLanguage,
   type InterfaceLanguage,
 } from './interfaceLanguage';
+import { readPresentationLanguageHint } from './translationCache';
 
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the profile settings that name the watch region. */
@@ -175,12 +176,17 @@ export class ProfileSession {
 
   /** Resolved by the settings projection; a saved language affects the next content request. */
   get interfaceLanguage(): InterfaceLanguage {
-    const selected =
-      this.preferences?.value?.interfaceLanguage ??
-      this.policy?.settings?.value?.preferences.interfaceLanguage;
+    const personal = this.preferences?.value;
+    const household = this.policy?.settings?.value?.preferences;
+    const selected = personal?.interfaceLanguage ?? household?.interfaceLanguage;
     if (this.local)
       return readLocalInterfaceLanguage() ?? (isInterfaceLanguage(selected) ? selected : 'en');
-    return isInterfaceLanguage(selected) ? selected : 'en';
+    if (isInterfaceLanguage(selected)) return selected;
+    // Avoid painting English between a warm cached launch and the authoritative synced profile arriving.
+    // Once either preference projection has loaded, absence means the profile's actual default: English.
+    return personal === undefined && household === undefined
+      ? (readPresentationLanguageHint() ?? 'en')
+      : 'en';
   }
 
   /** Whether this profile's content is limited by a ceiling, an unknown-rating block or the Kid audience gate. */

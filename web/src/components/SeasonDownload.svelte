@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import ActionMenu from './ActionMenu.svelte';
   import { downloadSeason, type SeasonJob, type SeasonTitle } from '../lib/seasonDownloads.svelte';
@@ -114,7 +115,7 @@
         : ''}{job.waiting ? ` · ${job.waiting} waiting to air` : ''}{job.uncertain
         ? ` · ${job.uncertain} unconfirmed`
         : ''}
-    </p>{:else if failure}<p role="status">{failure}</p>{/if}
+    </p>{:else if failure}<p role="status">{i18n.phrase(failure)}</p>{/if}
 </div>
 
 {#snippet downloadLabel()}

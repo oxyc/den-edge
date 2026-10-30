@@ -3,6 +3,7 @@
 <script lang="ts">
   import type { MediaType } from '../lib/library';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     value,
@@ -26,20 +27,20 @@
   ];
 </script>
 
-<div class="filter" role="group" aria-label={label} data-spatial-list="horizontal">
+<div class="filter" role="group" aria-label={i18n.phrase(label)} data-spatial-list="horizontal">
   {#each FILTERS as filter (filter.label)}
     {#if href}
       <a
         href={href(filter.value)}
         aria-current={value === filter.value ? 'page' : undefined}
         onclick={(event) => activateLinkInPlace(event, () => onchange(filter.value))}
-        >{filter.label}</a
+        >{i18n.phrase(filter.label)}</a
       >
     {:else}
       <button
         type="button"
         aria-pressed={value === filter.value}
-        onclick={() => onchange(filter.value)}>{filter.label}</button
+        onclick={() => onchange(filter.value)}>{i18n.phrase(filter.label)}</button
       >
     {/if}
   {/each}

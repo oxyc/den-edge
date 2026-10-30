@@ -14,7 +14,7 @@
           d="M1 18v3h3a3 3 0 0 0-3-3Zm0-4v2a5 5 0 0 1 5 5h2a7 7 0 0 0-7-7Zm0-4v2a9 9 0 0 1 9 9h2A11 11 0 0 0 1 10Zm20-7H3a2 2 0 0 0-2 2v3h2V5h18v14h-7v2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"
         />
       </svg>
-      <span>Choose your Chromecast</span>
+      <span id="choose-label">Choose your Chromecast</span>
     </button>
     <main>
       <video controls playsinline x-webkit-airplay="allow"></video>
@@ -23,9 +23,11 @@
         <!-- main.ts puts Google's launcher before this menu once the Cast SDK has started (Chromium only; Safari has
              AirPlay instead and would draw an empty circle). The menu is revealed only while a session is connected. -->
         <details class="cast-options" hidden>
-          <summary aria-label="Cast options" title="Cast options">⋯</summary>
+          <summary id="cast-options-label" aria-label="Cast options" title="Cast options">
+            ⋯
+          </summary>
           <label>
-            <span>Receiver</span>
+            <span id="receiver-label">Receiver</span>
             <select id="profile">
               <option value="legacy">Chromecast 1–2</option>
               <option value="gen3">Chromecast 3</option>

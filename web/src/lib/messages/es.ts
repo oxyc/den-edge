@@ -1,4 +1,5 @@
 import type { MessageCatalog } from './en';
+export { phrases } from './phrases/es';
 
 export const messages = {
   'nav.main': 'Navegación principal',

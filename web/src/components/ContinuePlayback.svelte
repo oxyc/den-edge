@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
   import DetailIcon from './DetailIcon.svelte';
 
@@ -46,7 +47,7 @@
       <DetailIcon name="play" filled />
     </span>
     <span class="continue-copy">
-      <strong>{label}</strong>
+      <strong>{i18n.phrase(label)}</strong>
       {#if episode}<small>S{episode.season} · E{episode.episode}</small>{/if}
       {#if fraction !== undefined}
         <span class="resume-track"

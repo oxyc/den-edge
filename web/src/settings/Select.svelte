@@ -2,6 +2,8 @@
      keyboard, the system wheel on a phone. Quiet, it sits in a row where the TV shows the chosen value; boxed, it's a
      field of its own. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
+
   type Option = { value: string; label: string };
 
   let {
@@ -28,18 +30,18 @@
 <select
   class:boxed
   aria-labelledby={labelledby}
-  aria-label={label}
+  aria-label={label ? i18n.phrase(label) : undefined}
   {value}
   {disabled}
   onchange={(event) => onchange(event.currentTarget.value)}
 >
   {#each options as option (option.value)}
-    <option value={option.value}>{option.label}</option>
+    <option value={option.value}>{i18n.phrase(option.label)}</option>
   {/each}
   {#each groups as group (group.label)}
-    <optgroup label={group.label}>
+    <optgroup label={i18n.phrase(group.label)}>
       {#each group.options as option (option.value)}
-        <option value={option.value}>{option.label}</option>
+        <option value={option.value}>{i18n.phrase(option.label)}</option>
       {/each}
     </optgroup>
   {/each}

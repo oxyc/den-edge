@@ -1,6 +1,7 @@
 <!-- What the library itself says, above every page: a passing note ("Library updated to v4" on the browser that made
      the switch), and what keeps it from being written while that lasts ("Library update required"). -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   let {
     toast,
     alert,
@@ -13,10 +14,10 @@
   } = $props();
 </script>
 
-{#if alert}<p class="library-status" role="alert">{alert}</p>{/if}
+{#if alert}<p class="library-status" role="alert">{i18n.phrase(alert)}</p>{/if}
 {#if toast}<p class="library-status toast" role="status">
-    <span>{toast}</span>{#if undo}<button type="button" class="undo" onclick={undo.run}
-        >{undo.label}</button
+    <span>{i18n.phrase(toast)}</span>{#if undo}<button type="button" class="undo" onclick={undo.run}
+        >{i18n.phrase(undo.label)}</button
       >{/if}
   </p>{/if}
 

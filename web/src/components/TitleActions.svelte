@@ -20,6 +20,7 @@
   import { tick } from 'svelte';
   import { activateLinkInPlace } from '../lib/linkActivation';
   import { playOnLabel, type HouseholdTv } from '../lib/householdTvs';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     row,
@@ -409,7 +410,7 @@
           data-saving={pressed.saving('reaction') || undefined}
         >
           <ButtonIcon name={opinionIcon(reaction)} filled={reaction !== null} />
-          <span class="value" aria-hidden="true">{rated}</span>
+          <span class="value" aria-hidden="true">{i18n.phrase(rated)}</span>
           <span class="chevron"><ButtonIcon name="chevron" /></span>
           <select
             aria-label="Your opinion"
@@ -421,7 +422,8 @@
             }}
           >
             <option value="">No rating</option>
-            {#each reactions as [value, label] (value)}<option {value}>{label}</option>{/each}
+            {#each reactions as [value, label] (value)}<option {value}>{i18n.phrase(label)}</option
+              >{/each}
           </select>
         </div>
       {/if}
@@ -432,11 +434,11 @@
 {#snippet seenPicker()}
   <ButtonIcon name="eye" filled={seen} /><span>Seen</span>
 {/snippet}
-{#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p
+{#if failure}<p class="failure" role="alert">{i18n.phrase(failure)}</p>{:else if notice}<p
     class="notice"
     role="status"
   >
-    {notice}
+    {i18n.phrase(notice)}
   </p>{:else if away && !onplayhere}<p class="notice">
     {#if blocked}
       This browser is blocking Den from reaching your home network, so it cannot play here. Allow

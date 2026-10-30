@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   let {
     label = 'Loading',
     page = false,
@@ -19,7 +20,7 @@
   data-route-loading={page ? '' : undefined}
 >
   <span class="spinner" aria-hidden="true"></span>
-  <span class="label">{label}</span>
+  <span class="label">{i18n.phrase(label)}</span>
 </div>
 
 <style>

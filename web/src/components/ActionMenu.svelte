@@ -10,6 +10,7 @@
   import Button from './Button.svelte';
   import type { MenuItem } from '../lib/titleActions';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     items,
@@ -516,7 +517,7 @@
   aria-haspopup="menu"
   aria-expanded={open}
   aria-controls={prepared ? menuId : undefined}
-  aria-label={label}
+  aria-label={i18n.phrase(label)}
   onpointerdown={() => (triggerWasOpenOnPointerDown = showing())}
   onclick={toggleFromTrigger}
 >
@@ -538,11 +539,11 @@
       >
         <span class="sheet-handle" aria-hidden="true"></span>
         {#if heading}<p class="sheet-heading">{heading}</p>{/if}
-        {#if note}<p class="menu-note" id={`${menuId}-note`}>{note}</p>{/if}
+        {#if note}<p class="menu-note" id={`${menuId}-note`}>{i18n.phrase(note)}</p>{/if}
       </div>
     {:else}
       {#if __DEN_TV__ && heading}<p class="tv-menu-heading">{heading}</p>{/if}
-      {#if note}<p class="menu-note" id={`${menuId}-note`}>{note}</p>{/if}
+      {#if note}<p class="menu-note" id={`${menuId}-note`}>{i18n.phrase(note)}</p>{/if}
     {/if}
     <!-- Only a wrapper, so the menu still owns its items; on the sheet, what scrolls under the head. -->
     <div class="items" role="presentation" bind:this={list} onpointerdown={sheetPointerDown}>
@@ -566,7 +567,7 @@
           onclick={(event) => run(item, event)}
         >
           {#if item.description}<span class="item-description" id={`${menuId}-${i}`}
-              >{item.description}</span
+              >{i18n.phrase(item.description)}</span
             >{/if}
         </Button>
       {/each}
@@ -579,7 +580,7 @@
       class="menu"
       class:sheet={mobile}
       role="menu"
-      aria-label={label}
+      aria-label={i18n.phrase(label)}
       aria-describedby={note ? `${menuId}-note` : undefined}
       tabindex="-1"
       oncancel={cancelled}
@@ -599,7 +600,7 @@
       class:sheet={mobile}
       popover="auto"
       role="menu"
-      aria-label={label}
+      aria-label={i18n.phrase(label)}
       aria-describedby={note ? `${menuId}-note` : undefined}
       tabindex="-1"
       ontoggle={toggled}
