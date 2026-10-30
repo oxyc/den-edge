@@ -9,6 +9,7 @@ import {
 } from './detail';
 import {
   airDate,
+  airWindow,
   billboardFacts,
   calendarDate,
   cleanedOverview,
@@ -73,6 +74,20 @@ describe('detail presentation', () => {
     expect(airDate('2026-09-12', 'en-US')).toBe('Sep 12, 2026');
     expect(futureDate('2026-09-12', new Date(2026, 8, 12, 0))).toBe(false);
     expect(futureDate('2026-09-13', new Date(2026, 8, 12, 23))).toBe(true);
+  });
+  it('holds back only episodes more than seven calendar days out', () => {
+    const late = new Date(2026, 9, 30, 23, 59);
+    expect(airWindow('2026-11-05', late)).toBe('near'); // 6 days
+    expect(airWindow('2026-11-06', late)).toBe('near'); // 7 days
+    expect(airWindow('2026-11-07', late)).toBe('upcoming'); // 8 days
+    // Calendar days, not hours: just after midnight the 7th day ahead is still in.
+    expect(airWindow('2026-11-06', new Date(2026, 9, 30, 0, 1))).toBe('near');
+    expect(airWindow('2026-11-01', late)).toBe('near');
+    expect(airWindow('2026-10-30', late)).toBe('aired');
+    expect(airWindow('2020-01-01', late)).toBe('aired');
+    expect(airWindow(undefined, late)).toBe('aired');
+    // Across a DST change the day count stays whole.
+    expect(airWindow('2027-03-31', new Date(2027, 2, 24, 12))).toBe('near');
   });
   it('uses the future release date itself as a compact poster badge', () => {
     const now = new Date(2026, 8, 19, 23, 59);

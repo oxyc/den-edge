@@ -14,7 +14,7 @@
   import DetailIcon from './DetailIcon.svelte';
   import ActionMenu from './ActionMenu.svelte';
   import { RESUME_FLOOR, WATCHED } from '../lib/actions';
-  import { airDate, cleanedOverview, futureDate } from '../lib/detailPresentation';
+  import { airDate, airWindow, cleanedOverview, futureDate } from '../lib/detailPresentation';
   import type { MenuItem } from '../lib/titleActions';
   import type { Episode } from '../lib/detail';
   import { activateLinkInPlace } from '../lib/linkActivation';
@@ -64,20 +64,23 @@
     downloadState?: 'downloading' | 'ready';
   } = $props();
   const seen = $derived(progress >= WATCHED);
+  /** Not aired yet: the row says when it airs instead of describing it. */
   const upcoming = $derived(futureDate(episode.airDate));
+  /** Too far out to have a release: nothing to play, list or download. Within a week it acts like an aired one. */
+  const held = $derived(airWindow(episode.airDate) === 'upcoming');
   const date = $derived(airDate(episode.airDate));
   const menuItems = $derived<MenuItem[]>([
-    ...(onplaytv && !upcoming
+    ...(onplaytv && !held
       ? tvs.map((tv) => ({
           kind: 'item' as const,
           label: playOnLabel(tv, tvs),
           onselect: () => onplaytv(tv.id),
         }))
       : []),
-    ...(onsources && !upcoming
+    ...(onsources && !held
       ? [{ kind: 'item' as const, label: 'Sources', onselect: onsources }]
       : []),
-    ...(ondownload && !upcoming
+    ...(ondownload && !held
       ? [
           {
             kind: 'item' as const,
@@ -101,7 +104,7 @@
       onselect: () => onseen(!seen),
     },
   ]);
-  const inactive = $derived(upcoming || busy);
+  const inactive = $derived(held || busy);
 
   /**
    * A plain click plays here, and the link is the browser's for every other: a modifier or another button opens the
@@ -164,7 +167,7 @@
       aria-disabled={inactive || undefined}
       onclick={press}
       onkeydown={key}
-      aria-label={upcoming
+      aria-label={held
         ? i18n.format('episode.upcoming', 'Episode {number}: {name}. Airs {date}', {
             number: episode.number,
             name: episode.name,
@@ -191,7 +194,7 @@
         {:else}<span class="missing-art"><DetailIcon name="play" /></span>{/if}
         <span class="number">{episode.number}</span>
         {#if seen}<span class="watched"><DetailIcon name="check" /></span>{/if}
-        {#if !upcoming}<span class="play-glyph"><DetailIcon name="play" filled /></span>{/if}
+        {#if !held}<span class="play-glyph"><DetailIcon name="play" filled /></span>{/if}
         {#if progress > RESUME_FLOOR}<span class="progress"
             ><span class="progress-fill" style:width={`${seen ? 100 : progress * 100}%`}
             ></span></span

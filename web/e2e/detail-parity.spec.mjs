@@ -62,8 +62,27 @@ const episodes = (n) => ({
       air_date: n === 2 ? '2099-06-30' : '2024-01-08',
       overview: 'This must stay hidden until the episode airs.',
     },
+    // Due two days out: a streaming service may already have released it, so it plays like an aired one.
+    ...(n === 2
+      ? [
+          {
+            episode_number: 3,
+            name: 'Out early',
+            still_path: '/still.jpg',
+            runtime: 50,
+            air_date: daysFromToday(2),
+            overview: 'Released before its broadcast slot.',
+          },
+        ]
+      : []),
   ],
 });
+/** A local calendar date `days` from today, as TMDB writes it (`YYYY-MM-DD`). */
+function daysFromToday(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 const film = (id, name, year) => ({
   id,
   media_type: 'movie',
@@ -402,6 +421,28 @@ for (const width of [390, 834, 1280])
       await expect(upcoming.locator('.air-date')).toContainText('2099');
       await expect(upcoming.locator('.episode-play')).toBeDisabled();
       await expect(upcoming.locator('.overview')).toHaveCount(0);
+      const upcomingMenu = upcoming.getByRole('button', {
+        name: 'Options for episode 2',
+        exact: true,
+      });
+      await upcomingMenu.click();
+      await expect(upcoming.getByRole('menuitem', { name: 'Mark watched' })).toBeVisible();
+      await expect(upcoming.getByRole('menuitem', { name: 'Sources', exact: true })).toHaveCount(0);
+      await upcomingMenu.click();
+      // Within a week of its air date the episode still says when it airs, but Sources and Play work.
+      const near = active.locator('.episode').filter({ hasText: 'Out early' });
+      await expect(near.locator('.air-date')).toBeVisible();
+      const nearMenu = near.getByRole('button', { name: 'Options for episode 3', exact: true });
+      await nearMenu.click();
+      await expect(near.getByRole('menuitem', { name: 'Sources', exact: true })).toBeVisible();
+      await nearMenu.click();
+      const nearPlay = near.getByRole('link', { name: /Play episode 3/ });
+      await expect(nearPlay).not.toHaveAttribute('aria-disabled', 'true');
+      await nearPlay.click();
+      expect(await page.evaluate(() => window.plays.at(-1))).toMatchObject({
+        season: 2,
+        episode: 3,
+      });
       await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
       const studioRow = active.getByRole('region', { name: 'More from Studio Ghibli' });
       await expect(
