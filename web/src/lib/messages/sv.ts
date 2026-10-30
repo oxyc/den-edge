@@ -44,5 +44,7 @@ export const messages = {
   'page.downloads': 'Hämtningar',
   'page.people': 'Personer',
   'page.service': 'Tjänst',
+  'common.play': 'Spela',
+  'common.resume': 'Fortsätt',
   'common.close': 'Stäng',
 } as const satisfies MessageCatalog;

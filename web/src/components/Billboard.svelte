@@ -14,6 +14,7 @@
   import { SvelteSet } from 'svelte/reactivity';
   import Button from './Button.svelte';
   import TitleActions from './TitleActions.svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import { leavesBillboard, nextSlide, type SlideAction } from '../lib/billboardActions';
   import type { TitleRow } from '../lib/wire';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
@@ -1106,7 +1107,7 @@
                     variant="primary"
                     size="large"
                     icon="play"
-                    label="Play"
+                    label={i18n.text('common.play')}
                     href={titleHref({ ...title, play: true })}
                     tabindex={n === index ? 0 : -1}
                     onclick={(event) => activateLinkInPlace(event, () => onplay(title))}

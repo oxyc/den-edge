@@ -52,6 +52,7 @@
   import type { Warning } from '../lib/contentWarnings';
   import type { MenuItem } from '../lib/titleActions';
   import type { HouseholdTv } from '../lib/householdTvs';
+  import { i18n } from '../lib/i18n.svelte';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -1031,7 +1032,7 @@
             {failure}
             {notice}
             detailPage
-            playLabel={continuing ? 'Resume' : 'Play'}
+            playLabel={i18n.text(continuing ? 'common.resume' : 'common.play')}
             onwatchlist={(on) => onwatchlist(d.title, on)}
             onseen={(on) => onseen(d.title, on)}
             {seenOverride}

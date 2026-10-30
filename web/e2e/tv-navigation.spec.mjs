@@ -340,6 +340,40 @@ test('Home returns to the TV root without loading a backend document', async ({ 
   await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeVisible();
 });
 
+test('interface language translates routes and actions and survives a reload', async ({ page }) => {
+  await setup(page);
+  await browse(page);
+
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  const language = page.getByRole('combobox', {
+    name: 'Interface language',
+    exact: true,
+  });
+  await expect(language).toBeEnabled({ timeout: 30_000 });
+  await language.selectOption('es');
+
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es');
+  await expect(page.getByRole('heading', { name: 'Ajustes', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Buscar', exact: true })).toBeVisible();
+
+  await page.getByRole('link', { name: 'Inicio', exact: true }).click();
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });
+  await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Ajustes', exact: true }).click();
+  const restored = page.locator('#interface-language select');
+  await expect(restored).toHaveValue('es', { timeout: 30_000 });
+
+  await restored.selectOption('en');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+  await expect(page.getByRole('link', { name: 'Home', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+  await expect(page.locator('#interface-language select')).toHaveValue('en', { timeout: 30_000 });
+});
+
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({
   page,
 }) => {

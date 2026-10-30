@@ -1805,6 +1805,10 @@
                   preferences={session.preferences}
                   content={session.content}
                   local={session.local}
+                  oninterfacelanguage={(language) => {
+                    session.presentIn(language);
+                    void setInterfaceLanguage(language);
+                  }}
                   onjoin={!link && (session.local || ownHousehold) ? joinLibrary : undefined}
                   onresetkey={resetLibraryKey}
                   heldReset={pendingReset?.held === true}

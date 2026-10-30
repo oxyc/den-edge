@@ -27,6 +27,12 @@
   import type { ContentServiceClientPort } from './lib/contentServiceClient';
   import Button from './components/Button.svelte';
   import { keyboardInput } from './lib/inputModality';
+  import { i18n } from './lib/i18n.svelte';
+  import {
+    readLocalInterfaceLanguage,
+    rememberLocalInterfaceLanguage,
+    type InterfaceLanguage,
+  } from './lib/interfaceLanguage';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -38,6 +44,7 @@
     onresetkey,
     heldReset = false,
     onadoptheld,
+    oninterfacelanguage,
     preferences = null,
   }: {
     link: Link | null;
@@ -55,6 +62,7 @@
     onresetkey?: () => Promise<KeyResetOutcome | null>;
     heldReset?: boolean;
     onadoptheld?: () => Promise<void>;
+    oninterfacelanguage?: (language: InterfaceLanguage) => void;
   } = $props();
 
   let connectionsLease = $state.raw(untrack(() => model.connections()));
@@ -72,6 +80,9 @@
     recoveryLease?.snapshot.value ? structuredClone(recoveryLease.snapshot.value) : undefined,
   );
   const effectivePreferences = $derived(preferences ? preferences.value : settings?.preferences);
+  let localInterfaceLanguage = $state(
+    untrack(() => (local ? readLocalInterfaceLanguage() : undefined)),
+  );
   const ready = $derived(!!settings && !!effectivePreferences && !!connections);
   const loadError = $derived(model.settings.error ?? connectionsLease.snapshot.error);
   let retrying = $state(false);
@@ -94,7 +105,13 @@
     })
     .catch(() => undefined);
 
-  const prefs = $derived(effectivePreferences ? structuredClone(effectivePreferences) : undefined);
+  const prefs = $derived.by(() => {
+    if (!effectivePreferences) return undefined;
+    const value = structuredClone(effectivePreferences);
+    return local
+      ? { ...value, interfaceLanguage: localInterfaceLanguage ?? value.interfaceLanguage }
+      : value;
+  });
   // Undefined means the encrypted Settings view is still opening. It is never presented as an empty plugin list.
   const plugins = $derived(connections ? structuredClone(connections.plugins) : undefined);
   const pluginUrls = $derived(plugins?.map((plugin) => plugin.manifestUrl) ?? []);
@@ -160,7 +177,13 @@
 
   async function patchPreferences(changes: PreferenceChanges): Promise<void> {
     if (!preferences) {
+      const localLanguage = local ? changes.interfaceLanguage : undefined;
       await model.patchPreferences(changes);
+      if (localLanguage) {
+        localInterfaceLanguage = localLanguage;
+        rememberLocalInterfaceLanguage(localLanguage);
+        oninterfacelanguage?.(localLanguage);
+      }
       return;
     }
     // Every preference, region and services included, belongs to the active profile's library; the household's write
@@ -313,8 +336,8 @@
   <SettingsNav variant="rail" sections={__DEN_TV_LEGACY_JS_CORE__ ? viewerSections : undefined} />
   <div class="page">
     <div class="title">
-      <h1>Settings</h1>
-      <ExpandAll label="Settings" />
+      <h1>{i18n.text('settings.title')}</h1>
+      <ExpandAll label={i18n.text('settings.title')} />
     </div>
     <SettingsNav variant="bar" sections={__DEN_TV_LEGACY_JS_CORE__ ? viewerSections : undefined} />
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}

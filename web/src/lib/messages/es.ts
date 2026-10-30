@@ -45,5 +45,7 @@ export const messages = {
   'page.downloads': 'Descargas',
   'page.people': 'Personas',
   'page.service': 'Servicio',
+  'common.play': 'Reproducir',
+  'common.resume': 'Reanudar',
   'common.close': 'Cerrar',
 } as const satisfies MessageCatalog;

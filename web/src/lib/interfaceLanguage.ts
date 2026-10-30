@@ -14,6 +14,31 @@ export const interfaceLocale = (language: InterfaceLanguage): string =>
 export const tmdbLanguage = (language: InterfaceLanguage): string | undefined =>
   language === 'en' ? undefined : interfaceLocale(language);
 
+const LOCAL_INTERFACE_LANGUAGE = 'den.interfaceLanguage.local.v1';
+
+/** An unpaired Look Around library has no synced identity; keep its presentation choice on this browser. */
+export function readLocalInterfaceLanguage(
+  storage: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage,
+): InterfaceLanguage | undefined {
+  try {
+    const value = storage?.getItem(LOCAL_INTERFACE_LANGUAGE);
+    return isInterfaceLanguage(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function rememberLocalInterfaceLanguage(
+  language: InterfaceLanguage,
+  storage: Pick<Storage, 'setItem'> | undefined = globalThis.localStorage,
+): void {
+  try {
+    storage?.setItem(LOCAL_INTERFACE_LANGUAGE, language);
+  } catch {
+    // A storage-refusing browser keeps the choice for this visit through the reactive settings projection.
+  }
+}
+
 interface ReadAnswer {
   readonly version: 1;
   readonly selection: {

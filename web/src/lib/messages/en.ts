@@ -42,6 +42,8 @@ export const ENGLISH_MESSAGES = {
   'page.downloads': 'Downloads',
   'page.people': 'People',
   'page.service': 'Service',
+  'common.play': 'Play',
+  'common.resume': 'Resume',
   'common.close': 'Close',
 } as const;
 
