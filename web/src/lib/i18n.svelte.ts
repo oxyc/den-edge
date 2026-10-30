@@ -10,6 +10,20 @@ import {
   translationCacheSchema,
 } from './translationCache';
 
+/** Non-reactive bounded cache: insertion is an implementation detail and must never invalidate a view. */
+class StableCache<Key, Value> {
+  readonly #values = new Map<Key, Value>();
+  constructor(entries: readonly (readonly [Key, Value])[] = []) {
+    for (const [key, value] of entries) this.#values.set(key, value);
+  }
+  get(key: Key): Value | undefined {
+    return this.#values.get(key);
+  }
+  set(key: Key, value: Value): void {
+    this.#values.set(key, value);
+  }
+}
+
 interface LoadedCatalog {
   readonly messages: MessageCatalog;
   readonly phrases: Readonly<Record<string, string>>;
@@ -46,9 +60,8 @@ let state = $state.raw<{
 });
 
 let requested = 0;
-// Plain module Maps are deliberately outside Svelte state: warming a cache must never invalidate a view.
-const pluralRules = new Map<InterfaceLanguage, Intl.PluralRules>();
-let phraseKeys: Map<string, string> | undefined;
+const pluralRules = new StableCache<InterfaceLanguage, Intl.PluralRules>();
+let phraseKeys: StableCache<string, string> | undefined;
 
 const phraseKey = (value: string): string => {
   let hash = 0x811c9dc5;
@@ -58,7 +71,7 @@ const phraseKey = (value: string): string => {
   }
   return (hash >>> 0).toString(36);
 };
-const loaded = new Map<InterfaceLanguage, VersionedCatalog>([
+const loaded = new StableCache<InterfaceLanguage, VersionedCatalog>([
   [
     'en',
     {
@@ -72,7 +85,7 @@ const loaded = new Map<InterfaceLanguage, VersionedCatalog>([
 ]);
 
 function translatedPhrase(english: string): string {
-  phraseKeys ??= new Map();
+  phraseKeys ??= new StableCache();
   let key = phraseKeys.get(english);
   if (!key) {
     key = phraseKey(english);
