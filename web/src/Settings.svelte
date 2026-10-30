@@ -33,6 +33,7 @@
     rememberLocalInterfaceLanguage,
     type InterfaceLanguage,
   } from './lib/interfaceLanguage';
+  import { rememberFreshPresentationLanguage } from './lib/translationCache';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -110,7 +111,7 @@
     const value = structuredClone(effectivePreferences);
     return local
       ? { ...value, interfaceLanguage: localInterfaceLanguage ?? value.interfaceLanguage }
-      : value;
+      : { ...value, interfaceLanguage: i18n.language };
   });
   // Undefined means the encrypted Settings view is still opening. It is never presented as an empty plugin list.
   const plugins = $derived(connections ? structuredClone(connections.plugins) : undefined);
@@ -177,12 +178,15 @@
 
   async function patchPreferences(changes: PreferenceChanges): Promise<void> {
     if (!preferences) {
-      const localLanguage = local ? changes.interfaceLanguage : undefined;
+      const language = changes.interfaceLanguage;
       await model.patchPreferences(changes);
-      if (localLanguage) {
-        localInterfaceLanguage = localLanguage;
-        rememberLocalInterfaceLanguage(localLanguage);
-        oninterfacelanguage?.(localLanguage);
+      if (language) {
+        rememberFreshPresentationLanguage(language);
+        if (local) {
+          localInterfaceLanguage = language;
+          rememberLocalInterfaceLanguage(language);
+        }
+        oninterfacelanguage?.(language);
       }
       return;
     }
@@ -192,6 +196,10 @@
     const { maturityCeiling, ...personal } = changes;
     if ('maturityCeiling' in changes) await model.patchPreferences({ maturityCeiling });
     if (Object.keys(personal).length) await preferences.patch(personal);
+    if (changes.interfaceLanguage) {
+      rememberFreshPresentationLanguage(changes.interfaceLanguage);
+      oninterfacelanguage?.(changes.interfaceLanguage);
+    }
   }
   const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));
   const removeLibraryDevice = (id: string) => run(() => model.removeDevice(id));

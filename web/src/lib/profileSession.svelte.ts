@@ -25,7 +25,10 @@ import {
   readLocalInterfaceLanguage,
   type InterfaceLanguage,
 } from './interfaceLanguage';
-import { readPresentationLanguageHint } from './translationCache';
+import {
+  readFreshPresentationLanguageHint,
+  readPresentationLanguageHint,
+} from './translationCache';
 
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the profile settings that name the watch region. */
@@ -178,15 +181,20 @@ export class ProfileSession {
   get interfaceLanguage(): InterfaceLanguage {
     const personal = this.preferences?.value;
     const household = this.policy?.settings?.value?.preferences;
-    const selected = personal?.interfaceLanguage ?? household?.interfaceLanguage;
+    // A persistent/preview profile owns an effective preference projection. Do not fall through from a temporarily
+    // absent personal value to the household control log: committed profiles inherit by an explicit seed, and that
+    // old household value may be English while the profile's newer Spanish/Swedish write is revalidating.
+    const selected = this.preferences ? personal?.interfaceLanguage : household?.interfaceLanguage;
     if (this.local)
       return readLocalInterfaceLanguage() ?? (isInterfaceLanguage(selected) ? selected : 'en');
+    const fresh = readFreshPresentationLanguageHint();
+    if (fresh && fresh !== selected) return fresh;
     if (isInterfaceLanguage(selected)) return selected;
-    // Avoid painting English between a warm cached launch and the authoritative synced profile arriving.
-    // Once either preference projection has loaded, absence means the profile's actual default: English.
-    return personal === undefined && household === undefined
-      ? (readPresentationLanguageHint() ?? 'en')
-      : 'en';
+    // A profile-scoped presentation hint is the stale half of startup's stale-while-revalidate path. Keep using it
+    // while a restored profile projection has no interface-language value: its latest write may already be accepted
+    // by Edge while this browser is still reopening or repairing its encrypted projection. A real synced value above
+    // (including explicit English) remains authoritative after the short reload-revalidation grace period.
+    return readPresentationLanguageHint() ?? 'en';
   }
 
   /** Whether this profile's content is limited by a ceiling, an unknown-rating block or the Kid audience gate. */

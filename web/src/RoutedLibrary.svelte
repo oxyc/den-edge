@@ -232,11 +232,6 @@
   let session = $state.raw(
     untrack(() => open(libraryIdentity, !link && !ownHousehold && libraryIdentity !== null)),
   );
-  $effect(() => {
-    const language = session.interfaceLanguage;
-    session.presentIn(language);
-    void setInterfaceLanguage(language);
-  });
   let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
@@ -415,6 +410,14 @@
             : profileCoordinator.restoring))),
   );
   const shown = $derived(optimistic && optimisticOwner ? optimisticOwner : session);
+  $effect(() => {
+    // During profile restoration `shown` is the cached Owner session while `session` is a hidden household
+    // bootstrap. Presentation must follow what is actually rendered; otherwise the bootstrap's default English
+    // overwrites the profile-scoped hint after the correct non-English first paint.
+    const language = shown.interfaceLanguage;
+    shown.presentIn(language);
+    void setInterfaceLanguage(language);
+  });
   const localLegacyBackup = $derived(
     shown.local && shown.alert?.startsWith('This backup predates Library v4.') ? shown.alert : null,
   );

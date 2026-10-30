@@ -5,7 +5,9 @@ import { presentationLanguageKeyForScope } from './presentationLanguageHint';
 
 export {
   currentPresentationScope,
+  readFreshPresentationLanguageHint,
   readPresentationLanguageHint,
+  rememberFreshPresentationLanguage,
   rememberPresentationLanguage,
 } from './presentationLanguageHint';
 

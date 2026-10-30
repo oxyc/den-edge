@@ -2,6 +2,8 @@ import type { InterfaceLanguage } from './interfaceLanguage';
 
 const LEGACY_KEY = 'den.interfaceLanguage.presentation.v1';
 const KEY_PREFIX = 'den.interfaceLanguage.presentation.v2.';
+const WRITTEN_AT_SUFFIX = '.written-at';
+const REVALIDATION_GRACE_MS = 5 * 60_000;
 const isInterfaceLanguage = (value: unknown): value is InterfaceLanguage =>
   value === 'en' || value === 'es' || value === 'sv';
 
@@ -59,6 +61,27 @@ export function readPresentationLanguageHint(
   }
 }
 
+/** A just-selected browser value wins while its encrypted synced projection catches up after a reload. */
+export function readFreshPresentationLanguageHint(
+  source: Pick<Storage, 'getItem'> | undefined = availableStorage(),
+  now = Date.now(),
+): InterfaceLanguage | undefined {
+  try {
+    const key = presentationLanguageKey(source);
+    const language = source?.getItem(key);
+    const writtenAt = Number(source?.getItem(`${key}${WRITTEN_AT_SUFFIX}`));
+    return isInterfaceLanguage(language) &&
+      Number.isFinite(writtenAt) &&
+      writtenAt > 0 &&
+      now - writtenAt >= 0 &&
+      now - writtenAt <= REVALIDATION_GRACE_MS
+      ? language
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function rememberPresentationLanguage(
   language: InterfaceLanguage,
   target: Pick<Storage, 'getItem' | 'setItem'> | undefined = availableStorage(),
@@ -67,5 +90,19 @@ export function rememberPresentationLanguage(
     target?.setItem(presentationLanguageKey(target), language);
   } catch {
     // The synced preference remains authoritative; only this profile's next first-frame hint is unavailable.
+  }
+}
+
+/** Mark a completed viewer selection as newer than a projection that may be stale during the next reload. */
+export function rememberFreshPresentationLanguage(
+  language: InterfaceLanguage,
+  target: Pick<Storage, 'getItem' | 'setItem'> | undefined = availableStorage(),
+): void {
+  try {
+    const key = presentationLanguageKey(target);
+    target?.setItem(key, language);
+    target?.setItem(`${key}${WRITTEN_AT_SUFFIX}`, String(Date.now()));
+  } catch {
+    // Sync still holds the choice; only its short reload bridge is unavailable.
   }
 }

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   readCachedTranslationCatalog,
+  readFreshPresentationLanguageHint,
   readPresentationLanguageHint,
+  rememberFreshPresentationLanguage,
   rememberPresentationLanguage,
   rememberTranslationCatalog,
   translationCacheKeys,
@@ -25,6 +27,16 @@ describe('translation cache', () => {
     expect(readPresentationLanguageHint(kept)).toBeUndefined();
     rememberPresentationLanguage('sv', kept);
     expect(readPresentationLanguageHint(kept)).toBe('sv');
+  });
+
+  it('gives a completed selection only a bounded revalidation grace period', () => {
+    const kept = memory();
+    rememberFreshPresentationLanguage('es', kept);
+    const selectedAt = Number(
+      kept.values.get('den.interfaceLanguage.presentation.v2.default.written-at'),
+    );
+    expect(readFreshPresentationLanguageHint(kept, selectedAt)).toBe('es');
+    expect(readFreshPresentationLanguageHint(kept, selectedAt + 5 * 60_000 + 1)).toBeUndefined();
   });
 
   it('keeps first-frame language hints separate for profiles sharing one browser', () => {
