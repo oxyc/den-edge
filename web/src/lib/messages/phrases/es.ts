@@ -803,7 +803,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Searching: 'Buscando',
   season: 'temporada',
   Season: 'Temporada',
-  seasons: 'estaciones',
+  seasons: 'temporadas',
   Seasons: 'Temporadas',
   'Seek previews': 'Buscar vistas previas',
   Seen: 'Visto',

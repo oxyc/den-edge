@@ -153,6 +153,14 @@ for (const profiles of [false, true]) {
       await expect(
         laptop.getByRole('combobox', { name: 'Idioma de la interfaz', exact: true }),
       ).toHaveValue('es', { timeout: 30_000 });
+
+      // A client-side route after the reload must use that restored language too. This catches a shell whose
+      // Settings view restored Spanish while ordinary library content fell back to English.
+      await laptop.goto(`${E2E_ORIGIN}/watchlist`);
+      await expect(laptop.getByRole('heading', { name: 'Mi lista', level: 1 })).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(laptop.getByRole('link', { name: 'Mi lista', exact: true })).toBeVisible();
     });
   });
 }

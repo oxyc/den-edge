@@ -422,9 +422,9 @@
 {/snippet}
 
 <div class="title">
-  <h1>Watchlist</h1>
+  <h1>{i18n.phrase('Watchlist')}</h1>
   <!-- The library's other list: what the debrid is fetching for it, from any device. -->
-  <a class="aside" href="/downloads">Downloads ›</a>
+  <a class="aside" href="/downloads">{i18n.phrase('Downloads')} ›</a>
 </div>
 {#if failure}<p class="failure" role="alert">{i18n.phrase(failure)}</p>{/if}
 <p class="visually-hidden" aria-live="polite">{confirming?.question ?? ''}</p>
@@ -462,10 +462,11 @@
 {/if}
 
 {#if savedCounts.all}
-  <section aria-label="Watchlist">
+  <section aria-label={i18n.phrase('Watchlist')}>
     <div class="heading">
       <h2>
-        Watchlist <span class="count">{savedKind ? savedCounts[savedKind] : savedCounts.all}</span>
+        {i18n.phrase('Watchlist')}
+        <span class="count">{savedKind ? savedCounts[savedKind] : savedCounts.all}</span>
       </h2>
       <TypeFilter
         value={savedKind}

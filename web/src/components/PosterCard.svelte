@@ -24,6 +24,7 @@
   import { contentServiceContext } from '../lib/contentContext';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import { titleCaption, type Title } from '../lib/library';
+  import { localizePosterCaption } from '../lib/localizedRuntimeCopy';
   import { libraryShapes, libraryStandings } from '../lib/standing.svelte';
   import { startupMarkOnce } from '../lib/startupTiming';
   import ActionMenu from './ActionMenu.svelte';
@@ -157,6 +158,7 @@
   const line = $derived(
     landscape ? caption : titleCaption(title, caption, libraryShapes.of(title), lead),
   );
+  const localizedLine = $derived(localizePosterCaption(line, (part) => i18n.phrase(part)));
   // A download row's own state replaces the standing badge outright: the title may well be "Seen" from an
   // earlier season, which says nothing about the episode this card is fetching.
   const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
@@ -306,8 +308,8 @@
         class="standing download-{downloadBadge.state}"
         class:raised={progress}
         role="img"
-        aria-label={downloadBadge.label}
-        title={downloadBadge.label}
+        aria-label={i18n.phrase(downloadBadge.label)}
+        title={i18n.phrase(downloadBadge.label)}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           {#if downloadBadge.state === 'queued'}
@@ -337,8 +339,8 @@
         class="standing"
         class:raised={progress}
         role="img"
-        aria-label={standingLabel[standing]}
-        title={standingLabel[standing]}
+        aria-label={i18n.phrase(standingLabel[standing])}
+        title={i18n.phrase(standingLabel[standing])}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           {#if standing === 'watched'}
@@ -359,7 +361,7 @@
   </span>
   <span class="meta">
     <span class="name">{title.title}</span>
-    {#if line}<span class="caption">{line}</span>{/if}
+    {#if localizedLine}<span class="caption">{localizedLine}</span>{/if}
   </span>
 {/snippet}
 
