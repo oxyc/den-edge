@@ -65,6 +65,7 @@ jobs:
             exit 1
           }
 
+          npm ci --ignore-scripts
           npm install --global @webos-tools/cli@3.2.6
           node scripts/tv-package.mjs webos --url https://den-tv.oxy.fi/ --version "$version"
           mkdir -p tv-release/den-tv-webos
