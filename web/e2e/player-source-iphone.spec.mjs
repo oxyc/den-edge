@@ -192,11 +192,13 @@ async function guestPlayer(page, { hearth, originalLanguage, automaticSubtitles 
     await expect(page.locator('#subtitle-language select')).toHaveValue('__automatic', {
       timeout: 30_000,
     });
+    await expect(page.locator('#interface-language select')).toHaveValue('sv');
+    await expect(page.locator('html')).toHaveAttribute('lang', 'sv');
   }
   await page.goto(`${ORIGIN}/movie/${TITLE}`);
   const play = page
     .locator('[data-active="true"]')
-    .getByRole('link', { name: 'Play', exact: true });
+    .getByRole('link', { name: automaticSubtitles ? 'Spela' : 'Play', exact: true });
   await expect(play).toBeVisible({ timeout: 30_000 });
   await play.tap();
   await expect

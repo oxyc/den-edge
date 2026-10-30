@@ -20,7 +20,11 @@ import type {
 import type { ProfileActivity } from './visitorActivity.svelte';
 import { SyncedProfilePreferences, type ProfilePreferences } from './profilePreferences.svelte';
 import { LocalizedContent } from './localizedContent';
-import { isInterfaceLanguage, type InterfaceLanguage } from './interfaceLanguage';
+import {
+  isInterfaceLanguage,
+  readLocalInterfaceLanguage,
+  type InterfaceLanguage,
+} from './interfaceLanguage';
 
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the profile settings that name the watch region. */
@@ -174,6 +178,8 @@ export class ProfileSession {
     const selected =
       this.preferences?.value?.interfaceLanguage ??
       this.policy?.settings?.value?.preferences.interfaceLanguage;
+    if (this.local)
+      return readLocalInterfaceLanguage() ?? (isInterfaceLanguage(selected) ? selected : 'en');
     return isInterfaceLanguage(selected) ? selected : 'en';
   }
 
