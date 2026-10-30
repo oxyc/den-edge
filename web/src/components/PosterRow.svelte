@@ -14,6 +14,7 @@
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { i18n } from '../lib/i18n.svelte';
+  import { capitalizeHeading } from '../lib/headingText';
 
   let {
     heading,
@@ -36,6 +37,20 @@
     /** The horizontal scroller, for a loader that windows and extends its own cards. */
     track?: HTMLDivElement;
   } = $props();
+
+  const localizedHeading = $derived(capitalizeHeading(i18n.phrase(heading), i18n.language));
+  const localizedAriaLabel = $derived(
+    capitalizeHeading(i18n.phrase(ariaLabel ?? heading), i18n.language),
+  );
+  const localizedHeadingLink = $derived.by(() => {
+    if (!headingLink) return undefined;
+    let before = i18n.phrase(headingLink.before);
+    let label = i18n.phrase(headingLink.label);
+    const after = i18n.phrase(headingLink.after);
+    if (before) before = capitalizeHeading(before, i18n.language);
+    else label = capitalizeHeading(label, i18n.language);
+    return { ...headingLink, before, label, after };
+  });
 
   /**
    * Whether the row is within `AHEAD` of the active screen. Far and retained-hidden rows release their images;
@@ -76,20 +91,18 @@
   });
 </script>
 
-<section class="row" aria-label={i18n.phrase(ariaLabel ?? heading)} bind:this={section}>
+<section class="row" aria-label={localizedAriaLabel} bind:this={section}>
   <div class="head">
     <h2>
       <span class="heading-copy">
-        {#if headingLink && !__DEN_TV__}
-          {i18n.phrase(headingLink.before)}<a class="heading-link" href={headingLink.href}
-            >{i18n.phrase(headingLink.label)}</a
-          >{i18n.phrase(headingLink.after)}
-        {:else if headingLink}
-          {i18n.phrase(headingLink.before)}{i18n.phrase(headingLink.label)}{i18n.phrase(
-            headingLink.after,
-          )}
+        {#if localizedHeadingLink && !__DEN_TV__}
+          {localizedHeadingLink.before}<a class="heading-link" href={localizedHeadingLink.href}
+            >{localizedHeadingLink.label}</a
+          >{localizedHeadingLink.after}
+        {:else if localizedHeadingLink}
+          {localizedHeadingLink.before}{localizedHeadingLink.label}{localizedHeadingLink.after}
         {:else}
-          {i18n.phrase(heading)}
+          {localizedHeading}
         {/if}
       </span>
     </h2>

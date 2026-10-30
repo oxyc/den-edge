@@ -813,6 +813,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Series: 'Serie',
   'Series details': 'Seriedetaljer',
   'server?': 'server?',
+  Services: 'Tjänster',
+  'Services unavailable': 'Tjänsterna är inte tillgängliga',
   'Services are licensed per country, so pick them by country. Each becomes a brand tile on Home, opening that country’s catalogue. Every pick shares the one shelf, and a tile says which country it is for when you have picked the same service twice. The “where to watch” badges on individual titles still follow your own region.':
     'Tjänsterna är licensierade per land, så välj dem efter land. Var och en blir en varumärkesbricka på Home, vilket öppnar landets katalog. Varje plocka delar på en hylla, och en bricka säger vilket land det är för när du har plockat samma tjänst två gånger. Märkena "var att titta på" på enskilda titlar följer fortfarande din egen region.',
   'Set an Owner PIN': 'Ställ in en ägar-PIN',
