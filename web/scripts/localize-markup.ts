@@ -173,10 +173,9 @@ export const localizeMarkup = () => ({
     visit(ast.fragment, [], edits, phrases);
     if (!edits.length) return { code: content };
 
-    if (
-      !content.includes("from './lib/i18n.svelte'") &&
-      !content.includes("from '../lib/i18n.svelte'")
-    ) {
+    const importsI18n =
+      /import\s*\{[^}]*\bi18n\b[^}]*\}\s*from\s*['"][^'"]*\/i18n\.svelte['"]/.test(content);
+    if (!importsI18n) {
       let module = relative(
         filename.slice(0, filename.lastIndexOf(sep)),
         `${process.cwd()}/src/lib/i18n.svelte`,

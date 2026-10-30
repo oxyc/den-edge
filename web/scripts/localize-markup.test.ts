@@ -23,6 +23,19 @@ describe('UI translation coverage', () => {
     expect(result.code).toContain('i18n.phrase("Home")');
   });
 
+  it('imports the i18n binding when a component imports only another language helper', () => {
+    const source = `<script>import { setInterfaceLanguage } from './lib/i18n.svelte';</script>
+      <button>Downloads</button>`;
+    const result = localizeMarkup().markup({
+      content: source,
+      filename: `${process.cwd()}/src/TranslationFixture.svelte`,
+    });
+
+    expect(result.code).toContain('import { setInterfaceLanguage }');
+    expect(result.code).toContain('import { i18n } from "./lib/i18n.svelte"');
+    expect(result.code).toContain('i18n.phrase("Downloads")');
+  });
+
   it('keeps Spanish and Swedish catalogs complete and translates prominent navigation and shelves', () => {
     expect(Object.keys(spanish)).toEqual(Object.keys(swedish));
     expect(spanish).toMatchObject({
