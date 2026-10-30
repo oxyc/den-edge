@@ -686,7 +686,15 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'progress.record':
       return (
-        exact(value, ['kind', 'title', 'episode', 'fraction', 'seconds', 'observedAt']) &&
+        exact(value, [
+          'kind',
+          'title',
+          'episode',
+          'fraction',
+          'seconds',
+          'playing',
+          'observedAt',
+        ]) &&
         titleRef(value.title) &&
         optional(value.episode, episodeRef) &&
         (value.episode === undefined ||
@@ -696,6 +704,7 @@ function command(value: unknown): value is LibraryCommand {
         value.fraction <= 1 &&
         finite(value.seconds) &&
         value.seconds >= 0 &&
+        optional(value.playing, bool) &&
         integer(value.observedAt)
       );
     case 'preferences.patch':
@@ -1237,14 +1246,15 @@ function version(value: unknown): value is LibraryVersion {
 
 function progress(
   value: unknown,
-): value is { fraction: number; seconds?: number; updatedAt?: number } {
+): value is { fraction: number; seconds?: number; playing?: boolean; updatedAt?: number } {
   return (
     record(value) &&
-    exact(value, ['fraction', 'seconds', 'updatedAt']) &&
+    exact(value, ['fraction', 'seconds', 'playing', 'updatedAt']) &&
     finite(value.fraction) &&
     value.fraction >= 0 &&
     value.fraction <= 1 &&
     optional(value.seconds, finite) &&
+    optional(value.playing, bool) &&
     optional(value.updatedAt, integer)
   );
 }
@@ -1257,6 +1267,7 @@ function continueItem(value: unknown): value is ContinueItem {
       'fraction',
       'episode',
       'seconds',
+      'playing',
       'updatedAt',
       'liveEpisode',
       'liveFraction',
@@ -1294,6 +1305,7 @@ function continueItem(value: unknown): value is ContinueItem {
       (candidate): candidate is number => finite(candidate) && candidate >= 0 && candidate <= 1,
     ) &&
     optional(value.seconds, finite) &&
+    optional(value.playing, bool) &&
     optional(value.updatedAt, integer) &&
     optional(value.device, text) &&
     optional(

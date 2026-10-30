@@ -221,6 +221,7 @@ export type LibraryCommand =
       episode?: EpisodeRef;
       fraction: number;
       seconds: number;
+      playing?: boolean;
       observedAt: number;
     }
   | { kind: 'preferences.patch'; patch: LibraryPreferencesPatch }
@@ -389,6 +390,8 @@ export interface ContinueItem {
   fraction: number;
   episode?: { season: number; episode: number };
   seconds?: number;
+  /** Explicit producer state at `updatedAt`; absent on positions from older clients. */
+  playing?: boolean;
   updatedAt?: number;
   /** The episode and fraction supplying `seconds`, when the resume target above is already another episode. */
   liveEpisode?: { season: number; episode: number };
@@ -454,13 +457,14 @@ export interface TitleView {
   watched: boolean;
   reaction: Reaction | null;
   standing: Standing | null;
-  progress: { fraction: number; seconds?: number; updatedAt?: number } | null;
+  progress: { fraction: number; seconds?: number; playing?: boolean; updatedAt?: number } | null;
   episodes: Array<{
     season: number;
     episode: number;
     watched: boolean;
     fraction: number;
     seconds?: number;
+    playing?: boolean;
     updatedAt?: number;
   }>;
 }

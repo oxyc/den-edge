@@ -1,6 +1,6 @@
 import { RESUME_FLOOR, WATCHED } from './actions';
 
-export type ProgressWrite = (fraction: number, seconds: number) => void;
+export type ProgressWrite = (fraction: number, seconds: number, playing: boolean) => void;
 
 export type PlaybackContent = 'movie' | 'episode';
 
@@ -47,6 +47,8 @@ export class PlaybackProgressReporter {
   private reported = -1;
   private completed = false;
   private sourceEverPlayed = false;
+  private isPlaying = false;
+  private reportedPlaying: boolean | undefined;
   /** Playback started or resumed and no position has been written since. */
   private starting = false;
 
@@ -59,6 +61,11 @@ export class PlaybackProgressReporter {
     this.completed = false;
     this.sourceEverPlayed = true;
     this.starting = true;
+    this.isPlaying = true;
+  }
+
+  paused() {
+    this.isPlaying = false;
   }
 
   /**
@@ -78,10 +85,16 @@ export class PlaybackProgressReporter {
     });
     if (fraction === null) return;
     const second = Math.floor(currentTime);
-    if (this.reported >= 0 && Math.abs(second - this.reported) <= slack) return;
+    if (
+      this.reported >= 0 &&
+      Math.abs(second - this.reported) <= slack &&
+      this.reportedPlaying === this.isPlaying
+    )
+      return;
     this.reported = second;
+    this.reportedPlaying = this.isPlaying;
     this.starting = false;
-    this.write(fraction, second);
+    this.write(fraction, second, this.isPlaying);
   }
 
   complete(currentTime: number) {
@@ -89,6 +102,8 @@ export class PlaybackProgressReporter {
     const second = Number.isFinite(currentTime) ? Math.max(0, Math.floor(currentTime)) : 0;
     this.completed = true;
     this.reported = second;
-    this.write(1, second);
+    this.isPlaying = false;
+    this.reportedPlaying = false;
+    this.write(1, second, false);
   }
 }

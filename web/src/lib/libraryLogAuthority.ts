@@ -2065,22 +2065,30 @@ export class LibraryLogAuthority {
       const before =
         this.#log.episode(command.episode, command.episode.season, command.episode.episode) ??
         blankEpisode(command.episode, command.episode.season, command.episode.episode);
-      if (before.progress.value === command.fraction && before.progress.seconds === command.seconds)
+      if (
+        before.progress.value === command.fraction &&
+        before.progress.seconds === command.seconds &&
+        before.progress.playing === command.playing
+      )
         return this.#unchanged();
       await this.#clock.see(this.#log.newestStamp());
       const at = await this.#clock.issue(command.observedAt);
       return this.#writeRow(
-        updateEpisodeProgress(before, command.fraction, command.seconds, at),
+        updateEpisodeProgress(before, command.fraction, command.seconds, at, command.playing),
         this.#affected(command.title),
       );
     }
     const before = this.#log.title(command.title) ?? blankTitle(command.title, command.observedAt);
-    if (before.resume.value === command.fraction && before.resume.seconds === command.seconds)
+    if (
+      before.resume.value === command.fraction &&
+      before.resume.seconds === command.seconds &&
+      before.resume.playing === command.playing
+    )
       return this.#unchanged();
     await this.#clock.see(this.#log.newestStamp());
     const at = await this.#clock.issue(command.observedAt);
     return this.#writeRow(
-      updateProgress(before, command.fraction, command.seconds, at),
+      updateProgress(before, command.fraction, command.seconds, at, command.playing),
       this.#affected(command.title),
     );
   }

@@ -17,11 +17,23 @@ export const WATCHED = 0.95;
 export const RESUME_FLOOR = 0.02;
 
 /** A resume point moved to `fraction` (the TV's `updateProgress`); playing past the end of a finished one is a replay. */
-function moved(progress: Progress, fraction: number, seconds: number, at: Stamp): Progress {
+function moved(
+  progress: Progress,
+  fraction: number,
+  seconds: number,
+  at: Stamp,
+  playing?: boolean,
+): Progress {
   const value = Math.min(1, Math.max(0, fraction));
   // A replay starts a new viewing, or the finished one's 100% outvotes every new position.
   const replay = progress.value >= WATCHED && value < WATCHED;
-  return { value, at, viewing: progress.viewing + (replay ? 1 : 0), seconds };
+  return {
+    value,
+    at,
+    viewing: progress.viewing + (replay ? 1 : 0),
+    seconds,
+    ...(playing !== undefined ? { playing } : {}),
+  };
 }
 
 /** Where playback of a movie got to: in progress, or seen past the credits' start. */
@@ -30,8 +42,9 @@ export function updateProgress(
   fraction: number,
   seconds: number,
   at: Stamp,
+  playing?: boolean,
 ): TitleRow {
-  const resume = moved(row.resume, fraction, seconds, at);
+  const resume = moved(row.resume, fraction, seconds, at, playing);
   if (resume.value >= WATCHED)
     return { ...row, resume, status: { value: 'watched', at }, watchedAt: row.watchedAt ?? at[0] };
   if (resume.value > 0) return { ...row, resume, status: { value: 'inProgress', at } };
@@ -44,8 +57,9 @@ export function updateEpisodeProgress(
   fraction: number,
   seconds: number,
   at: Stamp,
+  playing?: boolean,
 ): EpisodeRow {
-  return { ...row, progress: moved(row.progress, fraction, seconds, at) };
+  return { ...row, progress: moved(row.progress, fraction, seconds, at, playing) };
 }
 
 /** A title the library has never held: every field at the zero stamp, so any real edit beats it. */

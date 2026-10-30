@@ -172,13 +172,14 @@ export function continueItems(
 ): Extract<LibrarySelectionValue, { kind: 'continue' }>['items'] {
   return projector
     .project(library)
-    .map(({ ref, fraction, episode, seconds, at, liveEpisode, liveFraction, by }) => {
+    .map(({ ref, fraction, episode, seconds, playing, at, liveEpisode, liveFraction, by }) => {
       const device = by && deviceName(devices, by)?.slice(0, 256);
       return {
         title: { type: ref.type, id: ref.id },
         fraction,
         ...(episode ? { episode } : {}),
         ...(seconds !== undefined ? { seconds } : {}),
+        ...(playing !== undefined ? { playing } : {}),
         ...(at !== undefined ? { updatedAt: at } : {}),
         ...(liveEpisode ? { liveEpisode } : {}),
         ...(liveFraction !== undefined ? { liveFraction } : {}),

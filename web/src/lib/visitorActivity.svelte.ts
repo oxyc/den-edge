@@ -41,11 +41,12 @@ export interface ProfileActivity {
     fraction: number,
     seconds: number,
     episode?: { season: number; episode: number },
+    playing?: boolean,
   ): Promise<{ delivery: 'local' }>;
   setContinueDismissed(title: Title, dismissed: boolean): Promise<{ delivery: 'local' }>;
 }
 
-type Progress = { fraction: number; seconds?: number; updatedAt: number };
+type Progress = { fraction: number; seconds?: number; playing?: boolean; updatedAt: number };
 type EpisodeActivity = Progress & { watched: boolean; season: number; episode: number };
 type TitleActivity = {
   title: Title;
@@ -104,6 +105,7 @@ export class VisitorActivityProjection implements ProfileActivity {
             title: activity.title,
             fraction: progress.fraction,
             seconds: progress.seconds,
+            playing: progress.playing,
             at: progress.updatedAt,
           });
         continue;
@@ -117,6 +119,7 @@ export class VisitorActivityProjection implements ProfileActivity {
           fraction: episode.fraction,
           episode: { season: episode.season, episode: episode.episode },
           seconds: episode.seconds,
+          playing: episode.playing,
           at: episode.updatedAt,
         });
     }
@@ -242,6 +245,7 @@ export class VisitorActivityProjection implements ProfileActivity {
     fraction: number,
     seconds: number,
     episode?: { season: number; episode: number },
+    playing?: boolean,
   ): Promise<{ delivery: 'local' }> {
     return this.#change((state) => {
       const activity = this.#ensure(state, title);
@@ -254,11 +258,12 @@ export class VisitorActivityProjection implements ProfileActivity {
           ...episode,
           fraction,
           seconds,
+          playing,
           updatedAt,
           watched: fraction >= WATCHED,
         };
       } else {
-        activity.progress = { fraction, seconds, updatedAt };
+        activity.progress = { fraction, seconds, playing, updatedAt };
         activity.watched = fraction >= WATCHED;
         activity.watchedAt = activity.watched ? updatedAt : undefined;
       }
@@ -289,7 +294,12 @@ export class VisitorActivityProjection implements ProfileActivity {
             ? 'watchlist'
             : null,
       progress: progress
-        ? { fraction: progress.fraction, seconds: progress.seconds, updatedAt: progress.updatedAt }
+        ? {
+            fraction: progress.fraction,
+            seconds: progress.seconds,
+            playing: progress.playing,
+            updatedAt: progress.updatedAt,
+          }
         : null,
       episodes: Object.values(activity.episodes).map((item) => ({
         season: item.season,
@@ -297,6 +307,7 @@ export class VisitorActivityProjection implements ProfileActivity {
         watched: item.watched,
         fraction: item.fraction,
         seconds: item.seconds,
+        playing: item.playing,
         updatedAt: item.updatedAt,
       })),
     };
@@ -450,13 +461,15 @@ export class VisitorActivityProjection implements ProfileActivity {
       typeof raw.updatedAt !== 'number' ||
       !Number.isFinite(raw.updatedAt) ||
       (raw.seconds !== undefined &&
-        (typeof raw.seconds !== 'number' || !Number.isFinite(raw.seconds)))
+        (typeof raw.seconds !== 'number' || !Number.isFinite(raw.seconds))) ||
+      (raw.playing !== undefined && typeof raw.playing !== 'boolean')
     )
       return undefined;
     return {
       fraction: raw.fraction,
       updatedAt: raw.updatedAt,
       ...(typeof raw.seconds === 'number' ? { seconds: raw.seconds } : {}),
+      ...(typeof raw.playing === 'boolean' ? { playing: raw.playing } : {}),
     };
   }
 

@@ -113,6 +113,7 @@ export interface LibraryRecord {
   progressAt: number;
   /** The resume point in seconds, where the device that wrote it knew it. */
   seconds?: number;
+  playing?: boolean;
   /** The stamp device id of the device that wrote the resume point. */
   progressBy?: string;
   addedAt: number;
@@ -127,6 +128,7 @@ export interface Mark {
   fraction: number;
   updatedAt: number;
   seconds?: number;
+  playing?: boolean;
   /** The stamp device id of the device that wrote it. */
   updatedBy?: string;
   title: string;
@@ -191,6 +193,8 @@ export interface ContinueEntry {
   episode?: { season: number; episode: number };
   /** Where it was last playing, in seconds, and when that was written (epoch ms): `livePosition`. */
   seconds?: number;
+  /** Explicit state at `at`; absent for legacy rows whose movement is inferred. */
+  playing?: boolean;
   at?: number;
   /** The episode and fraction that supplied a live position, when Continue Watching offers another episode. */
   liveEpisode?: { season: number; episode: number };
@@ -317,6 +321,7 @@ class LibraryFold {
       progress: row.resume.value,
       progressAt: row.resume.at[0],
       ...(row.resume.seconds !== undefined ? { seconds: row.resume.seconds } : {}),
+      ...(row.resume.playing !== undefined ? { playing: row.resume.playing } : {}),
       ...(row.resume.at[2] ? { progressBy: row.resume.at[2] } : {}),
       addedAt: row.addedAt,
       deleted: row.deleted.value,
@@ -382,6 +387,7 @@ function markFromEpisode(
     fraction: decided.fraction,
     updatedAt: decided.at,
     ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
+    ...(row.progress.playing !== undefined ? { playing: row.progress.playing } : {}),
     ...(row.progress.at[2] ? { updatedBy: row.progress.at[2] } : {}),
     title: display?.title ?? '',
     posterPath: display?.posterPath,
@@ -887,6 +893,7 @@ function continueCandidates(
       ...(positioned
         ? {
             seconds: mark.seconds,
+            ...(mark.playing !== undefined ? { playing: mark.playing } : {}),
             at: mark.updatedAt,
             liveEpisode: { season: mark.season, episode: mark.episode },
             liveFraction: mark.fraction,
@@ -911,6 +918,7 @@ function continueCandidates(
       ...(record.seconds !== undefined
         ? {
             seconds: record.seconds,
+            ...(record.playing !== undefined ? { playing: record.playing } : {}),
             at: record.progressAt,
             ...(record.progressBy ? { by: record.progressBy } : {}),
           }

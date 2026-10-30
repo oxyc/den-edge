@@ -42,14 +42,14 @@ export interface Sighting {
  */
 export function sight(
   previous: Sighting | undefined,
-  entry: { seconds?: number; at?: number },
+  entry: { seconds?: number; at?: number; playing?: boolean },
 ): Sighting | undefined {
   if (entry.seconds === undefined || entry.at === undefined) return undefined;
   if (previous && entry.at <= previous.at) return previous;
   return {
     seconds: entry.seconds,
     at: entry.at,
-    moving: !previous || entry.seconds !== previous.seconds,
+    moving: entry.playing ?? (!previous || entry.seconds !== previous.seconds),
   };
 }
 

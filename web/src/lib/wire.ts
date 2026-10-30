@@ -90,6 +90,8 @@ export interface Progress {
   at: Stamp;
   viewing: number;
   seconds?: number;
+  /** Producer truth for this write; absent on rows from older clients. */
+  playing?: boolean;
 }
 
 export interface TitleRow {
