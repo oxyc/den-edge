@@ -43,6 +43,7 @@
           row.atlasHeading,
           i18n.language,
           i18n.phrase,
+          i18n.format,
           row.atlasHeadingMediaType,
           row.title,
         )
