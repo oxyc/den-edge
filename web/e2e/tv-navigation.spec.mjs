@@ -357,6 +357,12 @@ test('interface language translates routes and actions and survives a reload', a
   await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Buscar', exact: true })).toBeVisible();
 
+  // A lazily loaded route must use the selected catalog too; this is the journey that previously left page copy
+  // such as Downloads in English even though the navigation had changed.
+  await page.goto(`${E2E_ORIGIN}/downloads`);
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });
+  await expect(page.getByRole('heading', { name: 'Descargas', level: 1 })).toBeVisible();
+
   await page.getByRole('link', { name: 'Inicio', exact: true }).click();
   await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
   await page.reload();

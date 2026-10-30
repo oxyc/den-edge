@@ -4,6 +4,7 @@ import type { Plugin, ProxyOptions, ViteDevServer } from 'vite';
 import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
 import { upstream } from './scripts/upstream.ts';
+import { localizeMarkup } from './scripts/localize-markup.ts';
 
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
 // den-edge — the homelab's by default, DEN_EDGE for another. Under e2e (`DEN_E2E=1`) it is never a real one.
@@ -203,7 +204,7 @@ export default defineConfig({
     previewProfiles(),
     previewBuild(),
     ...(watching ? [probe()] : []),
-    svelte(),
+    svelte({ preprocess: localizeMarkup() }),
     preloadApplication(),
   ],
   server: {

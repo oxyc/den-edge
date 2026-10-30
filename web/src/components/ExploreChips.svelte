@@ -55,6 +55,7 @@
 
 <script lang="ts">
   import { navigate } from '../lib/navigation';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     chips,
@@ -222,7 +223,7 @@
     href={href(item.id)}
     aria-current={item.group === 'for-you' && !typing && selected.length === 0 ? 'page' : undefined}
     data-chip={item.id}
-    onclick={(event) => choose(event, item.id)}>{item.label}</a
+    onclick={(event) => choose(event, item.id)}>{i18n.phrase(item.label)}</a
   >
 {/snippet}
 
@@ -240,8 +241,8 @@
 
 {#snippet sectioned()}
   {#each listed() as section (section.group)}
-    <div class="section" role="group" aria-label={section.heading}>
-      <h2 class="heading">{section.heading}</h2>
+    <div class="section" role="group" aria-label={i18n.phrase(section.heading)}>
+      <h2 class="heading">{i18n.phrase(section.heading)}</h2>
       <div class="list">
         {#each section.shown as item (item.id)}{@render chip(item)}{/each}
       </div>
@@ -281,8 +282,8 @@
   </div>
   <div class="sheet-body">
     {#each sheetSections as section (section.group)}
-      <div class="sheet-section" role="group" aria-label={section.heading}>
-        <h3 class="heading">{section.heading}</h3>
+      <div class="sheet-section" role="group" aria-label={i18n.phrase(section.heading)}>
+        <h3 class="heading">{i18n.phrase(section.heading)}</h3>
         <div class="row" class:spread={spread[section.group]}>
           {#each spread[section.group] ? section.chips : section.chips.slice(0, first(section.group)) as item (item.id)}{@render chip(
               item,

@@ -1,5 +1,7 @@
 <!-- A single choice among a few short options (subtitles per language, the parental limit), as radio buttons. -->
 <script lang="ts" generics="T">
+  import { i18n } from '../lib/i18n.svelte';
+
   let {
     name,
     labelledby,
@@ -29,7 +31,7 @@
         {disabled}
         onchange={() => onchange(option.value)}
       />
-      <span>{option.label}</span>
+      <span>{i18n.phrase(option.label)}</span>
     </label>
   {/each}
 </div>

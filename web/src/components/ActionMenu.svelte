@@ -10,6 +10,7 @@
   import Button from './Button.svelte';
   import type { MenuItem } from '../lib/titleActions';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     items,
@@ -566,7 +567,7 @@
           onclick={(event) => run(item, event)}
         >
           {#if item.description}<span class="item-description" id={`${menuId}-${i}`}
-              >{item.description}</span
+              >{i18n.phrase(item.description)}</span
             >{/if}
         </Button>
       {/each}

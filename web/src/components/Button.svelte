@@ -57,6 +57,7 @@
 </script>
 
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
 
   let {
@@ -113,11 +114,14 @@
   function unavailable() {
     return busy || disabled || ariaDisabled === true || ariaDisabled === 'true';
   }
+
+  const localizedLabel = $derived(label ? i18n.phrase(label) : undefined);
+  const localizedAriaLabel = $derived(i18n.phrase(ariaLabel ?? ariaLabelAttribute ?? label ?? ''));
 </script>
 
 {#snippet contents()}
   {#if icon}<ButtonIcon name={icon} filled={iconFilled} />{/if}
-  {#if label}<span class="den-button-label">{label}</span>{/if}
+  {#if localizedLabel}<span class="den-button-label">{localizedLabel}</span>{/if}
   {#if children}{@render children()}{/if}
 {/snippet}
 
@@ -127,9 +131,9 @@
     role={role ?? 'link'}
     tabindex={tabindex ?? (unavailable() ? 0 : undefined)}
     {id}
-    {title}
+    title={title ? i18n.phrase(title) : undefined}
     class="den-button den-button-{variant} den-button-{size} {className}"
-    aria-label={ariaLabel ?? ariaLabelAttribute ?? label}
+    aria-label={localizedAriaLabel || undefined}
     aria-describedby={ariaDescribedby}
     aria-busy={busy || ariaBusy || undefined}
     aria-disabled={unavailable() || undefined}
@@ -148,11 +152,11 @@
     bind:this={element}
     {type}
     {id}
-    {title}
+    title={title ? i18n.phrase(title) : undefined}
     {role}
     {tabindex}
     class="den-button den-button-{variant} den-button-{size} {className}"
-    aria-label={ariaLabel ?? ariaLabelAttribute ?? label}
+    aria-label={localizedAriaLabel || undefined}
     aria-describedby={ariaDescribedby}
     aria-pressed={pressed ?? ariaPressed}
     aria-checked={ariaChecked}

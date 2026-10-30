@@ -1,6 +1,8 @@
 <!-- A list the TV draws as one row per option, as a grid of checkboxes: a hide list (HideRow) dims what's hidden and
      marks it with an eye-slash, a pick list (SelectRow) marks what's picked with a checkmark. -->
 <script lang="ts" generics="T extends string | number">
+  import { i18n } from '../lib/i18n.svelte';
+
   let {
     legend,
     options,
@@ -26,7 +28,7 @@
 </script>
 
 <fieldset class:stacked>
-  <legend>{legend}</legend>
+  <legend>{i18n.phrase(legend)}</legend>
   <div class="grid" class:wide class:stacked>
     {#each options as option (option.value)}
       <label
@@ -42,8 +44,8 @@
           onchange={(event) => onchange(option.value, event.currentTarget.checked)}
         />
         <span class="name"
-          >{option.label}{#if option.note}
-            <small>{option.note}</small>{/if}</span
+          >{i18n.phrase(option.label)}{#if option.note}
+            <small>{i18n.phrase(option.note)}</small>{/if}</span
         >
         <!-- Right after the label rather than at the cell's far end, where in a grid cell wider than its label it
              would read as belonging to the next one. -->

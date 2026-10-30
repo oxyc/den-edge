@@ -2334,7 +2334,8 @@
     const looking = castFrame?.contentWindow;
     if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
       const message = event.data as { type?: string; available?: unknown; profile?: unknown };
-      if (message.type === 'den-ready') looking.postMessage({ type: 'den-discover' }, lookOrigin);
+      if (message.type === 'den-ready')
+        looking.postMessage({ type: 'den-discover', interfaceLanguage }, lookOrigin);
       else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
         look({ kind: 'availability', available: message.available });
       else if (message.type === 'den-cast-session' && castOffer === 'choose') {
@@ -2586,7 +2587,10 @@
     const next = castLook(castOffer, event);
     castOffer = next.offer;
     if (next.offer === 'choose' && discoveredOrigin)
-      castFrame?.contentWindow?.postMessage({ type: 'den-choose' }, discoveredOrigin);
+      castFrame?.contentWindow?.postMessage(
+        { type: 'den-choose', interfaceLanguage },
+        discoveredOrigin,
+      );
     if (next.offer !== 'looking' && next.offer !== 'choose') lookOrigin = undefined;
     if (!next.move || !session) return;
     castOffered = true;

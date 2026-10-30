@@ -1,6 +1,7 @@
 <!-- Explore and People, side by side as the page's heading: the page open is its title, the other beside it, dimmed,
      a link there carrying what both understand (`peopleFromExplore`, `exploreFromPeople`). -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   let {
     current,
     explore,
@@ -21,9 +22,9 @@
 <nav class="tabs" aria-label="Explore or People">
   {#each tabs as tab (tab.id)}
     {#if tab.id === current}
-      <h1><a href={tab.href} aria-current="page">{tab.label}</a></h1>
+      <h1><a href={tab.href} aria-current="page">{i18n.phrase(tab.label)}</a></h1>
     {:else}
-      <a class="other" href={tab.href}>{tab.label}</a>
+      <a class="other" href={tab.href}>{i18n.phrase(tab.label)}</a>
     {/if}
   {/each}
 </nav>

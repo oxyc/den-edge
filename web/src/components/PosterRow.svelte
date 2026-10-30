@@ -13,6 +13,7 @@
   import { setContext, type Snippet } from 'svelte';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     heading,
@@ -75,22 +76,27 @@
   });
 </script>
 
-<section class="row" aria-label={ariaLabel ?? heading} bind:this={section}>
+<section class="row" aria-label={i18n.phrase(ariaLabel ?? heading)} bind:this={section}>
   <div class="head">
     <h2>
       <span class="heading-copy">
         {#if headingLink && !__DEN_TV__}
-          {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
-          >{headingLink.after}
+          {i18n.phrase(headingLink.before)}<a class="heading-link" href={headingLink.href}
+            >{i18n.phrase(headingLink.label)}</a
+          >{i18n.phrase(headingLink.after)}
         {:else if headingLink}
-          {headingLink.before}{headingLink.label}{headingLink.after}
+          {i18n.phrase(headingLink.before)}{i18n.phrase(headingLink.label)}{i18n.phrase(
+            headingLink.after,
+          )}
         {:else}
-          {heading}
+          {i18n.phrase(heading)}
         {/if}
       </span>
     </h2>
     {#if aside}
-      <a class="aside" href={aside.href} aria-label={aside.ariaLabel}>{aside.label} ›</a>
+      <a class="aside" href={aside.href} aria-label={i18n.phrase(aside.ariaLabel ?? aside.label)}
+        >{i18n.phrase(aside.label)} ›</a
+      >
     {/if}
   </div>
   <div class="track" bind:this={track}>
