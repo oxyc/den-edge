@@ -40,7 +40,7 @@
   const services = createWorkerServiceSession();
   const content = services.content;
   let open = $state(!startsClosed);
-  let progress = $state<{ fraction: number; seconds: number }>();
+  let progress = $state<{ fraction: number; seconds: number; playing: boolean }>();
   let progressWrites = $state(0);
   let closeCount = $state(0);
   let nextCount = $state(0);
@@ -94,8 +94,8 @@
     next={hasNext ? 'S1 · E2' : undefined}
     {castDiscoveryMs}
     {castPlayMs}
-    onprogress={(fraction, seconds) => {
-      progress = { fraction, seconds };
+    onprogress={(fraction, seconds, _at, playing) => {
+      progress = { fraction, seconds, playing };
       progressWrites += 1;
     }}
     onclose={() => {
