@@ -21,6 +21,9 @@ const object = (value: unknown): value is Record<string, unknown> =>
  * Bounds keep a compromised upstream from turning a shelf title into unbounded retained UI state.
  */
 export function atlasHeadingOf(value: unknown): AtlasHeading | undefined {
+  if (typeof value === 'string' && value && Array.from(value).length <= MAX_FALLBACK) {
+    return { id: 'den.legacy', args: {}, fallback: value };
+  }
   if (!object(value)) return undefined;
   const { id, fallback } = value;
   // `arguments` was briefly published by the first rollout worktree. Read it during the transition; all newly
@@ -133,6 +136,7 @@ export function formatAtlasHeading(
   if (language === 'en') return heading.fallback;
   const fixed = FIXED[heading.id]?.[language];
   if (fixed) return shelfWithMediaType(fixed, shelfMediaType, language);
+  if (heading.id.startsWith('atlas.taxonomy.')) return phrase(heading.fallback);
   const argument = heading.args;
   const service = stringArgument(argument.service);
   let localized: string | undefined;

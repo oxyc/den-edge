@@ -132,5 +132,10 @@ describe('Atlas shelf headings', () => {
     expect(atlasHeadingOf({ id: 'shelf.watchlist', arguments: {}, fallback: 'Watchlist' })).toEqual(
       { id: 'shelf.watchlist', args: {}, fallback: 'Watchlist' },
     );
+    expect(atlasHeadingOf('Continue Watching')).toEqual({
+      id: 'den.legacy',
+      args: {},
+      fallback: 'Continue Watching',
+    });
   });
 });
