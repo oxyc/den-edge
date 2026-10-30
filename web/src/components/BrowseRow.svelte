@@ -3,6 +3,7 @@
      empty hides itself. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
+  import { formatAtlasHeading } from '../lib/atlasHeading';
   import { onDestroy, tick } from 'svelte';
   import type { RowDef } from '../lib/catalog';
   import {
@@ -37,18 +38,28 @@
   } = $props();
 
   const localizedHeading = $derived(
-    row.titleMessage
-      ? i18n.format(
-          row.titleMessage.id,
+    row.atlasHeading && i18n.language !== 'en'
+      ? formatAtlasHeading(
+          row.atlasHeading,
+          i18n.language,
+          i18n.phrase,
+          row.atlasHeadingMediaType,
           row.title,
-          Object.fromEntries(
-            Object.entries(row.titleMessage.values).map(([key, value]) => [
-              key,
-              row.titleMessage?.translateValues?.includes(key) ? i18n.phrase(String(value)) : value,
-            ]),
-          ),
         )
-      : i18n.phrase(row.title),
+      : row.titleMessage
+        ? i18n.format(
+            row.titleMessage.id,
+            row.title,
+            Object.fromEntries(
+              Object.entries(row.titleMessage.values).map(([key, value]) => [
+                key,
+                row.titleMessage?.translateValues?.includes(key)
+                  ? i18n.phrase(String(value))
+                  : value,
+              ]),
+            ),
+          )
+        : i18n.phrase(row.title),
   );
   const localizedHeadingLink = $derived.by(() => {
     if (!row.headingLink || !row.titleMessage) return row.headingLink;

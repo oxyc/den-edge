@@ -61,6 +61,7 @@ import {
 } from './titleMetadata';
 import { reuse } from './reuse';
 import { parseRecommendationSlides } from './recommend';
+import { atlasHeadingOf } from './atlasHeading';
 import { discoverParams } from './catalog';
 import { awaitingPicture, searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
@@ -1466,11 +1467,20 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
               : [];
             const type: MediaType | null =
               entry.type === 'series' ? 'tv' : entry.type === 'movie' ? 'movie' : null;
+            const heading = atlasHeadingOf(entry.heading);
             return providerIds.length &&
               type &&
               typeof entry.id === 'string' &&
               typeof entry.name === 'string'
-              ? [{ id: entry.id, name: entry.name, type, providerIds }]
+              ? [
+                  {
+                    id: entry.id,
+                    name: entry.name,
+                    type,
+                    providerIds,
+                    ...(heading ? { heading } : {}),
+                  },
+                ]
               : [];
           });
           return { state: 'ready', value } as const;

@@ -75,6 +75,7 @@ export type ContentKidsHomeSource =
 export interface ContentKidsHomeRow {
   id: string;
   title: string;
+  heading?: import('./atlasHeading').AtlasHeading;
   group: string;
   source: ContentKidsHomeSource;
 }
@@ -298,6 +299,7 @@ export interface ContentServiceDirectoryEntry {
 export interface ContentAtlasCatalog {
   id: string;
   name: string;
+  heading?: import('./atlasHeading').AtlasHeading;
   type: MediaType;
   providerIds: number[];
 }

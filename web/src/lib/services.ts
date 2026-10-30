@@ -168,6 +168,8 @@ export function atlasServiceRows(
       return {
         id: `service-atlas-${service.id}-${country}-${catalog.id}-${catalog.type}`,
         title: mixed ? `${catalog.name} · ${NOUN[catalog.type]}` : catalog.name,
+        atlasHeading: catalog.heading,
+        atlasHeadingMediaType: mixed ? catalog.type : undefined,
         type: catalog.type,
         replaces: catalog.id.endsWith('-new')
           ? ('new' as const)

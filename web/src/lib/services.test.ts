@@ -173,7 +173,17 @@ describe('atlas rows', () => {
     catalogs: [
       { type: 'movie', id: 'jw-trending', name: 'Trending Everywhere' },
       { type: 'movie', id: 'jw-nfx', name: 'Popular on Netflix', denProviderIds: [8] },
-      { type: 'movie', id: 'jw-nfx-new', name: 'New on Netflix', denProviderIds: [8] },
+      {
+        type: 'movie',
+        id: 'jw-nfx-new',
+        name: 'New on Netflix',
+        denProviderIds: [8],
+        heading: {
+          id: 'atlas.catalog.new_on',
+          args: { service: 'Netflix' },
+          fallback: 'New on Netflix',
+        },
+      },
       { type: 'series', id: 'jw-nfx-leaving', name: 'Leaving Netflix Soon', denProviderIds: [8] },
       { type: 'movie', id: 'jw-prv', name: 'Popular on Prime Video', denProviderIds: [119, 9] },
       { type: 'movie', id: 'den-titles', name: 'Titles' },
@@ -189,6 +199,11 @@ describe('atlas rows', () => {
     expect(listed.map((c) => c.id)).toEqual(['jw-nfx', 'jw-nfx-new', 'jw-nfx-leaving', 'jw-prv']);
     expect(at(listed, 2).type, 'a series catalog').toBe('tv');
     expect(at(listed, 3).providerIds, 'every id the catalog covers').toEqual([119, 9]);
+    expect(at(listed, 1).heading).toEqual({
+      id: 'atlas.catalog.new_on',
+      args: { service: 'Netflix' },
+      fallback: 'New on Netflix',
+    });
   });
 
   it('asks atlas for the service’s own charts, in the country the page is for', async () => {
@@ -210,6 +225,8 @@ describe('atlas rows', () => {
       'Popular on Netflix · Movies',
       'Leaving Netflix Soon · Series',
     ]);
+    expect(rows[0]?.atlasHeading?.id).toBe('atlas.catalog.new_on');
+    expect(rows[0]?.atlasHeadingMediaType).toBe('movie');
     await Promise.all(rows.map((row) => row.load(1)));
     expect(asked).toEqual([
       '/atlas/catalog/movie/jw-nfx-new/country=FI.json',
