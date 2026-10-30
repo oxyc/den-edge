@@ -8,6 +8,11 @@ import type { ConfigValue, SettingsRow } from '../lib/wire';
 import { readSubtitlePreference, writeSubtitlePreference } from '../lib/subtitlePreference';
 import type { SubtitlePreference } from '../lib/subtitlePreference';
 import {
+  readInterfaceLanguage,
+  writeInterfaceLanguage,
+  type InterfaceLanguage,
+} from '../lib/interfaceLanguage';
+import {
   acceptsProfilePreference,
   isProfileLanguage,
   isProfileRegion,
@@ -22,6 +27,8 @@ import {
 } from '../lib/profilePreferenceSchema';
 
 export interface SyncedPrefs {
+  /** The profile-scoped UI and automatic-subtitle language. */
+  interfaceLanguage: InterfaceLanguage;
   excludedGenres: number[];
   excludedLanguages: string[];
   hideAnime: boolean;
@@ -92,7 +99,9 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
   const sources = strings('den.enabledRatingSources');
   const serviceValue = value('den.myServicePicks');
   const subtitle = readSubtitlePreference(row);
+  const interfaceLanguage = readInterfaceLanguage(row);
   return {
+    interfaceLanguage: interfaceLanguage.language,
     excludedGenres: genres && 'ints' in genres ? genres.ints : [],
     excludedLanguages: strings('den.excludedLanguages') ?? [],
     hideAnime: bool('den.hideAnime') ?? false,
@@ -355,6 +364,7 @@ export function toggled<T>(values: readonly T[], value: T, on: boolean): T[] {
 }
 
 export const change = {
+  interfaceLanguage: (language: InterfaceLanguage): PrefChanges => writeInterfaceLanguage(language),
   excludedGenres: (ids: Iterable<number>): PrefChanges => ({
     'den.excludedGenreIDs': {
       ints: [...new Set([...ids].filter((id) => Number.isSafeInteger(id) && id > 0))]

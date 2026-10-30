@@ -7,6 +7,7 @@ import { retryAfterMs } from './retryAfter';
 import { seriesShape, toTitle, type Details } from './tmdb';
 import { TMDB_PROXY_KEY, tmdbFetch } from './tmdbCache';
 import type { SettingsRow } from './wire';
+import { tmdbLanguage, type InterfaceLanguage } from './interfaceLanguage';
 
 /** The library's own key, or the sentinel asking den-edge to lend its configured key. */
 export function tmdbKeyOf(keys: SettingsRow | undefined): string {
@@ -23,12 +24,17 @@ export async function fetchDetailsResult(
   ref: { type: MediaType; id: number },
   key: string,
   fetchImpl: typeof fetch = tmdbFetch,
+  language: InterfaceLanguage = 'en',
 ): Promise<DetailsResult> {
   let details: Record<string, unknown>;
   try {
     const append = ref.type === 'tv' ? 'credits,external_ids' : 'credits';
-    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${append}`;
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
+    const url = new URL(`https://api.themoviedb.org/3/${ref.type}/${ref.id}`);
+    url.searchParams.set('api_key', key);
+    url.searchParams.set('append_to_response', append);
+    const localized = tmdbLanguage(language);
+    if (localized) url.searchParams.set('language', localized);
+    const res = await fetchImpl(url.toString(), { signal: AbortSignal.timeout(15_000) });
     if (res.status === 404) return { kind: 'missing' };
     if (!res.ok)
       return {

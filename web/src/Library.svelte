@@ -1489,6 +1489,7 @@
   const playbackPrefs = $derived.by(() => {
     const value = settings?.preferences;
     return {
+      interfaceLanguage: value?.interfaceLanguage ?? 'en',
       audioLanguage: value?.audioLanguage,
       subtitleLanguage: value?.subtitleLanguage,
       hasExplicitSubtitlePreference: value?.hasExplicitSubtitlePreference ?? false,
@@ -2685,9 +2686,10 @@
         (install) => !!sharedInstallOf(install) === guestSource,
       )}
       audioLanguage={playbackPrefs.audioLanguage}
+      interfaceLanguage={playbackPrefs.interfaceLanguage}
       subtitleLanguage={playbackPrefs.hasExplicitSubtitlePreference
         ? (playbackPrefs.subtitleLanguage ?? null)
-        : undefined}
+        : playbackPrefs.interfaceLanguage}
       shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
       maxSubtitlesPerLanguage={playbackPrefs.maxSubtitlesPerLanguage}
       autoSkip={playbackPrefs.autoSkipSegments}

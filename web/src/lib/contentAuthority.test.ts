@@ -26,6 +26,23 @@ const json = (body: unknown, init: ResponseInit = {}) =>
   });
 
 describe('ContentAuthority', () => {
+  it('omits English language and isolates Spanish and Swedish TMDB URLs', async () => {
+    const asked: string[] = [];
+    const tmdbFetch = vi.fn<typeof fetch>(async (input) => {
+      asked.push(String(input));
+      return json({ id: 603, title: 'The Matrix', original_title: 'The Matrix' });
+    });
+    const authority = new ContentAuthority(credentials(), { tmdbFetch });
+
+    await authority.title({ type: 'movie', id: 603 }, 'en');
+    await authority.title({ type: 'movie', id: 603 }, 'es');
+    await authority.title({ type: 'movie', id: 603 }, 'sv');
+
+    const urls = asked.map((value) => new URL(value));
+    expect(urls.map((url) => url.searchParams.get('language'))).toEqual([null, 'es-ES', 'sv-SE']);
+    expect(new Set(asked).size).toBe(3);
+  });
+
   it('validates candidate and saved provider keys without returning either key', async () => {
     const seen: Array<{ url: string; key: string | null }> = [];
     const answer = async (input: RequestInfo | URL, init?: RequestInit) => {

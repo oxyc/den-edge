@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Den</string>
+    <string name="load_error_title">Den no pudo iniciarse</string>
+    <string name="load_error_body">Comprueba la conexión a internet de este televisor e inténtalo de nuevo.</string>
+    <string name="retry">Intentar de nuevo</string>
+    <string name="exit">Salir</string>
+</resources>

@@ -96,6 +96,7 @@
     type JoinAnswer,
     type JoinLink,
   } from './lib/browserHousehold';
+  import { setInterfaceLanguage } from './lib/i18n.svelte';
 
   let {
     link,
@@ -231,6 +232,9 @@
   let session = $state.raw(
     untrack(() => open(libraryIdentity, !link && !ownHousehold && libraryIdentity !== null)),
   );
+  $effect(() => {
+    void setInterfaceLanguage(session.interfaceLanguage);
+  });
   let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);

@@ -7,6 +7,7 @@ import { withSharedTitleMetadata } from './titleMetadata';
 import { toTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 import { fetchDetailsResult } from './workerTmdbProvider';
+import { tmdbLanguage, type InterfaceLanguage } from './interfaceLanguage';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -66,12 +67,18 @@ export function searchSources(
   fetchImpl: typeof fetch = tmdbFetch,
   atlas: string | null = '/atlas',
   tmdbLanes = true,
+  language: InterfaceLanguage = 'en',
 ): SearchSources {
   const cache = new Map<string, Promise<Title | null>>();
 
   async function tmdb(path: string, params: Record<string, string> = {}): Promise<Json> {
     const url = new URL(TMDB + path);
-    for (const [name, value] of Object.entries({ ...params, api_key: tmdbKey }))
+    const localized = tmdbLanguage(language);
+    for (const [name, value] of Object.entries({
+      ...params,
+      ...(localized ? { language: localized } : {}),
+      api_key: tmdbKey,
+    }))
       url.searchParams.set(name, value);
     const res = await fetchImpl(url.toString());
     if (!res.ok) throw new Error(`TMDB answered ${res.status}`);
@@ -231,7 +238,7 @@ export function searchSources(
       const key = `${ref.type}-${ref.id}`;
       let pending = cache.get(key);
       if (!pending) {
-        const asked = fetchDetailsResult(ref, tmdbKey, fetchImpl).then((result) =>
+        const asked = fetchDetailsResult(ref, tmdbKey, fetchImpl, language).then((result) =>
           result.kind === 'found' ? result.details.title : null,
         );
         pending = asked;

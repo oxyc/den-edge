@@ -1,22 +1,26 @@
 <!-- Where each section of the page is, following the one in view: a rail beside the page on a wide screen, a bar of
      tabs on a tablet, and the browser's own picker on a phone, where five tabs don't fit. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
+
   const ALL_SECTIONS = [
-    { id: 'playback', label: 'Playback' },
-    { id: 'content', label: 'Content' },
-    { id: 'connections', label: 'Connections' },
-    { id: 'sharing', label: 'Sharing' },
-    { id: 'assistants', label: 'Assistants' },
-    { id: 'import', label: 'Import' },
-    { id: 'advanced', label: 'Advanced' },
-    { id: 'about', label: 'About' },
+    { id: 'playback', message: 'settings.section.playback' },
+    { id: 'content', message: 'settings.section.content' },
+    { id: 'connections', message: 'settings.section.connections' },
+    { id: 'sharing', message: 'settings.section.sharing' },
+    { id: 'assistants', message: 'settings.section.assistants' },
+    { id: 'import', message: 'settings.section.import' },
+    { id: 'advanced', message: 'settings.section.advanced' },
+    { id: 'about', message: 'settings.section.about' },
   ] as const;
 
   type SectionId = (typeof ALL_SECTIONS)[number]['id'];
   let { variant, sections }: { variant: 'rail' | 'bar'; sections?: readonly SectionId[] } =
     $props();
   const SECTIONS = $derived(
-    sections ? ALL_SECTIONS.filter((section) => sections.includes(section.id)) : ALL_SECTIONS,
+    (sections ? ALL_SECTIONS.filter((section) => sections.includes(section.id)) : ALL_SECTIONS).map(
+      (section) => ({ ...section, label: i18n.text(section.message) }),
+    ),
   );
   let current = $state<string>('playback');
 
@@ -47,7 +51,7 @@
 </script>
 
 {#if variant === 'rail'}
-  <nav class="rail" aria-label="Settings sections">
+  <nav class="rail" aria-label={i18n.text('settings.sections')}>
     {#each SECTIONS as section (section.id)}
       <a
         href="#{section.id}"
@@ -60,7 +64,7 @@
     {/each}
   </nav>
 {:else}
-  <nav class="tabs glass" aria-label="Settings sections">
+  <nav class="tabs glass" aria-label={i18n.text('settings.sections')}>
     {#each SECTIONS as section (section.id)}
       <a
         href="#{section.id}"
@@ -73,7 +77,11 @@
     {/each}
   </nav>
   <div class="jump glass">
-    <select aria-label="Go to section" value={current} onchange={(e) => go(e.currentTarget.value)}>
+    <select
+      aria-label={i18n.text('settings.goToSection')}
+      value={current}
+      onchange={(e) => go(e.currentTarget.value)}
+    >
       {#each SECTIONS as section (section.id)}
         <option value={section.id}>{section.label}</option>
       {/each}

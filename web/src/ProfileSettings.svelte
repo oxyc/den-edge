@@ -13,6 +13,7 @@
   import { ATLAS_FALLBACK } from './settings/credits';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
+  import { i18n } from './lib/i18n.svelte';
 
   let {
     session,
@@ -21,7 +22,9 @@
   const prefs = $derived((session.preferences as ProfilePreferences).value);
   let saving = $state(false);
   let failure = $state<string | null>(null);
-  const role = $derived(session.identity.kind === 'visitor' ? 'Visitor' : 'Kid');
+  const role = $derived(
+    i18n.text(session.identity.kind === 'visitor' ? 'profile.visitor' : 'profile.kid'),
+  );
   const locked = $derived(profiles?.settingsLocked ?? false);
   let pin = $state('');
   let denied = $state(false);
@@ -40,7 +43,7 @@
     saving = true;
     failure = null;
     const changed = (await profiles?.setKidPolicy(policy)) ?? false;
-    if (!changed) failure = 'Couldn’t change that. Check your connection and try again.';
+    if (!changed) failure = i18n.text('profile.policySaveFailed');
     saving = false;
     return changed;
   }
@@ -52,7 +55,7 @@
       .patch(changes)
       .catch((error: unknown) => {
         console.warn('den: profile preference save failed', error);
-        failure = 'Couldn’t save that. Try again.';
+        failure = i18n.text('profile.saveFailed');
       })
       .finally(() => (saving = false));
   }
@@ -60,8 +63,8 @@
 
 {#if locked}
   <section class="settings-gate" aria-labelledby="settings-gate-title">
-    <h1 id="settings-gate-title">Owner access</h1>
-    <p>Enter the Owner PIN to open this profile’s settings.</p>
+    <h1 id="settings-gate-title">{i18n.text('profile.ownerAccess')}</h1>
+    <p>{i18n.text('profile.ownerPinPrompt')}</p>
     <form
       onsubmit={(event) => {
         event.preventDefault();
@@ -70,19 +73,19 @@
     >
       <PinInput
         id="settings-gate-pin"
-        label="Owner PIN"
+        label={i18n.text('profile.ownerPin')}
         bind:value={pin}
         focusOnMount
         invalid={denied}
         onvalue={() => (denied = false)}
         oncomplete={() => void unlock()}
       />
-      {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
+      {#if denied}<p class="denied" role="alert">{i18n.text('profile.pinMismatch')}</p>{/if}
       <div class="actions">
         <Button
           type="submit"
           variant="primary"
-          label="Open settings"
+          label={i18n.text('profile.openSettings')}
           disabled={!/^\d{4}$/.test(pin)}
         />
       </div>
@@ -94,14 +97,14 @@
     <div class="page">
       <div class="title">
         <div>
-          <h1>Settings</h1>
-          <p>{role} profile</p>
+          <h1>{i18n.text('settings.title')}</h1>
+          <p>{role}</p>
         </div>
       </div>
       <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
       {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
       {#if !prefs}
-        <p class="banner" role="status">Loading your settings…</p>
+        <p class="banner" role="status">{i18n.text('profile.loadingSettings')}</p>
       {:else}
         <PlaybackSection {prefs} disabled={saving} {save} />
         <ContentSection

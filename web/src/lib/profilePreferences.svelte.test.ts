@@ -32,6 +32,7 @@ class MemoryStorage implements Storage {
 }
 
 const ownerPreferences: LibraryPreferences = {
+  interfaceLanguage: 'sv',
   excludedGenres: [27],
   excludedLanguages: ['sv'],
   hideAnime: true,
@@ -79,6 +80,7 @@ describe('preview profile preferences', () => {
       null,
     );
     expect(store.value).toMatchObject({
+      interfaceLanguage: 'sv',
       excludedGenres: [],
       excludedLanguages: [],
       hideAnime: false,
@@ -94,9 +96,10 @@ describe('preview profile preferences', () => {
     const storage = new MemoryStorage();
     const session = kid();
     const first = new PreviewProfilePreferences(session.identity, session.policy!, storage, null);
-    await first.patch({ audioLanguage: 'da', excludedGenres: [35] });
+    await first.patch({ interfaceLanguage: 'en', audioLanguage: 'da', excludedGenres: [35] });
 
     const second = new PreviewProfilePreferences(session.identity, session.policy!, storage, null);
+    expect(second.value?.interfaceLanguage).toBe('en');
     expect(second.value?.audioLanguage).toBe('da');
     expect(second.value?.excludedGenres).toEqual([35]);
     expect(storage.values.size).toBe(1);

@@ -19,6 +19,8 @@ import type {
 } from './libraryServiceProtocol';
 import type { ProfileActivity } from './visitorActivity.svelte';
 import { SyncedProfilePreferences, type ProfilePreferences } from './profilePreferences.svelte';
+import { LocalizedContent } from './localizedContent';
+import { isInterfaceLanguage, type InterfaceLanguage } from './interfaceLanguage';
 
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the profile settings that name the watch region. */
@@ -62,7 +64,8 @@ export class ProfileSession {
   undo = $state<{ label: string; run: () => void } | null>(null);
   /** The page has drawn what it opened for (`foregroundReady`): optional background work may start. */
   foregrounded = $state(false);
-  readonly #policed: ContentServiceClientPort | null;
+  readonly #content: ContentServiceClientPort;
+  #localizedContent?: ContentServiceClientPort;
   #region?: Promise<string | undefined>;
   readonly #displays = new SvelteMap<string, Title>();
   readonly #missing = new SvelteSet<string>();
@@ -95,7 +98,7 @@ export class ProfileSession {
     /** Validated effective approvals for this Kid; empty for Owner and Visitor. */
     readonly approvedTitles: readonly TitleRef[] = [],
   ) {
-    this.#policed = this.restricted
+    const policed = this.restricted
       ? new PolicedContent(household.content, async () =>
           contentPolicyFor(
             this.contentPolicy,
@@ -105,6 +108,7 @@ export class ProfileSession {
           ),
         )
       : null;
+    this.#content = policed ?? household.content;
   }
 
   /**
@@ -147,7 +151,19 @@ export class ProfileSession {
    * one. An unrestricted profile (the legacy household, an Owner with no ceiling) uses the household port as-is.
    */
   get content(): ContentServiceClientPort {
-    return this.#policed ?? this.household.content;
+    if (this.interfaceLanguage === 'en') return this.#content;
+    return (this.#localizedContent ??= new LocalizedContent(
+      this.#content,
+      () => this.interfaceLanguage,
+    ));
+  }
+
+  /** Resolved once by the settings projection; the closure lets a saved language affect the next content request. */
+  get interfaceLanguage(): InterfaceLanguage {
+    const selected =
+      this.preferences?.value?.interfaceLanguage ??
+      this.policy?.settings?.value?.preferences.interfaceLanguage;
+    return isInterfaceLanguage(selected) ? selected : 'en';
   }
 
   /** Whether this profile's content is limited by a ceiling, an unknown-rating block or the Kid audience gate. */

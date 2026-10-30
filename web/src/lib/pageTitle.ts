@@ -8,6 +8,7 @@
 // what it is showing.
 
 import type { Route } from './route';
+import { i18n } from './i18n.svelte';
 
 const SITE = 'Den';
 
@@ -15,22 +16,24 @@ const SITE = 'Den';
 export function pageTitle(route: Route): string {
   switch (route.page) {
     case 'movies':
-      return `Movies · ${SITE}`;
+      return `${i18n.text('nav.movies')} · ${SITE}`;
     case 'series':
-      return `Series · ${SITE}`;
+      return `${i18n.text('nav.series')} · ${SITE}`;
     case 'watchlist':
-      return `Watchlist · ${SITE}`;
+      return `${i18n.text('nav.watchlist')} · ${SITE}`;
     case 'downloads':
-      return `Downloads · ${SITE}`;
+      return `${i18n.text('page.downloads')} · ${SITE}`;
     case 'settings':
-      return `Settings · ${SITE}`;
+      return `${i18n.text('nav.settings')} · ${SITE}`;
     case 'search':
-      return route.query.trim() ? `${route.query.trim()} · Search · ${SITE}` : `Search · ${SITE}`;
+      return route.query.trim()
+        ? `${route.query.trim()} · ${i18n.text('nav.search')} · ${SITE}`
+        : `${i18n.text('nav.search')} · ${SITE}`;
     case 'people':
-      return `People · ${SITE}`;
+      return `${i18n.text('page.people')} · ${SITE}`;
     // Until the directory names it: the page calls itself "Netflix · Den" through `named` once it knows.
     case 'service':
-      return `Service · ${SITE}`;
+      return `${i18n.text('page.service')} · ${SITE}`;
     default:
       return SITE;
   }

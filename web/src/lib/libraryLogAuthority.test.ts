@@ -1811,6 +1811,7 @@ describe('LibraryLogAuthority', () => {
     await expect(authority.select({ kind: 'settings' })).resolves.toEqual({
       kind: 'settings',
       preferences: {
+        interfaceLanguage: 'en',
         excludedGenres: [],
         excludedLanguages: [],
         hideAnime: false,
@@ -1838,6 +1839,7 @@ describe('LibraryLogAuthority', () => {
         {
           kind: 'preferences.patch',
           patch: {
+            interfaceLanguage: 'sv',
             excludedGenres: [878, 27],
             excludedLanguages: ['sv', 'fi'],
             hideAnime: true,
