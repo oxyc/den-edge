@@ -437,7 +437,14 @@ test.describe('Worker-owned detail metadata boundary', () => {
     ratingsGate.resolve();
     warningsGate.resolve();
     await expect(page.getByText('IMDb', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('Content warnings: 1')).toBeVisible();
+    const warnings = page.getByLabel('Content warnings: 1');
+    await expect(warnings).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await warnings.click();
+    await expect(page.locator('.hero')).toHaveCSS('z-index', '11');
+    await expect(page.locator('details[open] .warnings')).toBeVisible();
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(page.locator('.hero')).toHaveCSS('z-index', 'auto');
     expect(requests.find(({ provider }) => provider === 'ratings').headers['x-api-key']).toBe(
       'worker-detail-omdb',
     );

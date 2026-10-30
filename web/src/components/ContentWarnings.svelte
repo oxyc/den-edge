@@ -233,6 +233,14 @@
      and unreachable. Here it is a sheet across the page instead, which is also how this phone opens the
      player's own menus. */
   @media (width <= 759px) {
+    /* Detail's hero is intentionally an isolated stacking context. A fixed child cannot out-rank a sibling
+       navigation bar outside that context, however large the child's own z-index is. Raise the hero only for
+       the lifetime of the open disclosure so the sheet and scrim occupy the modal layer; ordinary hero media
+       remains below the navigation. */
+    :global(.hero:has(details[open])) {
+      z-index: 11;
+    }
+
     .warnings {
       position: fixed;
       z-index: 40;
