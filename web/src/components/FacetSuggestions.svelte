@@ -2,6 +2,7 @@
      beside it ("Swedish · language"). Picking one is the page's to decide; Search and People both turn the text into
      the pick. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { KIND, namesExactly, type Chip } from '../lib/explore';
 
   let {
@@ -32,7 +33,9 @@
         href={href(chip)}
         data-chip={chip.id}
         onclick={(event) => plain(event) && onpick(chip)}
-        >{chip.label}<span class="kind">{` · ${chip.kind ?? KIND[chip.group]}`}</span></a
+        >{i18n.phrase(chip.label)}<span class="kind"
+          >{` · ${i18n.phrase(chip.kind ?? KIND[chip.group])}`}</span
+        ></a
       >
     {/each}
   </div>

@@ -2,6 +2,7 @@
      paused pick (Explore's, while a query is typed) is drawn dashed and said so. A pick that joins the one before it
      as either-or (`or`, one kind's values: "Swedish or Danish") has an "or" between them. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import type { Chip } from '../lib/explore';
 
   let {
@@ -26,7 +27,7 @@
         aria-label="Remove {chip.label}"
         data-chip={chip.id}
         onclick={() => onremove(chip.id)}
-        >{chip.label}<span class="x" aria-hidden="true">✕</span></button
+        >{i18n.phrase(chip.label)}<span class="x" aria-hidden="true">✕</span></button
       >
     {/each}
     <button type="button" class="clear" onclick={onclear}>Clear all</button>

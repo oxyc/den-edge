@@ -437,3 +437,9 @@ a[data-spatial-skip]:not(.slide-link):focus-visible {
     backdrop-filter: none;
   }
 }
+
+/* The build-time navigation shell is English. Hide only that retained shell on a warm non-English load; appMain
+   clears the marker in the same task that mounts the already-localized live navigation. */
+html[data-den-cached-interface-language] #app > .bar-anchor {
+  visibility: hidden;
+}

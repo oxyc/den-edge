@@ -30,7 +30,7 @@
 <select
   class:boxed
   aria-labelledby={labelledby}
-  aria-label={label}
+  aria-label={label ? i18n.phrase(label) : undefined}
   {value}
   {disabled}
   onchange={(event) => onchange(event.currentTarget.value)}

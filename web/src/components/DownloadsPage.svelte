@@ -123,7 +123,7 @@
 
 <h1>Downloads</h1>
 <p class="note">Your debrid fetches these — you can close Den, they keep going.</p>
-{#if message}<p class="note" role="status">{message}</p>{/if}
+{#if message}<p class="note" role="status">{i18n.phrase(message)}</p>{/if}
 
 {#if !list.length}
   <p class="note">No downloads yet. Download a title from its Sources to see it here.</p>

@@ -4,6 +4,18 @@ import './app.css';
 import { openingLibraryIdentity } from './lib/openingLibraryIdentity';
 import { beginStartupRenderPhase, startupMark } from './lib/startupTiming';
 
+// A synced preference is authoritative once its profile opens. Until then, keep a warm non-English return visit
+// from painting the build-time English navigation shell: appMain reads the matching cached catalog synchronously.
+try {
+  const language = localStorage.getItem('den.interfaceLanguage.presentation.v1');
+  if (language === 'es' || language === 'sv') {
+    document.documentElement.lang = language;
+    document.documentElement.dataset.denCachedInterfaceLanguage = language;
+  }
+} catch {
+  // Storage can be unavailable; the ordinary English shell remains the safe fallback.
+}
+
 startupMark('page boot');
 // Desktop used to fetch and compile its DedicatedWorker beside the app module. Preserve that overlap for a browser
 // which already has a library to open, without constructing an authority before its exact shared identity is known.

@@ -2,6 +2,7 @@
      until there is a library to pick in. It carries the JustWatch credit for the whole row, since what a tile leads to
      is availability data. A settled failure keeps one quiet placeholder so lower rows do not jump. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
   import type { Service } from '../settings/services';
@@ -57,8 +58,8 @@
 </script>
 
 {#if services.length || pending || empty}
-  <section class="row services-row" aria-label={heading} bind:this={section}>
-    <h2>{heading}</h2>
+  <section class="row services-row" aria-label={i18n.phrase(heading)} bind:this={section}>
+    <h2>{i18n.phrase(heading)}</h2>
     <div class="track">
       {#each services as { pick, service } (`${service.id}@${pick.country}`)}
         <ServiceTile

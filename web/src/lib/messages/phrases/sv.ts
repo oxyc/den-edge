@@ -69,7 +69,7 @@ export const phrases: Readonly<Record<string, string>> = {
   'Against Nature': 'Mot naturen',
   'Age limit': 'Åldersgräns',
   'ago.': 'sedan.',
-  Airs: 'Airs',
+  Airs: 'Sänds',
   All: 'Alla',
   'All ›': 'alla ›',
   'All categories': 'Alla kategorier',
@@ -123,7 +123,7 @@ export const phrases: Readonly<Record<string, string>> = {
     'Godkänn också att ta bort dem från din SIMKL bevakningslista. Att godkänna här räknas för varje enhet.',
   Arabic: 'arabiska',
   'Art House': 'Konsthus',
-  'Assassin & Hitman': 'Assassin & Hitman',
+  'Assassin & Hitman': 'Lönnmördare',
   Assault: 'Överfall',
   Assistants: 'Assistenter',
   'Audio track': 'Ljudspår',
@@ -219,6 +219,13 @@ export const phrases: Readonly<Record<string, string>> = {
   'couldn’t be matched safely': 'kunde inte matchas säkert',
   'Couldn’t finish': 'Kunde inte avsluta',
   'Couldn’t load': 'Det gick inte att ladda',
+  'Couldn’t load the episodes. Nothing was marked Seen.':
+    'Avsnitten kunde inte läsas in. Inget markerades som sett.',
+  'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',
+  'Couldn’t save that. Check your connection and try again.':
+    'Det gick inte att spara. Kontrollera anslutningen och försök igen.',
+  'Couldn’t start that download. Try again.': 'Hämtningen kunde inte startas. Försök igen.',
+  'Couldn’t try that release. Try again.': 'Det gick inte att prova den versionen. Försök igen.',
   'Couldn’t load people right now. Try again in a moment.':
     'Det gick inte att ladda folk just nu. Försök igen om ett ögonblick.',
   'Couldn’t load releases.': 'Det gick inte att läsa in releaser.',
@@ -254,7 +261,7 @@ export const phrases: Readonly<Record<string, string>> = {
   Current: 'Aktuell',
   Cyberpunk: 'Cyberpunk',
   Danish: 'danska',
-  'Dark and Gritty Series': 'Dark and Gritty Series',
+  'Dark and Gritty Series': 'Mörka och råa serier',
   'Dark Comedies': 'Mörka komedier',
   Days: 'dagar',
   Death: 'Död',
@@ -270,6 +277,19 @@ export const phrases: Readonly<Record<string, string>> = {
   'Den held back these watchlist removals because there were so many at once:':
     'Den höll tillbaka dessa borttagningar av bevakningslistor eftersom det fanns så många på en gång:',
   'Den home': 'Den hem',
+  'Den is a neutral media player.': 'Den är en neutral mediespelare.',
+  'Den plays your own media servers (Jellyfin / Plex) and discovers titles via TMDB. It ships no content and no sources of its own.':
+    'Den spelar från dina egna medieservrar (Jellyfin / Plex) och hittar titlar via TMDB. Den innehåller inget eget innehåll och inga egna källor.',
+  'Addons are user-added.': 'Tillägg läggs till av användaren.',
+  'Den implements a neutral addon protocol. It bundles, presets, and recommends no addons. Any addon is one you add yourself by entering its URL.':
+    'Den använder ett neutralt tilläggsprotokoll. Inga tillägg medföljer, förinställs eller rekommenderas. Du lägger själv till varje tillägg genom att ange dess URL.',
+  'Den does not review or endorse addons.': 'Den granskar eller rekommenderar inte tillägg.',
+  'Addons are third-party services Den neither operates nor vets. Den simply plays a stream URL that a user-added addon returns.':
+    'Tillägg är tredjepartstjänster som Den varken driver eller granskar. Den spelar endast den strömnings-URL som ett användartillägg returnerar.',
+  'Addon developers and users are responsible for content.':
+    'Tilläggsutvecklare och användare ansvarar för innehållet.',
+  'Addons must not facilitate access to content you are not authorized to access. You are responsible for ensuring your use complies with applicable law and the rights of content owners.':
+    'Tillägg får inte underlätta åtkomst till innehåll som du saknar behörighet till. Du ansvarar för att din användning följer tillämplig lag och innehållsägarnas rättigheter.',
   'Den Reel': 'Den Reel',
   'Den Scout': 'Den Scout',
   'Den stops syncing your watch history with it, on every device.':
@@ -279,7 +299,7 @@ export const phrases: Readonly<Record<string, string>> = {
     'Den använder din egen TMDB-nyckel (gratis på themoviedb.org) för sökning, och varje titels affisch och detaljer.',
   'Den will accept its index without checking a signature, as before.':
     'Den kommer att acceptera sitt index utan att kontrollera en signatur, som tidigare.',
-  Deny: 'Deny',
+  Deny: 'Neka',
   device: 'enhet',
   devices: 'enheter',
   Devices: 'Enheter',
@@ -757,6 +777,8 @@ export const phrases: Readonly<Record<string, string>> = {
   Save: 'Spara',
   'Save & validate': 'Spara & validera',
   Saved: 'Sparad',
+  'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.':
+    'Sparat på den här enheten. Väntar på synkronisering – behåll webbläsarens data tills anslutningen återupprättas.',
   'Saving…': 'Sparar...',
   'Scan the QR shown by a TV without a library, or type its code here.':
     'Skanna QR-koden som visas av en TV utan bibliotek, eller skriv in dess kod här.',

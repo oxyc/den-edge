@@ -938,7 +938,7 @@
       {#if __DEN_TV__ && warnings?.length}
         <aside class="content-warnings-overlay" aria-label="Content warnings">
           <strong>Content warnings</strong>
-          {#each warnings as warning (warning.id)}<span>{warning.label}</span>{/each}
+          {#each warnings as warning (warning.id)}<span>{i18n.phrase(warning.label)}</span>{/each}
           <small>Powered by DoesTheDogDie.com</small>
         </aside>
       {/if}

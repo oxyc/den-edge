@@ -22,6 +22,7 @@
 </script>
 
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import Button from '../components/Button.svelte';
   import { parsePrimeFiles } from '../lib/primeImport';
   import { planPrimeImport } from '../lib/primeImportPlan';
@@ -196,7 +197,7 @@
       open on it.
     </p>
   {:else if state.step === 'failed'}
-    <p class="status bad" role="alert">{state.message}</p>
+    <p class="status bad" role="alert">{i18n.phrase(state.message)}</p>
   {/if}
 </SettingRow>
 

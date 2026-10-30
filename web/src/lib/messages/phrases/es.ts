@@ -222,6 +222,15 @@ export const phrases: Readonly<Record<string, string>> = {
   'couldn’t be matched safely': 'no se pudo emparejar de forma segura',
   'Couldn’t finish': 'No pude terminar',
   'Couldn’t load': 'No se pudo cargar',
+  'Couldn’t load the episodes. Nothing was marked Seen.':
+    'No se pudieron cargar los episodios. No se marcó ninguno como visto.',
+  'Couldn’t remove that download. Try again.':
+    'No se pudo quitar esa descarga. Inténtalo de nuevo.',
+  'Couldn’t save that. Check your connection and try again.':
+    'No se pudo guardar. Comprueba la conexión e inténtalo de nuevo.',
+  'Couldn’t start that download. Try again.':
+    'No se pudo iniciar esa descarga. Inténtalo de nuevo.',
+  'Couldn’t try that release. Try again.': 'No se pudo probar esa versión. Inténtalo de nuevo.',
   'Couldn’t load people right now. Try again in a moment.':
     'No se pudo cargar gente en este momento. Inténtalo de nuevo en un momento.',
   'Couldn’t load releases.': 'No se pudieron cargar las versiones.',
@@ -274,7 +283,20 @@ export const phrases: Readonly<Record<string, string>> = {
   'Den Hearth': 'Den Hearth',
   'Den held back these watchlist removals because there were so many at once:':
     'Den retrasó estas eliminaciones de listas de seguimiento porque había muchas a la vez:',
-  'Den home': 'Den casa',
+  'Den home': 'Inicio de Den',
+  'Den is a neutral media player.': 'Den es un reproductor multimedia neutral.',
+  'Den plays your own media servers (Jellyfin / Plex) and discovers titles via TMDB. It ships no content and no sources of its own.':
+    'Den reproduce tus propios servidores multimedia (Jellyfin / Plex) y descubre títulos mediante TMDB. No incluye contenido ni fuentes propias.',
+  'Addons are user-added.': 'Los complementos los añade el usuario.',
+  'Den implements a neutral addon protocol. It bundles, presets, and recommends no addons. Any addon is one you add yourself by entering its URL.':
+    'Den implementa un protocolo neutral de complementos. No incluye, preconfigura ni recomienda ninguno. Cada complemento lo añades tú al introducir su URL.',
+  'Den does not review or endorse addons.': 'Den no revisa ni respalda complementos.',
+  'Addons are third-party services Den neither operates nor vets. Den simply plays a stream URL that a user-added addon returns.':
+    'Los complementos son servicios de terceros que Den no opera ni verifica. Den solo reproduce la URL de transmisión que devuelve un complemento añadido por el usuario.',
+  'Addon developers and users are responsible for content.':
+    'Los desarrolladores y usuarios de complementos son responsables del contenido.',
+  'Addons must not facilitate access to content you are not authorized to access. You are responsible for ensuring your use complies with applicable law and the rights of content owners.':
+    'Los complementos no deben facilitar el acceso a contenido para el que no tengas autorización. Eres responsable de que tu uso cumpla la legislación aplicable y los derechos de los propietarios del contenido.',
   'Den Reel': 'Den Reel',
   'Den Scout': 'Den Scout',
   'Den stops syncing your watch history with it, on every device.':
@@ -284,7 +306,7 @@ export const phrases: Readonly<Record<string, string>> = {
     'Den usa su propia clave TMDB (gratuita en themoviedb.org) para realizar búsquedas y el póster y los detalles de cada título.',
   'Den will accept its index without checking a signature, as before.':
     'Den aceptará su índice sin comprobar la firma, como antes.',
-  Deny: 'Deny',
+  Deny: 'Denegar',
   device: 'dispositivo',
   devices: 'dispositivos',
   Devices: 'Dispositivos',
@@ -765,6 +787,8 @@ export const phrases: Readonly<Record<string, string>> = {
   Save: 'Guardar',
   'Save & validate': 'Guardar y validar',
   Saved: 'Guardado',
+  'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.':
+    'Guardado en este dispositivo. Esperando para sincronizar; conserva los datos de este navegador hasta que vuelva a conectarse.',
   'Saving…': 'Guardando…',
   'Scan the QR shown by a TV without a library, or type its code here.':
     'Escanea el QR que muestra un televisor sin biblioteca, o escribe su código aquí.',

@@ -5,6 +5,16 @@ import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
 import { upstream } from './scripts/upstream.ts';
 import { localizeMarkup } from './scripts/localize-markup.ts';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const translationRevision = createHash('sha256');
+for (const file of ['es.ts', 'sv.ts', 'phrases/es.ts', 'phrases/sv.ts'])
+  translationRevision.update(
+    readFileSync(fileURLToPath(new URL(`./src/lib/messages/${file}`, import.meta.url))),
+  );
+const translationsRevision = translationRevision.digest('hex').slice(0, 16);
 
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
 // den-edge — the homelab's by default, DEN_EDGE for another. Under e2e (`DEN_E2E=1`) it is never a real one.
@@ -179,6 +189,7 @@ export default defineConfig({
     __DEN_TV_API_ORIGIN__: JSON.stringify(''),
     __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(''),
     __DEN_TV_WEB_ORIGIN__: JSON.stringify(''),
+    __DEN_TRANSLATIONS_REVISION__: JSON.stringify(translationsRevision),
     'import.meta.env.DEN_E2E': JSON.stringify(process.env.DEN_E2E === '1'),
     'import.meta.env.DEN_ALLOCATION_AUDIT': JSON.stringify(
       process.env.DEN_ALLOCATION_AUDIT === '1',

@@ -2,6 +2,7 @@
      the code filled in, which a first-time guest reached through the "Link your Apple TV" section above it — the
      one thing a guest has no use for. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { guestGrants, type RedeemFailure } from '../lib/grants.svelte';
   import Button from './Button.svelte';
 
@@ -47,7 +48,7 @@
 <dialog bind:this={dialog} aria-labelledby="invite-title" onclose={() => (code = null)}>
   <h2 id="invite-title">Accept this invite?</h2>
   {#if failure}
-    <p role="status" class="bad">{failure}</p>
+    <p role="status" class="bad">{i18n.phrase(failure)}</p>
     <div class="actions">
       <Button
         variant="primary"

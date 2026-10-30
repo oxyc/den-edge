@@ -14,9 +14,9 @@
   } = $props();
 </script>
 
-{#if alert}<p class="library-status" role="alert">{alert}</p>{/if}
+{#if alert}<p class="library-status" role="alert">{i18n.phrase(alert)}</p>{/if}
 {#if toast}<p class="library-status toast" role="status">
-    <span>{toast}</span>{#if undo}<button type="button" class="undo" onclick={undo.run}
+    <span>{i18n.phrase(toast)}</span>{#if undo}<button type="button" class="undo" onclick={undo.run}
         >{i18n.phrase(undo.label)}</button
       >{/if}
   </p>{/if}

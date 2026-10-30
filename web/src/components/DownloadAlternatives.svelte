@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import type { LibraryModel } from '../lib/libraryModel.svelte';
   import type {
     DownloadSourceOption,
@@ -79,7 +80,7 @@
     </select>
   </label>
 {/if}
-{#if message}<p class="hint" role="status">{message}</p>{/if}
+{#if message}<p class="hint" role="status">{i18n.phrase(message)}</p>{/if}
 
 <style>
   .try,

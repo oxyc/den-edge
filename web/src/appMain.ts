@@ -126,6 +126,7 @@ if (!target) throw new Error('index.html has no #app element');
 const appMounted = beginStartupRenderPhase('app_mount');
 target.replaceChildren();
 mount(App, { target });
+delete document.documentElement.dataset.denCachedInterfaceLanguage;
 startupMark('app mounted');
 appMounted();
 

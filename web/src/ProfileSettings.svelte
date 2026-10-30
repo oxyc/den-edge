@@ -102,7 +102,7 @@
         </div>
       </div>
       <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
-      {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
+      {#if failure}<p class="banner bad" role="alert">{i18n.phrase(failure)}</p>{/if}
       {#if !prefs}
         <p class="banner" role="status">{i18n.text('profile.loadingSettings')}</p>
       {:else}

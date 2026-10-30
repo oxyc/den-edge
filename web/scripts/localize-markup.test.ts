@@ -5,6 +5,8 @@ import { phrases as spanish } from '../src/lib/messages/phrases/es';
 import { phrases as swedish } from '../src/lib/messages/phrases/sv';
 import { localizeMarkup } from './localize-markup';
 
+const INTERNAL_STATE = new Set(['lost', 'engine', 'unsupported', 'protocol', 'source']);
+
 describe('UI translation coverage', () => {
   it('compiles markup text, accessibility copy, and conditional output through the phrase catalog', () => {
     const source = `<script>let ready = true;</script>
@@ -65,9 +67,9 @@ describe('UI translation coverage', () => {
     for (const filename of files) {
       const source = readFileSync(filename, 'utf8');
       for (const match of source.matchAll(
-        /\b(?:label|heading|title|detail|description|message|question|footer|empty|one):\s*'([^'\n]*[A-Za-z][^'\n]*)'/g,
+        /\b(?:(?:label|heading|title|detail|description|message|question|footer|empty|one):|(?:message|failure|notice|toast)\s*=)\s*'([^'\n]*[A-Za-z][^'\n]*)'/g,
       ))
-        found.add(match[1]);
+        if (!INTERNAL_STATE.has(match[1])) found.add(match[1]);
     }
     const missing = [...found].filter((phrase) => !(phrase in spanish) || !(phrase in swedish));
     expect(missing).toEqual([]);

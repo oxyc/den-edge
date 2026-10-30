@@ -5,6 +5,7 @@
   import { tick } from 'svelte';
   import Button from '../components/Button.svelte';
   import type { ButtonVariant } from '../components/Button.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     label,
@@ -61,7 +62,7 @@
   <div
     class="confirm"
     role="group"
-    aria-label={question}
+    aria-label={i18n.phrase(question)}
     onkeydown={(event) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
@@ -69,8 +70,8 @@
     }}
   >
     <p>
-      <b>{question}</b>
-      {detail ?? ''}
+      <b>{i18n.phrase(question)}</b>
+      {detail ? i18n.phrase(detail) : ''}
     </p>
     <span class="actions">
       <Button

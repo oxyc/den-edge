@@ -2,6 +2,7 @@
      heading, named for what it does next. Absent where nothing opens. -->
 <script lang="ts">
   import { rows } from './rows.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let { section, label }: { section?: string; label: string } = $props();
 
@@ -13,8 +14,8 @@
   <button
     type="button"
     class="expand-all"
-    aria-label="{action} in {label}"
-    onclick={() => rows.setAll(!allOpen, section)}>{action}</button
+    aria-label={i18n.phrase(`${action} in ${label}`)}
+    onclick={() => rows.setAll(!allOpen, section)}>{i18n.phrase(action)}</button
   >
 {/if}
 
