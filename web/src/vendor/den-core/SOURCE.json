@@ -5,9 +5,9 @@
   "rust": "1.95.0",
   "uniffi": "0.32.2",
   "wasmBindgen": "0.2.129",
-  "sourceDigest": "9e453a4407e353b5123e0f81ccf2f99d2105bf9846ad8ecef572251a8e2db1dd",
+  "sourceDigest": "dbbb2510934e7e6631cbc3a625a0bab1122bcdd818ff0de88542619d8e61e833",
   "sources": {
-    "Cargo.lock": "f115488e9201a813cd5a6592f0d63e0475c47bc7eac4c16d1ba7b674c2fd48a4",
+    "Cargo.lock": "af37a67c544e5b70027df1a9b9295b3f1a28a730536befd0a1d157170201d2ef",
     "Cargo.toml": "78a42b11e94599d79e1890c0b277fde883a64ed0598cf50a36db961160b76348",
     "LICENSE": "78d07b0e03dde5590c86e9df27e9b7ba5d84b2f282ebea4c45022bf84cf86c0e",
     "Swift/Package.swift": "3ce34280c2ff0219ef32d8ae1fd5d5503d22353cf119cc871424eb6741a72ae9",
