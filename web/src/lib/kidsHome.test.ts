@@ -22,6 +22,11 @@ describe('kidsHomeRows', () => {
                   {
                     id: 'thomas',
                     title: 'All Aboard with Thomas',
+                    heading: {
+                      id: 'shelf.kids.thomas-and-friends',
+                      args: {},
+                      fallback: 'All Aboard with Thomas',
+                    },
                     group: 'favorite-worlds',
                     source: { kind: 'query', query: 'Thomas and Friends', minimumScore: 0.79 },
                   },
@@ -49,6 +54,11 @@ describe('kidsHomeRows', () => {
     } as unknown as ContentServiceClientPort;
 
     const [row] = await kidsHomeRows(content);
+    expect(row?.atlasHeading).toEqual({
+      id: 'shelf.kids.thomas-and-friends',
+      args: {},
+      fallback: 'All Aboard with Thomas',
+    });
     expect((await row!.load(1)).map((title) => title.id)).toEqual([1]);
     expect((await row!.load(2)).map((title) => [title.id, title.posterPath])).toEqual([
       [2, '/2.jpg'],

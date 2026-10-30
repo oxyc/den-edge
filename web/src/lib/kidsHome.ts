@@ -2,6 +2,7 @@ import { drawn, type RowDef } from './catalog';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { ContentKidsHomeRow, ContentKidsHomeSource } from './contentServiceProtocol';
 import type { HomeRowAffinity } from './homeRowRanking';
+import { atlasHeadingOf } from './atlasHeading';
 
 type Json = Record<string, unknown>;
 
@@ -87,8 +88,17 @@ export function parseKidsHomeCatalogue(value: unknown): ContentKidsHomeRow[] {
       return [];
     const source = sourceOf(row.source);
     if (!source) return [];
+    const heading = atlasHeadingOf(row.heading);
     seen.add(row.id);
-    return [{ id: row.id, title: row.title, group: row.group, source }];
+    return [
+      {
+        id: row.id,
+        title: row.title,
+        group: row.group,
+        source,
+        ...(heading ? { heading } : {}),
+      },
+    ];
   });
 }
 
@@ -98,7 +108,7 @@ export async function kidsHomeRows(content: ContentServiceClientPort): Promise<R
   if (answer.answer.state !== 'ready' || answer.answer.value.operation !== 'kids-home') return [];
   const lookup = async (ref: { type: 'movie' | 'tv'; id: number }) =>
     (await content.query({ kind: 'titles', titles: [ref] })).titles[0] ?? null;
-  return answer.answer.value.rows.map(({ id, title, group, source }) => {
+  return answer.answer.value.rows.map(({ id, title, heading, group, source }) => {
     const cursor = crypto.randomUUID();
     // Atlas cards carry a poster only once some browser has told den-edge one, and a card with no poster is
     // hidden, so the rest are looked up (`drawn`) — without it a 12-title row showed the 2 already known.
@@ -143,6 +153,7 @@ export async function kidsHomeRows(content: ContentServiceClientPort): Promise<R
     return {
       id: `kids-${id}`,
       title,
+      atlasHeading: heading,
       affinity,
       load: (page) => {
         let loading = pages.get(page);

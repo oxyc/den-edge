@@ -810,6 +810,10 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** Atlas's locale-neutral title contract. Missing or unknown contracts leave `title` as compatibility copy. */
+  atlasHeading?: import('./atlasHeading').AtlasHeading;
+  /** A service page showing both kinds adds this local distinction to Atlas's media-neutral catalog heading. */
+  atlasHeadingMediaType?: MediaType;
   /** Stable parameterized copy for headings which contain a title, person, place or provider name. */
   titleMessage?: {
     id: import('./messages/parameters').ParameterMessageId;
