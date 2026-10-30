@@ -98,6 +98,7 @@ export const parameters = {
   'person.moreFromBecause': 'Más de {name} — porque viste {title}',
   'person.starringBecause': 'Con {name} — porque viste {title}',
   'category.countryType': '{type} de {country}',
+  'category.serviceSort': '{type}: {value}',
   'notice.allowedForChild': 'Se permitió “{title}” para {name}',
   'notice.removedFromChild': 'Se quitó “{title}” de {name}',
 } as const satisfies ParameterCatalog;

@@ -262,7 +262,17 @@ export function formatAtlasHeading(
         ? headingCase(phrase(String(argument.label)), language)
         : compatibilityFallback;
     case 'category.service_sort':
-      return headingCase(phrase(heading.fallback), language);
+      if (!stringArgument(argument.label)) return compatibilityFallback;
+      if (argument.names_media_type !== 'true')
+        return headingCase(phrase(stringArgument(argument.label)!), language);
+      {
+        const media = mediaType(stringArgument(argument.media_type), phrase);
+        if (!media) return compatibilityFallback;
+        return format('category.serviceSort', '{value} {type}', {
+          value: headingCase(phrase(stringArgument(argument.label)!), language),
+          type: media,
+        });
+      }
     case 'den.verbatim':
       return heading.fallback;
     default:

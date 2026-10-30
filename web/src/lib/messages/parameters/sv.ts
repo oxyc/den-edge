@@ -97,6 +97,7 @@ export const parameters = {
   'person.moreFromBecause': 'Mer från {name} — eftersom du tittade på {title}',
   'person.starringBecause': 'Med {name} — eftersom du tittade på {title}',
   'category.countryType': '{type} från {country}',
+  'category.serviceSort': '{type}: {value}',
   'notice.allowedForChild': '“{title}” tilläts för {name}',
   'notice.removedFromChild': '“{title}” togs bort från {name}',
 } as const satisfies ParameterCatalog;

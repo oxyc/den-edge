@@ -53,7 +53,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Access client ID': 'Åtkomst till klient-ID',
   'Access client secret': 'Åtkomst till klienthemlighet',
   'Access lasts': 'Tillgången varar',
-  Acclaimed: 'Hyllad',
+  Acclaimed: 'Hyllade',
   Action: 'Åtgärd',
   'Action & Adventure': 'Action & Äventyr',
   'Action Comedy': 'Actionkomedi',
@@ -734,7 +734,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Recent searches available. Press Down Arrow to review.':
     'Senaste sökningar tillgängliga. Tryck på nedåtpilen för att granska.',
   'Recently downloaded': 'Nyligen nedladdad',
-  'Recently released': 'Nyligen släppt',
+  'Recently released': 'Nyligen släppta',
   'Recovery code': 'Återställningskod',
   'Redeem within (days)': 'Lös in inom (dagar)',
   refused: 'vägrade',
@@ -1181,4 +1181,5 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Trending Everywhere': 'Populärt överallt',
   Titles: 'Titlar',
   'Dark Comedy': 'Svart komedi',
+  'Most Popular': 'Mest populära',
 };

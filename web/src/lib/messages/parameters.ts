@@ -96,6 +96,7 @@ export const PARAMETER_FALLBACKS = {
   'person.moreFromBecause': 'More from {name} — because you watched {title}',
   'person.starringBecause': 'Starring {name} — because you watched {title}',
   'category.countryType': '{country} {type}',
+  'category.serviceSort': '{value} {type}',
   'notice.allowedForChild': 'Allowed “{title}” for {name}',
   'notice.removedFromChild': 'Removed “{title}” from {name}',
 } as const;

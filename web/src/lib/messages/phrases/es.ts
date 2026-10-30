@@ -56,7 +56,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Access client ID': 'Acceder a la identificación del cliente',
   'Access client secret': 'Acceder al secreto del cliente',
   'Access lasts': 'El acceso dura',
-  Acclaimed: 'Aclamado',
+  Acclaimed: 'Aclamadas',
   Action: 'Acción',
   'Action & Adventure': 'Acción y aventura',
   'Action Comedy': 'Comedia de acción',
@@ -745,7 +745,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Recent searches available. Press Down Arrow to review.':
     'Búsquedas recientes disponibles. Presione la flecha hacia abajo para revisar.',
   'Recently downloaded': 'Descargado recientemente',
-  'Recently released': 'Lanzado recientemente',
+  'Recently released': 'Lanzamientos recientes',
   'Recovery code': 'Código de recuperación',
   'Redeem within (days)': 'Canjear dentro de (días)',
   refused: 'rechazado',
@@ -1193,4 +1193,5 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Trending Everywhere': 'Tendencias en todas partes',
   Titles: 'Títulos',
   'Dark Comedy': 'Comedia negra',
+  'Most Popular': 'Más populares',
 };

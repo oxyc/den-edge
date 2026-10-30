@@ -164,14 +164,25 @@ describe('Atlas shelf headings', () => {
         es,
       ),
     ).toBe('Porque ves misterio');
-    expect(
-      formatAtlasHeading(
-        heading('category.service_sort', 'Popular', {}),
-        'sv',
-        (value) => (value === 'Popular' ? 'Populärt' : svPhrase(value)),
-        sv,
-      ),
-    ).toBe('Populärt');
+    const sorts = [
+      ['Most Popular', 'Más populares', 'Mest populära'],
+      ['Recently released', 'Lanzamientos recientes', 'Nyligen släppta'],
+      ['Acclaimed', 'Aclamadas', 'Hyllade'],
+    ] as const;
+    for (const [label, spanish, swedish] of sorts) {
+      for (const [mediaType, englishType, esType, svType] of [
+        ['movie', 'Movies', 'Películas', 'Filmer'],
+        ['tv', 'Series', 'Series', 'Serier'],
+      ] as const) {
+        const serviceSort = heading('category.service_sort', `${label} ${englishType}`, {
+          label,
+          media_type: mediaType,
+          names_media_type: 'true',
+        });
+        expect(formatAtlasHeading(serviceSort, 'es', esPhrase, es)).toBe(`${esType}: ${spanish}`);
+        expect(formatAtlasHeading(serviceSort, 'sv', svPhrase, sv)).toBe(`${svType}: ${swedish}`);
+      }
+    }
     expect(
       formatAtlasHeading(
         heading('den.verbatim', 'Owner supplied', { value: 'Owner supplied' }),
