@@ -2,6 +2,7 @@
      year floor, which warnings and ratings show, the player's subtitle list, and legacy parental controls. Each of the
      TV's pushed screens opens in place here. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { tick } from 'svelte';
   import Button from '../components/Button.svelte';
   import PinInput from '../components/PinInput.svelte';
@@ -197,7 +198,10 @@
         options: [
           {
             value: region,
-            label: `${countryName(region)} (your region)${count(region) ? ` — ${count(region)} picked` : ''}`,
+            label: i18n.format('content.yourRegion', '{country} (your region){picked}', {
+              country: countryName(region),
+              picked: count(region) ? ` — ${count(region)} ${i18n.phrase('picked')}` : '',
+            }),
           },
         ],
       },
@@ -207,7 +211,10 @@
               label: 'Countries with picks',
               options: picked.map(([code, n]) => ({
                 value: code,
-                label: `${countryName(code)} — ${n} picked`,
+                label: i18n.format('content.regionPicked', '{country} — {count} picked', {
+                  country: countryName(code),
+                  count: n,
+                }),
               })),
             },
           ]
@@ -442,7 +449,12 @@
         labelledby="region-label"
         value={prefs.watchRegion ?? ''}
         options={[
-          { value: '', label: `Automatic (${countryName(deviceRegion)})` },
+          {
+            value: '',
+            label: i18n.format('content.automaticRegion', 'Automatic ({country})', {
+              country: countryName(deviceRegion),
+            }),
+          },
           ...(countries ?? []).map((c) => ({ value: c.code, label: c.name })),
           ...(prefs.watchRegion && !countries?.some((c) => c.code === prefs.watchRegion)
             ? [{ value: prefs.watchRegion, label: countryName(prefs.watchRegion) }]
@@ -590,7 +602,10 @@
               ]),
             ]
               .sort((a, b) => a - b)
-              .map((age) => ({ value: String(age), label: `Up to age ${age}` })),
+              .map((age) => ({
+                value: String(age),
+                label: i18n.format('content.upToAge', 'Up to age {age}', { age }),
+              })),
           ]}
           {disabled}
           onchange={(age) =>

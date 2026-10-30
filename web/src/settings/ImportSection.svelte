@@ -92,7 +92,14 @@
       ? { step: 'done', written: result.written }
       : {
           step: 'failed',
-          message: `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
+          message: i18n.format(
+            'import.saved',
+            'Saved {written} of {total}. The rest couldn’t be saved; importing the file again picks up where this stopped.',
+            {
+              written: result.written.toLocaleString(),
+              total: result.total.toLocaleString(),
+            },
+          ),
         };
   }
 
@@ -187,7 +194,9 @@
       <div class="form">
         <Button
           variant="primary"
-          label={`Mark ${plural(chosen.length, 'film or series', 'films and series')} as seen`}
+          label={i18n.format('import.markSeen', 'Mark {value} as seen', {
+            value: plural(chosen.length, 'film or series', 'films and series'),
+          })}
           disabled={!chosen.length}
           onclick={() => void write(chosen)}
         />

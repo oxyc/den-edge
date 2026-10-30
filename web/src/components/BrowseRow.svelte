@@ -36,6 +36,33 @@
     prefetch?: boolean;
   } = $props();
 
+  const localizedHeading = $derived(
+    row.titleMessage
+      ? i18n.format(
+          row.titleMessage.id,
+          row.title,
+          Object.fromEntries(
+            Object.entries(row.titleMessage.values).map(([key, value]) => [
+              key,
+              row.titleMessage?.translateValues?.includes(key) ? i18n.phrase(String(value)) : value,
+            ]),
+          ),
+        )
+      : i18n.phrase(row.title),
+  );
+  const localizedHeadingLink = $derived.by(() => {
+    if (!row.headingLink || !row.titleMessage) return row.headingLink;
+    const marker = String(row.titleMessage.values.value ?? row.headingLink.label);
+    const at = localizedHeading.indexOf(marker);
+    if (at < 0) return row.headingLink;
+    return {
+      ...row.headingLink,
+      before: localizedHeading.slice(0, at),
+      label: marker,
+      after: localizedHeading.slice(at + marker.length),
+    };
+  });
+
   let wrapper: HTMLElement;
   let end: HTMLElement;
   let track = $state<HTMLDivElement>();
@@ -263,9 +290,9 @@
   class:gone={done && !pager.failed && visible.length === 0}
 >
   <PosterRow
-    heading={i18n.phrase(row.title)}
+    heading={localizedHeading}
     ariaLabel={row.ariaLabel ? i18n.phrase(row.ariaLabel) : undefined}
-    headingLink={row.headingLink}
+    headingLink={localizedHeadingLink}
     aside={row.aside}
     active={rowNear}
     bind:track

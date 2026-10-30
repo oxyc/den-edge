@@ -8,9 +8,50 @@ import { localizeMarkup } from './scripts/localize-markup.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { sourcePhrases as spanishPhrases } from './src/lib/messages/phrases/es.ts';
+import { sourcePhrases as swedishPhrases } from './src/lib/messages/phrases/sv.ts';
+
+const phraseKey = (value: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+/** Compile translator-friendly English-keyed sources to compact runtime maps before any app code is bundled. */
+const compiledPhrases = (): Plugin => {
+  const catalogs = new Map([
+    ['\0den-phrases-es', spanishPhrases],
+    ['\0den-phrases-sv', swedishPhrases],
+  ]);
+  return {
+    name: 'den-compiled-phrase-catalogs',
+    resolveId(id) {
+      const resolved = `\0${id}`;
+      return catalogs.has(resolved) ? resolved : undefined;
+    },
+    load(id) {
+      const source = catalogs.get(id);
+      if (!source) return undefined;
+      const compact = Object.fromEntries(
+        Object.entries(source).map(([english, translation]) => [phraseKey(english), translation]),
+      );
+      return `export const phrases=${JSON.stringify(compact)}`;
+    },
+  };
+};
 
 const translationRevision = createHash('sha256');
-for (const file of ['es.ts', 'sv.ts', 'phrases/es.ts', 'phrases/sv.ts'])
+for (const file of [
+  'es.ts',
+  'sv.ts',
+  'phrases/es.ts',
+  'phrases/sv.ts',
+  'parameters/es.ts',
+  'parameters/sv.ts',
+])
   translationRevision.update(
     readFileSync(fileURLToPath(new URL(`./src/lib/messages/${file}`, import.meta.url))),
   );
@@ -215,6 +256,7 @@ export default defineConfig({
     previewProfiles(),
     previewBuild(),
     ...(watching ? [probe()] : []),
+    compiledPhrases(),
     svelte({ preprocess: localizeMarkup() }),
     preloadApplication(),
   ],

@@ -3,6 +3,7 @@
      included; a guest sees their own. Disconnecting ends a connection at its next call; one allowed to change the
      library also has its grant revoked in the library, which every device enforces (den-spec wire/assistant-v1.md). -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
@@ -288,7 +289,7 @@
   detail: string,
 )}
   {@const active = list.filter((g) => g.state === 'active').length}
-  <SettingRow {id} {label} value={active ? `${active} allowed` : 'None'}>
+  <SettingRow {id} {label} value={active ? i18n.allowedCount(active) : 'None'}>
     <ul class="list">
       {#each list as grant (grant.grant)}
         <li class="line">

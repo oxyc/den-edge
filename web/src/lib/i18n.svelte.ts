@@ -1,4 +1,5 @@
 import { ENGLISH_MESSAGES, type MessageCatalog, type MessageId } from './messages/en';
+import type { ParameterCatalog, ParameterMessageId } from './messages/parameters';
 import type { InterfaceLanguage } from './interfaceLanguage';
 import { ensureIntl } from './intlSupport';
 import {
@@ -6,13 +7,14 @@ import {
   readPresentationLanguageHint,
   rememberPresentationLanguage,
   rememberTranslationCatalog,
+  translationCacheSchema,
 } from './translationCache';
 
-/** Non-reactive bounded-by-language cache: catalog insertion must never invalidate a view. */
+/** Non-reactive bounded cache: insertion is an implementation detail and must never invalidate a view. */
 class StableCache<Key, Value> {
-  readonly #values: Map<Key, Value>;
+  readonly #values = new Map<Key, Value>();
   constructor(entries: readonly (readonly [Key, Value])[] = []) {
-    this.#values = new Map(entries);
+    for (const [key, value] of entries) this.#values.set(key, value);
   }
   get(key: Key): Value | undefined {
     return this.#values.get(key);
@@ -25,6 +27,7 @@ class StableCache<Key, Value> {
 interface LoadedCatalog {
   readonly messages: MessageCatalog;
   readonly phrases: Readonly<Record<string, string>>;
+  readonly parameters: Partial<ParameterCatalog>;
 }
 
 interface VersionedCatalog {
@@ -35,28 +38,45 @@ interface VersionedCatalog {
 const initialLanguage = readPresentationLanguageHint() ?? 'en';
 const initialCached = readCachedTranslationCatalog(initialLanguage);
 const initialCatalog: LoadedCatalog = initialCached
-  ? { messages: initialCached.messages, phrases: initialCached.phrases }
-  : { messages: ENGLISH_MESSAGES, phrases: {} };
+  ? {
+      messages: initialCached.messages,
+      phrases: initialCached.phrases,
+      parameters: initialCached.parameters,
+    }
+  : { messages: ENGLISH_MESSAGES, phrases: {}, parameters: {} };
 
 let state = $state.raw<{
   language: InterfaceLanguage;
   catalog: MessageCatalog;
   phrases: Readonly<Record<string, string>>;
+  parameters: Partial<ParameterCatalog>;
   generation: number;
 }>({
   language: initialCached ? initialLanguage : 'en',
   catalog: initialCatalog.messages,
   phrases: initialCatalog.phrases,
+  parameters: initialCatalog.parameters,
   generation: 0,
 });
 
 let requested = 0;
+const pluralRules = new StableCache<InterfaceLanguage, Intl.PluralRules>();
+let phraseKeys: StableCache<string, string> | undefined;
+
+const phraseKey = (value: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+};
 const loaded = new StableCache<InterfaceLanguage, VersionedCatalog>([
   [
     'en',
     {
       revision: __DEN_TRANSLATIONS_REVISION__,
-      value: { messages: ENGLISH_MESSAGES, phrases: {} },
+      value: { messages: ENGLISH_MESSAGES, phrases: {}, parameters: {} },
     },
   ],
   ...(initialCached
@@ -65,70 +85,22 @@ const loaded = new StableCache<InterfaceLanguage, VersionedCatalog>([
 ]);
 
 function translatedPhrase(english: string): string {
-  const exact = state.phrases[english];
+  phraseKeys ??= new StableCache();
+  let key = phraseKeys.get(english);
+  if (!key) {
+    key = phraseKey(english);
+    phraseKeys.set(english, key);
+  }
+  const exact = state.phrases[key];
   if (exact) return exact;
   const trimmed = english.trim();
-  const trimmedTranslation = state.phrases[trimmed];
-  if (trimmedTranslation) return english.replace(trimmed, trimmedTranslation);
-
-  const rules: readonly (readonly [RegExp, string])[] =
-    state.language === 'es'
-      ? [
-          [/^More from (.+)$/, 'Más de $1'],
-          [/^More about (.+)$/, 'Más sobre $1'],
-          [/^More adapted from (.+)$/, 'Más adaptaciones de $1'],
-          [/^More in (.+)$/, 'Más en $1'],
-          [/^More (.+) like this$/, 'Más títulos $1 como este'],
-          [/^Set in (.+)$/, 'Ambientadas en $1'],
-          [/^Written by (.+)$/, 'Escritas por $1'],
-          [/^Starring (.+)$/, 'Con $1'],
-          [/^Actions for (.+)$/, 'Acciones para $1'],
-          [/^More actions for (.+)$/, 'Más acciones para $1'],
-          [/^Open details for (.+)$/, 'Abrir detalles de $1'],
-          [/^Switch profile, current (.+)$/, 'Cambiar perfil, actual: $1'],
-          [/^Use (.+)$/, 'Usar $1'],
-          [/^Browse (.+)$/, 'Explorar $1'],
-          [/^Play (.+)$/, 'Reproducir $1'],
-          [/^Remove (.+) from Continue Watching$/, 'Quitar $1 de Seguir viendo'],
-          [/^Added “(.+)” to your watchlist$/, '“$1” se añadió a Mi lista'],
-          [/^Removed “(.+)” from your watchlist$/, '“$1” se quitó de Mi lista'],
-          [/^Marked “(.+)” as seen$/, '“$1” se marcó como visto'],
-          [/^Marked “(.+)” as unseen$/, '“$1” se marcó como no visto'],
-          [/^(\d+) allowed$/, '$1 permitidos'],
-          [/^Expand all in (.+)$/, 'Expandir todo en $1'],
-          [/^Collapse all in (.+)$/, 'Contraer todo en $1'],
-        ]
-      : [
-          [/^More from (.+)$/, 'Mer från $1'],
-          [/^More about (.+)$/, 'Mer om $1'],
-          [/^More adapted from (.+)$/, 'Fler filmatiseringar av $1'],
-          [/^More in (.+)$/, 'Mer på $1'],
-          [/^More (.+) like this$/, 'Mer $1 som detta'],
-          [/^Set in (.+)$/, 'Utspelar sig i $1'],
-          [/^Written by (.+)$/, 'Skrivet av $1'],
-          [/^Starring (.+)$/, 'Med $1'],
-          [/^Actions for (.+)$/, 'Åtgärder för $1'],
-          [/^More actions for (.+)$/, 'Fler åtgärder för $1'],
-          [/^Open details for (.+)$/, 'Öppna information om $1'],
-          [/^Switch profile, current (.+)$/, 'Byt profil, aktuell: $1'],
-          [/^Use (.+)$/, 'Använd $1'],
-          [/^Browse (.+)$/, 'Bläddra bland $1'],
-          [/^Play (.+)$/, 'Spela $1'],
-          [/^Remove (.+) from Continue Watching$/, 'Ta bort $1 från Fortsätt titta'],
-          [/^Added “(.+)” to your watchlist$/, '“$1” lades till i Min lista'],
-          [/^Removed “(.+)” from your watchlist$/, '“$1” togs bort från Min lista'],
-          [/^Marked “(.+)” as seen$/, '“$1” markerades som sedd'],
-          [/^Marked “(.+)” as unseen$/, '“$1” markerades som osedd'],
-          [/^(\d+) allowed$/, '$1 tillåtna'],
-          [/^Expand all in (.+)$/, 'Expandera alla i $1'],
-          [/^Collapse all in (.+)$/, 'Fäll ihop alla i $1'],
-        ];
-  for (const [pattern, replacement] of rules) {
-    const match = english.match(pattern);
-    if (!match?.[1]) continue;
-    // The captured part is usually a media title, person, studio, or device name. Keep proper names verbatim.
-    return replacement.replace('$1', match[1]);
+  let trimmedKey = phraseKeys.get(trimmed);
+  if (!trimmedKey) {
+    trimmedKey = phraseKey(trimmed);
+    phraseKeys.set(trimmed, trimmedKey);
   }
+  const trimmedTranslation = state.phrases[trimmedKey];
+  if (trimmedTranslation) return english.replace(trimmed, trimmedTranslation);
   return english;
 }
 
@@ -139,7 +111,11 @@ const cachedCatalog = (language: InterfaceLanguage): VersionedCatalog | undefine
   if (!persisted) return undefined;
   const found = {
     revision: persisted.revision,
-    value: { messages: persisted.messages, phrases: persisted.phrases },
+    value: {
+      messages: persisted.messages,
+      phrases: persisted.phrases,
+      parameters: persisted.parameters,
+    },
   };
   loaded.set(language, found);
   return found;
@@ -151,34 +127,60 @@ async function currentCatalog(language: InterfaceLanguage): Promise<VersionedCat
   if (language === 'en')
     return {
       revision: __DEN_TRANSLATIONS_REVISION__,
-      value: { messages: ENGLISH_MESSAGES, phrases: {} },
+      value: { messages: ENGLISH_MESSAGES, phrases: {}, parameters: {} },
     };
   const imported =
     language === 'es' ? await import('./messages/es') : await import('./messages/sv');
   const value = {
     revision: __DEN_TRANSLATIONS_REVISION__,
-    value: { messages: imported.messages, phrases: imported.phrases },
+    value: {
+      messages: imported.messages,
+      phrases: imported.phrases,
+      parameters: imported.parameters,
+    },
   };
   loaded.set(language, value);
-  rememberTranslationCatalog(language, {
-    revision: value.revision,
-    messages: value.value.messages,
-    phrases: value.value.phrases,
-  });
   return value;
 }
+
+const persistAfterTranslatedPaint = (
+  language: Exclude<InterfaceLanguage, 'en'>,
+  catalog: VersionedCatalog,
+): void => {
+  const persist = () =>
+    rememberTranslationCatalog(language, {
+      schema: translationCacheSchema,
+      language,
+      revision: catalog.revision,
+      messages: catalog.value.messages,
+      phrases: catalog.value.phrases,
+      parameters: catalog.value.parameters,
+    });
+  if (
+    typeof document === 'undefined' ||
+    document.hidden ||
+    typeof requestAnimationFrame !== 'function'
+  ) {
+    setTimeout(persist, 0);
+    return;
+  }
+  // Let the newly selected language reach a frame before serializing its bounded persistent snapshot.
+  requestAnimationFrame(() => setTimeout(persist, 0));
+};
 
 const publish = (language: InterfaceLanguage, next: LoadedCatalog): void => {
   if (
     state.language === language &&
     state.catalog === next.messages &&
-    state.phrases === next.phrases
+    state.phrases === next.phrases &&
+    state.parameters === next.parameters
   )
     return;
   state = {
     language,
     catalog: next.messages,
     phrases: next.phrases,
+    parameters: next.parameters,
     generation: state.generation + 1,
   };
 };
@@ -198,6 +200,8 @@ export async function setInterfaceLanguage(language: InterfaceLanguage): Promise
       : await currentCatalog(language);
   if (request !== requested) return;
   publish(language, next.value);
+  if (language !== 'en' && stale?.revision !== next.revision)
+    persistAfterTranslatedPaint(language, next);
   if (typeof navigator !== 'undefined' && navigator.userAgent.includes('DenAndroidTV/')) {
     // The trusted top-level navigation seam lets the launcher remember only this allowlisted presentation hint.
     window.location.href = `den://language/${language}`;
@@ -213,6 +217,27 @@ export const i18n = {
   },
   text(id: MessageId): string {
     return state.catalog[id] ?? ENGLISH_MESSAGES[id];
+  },
+  /** Parameterized messages are compiled catalog entries; production never parses ICU or English sentences. */
+  format(
+    id: ParameterMessageId,
+    english: string,
+    values: Readonly<Record<string, string | number>>,
+  ): string {
+    let output = state.parameters[id] ?? english;
+    for (const [name, value] of Object.entries(values))
+      output = output.split(`{${name}}`).join(String(value));
+    return output;
+  },
+  allowedCount(count: number): string {
+    let rules = pluralRules.get(state.language);
+    if (!rules) {
+      rules = new Intl.PluralRules(state.language);
+      pluralRules.set(state.language, rules);
+    }
+    const form =
+      rules.select(count) === 'one' ? 'profile.allowedCount.one' : 'profile.allowedCount.other';
+    return this.format(form, '{count} allowed', { count });
   },
   /** Static English copy is its own fallback, so the default language carries no duplicate phrase catalog. */
   phrase(english: string): string {

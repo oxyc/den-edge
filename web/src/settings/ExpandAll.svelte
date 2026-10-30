@@ -14,7 +14,11 @@
   <button
     type="button"
     class="expand-all"
-    aria-label={i18n.phrase(`${action} in ${label}`)}
+    aria-label={i18n.format(
+      allOpen ? 'settings.collapseAllIn' : 'settings.expandAllIn',
+      allOpen ? 'Collapse all in {value}' : 'Expand all in {value}',
+      { value: label },
+    )}
     onclick={() => rows.setAll(!allOpen, section)}>{i18n.phrase(action)}</button
   >
 {/if}

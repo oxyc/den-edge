@@ -1079,7 +1079,9 @@
             <a
               class="slide-link"
               href={titleHref(title)}
-              aria-label={`Open details for ${title.title}`}
+              aria-label={i18n.format('actions.openDetailsFor', 'Open details for {value}', {
+                value: title.title,
+              })}
               data-spatial-skip
               tabindex={n === index ? 0 : -1}
               draggable="false"

@@ -394,9 +394,9 @@ test('interface language translates routes and actions and survives a reload', a
   // A release with changed translations paints the last complete catalog first, then replaces it from the new
   // hashed module. This exercises the stale-while-revalidate branch without coupling the test to a build hash.
   await page.evaluate(() => {
-    const key = 'den.translations.v1.es';
+    const key = 'den.translations.v3.es';
     const cached = JSON.parse(localStorage.getItem(key));
-    cached.revision = 'previous-release';
+    cached.revision = '0000000000000000';
     cached.messages['nav.home'] = 'Inicio anterior';
     localStorage.setItem(key, JSON.stringify(cached));
   });

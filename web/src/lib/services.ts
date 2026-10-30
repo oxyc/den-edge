@@ -668,6 +668,11 @@ function rowsFor(
       // one would let a reused surface keep the other's posters.
       id: `service-tmdb-${service.id}-${country}-${id}-${type}`,
       title: `${title} ${NOUN[type]}`,
+      titleMessage: {
+        id: 'category.namedType',
+        values: { value: title, type: NOUN[type] },
+        translateValues: ['value', 'type'],
+      },
       load: (page: number) => catalogPage(pages, { kind: 'discover', query }, page),
     };
   });

@@ -5,6 +5,7 @@
      close.
      The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
@@ -4418,18 +4419,28 @@
         {@const dropsSubtitle =
           !!session && !external && subtitleChoice !== null && subtitlesNeedPlaylist()}
         <ActionMenu
-          label={session ? `Playing from ${source}` : 'Choose playback source'}
+          label={session
+            ? i18n.format('player.playingFrom', 'Playing from {source}', { source })
+            : i18n.phrase('Choose playback source')}
           note={session
             ? external
               ? directWithoutDenSubtitles
                 ? session.subtitles?.some((track) => track.torboxTrack !== undefined)
-                  ? 'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.'
-                  : 'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.'
-                : 'Playing directly from TorBox'
+                  ? i18n.phrase(
+                      'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.',
+                    )
+                  : i18n.phrase(
+                      'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.',
+                    )
+                : i18n.phrase('Playing directly from TorBox')
               : ruledOut
-                ? `Playing through Den Remux. ${ruledOut}.`
-                : 'Playing through Den Remux'
-            : 'Playback has no active source. Try either path explicitly.'}
+                ? i18n.format(
+                    'player.playingThroughReason',
+                    'Playing through Den Remux. {reason}.',
+                    { reason: i18n.phrase(ruledOut) },
+                  )
+                : i18n.phrase('Playing through Den Remux')
+            : i18n.phrase('Playback has no active source. Try either path explicitly.')}
           triggerClass="den-button den-button-player den-button-compact player-source-switch"
           onclose={scheduleWebControls}
           items={() =>
@@ -4437,14 +4448,18 @@
               ? [
                   {
                     kind: 'item',
-                    label: `Switch to ${external ? 'Den Remux' : 'TorBox'}`,
+                    label: i18n.format('player.switchTo', 'Switch to {source}', {
+                      source: external ? 'Den Remux' : 'TorBox',
+                    }),
                     description: external
-                      ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
+                      ? i18n.phrase(
+                          'For audio or subtitles this browser can’t play, or a stream that stalls',
+                        )
                       : ruledOut
                         ? undefined
                         : dropsSubtitle
-                          ? 'Turns subtitles off: this player shows only Den Remux’s'
-                          : 'Straight from the source, no conversion',
+                          ? i18n.phrase('Turns subtitles off: this player shows only Den Remux’s')
+                          : i18n.phrase('Straight from the source, no conversion'),
                     disabled: !!ruledOut || deliverySwitching || switching,
                     onselect: () => {
                       if (!dropsSubtitle) return switchDelivery();
@@ -4457,8 +4472,10 @@
               : [
                   {
                     kind: 'item',
-                    label: 'Try TorBox without Den subtitles',
-                    description: ruledOut ?? 'Play the release directly, without Den subtitles',
+                    label: i18n.phrase('Try TorBox without Den subtitles'),
+                    description: i18n.phrase(
+                      ruledOut ?? 'Play the release directly, without Den subtitles',
+                    ),
                     disabled: !!ruledOut || deliverySwitching || switching,
                     onselect: () => trySourceWithoutSession('torbox'),
                   },
@@ -4610,7 +4627,13 @@
     {:else if failure === 'lost'}
       <div class="terminal-message" role="alert">
         <p>The connection was gone too long for this to carry on.</p>
-        <Button variant="primary" label={`Resume from ${clockTime(lostAt)}`} onclick={resumeLost} />
+        <Button
+          variant="primary"
+          label={i18n.format('player.resumeFrom', 'Resume from {time}', {
+            time: clockTime(lostAt),
+          })}
+          onclick={resumeLost}
+        />
       </div>
     {:else if failure === 'ended'}
       <div class="terminal-message error" role="alert">
@@ -4937,7 +4960,7 @@
              quality and size over the release's file name — and ticks the one playing. -->
         <div class="pick-menu stream-pick">
           <ActionMenu
-            label={`Stream: ${short}`}
+            label={i18n.format('player.stream', 'Stream: {stream}', { stream: short })}
             heading="Streams"
             note={releaseListing === 'loading'
               ? 'Finding the other available streams…'
@@ -4973,7 +4996,9 @@
           {#if customTransport}
             <div class="pick-menu audio-pick">
               <ActionMenu
-                label={`Audio track: ${trackLabel(playingTrack, session.audioTrack)}`}
+                label={i18n.format('player.audioTrack', 'Audio track: {track}', {
+                  track: trackLabel(playingTrack, session.audioTrack),
+                })}
                 heading="Audio Track"
                 triggerClass="pick"
                 onclose={scheduleWebControls}
@@ -5025,7 +5050,9 @@
           {@const chosenSubtitleLabel = chosenSubtitle ? subtitleLabel(chosenSubtitle) : 'Off'}
           <div class="pick-menu subtitle-pick">
             <ActionMenu
-              label={`Subtitles: ${chosenSubtitleLabel}`}
+              label={i18n.format('player.subtitles', 'Subtitles: {subtitles}', {
+                subtitles: chosenSubtitleLabel,
+              })}
               heading="Subtitles"
               note={session.external && directWithoutDenSubtitles
                 ? 'Den subtitles were not requested for this direct stream. This release’s embedded TorBox subtitles remain available.'
@@ -5053,12 +5080,24 @@
                   ? [
                       {
                         kind: 'item' as const,
-                        label: `Adjust subtitle timing (${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}s)`,
+                        label: i18n.format(
+                          'player.adjustSubtitleTiming',
+                          'Adjust subtitle timing ({offset}s)',
+                          {
+                            offset: `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}`,
+                          },
+                        ),
                         onselect: openSubtitleTiming,
                       },
                       {
                         kind: 'item' as const,
-                        label: `Reset subtitle timing (${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}s)`,
+                        label: i18n.format(
+                          'player.resetSubtitleTiming',
+                          'Reset subtitle timing ({offset}s)',
+                          {
+                            offset: `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}`,
+                          },
+                        ),
                         disabled: subtitleOffset === 0,
                         onselect: () => {
                           subtitleOffset = 0;
@@ -5146,7 +5185,11 @@
             >
             <Button label="Stay" onclick={stay} />
           {:else}
-            <Button label={`Next: ${next}`} href={nextHref} onclick={advanceLink} />
+            <Button
+              label={i18n.format('player.next', 'Next: {title}', { title: next })}
+              href={nextHref}
+              onclick={advanceLink}
+            />
           {/if}
         {/if}
       </div>

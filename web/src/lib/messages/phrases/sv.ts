@@ -1,5 +1,5 @@
 // Generated from user-facing Svelte markup; English remains inline as the zero-cost fallback.
-export const phrases: Readonly<Record<string, string>> = {
+export const sourcePhrases: Readonly<Record<string, string>> = {
   '— your own redeems count too.': '– Dina egna inlösen räknas också.',
   ', or in Den wherever your library is already open, under':
     ', eller i Den varhelst ditt bibliotek redan är öppet, under',
@@ -1141,7 +1141,31 @@ export const phrases: Readonly<Record<string, string>> = {
   'Your TMDB API key': 'Din TMDB API-nyckel',
   'Your watchlist lives in your library, which this browser can’t keep.':
     'Din bevakningslista finns i ditt bibliotek, vilket den här webbläsaren inte kan behålla.',
+  'Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it.':
+    'Ditt bibliotek flyttas till en ny nyckel med allt innehåll kvar. Alla andra enheter, även din Apple TV, förlorar åtkomsten och måste parkopplas igen med en kod; den här webbläsaren behåller nyckeln.',
+  'Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it. Your recovery code stops working.':
+    'Ditt bibliotek flyttas till en ny nyckel med allt innehåll kvar. Alla andra enheter, även din Apple TV, förlorar åtkomsten och måste parkopplas igen med en kod; den här webbläsaren behåller nyckeln. Din återställningskod slutar fungera.',
   'yourself, just now.': 'dig själv, just nu.',
   YouTube: 'YouTube',
   Zombie: 'Zombie',
+  British: 'Brittiska',
+  Indian: 'Indiska',
+  Brazilian: 'Brasilianska',
+  Mexican: 'Mexikanska',
+  'Choose playback source': 'Välj uppspelningskälla',
+  'Playing directly from TorBox': 'Spelas direkt från TorBox',
+  'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.':
+    'Spelas direkt från TorBox. Den-undertexter begärdes inte; inbäddade TorBox-undertexter är fortfarande tillgängliga.',
+  'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.':
+    'Spelas direkt från TorBox. Den-undertexter begärdes inte och utgåvan saknar inbäddade TorBox-undertexter.',
+  'Playing through Den Remux': 'Spelas via Den Remux',
+  'Playback has no active source. Try either path explicitly.':
+    'Uppspelningen har ingen aktiv källa. Prova någon av vägarna direkt.',
+  'For audio or subtitles this browser can’t play, or a stream that stalls':
+    'För ljud eller undertexter som webbläsaren inte kan spela, eller en ström som stannar',
+  'Turns subtitles off: this player shows only Den Remux’s':
+    'Stänger av undertexter: spelaren visar bara undertexter från Den Remux',
+  'Straight from the source, no conversion': 'Direkt från källan, utan konvertering',
+  'Play the release directly, without Den subtitles': 'Spela utgåvan direkt, utan Den-undertexter',
+  'This Hearth has no TorBox to play from': 'Den här Hearth har ingen TorBox att spela från',
 };

@@ -469,7 +469,11 @@
                   ><button
                     class="recent-remove"
                     type="button"
-                    aria-label={`Remove ${value} from recent searches`}
+                    aria-label={i18n.format(
+                      'search.removeRecent',
+                      'Remove {value} from recent searches',
+                      { value },
+                    )}
                     onclick={() => removeRecent(value)}>×</button
                   >
                 </li>

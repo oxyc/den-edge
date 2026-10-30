@@ -1,5 +1,6 @@
 import type { MessageCatalog } from './en';
-export { phrases } from './phrases/es';
+export { phrases } from 'den-phrases-es';
+export { parameters } from './parameters/es';
 
 export const messages = {
   'nav.main': 'Navegación principal',

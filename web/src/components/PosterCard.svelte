@@ -13,6 +13,7 @@
 </script>
 
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { getContext, onDestroy } from 'svelte';
   import { availability } from '../lib/availability.svelte';
   import { observeNearViewport } from '../lib/nearViewport';
@@ -412,7 +413,7 @@
     <ActionMenu
       bind:this={actionMenu}
       items={() => titleMenuItems(title, titleActions, { continueWatching, href: href!, notify })}
-      label={`Actions for ${title.title}`}
+      label={i18n.format('actions.forTitle', 'Actions for {value}', { value: title.title })}
       heading={title.title}
       triggerClass={release ? 'action below' : 'action'}
       glyph={ellipsis}

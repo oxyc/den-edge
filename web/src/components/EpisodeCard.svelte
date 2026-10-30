@@ -10,6 +10,7 @@
 </script>
 
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import ActionMenu from './ActionMenu.svelte';
   import { RESUME_FLOOR, WATCHED } from '../lib/actions';
@@ -164,8 +165,15 @@
       onclick={press}
       onkeydown={key}
       aria-label={upcoming
-        ? `Episode ${episode.number}: ${episode.name}. Airs ${date}`
-        : `Play episode ${episode.number}: ${episode.name}`}
+        ? i18n.format('episode.upcoming', 'Episode {number}: {name}. Airs {date}', {
+            number: episode.number,
+            name: episode.name,
+            date: date ?? '',
+          })
+        : i18n.format('episode.play', 'Play episode {number}: {name}', {
+            number: episode.number,
+            name: episode.name,
+          })}
     >
       <span class="still">
         {#if episode.stillPath || fallback}
@@ -194,7 +202,9 @@
     <div class="episode-menu">
       <ActionMenu
         items={menuItems}
-        label={`Options for episode ${episode.number}`}
+        label={i18n.format('episode.options', 'Options for episode {number}', {
+          number: episode.number,
+        })}
         triggerClass="episode-trigger"
         glyph={more}
       />

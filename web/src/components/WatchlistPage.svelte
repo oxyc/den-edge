@@ -164,7 +164,10 @@
     ...(historyPage ? facetYears.filter((y) => y.count || y.year === year) : view.years).map(
       (y) => ({
         value: y.year,
-        label: `${y.year === UNKNOWN_YEAR ? 'Unknown' : y.year} (${y.count})`,
+        label: i18n.format('watchlist.yearCount', '{year} ({count})', {
+          year: y.year === UNKNOWN_YEAR ? i18n.phrase('Unknown') : y.year,
+          count: y.count,
+        }),
       }),
     ),
   ]);
@@ -318,7 +321,13 @@
   function press(control: Control, title: Title) {
     const id = `${control.icon}:${key(title)}`;
     if (control.confirm && confirming?.id !== id) {
-      confirming = { id, question: `${control.confirm} ${title.title}` };
+      confirming = {
+        id,
+        question: i18n.format('actions.confirmTitle', '{action} {title}', {
+          action: i18n.phrase(control.confirm),
+          title: title.title,
+        }),
+      };
       return;
     }
     confirming = null;

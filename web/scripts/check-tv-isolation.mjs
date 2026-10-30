@@ -104,11 +104,15 @@ if (process.argv.includes('--capture')) {
   // The versioned warm catalog cache adds 0.4 KiB gzip to the shared language seam. It prevents an English repaint
   // and avoids fetching or parsing the lazy catalog on unchanged Spanish/Swedish reloads. Allow one KiB of total
   // graph room while leaving the independently enforced English initial ceiling and catalog ceiling unchanged.
+  // Structured dynamic copy replaces runtime English-sentence matching and closes generated-menu/shelf gaps. Its
+  // presentation descriptors add 0.8 KiB across lazily visited screens; build-compiled phrase maps simultaneously
+  // cut the opt-in catalogs by over 10 KiB and English startup remains 6.6 KiB below baseline. Give the audited
+  // app graph one KiB while keeping both transfer-critical ceilings above unchanged.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
   // unchanged initial-graph ceiling above remains the English startup contract.
   if (current.translationGzip > 51200) throw new Error('Lazy translation catalog budget exceeded');
-  if (coreTotalDelta > 52224) throw new Error('Browser total JS/CSS budget exceeded');
+  if (coreTotalDelta > 53248) throw new Error('Browser total JS/CSS budget exceeded');
 }

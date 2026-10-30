@@ -640,7 +640,10 @@
   );
   const continueLabel = $derived(
     series?.kind === 'next' && target
-      ? `Play Next · S${target.season} · E${target.episode}`
+      ? i18n.format('player.playNextEpisode', 'Play Next · S{season} · E{episode}', {
+          season: target.season,
+          episode: target.episode,
+        })
       : 'Continue Watching',
   );
   /** Directors lead the row, followed by cast in billing order, once per person. */
@@ -1044,7 +1047,9 @@
             {tvs}
             primaryPlay={live && !transportPlaying && ontransport
               ? {
-                  label: `Resume on ${live.device ?? 'TV'}`,
+                  label: i18n.format('detail.resumeOn', 'Resume on {device}', {
+                    device: live.device ?? 'TV',
+                  }),
                   onselect: () => void transport('play'),
                   tv: live.deviceId,
                 }

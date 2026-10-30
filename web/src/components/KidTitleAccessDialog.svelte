@@ -3,6 +3,7 @@
   import type { Title } from '../lib/library';
   import Button from './Button.svelte';
   import PinInput from './PinInput.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     request,
@@ -44,18 +45,36 @@
   function close() {
     dialog?.close();
   }
+
+  const heading = $derived(
+    request
+      ? i18n.format('actions.childAccessQuestion', '{action} for {name}?', {
+          action: i18n.phrase(request.allow ? 'Allow' : 'Remove'),
+          name: request.kid.name,
+        })
+      : '',
+  );
+  const detail = $derived(
+    request
+      ? request.allow
+        ? i18n.format(
+            'profile.allowTitleDetail',
+            'This lets {name} open and play “{title}”, even when their content limit would block it.',
+            { name: request.kid.name, title: request.title.title },
+          )
+        : i18n.format(
+            'profile.removeTitleDetail',
+            '{name} will follow their content limit for “{title}” again.',
+            { name: request.kid.name, title: request.title.title },
+          )
+      : '',
+  );
 </script>
 
 <dialog bind:this={dialog} aria-labelledby="kid-title-access-title" {onclose}>
   {#if request}
-    <h2 id="kid-title-access-title">
-      {request.allow ? 'Allow' : 'Remove'} for {request.kid.name}?
-    </h2>
-    <p>
-      {request.allow
-        ? `This lets ${request.kid.name} open and play “${request.title.title}”, even when their content limit would block it.`
-        : `${request.kid.name} will follow their content limit for “${request.title.title}” again.`}
-    </p>
+    <h2 id="kid-title-access-title">{heading}</h2>
+    <p>{detail}</p>
     <form
       onsubmit={(event) => {
         event.preventDefault();

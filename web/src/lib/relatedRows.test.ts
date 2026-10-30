@@ -1272,8 +1272,8 @@ describe('languageRow', () => {
 
     expect(row.title).toBe('More in Swedish');
     expect(row.headingLink).toEqual({
-      before: 'More ',
-      label: 'in Swedish',
+      before: 'More in ',
+      label: 'Swedish',
       after: '',
       href: '/search?type=tv&c=lang-sv',
     });

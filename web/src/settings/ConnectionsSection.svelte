@@ -3,6 +3,7 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network — says where to do it. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import ActionMenu from '../components/ActionMenu.svelte';
@@ -952,8 +953,20 @@
             Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
           </p>
           <Confirm
-            label={`Remove ${heldRemovals.length === 1 ? '1 title' : `${heldRemovals.length} titles`} from SIMKL`}
-            question={`Remove ${heldRemovals.length === 1 ? 'this title' : `these ${heldRemovals.length} titles`} from your SIMKL watchlist?`}
+            label={i18n.format(
+              heldRemovals.length === 1 ? 'simkl.removeLabel.one' : 'simkl.removeLabel.other',
+              heldRemovals.length === 1
+                ? 'Remove 1 title from SIMKL'
+                : 'Remove {count} titles from SIMKL',
+              { count: heldRemovals.length },
+            )}
+            question={i18n.format(
+              heldRemovals.length === 1 ? 'simkl.removeQuestion.one' : 'simkl.removeQuestion.other',
+              heldRemovals.length === 1
+                ? 'Remove this title from your SIMKL watchlist?'
+                : 'Remove these {count} titles from your SIMKL watchlist?',
+              { count: heldRemovals.length },
+            )}
             detail="This can't be undone."
             {disabled}
             onconfirm={() =>
@@ -1099,7 +1112,9 @@
                     (menu) => (pluginMenus = { ...pluginMenus, [url]: menu })
                   }
                   items={() => pluginItems(url, configureURL, pinned)}
-                  label="More actions for {den?.label ?? hostOf(url)}"
+                  label={i18n.format('actions.moreFor', 'More actions for {value}', {
+                    value: den?.label ?? hostOf(url),
+                  })}
                   heading={den?.label ?? hostOf(url)}
                   triggerClass="addon-trigger"
                   onclose={() => {
@@ -1194,7 +1209,9 @@
                     (menu) => (guestMenus = { ...guestMenus, [grant.gid]: menu })
                   }
                   items={() => guestItems(grant.gid, grant.secret, Boolean(hasOverride))}
-                  label="More actions for Den Hearth"
+                  label={i18n.format('actions.moreFor', 'More actions for {value}', {
+                    value: 'Den Hearth',
+                  })}
                   heading="Den Hearth"
                   triggerClass="addon-trigger"
                   glyph={more}
@@ -1428,7 +1445,13 @@
         <Confirm
           label={resetting ? 'Resetting…' : 'Reset library key…'}
           question="Reset your library key?"
-          detail={`Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it.${hasRecoveryCode ? ' Your recovery code stops working.' : ''}`}
+          detail={hasRecoveryCode
+            ? i18n.phrase(
+                'Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it. Your recovery code stops working.',
+              )
+            : i18n.phrase(
+                'Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it.',
+              )}
           confirmLabel="Reset key"
           disabled={disabled || resetting}
           onconfirm={() => void resetKey()}
