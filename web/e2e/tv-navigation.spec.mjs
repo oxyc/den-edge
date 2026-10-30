@@ -371,6 +371,9 @@ test('interface language translates routes and actions and survives a reload', a
 
   await page.getByRole('link', { name: 'Inicio', exact: true }).click();
   await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+  const services = page.getByRole('region', { name: 'Servicios', exact: true });
+  await expect(services.getByRole('heading', { name: 'Servicios', exact: true })).toBeVisible();
+  await expect(services.getByText('Servicios no disponibles', { exact: true })).toBeVisible();
   await page.addInitScript(() => {
     window.__denPaintedEnglishShell = false;
     const inspect = () => {

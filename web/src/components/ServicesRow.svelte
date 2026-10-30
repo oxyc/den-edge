@@ -3,6 +3,7 @@
      is availability data. A settled failure keeps one quiet placeholder so lower rows do not jump. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
+  import { capitalizeHeading } from '../lib/headingText';
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
   import type { Service } from '../settings/services';
@@ -31,6 +32,7 @@
     /** Called once when this rail is close enough that its provider directories should start loading. */
     onvisible?: () => void;
   } = $props();
+  const localizedHeading = $derived(capitalizeHeading(i18n.phrase(heading), i18n.language));
   let section = $state<HTMLElement>();
 
   $effect(() => {
@@ -58,8 +60,8 @@
 </script>
 
 {#if services.length || pending || empty}
-  <section class="row services-row" aria-label={i18n.phrase(heading)} bind:this={section}>
-    <h2>{i18n.phrase(heading)}</h2>
+  <section class="row services-row" aria-label={localizedHeading} bind:this={section}>
+    <h2>{localizedHeading}</h2>
     <div class="track">
       {#each services as { pick, service } (`${service.id}@${pick.country}`)}
         <ServiceTile
@@ -77,7 +79,7 @@
           {/each}
         {:else if empty}
           <span class="hold empty"
-            ><span class="plate" aria-hidden="true">—</span><span>{empty}</span></span
+            ><span class="plate" aria-hidden="true">—</span><span>{i18n.phrase(empty)}</span></span
           >
         {/if}
       {/each}

@@ -52,12 +52,19 @@ describe('UI translation coverage', () => {
       'Continue Watching': 'Seguir viendo',
       Downloads: 'Descargas',
       Play: 'Reproducir',
+      Action: 'Acción',
+      Bingeable: 'Atracones',
+      Whodunits: 'Novelas policíacas',
+      Services: 'Servicios',
+      'Services unavailable': 'Servicios no disponibles',
     });
     expect(swedish).toMatchObject({
       More: 'Mer',
       'Continue Watching': 'Fortsätt titta',
       Downloads: 'Hämtningar',
       Play: 'Spela',
+      Services: 'Tjänster',
+      'Services unavailable': 'Tjänsterna är inte tillgängliga',
     });
   });
 
