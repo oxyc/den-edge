@@ -2,6 +2,7 @@
      doing and how fast, then the figures behind it, then which release, and who queued it when that wasn't this
      browser. Text, not controls: it is a status. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import type { DownloadViewItem } from '../lib/libraryServiceProtocol';
   import { viewFacts, viewHeadline, viewTrouble } from '../lib/downloadStatus';
 
@@ -26,7 +27,7 @@
 
 <div class="download-status">
   <p class="headline" class:trouble={viewTrouble(download)} role="status">
-    {viewHeadline(download)}
+    {i18n.phrase(viewHeadline(download))}
   </p>
   {#if lines.length}<p>{lines.join(' · ')}</p>{/if}
   {#if release && download.release}<p class="release">{download.release.label}</p>{/if}

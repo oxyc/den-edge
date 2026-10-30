@@ -1138,16 +1138,17 @@
     {/if}
     {#if d.seasons.length && !restricted}
       {@const regular = d.seasons.filter((s) => s.number > 0)}
-      <section class="seasons" aria-label="Episodes">
+      <section class="seasons" aria-label={i18n.phrase('Episodes')}>
         <p class="totals">
           {regular.length}
-          {regular.length === 1 ? 'season' : 'seasons'} · {regular.reduce(
+          {i18n.phrase(regular.length === 1 ? 'season' : 'seasons')} · {regular.reduce(
             (sum, s) => sum + s.episodeCount,
             0,
-          )} episodes
+          )}
+          {i18n.phrase('episodes')}
         </p>
         <div class="section-heading">
-          <h2>Episodes</h2>
+          <h2>{i18n.phrase('Episodes')}</h2>
           {#if series && series.total > 0}<span class="watched-count"
               >{series.watched === series.total
                 ? 'All watched'

@@ -95,8 +95,8 @@
       >{/if}{#if factHref(fact, i) && !__DEN_TV__}<a
         class="filter-link"
         data-spatial-skip
-        href={factHref(fact, i)}>{fact}</a
-      >{:else}<span>{fact}</span>{/if}{/each}
+        href={factHref(fact, i)}>{i18n.phrase(fact)}</a
+      >{:else}<span>{i18n.phrase(fact)}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
   {#if !__DEN_TV__}<ContentWarnings {warnings} />{/if}
   {#if d.providers.length}
