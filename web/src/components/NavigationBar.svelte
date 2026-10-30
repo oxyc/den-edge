@@ -26,6 +26,7 @@
   } from '../lib/recentSearches';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { libraryOpeningProgress } from '../lib/libraryOpening.svelte';
+  import { i18n } from '../lib/i18n.svelte';
   let {
     route,
     query = '',
@@ -247,13 +248,13 @@
    * to draw them: the first attempt was a small disc with long rays, which is a sun. Three rails with their
    * knobs offset survives the size, and settings as adjustments is a fair reading of what the page is.
    */
-  const tabs = [
-    { page: 'library', label: 'Home', icon: undefined },
-    { page: 'movies', label: 'Movies', icon: undefined },
-    { page: 'series', label: 'Series', icon: undefined },
-    { page: 'watchlist', label: 'Watchlist', icon: undefined },
-    { page: 'settings', label: 'Settings', icon: 'sliders' },
-  ] as const;
+  const tabs = $derived([
+    { page: 'library' as const, label: i18n.text('nav.home'), icon: undefined },
+    { page: 'movies' as const, label: i18n.text('nav.movies'), icon: undefined },
+    { page: 'series' as const, label: i18n.text('nav.series'), icon: undefined },
+    { page: 'watchlist' as const, label: i18n.text('nav.watchlist'), icon: undefined },
+    { page: 'settings' as const, label: i18n.text('nav.settings'), icon: 'sliders' as const },
+  ]);
   /** A library's first read from den-edge, drawn along the bar's lower edge while it runs. */
   const opening = $derived(libraryOpeningProgress());
   /** What the line draws: the read's progress, then full for a moment once it has finished, then nothing. */
@@ -295,7 +296,7 @@
       class="opening"
       class:finished
       role="progressbar"
-      aria-label="Loading your library"
+      aria-label={i18n.text('nav.loadingLibrary')}
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={finished ? 100 : Math.round((opening ?? 0) * 100)}
@@ -325,10 +326,10 @@
     <p class="opening-label" class:finished aria-hidden="true">
       <!-- Only the read's own figure: none until it has kept something, never the creep before it. -->
       {finished
-        ? 'Library ready'
+        ? i18n.text('nav.libraryReady')
         : opening
-          ? `Loading your library · ${Math.round(opening * 100)}%`
-          : 'Loading your library'}
+          ? `${i18n.text('nav.loadingLibrary')} · ${Math.round(opening * 100)}%`
+          : i18n.text('nav.loadingLibrary')}
     </p>
   {/if}
 {/snippet}
@@ -336,11 +337,11 @@
 <div class="bar-anchor">
   {#if __DEN_TV__}
     <header class="bar tv-bar">
-      <nav aria-label="Main navigation">
+      <nav aria-label={i18n.text('nav.main')}>
         <button
           class="tv-search-button"
           type="button"
-          aria-label="Search"
+          aria-label={i18n.text('nav.search')}
           aria-current={route.page === 'search' ? 'page' : undefined}
           onclick={() => navigate(searchHref(''))}
         >
@@ -477,7 +478,7 @@
           </div>
         {/if}
       </form>
-      <nav aria-label="Main navigation">
+      <nav aria-label={i18n.text('nav.main')}>
         {#each tabs as tab (tab.page)}
           <a
             href={tab.page === 'library' ? '/' : `/${tab.page}`}
@@ -496,7 +497,7 @@
       <button
         class="search-toggle"
         type="button"
-        aria-label="Search"
+        aria-label={i18n.text('nav.search')}
         aria-expanded={expanded}
         aria-controls="nav-search"
         onclick={openSearch}

@@ -16,6 +16,7 @@ import {
   PROFILE_SERVICE_LIMIT,
   PROFILE_WARNING_CATEGORIES,
 } from './profilePreferenceSchema';
+import { isInterfaceLanguage } from './interfaceLanguage';
 
 const KID_PREFIX = 'den.profile.preferences.preview.v1:';
 const VISITOR_DOCUMENT = 'preferences';
@@ -36,6 +37,7 @@ export interface ProfilePreferences {
 }
 
 const personalDefaults = (): PersonalPreferences => ({
+  interfaceLanguage: undefined,
   excludedGenres: [],
   excludedLanguages: [],
   hideAnime: false,
@@ -96,6 +98,9 @@ const readPersonal = (value: unknown): PersonalPreferences => {
   if (!value || typeof value !== 'object') return defaults;
   const stored = value as Record<string, unknown>;
   return {
+    interfaceLanguage: isInterfaceLanguage(stored.interfaceLanguage)
+      ? stored.interfaceLanguage
+      : defaults.interfaceLanguage,
     excludedGenres: validGenres(stored.excludedGenres) ?? defaults.excludedGenres,
     excludedLanguages: validLanguages(stored.excludedLanguages) ?? defaults.excludedLanguages,
     hideAnime: typeof stored.hideAnime === 'boolean' ? stored.hideAnime : defaults.hideAnime,
@@ -161,6 +166,7 @@ const applyPersonalPatch = (
 ): PersonalPreferences => {
   assertPersonalPatch(patch);
   const next = structuredClone(current);
+  if (patch.interfaceLanguage !== undefined) next.interfaceLanguage = patch.interfaceLanguage;
   if (patch.watchRegion !== undefined) next.watchRegion = patch.watchRegion ?? undefined;
   if (patch.services)
     Object.assign(
@@ -252,6 +258,7 @@ export class PreviewProfilePreferences implements ProfilePreferences {
     const own = structuredClone(this.#personal);
     return {
       ...own,
+      interfaceLanguage: own.interfaceLanguage ?? household.interfaceLanguage ?? 'en',
       watchRegion: own.watchRegion ?? household.watchRegion,
       services: own.servicesConfigured ? own.services : [...household.services],
       servicesConfigured: own.servicesConfigured || household.servicesConfigured,
@@ -343,6 +350,7 @@ const assertPersonalPatch = (patch: PreferenceChanges): void => {
   if ('maturityCeiling' in patch)
     throw new TypeError('A profile cannot write its content policy through preferences');
   const valid =
+    (patch.interfaceLanguage === undefined || isInterfaceLanguage(patch.interfaceLanguage)) &&
     (patch.minReleaseYear === undefined ||
       patch.minReleaseYear === null ||
       isProfileYear(patch.minReleaseYear)) &&

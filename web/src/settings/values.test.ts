@@ -31,6 +31,7 @@ const row = (values: SettingsRow['values']): SettingsRow => ({
 describe('synced prefs', () => {
   it("reads nothing as the TV's defaults", () => {
     expect(readSyncedPrefs(undefined)).toEqual({
+      interfaceLanguage: 'en',
       excludedGenres: [],
       excludedLanguages: [],
       hideAnime: false,
@@ -48,6 +49,7 @@ describe('synced prefs', () => {
       watchRegion: undefined,
       services: [],
       servicesConfigured: false,
+      maturityCeiling: undefined,
     });
   });
 

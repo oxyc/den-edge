@@ -543,6 +543,7 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
     !record(value) ||
     !Object.values(value).some((candidate) => candidate !== undefined) ||
     !exact(value, [
+      'interfaceLanguage',
       'excludedGenres',
       'excludedLanguages',
       'hideAnime',
@@ -570,6 +571,11 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
   const sources = value.ratingSources;
   const services = value.services;
   return (
+    optional(
+      value.interfaceLanguage,
+      (candidate): candidate is 'en' | 'es' | 'sv' =>
+        candidate === 'en' || candidate === 'es' || candidate === 'sv',
+    ) &&
     (genres === undefined ||
       (list(
         genres,
@@ -1516,6 +1522,7 @@ function preferencesView(value: unknown): boolean {
   if (
     !record(value) ||
     !exact(value, [
+      'interfaceLanguage',
       'excludedGenres',
       'excludedLanguages',
       'hideAnime',
@@ -1544,6 +1551,11 @@ function preferencesView(value: unknown): boolean {
   const shownWarnings = value.shownWarnings;
   const services = value.services;
   return (
+    optional(
+      value.interfaceLanguage,
+      (candidate): candidate is 'en' | 'es' | 'sv' =>
+        candidate === 'en' || candidate === 'es' || candidate === 'sv',
+    ) &&
     list(
       genres,
       (candidate): candidate is number => integer(candidate) && candidate > 0,

@@ -53,9 +53,27 @@ it('validates bounded semantic requests and unversioned content replies', () => 
       type: 'content-query',
       protocol: CONTENT_SERVICE_PROTOCOL,
       requestId: 'hero',
-      request: { kind: 'title.hero', title: { type: 'movie', id: 7 }, region: 'US' },
+      request: {
+        kind: 'title.hero',
+        title: { type: 'movie', id: 7 },
+        region: 'US',
+        interfaceLanguage: 'sv',
+      },
     }).ok,
   ).toBe(true);
+  expect(
+    decodeContentServiceClientMessage({
+      type: 'content-query',
+      protocol: CONTENT_SERVICE_PROTOCOL,
+      requestId: 'unsupported-language',
+      request: {
+        kind: 'title.hero',
+        title: { type: 'movie', id: 7 },
+        region: 'US',
+        interfaceLanguage: 'fr',
+      },
+    }).ok,
+  ).toBe(false);
   expect(
     decodeContentServiceClientMessage({
       type: 'content-query',

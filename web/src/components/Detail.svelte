@@ -560,7 +560,12 @@
     const row = list.querySelector(`[data-episode="${asked}"]`);
     if (!row) return;
     addressedEpisode = asked!;
-    row.scrollIntoView({ block: 'center' });
+    // Router restores the new visit's saved top after the mounting flush. Run after that restore so a fast cached
+    // season cannot have its addressed scroll overwritten; slower provider answers naturally take this path later.
+    requestAnimationFrame(() => {
+      if (episodeAsked === key && row.isConnected && active)
+        row.scrollIntoView({ block: 'center' });
+    });
   });
 
   /**

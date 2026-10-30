@@ -292,6 +292,7 @@ export type LibraryCommand =
 export type StoredPreferenceValues = Record<string, object>;
 
 export interface LibraryPreferencesPatch {
+  interfaceLanguage?: import('./interfaceLanguage').InterfaceLanguage;
   excludedGenres?: number[];
   excludedLanguages?: string[];
   hideAnime?: boolean;
@@ -551,6 +552,7 @@ export interface SimklView {
 
 /** Every preference synchronized in the library, projected with the same defaults as the settings screen. */
 export interface LibraryPreferences {
+  interfaceLanguage?: import('./interfaceLanguage').InterfaceLanguage;
   excludedGenres: number[];
   excludedLanguages: string[];
   hideAnime: boolean;

@@ -66,6 +66,7 @@ import { awaitingPicture, searchStream, type Hit } from './search';
 import { searchSources } from './searchSources';
 import { parseKidsHomeCatalogue } from './kidsHome';
 import { ContentImportAuthority } from './contentImportAuthority';
+import { tmdbLanguage, type InterfaceLanguage } from './interfaceLanguage';
 import {
   fetchFilterCounts,
   fetchPeopleCounts,
@@ -139,9 +140,17 @@ export interface ContentExtras {
 
 /** The only provider surface the Worker protocol needs to know. */
 export interface ContentReader {
-  title(ref: ContentRef): Promise<ProviderResult<Details>>;
-  detail(ref: ContentRef, region?: string): Promise<ProviderResult<TitleDetail>>;
-  season(seriesId: number, season: number): Promise<ProviderResult<Episode[]>>;
+  title(ref: ContentRef, language?: InterfaceLanguage): Promise<ProviderResult<Details>>;
+  detail(
+    ref: ContentRef,
+    region?: string,
+    language?: InterfaceLanguage,
+  ): Promise<ProviderResult<TitleDetail>>;
+  season(
+    seriesId: number,
+    season: number,
+    language?: InterfaceLanguage,
+  ): Promise<ProviderResult<Episode[]>>;
   identifiers(ref: ContentRef): Promise<ProviderResult<ContentIdentifiers>>;
   extras(imdbId: string, warningCategories?: readonly string[]): Promise<ContentExtras>;
 }
@@ -299,9 +308,19 @@ function absent(url: string, response: Response): boolean {
   return false;
 }
 
-function tmdbUrl(path: string, key: string, params: Record<string, string> = {}): string {
+function tmdbUrl(
+  path: string,
+  key: string,
+  params: Record<string, string> = {},
+  language: InterfaceLanguage = 'en',
+): string {
   const url = new URL(TMDB + path);
-  for (const [name, value] of Object.entries({ ...params, api_key: key }))
+  const localized = tmdbLanguage(language);
+  for (const [name, value] of Object.entries({
+    ...params,
+    ...(localized ? { language: localized } : {}),
+    api_key: key,
+  }))
     url.searchParams.set(name, value);
   return url.toString();
 }
@@ -372,6 +391,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return { kind: 'grants.configure' };
     }
     await this.#wait(this.credentials.ready?.() ?? Promise.resolve(), signal);
+    const language = request.interfaceLanguage ?? 'en';
     switch (request.kind) {
       case 'titles': {
         const titles: Details['title'][] = [];
@@ -381,7 +401,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           for (let ref = request.titles[next++]; ref; ref = request.titles[next++]) {
             // A title the policy does not establish is neither shown nor retried: it is not a transient failure.
             if (!(await this.#allowed(ref, policy, signal))) continue;
-            const result = await this.#wait(this.title(ref), signal);
+            const result = await this.#wait(this.title(ref, language), signal);
             if (result.kind === 'found') titles.push(result.value.title);
             else if (result.kind === 'unavailable' || result.kind === 'not-configured')
               retryable.push(ref);
@@ -419,7 +439,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         if (!(await this.#allowed(request.title, policy, signal)))
           return { kind: 'title.detail', detail: REFUSED };
         const detail = optional(
-          await this.#wait(this.detail(request.title, request.region), signal),
+          await this.#wait(this.detail(request.title, request.region, language), signal),
           'tmdb',
         );
         // TMDB's "recommendations" are a TMDB-only discovery list that no store has aged or audience-checked.
@@ -435,7 +455,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         if (!(await this.#allowed(request.title, policy, signal)))
           return { kind: 'title.hero', hero: REFUSED };
         const detail = optional(
-          await this.#wait(this.detail(request.title, request.region), signal),
+          await this.#wait(this.detail(request.title, request.region, language), signal),
           'tmdb',
         );
         return {
@@ -446,7 +466,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'prefetch.detail':
         if (await this.#allowed(request.title, policy, signal))
-          await this.#wait(this.detail(request.title, request.region), signal);
+          await this.#wait(this.detail(request.title, request.region, language), signal);
         return { kind: 'prefetch.detail' };
       case 'title.external-id': {
         if (!(await this.#allowed(request.title, policy, signal)))
@@ -468,7 +488,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         return {
           kind: 'season',
           episodes: optional(
-            await this.#wait(this.season(request.title.id, request.season), signal),
+            await this.#wait(this.season(request.title.id, request.season, language), signal),
             'tmdb',
           ),
         };
@@ -492,7 +512,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         if (failsClosed(policy)) return { kind: 'catalog.page', titles: [] };
         return {
           kind: 'catalog.page',
-          titles: await this.#wait(this.#catalog(request.catalog, request.page), signal),
+          titles: await this.#wait(this.#catalog(request.catalog, request.page, language), signal),
         };
       case 'search': {
         const atlas = this.credentials.atlas?.() ?? null;
@@ -521,6 +541,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           ),
           atlas,
           !restricted,
+          language,
         );
         // Every batch goes to the page as it is made — the grid named at once, then each poster as it lands — and the
         // last is the finished answer.
@@ -543,7 +564,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         // A TMDB collection is another TMDB-only title list; a fail-closed profile's franchise is atlas'.
         if (failsClosed(policy)) return { kind: 'collection', titles: [] };
         const body = await this.#wait(
-          this.#tmdb(`/collection/${request.id}`, this.#tmdbKey()),
+          this.#tmdb(`/collection/${request.id}`, this.#tmdbKey(), {}, language),
           signal,
         );
         return {
@@ -552,7 +573,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         };
       }
       case 'person': {
-        const body = await this.#wait(this.#tmdb(`/person/${request.id}`, this.#tmdbKey()), signal);
+        const body = await this.#wait(
+          this.#tmdb(`/person/${request.id}`, this.#tmdbKey(), {}, language),
+          signal,
+        );
         const person = body.kind === 'found' ? parsePerson(request.id, body.value) : null;
         return {
           kind: 'person',
@@ -570,7 +594,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         if (failsClosed(policy))
           return { kind: 'person.filmography', credits: { state: 'absent' } };
         const body = await this.#wait(
-          this.#tmdb(`/person/${request.id}/combined_credits`, this.#tmdbKey()),
+          this.#tmdb(`/person/${request.id}/combined_credits`, this.#tmdbKey(), {}, language),
           signal,
         );
         return {
@@ -583,7 +607,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'service.regions': {
         const body = await this.#wait(
-          this.#tmdb('/watch/providers/regions', this.#tmdbKey()),
+          this.#tmdb('/watch/providers/regions', this.#tmdbKey(), {}, language),
           signal,
         );
         if (body.kind !== 'found') throw this.#fault(body, 'service regions unavailable');
@@ -594,9 +618,14 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         const answers = await Promise.all(
           (['movie', 'tv'] as const).map((media) =>
             this.#wait(
-              this.#tmdb(`/watch/providers/${media}`, this.#tmdbKey(), {
-                watch_region: region,
-              }),
+              this.#tmdb(
+                `/watch/providers/${media}`,
+                this.#tmdbKey(),
+                {
+                  watch_region: region,
+                },
+                language,
+              ),
               signal,
             ),
           ),
@@ -726,17 +755,19 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     }
   }
 
-  title(ref: ContentRef): Promise<ProviderResult<Details>> {
+  title(ref: ContentRef, language: InterfaceLanguage = 'en'): Promise<ProviderResult<Details>> {
     if (!validRef(ref)) return Promise.resolve(unavailable('invalid-answer'));
     const key = this.#tmdbKey();
-    return this.#join(`title\0${ref.type}:${ref.id}\0${key}`, async () => {
+    return this.#join(`title\0${ref.type}:${ref.id}\0${language}\0${key}`, async () => {
       const path = `/${ref.type}/${ref.id}`;
       const params = { append_to_response: titleAppends(ref.type) };
       // A library names every title it holds: from the brief kept of each answer where there is one, rather than
       // from the whole answer, credits and all, read and parsed for a name and a poster.
-      const kept = briefDetails(await this.#tmdbFetch.brief?.(tmdbUrl(path, key, params)));
+      const kept = briefDetails(
+        await this.#tmdbFetch.brief?.(tmdbUrl(path, key, params, language)),
+      );
       if (kept) return { kind: 'found', value: kept };
-      const body = await this.#tmdb(path, key, params);
+      const body = await this.#tmdb(path, key, params, language);
       if (body.kind !== 'found') return body;
       const title = toTitle(ref, body.value);
       if (!title) return unavailable('invalid-answer');
@@ -747,27 +778,43 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     });
   }
 
-  detail(ref: ContentRef, region = 'US'): Promise<ProviderResult<TitleDetail>> {
+  detail(
+    ref: ContentRef,
+    region = 'US',
+    language: InterfaceLanguage = 'en',
+  ): Promise<ProviderResult<TitleDetail>> {
     if (!validRef(ref)) return Promise.resolve(unavailable('invalid-answer'));
     const country = /^[a-z]{2}$/i.test(region) ? region.toUpperCase() : 'US';
     const key = this.#tmdbKey();
-    return this.#join(`detail\0${ref.type}:${ref.id}\0${country}\0${key}`, async () => {
-      const append =
-        ref.type === 'tv'
-          ? 'aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers'
-          : 'credits,recommendations,videos,external_ids,release_dates,watch/providers';
-      const body = await this.#tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append });
-      if (body.kind !== 'found') return body;
-      const detail = parseDetail(ref, body.value, country);
-      return detail ? { kind: 'found', value: detail } : unavailable('invalid-answer');
-    });
+    return this.#join(
+      `detail\0${ref.type}:${ref.id}\0${country}\0${language}\0${key}`,
+      async () => {
+        const append =
+          ref.type === 'tv'
+            ? 'aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers'
+            : 'credits,recommendations,videos,external_ids,release_dates,watch/providers';
+        const body = await this.#tmdb(
+          `/${ref.type}/${ref.id}`,
+          key,
+          { append_to_response: append },
+          language,
+        );
+        if (body.kind !== 'found') return body;
+        const detail = parseDetail(ref, body.value, country);
+        return detail ? { kind: 'found', value: detail } : unavailable('invalid-answer');
+      },
+    );
   }
 
-  season(seriesId: number, season: number): Promise<ProviderResult<Episode[]>> {
+  season(
+    seriesId: number,
+    season: number,
+    language: InterfaceLanguage = 'en',
+  ): Promise<ProviderResult<Episode[]>> {
     if (!validSeason(seriesId, season)) return Promise.resolve(unavailable('invalid-answer'));
     const key = this.#tmdbKey();
-    return this.#join(`season\0${seriesId}:${season}\0${key}`, async () => {
-      const body = await this.#tmdb(`/tv/${seriesId}/season/${season}`, key);
+    return this.#join(`season\0${seriesId}:${season}\0${language}\0${key}`, async () => {
+      const body = await this.#tmdb(`/tv/${seriesId}/season/${season}`, key, {}, language);
       if (body.kind !== 'found') return body;
       if (!Array.isArray(body.value.episodes)) return unavailable('invalid-answer');
       return { kind: 'found', value: parseSeason(body.value) };
@@ -910,6 +957,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   async #catalog(
     catalog: Extract<ContentRequest, { kind: 'catalog.page' }>['catalog'],
     page: number,
+    language: InterfaceLanguage = 'en',
   ): Promise<import('./library').Title[]> {
     if (!Number.isSafeInteger(page) || page < 1 || page > 500) return [];
     let path: string;
@@ -942,7 +990,12 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         path = `/${type}/${catalog.title.id}/recommendations`;
         break;
     }
-    const body = await this.#tmdb(path, this.#tmdbKey(), { ...params, page: String(page) });
+    const body = await this.#tmdb(
+      path,
+      this.#tmdbKey(),
+      { ...params, page: String(page) },
+      language,
+    );
     if (body.kind === 'missing') return [];
     if (body.kind !== 'found')
       throw new ContentServiceFault({
@@ -1610,10 +1663,11 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     path: string,
     key: string,
     params: Record<string, string> = {},
+    language: InterfaceLanguage = 'en',
   ): Promise<ProviderResult<Json>> {
     let response: Response;
     try {
-      response = await this.#tmdbFetch(tmdbUrl(path, key, params), {
+      response = await this.#tmdbFetch(tmdbUrl(path, key, params, language), {
         signal: AbortSignal.timeout(15_000),
       });
     } catch {

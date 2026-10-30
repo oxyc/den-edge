@@ -3,6 +3,8 @@ package com.den.edge.tv;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.content.Context;
+import android.content.res.Configuration;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -21,6 +23,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
+import java.util.Locale;
 
 public final class MainActivity extends ComponentActivity {
     private static final Uri TV_URI = Uri.parse(BuildConfig.DEN_TV_URL);
@@ -28,6 +31,9 @@ public final class MainActivity extends ComponentActivity {
     private static final String ANDROID_EXIT_HOST = "exit";
     private static final String ANDROID_RETRY_HOST = "retry";
     private static final String ANDROID_PLAYBACK_HOST = "playback";
+    private static final String ANDROID_LANGUAGE_HOST = "language";
+    private static final String LANGUAGE_PREFERENCES = "den-presentation";
+    private static final String LANGUAGE_KEY = "interface-language";
 
     private FrameLayout root;
     private WebView webView;
@@ -38,6 +44,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        applyStoredLanguage();
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(
@@ -237,8 +244,34 @@ public final class MainActivity extends ComponentActivity {
         else if (ANDROID_RETRY_HOST.equals(uri.getHost())) webView.loadUrl(BuildConfig.DEN_TV_URL);
         else if (ANDROID_PLAYBACK_HOST.equals(uri.getHost())) {
             setPlaybackActive("/start".equals(uri.getPath()));
+        } else if (ANDROID_LANGUAGE_HOST.equals(uri.getHost()) && isTrustedTopLevelPage()) {
+            String language = uri.getLastPathSegment();
+            if ("en".equals(language) || "es".equals(language) || "sv".equals(language)) {
+                getSharedPreferences(LANGUAGE_PREFERENCES, Context.MODE_PRIVATE)
+                        .edit().putString(LANGUAGE_KEY, language).apply();
+                applyLanguage(language);
+            }
         }
         return true;
+    }
+
+    private boolean isTrustedTopLevelPage() {
+        return webView != null && webView.getUrl() != null && isDenPage(Uri.parse(webView.getUrl()));
+    }
+
+    private void applyStoredLanguage() {
+        String language = getSharedPreferences(LANGUAGE_PREFERENCES, Context.MODE_PRIVATE)
+                .getString(LANGUAGE_KEY, "en");
+        applyLanguage(language);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyLanguage(String language) {
+        Locale locale = Locale.forLanguageTag(language);
+        Locale.setDefault(locale);
+        Configuration configuration = new Configuration(getResources().getConfiguration());
+        configuration.setLocale(locale);
+        getResources().updateConfiguration(configuration, getResources().getDisplayMetrics());
     }
 
     private final class DenWebViewClient extends WebViewClient {

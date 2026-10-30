@@ -52,6 +52,7 @@ export function acceptsProfilePreference(key: string, value: ConfigValue | null)
       return 'bool' in value && value.bool === true;
     case 'den.preferredAudioLanguage':
     case 'den.preferredSubtitleLanguage':
+    case 'den.interfaceLanguage':
       return 'string' in value && isProfileLanguage(value.string);
     case 'den.shownSubtitleLanguages':
     case 'den.excludedLanguages':
@@ -104,6 +105,7 @@ const PROFILE_KEYS = new Set([
   'den.preferredAudioLanguage',
   'den.preferredSubtitleLanguage',
   'den.hasExplicitSubtitlePreference',
+  'den.interfaceLanguage',
   'den.shownSubtitleLanguages',
   'den.maxSubtitlesPerLanguage',
   'den.excludedGenreIDs',

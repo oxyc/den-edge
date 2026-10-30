@@ -205,7 +205,7 @@ export interface ContentImportSearchHit {
   year?: number;
 }
 
-export type ContentRequest =
+type ContentOperation =
   | { kind: 'sources.configure'; atlas: string | null }
   /** The guest grants the page holds, whole, so the Worker's own `~<gid>` calls can carry them. */
   | { kind: 'grants.configure'; grants: { gid: string; secret: string }[] }
@@ -244,6 +244,14 @@ export type ContentRequest =
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
   | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string }
   | { kind: 'provider-cache.clear'; service: 'tmdb' };
+
+/**
+ * Presentation language crosses the Worker boundary with each request. A SharedWorker may serve tabs on different
+ * profiles, so it must never read this from mutable worker-global state. Atlas operations deliberately ignore it.
+ */
+export type ContentRequest = ContentOperation & {
+  interfaceLanguage?: import('./interfaceLanguage').InterfaceLanguage;
+};
 
 export type OptionalContent<T> =
   | { state: 'ready'; value: T }

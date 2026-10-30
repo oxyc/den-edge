@@ -29,6 +29,7 @@ interface Media {
   speed?: string;
   measure?: boolean;
   mode: 'browser' | 'cast';
+  interfaceLanguage?: 'en' | 'es' | 'sv';
   title: string;
   subtitle?: string;
   image?: string;
@@ -136,7 +137,11 @@ interface CastGlobals {
           name?: string;
           language?: string;
         };
-        LoadRequest: new (info: unknown) => { currentTime?: number; activeTrackIds?: number[] };
+        LoadRequest: new (info: unknown) => {
+          currentTime?: number;
+          activeTrackIds?: number[];
+          customData?: unknown;
+        };
         EditTracksInfoRequest: new (activeTrackIds?: number[]) => unknown;
       };
     };
@@ -606,6 +611,7 @@ async function loadCast(): Promise<void> {
   }
   const request = new chrome.media.LoadRequest(info);
   request.currentTime = Math.max(0, media.currentTime ?? 0);
+  request.customData = { interfaceLanguage: media.interfaceLanguage ?? 'en' };
   // An out-of-band VTT is known now; HLS renditions are discovered by the receiver and selected after LOAD.
   request.activeTrackIds =
     media.subtitleLanguage && validSubtitleTrack(media.subtitleTrack) ? [1] : [];

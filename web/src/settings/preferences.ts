@@ -6,6 +6,7 @@ import type {
 } from '../lib/libraryServiceProtocol';
 import type { Immutable } from '../lib/libraryModel.svelte';
 import type { SubtitlePreference } from '../lib/subtitlePreference';
+import { isInterfaceLanguage, type InterfaceLanguage } from '../lib/interfaceLanguage';
 import {
   isProfileLanguage,
   isProfileRegion,
@@ -48,6 +49,9 @@ export function parsePublicKey(text: string): string | null {
 
 /** UI-shaped preference edits. The library service owns their storage names and default encoding. */
 export const preferenceChange = {
+  interfaceLanguage: (interfaceLanguage: InterfaceLanguage): PreferenceChanges => ({
+    ...(isInterfaceLanguage(interfaceLanguage) ? { interfaceLanguage } : {}),
+  }),
   excludedGenres: (values: Iterable<number>): PreferenceChanges => ({
     excludedGenres: [...new Set([...values].filter((id) => Number.isSafeInteger(id) && id > 0))]
       .sort((a, b) => a - b)

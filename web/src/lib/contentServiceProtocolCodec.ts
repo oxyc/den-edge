@@ -392,6 +392,18 @@ function importLookup(value: unknown): value is ContentImportLookup {
 
 function request(value: unknown): value is ContentRequest {
   if (!record(value) || !text(value.kind, 64)) return false;
+  if (
+    value.interfaceLanguage !== undefined &&
+    value.interfaceLanguage !== 'en' &&
+    value.interfaceLanguage !== 'es' &&
+    value.interfaceLanguage !== 'sv'
+  )
+    return false;
+  if (value.interfaceLanguage !== undefined) {
+    const { interfaceLanguage: _interfaceLanguage, ...operation } = value;
+    value = operation;
+  }
+  if (!record(value)) return false;
   switch (value.kind) {
     case 'sources.configure':
       return exact(value, ['kind', 'atlas']) && serviceBase(value.atlas);

@@ -2097,6 +2097,8 @@ export class LibraryLogAuthority {
     patch: Extract<LibraryCommand, { kind: 'preferences.patch' }>['patch'],
   ): Promise<LibraryAuthorityCommandResult> {
     const changes: PrefChanges = {};
+    if (patch.interfaceLanguage !== undefined)
+      Object.assign(changes, preferenceChange.interfaceLanguage(patch.interfaceLanguage));
     if (patch.excludedGenres !== undefined)
       Object.assign(changes, preferenceChange.excludedGenres(patch.excludedGenres));
     if (patch.excludedLanguages !== undefined)

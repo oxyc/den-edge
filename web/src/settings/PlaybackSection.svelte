@@ -10,6 +10,7 @@
     type PreferenceChanges,
     type SettingsPreferences,
   } from './preferences';
+  import { i18n } from '../lib/i18n.svelte';
 
   let {
     prefs,
@@ -24,28 +25,54 @@
   const languages = LANGUAGES.map((l) => ({ value: l.code, label: l.name }));
 </script>
 
-<SettingsSection id="playback" title="Playback">
-  <SettingRow id="audio-language" label="Audio language">
+<SettingsSection id="playback" title={i18n.text('settings.section.playback')}>
+  <SettingRow id="interface-language" label={i18n.text('settings.interfaceLanguage')}>
     {#snippet control()}
       <Select
-        labelledby="audio-language-label"
+        labelledby="interface-language-label"
+        value={prefs.interfaceLanguage ?? 'en'}
+        options={[
+          { value: 'en', label: 'English' },
+          { value: 'es', label: 'Español' },
+          { value: 'sv', label: 'Svenska' },
+        ]}
+        {disabled}
+        onchange={(language) =>
+          save(
+            change.interfaceLanguage(language === 'es' ? 'es' : language === 'sv' ? 'sv' : 'en'),
+          )}
+      />
+    {/snippet}
+  </SettingRow>
+  <SettingRow
+    id="audio-language"
+    label={i18n.text('settings.audioLanguage')}
+    detail={i18n.text('settings.originalDefault')}
+  >
+    {#snippet control()}
+      <Select
+        label={i18n.text('settings.audioLanguage')}
         value={prefs.audioLanguage ?? ''}
-        options={[{ value: '', label: 'Original' }, ...languages]}
+        options={[{ value: '', label: i18n.text('settings.original') }, ...languages]}
         {disabled}
         onchange={(code) => save(change.audioLanguage(code || undefined))}
       />
     {/snippet}
   </SettingRow>
-  <SettingRow id="subtitle-language" label="Subtitle language">
+  <SettingRow
+    id="subtitle-language"
+    label={i18n.text('settings.subtitleLanguage')}
+    detail={i18n.text('settings.automaticFollowsInterface')}
+  >
     {#snippet control()}
       <Select
-        labelledby="subtitle-language-label"
+        label={i18n.text('settings.subtitleLanguage')}
         value={prefs.hasExplicitSubtitlePreference
           ? (prefs.subtitleLanguage ?? '__off')
           : '__automatic'}
         options={[
-          { value: '__automatic', label: 'Automatic' },
-          { value: '__off', label: 'Off' },
+          { value: '__automatic', label: i18n.text('settings.automatic') },
+          { value: '__off', label: i18n.text('settings.off') },
           ...languages,
         ]}
         {disabled}
@@ -62,7 +89,7 @@
       />
     {/snippet}
   </SettingRow>
-  <SettingRow id="auto-skip" label="Auto-skip intros & credits">
+  <SettingRow id="auto-skip" label={i18n.text('settings.autoSkip')}>
     {#snippet control()}
       <Switch
         labelledby="auto-skip-label"
@@ -72,7 +99,7 @@
       />
     {/snippet}
   </SettingRow>
-  <SettingRow id="autoplay-trailers" label="Autoplay trailers on detail pages">
+  <SettingRow id="autoplay-trailers" label={i18n.text('settings.autoplayTrailers')}>
     {#snippet control()}
       <Switch
         labelledby="autoplay-trailers-label"

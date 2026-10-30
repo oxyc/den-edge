@@ -728,7 +728,13 @@ impl Detail {
     /// Only representations used by a checked-in client become durable. An arbitrary public subset is still
     /// answered, but reparsed on its next ask rather than multiplying files beside every canonical title.
     fn durable_variant(&self) -> bool {
-        self.rest.is_empty()
+        let supported_language = self.rest.is_empty()
+            || matches!(
+                self.rest.as_slice(),
+                [(name, value)]
+                    if name == "language" && matches!(value.as_str(), "en-US" | "es-ES" | "sv-SE")
+            );
+        supported_language
             && self.kept.iter().any(|appends| {
                 let known: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
                 self.asked.len() == known.len() && self.asked.iter().all(|a| known.contains(a.as_str()))
@@ -2940,6 +2946,12 @@ mod tests {
         let b = cache_key("/3/movie/550", Some("language=en-US&api_key=bbb"));
         assert_eq!(a, b);
         assert!(!a.contains("aaa"), "{a}");
+        let default_english = cache_key("/3/movie/550", None);
+        let spanish = cache_key("/3/movie/550", Some("language=es-ES"));
+        let swedish = cache_key("/3/movie/550", Some("language=sv-SE"));
+        assert_ne!(default_english, spanish);
+        assert_ne!(default_english, swedish);
+        assert_ne!(spanish, swedish);
         assert_ne!(a, cache_key("/3/movie/550", Some("language=fi")));
     }
 
@@ -3981,6 +3993,23 @@ mod tests {
             !dir.join(".tmdb-prepared").exists(),
             "arbitrary rest parameters amplified the durable cache"
         );
+    }
+
+    #[test]
+    fn supported_language_variants_are_durable_and_bounded() {
+        let dir = temp_dir();
+        for language in ["en-US", "es-ES", "sv-SE"] {
+            let query = format!("append_to_response=credits&language={language}");
+            let detail = Detail::of("/3/movie/550", Some(&query), Some(&dir)).unwrap();
+            assert!(detail.durable_variant(), "{language}");
+        }
+        for query in [
+            "append_to_response=credits&language=fr-FR",
+            "append_to_response=credits&language=es-ES&region=ES",
+        ] {
+            let detail = Detail::of("/3/movie/550", Some(query), Some(&dir)).unwrap();
+            assert!(!detail.durable_variant(), "{query}");
+        }
     }
 
     #[tokio::test]

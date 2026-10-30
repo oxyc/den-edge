@@ -6,6 +6,7 @@
   import Player from '../src/components/Player.svelte';
   import type { Title } from '../src/lib/library';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import { isInterfaceLanguage } from '../src/lib/interfaceLanguage';
   import { rememberGrant } from '../src/lib/relayFetch';
   import { tabName } from '../src/lib/tabName.svelte';
   import { PlaybackCursor } from '../src/lib/reel';
@@ -25,6 +26,10 @@
   const playback =
     playbackQuery === 'managed' ? '/den/config/playback' : (playbackQuery ?? undefined);
   const subtitleLanguage = query.get('subtitleLanguage') ?? undefined;
+  const requestedInterfaceLanguage = query.get('interfaceLanguage');
+  const interfaceLanguage = isInterfaceLanguage(requestedInterfaceLanguage)
+    ? requestedInterfaceLanguage
+    : undefined;
   const shownSubtitleLanguages = query.get('shownSubtitles')?.split(',').filter(Boolean);
   const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
@@ -86,6 +91,7 @@
     scout={{ install: scoutInstall, base: '/scout/config' }}
     {remux}
     {playback}
+    {interfaceLanguage}
     {subtitleLanguage}
     {shownSubtitleLanguages}
     {maxSubtitlesPerLanguage}

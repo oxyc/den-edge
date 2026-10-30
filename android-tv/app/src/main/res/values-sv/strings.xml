@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Den</string>
+    <string name="load_error_title">Den kunde inte starta</string>
+    <string name="load_error_body">Kontrollera TV:ns internetanslutning och försök igen.</string>
+    <string name="retry">Försök igen</string>
+    <string name="exit">Avsluta</string>
+</resources>

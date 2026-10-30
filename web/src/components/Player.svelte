@@ -23,6 +23,7 @@
   import { hlsConfig } from '../lib/hlsConfig';
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
+  import type { InterfaceLanguage } from '../lib/interfaceLanguage';
   import type { Episode as EpisodeDetail } from '../lib/detail';
   import { PLAYBACK_PROGRESS_SAVE_MS, PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -159,6 +160,7 @@
     playback,
     subtitles,
     audioLanguage,
+    interfaceLanguage = 'en',
     subtitleLanguage,
     shownSubtitleLanguages,
     maxSubtitlesPerLanguage = 3,
@@ -189,6 +191,8 @@
     subtitles: string[];
     /** Settings › Playback's audio language (ISO 639-1); undefined is each title's original language. */
     audioLanguage?: string;
+    /** Active profile presentation language, used by Automatic subtitles and forwarded to Cast. */
+    interfaceLanguage?: InterfaceLanguage;
     /** Its subtitle language; undefined is Automatic, null is explicit Off. */
     subtitleLanguage?: string | null;
     /** Settings › Content's visible subtitle languages, offered in the picker beside the chosen one. */
@@ -1009,7 +1013,7 @@
         shownSubtitles: shownSubtitleLanguages,
       },
       title.originalLanguage,
-      navigator.languages,
+      [interfaceLanguage],
     );
     // Whether a subtitle will show: the one chosen, or the one `autoSubtitleLanguage` picks below on the title's first
     // session, for audio — in the title's original language, the most that can be told before a session says — that
@@ -1022,7 +1026,7 @@
           title.originalLanguage !== undefined &&
           autoSubtitleLanguage(
             title.originalLanguage,
-            navigator.languages,
+            [interfaceLanguage],
             subtitleLanguages.map((language) => ({ language })),
           ) !== null));
     const claimed = (decodes ??= await playable());
@@ -1389,7 +1393,7 @@
       // as far as can be told. Without it, a title in the viewer's own language came up with subtitles on.
       subtitleChoice = autoSubtitleLanguage(
         result.audioTracks[result.audioTrack]?.language ?? title.originalLanguage,
-        navigator.languages,
+        [interfaceLanguage],
         result.subtitles ?? [],
       );
     }
@@ -2293,6 +2297,7 @@
                 lifecycleUrl: current.control?.end,
               }),
           mode: castMode ? 'cast' : 'browser',
+          interfaceLanguage,
           title: title.title,
           subtitle: season !== undefined ? `S${season} · E${episode}` : undefined,
           image: poster,

@@ -19,6 +19,8 @@ import type {
 } from './libraryServiceProtocol';
 import type { ProfileActivity } from './visitorActivity.svelte';
 import { SyncedProfilePreferences, type ProfilePreferences } from './profilePreferences.svelte';
+import { LocalizedContent } from './localizedContent';
+import { isInterfaceLanguage, type InterfaceLanguage } from './interfaceLanguage';
 
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the profile settings that name the watch region. */
@@ -62,7 +64,10 @@ export class ProfileSession {
   undo = $state<{ label: string; run: () => void } | null>(null);
   /** The page has drawn what it opened for (`foregroundReady`): optional background work may start. */
   foregrounded = $state(false);
-  readonly #policed: ContentServiceClientPort | null;
+  readonly #content: ContentServiceClientPort;
+  readonly #localizedContent: ContentServiceClientPort;
+  #contentPort = $state.raw<ContentServiceClientPort | null>(null);
+  #requestLanguage: InterfaceLanguage = 'en';
   #region?: Promise<string | undefined>;
   readonly #displays = new SvelteMap<string, Title>();
   readonly #missing = new SvelteSet<string>();
@@ -95,7 +100,7 @@ export class ProfileSession {
     /** Validated effective approvals for this Kid; empty for Owner and Visitor. */
     readonly approvedTitles: readonly TitleRef[] = [],
   ) {
-    this.#policed = this.restricted
+    const policed = this.restricted
       ? new PolicedContent(household.content, async () =>
           contentPolicyFor(
             this.contentPolicy,
@@ -105,6 +110,9 @@ export class ProfileSession {
           ),
         )
       : null;
+    this.#content = policed ?? household.content;
+    this.#localizedContent = new LocalizedContent(this.#content, () => this.#requestLanguage);
+    this.#contentPort = this.#content;
   }
 
   /**
@@ -143,11 +151,30 @@ export class ProfileSession {
   }
 
   /**
-   * Every content query this profile makes runs under its policy: the page, the Worker and atlas all see the same
-   * one. An unrestricted profile (the legacy household, an Owner with no ceiling) uses the household port as-is.
+   * Every query runs under this profile's policy. Non-English presentation then adds its locale at the final page
+   * boundary; English retains the underlying port identity and recovery path.
    */
   get content(): ContentServiceClientPort {
-    return this.#policed ?? this.household.content;
+    return this.#contentPort ?? this.#content;
+  }
+
+  /**
+   * Move presentation-dependent reads to the selected locale only when that locale actually changes. English keeps
+   * the native session port (and its recovery/deduplication identity); resolving an undecided preference to English
+   * therefore invalidates no content consumer and repeats no request.
+   */
+  presentIn(language: InterfaceLanguage): void {
+    this.#requestLanguage = language;
+    const content = language === 'en' ? this.#content : this.#localizedContent;
+    if (this.#contentPort !== content) this.#contentPort = content;
+  }
+
+  /** Resolved by the settings projection; a saved language affects the next content request. */
+  get interfaceLanguage(): InterfaceLanguage {
+    const selected =
+      this.preferences?.value?.interfaceLanguage ??
+      this.policy?.settings?.value?.preferences.interfaceLanguage;
+    return isInterfaceLanguage(selected) ? selected : 'en';
   }
 
   /** Whether this profile's content is limited by a ceiling, an unknown-rating block or the Kid audience gate. */
