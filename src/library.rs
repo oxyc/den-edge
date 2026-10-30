@@ -51,6 +51,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
+#[cfg(test)]
+mod recovery_client_server;
+#[cfg(test)]
+mod request_authority_tests;
 pub(crate) mod reset_lock;
 mod snapshot;
 pub(crate) mod v3;
@@ -530,6 +534,66 @@ fn full_generation(state: &AppState, library: &str) -> String {
     format!("{}.{}", state.store.generation(), library)
 }
 
+/// Admission is only an early refusal: bodies and lock waits can outlive a rewrite or restore. Carry the
+/// caller's authority to the library lock, then bind a batch to that checked generation in its transaction.
+struct RequestAuthority {
+    wire: Option<u64>,
+    generation: Option<String>,
+}
+
+impl RequestAuthority {
+    /// Legacy logs have public generation 0 until lazy conversion. Check that fact under the slot lock before
+    /// conversion assigns one, so the first wired request keeps working without accepting a concurrent creator.
+    async fn legacy_locked(
+        &self,
+        state: &AppState,
+        id: &str,
+        slot: &LibrarySlot,
+    ) -> Result<bool, Box<Response>> {
+        if self.wire.is_none() || self.generation.as_deref() != Some("0") {
+            return Ok(false);
+        }
+        authority(state, slot, id)
+            .await
+            .map(|selected| selected == AUTHORITY_V2)
+            .map_err(|reason| Box::new(read_error(reason)))
+    }
+
+    fn check(&self, state: &AppState, protocol: Option<&v3::Protocol>) -> Result<(), Box<Response>> {
+        let minimum = protocol.map_or(2, |protocol| protocol.wire_min);
+        if minimum >= 3 && self.wire.unwrap_or(0) < minimum {
+            return Err(Box::new(upgrade_required(minimum)));
+        }
+        if self.wire.is_some() {
+            let current = protocol.map_or_else(|| "0".to_owned(), |p| full_generation(state, &p.generation));
+            if self.generation.as_deref() != Some(&current) {
+                return Err(Box::new(json_reply(StatusCode::CONFLICT, &error("generation_changed"))));
+            }
+        }
+        Ok(())
+    }
+
+    /// The caller keeps the library slot locked across this check and the mutation. Batch also checks inside
+    /// redb; sidecar/retirement mutations are serialized by the slot itself.
+    async fn check_store(
+        &self,
+        state: &AppState,
+        store: &Arc<dyn v3::LibraryStore>,
+        converted_legacy: bool,
+    ) -> Result<(), Box<Response>> {
+        let store = Arc::clone(store);
+        let protocol = tokio::task::spawn_blocking(move || store.protocol())
+            .await
+            .map_err(|reason| Box::new(internal("library authority task", io::Error::other(reason))))?
+            .map_err(|reason| Box::new(read_error(v3_io(reason))))?;
+        self.check(state, (!converted_legacy).then_some(&protocol))
+    }
+}
+
+fn upgrade_required(minimum: u64) -> Response {
+    json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": minimum }))
+}
+
 async fn protocol_for(state: &AppState, id: &str) -> Result<Option<v3::Protocol>, io::Error> {
     let manager = Arc::clone(&state.library_v3);
     let id = id.to_owned();
@@ -799,11 +863,16 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
         }
     }
+    let authority = RequestAuthority { wire, generation: sent_generation.clone() };
+    #[cfg(test)]
+    if let Some(gate) = req.extensions().get::<request_authority_tests::AdmissionGate>() {
+        gate.pause().await;
+    }
     let response = match (action, req.method().clone()) {
         (action, _) if exclusive_action => reset_lock::handle(state, id, token_hash, action, req).await,
         ("batch", Method::POST) => match write_budget(state, id) {
             Some(refused) => refused,
-            None => batch(state, id, token_hash, req).await,
+            None => batch(state, id, token_hash, &authority, req).await,
         },
         ("changes", Method::GET | Method::HEAD) => {
             let since = query_param(&req, "since").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -834,20 +903,22 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 });
             changes(state, id, token_hash, read, limit, gzip > 0 && gzip >= identity, hold).await
         }
-        ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
+        ("member", Method::PUT) => register_member(state, id, token_hash, &authority, req).await,
         ("", Method::DELETE) => match reset_headers(req.headers()) {
-            Ok((base, successor)) => forget(state, id, token_hash, base, successor.as_deref()).await,
+            Ok((base, successor)) => {
+                forget(state, id, token_hash, &authority, base, successor.as_deref()).await
+            }
             Err(()) => json_reply(StatusCode::BAD_REQUEST, &error("bad_request")),
         },
-        ("rewrite", Method::POST) => rewrite_open(state, id, token_hash).await,
+        ("rewrite", Method::POST) => rewrite_open(state, id, token_hash, &authority).await,
         (action, Method::POST) if action.starts_with("rewrite/") && action.ends_with("/rows") => {
-            rewrite_rows(state, id, token_hash, action, req).await
+            rewrite_rows(state, id, token_hash, &authority, action, req).await
         }
         (action, Method::POST) if action.starts_with("rewrite/") && action.ends_with("/commit") => {
-            rewrite_commit(state, id, token_hash, wire.unwrap_or(0), action, req).await
+            rewrite_commit(state, id, token_hash, &authority, action, req).await
         }
         (action, Method::DELETE) if action.starts_with("rewrite/") => {
-            rewrite_abort(state, id, token_hash, action).await
+            rewrite_abort(state, id, token_hash, &authority, action).await
         }
         ("batch" | "changes" | "member" | "" | "rewrite", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
@@ -856,9 +927,18 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     with_wire_headers(state, response, latest.as_ref())
 }
 
-async fn rewrite_open(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
+async fn rewrite_open(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    authority: &RequestAuthority,
+) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    let converted_legacy = match authority.legacy_locked(state, id, &slot).await {
+        Ok(legacy) => legacy,
+        Err(response) => return *response,
+    };
     let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
         Ok(store) => store,
         Err(response) => return *response,
@@ -878,6 +958,9 @@ async fn rewrite_open(state: &AppState, id: &str, token_hash: [u8; 32]) -> Respo
         Ok(Err(reason)) => return internal("rewrite open", v3_io(reason)),
         Err(reason) => return internal("rewrite open task", io::Error::other(reason)),
     };
+    if let Err(response) = authority.check(state, (!converted_legacy).then_some(&protocol)) {
+        return *response;
+    }
     let stage = RewriteStage {
         id: crate::hex(&crate::random_bytes::<16>()),
         base: protocol.head,
@@ -894,11 +977,16 @@ async fn rewrite_rows(
     state: &AppState,
     id: &str,
     token_hash: [u8; 32],
+    authority: &RequestAuthority,
     action: &str,
     req: Request,
 ) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    let converted_legacy = match authority.legacy_locked(state, id, &slot).await {
+        Ok(legacy) => legacy,
+        Err(response) => return *response,
+    };
     let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
         Ok(store) => store,
         Err(response) => return *response,
@@ -906,6 +994,9 @@ async fn rewrite_rows(
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
     if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
+        return *response;
+    }
+    if let Err(response) = authority.check_store(state, &store, converted_legacy).await {
         return *response;
     }
     let Some(requested) = rewrite_id(action, "/rows") else {
@@ -974,7 +1065,7 @@ async fn rewrite_commit(
     state: &AppState,
     id: &str,
     token_hash: [u8; 32],
-    wire: u64,
+    authority: &RequestAuthority,
     action: &str,
     req: Request,
 ) -> Response {
@@ -988,18 +1079,31 @@ async fn rewrite_commit(
     let Some(base) = body.get("base").and_then(Value::as_u64) else {
         return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
     };
-    let Some(wire_min) = body.get("wireMin").and_then(Value::as_u64).filter(|minimum| *minimum <= wire)
+    let Some(wire_min) =
+        body.get("wireMin").and_then(Value::as_u64).filter(|minimum| *minimum <= authority.wire.unwrap_or(0))
     else {
         return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
     };
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    let converted_legacy = match authority.legacy_locked(state, id, &slot).await {
+        Ok(legacy) => legacy,
+        Err(response) => return *response,
+    };
     let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
         Ok(store) => store,
         Err(response) => return *response,
     }) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
+    if let Err(response) = authority.check_store(state, &store, converted_legacy).await {
+        // The mutation checks exclusivity in its transaction. Only this early refusal needs another check
+        // to preserve the lock's precedence without adding a metadata hop to every successful request.
+        if let Err(locked) = ensure_exclusive_operation_unlocked(state, id, &store).await {
+            return *locked;
+        }
+        return *response;
+    }
     let stage = match load_rewrite(state, id).await {
         Ok(Some(stage)) if stage.id == requested => stage,
         Ok(Some(_)) | Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
@@ -1050,9 +1154,19 @@ async fn rewrite_commit(
     }
 }
 
-async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action: &str) -> Response {
+async fn rewrite_abort(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    authority: &RequestAuthority,
+    action: &str,
+) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    let converted_legacy = match authority.legacy_locked(state, id, &slot).await {
+        Ok(legacy) => legacy,
+        Err(response) => return *response,
+    };
     let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
         Ok(store) => store,
         Err(response) => return *response,
@@ -1060,6 +1174,9 @@ async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action:
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
     if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
+        return *response;
+    }
+    if let Err(response) = authority.check_store(state, &store, converted_legacy).await {
         return *response;
     }
     let Some(requested) = action.strip_prefix("rewrite/").filter(|value| !value.contains('/')) else {
@@ -1080,7 +1197,13 @@ async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action:
 }
 
 /// Replace the temporary legacy membership proof with the key derived specifically for relay membership.
-async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
+async fn register_member(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    authority: &RequestAuthority,
+    req: Request,
+) -> Response {
     let Some((claimed_id, member)) =
         req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.split_once(':'))
     else {
@@ -1092,6 +1215,10 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
     let member_hash: [u8; 32] = Sha256::digest(member.as_bytes()).into();
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    let converted_legacy = match authority.legacy_locked(state, id, &slot).await {
+        Ok(legacy) => legacy,
+        Err(response) => return *response,
+    };
     match load_rewrite(state, id).await {
         Ok(Some(_)) => {
             return crate::handler::retry_after(
@@ -1111,6 +1238,14 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
         }
         Err(reason) => return read_error(reason),
     };
+    if let Err(response) = authority.check_store(state, &store, converted_legacy).await {
+        // The mutation checks exclusivity in its transaction. Only this early refusal needs another check
+        // to preserve the lock's precedence without adding a metadata hop to every successful request.
+        if let Err(locked) = ensure_exclusive_operation_unlocked(state, id, &store).await {
+            return *locked;
+        }
+        return *response;
+    }
     match tokio::task::spawn_blocking(move || store.register_member(member_hash)).await {
         Ok(Ok(_)) => {}
         Ok(Err(v3::StoreError::Invalid(message))) if message == "member_already_registered" => {
@@ -1148,6 +1283,7 @@ async fn forget(
     state: &AppState,
     id: &str,
     token_hash: [u8; 32],
+    authority: &RequestAuthority,
     base: Option<u64>,
     successor: Option<&str>,
 ) -> Response {
@@ -1181,6 +1317,9 @@ async fn forget(
             Err(reason) => return internal("library exclusive operation task", io::Error::other(reason)),
         };
         if let Err(response) = ensure_exclusive_operation_unlocked(state, id, &store).await {
+            return *response;
+        }
+        if let Err(response) = authority.check_store(state, &store, false).await {
             return *response;
         }
     }
@@ -1394,6 +1533,8 @@ fn v3_io(error: v3::StoreError) -> io::Error {
         v3::StoreError::Forbidden => io::Error::new(io::ErrorKind::PermissionDenied, "forbidden"),
         v3::StoreError::TooLarge => io::Error::new(io::ErrorKind::InvalidInput, "value_too_large"),
         v3::StoreError::Locked => io::Error::new(io::ErrorKind::WouldBlock, "migration_in_progress"),
+        v3::StoreError::GenerationChanged => io::Error::other("generation_changed"),
+        v3::StoreError::UpgradeRequired(minimum) => io::Error::other(format!("upgrade_required:{minimum}")),
         v3::StoreError::Invalid(message) | v3::StoreError::Failed(message) => io::Error::other(message),
     }
 }
@@ -1591,10 +1732,16 @@ fn write_budget(state: &AppState, id: &str) -> Option<Response> {
     Some(crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
-async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
+async fn batch(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    request_authority: &RequestAuthority,
+    req: Request,
+) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     let member = req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let wire = req.headers().get(WIRE_HEADER).and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let wire = request_authority.wire;
     let requested_min = req.headers().get(WIRE_MIN_HEADER).and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
     if requested_min.zip(wire).is_some_and(|(minimum, supported)| minimum > supported) {
         return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
@@ -1709,10 +1856,20 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         }
         Err(error) => return read_error(error),
     };
-    let was_empty = match store.protocol() {
-        Ok(protocol) => protocol.head == 0,
+    let protocol = match store.protocol() {
+        Ok(protocol) => protocol,
         Err(error) => return internal("library protocol", v3_io(error)),
     };
+    // Before v3_store a new/legacy library had generation 0. Bind that successful first admission to the
+    // generation just created by the conversion; an already-selected database must match the original header.
+    if let Err(response) = request_authority.check(state, selected_v3.then_some(&protocol)) {
+        if let Err(locked) = ensure_exclusive_operation_unlocked(state, id, &store).await {
+            return *locked;
+        }
+        return *response;
+    }
+    let fence = v3::WriteAuthority { wire, generation: wire.map(|_| protocol.generation) };
+    let was_empty = protocol.head == 0;
     // Guest provenance must become durable before the first activity commit. If this fails, the empty store remains
     // empty and the retry comes through here again; a committed guest library can therefore never lose enrollment
     // merely because its invite record is reaped later.
@@ -1734,7 +1891,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         max_rows: state.visitor_library_max_rows,
     };
     let result = match tokio::task::spawn_blocking(move || {
-        write_store.apply_tiered(&writes, live_cap, applied_min, tier)
+        write_store.apply_tiered(&writes, live_cap, applied_min, tier, &fence)
     })
     .await
     {
@@ -1752,6 +1909,10 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         Ok(Err(v3::StoreError::Locked)) => {
             return json_reply(StatusCode::CONFLICT, &error("migration_in_progress"));
         }
+        Ok(Err(v3::StoreError::GenerationChanged)) => {
+            return json_reply(StatusCode::CONFLICT, &error("generation_changed"));
+        }
+        Ok(Err(v3::StoreError::UpgradeRequired(minimum))) => return upgrade_required(minimum),
         Ok(Err(error)) => return internal("library write", v3_io(error)),
         Err(error) => return internal("library write task", io::Error::other(error)),
     };

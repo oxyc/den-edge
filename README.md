@@ -214,6 +214,15 @@ cargo run                       # http://localhost:8080, state in ./data
 cargo test
 ```
 
+The library admission regressions use real handlers, deterministic body/lock barriers and durable redb stores:
+`cargo test --locked request_authority_tests`. To also run the production Web `LibraryLog` and crypto against
+a local Edge HTTP fixture, run `cd web && DEN_EDGE_REAL_RECOVERY=1 npm test -- src/lib/log.edge.test.ts` after
+`npm ci --ignore-scripts`. This opt-in test starts the ignored Rust HTTP fixture, verifies generation/upgrade
+recovery and server restart readback, then stops it; its control routes exist only in the test build. Its warm
+write timings (`EDGE_RECOVERY_TIMINGS=1`) are local unoptimized diagnostics, not production or device performance
+qualification. The normal Web CI check enables the recovery test with its existing Rust target cache; timing
+diagnostics remain opt-in and have no latency pass/fail threshold.
+
 ### Migration rehearsal
 
 `npm run rehearse` (in `web/`) runs the Owner split end to end: the real `den-edge` binary on a temporary copy of the
