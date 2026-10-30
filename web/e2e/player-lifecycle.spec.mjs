@@ -123,13 +123,17 @@ test('a play writes its position within seconds of starting, and again on resume
     await page.waitForTimeout(3_000);
     await expect(writes).toHaveText('1');
 
-    // Paused, its position is written; resumed, it is written again once the clock moves on.
+    // Pause and resume are producer truth, so both are written even when the media clock has not crossed into the
+    // next whole second yet. Requiring movement here recreated the ambiguity this contract removes.
     await video.evaluate((element) => element.pause());
     await expect(writes).toHaveText('2');
-    const pausedAt = (await written()).seconds;
+    const paused = await written();
+    expect(paused.playing).toBe(false);
     await video.evaluate((element) => element.play());
     await expect(writes).toHaveText('3', { timeout: 5_000 });
-    expect((await written()).seconds).toBeGreaterThan(pausedAt);
+    const resumed = await written();
+    expect(resumed.playing).toBe(true);
+    expect(resumed.seconds).toBeGreaterThanOrEqual(paused.seconds);
     await page.waitForTimeout(3_000);
     await expect(writes).toHaveText('3');
   } finally {

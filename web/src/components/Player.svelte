@@ -4696,8 +4696,17 @@
             } else console.warn('The video fired an error with no MediaError; it plays on.');
           }}
         >
-          {#each session?.externalSubtitles ?? [] as track (track.value)}
-            <track kind="subtitles" src={track.url} srclang={track.language} label={track.value} />
+          <!-- WebKit does not reliably reload cues when only an existing track element's src changes. Re-key on
+               the URL so an aligned replacement gets a new element; textTracks.onaddtrack applies its mode. -->
+          {#each session?.externalSubtitles ?? [] as track (track.url)}
+            <track
+              kind="subtitles"
+              src={track.url}
+              srclang={track.language}
+              label={track.value}
+              default={track.value === subtitleChoice}
+              onload={applySubtitles}
+            />
           {/each}
         </video>
         {#if customTransport}
