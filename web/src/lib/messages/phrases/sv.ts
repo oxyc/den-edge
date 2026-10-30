@@ -344,7 +344,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'ed25519:…': 'ed25519:...',
   'Edge of Your Seat': 'Kanten på ditt säte',
   'Endings Left for You to Decide': 'Avslut kvar för dig att bestämma',
-  English: 'engelska',
+  English: 'English',
   'Enter invite code': 'Ange inbjudningskoden',
   'Enter the Owner PIN to continue.': 'Ange ägar-PIN för att fortsätta.',
   'Enter the PIN again': 'Ange PIN-koden igen',

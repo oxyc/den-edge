@@ -14,6 +14,7 @@
     groups = [],
     boxed = false,
     disabled = false,
+    translateOptions = true,
     onchange,
   }: {
     labelledby?: string;
@@ -23,6 +24,7 @@
     groups?: readonly { label: string; options: readonly Option[] }[];
     boxed?: boolean;
     disabled?: boolean;
+    translateOptions?: boolean;
     onchange: (value: string) => void;
   } = $props();
 </script>
@@ -36,12 +38,16 @@
   onchange={(event) => onchange(event.currentTarget.value)}
 >
   {#each options as option (option.value)}
-    <option value={option.value}>{i18n.phrase(option.label)}</option>
+    <option value={option.value}
+      >{translateOptions ? i18n.phrase(option.label) : option.label}</option
+    >
   {/each}
   {#each groups as group (group.label)}
     <optgroup label={i18n.phrase(group.label)}>
       {#each group.options as option (option.value)}
-        <option value={option.value}>{i18n.phrase(option.label)}</option>
+        <option value={option.value}
+          >{translateOptions ? i18n.phrase(option.label) : option.label}</option
+        >
       {/each}
     </optgroup>
   {/each}

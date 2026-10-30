@@ -36,6 +36,7 @@
           { value: 'es', label: 'Español' },
           { value: 'sv', label: 'Svenska' },
         ]}
+        translateOptions={false}
         {disabled}
         onchange={(language) =>
           save(

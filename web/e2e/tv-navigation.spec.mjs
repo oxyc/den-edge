@@ -350,12 +350,18 @@ test('interface language translates routes and actions and survives a reload', a
     exact: true,
   });
   await expect(language).toBeEnabled({ timeout: 30_000 });
+  await expect(language.locator('option')).toHaveText(['English', 'Español', 'Svenska']);
   await language.selectOption('es');
 
   await expect(page.locator('html')).toHaveAttribute('lang', 'es');
   await expect(page.getByRole('heading', { name: 'Ajustes', level: 1 })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Inicio', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Buscar', exact: true })).toBeVisible();
+  await expect(page.locator('#interface-language select option')).toHaveText([
+    'English',
+    'Español',
+    'Svenska',
+  ]);
 
   // A lazily loaded route must use the selected catalog too; this is the journey that previously left page copy
   // such as Downloads in English even though the navigation had changed.
@@ -417,8 +423,17 @@ test('interface language translates routes and actions and survives a reload', a
   await page.getByRole('link', { name: 'Ajustes', exact: true }).click();
   const restored = page.locator('#interface-language select');
   await expect(restored).toHaveValue('es', { timeout: 30_000 });
+  await expect(restored.locator('option')).toHaveText(['English', 'Español', 'Svenska']);
 
-  await restored.selectOption('en');
+  await restored.selectOption('sv');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'sv');
+  await expect(page.locator('#interface-language select option')).toHaveText([
+    'English',
+    'Español',
+    'Svenska',
+  ]);
+
+  await page.locator('#interface-language select').selectOption('en');
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   await expect(page.getByRole('link', { name: 'Home', exact: true })).toBeVisible();
   await page.reload();
