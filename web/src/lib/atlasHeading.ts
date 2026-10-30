@@ -3,12 +3,12 @@ import type { InterfaceLanguage } from './interfaceLanguage';
 /** Locale-neutral presentation copy published by Atlas. Localized output is never put on the wire or cached. */
 export interface AtlasHeading {
   id: string;
-  args: Readonly<Record<string, string>>;
+  args: Readonly<Record<string, string | number>>;
   fallback: string;
 }
 
 const MAX_ID = 128;
-const MAX_ARGUMENTS = 12;
+const MAX_ARGUMENTS = 16;
 const MAX_ARGUMENT_NAME = 64;
 const MAX_ARGUMENT_VALUE = 512;
 const MAX_FALLBACK = 1_024;
@@ -28,11 +28,11 @@ export function atlasHeadingOf(value: unknown): AtlasHeading | undefined {
   const rawArguments = value.args ?? value.arguments;
   if (
     typeof id !== 'string' ||
-    !id ||
+    !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(id) ||
     id.length > MAX_ID ||
     typeof fallback !== 'string' ||
     !fallback ||
-    fallback.length > MAX_FALLBACK ||
+    Array.from(fallback).length > MAX_FALLBACK ||
     !object(rawArguments)
   )
     return undefined;
@@ -41,15 +41,20 @@ export function atlasHeadingOf(value: unknown): AtlasHeading | undefined {
     entries.length > MAX_ARGUMENTS ||
     entries.some(
       ([name, argument]) =>
-        !name ||
+        !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(name) ||
         name.length > MAX_ARGUMENT_NAME ||
-        typeof argument !== 'string' ||
-        argument.length > MAX_ARGUMENT_VALUE,
+        !(
+          (typeof argument === 'string' && Array.from(argument).length <= MAX_ARGUMENT_VALUE) ||
+          (typeof argument === 'number' && Number.isSafeInteger(argument))
+        ),
     )
   )
     return undefined;
-  return { id, args: Object.fromEntries(entries) as Record<string, string>, fallback };
+  return { id, args: Object.fromEntries(entries) as Record<string, string | number>, fallback };
 }
+
+const stringArgument = (value: string | number | undefined): string | undefined =>
+  value === undefined ? undefined : String(value);
 
 type NonEnglish = Exclude<InterfaceLanguage, 'en'>;
 
@@ -129,48 +134,45 @@ export function formatAtlasHeading(
   const fixed = FIXED[heading.id]?.[language];
   if (fixed) return shelfWithMediaType(fixed, shelfMediaType, language);
   const argument = heading.args;
+  const service = stringArgument(argument.service);
   let localized: string | undefined;
   switch (heading.id) {
     case 'atlas.catalog.trending_everywhere':
       localized = language === 'es' ? 'Tendencias en todas partes' : 'Trendigt överallt';
       break;
     case 'atlas.catalog.popular_on':
-      if (argument.service)
-        localized = `${language === 'es' ? 'Popular en' : 'Populärt på'} ${argument.service}`;
+      if (service) localized = `${language === 'es' ? 'Popular en' : 'Populärt på'} ${service}`;
       break;
     case 'atlas.catalog.new_on':
-      if (argument.service)
-        localized = `${language === 'es' ? 'Novedades en' : 'Nytt på'} ${argument.service}`;
+      if (service) localized = `${language === 'es' ? 'Novedades en' : 'Nytt på'} ${service}`;
       break;
     case 'atlas.catalog.leaving_soon':
-      if (argument.service)
-        localized =
-          language === 'es'
-            ? `Deja ${argument.service} pronto`
-            : `Lämnar ${argument.service} snart`;
+      if (service)
+        localized = language === 'es' ? `Deja ${service} pronto` : `Lämnar ${service} snart`;
       break;
     case 'atlas.catalog.coming_to':
-      if (argument.service)
-        localized = `${language === 'es' ? 'Próximamente en' : 'Kommer till'} ${argument.service}`;
+      if (service)
+        localized = `${language === 'es' ? 'Próximamente en' : 'Kommer till'} ${service}`;
       break;
     case 'atlas.catalog.titles':
       localized = language === 'es' ? 'Títulos' : 'Titlar';
       break;
     case 'recommendation.because_watched':
-      return argument.title
+      return stringArgument(argument.title)
         ? language === 'es'
-          ? `Porque viste ${argument.title}`
-          : `Eftersom du tittade på ${argument.title}`
+          ? `Porque viste ${stringArgument(argument.title)}`
+          : `Eftersom du tittade på ${stringArgument(argument.title)}`
         : compatibilityFallback;
     case 'recommendation.because_watchlisted':
-      return argument.title
+      return stringArgument(argument.title)
         ? language === 'es'
-          ? `Porque añadiste ${argument.title} a Mi lista`
-          : `Eftersom du lade till ${argument.title} i Min lista`
+          ? `Porque añadiste ${stringArgument(argument.title)} a Mi lista`
+          : `Eftersom du lade till ${stringArgument(argument.title)} i Min lista`
         : compatibilityFallback;
     case 'person.more_from':
     case 'person.starring': {
-      if (!argument.name) return compatibilityFallback;
+      const name = stringArgument(argument.name);
+      if (!name) return compatibilityFallback;
       const lead =
         heading.id === 'person.starring'
           ? language === 'es'
@@ -179,46 +181,53 @@ export function formatAtlasHeading(
           : language === 'es'
             ? 'Más de'
             : 'Mer från';
-      if (!argument.watched_title) return `${lead} ${argument.name}`;
+      const watchedTitle = stringArgument(argument.watched_title);
+      if (!watchedTitle) return `${lead} ${name}`;
       const because = language === 'es' ? 'porque viste' : 'eftersom du tittade på';
-      return `${lead} ${argument.name} — ${because} ${argument.watched_title}`;
+      return `${lead} ${name} — ${because} ${watchedTitle}`;
     }
     case 'person.created_by':
-      return argument.name
-        ? `${language === 'es' ? 'Creado por' : 'Skapad av'} ${argument.name}`
+      return stringArgument(argument.name)
+        ? `${language === 'es' ? 'Creado por' : 'Skapad av'} ${stringArgument(argument.name)}`
         : compatibilityFallback;
     case 'person.written_by':
-      return argument.name
-        ? `${language === 'es' ? 'Escrito por' : 'Skriven av'} ${argument.name}`
+      return stringArgument(argument.name)
+        ? `${language === 'es' ? 'Escrito por' : 'Skriven av'} ${stringArgument(argument.name)}`
         : compatibilityFallback;
     case 'external.with_media_type':
       return (
-        withMediaType(argument.label || heading.fallback, argument.media_type, language) ??
-        compatibilityFallback
+        withMediaType(
+          stringArgument(argument.label) || heading.fallback,
+          stringArgument(argument.media_type),
+          language,
+        ) ?? compatibilityFallback
       );
     case 'category.genre':
-    case 'category.recipe':
-      return argument.label
-        ? (withMediaType(phrase(argument.label), argument.media_type, language) ??
+    case 'category.recipe': {
+      if (!stringArgument(argument.label)) return compatibilityFallback;
+      const categoryLabel = phrase(stringArgument(argument.label)!);
+      return argument.names_media_type === 'true'
+        ? (withMediaType(categoryLabel, stringArgument(argument.media_type), language) ??
             compatibilityFallback)
-        : compatibilityFallback;
+        : categoryLabel;
+    }
     case 'category.decade': {
-      const decade = argument.value || argument.label;
-      const media = mediaType(argument.media_type, language);
+      const decade = stringArgument(argument.value) || stringArgument(argument.label);
+      const media = mediaType(stringArgument(argument.media_type), language);
       if (!decade || !media) return compatibilityFallback;
       return language === 'es' ? `${media} de los años ${decade}` : `${media} från ${decade}-talet`;
     }
     case 'category.country': {
-      const media = mediaType(argument.media_type, language);
+      const media = mediaType(stringArgument(argument.media_type), language);
       if (!argument.value || !media) return compatibilityFallback;
-      const country = countryName(argument.value, language);
+      const country = countryName(String(argument.value), language);
       return language === 'es' ? `${media} de ${country}` : `${media} från ${country}`;
     }
     case 'category.taxonomy':
     case 'category.plot':
     case 'category.acclaimed':
-      return argument.label ? phrase(argument.label) : compatibilityFallback;
-    case 'verbatim':
+      return argument.label ? phrase(String(argument.label)) : compatibilityFallback;
+    case 'den.verbatim':
       return heading.fallback;
     default:
       return compatibilityFallback;

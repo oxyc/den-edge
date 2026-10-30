@@ -60,6 +60,7 @@ describe('Atlas shelf headings', () => {
         heading('category.genre', 'Dark Comedy Movies', {
           label: 'Dark Comedy',
           media_type: 'movie',
+          names_media_type: 'true',
         }),
         'es',
         phrase,
@@ -115,6 +116,12 @@ describe('Atlas shelf headings', () => {
     expect(atlasHeadingOf({ id: 'shelf.watchlist', fallback: 'Watchlist' })).toBeUndefined();
     expect(
       atlasHeadingOf({ id: 'shelf.watchlist', args: { count: 1 }, fallback: 'Watchlist' }),
+    ).toEqual({ id: 'shelf.watchlist', args: { count: 1 }, fallback: 'Watchlist' });
+    expect(
+      atlasHeadingOf({ id: 'shelf.watchlist', args: { count: 1.5 }, fallback: 'Watchlist' }),
+    ).toBeUndefined();
+    expect(
+      atlasHeadingOf({ id: 'Shelf.Watchlist', args: {}, fallback: 'Watchlist' }),
     ).toBeUndefined();
     expect(
       atlasHeadingOf({ id: 'x'.repeat(129), args: {}, fallback: 'Future Atlas Shelf' }),
