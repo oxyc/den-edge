@@ -75,6 +75,15 @@ describe('sight', () => {
     expect(sight(paused, { seconds: 40, at: at + 60_000 })!.moving).toBe(true);
   });
 
+  it('takes explicit producer state over ambiguous position equality', () => {
+    const first = sight(undefined, { seconds: 600, at, playing: false });
+    expect(first?.moving).toBe(false);
+    const resumed = sight(first, { seconds: 600, at: at + 1_000, playing: true });
+    expect(resumed?.moving).toBe(true);
+    const paused = sight(resumed, { seconds: 605, at: at + 2_000, playing: false });
+    expect(paused?.moving).toBe(false);
+  });
+
   it('keeps what it saw while no newer write arrives', () => {
     const paused = { seconds: 10, at, moving: false };
     expect(sight(paused, { seconds: 10, at })).toBe(paused);

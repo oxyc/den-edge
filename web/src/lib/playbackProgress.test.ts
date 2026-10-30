@@ -39,8 +39,8 @@ describe('PlaybackProgressReporter', () => {
     progress.complete(91.4);
 
     expect(write.mock.calls).toEqual([
-      [0.91, 91],
-      [1, 91],
+      [0.91, 91, true],
+      [1, 91, false],
     ]);
   });
 
@@ -55,8 +55,8 @@ describe('PlaybackProgressReporter', () => {
     progress.report(10, 100);
 
     expect(write.mock.calls).toEqual([
-      [1, 91],
-      [0.1, 10],
+      [1, 91, false],
+      [0.1, 10, true],
     ]);
   });
 
@@ -75,12 +75,17 @@ describe('PlaybackProgressReporter', () => {
     progress.reportStart(9, 1_000);
     progress.reportStart(10, 1_000);
     // Paused: the pause writes, then the resume writes once the clock leaves that second.
+    progress.paused();
     progress.report(20.2, 1_000);
     progress.playing();
     progress.reportStart(20.6, 1_000);
     progress.reportStart(21.1, 1_000);
     progress.reportStart(22, 1_000);
 
-    expect(write.mock.calls.map(([, seconds]) => seconds)).toEqual([9, 20, 21]);
+    expect(write.mock.calls.map(([, seconds, playing]) => [seconds, playing])).toEqual([
+      [9, true],
+      [20, false],
+      [20, true],
+    ]);
   });
 });

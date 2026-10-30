@@ -672,6 +672,7 @@
           fraction: entry.fraction,
           ...(entry.episode ? { episode: entry.episode } : {}),
           ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
+          ...(entry.playing === undefined ? {} : { playing: entry.playing }),
           ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
           ...(entry.liveEpisode === undefined ? {} : { liveEpisode: entry.liveEpisode }),
           ...(entry.liveFraction === undefined ? {} : { liveFraction: entry.liveFraction }),
@@ -1372,7 +1373,7 @@
   }
 
   /** Where playback got to, written as the TV's player writes it. */
-  async function progressed(target: Target, fraction: number, seconds: number) {
+  async function progressed(target: Target, fraction: number, seconds: number, playing: boolean) {
     if (!model && !profileActivity) return;
     const { title, season, episode } = target;
     return runCommand(
@@ -1383,6 +1384,7 @@
               fraction,
               seconds,
               season !== undefined && episode !== undefined ? { season, episode } : undefined,
+              playing,
             )
         : () =>
             model!.recordProgress({
@@ -1392,6 +1394,7 @@
                 : {}),
               fraction,
               seconds,
+              playing,
               observedAt: Date.now(),
             }),
       title,
@@ -2691,8 +2694,8 @@
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
-      onprogress={(fraction, seconds, at) =>
-        void progressed({ title: target.title, ...at }, fraction, seconds)}
+      onprogress={(fraction, seconds, at, playing) =>
+        void progressed({ title: target.title, ...at }, fraction, seconds, playing)}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}

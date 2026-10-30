@@ -123,12 +123,19 @@ export function opsFor(before: Row, after: Row): Op[] {
   if (before.kind === 'ep' && after.kind === 'ep') {
     if (same(before.progress, after.progress)) return [];
     const target = after.title;
-    const { value, seconds, at } = after.progress;
+    const { value, seconds, playing, at } = after.progress;
     if (seconds !== undefined)
       return [
         {
           target,
-          write: { kind: 'progress', episode: [after.season, after.episode], value, seconds, at },
+          write: {
+            kind: 'progress',
+            episode: [after.season, after.episode],
+            value,
+            seconds,
+            ...(playing !== undefined ? { playing } : {}),
+            at,
+          },
         },
       ];
     return [
@@ -168,6 +175,7 @@ export function opsFor(before: Row, after: Row): Op[] {
           kind: 'progress',
           value: resume.value,
           ...(resume.seconds !== undefined ? { seconds: resume.seconds } : {}),
+          ...(resume.playing !== undefined ? { playing: resume.playing } : {}),
           at: resume.at,
         },
       });

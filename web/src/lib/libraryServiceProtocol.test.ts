@@ -169,10 +169,18 @@ describe('library service client protocol', () => {
           episode: { type: 'tv', id: 42, season: 2, episode: 3 },
           fraction: 0.4,
           seconds: 812,
+          playing: true,
           observedAt: 1_800_000_000_000,
         },
       }),
-    ).toMatchObject({ ok: true, value: { type: 'command', operationId: 'operation-1' } });
+    ).toMatchObject({
+      ok: true,
+      value: {
+        type: 'command',
+        operationId: 'operation-1',
+        command: { kind: 'progress.record', playing: true },
+      },
+    });
 
     for (const command of [
       { kind: 'watchlist.add', title: { type: 'movie', id: 12 } },

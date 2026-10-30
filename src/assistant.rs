@@ -1068,13 +1068,25 @@ mod tests {
 
     /// §16: the TV's queue is a queue of its own — its seqs, its acks, its budget — and only a TV drains it, so its
     /// drains say whether the TV is awake. den-mcp learns whether a request it appended was taken, never how it ended.
-    #[tokio::test]
-    async fn the_tv_queue_is_its_own_and_its_drains_say_the_tv_is_awake() {
-        Box::pin(tv_queue_scenario()).await;
+    #[test]
+    fn the_tv_queue_is_its_own_and_its_drains_say_the_tv_is_awake() {
+        std::thread::Builder::new()
+            .name("tv-queue-scenario".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(tv_queue_scenario());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     // This scenario's many sequential HTTP futures make its generated async state larger than macOS's test-thread
-    // stack. Poll it from the heap, as production requests are, so the exact test also runs under that smaller stack.
+    // stack. Give this unusually large scenario an explicit stack so it is deterministic on macOS as well as Linux.
     async fn tv_queue_scenario() {
         let h = write_harness().await;
         let (_, access) = write_access(&h).await;

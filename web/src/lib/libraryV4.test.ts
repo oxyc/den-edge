@@ -181,7 +181,7 @@ describe('Library v4 documents', () => {
         seasonReset: null,
         episodes: {
           2: {
-            progress: { value: 0.5, at: at(3000), viewing: 0, seconds: 900 },
+            progress: { value: 0.5, at: at(3000), viewing: 0, seconds: 900, playing: true },
             imported: false,
             plays: {},
             cleared: null,
@@ -201,6 +201,7 @@ describe('Library v4 documents', () => {
     expect(log.episode({ type: 'tv', id: 1399 }, 1, 2)?.progress).toMatchObject({
       value: 0.5,
       seconds: 900,
+      playing: true,
     });
     expect(log.settings('prefs')?.values['den.hideAnime']).toBeDefined();
     expect(

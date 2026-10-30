@@ -207,7 +207,7 @@
     castDiscoveryMs?: number;
     castPlayMs?: number;
     /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
-    onprogress: (fraction: number, seconds: number, at: Episode) => void;
+    onprogress: (fraction: number, seconds: number, at: Episode, playing: boolean) => void;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -497,7 +497,7 @@
   /** Each episode's positions are written against that episode, whatever the props name by the time they go. */
   const reporterFor = (at: Episode) =>
     new PlaybackProgressReporter(
-      (fraction, seconds) => onprogress(fraction, seconds, at),
+      (fraction, seconds, playing) => onprogress(fraction, seconds, at, playing),
       at.season !== undefined && at.episode !== undefined ? 'episode' : 'movie',
     );
   let progress = reporterFor(playingEpisode);
@@ -2942,6 +2942,7 @@
     if (tv) setTvPlaybackActive(false);
     revealWebControls(false);
     clearInterval(timer);
+    progress.paused();
     report();
     if (session) {
       sendHeartbeat(session);
