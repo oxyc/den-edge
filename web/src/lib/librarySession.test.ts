@@ -6,7 +6,10 @@ import { activeProfileSession, legacyProfileSession } from './profileSession.sve
 
 const KID_ID = '0123456789abcdef0123456789abcdef';
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe('ProfileSession presentation state', () => {
   const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
@@ -66,6 +69,58 @@ describe('ProfileSession presentation state', () => {
     });
     expect(session.content).toBe(contentPort);
     expect(closeWorkerServices).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a profile-scoped language hint until a real synced value revalidates it', () => {
+    const values = new Map<string, string>([
+      [
+        'den.profile.active.v1',
+        JSON.stringify({ version: 1, mode: 'persistent', profileId: KID_ID }),
+      ],
+      [`den.interfaceLanguage.presentation.v2.profile-${KID_ID}`, 'es'],
+      [`den.interfaceLanguage.presentation.v2.profile-${KID_ID}.written-at`, String(Date.now())],
+    ]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+    const householdModel = {
+      settings: {
+        connection: 'ready',
+        value: {
+          kind: 'settings',
+          preferences: { interfaceLanguage: 'en', services: [] },
+        },
+      },
+    } as unknown as LibraryModel;
+    const profileSettings: { value: unknown } = {
+      value: { kind: 'settings', preferences: { services: [] } },
+    };
+    const profileModel = {
+      get settings() {
+        return profileSettings;
+      },
+    } as unknown as LibraryModel;
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      householdModel,
+      content(),
+    );
+    const session = activeProfileSession(
+      persistentProfileIdentity(KID_ID, 'profile-key'),
+      household,
+      profileModel,
+    );
+
+    expect(session.interfaceLanguage).toBe('es');
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 5 * 60_000 + 1);
+    profileSettings.value = {
+      kind: 'settings',
+      preferences: { interfaceLanguage: 'en', services: [] },
+    };
+    expect(session.interfaceLanguage).toBe('en');
   });
 
   it('promotes only the same open household into a configuration-only profiles control plane', () => {

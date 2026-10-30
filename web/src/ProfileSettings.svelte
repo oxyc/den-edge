@@ -13,13 +13,17 @@
   import { ATLAS_FALLBACK } from './settings/credits';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
-  import { i18n } from './lib/i18n.svelte';
+  import { i18n, setInterfaceLanguage } from './lib/i18n.svelte';
+  import { rememberFreshPresentationLanguage } from './lib/translationCache';
 
   let {
     session,
     profiles = null,
   }: { session: ProfileSession; profiles?: ProfileModeCoordinator | null } = $props();
-  const prefs = $derived((session.preferences as ProfilePreferences).value);
+  const prefs = $derived.by(() => {
+    const value = (session.preferences as ProfilePreferences).value;
+    return value ? { ...value, interfaceLanguage: i18n.language } : undefined;
+  });
   let saving = $state(false);
   let failure = $state<string | null>(null);
   const role = $derived(
@@ -53,6 +57,12 @@
     failure = null;
     void (session.preferences as ProfilePreferences)
       .patch(changes)
+      .then(() => {
+        if (!changes.interfaceLanguage) return;
+        rememberFreshPresentationLanguage(changes.interfaceLanguage);
+        session.presentIn(changes.interfaceLanguage);
+        return setInterfaceLanguage(changes.interfaceLanguage);
+      })
       .catch((error: unknown) => {
         console.warn('den: profile preference save failed', error);
         failure = i18n.text('profile.saveFailed');

@@ -111,6 +111,52 @@ test('accepting an invite starts the guest’s library with the watchlist alread
   });
 });
 
+for (const profiles of [false, true]) {
+  test(`a synced ${profiles ? 'profile ' : ''}library keeps its interface language after reload`, async () => {
+    const edge = newEdge({ profiles });
+    await browserOf(edge, async (_browser, open) => {
+      const laptop = await laptopAcceptingAnInvite(open, edge);
+      if (profiles) {
+        await expect(
+          laptop.getByRole('button', { name: 'Switch profile, current Owner' }),
+        ).toBeVisible({ timeout: 30_000 });
+        // Finish the migration journey first. The hosted regression is a returning profile whose activity library
+        // is restored at startup, not the one-time legacy Owner session retained while a split is committing.
+        await laptop.reload();
+        await expect(
+          laptop.getByRole('button', { name: 'Switch profile, current Owner' }),
+        ).toBeVisible({ timeout: 30_000 });
+      }
+
+      await laptop.goto(`${E2E_ORIGIN}/settings`);
+      const language = laptop.getByRole('combobox', {
+        name: 'Interface language',
+        exact: true,
+      });
+      await expect(language).toBeEnabled({ timeout: 30_000 });
+      const saved = laptop.waitForResponse(
+        (response) =>
+          response.request().method() === 'POST' &&
+          new URL(response.url()).pathname.endsWith('/batch') &&
+          response.ok(),
+        { timeout: 30_000 },
+      );
+      await language.selectOption('es');
+      await saved;
+      await expect(language).toHaveValue('es');
+      await expect(laptop.locator('html')).toHaveAttribute('lang', 'es');
+      await expect(laptop.getByRole('heading', { name: 'Ajustes', level: 1 })).toBeVisible();
+
+      await laptop.reload();
+      await expect(laptop.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });
+      await expect(laptop.getByRole('heading', { name: 'Ajustes', level: 1 })).toBeVisible();
+      await expect(
+        laptop.getByRole('combobox', { name: 'Idioma de la interfaz', exact: true }),
+      ).toHaveValue('es', { timeout: 30_000 });
+    });
+  });
+}
+
 test('a page opened while the invite moves the library stays open when the move finishes', async () => {
   const edge = newEdge();
   await browserOf(edge, async (_browser, open) => {
