@@ -94,7 +94,10 @@
       </span>
     </h2>
     {#if aside}
-      <a class="aside" href={aside.href} aria-label={i18n.phrase(aside.ariaLabel ?? aside.label)}
+      <a
+        class="aside"
+        href={aside.href}
+        aria-label={aside.ariaLabel ? i18n.phrase(aside.ariaLabel) : undefined}
         >{i18n.phrase(aside.label)} ›</a
       >
     {/if}
