@@ -91,7 +91,14 @@
       ? { step: 'done', written: result.written }
       : {
           step: 'failed',
-          message: `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. Importing both files again picks up where this stopped.`,
+          message: i18n.format(
+            'import.savedPrime',
+            'Saved {written} of {total}. Importing both files again picks up where this stopped.',
+            {
+              written: result.written.toLocaleString(),
+              total: result.total.toLocaleString(),
+            },
+          ),
         };
   }
 

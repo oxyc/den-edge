@@ -3,6 +3,7 @@
      holds the owner's installs and the guest's browser only ever holds a secret of its own (`grants.ts`). What a guest
      holds lives in this browser (`grants.svelte.ts`), never in the library. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { tick, untrack } from 'svelte';
   import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
@@ -81,7 +82,14 @@
     { length: 5 },
     (_, index) => {
       const devices = index + 1;
-      return { value: devices, label: `${devices} device${devices === 1 ? '' : 's'}` };
+      return {
+        value: devices,
+        label: i18n.format(
+          devices === 1 ? 'sharing.deviceCount.one' : 'sharing.deviceCount.other',
+          devices === 1 ? '{count} device' : '{count} devices',
+          { count: devices },
+        ),
+      };
     },
   );
   DEVICE_LIMITS.push({ value: null, label: 'unlimited devices' });
@@ -226,7 +234,9 @@
     created = {
       name: reply.value.grant.name,
       code: reply.value.code,
-      title: `${reply.value.grant.name}’s invite.`,
+      title: i18n.format('sharing.inviteTitle', '{name}’s invite.', {
+        name: reply.value.grant.name,
+      }),
       notes: ['It is shown once.'],
     };
     copied = null;
@@ -293,7 +303,7 @@
     created = {
       name: next.name,
       code,
-      title: `${next.name}’s new link.`,
+      title: i18n.format('sharing.newLinkTitle', '{name}’s new link.', { name: next.name }),
       notes: [
         'The previous link no longer works.',
         ...(devicesRaised
@@ -366,7 +376,7 @@
       for (const days of [7, 30])
         items.push({
           kind: 'item',
-          label: `Extend by ${days} days`,
+          label: i18n.format('sharing.extendDays', 'Extend by {count} days', { count: days }),
           disabled: working,
           onselect: () => extend(grant, days),
         });
@@ -375,7 +385,7 @@
       items.push({
         kind: 'radio',
         group: 'devices',
-        label: `Allow ${label}`,
+        label: i18n.format('sharing.allow', 'Allow {value}', { value: label }),
         checked: value === deviceLimit(grant),
         disabled: working,
         onselect: () => void changeDeviceLimit(grant, value),
@@ -598,7 +608,9 @@
                       () => menus[grant.gid], (menu) => (menus = { ...menus, [grant.gid]: menu })
                     }
                     items={() => guestItems(grant)}
-                    label="More actions for {grant.name}"
+                    label={i18n.format('actions.moreFor', 'More actions for {value}', {
+                      value: grant.name,
+                    })}
                     heading={grant.name}
                     triggerClass="guest-trigger"
                     onclose={() => {

@@ -5,7 +5,10 @@ import {
   rememberPresentationLanguage,
   rememberTranslationCatalog,
   translationCacheKeys,
+  translationCacheSchema,
 } from './translationCache';
+import { messages as spanishMessages } from './messages/es';
+import { phraseKey } from './messages/phraseCatalog';
 
 const memory = () => {
   const values = new Map<string, string>();
@@ -24,13 +27,38 @@ describe('translation cache', () => {
     expect(readPresentationLanguageHint(kept)).toBe('sv');
   });
 
+  it('keeps first-frame language hints separate for profiles sharing one browser', () => {
+    const kept = memory();
+    const first = '1'.repeat(32);
+    const second = '2'.repeat(32);
+    kept.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: first }),
+    );
+    rememberPresentationLanguage('es', kept);
+    kept.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: second }),
+    );
+    expect(readPresentationLanguageHint(kept)).toBeUndefined();
+    rememberPresentationLanguage('sv', kept);
+    kept.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: first }),
+    );
+    expect(readPresentationLanguageHint(kept)).toBe('es');
+  });
+
   it('round-trips a versioned non-English catalog for synchronous warm starts', () => {
     const kept = memory();
     const catalog = {
-      revision: 'release-b',
-      messages: { 'nav.home': 'Inicio' },
-      phrases: { Play: 'Reproducir' },
-    } as never;
+      schema: translationCacheSchema,
+      language: 'es' as const,
+      revision: '0123456789abcdef',
+      messages: spanishMessages,
+      phrases: { [phraseKey('Play')]: 'Reproducir' },
+      parameters: {},
+    };
     rememberTranslationCatalog('es', catalog, kept);
     expect(readCachedTranslationCatalog('es', kept)).toEqual(catalog);
     expect(kept.values.has(translationCacheKeys.catalog('es'))).toBe(true);

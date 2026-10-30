@@ -10,6 +10,7 @@ import type { MediaType, Title } from './library';
 import { fansId, likeId, personHref, searchHref } from './route';
 import type { Browsable, TitleFacts } from './titleFacts';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import type { ParameterMessageId } from './messages/parameters';
 
 /** Titles a page adds: a screenful and a bit, the size TMDB's own pages come in. */
 const CHUNK = 20;
@@ -19,6 +20,11 @@ const NEIGHBOURS = 50;
 const keyOf = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
 
 type Ref = { type: MediaType; id: number };
+
+const titleMessage = (
+  id: ParameterMessageId,
+  value: string,
+): NonNullable<RowDef['titleMessage']> => ({ id, values: { value } });
 
 /**
  * `refs` drawn, in their order, from the cards atlas sent with them. A title atlas has a card for needs no request of
@@ -329,6 +335,7 @@ export function studioRow(
   return {
     id: `studio-${studio.id}`,
     title: `More from ${studio.name}`,
+    titleMessage: titleMessage('related.moreFrom', studio.name),
     headingLink: {
       before: 'More from ',
       label: studio.name,
@@ -346,13 +353,13 @@ export function languageRow(
   self: Title,
   content: ContentServiceClientPort,
 ): RowDef {
-  const label = `in ${language.name}`;
   return {
     id: `language-${language.id}`,
-    title: `More ${label}`,
+    title: `More in ${language.name}`,
+    titleMessage: titleMessage('related.moreIn', language.name),
     headingLink: {
-      before: 'More ',
-      label,
+      before: 'More in ',
+      label: language.name,
       after: '',
       href: searchHref('', { type: self.type, chips: [`lang-${language.id}`] }),
     },
@@ -470,6 +477,7 @@ export function countryRow(
   return {
     id: `country-${country.id}`,
     title: `More from ${name}`,
+    titleMessage: titleMessage('related.moreFrom', name),
     headingLink: {
       before: 'More from ',
       label: name,
@@ -525,6 +533,7 @@ function producerRow(
   return {
     id: `${kind}-${value.id}`,
     title: `More from ${value.name}`,
+    titleMessage: titleMessage('related.moreFrom', value.name),
     headingLink: {
       before: 'More from ',
       label: value.name,
@@ -568,9 +577,16 @@ function themeRow(
   self: Title,
   content: ContentServiceClientPort,
 ): RowDef {
+  const messageId =
+    kind === 'subject'
+      ? 'related.moreAbout'
+      : kind === 'place'
+        ? 'related.setIn'
+        : 'related.moreAdaptedFrom';
   return {
     id: `${kind}-${value.id}`,
     title: `${before}${value.name}`,
+    titleMessage: titleMessage(messageId, value.name),
     headingLink: {
       before,
       label: value.name,
@@ -631,6 +647,7 @@ export function moodRow(
     id: `mood-like-${mood}`,
     // No link: Search takes a "Like" or a mood, never both, so no page there shows these titles.
     title: `More ${word} like this`,
+    titleMessage: titleMessage('related.moreLikeThis', word),
     filter: (title) => keyOf(title) !== keyOf(self),
     load: async () => {
       await after;
@@ -808,9 +825,17 @@ export function personRow(
       : 'Starring ',
 ): RowDef {
   let films: Promise<Title[]> | undefined;
+  const messageId = before.startsWith('More from')
+    ? 'related.moreFrom'
+    : before.startsWith('Created by')
+      ? 'related.createdBy'
+      : before.startsWith('Written by')
+        ? 'related.writtenBy'
+        : 'related.starring';
   return {
     id: `${department.toLowerCase()}-${person.id}`,
     title: `${before}${person.name}`,
+    titleMessage: titleMessage(messageId, person.name),
     headingLink: {
       before,
       label: person.name,

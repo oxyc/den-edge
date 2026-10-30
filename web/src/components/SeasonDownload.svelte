@@ -55,7 +55,9 @@
     if (observer.signal.aborted) return;
     loadingSeason = undefined;
     if (!selectedEpisodes) {
-      failure = `Couldn’t load season ${target}. Try again.`;
+      failure = i18n.format('error.loadSeason', 'Couldn’t load season {season}. Try again.', {
+        season: target,
+      });
       return;
     }
     void downloadSeason(

@@ -1,6 +1,7 @@
 // The household's TVs that take plays (den-spec inbox-v1 §5), as every Play on TV control lists them.
 
 import type { LibraryDeviceView } from './libraryServiceProtocol';
+import { i18n } from './i18n.svelte';
 
 /** A TV in the household that takes plays from any device holding the library. */
 export interface HouseholdTv {
@@ -50,5 +51,8 @@ export function householdTvs(
 
 /** "Play on TV" with one TV; with several, each by its name. */
 export function playOnLabel(tv: HouseholdTv, tvs: readonly HouseholdTv[], verb = 'Play'): string {
-  return tvs.length > 1 ? `${verb} on ${tv.name}` : `${verb} on TV`;
+  const action = i18n.phrase(verb);
+  return tvs.length > 1
+    ? i18n.format('actions.onDevice', '{action} on {device}', { action, device: tv.name })
+    : i18n.format('actions.onTv', '{action} on TV', { action });
 }

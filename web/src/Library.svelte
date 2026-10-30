@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { untrack } from 'svelte';
@@ -1070,7 +1071,12 @@
               type: title.type,
               id: title.id,
             });
-          else failure = `Couldn’t reach ${tv.name}. Check that this device is online.`;
+          else
+            failure = i18n.format(
+              'error.couldntReachDevice',
+              'Couldn’t reach {device}. Check that this device is online.',
+              { device: tv.name },
+            );
         }
       : undefined,
   );
@@ -1255,8 +1261,12 @@
         menuToast(
           ok,
           on
-            ? `Added “${title.title}” to your watchlist`
-            : `Removed “${title.title}” from your watchlist`,
+            ? i18n.format('notice.addedWatchlist', 'Added “{value}” to your watchlist', {
+                value: title.title,
+              })
+            : i18n.format('notice.removedWatchlist', 'Removed “{value}” from your watchlist', {
+                value: title.title,
+              }),
           on ? undefined : { label: 'Undo', run: () => void toggleWatchlist(title, true) },
         ),
       );
@@ -1265,7 +1275,11 @@
       void setSeen(title, seen).then((ok) =>
         menuToast(
           ok,
-          seen ? `Marked “${title.title}” as seen` : `Marked “${title.title}” as unseen`,
+          seen
+            ? i18n.format('notice.markedSeen', 'Marked “{value}” as seen', { value: title.title })
+            : i18n.format('notice.markedUnseen', 'Marked “{value}” as unseen', {
+                value: title.title,
+              }),
         ),
       );
     },
@@ -1279,15 +1293,29 @@
               ? 'Not for me'
               : 'No rating';
       void setReaction(title, reaction).then((ok) =>
-        menuToast(ok, `Set “${title.title}” to ${label}`),
+        menuToast(
+          ok,
+          i18n.format('notice.setReaction', 'Set “{title}” to {reaction}', {
+            title: title.title,
+            reaction: i18n.phrase(label),
+          }),
+        ),
       );
     },
     dismissContinueWatching: (title) => {
       void dismiss(title).then((ok) =>
-        menuToast(ok, `Removed “${title.title}” from Continue Watching`, {
-          label: 'Undo',
-          run: () => void restore(title),
-        }),
+        menuToast(
+          ok,
+          i18n.format(
+            'notice.removedContinueWatching',
+            'Removed “{value}” from Continue Watching',
+            { value: title.title },
+          ),
+          {
+            label: 'Undo',
+            run: () => void restore(title),
+          },
+        ),
       );
     },
     get kids() {
@@ -2327,7 +2355,15 @@
     );
     if (saved)
       session.notify(
-        `${request.allow ? 'Allowed' : 'Removed'} “${request.title.title}” ${request.allow ? 'for' : 'from'} ${request.kid.name}`,
+        request.allow
+          ? i18n.format('notice.allowedForChild', 'Allowed “{title}” for {name}', {
+              title: request.title.title,
+              name: request.kid.name,
+            })
+          : i18n.format('notice.removedFromChild', 'Removed “{title}” from {name}', {
+              title: request.title.title,
+              name: request.kid.name,
+            }),
       );
     return saved;
   }}

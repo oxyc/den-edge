@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { flushSync, onMount, tick } from 'svelte';
   import type { ProfileChoice, ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { onProfileSwitcherRequest } from '../lib/profileSwitcherControl';
@@ -156,8 +157,12 @@
   class:mobile-hidden={hideOnMobile}
   type="button"
   aria-haspopup="dialog"
-  aria-label={`Switch profile, current ${active?.name ?? 'profile'}`}
-  title={`Switch profile, current ${active?.name ?? 'profile'}`}
+  aria-label={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+    value: active?.name ?? i18n.phrase('profile'),
+  })}
+  title={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+    value: active?.name ?? i18n.phrase('profile'),
+  })}
   onclick={open}
 >
   <ProfileAvatar choice={active} compact neutral />
@@ -241,7 +246,11 @@
           type="button"
           disabled={switching || !/^\d{4}$/.test(pin)}
           onclick={() => void setPin(pin)}
-          >{switching ? 'Saving…' : firstPin === null ? 'Continue' : `Use ${pending.name}`}</button
+          >{switching
+            ? 'Saving…'
+            : firstPin === null
+              ? 'Continue'
+              : i18n.format('actions.use', 'Use {value}', { value: pending.name })}</button
         >
         <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
       </div>
@@ -278,7 +287,9 @@
             switching ||
             (profiles.parentalPinConfigured === true && !/^\d{4}$/.test(pin))}
           onclick={() => void switchTo(pending!)}
-          >{switching ? 'Switching…' : `Use ${pending.name}`}</button
+          >{switching
+            ? 'Switching…'
+            : i18n.format('actions.use', 'Use {value}', { value: pending.name })}</button
         >
         <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
       </div>
@@ -292,7 +303,7 @@
               class:current={choiceKey(choice) === choiceKey(active)}
               type="button"
               disabled={switching || profiles.waitsForPin(choice.role)}
-              aria-label={`Use ${choice.name}`}
+              aria-label={i18n.format('actions.use', 'Use {value}', { value: choice.name })}
               data-spatial-anchor
               onclick={() => void choose(choice)}
             >

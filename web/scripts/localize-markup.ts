@@ -41,6 +41,7 @@ interface Node {
 
 const phrase = (value: string): string => value.replace(/\s+/g, ' ').trim();
 const hasWords = (value: string): boolean => /[A-Za-zÀ-ÿ]/.test(value);
+const compiled = (value: string): string => `i18n.phrase(${JSON.stringify(value)})`;
 
 function localizeOutputExpression(
   node: Node | undefined,
@@ -59,7 +60,7 @@ function localizeOutputExpression(
     edits.push({
       start: node.start,
       end: node.end,
-      value: `i18n.phrase(${JSON.stringify(node.value)})`,
+      value: compiled(node.value),
     });
     return;
   }
@@ -97,7 +98,7 @@ function visit(
       edits.push({
         start: node.start,
         end: node.end,
-        value: `${node.name}={i18n.phrase(${JSON.stringify(translated)})}`,
+        value: `${node.name}={${compiled(translated)}}`,
       });
       return;
     }
@@ -135,7 +136,7 @@ function visit(
       edits.push({
         start: node.start,
         end: node.end,
-        value: `${leading}{i18n.phrase(${JSON.stringify(translated)})}${trailing}`,
+        value: `${leading}{${compiled(translated)}}${trailing}`,
       });
       return;
     }

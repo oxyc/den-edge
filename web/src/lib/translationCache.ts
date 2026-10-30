@@ -1,13 +1,26 @@
-import { isInterfaceLanguage, type InterfaceLanguage } from './interfaceLanguage';
-import type { MessageCatalog } from './messages/en';
+import type { InterfaceLanguage } from './interfaceLanguage';
+import { ENGLISH_MESSAGES, type MessageCatalog, type MessageId } from './messages/en';
+import type { ParameterCatalog } from './messages/parameters';
+import { presentationLanguageKeyForScope } from './presentationLanguageHint';
 
-const PRESENTATION_LANGUAGE = 'den.interfaceLanguage.presentation.v1';
-const CATALOG_PREFIX = 'den.translations.v1.';
+export {
+  currentPresentationScope,
+  readPresentationLanguageHint,
+  rememberPresentationLanguage,
+} from './presentationLanguageHint';
+
+const CATALOG_PREFIX = 'den.translations.v3.';
+const CATALOG_SCHEMA = 3 as const;
+const MAX_CATALOG_BYTES = 512 * 1024;
+const MESSAGE_IDS = Object.keys(ENGLISH_MESSAGES) as MessageId[];
 
 export interface CachedTranslationCatalog {
+  readonly schema: typeof CATALOG_SCHEMA;
+  readonly language: Exclude<InterfaceLanguage, 'en'>;
   readonly revision: string;
   readonly messages: MessageCatalog;
   readonly phrases: Readonly<Record<string, string>>;
+  readonly parameters: Partial<ParameterCatalog>;
 }
 
 const storage = (): Storage | undefined => {
@@ -18,29 +31,6 @@ const storage = (): Storage | undefined => {
   }
 };
 
-/** The last effective profile language is only a first-frame hint; synced preferences remain authoritative. */
-export function readPresentationLanguageHint(
-  source: Pick<Storage, 'getItem'> | undefined = storage(),
-): InterfaceLanguage | undefined {
-  try {
-    const value = source?.getItem(PRESENTATION_LANGUAGE);
-    return isInterfaceLanguage(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-export function rememberPresentationLanguage(
-  language: InterfaceLanguage,
-  target: Pick<Storage, 'setItem'> | undefined = storage(),
-): void {
-  try {
-    target?.setItem(PRESENTATION_LANGUAGE, language);
-  } catch {
-    // Private browsing and full TV storage still work; only the next-launch warm start is unavailable.
-  }
-}
-
 export function readCachedTranslationCatalog(
   language: InterfaceLanguage,
   source: Pick<Storage, 'getItem'> | undefined = storage(),
@@ -49,15 +39,28 @@ export function readCachedTranslationCatalog(
   try {
     const raw = source?.getItem(`${CATALOG_PREFIX}${language}`);
     if (!raw) return undefined;
+    if (raw.length > MAX_CATALOG_BYTES) return undefined;
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const candidate = value as Partial<CachedTranslationCatalog>;
     if (
+      candidate.schema !== CATALOG_SCHEMA ||
+      candidate.language !== language ||
       typeof candidate.revision !== 'string' ||
+      candidate.revision.length !== 16 ||
       !candidate.messages ||
       typeof candidate.messages !== 'object' ||
+      Array.isArray(candidate.messages) ||
       !candidate.phrases ||
-      typeof candidate.phrases !== 'object'
+      typeof candidate.phrases !== 'object' ||
+      Array.isArray(candidate.phrases) ||
+      !candidate.parameters ||
+      typeof candidate.parameters !== 'object' ||
+      Array.isArray(candidate.parameters) ||
+      Object.keys(candidate.messages).length !== MESSAGE_IDS.length ||
+      MESSAGE_IDS.some((id) => typeof candidate.messages?.[id] !== 'string') ||
+      Object.values(candidate.phrases).some((entry) => typeof entry !== 'string') ||
+      Object.values(candidate.parameters).some((entry) => typeof entry !== 'string')
     )
       return undefined;
     return candidate as CachedTranslationCatalog;
@@ -73,13 +76,17 @@ export function rememberTranslationCatalog(
 ): void {
   if (language === 'en') return;
   try {
-    target?.setItem(`${CATALOG_PREFIX}${language}`, JSON.stringify(catalog));
+    const serialized = JSON.stringify(catalog);
+    if (serialized.length <= MAX_CATALOG_BYTES)
+      target?.setItem(`${CATALOG_PREFIX}${language}`, serialized);
   } catch {
     // HTTP caching remains the fallback when this browser refuses or has exhausted persistent storage.
   }
 }
 
 export const translationCacheKeys = {
-  presentationLanguage: PRESENTATION_LANGUAGE,
+  presentationLanguage: (scope = 'default'): string => presentationLanguageKeyForScope(scope),
   catalog: (language: Exclude<InterfaceLanguage, 'en'>): string => `${CATALOG_PREFIX}${language}`,
 };
+
+export const translationCacheSchema = CATALOG_SCHEMA;

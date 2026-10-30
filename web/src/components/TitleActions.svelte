@@ -186,7 +186,16 @@
       : [],
   );
   const primaryAlternates = $derived([
-    ...(onplayhere ? [{ label: `${playLabel} here`, onselect: onplayhere }] : []),
+    ...(onplayhere
+      ? [
+          {
+            label: i18n.format('actions.playHere', '{action} here', {
+              action: i18n.phrase(playLabel),
+            }),
+            onselect: onplayhere,
+          },
+        ]
+      : []),
     ...onTv.filter((tv) => tv.id !== primaryPlay?.tv),
   ]);
   const opinionIcon = (value: Reaction | null) =>

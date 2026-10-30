@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ProfileChoice } from '../lib/profileModeCoordinator.svelte';
   import ProfileAvatar from './ProfileAvatar.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   /** The remembered profile, drawn in the switcher's place until the coordinator can open the real switcher. */
   let { choice }: { choice: ProfileChoice } = $props();
@@ -10,8 +11,12 @@
   class="profile-trigger mobile-hidden"
   type="button"
   disabled
-  aria-label={`Switch profile, current ${choice.name}`}
-  title={`Switch profile, current ${choice.name}`}
+  aria-label={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+    value: choice.name,
+  })}
+  title={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+    value: choice.name,
+  })}
 >
   <ProfileAvatar {choice} compact neutral />
 </button>

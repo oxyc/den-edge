@@ -2,6 +2,7 @@
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { openProfileSwitcher } from '../lib/profileSwitcherControl';
   import ProfileAvatar from './ProfileAvatar.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let { profiles }: { profiles: ProfileModeCoordinator } = $props();
   const active = $derived(profiles.activeChoice);
@@ -10,7 +11,9 @@
 <button
   class="mobile-profile-row"
   type="button"
-  aria-label={`Switch profile, current ${active?.name ?? 'profile'}`}
+  aria-label={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+    value: active?.name ?? i18n.phrase('profile'),
+  })}
   onclick={(event) =>
     openProfileSwitcher({ trigger: event.currentTarget, restoreFocus: event.detail === 0 })}
 >

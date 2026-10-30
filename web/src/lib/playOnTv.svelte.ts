@@ -12,6 +12,7 @@ import { stillQueued } from './inbox';
 import type { Link } from './links.svelte';
 import type { ProfileSession } from './profileSession.svelte';
 import { LIVE_MS } from './livePosition';
+import { i18n } from './i18n.svelte';
 
 /** How often den-edge's read-only "is it still queued" peek is asked while waiting (`POST /inbox/pending`). */
 export const PEEK_MS = 2_000;
@@ -44,14 +45,20 @@ export function playOnTvStatus({
   queued,
   playing,
 }: PlayOnTvInput): PlayOnTvStatus {
-  if (playing) return { message: `Playing on ${tvName}`, done: true };
+  if (playing)
+    return {
+      message: i18n.format('playback.playingOn', 'Playing on {device}', { device: tvName }),
+      done: true,
+    };
   const elapsed = now - sentAt;
   // `queued === false` is den-edge's word that the TV took it, so the hint — which exists only to say Den might
   // not be open — would be a false alarm once that's known, even past HINT_MS.
   const needsHint = elapsed >= HINT_MS && queued !== false;
   const message = needsHint
-    ? `Sent to ${tvName}… Den needs to be open on ${tvName}.`
-    : `Sent to ${tvName}…`;
+    ? i18n.format('playback.sentNeedsOpen', 'Sent to {device}… Den needs to be open on {device}.', {
+        device: tvName,
+      })
+    : i18n.format('playback.sentTo', 'Sent to {device}…', { device: tvName });
   return { message, done: elapsed >= GIVE_UP_MS };
 }
 

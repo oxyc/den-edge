@@ -12,6 +12,7 @@ import type { Notify } from './toast';
 import { titleState, type Reaction } from './titleState';
 import type { TitleRow } from './wire';
 import { playOnLabel, type HouseholdTv } from './householdTvs';
+import { i18n } from './i18n.svelte';
 
 const TITLE_ACTIONS = Symbol('title actions');
 
@@ -104,7 +105,9 @@ export function titleMenuItems(
       const target = title.type === 'tv' ? ctx.resumeOf(title) : undefined;
       items.push({
         kind: 'link',
-        label: target ? `Resume S${target.season} · E${target.episode}` : 'Play',
+        label: target
+          ? i18n.format('actions.resumeEpisode', 'Resume S{season} · E{episode}', target)
+          : i18n.phrase('Play'),
         href: titleHref({ ...title, ...target, play: true }),
         onselect: () => ctx.playHere?.(title),
       });
@@ -120,14 +123,14 @@ export function titleMenuItems(
     }
     items.push({
       kind: 'checkbox',
-      label: listed ? 'Remove from watchlist' : 'Add to watchlist',
+      label: i18n.phrase(listed ? 'Remove from watchlist' : 'Add to watchlist'),
       checked: listed,
       disabled: busy,
       onselect: () => ctx.toggleWatchlist(title, !listed),
     });
     items.push({
       kind: 'checkbox',
-      label: seen ? 'Mark as unseen' : 'Mark as seen',
+      label: i18n.phrase(seen ? 'Mark as unseen' : 'Mark as seen'),
       checked: seen,
       disabled: busy,
       onselect: () => ctx.toggleSeen(title, !seen),
@@ -135,7 +138,7 @@ export function titleMenuItems(
     for (const [value, label] of REACTIONS) {
       items.push({
         kind: 'radio',
-        label,
+        label: i18n.phrase(label),
         group: 'reaction',
         checked: reaction === value,
         disabled: busy,
@@ -145,7 +148,7 @@ export function titleMenuItems(
     if (continueWatching) {
       items.push({
         kind: 'item',
-        label: 'Remove from Continue Watching',
+        label: i18n.phrase('Remove from Continue Watching'),
         disabled: busy,
         onselect: () => ctx.dismissContinueWatching(title),
       });
@@ -154,7 +157,10 @@ export function titleMenuItems(
       const approved = kid.approvals.includes(`${title.type}:${title.id}`);
       items.push({
         kind: 'item',
-        label: `${approved ? 'Remove' : 'Allow'} for ${kid.name}`,
+        label: i18n.format('actions.childAccess', '{action} for {name}', {
+          action: i18n.phrase(approved ? 'Remove' : 'Allow'),
+          name: kid.name,
+        }),
         disabled: busy,
         onselect: () => ctx.changeKidAccess?.(kid, title, !approved),
       });
@@ -162,18 +168,18 @@ export function titleMenuItems(
   }
   items.push({
     kind: 'link',
-    label: 'More like this',
+    label: i18n.phrase('More like this'),
     href: searchHref('', { chips: [likeId(title)] }),
   });
   items.push({
     kind: 'item',
-    label: 'Share',
+    label: i18n.phrase('Share'),
     onselect: () =>
       void shareOrCopy({
         title: title.title,
         url: `${__DEN_TV_WEB_ORIGIN__ || location.origin}${href}`,
       }).then((result) => {
-        if (result === 'copied') notify?.('Link copied');
+        if (result === 'copied') notify?.(i18n.phrase('Link copied'));
       }),
   });
   return items;

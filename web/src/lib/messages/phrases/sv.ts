@@ -1,5 +1,5 @@
 // Generated from user-facing Svelte markup; English remains inline as the zero-cost fallback.
-export const phrases: Readonly<Record<string, string>> = {
+export const sourcePhrases: Readonly<Record<string, string>> = {
   '— your own redeems count too.': '– Dina egna inlösen räknas också.',
   ', or in Den wherever your library is already open, under':
     ', eller i Den varhelst ditt bibliotek redan är öppet, under',
@@ -1141,7 +1141,15 @@ export const phrases: Readonly<Record<string, string>> = {
   'Your TMDB API key': 'Din TMDB API-nyckel',
   'Your watchlist lives in your library, which this browser can’t keep.':
     'Din bevakningslista finns i ditt bibliotek, vilket den här webbläsaren inte kan behålla.',
+  'Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it.':
+    'Ditt bibliotek flyttas till en ny nyckel med allt innehåll kvar. Alla andra enheter, även din Apple TV, förlorar åtkomsten och måste parkopplas igen med en kod; den här webbläsaren behåller nyckeln.',
+  'Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it. Your recovery code stops working.':
+    'Ditt bibliotek flyttas till en ny nyckel med allt innehåll kvar. Alla andra enheter, även din Apple TV, förlorar åtkomsten och måste parkopplas igen med en kod; den här webbläsaren behåller nyckeln. Din återställningskod slutar fungera.',
   'yourself, just now.': 'dig själv, just nu.',
   YouTube: 'YouTube',
   Zombie: 'Zombie',
+  British: 'Brittiska',
+  Indian: 'Indiska',
+  Brazilian: 'Brasilianska',
+  Mexican: 'Mexikanska',
 };

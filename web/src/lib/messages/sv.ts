@@ -1,5 +1,6 @@
 import type { MessageCatalog } from './en';
-export { phrases } from './phrases/sv';
+export { phrases } from 'den-phrases-sv';
+export { parameters } from './parameters/sv';
 
 export const messages = {
   'nav.main': 'Huvudnavigering',

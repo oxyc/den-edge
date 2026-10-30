@@ -1,6 +1,7 @@
 <!-- A title's trailer, in YouTube's embed (youtube-nocookie.com): the web's trailers, from the YouTube id TMDB lists —
      the one the TV falls back to when it can't reach den-reel. -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import { onDestroy, onMount } from 'svelte';
   import Button from './Button.svelte';
   import ButtonIcon from './ButtonIcon.svelte';
@@ -48,7 +49,7 @@
   class="trailer"
   role="dialog"
   aria-modal="true"
-  aria-label={`${title}: trailer`}
+  aria-label={i18n.format('trailer.label', '{title}: trailer', { title })}
   tabindex="-1"
   onkeydown={trapTab}
 >
@@ -79,7 +80,7 @@
   <!-- The page sends no referrer, and YouTube's embed refuses to play without one: this frame sends its origin. -->
   <iframe
     src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(key)}?autoplay=1&rel=0&playsinline=1`}
-    title={`${title}: trailer`}
+    title={i18n.format('trailer.label', '{title}: trailer', { title })}
     allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
     allowfullscreen
     referrerpolicy="strict-origin-when-cross-origin"

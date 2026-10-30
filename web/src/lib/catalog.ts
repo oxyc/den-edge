@@ -664,6 +664,7 @@ const genreItems = (type: MediaType, id: number): FilterItem[] | undefined => {
 export interface Category {
   id: string;
   title: string;
+  titleMessage?: NonNullable<RowDef['titleMessage']>;
   query: DiscoverQuery;
   /** The same row as atlas's filter (`filterRoutes.ts`), where atlas can say it; `query` is its fallback. */
   atlas?: FilterItem[];
@@ -733,6 +734,11 @@ export function categories(
           {
             id: `genre-${id}-${type}`,
             title: `${name} ${noun}`,
+            titleMessage: {
+              id: 'category.namedType',
+              values: { value: name, type: noun },
+              translateValues: ['value', 'type'],
+            },
             query: {
               mediaType: type,
               genres: [id],
@@ -757,6 +763,11 @@ export function categories(
     decades.push({
       id: `decade-${decade}-${type}`,
       title: `${decade}s ${noun}`,
+      titleMessage: {
+        id: 'category.decadeType',
+        values: { decade, type: noun },
+        translateValues: ['type'],
+      },
       query: {
         mediaType: type,
         voteCountGte: 50,
@@ -766,9 +777,14 @@ export function categories(
       atlas: [{ kind: 'decade', id: String(decade) }],
     });
   }
-  const countries = COUNTRIES.map(([code, demonym]) => ({
+  const countries: Category[] = COUNTRIES.map(([code, demonym]) => ({
     id: `country-${code}-${type}`,
     title: `${demonym} ${noun}`,
+    titleMessage: {
+      id: 'category.namedType',
+      values: { value: demonym, type: noun },
+      translateValues: ['value', 'type'],
+    },
     query: { mediaType: type, originCountry: [code], voteCountGte: 30, releaseDateGte: dateGte },
     atlas: [{ kind: 'country', id: code }],
   }));
@@ -794,6 +810,13 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** Stable parameterized copy for headings which contain a title, person, place or provider name. */
+  titleMessage?: {
+    id: import('./messages/parameters').ParameterMessageId;
+    values: Readonly<Record<string, string | number>>;
+    /** Values which are Den-authored copy rather than proper names or numbers. */
+    translateValues?: readonly string[];
+  };
   /** Optional profile signals used only to order Home's discovery rows; membership and paging stay unchanged. */
   affinity?: HomeRowAffinity;
   /** A more specific accessible name where the visible heading is deliberately shared between several rows. */
@@ -1019,13 +1042,16 @@ export function atlasFirst(atlas: RowDef, tmdb: RowDef): RowDef {
  */
 export function categoryRow(
   pages: Pages,
-  { id, title, query, atlas: items }: Category,
+  { id, title, titleMessage, query, atlas: items }: Category,
   atlas?: AtlasFilterSource,
 ): RowDef {
-  const tmdb = discoverRow(pages, id, title, query);
+  const tmdb = { ...discoverRow(pages, id, title, query), titleMessage };
   if (!atlas || !items) return tmdb;
   const load = contentFilterTitles(atlas.content, query.mediaType, items);
-  return { ...atlasFirst(drawn({ id, title, load }, atlas.title), tmdb), id: `${id}-atlas` };
+  return {
+    ...atlasFirst(drawn({ id, title, titleMessage, load }, atlas.title), tmdb),
+    id: `${id}-atlas`,
+  };
 }
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
@@ -1117,6 +1143,10 @@ export function personalRows(
     id: `${id}-${seed.type}-${seed.id}`,
     title: `${before}${seed.title}${after}`,
     headingLink: { before, label: seed.title, after, href: titleHref(seed) },
+    titleMessage: {
+      id: id === 'byw' ? 'category.becauseWatched' : 'category.becauseWatchlisted',
+      values: { value: seed.title },
+    },
     load: async (page) =>
       (
         await catalogPage(

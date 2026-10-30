@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import ContentWarnings from './ContentWarnings.svelte';
   import type { Warning } from '../lib/contentWarnings';
   import type { TitleDetail } from '../lib/detail';
@@ -63,24 +64,29 @@
         >{/if}
     {/if}
     {#if imdb !== undefined && tmdb !== undefined}
-      {#if __DEN_TV__}<span aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
-          ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></span
+      {#if __DEN_TV__}<span
+          aria-label={i18n.format('rating.tmdb', 'TMDB rating {rating}', {
+            rating: tmdb.toFixed(1),
+          })}><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></span
         >{:else}<a
           data-spatial-skip
           href={tmdbHref}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
-          ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></a
+          aria-label={i18n.format('rating.tmdb', 'TMDB rating {rating}', {
+            rating: tmdb.toFixed(1),
+          })}><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></a
         >{/if}
     {/if}
     {#if enabled.includes('rottenTomatoes') && ratings?.rottenTomatoes !== undefined}<span
-        aria-label={`Rotten Tomatoes ${ratings.rottenTomatoes}%`}
-        ><b>{ratings.rottenTomatoes}%</b><span class="source">RT</span></span
+        aria-label={i18n.format('rating.rottenTomatoes', 'Rotten Tomatoes {rating}%', {
+          rating: ratings.rottenTomatoes,
+        })}><b>{ratings.rottenTomatoes}%</b><span class="source">RT</span></span
       >{/if}
     {#if enabled.includes('metacritic') && ratings?.metacritic !== undefined}<span
-        aria-label={`Metacritic ${ratings.metacritic} out of 100`}
-        ><b>{ratings.metacritic}</b><span class="source">MC</span></span
+        aria-label={i18n.format('rating.metacritic', 'Metacritic {rating} out of 100', {
+          rating: ratings.metacritic,
+        })}><b>{ratings.metacritic}</b><span class="source">MC</span></span
       >{/if}
   </div>
 {/if}
@@ -96,7 +102,9 @@
   {#if d.providers.length}
     <span
       class="providers"
-      aria-label={`Streaming on ${d.providers.map((p) => p.name).join(', ')}`}
+      aria-label={i18n.format('streaming.on', 'Streaming on {providers}', {
+        providers: d.providers.map((p) => p.name).join(', '),
+      })}
     >
       {#each d.providers as provider (provider.id)}
         {#if __DEN_TV__}<span class="provider" title={provider.name}
@@ -110,8 +118,10 @@
             class="provider"
             data-spatial-skip
             href={serviceHref(provider.id, region, provider.name)}
-            aria-label={`Browse ${provider.name}`}
-            title={`Browse ${provider.name}`}
+            aria-label={i18n.format('actions.browse', 'Browse {value}', {
+              value: provider.name,
+            })}
+            title={i18n.format('actions.browse', 'Browse {value}', { value: provider.name })}
             >{#if provider.logoPath}<img
                 src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
                 alt=""

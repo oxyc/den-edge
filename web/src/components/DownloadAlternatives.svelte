@@ -48,7 +48,9 @@
     try {
       await model.tryDownloadRelease(title.target, source.identity);
       open = false;
-      message = `Also trying ${source.label}`;
+      message = i18n.format('download.alsoTrying', 'Also trying {source}', {
+        source: source.label,
+      });
     } catch {
       message = 'Couldn’t try that release. Try again.';
     } finally {
