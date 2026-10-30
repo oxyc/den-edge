@@ -40,6 +40,8 @@ export const parameters = {
   'player.adjustSubtitleTiming': 'Justera undertextsynkronisering ({offset}s)',
   'player.resetSubtitleTiming': 'Återställ undertextsynkronisering ({offset}s)',
   'player.next': 'Nästa: {title}',
+  'player.playingFrom': 'Spelas från {source}',
+  'player.playingThroughReason': 'Spelas via Den Remux. {reason}.',
   'search.removeRecent': 'Ta bort {value} från senaste sökningar',
   'sharing.deviceCount.one': '{count} enhet',
   'sharing.deviceCount.other': '{count} enheter',

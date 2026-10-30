@@ -235,21 +235,21 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(playback).toHaveLength(1);
       expect(playback[0]).toMatchObject({ player: 'native', directFailed: true });
 
-      const stamp = page.getByRole('button', { name: 'Playing from Den Remux' });
+      const stamp = page.getByRole('button', { name: 'Spelas från Den Remux' });
       await expect(stamp).toHaveText('Den Remux');
       expect(await tapLandsOnStamp(stamp)).toBe(true);
       await stamp.tap();
-      const sheet = page.getByRole('menu', { name: 'Playing from Den Remux' });
+      const sheet = page.getByRole('menu', { name: 'Spelas från Den Remux' });
       await expect(sheet).toBeVisible();
-      await expect(sheet).toContainText('Playing through Den Remux');
-      const toTorbox = sheet.getByRole('menuitem', { name: 'Switch to TorBox' });
+      await expect(sheet).toContainText('Spelas via Den Remux');
+      const toTorbox = sheet.getByRole('menuitem', { name: 'Byt till TorBox' });
       await expect(toTorbox).not.toHaveAttribute('aria-disabled', 'true');
       // The subtitle can't come along: the system player shows only a playlist's, and TorBox's names none.
-      await expect(toTorbox).toContainText('Turns subtitles off');
+      await expect(toTorbox).toContainText('Stänger av undertexter');
       expect(playback).toHaveLength(1);
 
       await toTorbox.tap();
-      const torboxStamp = page.getByRole('button', { name: 'Playing from TorBox' });
+      const torboxStamp = page.getByRole('button', { name: 'Spelas från TorBox' });
       await expect(torboxStamp).toHaveText('TorBox', { timeout: 30_000 });
       expect(playback).toHaveLength(2);
       expect(playback[1]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
@@ -266,9 +266,9 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       // And back, from the TorBox stamp's own sheet.
       expect(await tapLandsOnStamp(torboxStamp)).toBe(true);
       await torboxStamp.tap();
-      const back = page.getByRole('menu', { name: 'Playing from TorBox' });
-      await expect(back).toContainText('Playing directly from TorBox');
-      await back.getByRole('menuitem', { name: 'Switch to Den Remux' }).tap();
+      const back = page.getByRole('menu', { name: 'Spelas från TorBox' });
+      await expect(back).toContainText('Spelas direkt från TorBox');
+      await back.getByRole('menuitem', { name: 'Byt till Den Remux' }).tap();
       await expect(stamp).toHaveText('Den Remux', { timeout: 30_000 });
       expect(playback[2]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
     } catch (error) {
@@ -294,18 +294,18 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
             : { json: remuxAnswer },
       });
       expect(playback[0]).toMatchObject({ directFailed: true });
-      const stamp = page.getByRole('button', { name: 'Playing from Den Remux' });
+      const stamp = page.getByRole('button', { name: 'Spelas från Den Remux' });
       await stamp.tap();
-      const sheet = page.getByRole('menu', { name: 'Playing from Den Remux' });
-      await sheet.getByRole('menuitem', { name: 'Switch to TorBox' }).tap();
+      const sheet = page.getByRole('menu', { name: 'Spelas från Den Remux' });
+      await sheet.getByRole('menuitem', { name: 'Byt till TorBox' }).tap();
       await expect(sheet).toBeHidden();
       await expect.poll(() => playback.length).toBe(2);
       expect(playback[1]).toMatchObject({ directOnly: true });
       await expect(stamp).toHaveText('Den Remux');
 
       await stamp.tap();
-      await expect(sheet).toContainText('This Hearth has no TorBox to play from');
-      await expect(sheet.getByRole('menuitem', { name: 'Switch to TorBox' })).toHaveAttribute(
+      await expect(sheet).toContainText('Den här Hearth har ingen TorBox att spela från');
+      await expect(sheet.getByRole('menuitem', { name: 'Byt till TorBox' })).toHaveAttribute(
         'aria-disabled',
         'true',
       );

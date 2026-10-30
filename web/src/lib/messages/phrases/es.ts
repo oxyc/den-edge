@@ -1163,4 +1163,21 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Indian: 'Indias',
   Brazilian: 'Brasileñas',
   Mexican: 'Mexicanas',
+  'Choose playback source': 'Elegir fuente de reproducción',
+  'Playing directly from TorBox': 'Reproduciendo directamente desde TorBox',
+  'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.':
+    'Reproduciendo directamente desde TorBox. No se solicitaron subtítulos de Den; los subtítulos integrados de TorBox siguen disponibles.',
+  'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.':
+    'Reproduciendo directamente desde TorBox. No se solicitaron subtítulos de Den y este archivo no tiene subtítulos integrados de TorBox.',
+  'Playing through Den Remux': 'Reproduciendo mediante Den Remux',
+  'Playback has no active source. Try either path explicitly.':
+    'La reproducción no tiene una fuente activa. Prueba una de las dos rutas.',
+  'For audio or subtitles this browser can’t play, or a stream that stalls':
+    'Para audio o subtítulos que este navegador no puede reproducir, o una emisión que se detiene',
+  'Turns subtitles off: this player shows only Den Remux’s':
+    'Desactiva los subtítulos: este reproductor solo muestra los de Den Remux',
+  'Straight from the source, no conversion': 'Directamente desde la fuente, sin conversión',
+  'Play the release directly, without Den subtitles':
+    'Reproducir el archivo directamente, sin subtítulos de Den',
+  'This Hearth has no TorBox to play from': 'Este Hearth no tiene TorBox desde donde reproducir',
 };

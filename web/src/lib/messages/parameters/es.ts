@@ -41,6 +41,8 @@ export const parameters = {
   'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset}s)',
   'player.resetSubtitleTiming': 'Restablecer sincronización de subtítulos ({offset}s)',
   'player.next': 'Siguiente: {title}',
+  'player.playingFrom': 'Reproduciendo desde {source}',
+  'player.playingThroughReason': 'Reproduciendo mediante Den Remux. {reason}.',
   'search.removeRecent': 'Quitar {value} de las búsquedas recientes',
   'sharing.deviceCount.one': '{count} dispositivo',
   'sharing.deviceCount.other': '{count} dispositivos',

@@ -39,6 +39,8 @@ export const PARAMETER_FALLBACKS = {
   'player.adjustSubtitleTiming': 'Adjust subtitle timing ({offset}s)',
   'player.resetSubtitleTiming': 'Reset subtitle timing ({offset}s)',
   'player.next': 'Next: {title}',
+  'player.playingFrom': 'Playing from {source}',
+  'player.playingThroughReason': 'Playing through Den Remux. {reason}.',
   'search.removeRecent': 'Remove {value} from recent searches',
   'sharing.deviceCount.one': '{count} device',
   'sharing.deviceCount.other': '{count} devices',

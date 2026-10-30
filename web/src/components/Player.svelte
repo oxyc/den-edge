@@ -4419,18 +4419,28 @@
         {@const dropsSubtitle =
           !!session && !external && subtitleChoice !== null && subtitlesNeedPlaylist()}
         <ActionMenu
-          label={session ? `Playing from ${source}` : 'Choose playback source'}
+          label={session
+            ? i18n.format('player.playingFrom', 'Playing from {source}', { source })
+            : i18n.phrase('Choose playback source')}
           note={session
             ? external
               ? directWithoutDenSubtitles
                 ? session.subtitles?.some((track) => track.torboxTrack !== undefined)
-                  ? 'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.'
-                  : 'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.'
-                : 'Playing directly from TorBox'
+                  ? i18n.phrase(
+                      'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.',
+                    )
+                  : i18n.phrase(
+                      'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.',
+                    )
+                : i18n.phrase('Playing directly from TorBox')
               : ruledOut
-                ? `Playing through Den Remux. ${ruledOut}.`
-                : 'Playing through Den Remux'
-            : 'Playback has no active source. Try either path explicitly.'}
+                ? i18n.format(
+                    'player.playingThroughReason',
+                    'Playing through Den Remux. {reason}.',
+                    { reason: i18n.phrase(ruledOut) },
+                  )
+                : i18n.phrase('Playing through Den Remux')
+            : i18n.phrase('Playback has no active source. Try either path explicitly.')}
           triggerClass="den-button den-button-player den-button-compact player-source-switch"
           onclose={scheduleWebControls}
           items={() =>
@@ -4442,12 +4452,14 @@
                       source: external ? 'Den Remux' : 'TorBox',
                     }),
                     description: external
-                      ? 'For audio or subtitles this browser can’t play, or a stream that stalls'
+                      ? i18n.phrase(
+                          'For audio or subtitles this browser can’t play, or a stream that stalls',
+                        )
                       : ruledOut
                         ? undefined
                         : dropsSubtitle
-                          ? 'Turns subtitles off: this player shows only Den Remux’s'
-                          : 'Straight from the source, no conversion',
+                          ? i18n.phrase('Turns subtitles off: this player shows only Den Remux’s')
+                          : i18n.phrase('Straight from the source, no conversion'),
                     disabled: !!ruledOut || deliverySwitching || switching,
                     onselect: () => {
                       if (!dropsSubtitle) return switchDelivery();
@@ -4460,8 +4472,10 @@
               : [
                   {
                     kind: 'item',
-                    label: 'Try TorBox without Den subtitles',
-                    description: ruledOut ?? 'Play the release directly, without Den subtitles',
+                    label: i18n.phrase('Try TorBox without Den subtitles'),
+                    description: i18n.phrase(
+                      ruledOut ?? 'Play the release directly, without Den subtitles',
+                    ),
                     disabled: !!ruledOut || deliverySwitching || switching,
                     onselect: () => trySourceWithoutSession('torbox'),
                   },
