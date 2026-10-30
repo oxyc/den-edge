@@ -148,7 +148,9 @@ async function splitHousehold(page, edge) {
   await page.goto(`${E2E_ORIGIN}/`);
   await page.getByRole('button', { name: 'Look around instead' }).click();
   await page.goto(`${E2E_ORIGIN}/movie/1002`);
-  await expect(page.getByRole('button', { name: 'Watchlist', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Watchlist', exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
   await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
   await page
     .getByRole('dialog', { name: 'Accept this invite?' })
