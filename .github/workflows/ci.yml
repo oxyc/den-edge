@@ -63,7 +63,8 @@ jobs:
             echo "android_changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  test:
+  rust_tests:
+    name: Rust tests and checks
     needs: scope
     if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
@@ -78,11 +79,49 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked -- --skip library::reset_lock::tests
+      - name: Den-spec tool contracts
+        working-directory: spec/tools
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -p 'test_*.py'
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Formatting
         run: cargo fmt --all --check
+
+  # Reset-lock rehearsals deliberately perform many durable database restarts. They are valuable but I/O-bound, so
+  # run them beside the rest of Rust instead of adding their full duration to the Rust critical path.
+  reset_lock:
+    name: Reset-lock durability tests
+    needs: scope
+    if: always() && needs.scope.outputs.source_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --locked library::reset_lock::tests
+
+  # Preserve the existing required `test` status while the two Rust groups execute in parallel.
+  test:
+    needs: [scope, rust_tests, reset_lock]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both Rust groups
+        env:
+          SOURCE_CHANGED: ${{ needs.scope.outputs.source_changed }}
+          RUST_TESTS: ${{ needs.rust_tests.result }}
+          RESET_LOCK: ${{ needs.reset_lock.result }}
+        run: |
+          if [ "$SOURCE_CHANGED" = false ]; then
+            test "$RUST_TESTS" = skipped && test "$RESET_LOCK" = skipped
+          else
+            test "$RUST_TESTS" = success && test "$RESET_LOCK" = success
+          fi
 
   # Checks which need Node but not a browser run once. Keeping them out of the Playwright shards avoids paying
   # for lint, unit tests, and production builds twice.
@@ -171,9 +210,8 @@ jobs:
       - name: Test, build and lint the Android TV shell
         run: ./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug --no-daemon
 
-  # Playwright already uses all four CPUs on one hosted runner. File sharding supplies three runners without changing
-  # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server. Two shards
-  # left the first with roughly 200 tests and a six-minute critical path while the second finished near four minutes.
+  # Playwright already uses all four CPUs on one hosted runner. File sharding supplies four runners without changing
+  # test semantics; each shard owns independent browser contexts and the suite's isolated Vite server.
   e2e:
     needs: scope
     if: always() && needs.scope.outputs.source_changed == 'true'
@@ -181,8 +219,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
-    name: e2e (${{ matrix.shard }}/3)
+        shard: [1, 2, 3, 4]
+    name: e2e (${{ matrix.shard }}/4)
     container:
       image: mcr.microsoft.com/playwright:v1.64.1-noble
       options: --ipc=host
@@ -211,20 +249,46 @@ jobs:
         if: matrix.shard == 1
         run: node test/sync-policy-browser.mjs
       - name: Browser behavior
-        run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/3
+        run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/4
       - name: Retain browser failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: browser-failures-${{ matrix.shard }}-of-3
+          name: browser-failures-${{ matrix.shard }}-of-4
           path: web/test-results
           if-no-files-found: ignore
           retention-days: 7
-      - name: TV WebKit behavior and native HLS
-        if: matrix.shard == 1
-        run: DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv
+  # Chromium already exercises every platform-neutral TV journey in web-checks. WebKit gets the engine-sensitive
+  # playback, input, navigation and presentation surfaces on its own runner, so it neither repeats all 71 cases nor
+  # extends shard 1's critical path.
+  e2e_tv_webkit:
+    name: TV WebKit behavior
+    needs: scope
+    if: always() && needs.scope.outputs.source_changed == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: WebKit TV engine-sensitive behavior
+        run: >-
+          DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv --
+          tv-playback.spec.mjs tv-navigation.spec.mjs tv-compatibility.spec.mjs
+          tv-retained-input.spec.mjs tv-presentation.spec.mjs
       - name: Retain native TV failure evidence
-        if: failure() && matrix.shard == 1
+        if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tv-native-failures
@@ -237,7 +301,8 @@ jobs:
   # shards' dev server and four workers it measured the runner rather than the app.
   e2e-budgets:
     needs: scope
-    if: always() && needs.scope.outputs.source_changed == 'true'
+    # Advisory performance measurements are intentionally outside the normal PR/push critical path.
+    if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     name: e2e budgets
     container:
@@ -276,7 +341,7 @@ jobs:
   # Timing budgets still run and retain evidence, but an over-budget measurement is advisory.
   web:
     if: always()
-    needs: [scope, web-checks, e2e, e2e-budgets, android-tv]
+    needs: [scope, web-checks, e2e, e2e_tv_webkit, android-tv]
     runs-on: ubuntu-latest
     steps:
       - name: Require every web check
@@ -284,14 +349,14 @@ jobs:
           SOURCE_CHANGED: ${{ needs.scope.outputs.source_changed }}
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
-          BUDGETS: ${{ needs.e2e-budgets.result }}
+          TV_WEBKIT: ${{ needs.e2e_tv_webkit.result }}
           ANDROID_TV: ${{ needs.android-tv.result }}
           ANDROID_CHANGED: ${{ needs.scope.outputs.android_changed }}
         run: |
           if [ "$SOURCE_CHANGED" = false ]; then
-            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$BUDGETS" = skipped && test "$ANDROID_TV" = skipped
+            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
           else
-            test "$CHECKS" = success && test "$E2E" = success && test "$BUDGETS" = success
+            test "$CHECKS" = success && test "$E2E" = success && test "$TV_WEBKIT" = success
             if [ "$ANDROID_CHANGED" = true ]; then
               test "$ANDROID_TV" = success
             else
