@@ -1638,6 +1638,7 @@ pub fn allowed(addon: &str, method: &Method, rest: &str) -> bool {
             (read
                 && (under("/index")
                     || under("/catalog")
+                    || under("/airing")
                     || matches!(rest, "/labels.json" | "/vectors.bin" | "/meta.json")))
                 || (under("/recommend") && (read || *method == Method::POST))
         }
@@ -2173,6 +2174,8 @@ mod tests {
         assert!(allowed("atlas", &post, "/recommend") && allowed("atlas", &get, "/recommend"));
         assert!(allowed("atlas", &get, "/index/row/movie.json"));
         assert!(allowed("atlas", &get, "/catalog/movie/top.json"));
+        // A guest's own followed series get the same release dates a member's do; reading them changes nothing.
+        assert!(allowed("atlas", &get, "/airing/tv/259909") && !allowed("atlas", &post, "/airing/tv/259909"));
         for path in ["/labels.json", "/vectors.bin", "/meta.json"] {
             assert!(allowed("atlas", &get, path), "{path}");
         }
