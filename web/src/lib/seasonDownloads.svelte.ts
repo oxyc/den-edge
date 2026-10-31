@@ -1,5 +1,5 @@
 import type { Episode } from './detail';
-import { futureDate } from './detailPresentation';
+import { airWindow } from './detailPresentation';
 import type { LibraryModel } from './libraryModel.svelte';
 import type { DownloadTitleDescriptor } from './libraryServiceProtocol';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
@@ -85,7 +85,9 @@ async function downloadEpisodeWithModel(
     if (queued.status.state === 'awaiting-air') return 'waiting';
     return queued.release ? 'queued' : 'searching';
   }
-  if (futureDate(episode.airDate)) {
+  // Further out than a few days there is nothing to search for yet; a nearer one may already be out early.
+  const window = airWindow(episode.airDate);
+  if (window === 'upcoming') {
     await model.wantDownload(requested);
     return 'waiting';
   }
@@ -95,7 +97,7 @@ async function downloadEpisodeWithModel(
   // The service ranks a release nobody seeds last, so reaching one means none would arrive.
   if (!sources || !release || (release.cached === false && release.seeders === 0)) {
     await model.wantDownload(requested);
-    return 'searching';
+    return window === 'near' ? 'waiting' : 'searching';
   }
   if (release.cached) return 'ready';
   await model.enqueueDownload(requested, release, sources.length);

@@ -22,6 +22,26 @@ export function futureDate(value?: string, now = new Date()): boolean {
   );
 }
 
+/** How many calendar days ahead an episode's air date still counts as possibly released. */
+export const NEAR_AIR_DAYS = 7;
+
+/**
+ * An episode's place relative to its TMDB air date. TMDB's date is the broadcaster's slot, and a streaming service
+ * often releases the episode a few days earlier, so one due within `NEAR_AIR_DAYS` is `near`: it is offered and played
+ * like an aired one. Only an `upcoming` one — further out than that — is held back. Counted in calendar days, so the
+ * boundary doesn't move with the viewer's UTC offset.
+ */
+export function airWindow(value?: string, now = new Date()): 'aired' | 'near' | 'upcoming' {
+  const date = calendarDate(value);
+  if (!date) return 'aired';
+  const days = Math.round(
+    (new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime() -
+      new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) /
+      86_400_000,
+  );
+  return days <= 0 ? 'aired' : days <= NEAR_AIR_DAYS ? 'near' : 'upcoming';
+}
+
 export function airDate(value?: string, locale?: string): string {
   return (
     calendarDate(value)?.toLocaleDateString(locale, {

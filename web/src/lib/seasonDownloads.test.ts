@@ -140,6 +140,29 @@ describe('semantic season downloads', () => {
     expect(library.downloadSources).toHaveBeenCalledTimes(4);
   });
 
+  it('asks for an episode due within a week, and waits for its air date when nothing is out', async () => {
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 2);
+    const day = `${soon.getFullYear()}-${String(soon.getMonth() + 1).padStart(2, '0')}-${String(soon.getDate()).padStart(2, '0')}`;
+    const { library } = model();
+    (library as unknown as { downloadSources: unknown }).downloadSources = vi.fn(async () => ({
+      result: { kind: 'download.sources', sources: [] },
+      version: {},
+    }));
+    (library as unknown as { wantDownload: unknown }).wantDownload = vi.fn(async () => {});
+    const updates: Array<Record<string, number | boolean>> = [];
+    await downloadSeason(
+      library,
+      'tt1',
+      2,
+      [{ number: 1, name: 'Soon', airDate: day }],
+      title,
+      (job) => updates.push({ ...job }),
+    );
+    expect(library.downloadSources).toHaveBeenCalledOnce();
+    expect(updates.at(-1)).toMatchObject({ waiting: 1, searching: 0, running: false });
+  });
+
   it('stops publishing to an observer that has been cancelled', async () => {
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => (finish = resolve));
