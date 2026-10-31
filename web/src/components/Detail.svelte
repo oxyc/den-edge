@@ -23,7 +23,7 @@
   import DetailTabs from './DetailTabs.svelte';
   import EpisodeCard from './EpisodeCard.svelte';
   import SeasonDownload from './SeasonDownload.svelte';
-  import { downloadEpisode } from '../lib/seasonDownloads.svelte';
+  import { downloadEpisode, recheckEpisode } from '../lib/seasonDownloads.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import ContinuePlayback from './ContinuePlayback.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
@@ -800,6 +800,17 @@
       notify?.('Couldn’t start that download. Try again in a moment.');
   }
 
+  /** "Check for sources again": scout rebuilds the episode's list past its caches, and the toast says what it found. */
+  async function recheckEpisodeSources(episode: Episode) {
+    const d = untrack(() => detail),
+      picked = untrack(() => displayedSeason);
+    if (!d || !model || guestScout || !d.imdbId || picked === null) return;
+    const found = await recheckEpisode(model, d.imdbId, picked, episode, d.title).catch(() => null);
+    if (found === null) notify?.('Couldn’t check the sources. Try again in a moment.');
+    else if (found === 0) notify?.('Still nothing for this episode.');
+    else notify?.(found === 1 ? 'Found 1 source.' : `Found ${found} sources.`);
+  }
+
   async function seasonEpisodesForDownload(
     picked: number,
     signal: AbortSignal,
@@ -1271,6 +1282,9 @@
                           void sourcesPanel?.show();
                         }
                       }}
+                  onrecheck={model && scout && !guestScout && d.imdbId
+                    ? () => void recheckEpisodeSources(e)
+                    : undefined}
                   ondownload={model && scout && !guestScout && d.imdbId
                     ? () => void queueEpisode(e)
                     : undefined}

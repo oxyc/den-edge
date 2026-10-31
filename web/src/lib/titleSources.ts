@@ -151,7 +151,13 @@ export function parseAnswer(body: unknown): SourceAnswer | undefined {
   };
 }
 
-/** Scout's list for a title and what it says about it; `sources` is null when scout could not be reached. */
+/**
+ * Scout's list for a title and what it says about it; `sources` is null when scout could not be reached.
+ *
+ * `fresh` asks scout to rebuild the list past its own caches (`?fresh=1`) and skips the browser's. The plain address
+ * is then asked again with `reload`, which scout answers from the list it just rebuilt, so the copy the browser keeps
+ * for it is that list rather than the one the viewer was checking past. A scout without `fresh` ignores it.
+ */
 export async function fetchSourceList(
   addon: Addon,
   imdb: string,
@@ -160,16 +166,23 @@ export async function fetchSourceList(
   episode?: number,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
+  fresh = false,
 ): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer }> {
   try {
     const id =
       season !== undefined && episode !== undefined ? `${imdb}:${season}:${episode}` : imdb;
+    const url = `${addon.base}/stream/${season === undefined ? 'movie' : 'series'}/${encodeURIComponent(id)}.json`;
     const response = await fetchImpl(
-      `${addon.base}/stream/${season === undefined ? 'movie' : 'series'}/${encodeURIComponent(id)}.json`,
-      { signal },
+      fresh ? `${url}?fresh=1` : url,
+      fresh ? { signal, cache: 'no-store' } : { signal },
     );
     if (!response.ok) return { sources: null };
     const body: unknown = await response.json();
+    if (fresh)
+      void fetchImpl(url, { cache: 'reload' }).then(
+        (plain) => plain.body?.cancel(),
+        () => {},
+      );
     return { sources: parseSources(body, addon, routes), answer: parseAnswer(body) };
   } catch {
     return { sources: null };

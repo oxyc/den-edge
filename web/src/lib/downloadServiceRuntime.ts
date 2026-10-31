@@ -74,7 +74,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
           // Foreign tickets are renewed by identity. Never block a synchronous policy decision on discovery.
           return current?.scout ? scoutTicket(url, current.scout, current.routes) : null;
         },
-        resolve: async (title) => {
+        resolve: async (title, fresh) => {
           const { scout, routes } = await providers();
           if (!scout) return { sources: null, failure: 'not-configured' };
           const identifier = title.imdbId
@@ -97,6 +97,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             title.episode,
             undefined,
             this.fetchImpl,
+            fresh,
           );
           return found.sources === null ? { ...found, failure: 'unreachable' } : found;
         },

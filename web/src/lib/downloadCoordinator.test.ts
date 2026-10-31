@@ -184,6 +184,32 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(2);
   });
 
+  it('asks afresh past its snapshot and past a plain ask in flight, and only a fresh ask says so', async () => {
+    const shared = testLog();
+    const asked: boolean[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asked.push(fresh === true);
+          if (!fresh) await held;
+          return { sources: [first] };
+        },
+      },
+      { now: () => T0 },
+    );
+    const plain = queue.sourcesForTitle(title);
+    await queue.sourcesForTitle(title, false, true);
+    release();
+    await plain;
+    await queue.sourcesForTitle(title);
+    expect(asked).toEqual([false, true]);
+  });
+
   it('downloads Rebecka Martinsson S02E01 as an uncached 1080p, not the cached SD AVI', async () => {
     const avi = source('Rebecka.Martinsson.S02E01.SWEDiSH.PDTV.XviD-GRP.avi', {
       resolution: '480p',

@@ -60,7 +60,11 @@ export interface DownloadStatus {
   announce: boolean;
 }
 
-export type DownloadResolve = (title: DownloadTitle) => Promise<{
+/** `fresh` asks scout to rebuild the list past its caches (`?fresh=1`), for a viewer checking again by hand. */
+export type DownloadResolve = (
+  title: DownloadTitle,
+  fresh?: boolean,
+) => Promise<{
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
@@ -377,14 +381,19 @@ export class DownloadCoordinator {
    * One short-lived worker-owned snapshot backs display and the action selected from it. Tickets never leave this
    * object, and a click does not repeat the provider request that produced the visible list.
    */
-  async sourcesForTitle(title: DownloadTitle, refresh = false): Promise<DownloadSourceSnapshot> {
+  async sourcesForTitle(
+    title: DownloadTitle,
+    refresh = false,
+    fresh = false,
+  ): Promise<DownloadSourceSnapshot> {
     const key = contentKeyOf(title);
     const now = this.now();
     const cached = this.#sourceCache.get(key);
-    if (!refresh && cached && cached.expiresAt > now) return cached.snapshot;
+    if (!refresh && !fresh && cached && cached.expiresAt > now) return cached.snapshot;
+    // A fresh ask never joins a plain one already running: that one may be answered from the caches it skips.
     const pending = this.#sourcePending.get(key);
-    if (pending) return pending;
-    const run = this.effects.resolve(title).then(({ sources, answer, failure }) => {
+    if (pending && !fresh) return pending;
+    const run = this.effects.resolve(title, fresh).then(({ sources, answer, failure }) => {
       const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
       const ordered = preferred
         ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]

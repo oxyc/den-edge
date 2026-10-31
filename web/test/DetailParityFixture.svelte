@@ -9,6 +9,7 @@
   import '../src/app.css';
   import { testLog } from '../src/lib/downloadTestLog';
   import { fetchSourceList } from '../src/lib/titleSources';
+  import { setToastContext } from '../src/lib/toast';
   import { fixtureLibraryService } from './libraryService';
   import { fixtureContentServiceContext } from './contentService';
   import { installKeyboardNavigation } from '../src/lib/keyboardNavigation';
@@ -28,7 +29,7 @@
     // The parity spec changes Scout's answer between opening Sources and using the episode's direct Download action.
     refreshDownloadSources: true,
     effects: {
-      resolve: async (title) =>
+      resolve: async (title, fresh) =>
         title.imdbId
           ? fetchSourceList(
               scout,
@@ -38,10 +39,14 @@
               title.episode,
               undefined,
               fetch,
+              fresh,
             )
           : { sources: null },
     },
   });
+  // What `Library.svelte` does with a toast: shows it. Detail's episode actions report through it.
+  let toast = $state('');
+  setToastContext((message) => (toast = message));
   // Production's library service schedules download maintenance; this in-process fixture drives the same query.
   const downloadPoll = setInterval(() => void library.model.refreshDownloads(), 300);
   onDestroy(() => clearInterval(downloadPoll));
@@ -141,4 +146,5 @@
       {/if}
     {/snippet}
   </Router>
+  {#if toast}<p class="fixture-toast" role="status">{toast}</p>{/if}
 </main>

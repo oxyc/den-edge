@@ -1341,6 +1341,20 @@ describe('library service server protocol', () => {
     expect(result({ url: '/scout/p/private-ticket' })).toMatchObject({ ok: false });
     expect(result({ attributes: { provider: 'private' } })).toMatchObject({ ok: false });
 
+    const ask = (extra: Record<string, unknown>) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-sources-ask',
+        query: {
+          kind: 'download.sources',
+          title: { target: { type: 'tv', id: 7, season: 2, episode: 3 }, name: 'Show' },
+          ...extra,
+        },
+      });
+    expect(ask({ refresh: true, fresh: true })).toMatchObject({ ok: true });
+    expect(ask({ fresh: 'yes' })).toMatchObject({ ok: false });
+
     expect(
       decodeLibraryServiceClientMessage({
         type: 'query',
