@@ -6,6 +6,8 @@
      The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
+  import { withAiring } from '../lib/airing';
+  import { airingStore } from '../lib/airing.svelte';
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
@@ -925,9 +927,14 @@
       )
       .then(({ episodes }) => {
         if (controller.signal.aborted) return;
+        // Dated as the episode list dates it: atlas's release day where atlas has one.
         tvEpisode =
           episodes.state === 'ready'
-            ? (episodes.value.find((item) => item.number === pickedEpisode) ?? null)
+            ? (withAiring(
+                episodes.value,
+                pickedSeason,
+                untrack(() => airingStore(content).get(title.id)),
+              ).find((item) => item.number === pickedEpisode) ?? null)
             : null;
       })
       .catch(() => {

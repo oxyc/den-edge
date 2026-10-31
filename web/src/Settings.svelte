@@ -14,7 +14,13 @@
   import type { PreferenceChanges } from './settings/preferences';
   import { flushSync, onDestroy } from 'svelte';
   import type { Link } from './lib/links.svelte';
-  import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
+  import {
+    AIRING_CREDIT,
+    ATLAS_FALLBACK,
+    mergeCredits,
+    readAttribution,
+    type Credit,
+  } from './settings/credits';
   import { householdAssistantFetch, relayFetch } from './lib/relayFetch';
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
@@ -464,7 +470,9 @@
         viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
     {/if}
-    {#if !__DEN_TV_LEGACY_JS_CORE__}<AboutSection credits={mergeCredits(addonCredits)} />{/if}
+    {#if !__DEN_TV_LEGACY_JS_CORE__}<AboutSection
+        credits={mergeCredits([...addonCredits, [AIRING_CREDIT]])}
+      />{/if}
   </div>
 </div>
 

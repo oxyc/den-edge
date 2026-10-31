@@ -1063,7 +1063,9 @@
   <div class="rail" bind:this={rail} onscroll={scrolled} onscrollend={scrolled}>
     {#each shown as title, n (n)}
       {@const found = known.get(keyOf(title))}
-      {@const reason = recommendationReason(title.why)}
+      {@const reason = title.newEpisode
+        ? i18n.format('episode.newEpisode', 'New episode · S{season}E{episode}', title.newEpisode)
+        : recommendationReason(title.why)}
       <article
         class="slide"
         aria-roledescription="slide"

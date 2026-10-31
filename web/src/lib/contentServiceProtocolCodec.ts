@@ -500,6 +500,20 @@ function request(value: unknown): value is ContentRequest {
       );
     case 'atlas.recommend.personal':
       return exact(value, ['kind', 'body']) && recommendationBody(value.body);
+    case 'atlas.airing':
+      return (
+        exact(value, ['kind', 'series']) &&
+        Array.isArray(value.series) &&
+        value.series.length <= CONTENT_SERVICE_WIRE_LIMITS.titles &&
+        value.series.every(
+          (one) =>
+            record(one) &&
+            exact(one, ['tmdb', 'imdb']) &&
+            integer(one.tmdb, 1) &&
+            (one.imdb === undefined ||
+              (typeof one.imdb === 'string' && /^tt\d{1,12}$/.test(one.imdb))),
+        )
+      );
     case 'import.resolve':
       return (
         exact(value, ['kind', 'lookups']) &&
@@ -589,6 +603,14 @@ function result(value: unknown): value is ContentResult {
     case 'atlas.recommend.shared':
     case 'atlas.recommend.personal':
       return exact(value, ['kind', 'slides']) && resource(value.slides);
+    case 'atlas.airing':
+      return (
+        exact(value, ['kind', 'airing']) &&
+        resource(value.airing) &&
+        (!record(value.airing) ||
+          value.airing.state !== 'ready' ||
+          boundedArray(value.airing.value))
+      );
     case 'search':
       return exact(value, ['kind', 'hits']) && boundedArray(value.hits);
     case 'service.regions':

@@ -27,6 +27,8 @@ export const parameters = {
   'player.playNextEpisode': 'Spela nästa · S{season} · A{episode}',
   'episode.play': 'Spela avsnitt {number}: {name}',
   'episode.upcoming': 'Avsnitt {number}: {name}. Sänds {date}',
+  'episode.outOn': 'Ute {date} på {service}',
+  'episode.newEpisode': 'Nytt avsnitt · S{season}A{episode}',
   'settings.expandAllIn': 'Expandera alla i {value}',
   'settings.collapseAllIn': 'Fäll ihop alla i {value}',
   'profile.allowedCount.one': '{count} tillåten',

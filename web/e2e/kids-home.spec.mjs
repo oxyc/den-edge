@@ -24,6 +24,7 @@ const named = (id) => NAMES[id] ?? 'Dinosaur Day';
 async function kidsAtlas(page) {
   await guardNetwork(page);
   const atlasRequests = [];
+  const airingRequests = [];
   const recommendations = [];
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/metadata/title/query', (route) => route.fulfill({ json: { entries: [] } }));
@@ -31,6 +32,12 @@ async function kidsAtlas(page) {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith('/manifest.json'))
       return route.fulfill({ json: { id: 'com.den.atlas', catalogs: [] } });
+    // Release dates are public schedule data, one cached answer per series for everyone (`airing.ts`): they carry no
+    // profile policy, and are asked only for series this profile already follows.
+    if (/\/atlas\/airing\/tv\/\d+$/.test(url.pathname)) {
+      airingRequests.push(url);
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    }
     atlasRequests.push(url);
     if (url.pathname.endsWith('/index/kids-home.json'))
       return route.fulfill({
@@ -124,13 +131,13 @@ async function kidsAtlas(page) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"/>',
     }),
   );
-  return { atlasRequests, recommendations };
+  return { atlasRequests, airingRequests, recommendations };
 }
 
 test('Kid Home uses its child-facing catalogue and billboard under the Kid policy', async ({
   page,
 }) => {
-  const { atlasRequests, recommendations } = await kidsAtlas(page);
+  const { atlasRequests, airingRequests, recommendations } = await kidsAtlas(page);
   await page.goto(`${E2E_ORIGIN}/test/library.html?kid&populated&bluey`);
 
   await expect
@@ -157,6 +164,7 @@ test('Kid Home uses its child-facing catalogue and billboard under the Kid polic
     expect(url.searchParams.get('unknownRatings'), url.href).toBe('block');
     expect(url.searchParams.get('kidAudience'), url.href).toBe('child-or-teen');
   }
+  for (const url of airingRequests) expect(url.pathname).toBe('/atlas/airing/tv/82728');
 });
 
 test('a Kid’s Movies billboard leads with films, not the series that lead Home', async ({

@@ -26,6 +26,8 @@ export const PARAMETER_FALLBACKS = {
   'player.playNextEpisode': 'Play Next · S{season} · E{episode}',
   'episode.play': 'Play episode {number}: {name}',
   'episode.upcoming': 'Episode {number}: {name}. Airs {date}',
+  'episode.outOn': 'Out {date} on {service}',
+  'episode.newEpisode': 'New episode · S{season}E{episode}',
   'settings.expandAllIn': 'Expand all in {value}',
   'settings.collapseAllIn': 'Collapse all in {value}',
   'profile.allowedCount.one': '{count} allowed',

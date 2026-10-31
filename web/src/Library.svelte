@@ -114,6 +114,20 @@
   import { OverviewTitleIndex, titleViewRows } from './lib/libraryViewPresentation';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
   import KidTitleAccessDialog from './components/KidTitleAccessDialog.svelte';
+  import {
+    airedThrough,
+    airingEpisode,
+    comingBackSoon,
+    NewEpisodes,
+    outDay,
+    releasedEpisode,
+    thisWeek,
+    withNewEpisodes,
+    type Airing,
+    type NewEpisode,
+  } from './lib/airing';
+  import { airingStore } from './lib/airing.svelte';
+  import { recheckEpisode } from './lib/seasonDownloads.svelte';
 
   let {
     link: _link,
@@ -699,8 +713,159 @@
       shelf: displayed.slice(0, continueNameLimit).filter(present),
     };
   });
-  const continueEntries = $derived(continuePresentation.entries);
-  const continueShelfEntries = $derived(continuePresentation.shelf);
+  /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
+  const airings = $derived(airingStore(session.content));
+  /**
+   * The series this viewer follows: in Continue Watching, on the Watchlist, or with any of it watched. Their release
+   * dates are asked for while Home is open, and again as each answer's hour runs out.
+   */
+  const followedSeries = $derived.by(() => {
+    const standings = profileActivity ? profileActivity.standings : overviewPresentation.standings;
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one derived value and never mutated after.
+    const ids = new Set<number>();
+    for (const { title } of continuePresentation.entries)
+      if (title.type === 'tv') ids.add(title.id);
+    for (const key of standings.keys()) if (key.startsWith('tv:')) ids.add(Number(key.slice(3)));
+    return [...ids].filter((id) => Number.isSafeInteger(id) && id > 0).sort((a, b) => a - b);
+  });
+  const followedKey = $derived(followedSeries.join(','));
+  /** Ticks while Home is open so released episodes are looked for again (`NewEpisodes` holds each to `RECHECK_MS`). */
+  let airingTick = $state(0);
+  $effect(() => {
+    void followedKey;
+    const ids = untrack(() => followedSeries);
+    // Asked once the session has found its atlas: before that the worker has nowhere to ask.
+    if (!active || !atlas || !ids.length) return;
+    const store = untrack(() => airings);
+    void store.follow(ids.map((tmdb) => ({ tmdb })));
+    const timer = setInterval(() => {
+      airingTick++;
+      void store.follow(ids.map((tmdb) => ({ tmdb })));
+    }, 5 * 60_000);
+    return () => clearInterval(timer);
+  });
+  /** Each followed series' episode released in the last fortnight, by atlas's date. */
+  const releasedEpisodes = $derived(
+    followedSeries.flatMap((series): NewEpisode[] => {
+      const episode = releasedEpisode(airings.get(series));
+      return episode ? [{ series, season: episode.season, episode: episode.episode }] : [];
+    }),
+  );
+  /** Their library rows, to tell whether the viewer has started the released episode. */
+  let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
+  const releasedKey = $derived(releasedEpisodes.map(({ series }) => series).join(','));
+  $effect(() => {
+    void releasedKey;
+    const library = model;
+    const wanted = untrack(() => releasedEpisodes);
+    if (!library || !wanted.length) return;
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Replaced whole on each change of the released set.
+    const leases = new Map<number, LibraryModelLease<TitleView>>();
+    for (const { series } of wanted) leases.set(series, library.title({ type: 'tv', id: series }));
+    releasedViews = leases;
+    return () => {
+      for (const lease of leases.values()) lease.release();
+      if (releasedViews === leases) releasedViews = new Map();
+    };
+  });
+  /** Which released episodes have sources. Searched for afresh, never more than every half hour each. */
+  const newEpisodes = new NewEpisodes();
+  /** Released episodes the viewer has not started, whose library row has been read. */
+  const unstartedEpisodes = $derived(
+    releasedEpisodes.filter((released) => {
+      const view = releasedViews.get(released.series)?.snapshot.value;
+      // Both reads are needed to say it is unstarted: an unread one is no evidence, and searching on it is wasted.
+      // A followed series' view lists its watched episodes once the library knows its layout; before that, neither it
+      // nor Continue Watching can say whether the new one was started.
+      if (!view || !view.episodes.length || (!profileActivity && !continueView)) return false;
+      const same = (at: { season: number; episode: number } | undefined) =>
+        at?.season === released.season && at.episode === released.episode;
+      const row = view.episodes.find((item) => same(item));
+      // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
+      // Continue Watching's resume point instead.
+      // Read before naming: an entry whose title is not named yet is already a resume point.
+      const resuming = (profileActivity?.continueWatching ?? continueView?.items ?? []).some(
+        ({ title, episode, fraction }) =>
+          title.type === 'tv' && title.id === released.series && same(episode) && fraction > 0,
+      );
+      if (resuming || (row && (row.watched || row.fraction > 0))) {
+        newEpisodes.clear(released);
+        return false;
+      }
+      return true;
+    }),
+  );
+  let newEpisodesVersion = $state(0);
+  const SEARCH_SETTLE_MS = 2_000;
+  $effect(() => {
+    void airingTick;
+    const due = unstartedEpisodes.filter((episode) => newEpisodes.due(episode));
+    const library = downloadsModel;
+    if (!active || !library || !due.length) return;
+    // Marked before the first await, so this effect running again meanwhile does not search the same episodes twice.
+    // Each search runs to its answer, which is kept for whenever Home is shown next.
+    for (const released of due) newEpisodes.started(released);
+    void (async () => {
+      // Continue Watching is published a moment after the layout that lets it name a resume point: let it land, then
+      // search only what is still unstarted. Nothing waits on this search.
+      await new Promise((resolve) => setTimeout(resolve, SEARCH_SETTLE_MS));
+      for (const released of due) {
+        const key = NewEpisodes.key(released);
+        if (!untrack(() => unstartedEpisodes).some((one) => NewEpisodes.key(one) === key)) continue;
+        const imdb = await session.content
+          .query({ kind: 'title.external-id', title: { type: 'tv', id: released.series } })
+          .then((answer) => (answer.imdbId.state === 'ready' ? answer.imdbId.value : null))
+          .catch(() => null);
+        // A followed series need not be on any shelf, so it may not be named yet; its slide and card need the name.
+        if (!session.displayTitle({ type: 'tv', id: released.series }))
+          await nameLibraryTitles(session, [{ type: 'tv', id: released.series }]).catch(() => {});
+        const title = session.displayTitle({ type: 'tv', id: released.series });
+        const date = airingEpisode(
+          airings.get(released.series),
+          released.season,
+          released.episode,
+        )?.date;
+        const found =
+          imdb && title
+            ? await recheckEpisode(
+                library,
+                imdb,
+                released.season,
+                { number: released.episode, name: '', ...(date ? { airDate: date } : {}) },
+                title,
+              ).catch(() => null)
+            : null;
+        newEpisodes.checked(released, found);
+        newEpisodesVersion++;
+      }
+    })();
+  });
+  /** Released, unstarted, and with sources: the billboard's first slide and the head of Continue Watching. */
+  const newEpisodeList = $derived.by(() => {
+    void newEpisodesVersion;
+    return unstartedEpisodes.filter((episode) => newEpisodes.has(episode));
+  });
+  const newEntry = (released: NewEpisode): ContinueEntry | undefined => {
+    const title = session.displayTitle({ type: 'tv', id: released.series });
+    return title
+      ? { title, fraction: 0, episode: { season: released.season, episode: released.episode } }
+      : undefined;
+  };
+  const continueEntries = $derived(
+    withNewEpisodes(continuePresentation.entries, newEpisodeList, newEntry),
+  );
+  const continueShelfEntries = $derived(
+    withNewEpisodes(continuePresentation.shelf, newEpisodeList, newEntry),
+  );
+  /** The billboard's lead slides: each new episode's series, "New episode · S2E1" with Play. */
+  const newEpisodeSlides = $derived(
+    newEpisodeList.flatMap((released): RecommendedTitle[] => {
+      const title = session.displayTitle({ type: 'tv', id: released.series });
+      return title
+        ? [{ ...title, newEpisode: { season: released.season, episode: released.episode } }]
+        : [];
+    }),
+  );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
   $effect(() =>
@@ -1359,7 +1524,12 @@
         await promoteLibraryTitle(session, target.title);
       const shape = session.shapes.get(titleKey(target.title));
       const next = shape && episodeAfter(at, shape);
-      if (playing === target && next && isAired(next, shape.lastAired))
+      // Atlas's dates first: an episode out before TMDB's broadcast slot is next in line the day it is out.
+      const aired = airedThrough(
+        shape?.lastAired,
+        untrack(() => airings.get(target.title.id)),
+      );
+      if (playing === target && next && isAired(next, aired))
         following = { title: target.title, ...next };
     })();
   });
@@ -2311,6 +2481,42 @@
   const continueShelf = $derived(
     continueShelfEntries.filter((entry) => !facet || entry.title.type === facet),
   );
+  /** Home's billboard: a new episode's series leads, then the ranking without it. */
+  const homeSlides = $derived.by(() => {
+    const leads = newEpisodeSlides.filter((title) => !facet || title.type === facet);
+    const ranked = featured.filter(featuredShown);
+    if (!leads.length) return ranked;
+    const led = new Set(leads.map(titleKey));
+    return [...leads, ...ranked.filter((title) => !led.has(titleKey(title)))];
+  });
+  /** The followed series' answers alone: a title page may have asked for one nobody follows. */
+  const followedAirings = $derived.by(() => {
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one derived value and never mutated after.
+    const map = new Map<number, Airing>();
+    for (const id of followedSeries) {
+      const airing = airings.get(id);
+      if (airing) map.set(id, airing);
+    }
+    return map;
+  });
+  /** Followed series whose next season starts within a month, soonest first. */
+  const comingBack = $derived(
+    facet === 'movie'
+      ? []
+      : comingBackSoon(followedAirings).flatMap(({ series, date }) => {
+          const title = session.displayTitle({ type: 'tv', id: series });
+          return title ? [{ ...title, releaseDate: date }] : [];
+        }),
+  );
+  /** Followed series' episodes due in the next week, soonest first. */
+  const dueThisWeek = $derived(
+    facet === 'movie'
+      ? []
+      : thisWeek(followedAirings).flatMap((episode) => {
+          const title = session.displayTitle({ type: 'tv', id: episode.series });
+          return title ? [{ title, episode }] : [];
+        }),
+  );
   const watchlistShelf = $derived(savedTitles.filter((title) => !facet || title.type === facet));
   /** Home's library shelves, top to bottom as drawn, and whether each has anything to show. */
   const shelves = $derived([
@@ -2548,8 +2754,8 @@
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   <Billboard
     active={active && !playing}
-    titles={featured.filter(featuredShown)}
-    loading={billboardLoading}
+    titles={homeSlides}
+    loading={billboardLoading && !newEpisodeSlides.length}
     bind:showing={slideShown}
     onadvance={acceptStagedFeatured}
     content={session.content}
@@ -2585,6 +2791,7 @@
           <PosterCard
             title={entry.title}
             caption={caption(entry)}
+            badge={entry.isNew ? i18n.phrase('New') : undefined}
             progress={entry.fraction}
             live={liveClock(entry)}
             href={titleHref(entry.title)}
@@ -2647,6 +2854,37 @@
       </WindowedPosterRow>
     {:else if !lowerShelvesReady && !facet && shelfPlan?.watchlist}
       <PendingPosterRow heading="Watchlist" />
+    {/if}
+    {#if lowerShelvesReady && dueThisWeek.length}
+      <WindowedPosterRow
+        heading="This week"
+        items={dueThisWeek}
+        itemKey={({ title }) => `${title.type}:${title.id}`}
+        itemHref={({ title }) => titleHref(title)}
+        itemLabel={({ title }) => title.title}
+      >
+        {#snippet children({ title, episode }, onscreen)}
+          <PosterCard
+            {title}
+            caption={`S${episode.season} · E${episode.episode} · ${outDay(episode.date, i18n.language)}`}
+            href={titleHref({ ...title, season: episode.season, episode: episode.episode })}
+            {onscreen}
+          />
+        {/snippet}
+      </WindowedPosterRow>
+    {/if}
+    {#if lowerShelvesReady && comingBack.length}
+      <WindowedPosterRow
+        heading="Coming back soon"
+        items={comingBack}
+        itemKey={(title) => `${title.type}:${title.id}`}
+        itemHref={titleHref}
+        itemLabel={(title) => title.title}
+      >
+        {#snippet children(title, onscreen)}
+          <PosterCard {title} href={titleHref(title)} {onscreen} />
+        {/snippet}
+      </WindowedPosterRow>
     {/if}
     {#if !facet}
       {#if homeMetadataReady && HomeCatalogue}
