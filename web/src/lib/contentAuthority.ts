@@ -61,6 +61,14 @@ import {
 } from './titleMetadata';
 import { reuse } from './reuse';
 import { parseRecommendationSlides } from './recommend';
+import {
+  airingCache,
+  airingMaxAge,
+  airingPath,
+  parseAiring,
+  type Airing,
+  type AiringSeries,
+} from './airing';
 import { atlasHeadingOf } from './atlasHeading';
 import { discoverParams } from './catalog';
 import { awaitingPicture, searchStream, type Hit } from './search';
@@ -677,6 +685,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       case 'atlas.recommend.shared':
       case 'atlas.recommend.personal':
         return { kind: request.kind, slides: await this.#atlasRecommend(request, signal, policy) };
+      case 'atlas.airing':
+        return { kind: 'atlas.airing', airing: await this.#atlasAiring(request.series, signal) };
       case 'import.resolve':
         return {
           kind: 'import.resolve',
@@ -1594,6 +1604,36 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         shared ? reuse(`content:${policyKey(policy)}:${url}`, () => load()) : load(signal),
         signal,
       );
+    } catch (error) {
+      if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+      return { state: 'unavailable', provider: 'atlas', reason: 'network' };
+    }
+  }
+
+  /**
+   * Atlas's release dates for `series`, from the realm's one `airingCache`: only series not held fresh are asked
+   * for, one `GET /airing/tv/{id}` each. The answer is public and the same for every household, so it is asked
+   * without the profile's content policy in its query: one address per series is what lets Cloudflare, den-edge and
+   * the browser share it. Any failure leaves the page on TMDB's dates.
+   */
+  async #atlasAiring(
+    series: AiringSeries[],
+    signal: AbortSignal,
+  ): Promise<OptionalContent<Array<{ tmdb: number; airing: Airing }>>> {
+    const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
+    if (!atlas) return { state: 'not-configured' };
+    const ask = async (one: AiringSeries) => {
+      const response = await this.#providerFetch(`${atlas}${airingPath(one)}`);
+      const maxAge = airingMaxAge(response.headers.get('cache-control'));
+      if (response.status === 404) return { airing: null, maxAge };
+      if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+      return { airing: parseAiring(await response.json()) ?? null, maxAge };
+    };
+    try {
+      const found = await this.#wait(airingCache.lookup(atlas, series, ask), signal);
+      return found
+        ? { state: 'ready', value: [...found].map(([tmdb, airing]) => ({ tmdb, airing })) }
+        : { state: 'unavailable', provider: 'atlas', reason: 'network' };
     } catch (error) {
       if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
       return { state: 'unavailable', provider: 'atlas', reason: 'network' };

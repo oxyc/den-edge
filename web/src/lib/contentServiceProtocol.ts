@@ -241,6 +241,8 @@ type ContentOperation =
       day: string;
     }
   | { kind: 'atlas.recommend.personal'; body: ReturnType<typeof recommendBody> }
+  /** Release dates for the series a viewer follows (`GET /airing/tv/{id}`), each kept as long as atlas said. */
+  | { kind: 'atlas.airing'; series: import('./airing').AiringSeries[] }
   | { kind: 'import.resolve'; lookups: ContentImportLookup[] }
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
   | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string }
@@ -348,6 +350,11 @@ export type ContentResult =
   | { kind: 'atlas.service.chart'; titles: OptionalContent<Title[]> }
   | { kind: 'atlas.recommend.shared'; slides: OptionalContent<Slide[]> }
   | { kind: 'atlas.recommend.personal'; slides: OptionalContent<Slide[]> }
+  /** The asked series atlas knows, each with its answer; a series it does not know is absent. */
+  | {
+      kind: 'atlas.airing';
+      airing: OptionalContent<Array<{ tmdb: number; airing: import('./airing').Airing }>>;
+    }
   | { kind: 'import.resolve'; results: ContentImportLookupResult[] }
   | { kind: 'prefetch.detail' }
   | {

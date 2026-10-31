@@ -10,7 +10,7 @@
   import ContentSection from './settings/ContentSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
-  import { ATLAS_FALLBACK } from './settings/credits';
+  import { AIRING_CREDIT, ATLAS_FALLBACK } from './settings/credits';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import { i18n, setInterfaceLanguage } from './lib/i18n.svelte';
@@ -133,7 +133,7 @@
             : undefined}
         />
       {/if}
-      <AboutSection credits={[...ATLAS_FALLBACK]} />
+      <AboutSection credits={[...ATLAS_FALLBACK, AIRING_CREDIT]} />
     </div>
   </div>
 {/if}

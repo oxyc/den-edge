@@ -53,6 +53,8 @@
   import type { MenuItem } from '../lib/titleActions';
   import type { HouseholdTv } from '../lib/householdTvs';
   import { i18n } from '../lib/i18n.svelte';
+  import { airedThrough, seriesStatusBadge, withAiring } from '../lib/airing';
+  import { airingStore } from '../lib/airing.svelte';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -387,8 +389,18 @@
     asked !== undefined && d.seasons.some((s) => s.number === asked)
       ? asked
       : untrack(() => seriesPresentation(d, episodes, row, continued).initialSeason);
-  let seasonEpisodes = $state.raw<Episode[] | null | undefined>();
+  /** The displayed season's episodes as TMDB lists them. */
+  let tmdbSeasonEpisodes = $state.raw<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
+  /** Atlas's release dates for this series (`airing.ts`), where it has them: the one date every surface here reads. */
+  const airings = $derived(airingStore(content));
+  const airing = $derived(ref.type === 'tv' ? airings.get(ref.id) : undefined);
+  /** The displayed season's episodes, dated by atlas where it dates them. */
+  const seasonEpisodes = $derived(
+    tmdbSeasonEpisodes && displayedSeason !== null
+      ? withAiring(tmdbSeasonEpisodes, displayedSeason, airing)
+      : tmdbSeasonEpisodes,
+  );
   let seasonLoading = $state(false);
   /**
    * Episode cards are comparatively deep trees (art, progress, actions and a menu). A long season used to create
@@ -417,7 +429,7 @@
     withheld = false;
     season = null;
     seasonAsked = null;
-    seasonEpisodes = undefined;
+    tmdbSeasonEpisodes = undefined;
     displayedSeason = null;
     castShown = CAST_PAGE;
     castMounted = 0;
@@ -592,14 +604,14 @@
       )
       .then(({ episodes: loaded }) => {
         if (controller.signal.aborted) return;
-        seasonEpisodes = loaded.state === 'ready' ? loaded.value : null;
+        tmdbSeasonEpisodes = loaded.state === 'ready' ? loaded.value : null;
         displayedSeason = picked;
         seasonLoading = false;
         if (seasonEpisodes?.length) startupMarkOnce('episodes shown');
       })
       .catch(() => {
         if (controller.signal.aborted) return;
-        seasonEpisodes = null;
+        tmdbSeasonEpisodes = null;
         displayedSeason = picked;
         seasonLoading = false;
       });
@@ -612,7 +624,21 @@
     active && detail?.title.title ? named(detail.title.title, detail.title.year) : null,
   );
 
-  const series = $derived(detail ? seriesPresentation(detail, episodes, row, continued) : null);
+  // The series' release dates are asked once its detail names its IMDb id, TVmaze's lookup key, and the session has
+  // found its atlas.
+  $effect(() => {
+    const d = detail;
+    if (ref.type !== 'tv' || !d || !atlas) return;
+    void airings.follow([{ tmdb: d.title.id, ...(d.imdbId ? { imdb: d.imdbId } : {}) }]);
+  });
+  /** The detail with atlas's newest released episode, so an episode out before TMDB's date counts as aired. */
+  const airedDetail = $derived(
+    detail && airing ? { ...detail, lastAired: airedThrough(detail.lastAired, airing) } : detail,
+  );
+  const statusBadge = $derived(seriesStatusBadge(airing));
+  const series = $derived(
+    airedDetail ? seriesPresentation(airedDetail, episodes, row, continued) : null,
+  );
   const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
   const target = $derived(ref.type === 'tv' ? series?.target : undefined);
   // A fresh position from another device is more specific than Continue Watching's projected target. The latter
@@ -820,7 +846,13 @@
         { kind: 'season', title: { type: 'tv', id: ref.id }, season: picked },
         signal,
       );
-      return answer.episodes.state === 'ready' ? answer.episodes.value : null;
+      return answer.episodes.state === 'ready'
+        ? withAiring(
+            answer.episodes.value,
+            picked,
+            untrack(() => airing),
+          )
+        : null;
     } catch {
       return null;
     }
@@ -846,7 +878,14 @@
           season: item.number,
         });
         if (answer.episodes.state === 'ready')
-          numbers = markableEpisodes(item.number, answer.episodes.value);
+          numbers = markableEpisodes(
+            item.number,
+            withAiring(
+              answer.episodes.value,
+              item.number,
+              untrack(() => airing),
+            ),
+          );
       } catch {
         // The detail's aired count is still an exact-enough fallback when TMDB is temporarily unavailable.
       }
@@ -977,6 +1016,7 @@
               pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
               {warnings}
               {region}
+              status={statusBadge}
             />
             {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
             <div class="desktop-overview">

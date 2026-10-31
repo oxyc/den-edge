@@ -27,6 +27,8 @@ export const parameters = {
   'player.playNextEpisode': 'Reproducir siguiente · T{season} · E{episode}',
   'episode.play': 'Reproducir episodio {number}: {name}',
   'episode.upcoming': 'Episodio {number}: {name}. Se emite el {date}',
+  'episode.outOn': 'Disponible el {date} en {service}',
+  'episode.newEpisode': 'Nuevo episodio · T{season}E{episode}',
   'settings.expandAllIn': 'Expandir todo en {value}',
   'settings.collapseAllIn': 'Contraer todo en {value}',
   'profile.allowedCount.one': '{count} permitido',

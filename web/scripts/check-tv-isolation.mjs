@@ -112,11 +112,15 @@ if (process.argv.includes('--capture')) {
   // moving all Spanish/Swedish copy into the existing lazy catalogs, the app graph is 1.0 KiB over its prior ceiling
   // while English startup remains 6.2 KiB below baseline. Allow two KiB including gzip variance; the independent
   // English-initial and opt-in-catalog ceilings remain unchanged.
+  // Episode release dates from atlas (den#566) add the airing client and cache to the content worker, and to the
+  // page the one-date overlay, the new-episode search and its billboard slide, the Continue Watching badge and the
+  // two Home rows. Measured 4.1 KiB over main's complete graph (3.2 KiB of it in the initial graph, which stays
+  // 2.7 KiB below baseline). Allow five KiB including gzip variance; the initial and catalog ceilings are unchanged.
   if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
   // unchanged initial-graph ceiling above remains the English startup contract.
   if (current.translationGzip > 51200) throw new Error('Lazy translation catalog budget exceeded');
-  if (coreTotalDelta > 55296) throw new Error('Browser total JS/CSS budget exceeded');
+  if (coreTotalDelta > 60416) throw new Error('Browser total JS/CSS budget exceeded');
 }

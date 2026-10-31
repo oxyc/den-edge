@@ -53,6 +53,8 @@ export interface RecommendationWhy {
 /** A named recommendation, including the explanation Atlas attached to this particular ranking. */
 export interface RecommendedTitle extends Title {
   why?: RecommendationWhy;
+  /** A followed series' episode just out with sources found: its slide leads with "New episode · S2E1". */
+  newEpisode?: { season: number; episode: number };
 }
 
 const REASONS: Readonly<Record<string, string>> = {

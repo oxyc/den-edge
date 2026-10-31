@@ -77,6 +77,14 @@ export async function guardNetwork(target, origin = E2E_ORIGIN) {
       );
     if (url.origin === origin && cards)
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    // A series page and Home ask atlas for each series' release dates (`airing.ts`). Unless a spec answers, atlas has
+    // no schedule for a fixture series, and the page keeps TMDB's dates.
+    if (url.origin === origin && /\/airing\/tv\/\d+$/.test(url.pathname))
+      return route.fulfill({
+        status: 404,
+        headers: { 'cache-control': 'public, max-age=21600' },
+        json: { error: 'not_found' },
+      });
     // A library's recovery codes are checked at launch and when Settings opens (`recovery.ts`): none, unless a spec
     // says otherwise.
     if (url.origin === origin && url.pathname === '/recovery')

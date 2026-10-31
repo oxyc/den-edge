@@ -12,8 +12,11 @@
     pending = false,
     warnings = undefined,
     region = 'US',
+    status = undefined,
   }: {
     detail: TitleDetail;
+    /** A series' run, from TVmaze's status (`seriesStatusBadge`). */
+    status?: 'Ended' | 'Returning';
     ratings?: Ratings | null;
     enabled?: string[];
     pending?: boolean;
@@ -98,6 +101,9 @@
         href={factHref(fact, i)}>{i18n.phrase(fact)}</a
       >{:else}<span>{i18n.phrase(fact)}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
+  {#if status}<span class="chip" data-series-status
+      >{status === 'Ended' ? 'Ended' : 'Returning'}</span
+    >{/if}
   {#if !__DEN_TV__}<ContentWarnings {warnings} />{/if}
   {#if d.providers.length}
     <span

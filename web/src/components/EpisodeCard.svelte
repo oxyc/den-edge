@@ -16,7 +16,7 @@
   import { RESUME_FLOOR, WATCHED } from '../lib/actions';
   import { airDate, airWindow, cleanedOverview, futureDate } from '../lib/detailPresentation';
   import type { MenuItem } from '../lib/titleActions';
-  import type { Episode } from '../lib/detail';
+  import { outDay, type AiredEpisode } from '../lib/airing';
   import { activateLinkInPlace } from '../lib/linkActivation';
   import { playOnLabel, type HouseholdTv } from '../lib/householdTvs';
   let {
@@ -37,7 +37,7 @@
     ondownload,
     downloadState,
   }: {
-    episode: Episode;
+    episode: AiredEpisode;
     /**
      * The episode's own address (`?season=2&episode=3`). The row is a link to it, so a modified or middle click, a
      * right-click or a long press opens it like any other link; a plain click or Enter plays it, as it always has.
@@ -72,6 +72,18 @@
   /** Too far out to have a release: nothing to play, list or download. Within a week it acts like an aired one. */
   const held = $derived(airWindow(episode.airDate) === 'upcoming');
   const date = $derived(airDate(episode.airDate));
+  /**
+   * When an upcoming episode atlas dates is out: "Out Fri 6 Nov on Paramount+". TMDB's broadcast slot reads
+   * "Airs …" as before.
+   */
+  const outLabel = $derived(
+    upcoming && episode.airService !== undefined && episode.airDate
+      ? i18n.format('episode.outOn', 'Out {date} on {service}', {
+          date: outDay(episode.airDate, i18n.language),
+          service: episode.airService,
+        })
+      : undefined,
+  );
   const menuItems = $derived<MenuItem[]>([
     ...(onplaytv && !held
       ? tvs.map((tv) => ({
@@ -143,7 +155,12 @@
           ? 'Downloaded'
           : 'Downloading'}
       </span>{/if}
-    {#if upcoming}<span class="air-date">Airs <time datetime={episode.airDate}>{date}</time></span>
+    {#if outLabel}<span class="air-date" data-out
+        ><time datetime={episode.airDate}>{outLabel}</time></span
+      >
+    {:else if upcoming}<span class="air-date"
+        >Airs <time datetime={episode.airDate}>{date}</time></span
+      >
     {:else if episode.overview}<span class="overview">{cleanedOverview(episode)}</span>{/if}
   </span>
 {/snippet}

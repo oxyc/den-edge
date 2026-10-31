@@ -72,3 +72,14 @@ export const ATLAS_FALLBACK: readonly Credit[] = [
     url: 'https://www.justwatch.com',
   },
 ];
+
+/**
+ * Episode release dates and series status come from TVmaze through atlas (`airing.ts`), under CC BY-SA 4.0. Credited
+ * whatever atlas's manifest names, since every series page shows them; `mergeCredits` shows it once when atlas
+ * credits it too.
+ */
+export const AIRING_CREDIT: Credit = {
+  text: 'TV schedule data from TVmaze.',
+  link: 'TVmaze',
+  url: 'https://www.tvmaze.com',
+};

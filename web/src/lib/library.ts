@@ -205,6 +205,8 @@ export interface ContinueEntry {
   deviceId?: string;
   /** This device wrote `seconds`: its own playback, never a reason to pull the library faster. */
   here?: true;
+  /** The series has a new episode out (`withNewEpisodes`): drawn first, with a "New" badge. */
+  isNew?: true;
 }
 
 /** A Continue Watching decision before the title's late TMDB display fields are laid over it. */
