@@ -634,6 +634,56 @@ test('episode Sources target the selected episode and downloads never requeue wh
   }
 });
 
+test('Check for sources again asks scout afresh, past the cached list, and says what it found', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    // Nothing listed yet: scout's ordinary answer for the episode is empty until a fresh rebuild finds it.
+    const asked = [];
+    await page.route('**/scout/config/stream/**', (r) => {
+      const url = new URL(r.request().url());
+      asked.push(url.search);
+      const fresh = url.searchParams.get('fresh') === '1';
+      return r.fulfill({
+        headers: { 'cache-control': 'private, max-age=300' },
+        json: {
+          streams: fresh
+            ? [
+                {
+                  title: 'Episode.1080p.WEB.mkv',
+                  url: 'http://scout.internal/p/ready',
+                  behaviorHints: { filename: 'Episode.1080p.WEB.mkv' },
+                  attributes: { cached: true, resolution: '1080p' },
+                },
+              ]
+            : [],
+          den: { v: 1, answerKind: fresh ? 'live' : 'empty', coverage: { sources: [] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = page.locator('[data-active="true"]');
+    await active.getByRole('tab', { name: 'Season 2', exact: true }).click();
+    const row = active.locator('.episode').first();
+    await expect(row).toContainText('Season 2 premiere');
+    const menu = row.getByRole('button', { name: 'Options for episode 1', exact: true });
+    await menu.click();
+    await row.getByRole('menuitem', { name: 'Check for sources again', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Found' })).toHaveText(
+      'Found 1 source.',
+    );
+    expect(asked).toContain('?fresh=1');
+    // The browser's copy of the plain address is replaced too, so a later ordinary look sees the new list.
+    await expect.poll(() => asked.filter((q) => q === '').length).toBeGreaterThan(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a direct episode player URL starts its exact episode and selected release', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

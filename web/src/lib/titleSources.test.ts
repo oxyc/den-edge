@@ -125,6 +125,24 @@ it('scopes series sources to the exact requested episode', async () => {
   await fetchSources(addon, 'tt1', routes, 3, 7, undefined, network);
   expect(path).toBe('/scout/config/stream/series/tt1%3A3%3A7.json');
 });
+it('a fresh ask goes past every cache, then reloads the plain address the browser keeps', async () => {
+  const asked: Array<[string, RequestCache | undefined]> = [];
+  const network = (async (input, init) => {
+    asked.push([String(input), init?.cache]);
+    return Response.json({ streams: [raw] });
+  }) as typeof fetch;
+  const got = await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network, true);
+  expect(got.sources).toHaveLength(1);
+  await Promise.resolve();
+  expect(asked).toEqual([
+    ['/scout/config/stream/series/tt1%3A3%3A7.json?fresh=1', 'no-store'],
+    ['/scout/config/stream/series/tt1%3A3%3A7.json', 'reload'],
+  ]);
+  // A plain ask uses the browser's cache as before.
+  asked.length = 0;
+  await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network);
+  expect(asked).toEqual([['/scout/config/stream/series/tt1%3A3%3A7.json', undefined]]);
+});
 it('reads what scout says about its list, and nothing from an older scout or a malformed one', () => {
   const den = (extra: object) => ({
     streams: [],

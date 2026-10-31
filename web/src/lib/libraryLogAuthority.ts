@@ -812,7 +812,11 @@ export class LibraryLogAuthority {
       case 'download.sources': {
         await ensureDeferredSyncPolicy();
         const title = internalDownloadTitle(query.title);
-        const snapshot = await this.#downloadsCoordinator.sourcesForTitle(title, query.refresh);
+        const snapshot = await this.#downloadsCoordinator.sourcesForTitle(
+          title,
+          query.refresh,
+          query.fresh,
+        );
         const sources = Array.isArray(snapshot.sources)
           ? snapshot.sources
               .slice(0, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)

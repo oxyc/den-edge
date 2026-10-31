@@ -159,6 +159,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Change PIN': 'Ändra PIN-kod',
   ChatGPT: 'ChatGPT',
   'ChatGPT opens Den: choose Allow.': 'ChatGPT öppnar Den: välj Tillåt.',
+  'Check for sources again': 'Sök källor igen',
   'Check status': 'Kontrollera status',
   checking: 'kontrollerar',
   'Checking parental controls…': 'Kontrollerar föräldrakontroll...',

@@ -104,6 +104,27 @@ async function downloadEpisodeWithModel(
   return 'queued';
 }
 
+/**
+ * Ask for an episode's sources again past every cache (scout's `?fresh=1`): how many there are now, or null when
+ * nothing could be asked or the sources didn't all answer — no verdict either way.
+ */
+export async function recheckEpisode(
+  model: LibraryModel,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  title: SeasonTitle,
+): Promise<number | null> {
+  const { result } = await model.downloadSources(
+    descriptor(imdb, season, episode, title),
+    true,
+    true,
+  );
+  if (result.kind !== 'download.sources' || !result.sources) return null;
+  if (result.sources.length === 0 && result.answer?.kind === 'unknown') return null;
+  return result.sources.length;
+}
+
 export async function downloadEpisode(
   model: LibraryModel,
   imdb: string,

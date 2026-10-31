@@ -33,6 +33,7 @@
     tvs = [],
     onseen,
     onsources,
+    onrecheck,
     ondownload,
     downloadState,
   }: {
@@ -60,6 +61,8 @@
     tvs?: readonly HouseholdTv[];
     onseen: (seen: boolean) => void;
     onsources?: () => void;
+    /** Ask for this episode's sources again past every cache. */
+    onrecheck?: () => void;
     ondownload?: () => void;
     downloadState?: 'downloading' | 'ready';
   } = $props();
@@ -79,6 +82,9 @@
       : []),
     ...(onsources && !held
       ? [{ kind: 'item' as const, label: 'Sources', onselect: onsources }]
+      : []),
+    ...(onrecheck && !held
+      ? [{ kind: 'item' as const, label: 'Check for sources again', onselect: onrecheck }]
       : []),
     ...(ondownload && !held
       ? [

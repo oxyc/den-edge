@@ -953,7 +953,8 @@ export type LibraryQuery =
     }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
-  | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean }
+  /** `fresh`: rebuilt by scout past its caches (`?fresh=1`) — a viewer checking for sources again. */
+  | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean; fresh?: boolean }
   | { kind: 'download.artwork'; target: DownloadTarget }
   /** The stored `set:prefs` values with their stamps, as profile seeding takes them. */
   | { kind: 'preferences.raw' }
