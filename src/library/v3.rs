@@ -85,6 +85,8 @@ pub(crate) enum StoreError {
     Forbidden,
     /// An authenticated compound operation owns the library's durable exclusive mutation lock.
     Locked,
+    GenerationChanged,
+    UpgradeRequired(u64),
     /// A value over the cap of the library's wire minimum (`super::value_fits`).
     TooLarge,
     Invalid(String),
@@ -238,6 +240,13 @@ pub(super) struct VisitorTier {
     pub max_rows: usize,
 }
 
+/// The request's wire support and the library generation validated under its slot lock. The batch repeats
+/// both checks in the committing transaction, including writes that bypass the HTTP slot lock.
+pub(super) struct WriteAuthority {
+    pub wire: Option<u64>,
+    pub generation: Option<String>,
+}
+
 impl VisitorTier {
     /// No visitor limits and no mark: how every library outside `NEW_LIBRARIES=visitors` is written.
     #[cfg(test)]
@@ -256,7 +265,13 @@ pub(super) trait LibraryStore: Send + Sync {
         live_cap: usize,
         wire_min: u64,
     ) -> Result<BatchResult, StoreError> {
-        self.apply_tiered(writes, live_cap, wire_min, VisitorTier::NONE)
+        self.apply_tiered(
+            writes,
+            live_cap,
+            wire_min,
+            VisitorTier::NONE,
+            &WriteAuthority { wire: Some(u64::MAX), generation: None },
+        )
     }
     fn apply_tiered(
         &self,
@@ -264,6 +279,7 @@ pub(super) trait LibraryStore: Send + Sync {
         live_cap: usize,
         wire_min: u64,
         tier: VisitorTier,
+        authority: &WriteAuthority,
     ) -> Result<BatchResult, StoreError>;
     /// Whether the library was started as a visitor's: the tier its first commit recorded. A library with no
     /// mark, which is every library that predates the tier, is a member's.
@@ -739,6 +755,7 @@ impl LibraryStore for RedbLibrary {
         live_cap: usize,
         wire_min: u64,
         tier: VisitorTier,
+        authority: &WriteAuthority,
     ) -> Result<BatchResult, StoreError> {
         let mut unique = HashSet::with_capacity(writes.len());
         if writes.len() > MAX_WRITES
@@ -777,6 +794,16 @@ impl LibraryStore for RedbLibrary {
         // The minimum this batch leaves: a first batch sets it, as below. Read inside the transaction, so a rewrite
         // committed between the handler's read and this write is the minimum applied.
         let effective_min = if started_empty { current_min.max(wire_min) } else { current_min };
+        if effective_min >= 3 && authority.wire.unwrap_or(0) < effective_min {
+            return Err(StoreError::UpgradeRequired(effective_min));
+        }
+        if let Some(expected) = &authority.generation {
+            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let current = metadata.get("generation").map_err(StoreError::redb)?;
+            if current.as_ref().map(|value| value.value()) != Some(expected.as_bytes()) {
+                return Err(StoreError::GenerationChanged);
+            }
+        }
         if writes.iter().any(|write| !value_fits(&write.value, effective_min)) {
             return Err(StoreError::TooLarge);
         }
@@ -1589,8 +1616,9 @@ impl LibraryStore for StoreLease {
         live_cap: usize,
         wire_min: u64,
         tier: VisitorTier,
+        authority: &WriteAuthority,
     ) -> Result<BatchResult, StoreError> {
-        let result = self.store.apply_tiered(writes, live_cap, wire_min, tier)?;
+        let result = self.store.apply_tiered(writes, live_cap, wire_min, tier, authority)?;
         self.index.record(&self.id, &self.store.protocol()?)?;
         Ok(result)
     }
