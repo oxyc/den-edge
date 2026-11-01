@@ -1952,6 +1952,49 @@ it('decides a first open’s preference seed from its settings facts, opening th
   expect(openFull).toHaveBeenCalledOnce();
 });
 
+it('decides a preference seed from its settings facts on an open drawn from saved views', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const title = factTitle('watchlist', 10);
+  const sealed = await seal(keys, title);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    12,
+    [{ k: sealed.k, seq: 12, value: sealed.v, row: title }],
+    true,
+  );
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.close?.();
+
+  // The seed the previous page sent failed, so nothing kept says it was made.
+  const openFull = vi.fn(async () => fullAuthority());
+  const reopened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    vi.fn(),
+  );
+  expect(reopened?.views).toBe('saved');
+  await expect(
+    reopened!.authority.command({ kind: 'preferences.seed', household: {} }, 'seed-1'),
+  ).resolves.toEqual({ outcome: 'unchanged', delivery: 'synced', affected: [] });
+  expect(openFull).not.toHaveBeenCalled();
+  const undecided = { 'den.hideWatched': { value: { bool: true }, at: [1, 0, 'household'] } };
+  await reopened!.authority.command({ kind: 'preferences.seed', household: undecided }, 'seed-2');
+  expect(openFull).toHaveBeenCalledOnce();
+  await reopened!.authority.close?.();
+});
+
 it('keeps matching TV layouts lazy and promotes a changed layout', async () => {
   const vault = new MemoryVault();
   const value = await cached(vault);

@@ -206,15 +206,16 @@ async function seed(page, { others = 0, extra = [] } = {}) {
   );
 }
 
-/** Resolves once the page's library Worker hands its library to the whole log for an assistant publish. */
-function promotedForPublish(page) {
-  return new Promise((resolve) => {
-    const hear = (message) => {
-      if (message.text().includes('library promoted (task:assistant.publish)')) resolve();
-    };
-    page.on('console', hear);
-    page.on('worker', (worker) => worker.on?.('console', hear));
-  });
+/** The reasons the page's library Workers hand their library to the whole log for, as they say them. */
+function promotions(page) {
+  const reasons = [];
+  const hear = (message) => {
+    const reason = message.text().match(/library promoted \((.+)\)/)?.[1];
+    if (reason) reasons.push(reason);
+  };
+  page.on('console', hear);
+  page.on('worker', (worker) => worker.on?.('console', hear));
+  return reasons;
 }
 
 test('a series caught up to its last season stays in Continue Watching after the library is promoted', async ({
@@ -236,12 +237,15 @@ test('a series caught up to its last season stays in Continue Watching after the
   await expect(page.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible({
     timeout: 30_000,
   });
-  const promoted = promotedForPublish(page);
+  const promoted = promotions(page);
   await page.goto(`${E2E_ORIGIN}/`);
 
   const shelf = page.getByRole('region', { name: 'Continue Watching' });
   const card = shelf.locator(`a[href^="/tv/${TRACKER}-tracker"]`).first();
-  await promoted;
+  // The publish is what promotes the profile's library, after Home has named its series. The seed of the household's
+  // (empty) preferences is decided from the facts however this visit's views were opened, so it never promotes first.
+  await expect.poll(() => promoted, { timeout: 60_000 }).toContain('task:assistant.publish');
+  expect(promoted).not.toContain('command:preferences.seed');
   // Season 4 is out: the next episode is S4E1, after the whole log has taken over and after Home's airing tick.
   await expect(card).toContainText('S4 · E1', { timeout: 15_000 });
   await page.clock.fastForward(5 * 60_000 + 1_000);

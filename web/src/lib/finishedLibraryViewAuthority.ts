@@ -407,8 +407,9 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         );
         if (JSON.stringify(seeded) === JSON.stringify(command.household))
           return { outcome: 'unchanged', delivery: 'synced', affected: [] };
-        // Nothing kept says so on a first open, but the profile's own preferences are in its settings facts: when it
-        // has decided every one the household holds, there is nothing to write, and no log to open for it.
+        // Nothing kept says so on a first open, or on any open after a seed that failed, but the profile's own
+        // preferences are in its settings facts: when it has decided every one the household holds, there is nothing
+        // to write, and no log to open for it.
         if (await this.#seedDecided(command.household)) {
           await writeEncryptedLibraryValue(
             this.request.libraryKey,
@@ -778,11 +779,15 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     for (const listener of this.#listeners) listener(event);
   }
 
-  /** Whether seeding `household`'s preferences would write nothing (`LibraryLogAuthority`'s `#seedPreferences`). */
+  /**
+   * Whether seeding `household`'s preferences would write nothing (`LibraryLogAuthority`'s `#seedPreferences`). An open
+   * drawn from saved views decides it too: its fact store is held only at the views' head or past it. Requiring a facts
+   * open made the same no-op seed open the whole log whenever the previous page had saved its views first.
+   */
   async #seedDecided(
     household: Extract<LibraryCommand, { kind: 'preferences.seed' }>['household'],
   ): Promise<boolean> {
-    if (!this.factStore || !this.#preferFacts) return false;
+    if (!this.factStore) return false;
     try {
       const manifest = await this.factStore.manifest();
       if (
