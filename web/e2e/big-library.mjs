@@ -647,6 +647,16 @@ export async function settleProjection(context, edge, options = {}) {
  */
 export async function bigHousehold(context, edge, options = {}) {
   const page = await context.newPage();
+  // The waits below that read den-edge or this process, not the page, would sit out their whole timeout on a page
+  // whose renderer is gone (the kernel kills one on a machine short of memory): they end with it instead.
+  const crashed = new Promise((_, fail) =>
+    page.once('crash', () =>
+      fail(
+        new Error('the household page crashed: its renderer process was killed (out of memory?)'),
+      ),
+    ),
+  );
+  crashed.catch(() => {});
   const started = Date.now();
   const step = (what) =>
     process.env.BIG_LIBRARY_DEBUG &&
@@ -669,15 +679,18 @@ export async function bigHousehold(context, edge, options = {}) {
       .click();
     // The move is done once den-edge holds a library with the whole history in it: as Library v4 documents, one per
     // title, season and delivery document, about 5,100 of them at scale 1.
-    await expect
-      .poll(
-        () => Math.max(0, ...[...edge.libraries.values()].map((library) => library.rows.size)),
-        {
-          timeout: 180_000 * BIG_LIBRARY_SCALE,
-          message: 'the Owner library holds the seeded rows',
-        },
-      )
-      .toBeGreaterThan(5_000 * BIG_LIBRARY_SCALE);
+    await Promise.race([
+      expect
+        .poll(
+          () => Math.max(0, ...[...edge.libraries.values()].map((library) => library.rows.size)),
+          {
+            timeout: 180_000 * BIG_LIBRARY_SCALE,
+            message: 'the Owner library holds the seeded rows',
+          },
+        )
+        .toBeGreaterThan(5_000 * BIG_LIBRARY_SCALE),
+      crashed,
+    ]);
     step('moved');
     // The switcher is a presentation-level consequence of the completed move, not a reliable proxy for its progress.
     // den-edge holding every destination row means the network copy is complete, but the page can still be verifying
@@ -702,30 +715,36 @@ export async function bigHousehold(context, edge, options = {}) {
       await expect(page.locator('main').getByText('Continue Watching').first()).toBeVisible({
         timeout: 90_000,
       });
-      await expect
-        .poll(() => Date.now() - lastTmdb, {
-          timeout: 120_000,
-          message: `${path} named everything`,
-        })
-        .toBeGreaterThan(3_000);
+      await Promise.race([
+        expect
+          .poll(() => Date.now() - lastTmdb, {
+            timeout: 120_000,
+            message: `${path} named everything`,
+          })
+          .toBeGreaterThan(3_000),
+        crashed,
+      ]);
     }
     // And published what it named: a projection is built from the series layouts the page has learnt as well as the
     // library, and kept with them (`LibraryAssistantAuthority`). The Watchlist's first publish comes some seconds in,
     // often after its names are in: a page closed once they are leaves this browser with nothing published, and each
     // settling visit below then builds from as much as it had learnt by its own first publish.
     const named = Date.now();
-    await expect
-      .poll(
-        async () =>
-          (await publishes.answeredSince(named)) ||
-          (options.acceptInFlightPrimingPublish &&
-            (edge.assistant?.projections.length ?? 0) > watchlistProjectionsBefore),
-        {
-          timeout: 90_000,
-          message: '/watchlist published what it named',
-        },
-      )
-      .toBe(true);
+    await Promise.race([
+      expect
+        .poll(
+          async () =>
+            (await publishes.answeredSince(named)) ||
+            (options.acceptInFlightPrimingPublish &&
+              (edge.assistant?.projections.length ?? 0) > watchlistProjectionsBefore),
+          {
+            timeout: 90_000,
+            message: '/watchlist published what it named',
+          },
+        )
+        .toBe(true),
+      crashed,
+    ]);
     if (process.env.BIG_LIBRARY_DEBUG)
       console.log('priming publishes', JSON.stringify(await publishes.audit()));
     step('primed');

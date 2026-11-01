@@ -1,5 +1,6 @@
 import { defineConfig, chromium } from '@playwright/test';
 import { existsSync } from 'node:fs';
+import { totalmem } from 'node:os';
 import { E2E_PORT, E2E_ORIGIN } from './e2e/base-url.mjs';
 
 // Reuse the installed browser on macOS when Playwright's bundled browser is absent.
@@ -20,6 +21,15 @@ if (
 // machine would. Set here so the workers, and the browsers specs launch themselves, inherit it.
 if (process.platform === 'linux') process.env.WEBKIT_SKIA_ENABLE_CPU_RENDERING ??= '1';
 
+// A worker running a big-library spec peaks near 1.5 GB (its Chromium's renderer ~0.9 GB, the browser's other
+// processes ~0.4 GB, the worker itself ~0.25 GB), beside about 1 GB for the dev server and the runner. Past what the
+// machine holds, the kernel kills a renderer mid-test, and a spec waiting on den-edge (`bigHousehold`'s move) waits
+// out its whole timeout on a dead page. Four workers on GitHub's 16 GB runner; fewer where a container or VM has less.
+// A cgroup without a limit reports 0 or 2^64 (`process.constrainedMemory`), so the smaller of the two counts.
+const GB = 2 ** 30;
+const memory = Math.min(totalmem(), process.constrainedMemory() || Infinity);
+const WORKERS = Math.max(1, Math.min(4, Math.floor((memory - GB) / (1.5 * GB))));
+
 export default defineConfig({
   testDir: './e2e',
   // Time budgets measure the production build on a runner of their own (`playwright.budgets.config.ts`).
@@ -34,8 +44,8 @@ export default defineConfig({
   // Files are isolated by Playwright contexts and do not share mutable server state.
   // Keep local runs deterministic while allowing CI to execute independent files in parallel.
   // GitHub's public ubuntu-latest runner has four CPUs. Keep local runs conservative,
-  // but use the runner rather than leaving half of it idle.
-  workers: 4,
+  // but use the runner rather than leaving half of it idle — as far as its memory allows (`WORKERS`).
+  workers: WORKERS,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',
