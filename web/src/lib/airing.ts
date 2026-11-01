@@ -445,8 +445,8 @@ export function comingBackSoon(
 }
 
 /**
- * Each followed series' next episode due within `THIS_WEEK_DAYS`, soonest first. Today's is already out, so it is
- * not upcoming: it is a new episode instead.
+ * Each followed series' first episode out today or within `THIS_WEEK_DAYS`, soonest first: the Apple apps' rule
+ * (DenKit `NewEpisodePolicy.thisWeek`), so an episode out this evening is on the row the day it airs.
  */
 export function thisWeek(
   airings: ReadonlyMap<number, Airing>,
@@ -454,12 +454,14 @@ export function thisWeek(
 ): Array<{ series: number } & AiringEpisode> {
   return [...airings]
     .flatMap(([series, airing]) => {
-      const soonest = [airing.next, ...airing.upcoming]
-        .filter((episode): episode is AiringEpisode => {
-          const days = episode && daysUntil(episode.date, now);
-          return days !== undefined && days > 0 && days <= THIS_WEEK_DAYS;
+      const soonest = dated(airing)
+        .filter((episode) => {
+          const days = daysUntil(episode.date, now);
+          return days !== undefined && days >= 0 && days <= THIS_WEEK_DAYS;
         })
-        .sort((a, b) => a.date.localeCompare(b.date))[0];
+        .sort(
+          (a, b) => a.date.localeCompare(b.date) || a.season - b.season || a.episode - b.episode,
+        )[0];
       return soonest ? [{ series, ...soonest }] : [];
     })
     .sort((a, b) => a.date.localeCompare(b.date) || a.series - b.series);

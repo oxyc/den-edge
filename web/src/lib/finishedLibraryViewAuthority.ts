@@ -71,6 +71,7 @@ import {
   libraryMetadataShape,
   libraryMetadataShapeDigest,
   libraryMetadataTitle,
+  shapeFromLayoutDigest,
 } from './libraryMetadata';
 import { continueAiring, ContinueProjector, titleKey, type Shape } from './library';
 import { seenEpisodesFor } from './history';
@@ -197,6 +198,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     private readonly openNarrow?: (names: readonly string[]) => Promise<NarrowEdit | null>,
   ) {
     this.#preferFacts = preferFacts;
+    this.#keepSavedLayouts();
     if (factStore && !filling) this.#startViewWriter();
     if (filling) {
       this.#filling = true;
@@ -204,6 +206,20 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       this.#cancelFilling = filling.cancel;
       filling.page.committed = () => this.#refill();
       void filling.done.then((complete) => this.#filled(complete));
+    }
+  }
+
+  /**
+   * The layouts the saved Continue piece was drawn with, as the layouts its next projection from the facts reads (a
+   * refill, another device's write, the airing tick). The page names only the series it shows, so without these every
+   * series offered by its next episode beyond those dropped as "no layout" on the first projection after opening.
+   * A layout the page names this visit is newer and stays.
+   */
+  #keepSavedLayouts(): void {
+    for (const [key, digest] of Object.entries(this.cached.pieces.continue?.layouts ?? {})) {
+      if (this.#factShapes.has(key)) continue;
+      const shape = shapeFromLayoutDigest(digest);
+      if (shape) this.#factShapes.set(key, shape);
     }
   }
 
@@ -1207,6 +1223,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       (opened) => {
         if (!opened || !sameIdentity(opened.identity, this.cached.identity)) return false;
         Object.assign(this.cached.pieces, opened.pieces);
+        this.#keepSavedLayouts();
         return true;
       },
       () => false,
@@ -1355,6 +1372,15 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         if (this.#foregroundReady) await authority.observe({ kind: 'foreground-ready' });
         for (const { observation } of this.#titleShapes.values())
           await authority.observe(observation);
+        // And every layout Continue was decided with. The page names a series once a visit and never asks again, so a
+        // layout the whole log is not told here is one it never learns: each series offered by its next episode left
+        // Continue Watching with "no layout" a few seconds after Home opened, when an assistant publish promoted.
+        for (const [key, shape] of this.#factShapes) {
+          if (this.#titleShapes.has(key)) continue;
+          const [type, id] = key.split(':');
+          const seen = type === 'tv' && libraryMetadataShape({ type, id: Number(id) }, shape);
+          if (seen) await authority.observe({ kind: 'title-shape', ...seen });
+        }
         if (this.#airing) await authority.observe(this.#airing);
         this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
         return authority;

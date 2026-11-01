@@ -64,3 +64,24 @@ export const libraryMetadataShapeDigest = (
     .sort((left, right) => left.season - right.season)
     .map(({ season, episodes }) => `${season}:${episodes}`)
     .join(',')}|${shape.lastAired ? `${shape.lastAired.season}:${shape.lastAired.episode}` : ''}`;
+
+/**
+ * The layout a `libraryMetadataShapeDigest` says, read back; undefined for anything that is not one. The saved Continue
+ * piece keeps only these, so they are what its series' layouts are known by until the page names them again.
+ */
+export function shapeFromLayoutDigest(digest: string): Shape | undefined {
+  const match = /^((?:\d+:\d+)(?:,\d+:\d+)*)?\|(?:(\d+):(\d+))?$/.exec(digest);
+  if (!match) return undefined;
+  const counts = new Map<number, number>();
+  for (const part of match[1]?.split(',') ?? []) {
+    const [season, episodes] = part.split(':').map(Number) as [number, number];
+    if (!Number.isSafeInteger(season) || !Number.isSafeInteger(episodes) || counts.has(season))
+      return undefined;
+    counts.set(season, episodes);
+  }
+  if (!counts.size) return undefined;
+  return {
+    counts,
+    ...(match[2] ? { lastAired: { season: Number(match[2]), episode: Number(match[3]) } } : {}),
+  };
+}

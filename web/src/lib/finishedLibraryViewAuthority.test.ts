@@ -1129,7 +1129,7 @@ it('reads a title’s view from its own documents, as the full log builds it, wi
   expect(openFull).not.toHaveBeenCalled();
 });
 
-it('counts a served series’ episodes once naming finds its shape, and keeps other shapes from the log', async () => {
+it('counts a served series’ episodes once naming finds its shape, and hands the log every shape it learnt', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
   await seriesFacts(vault);
@@ -1167,13 +1167,15 @@ it('counts a served series’ episodes once naming finds its shape, and keeps ot
       { season: 1, episode: 3, watched: false, fraction: 0.5 },
     ],
   });
-  // A write opens the log: it is told the served series' shape, not the one only named.
+  // A write opens the log: it is told both shapes. The page names a series once a visit, so a shape the log is not told
+  // here is one Continue Watching never has again.
   await opened!.authority.command(
     { kind: 'watchlist.add', title: { type: 'movie', id: 9 } },
     'operation',
   );
   expect(observe.mock.calls.map(([observation]) => observation)).toEqual([
     expect.objectContaining({ kind: 'title-shape', title: series }),
+    expect.objectContaining({ kind: 'title-shape', title: { type: 'tv', id: 56 } }),
   ]);
   expect(openFull).toHaveBeenCalledOnce();
 });
