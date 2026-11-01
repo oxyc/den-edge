@@ -135,6 +135,44 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
   await page.close();
 });
 
+// A title outside atlas's corpus (Greetings from the North): atlas answers late and with nothing, so the row is
+// TMDB's recommendations — the same rule the Apple TV and iPhone/iPad follow — and once shown it never reorders.
+test('More like this for a title atlas does not hold is TMDB’s recommendations, in one stable order', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  await page.route('**/metadata/title/query', (r) => r.fulfill({ status: 404, json: {} }));
+  await page.route('**/atlas-o/**', async (r) => {
+    const path = new URL(r.request().url()).pathname;
+    if (path.includes('/versions/'))
+      return r.fulfill({ json: { seed: { type: 'movie', id: 1 }, versions: [], total: 0 } });
+    if (path.includes('/similar/')) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return r.fulfill({ json: { ids: [], mixed: [], mixedTotal: 0, total: 0 } });
+    }
+    if (path.includes('/franchise/')) return r.fulfill({ json: {} });
+    return r.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+  });
+  await routeTmdb(page, (r) => r.fulfill({ json: { page: 2, results: [], total_pages: 1 } }));
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-o`);
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+
+  const row = page.getByRole('region', { name: 'More like this' });
+  const order = () =>
+    row
+      .locator('a.card')
+      .evaluateAll((cards) => cards.map((card) => card.textContent.replace(/\s+/g, ' ').trim()));
+  await expect(row.getByRole('link', { name: /^Similar film 1 / })).toBeVisible();
+  const first = await order();
+  expect(first.length).toBeGreaterThan(3);
+  expect(first[0]).toMatch(/^Similar film 1\b/);
+  await page.waitForTimeout(1200);
+  expect(await order()).toEqual(first);
+  await page.close();
+});
+
 test('a stale related-row generation cannot publish over the current atlas', async ({
   browser,
 }) => {

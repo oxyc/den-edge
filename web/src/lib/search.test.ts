@@ -269,7 +269,47 @@ describe('searchStream over atlas’s /index/query', () => {
     });
     const batches: string[][] = [];
     for await (const batch of searchStream('pernille', s)) batches.push(batch.map(hitKey));
-    expect(batches).toEqual([['movie-603'], ['tv-123403', 'movie-603']]);
+    expect(batches).toEqual([['movie-603'], ['tv-123403', 'movie-603', 'movie-9']]);
+  });
+
+  // TMDB 347106 is outside atlas's corpus. atlas's `f.t` partly matched "Greetings from Tucson", which read as
+  // atlas having named a title, so TMDB was never asked and the film could not be found on the web.
+  it('finds a title atlas does not hold, by its English or its Swedish name', async () => {
+    const greetings: Title = {
+      type: 'movie',
+      id: 347106,
+      title: 'Greetings from the North',
+      posterPath: '/g.jpg',
+    };
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.startsWith('/atlas/index/query.json')
+        ? {
+            people: [],
+            hits: [
+              {
+                type: 'movie',
+                id: 1,
+                title: 'Greetings from Tucson',
+                posterPath: '/t.jpg',
+                f: { t: 0.32 },
+              },
+            ],
+          }
+        : { results: [] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+    const atlas = searchSources('k', fetchImpl);
+    expect((await atlas.query('greetings from the north')).named).toBe(false);
+    for (const query of ['greetings from the north', 'Glada hälsningar']) {
+      const s = sources({
+        query: atlas.query,
+        multi: async () => [{ kind: 'title' as const, title: greetings }],
+      });
+      const batches: string[][] = [];
+      for await (const batch of searchStream(query, s)) batches.push(batch.map(hitKey));
+      expect(batches.at(-1)).toContain('movie-347106');
+    }
   });
 });
 

@@ -2,7 +2,14 @@
 // title, facet and embedding indexes, served over the tailnet at /atlas (tailscale serve strips the prefix).
 
 import type { MediaType, Title } from './library';
-import type { FacetAnswer, Hit, Person, Ref, SearchSources } from './search';
+import {
+  foldedTitle,
+  type FacetAnswer,
+  type Hit,
+  type Person,
+  type Ref,
+  type SearchSources,
+} from './search';
 import { withSharedTitleMetadata } from './titleMetadata';
 import { toTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
@@ -100,10 +107,12 @@ export function searchSources(
       const people = records(body.people).flatMap((p): Person[] =>
         typeof p.id === 'number' && typeof p.name === 'string' ? [{ id: p.id, name: p.name }] : [],
       );
-      const byName = records(body.hits).some((h) => {
-        const features = h.f && typeof h.f === 'object' ? (h.f as Json) : {};
-        return typeof features.t === 'number' && features.t > 0;
-      });
+      // A title named only when one hit IS the query, as the Apple clients read it (`TitleSearchService`). atlas
+      // scores any title sharing a word (`f.t`): "greetings from the north" partly matched Greetings from Tucson,
+      // which counted as named and kept TMDB from finding Greetings from the North, a title atlas doesn't hold.
+      const byName = records(body.hits).some(
+        (h) => typeof h.title === 'string' && foldedTitle(h.title) === foldedTitle(query),
+      );
       const titles = records(body.hits).flatMap((h): Title[] => {
         const type = h.type === 'series' ? 'tv' : h.type === 'movie' ? 'movie' : undefined;
         if (!type || typeof h.id !== 'number' || typeof h.title !== 'string') return [];

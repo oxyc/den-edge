@@ -11,6 +11,80 @@ const active = (page) => page.locator('[data-route-page][data-active="true"]');
 const input = (page) =>
   page.getByRole('searchbox', { name: 'Search titles, people, moods, languages…' });
 
+// Greetings from the North (TMDB 347106) is outside atlas's corpus. atlas's answer to its name partly matches
+// Greetings from Tucson by title, which used to count as atlas having named a title, so TMDB was never asked.
+test('search finds a title atlas does not hold, by its English and its Swedish name', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/routes', (r) => r.fulfill({ json: {} }));
+  await page.route('**/metadata/title/query', (r) => r.fulfill({ status: 404, json: {} }));
+  await page.route('**/atlas/**', (r) => {
+    const url = new URL(r.request().url());
+    if (url.pathname.startsWith('/atlas/index/filter/'))
+      return r.fulfill({ status: 404, body: '' });
+    if (url.pathname === '/atlas/manifest.json')
+      return r.fulfill({ json: { id: 'com.den.atlas', catalogs: [] } });
+    if (url.pathname === '/atlas/index/query.json')
+      return r.fulfill({
+        json: {
+          people: [],
+          hits: [
+            {
+              type: 'movie',
+              id: 501,
+              title: 'Greetings from Tucson',
+              year: 2002,
+              posterPath: '/tucson.jpg',
+              f: { t: 0.3246 },
+            },
+          ],
+        },
+      });
+    return r.fulfill({ json: { labels: [] } });
+  });
+  await page.route('https://image.tmdb.org/**', (r) =>
+    r.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="750"><rect width="500" height="750" fill="#264c68"/></svg>',
+    }),
+  );
+  await routeTmdb(page, (r) => {
+    const url = new URL(r.request().url());
+    if (url.pathname.endsWith('/search/multi'))
+      return r.fulfill({
+        json: {
+          results: [
+            {
+              id: 347106,
+              media_type: 'movie',
+              title: 'Greetings from the North',
+              original_title: 'Glada hälsningar från Missångerträsk',
+              original_language: 'sv',
+              release_date: '2015-08-14',
+              poster_path: '/north.jpg',
+              genre_ids: [35],
+              vote_average: 5.6,
+              vote_count: 8,
+              popularity: 1,
+            },
+          ],
+          total_pages: 1,
+        },
+      });
+    return r.fulfill({ json: { results: [], total_pages: 1 } });
+  });
+
+  await page.goto(FIXTURE);
+  for (const query of ['greetings from the north', 'Glada hälsningar']) {
+    await input(page).click();
+    await input(page).fill(query);
+    await expect(
+      active(page).getByRole('link', { name: /Greetings from the North/ }),
+    ).toBeVisible();
+  }
+});
+
 test('search shows atlas’s titles before a slow poster lookup answers', async ({ page }) => {
   await guardNetwork(page);
   await page.route('**/routes', (r) => r.fulfill({ json: {} }));
