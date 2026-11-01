@@ -172,22 +172,36 @@ export function continueItems(
 ): Extract<LibrarySelectionValue, { kind: 'continue' }>['items'] {
   return projector
     .project(library)
-    .map(({ ref, fraction, episode, seconds, playing, at, liveEpisode, liveFraction, by }) => {
-      const device = by && deviceName(devices, by)?.slice(0, 256);
-      return {
-        title: { type: ref.type, id: ref.id },
+    .map(
+      ({
+        ref,
         fraction,
-        ...(episode ? { episode } : {}),
-        ...(seconds !== undefined ? { seconds } : {}),
-        ...(playing !== undefined ? { playing } : {}),
-        ...(at !== undefined ? { updatedAt: at } : {}),
-        ...(liveEpisode ? { liveEpisode } : {}),
-        ...(liveFraction !== undefined ? { liveFraction } : {}),
-        ...(device ? { device } : {}),
-        ...(by ? { deviceId: by } : {}),
-        ...(by && by === self ? { here: true as const } : {}),
-      };
-    });
+        episode,
+        upcoming,
+        seconds,
+        playing,
+        at,
+        liveEpisode,
+        liveFraction,
+        by,
+      }) => {
+        const device = by && deviceName(devices, by)?.slice(0, 256);
+        return {
+          title: { type: ref.type, id: ref.id },
+          fraction,
+          ...(episode ? { episode } : {}),
+          ...(upcoming ? { upcoming } : {}),
+          ...(seconds !== undefined ? { seconds } : {}),
+          ...(playing !== undefined ? { playing } : {}),
+          ...(at !== undefined ? { updatedAt: at } : {}),
+          ...(liveEpisode ? { liveEpisode } : {}),
+          ...(liveFraction !== undefined ? { liveFraction } : {}),
+          ...(device ? { device } : {}),
+          ...(by ? { deviceId: by } : {}),
+          ...(by && by === self ? { here: true as const } : {}),
+        };
+      },
+    );
 }
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {

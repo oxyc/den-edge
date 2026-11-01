@@ -72,7 +72,7 @@ import {
   libraryMetadataShapeDigest,
   libraryMetadataTitle,
 } from './libraryMetadata';
-import { ContinueProjector, titleKey, type Shape } from './library';
+import { continueAiring, ContinueProjector, titleKey, type Shape } from './library';
 import { seenEpisodesFor } from './history';
 import { projectDocument } from './libraryV4';
 import type { HomeLibraryView } from './homeLibraryView';
@@ -162,6 +162,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       observation: Extract<LibraryObservation, { kind: 'title-shape' }>;
     }
   >();
+  /** The followed series' release dates the page last observed: Continue weighs them, and a promotion is told them. */
+  #airing?: Extract<LibraryObservation, { kind: 'airing' }>;
   /** Titles whose view was read from the fact store: told of a change another device made. */
   readonly #titlesServed = new Map<string, TitleRef>();
   #preferFacts: boolean;
@@ -689,6 +691,28 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (observation.kind === 'foreground-ready') {
       this.#foregroundReady = true;
       return { outcome: 'unchanged' as const, affected: [] };
+    }
+    if (observation.kind === 'airing') {
+      this.#airing = structuredClone(observation);
+      if (!this.#factProjector.setAiring(continueAiring(observation)))
+        return { outcome: 'unchanged' as const, affected: [] };
+      // Continue decided from the facts is decided again with the dates. One read whole from the kept views is read
+      // again from the facts, as a refill reads it.
+      if (this.factStore && this.#factHome && this.cached.pieces.continue) {
+        this.cached.pieces.continue = {
+          ...this.cached.pieces.continue,
+          view: factContinue(
+            this.#factHome,
+            this.#factShapes,
+            this.#factProjector,
+            this.#factDevices,
+            this.#self,
+          ),
+        };
+        return { outcome: 'applied' as const, affected: [{ kind: 'continue' as const }] };
+      }
+      if (this.factStore && this.#preferFacts && this.cached.pieces.continue) this.#refill();
+      return { outcome: 'applied' as const, affected: [] };
     }
     if (observation.kind === 'title-shape' && this.documents) {
       const counts = new Map<number, number>();
@@ -1331,6 +1355,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         if (this.#foregroundReady) await authority.observe({ kind: 'foreground-ready' });
         for (const { observation } of this.#titleShapes.values())
           await authority.observe(observation);
+        if (this.#airing) await authority.observe(this.#airing);
         this.#emit({ kind: 'changed', affected: [{ kind: 'all' }] });
         return authority;
       });

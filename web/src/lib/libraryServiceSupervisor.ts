@@ -722,6 +722,8 @@ function failureFrom(error: unknown): LibraryServiceFailure {
 function observationKey(observation: LibraryObservation): string {
   if (observation.kind === 'lifecycle') return 'lifecycle';
   if (observation.kind === 'foreground-ready') return 'foreground-ready';
+  // Each one replaces the last: only the newest is replayed.
+  if (observation.kind === 'airing') return 'airing';
   return `title-shape:${observation.title.type}:${observation.title.id}`;
 }
 

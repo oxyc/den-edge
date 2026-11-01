@@ -8,6 +8,8 @@ import {
   airingMaxAge,
   airingPath,
   comingBackSoon,
+  continueAiringFacts,
+  localDay,
   parseAiring,
   releasedEpisode,
   seriesStatusBadge,
@@ -268,6 +270,51 @@ describe('new episodes', () => {
     ]);
     const list = [other];
     expect(withNewEpisodes(list, [], () => undefined)).toBe(list);
+  });
+
+  it('is no longer waiting once the episode it waited for is new', () => {
+    const waiting = {
+      title: { type: 'tv', id: DEXTER },
+      fraction: 0,
+      episode: { season: 2, episode: 2 },
+      upcoming: '2026-11-06',
+    };
+    expect(
+      withNewEpisodes([waiting], [{ series: DEXTER, season: 2, episode: 2 }], () => undefined),
+    ).toEqual([
+      { title: waiting.title, fraction: 0, episode: { season: 2, episode: 2 }, isNew: true },
+    ]);
+  });
+});
+
+describe('Continue Watching’s release dates', () => {
+  it('hands the policy every dated episode, the viewer’s day and whether the series ended', () => {
+    const facts = continueAiringFacts(new Map([[DEXTER, airing]]), saturday);
+    expect(facts.today).toBe('2026-10-31');
+    expect(facts.series).toHaveLength(1);
+    expect(facts.series[0]).toMatchObject({ title: { type: 'tv', id: DEXTER }, ended: false });
+    expect(facts.series[0]!.episodes).toContainEqual({ season: 2, episode: 2, date: '2026-11-06' });
+    expect(
+      continueAiringFacts(new Map([[DEXTER, { ...airing, status: 'ended' as const }]]), saturday)
+        .series[0]!.ended,
+    ).toBe(true);
+  });
+
+  it('dates a season premiere as its first episode', () => {
+    const premiere: Airing = {
+      source: 'tvmaze',
+      status: 'running',
+      service: null,
+      upcoming: [],
+      seasonPremiere: { season: 3, date: '2026-11-03' },
+    };
+    expect(continueAiringFacts(new Map([[1, premiere]]), saturday).series[0]!.episodes).toEqual([
+      { season: 3, episode: 1, date: '2026-11-03' },
+    ]);
+  });
+
+  it('counts the day where the viewer is', () => {
+    expect(localDay(new Date(2026, 0, 5, 23, 59))).toBe('2026-01-05');
   });
 });
 

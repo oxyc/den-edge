@@ -3,6 +3,7 @@ import { blankTitle, RESUME_FLOOR, WATCHED } from './actions';
 import {
   applyLog,
   applyLogInSlices,
+  continueAiring,
   ContinueProjector,
   ContinueSummaries,
   continueWatching,
@@ -676,5 +677,89 @@ describe("the TV's rows", () => {
   it('shows nothing for an empty library', () => {
     expect(watchlist(emptyLibrary())).toEqual([]);
     expect(continueWatching(emptyLibrary())).toEqual([]);
+  });
+});
+
+/**
+ * Dexter: Resurrection on Saturday 31 October 2026: S2E1, the only aired episode of season 2, finished yesterday; atlas
+ * dates S2E2 Friday 6 November. Another series is part-way through, watched before it.
+ */
+describe('a caught-up series waiting for its next episode', () => {
+  const dexter: Library = {
+    records: [],
+    marks: [mark(7, 2, 1, 1, 2000), mark(8, 1, 3, 0.4, 1000)],
+    flags: new Map(),
+    shapes: new Map([
+      [
+        'tv:7',
+        {
+          counts: new Map([
+            [1, 10],
+            [2, 10],
+          ]),
+          lastAired: { season: 2, episode: 1 },
+        },
+      ],
+      ['tv:8', { counts: new Map([[1, 8]]), lastAired: { season: 1, episode: 8 } }],
+    ]),
+    dismissed: new Map(),
+  };
+  const airing = (date: string, ended = false, today = '2026-10-31') =>
+    continueAiring({
+      today,
+      series: [
+        {
+          title: { type: 'tv', id: 7 },
+          episodes: [
+            { season: 2, episode: 1, date: '2026-10-30' },
+            { season: 2, episode: 2, date },
+          ],
+          ended,
+        },
+      ],
+    });
+  const row = (projector: ContinueProjector) =>
+    projector
+      .project(dexter)
+      .map(({ ref, episode, upcoming }) => ({ id: ref.id, episode, upcoming }));
+
+  it('stays on the row, first by when it was watched, waiting for S2E2', () => {
+    const projector = new ContinueProjector();
+    expect(projector.setAiring(airing('2026-11-06'))).toBe(true);
+    expect(row(projector)).toEqual([
+      { id: 7, episode: { season: 2, episode: 2 }, upcoming: '2026-11-06' },
+      { id: 8, episode: { season: 1, episode: 3 }, upcoming: undefined },
+    ]);
+  });
+
+  it('drops 20 days out, once ended, and with no dates at all', () => {
+    for (const dates of [airing('2026-11-20'), airing('2026-11-06', true)]) {
+      const projector = new ContinueProjector();
+      projector.setAiring(dates);
+      expect(row(projector).map(({ id }) => id)).toEqual([8]);
+    }
+    expect(row(new ContinueProjector()).map(({ id }) => id)).toEqual([8]);
+  });
+
+  it('decides the series again when its dates or the day change, and only then', () => {
+    let decisions = 0;
+    const projector = new ContinueProjector((request) => {
+      decisions++;
+      return syncPolicy(request);
+    });
+    projector.setAiring(airing('2026-11-20'));
+    expect(row(projector).map(({ id }) => id)).toEqual([8]);
+    expect(decisions).toBe(2);
+    expect(projector.setAiring(airing('2026-11-20')), 'the same dates change nothing').toBe(false);
+    expect(projector.setAiring(airing('2026-11-06'))).toBe(true);
+    expect(row(projector)[0]).toMatchObject({ id: 7, upcoming: '2026-11-06' });
+    expect(decisions, 'only the series whose dates changed').toBe(3);
+    // The day it comes out: offered as the next episode, no longer waiting.
+    expect(projector.setAiring(airing('2026-11-06', false, '2026-11-06'))).toBe(true);
+    expect(row(projector)[0]).toEqual({
+      id: 7,
+      episode: { season: 2, episode: 2 },
+      upcoming: undefined,
+    });
   });
 });

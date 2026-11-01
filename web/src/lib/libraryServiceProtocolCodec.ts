@@ -73,6 +73,9 @@ const integer = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
 const positiveInteger = (value: unknown): value is number => integer(value) && value > 0;
 const bool = (value: unknown): value is boolean => typeof value === 'boolean';
+/** A calendar day, `YYYY-MM-DD`. */
+const day = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const optional = <T>(
   value: unknown,
   check: (candidate: unknown) => candidate is T,
@@ -1226,6 +1229,34 @@ function observation(value: unknown): value is LibraryObservation {
       const count = value.seasons.find(({ season }) => season === lastAired.season)?.episodes;
       return count !== undefined && lastAired.episode <= count;
     }
+    case 'airing':
+      return (
+        exact(value, ['kind', 'today', 'series']) &&
+        day(value.today) &&
+        list(
+          value.series,
+          (
+            candidate,
+          ): candidate is Extract<LibraryObservation, { kind: 'airing' }>['series'][number] =>
+            record(candidate) &&
+            exact(candidate, ['title', 'episodes', 'ended']) &&
+            titleRef(candidate.title) &&
+            candidate.title.type === 'tv' &&
+            bool(candidate.ended) &&
+            list(
+              candidate.episodes,
+              (episode): episode is { season: number; episode: number; date: string } =>
+                record(episode) &&
+                exact(episode, ['season', 'episode', 'date']) &&
+                integer(episode.season) &&
+                integer(episode.episode) &&
+                day(episode.date),
+              LIBRARY_SERVICE_WIRE_LIMITS.airingEpisodes,
+            ),
+          LIBRARY_SERVICE_WIRE_LIMITS.airingSeries,
+        ) &&
+        unique(value.series, ({ title }) => String(title.id))
+      );
     case 'lifecycle':
       return (
         exact(value, ['kind', 'visible', 'online', 'playbackActive', 'playerOpen']) &&
@@ -1273,6 +1304,7 @@ function continueItem(value: unknown): value is ContinueItem {
       'title',
       'fraction',
       'episode',
+      'upcoming',
       'seconds',
       'playing',
       'updatedAt',
@@ -1283,6 +1315,8 @@ function continueItem(value: unknown): value is ContinueItem {
       'here',
     ]) &&
     titleRef(value.title) &&
+    optional(value.upcoming, day) &&
+    (value.upcoming === undefined || value.episode !== undefined) &&
     (value.here === undefined || value.here === true) &&
     finite(value.fraction) &&
     value.fraction >= 0 &&
