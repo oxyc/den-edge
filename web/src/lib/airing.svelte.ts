@@ -1,6 +1,7 @@
 import { SvelteMap } from 'svelte/reactivity';
 import type { Airing, AiringSeries } from './airing';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import { CONTENT_SERVICE_WIRE_LIMITS } from './contentServiceProtocol';
 
 /**
  * The page's release dates for the series its viewer follows, as the content worker last answered them (`atlas.airing`).
@@ -19,16 +20,25 @@ export class AiringStore {
     return this.#airings;
   }
 
-  /** Ask for `series`' dates. The worker asks atlas only for those it does not hold fresh; a failure changes nothing. */
+  /**
+   * Ask for `series`' dates. The worker asks atlas only for those it does not hold fresh; a failure changes nothing.
+   * Asked a request's worth at a time: one past the wire's title limit is refused whole, which left a library following
+   * more series than that with no dates at all.
+   */
   async follow(series: readonly AiringSeries[]): Promise<void> {
-    if (!series.length) return;
-    const answer = await this.content
-      .query({ kind: 'atlas.airing', series: [...series] })
-      .catch(() => null);
-    if (answer?.airing.state !== 'ready') return;
-    for (const { tmdb, airing } of answer.airing.value) {
-      const held = this.#airings.get(tmdb);
-      if (!held || JSON.stringify(held) !== JSON.stringify(airing)) this.#airings.set(tmdb, airing);
+    for (let at = 0; at < series.length; at += CONTENT_SERVICE_WIRE_LIMITS.titles) {
+      const answer = await this.content
+        .query({
+          kind: 'atlas.airing',
+          series: series.slice(at, at + CONTENT_SERVICE_WIRE_LIMITS.titles),
+        })
+        .catch(() => null);
+      if (answer?.airing.state !== 'ready') continue;
+      for (const { tmdb, airing } of answer.airing.value) {
+        const held = this.#airings.get(tmdb);
+        if (!held || JSON.stringify(held) !== JSON.stringify(airing))
+          this.#airings.set(tmdb, airing);
+      }
     }
   }
 }

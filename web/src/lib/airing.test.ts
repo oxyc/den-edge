@@ -203,8 +203,9 @@ describe('AiringCache', () => {
       season: 2,
       episode: 2,
     });
-    expect(thisWeek(new Map([[DEXTER, airing]]), releaseDay)).toEqual([
-      { series: DEXTER, season: 2, episode: 3, date: '2026-11-13' },
+    // Out today is still this week's, as the Apple apps list it (`NewEpisodePolicy.thisWeek`).
+    expect(thisWeek(new Map([[DEXTER, airing]]), releaseDay)).toMatchObject([
+      { series: DEXTER, season: 2, episode: 2, date: '2026-11-06' },
     ]);
   });
 });

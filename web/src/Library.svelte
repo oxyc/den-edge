@@ -2534,6 +2534,15 @@
           return title ? [{ title, episode }] : [];
         }),
   );
+  // The two rows name their own series: a followed series need not be on any shelf (most of a large library's are not),
+  // and a card is drawn only for a named one, so they stayed empty where the Apple apps listed them.
+  $effect(() => {
+    if (!active || facet === 'movie') return;
+    const refs = [...comingBackSoon(followedAirings), ...thisWeek(followedAirings)]
+      .map(({ series }) => ({ type: 'tv' as const, id: series }))
+      .filter((ref) => !session.displayTitle(ref) && !session.displayMissing(ref));
+    if (refs.length) void nameLibraryTitles(session, refs).catch(() => {});
+  });
   const watchlistShelf = $derived(savedTitles.filter((title) => !facet || title.type === facet));
   /** Home's library shelves, top to bottom as drawn, and whether each has anything to show. */
   const shelves = $derived([
