@@ -970,7 +970,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           page.head === identity.head &&
           Array.isArray(page.entries) &&
           page.entries.length === 0;
-        if (!unchanged && !(await this.#reconcileFacts(page)))
+        // More than a page behind is no small delta: the whole log reads it, and keeps its views at the head it reaches.
+        // A move leaves its new Owner library that far behind: the views kept here stand at the head before the moved
+        // rows, and a visit that drew them read every moved row again through the facts, alongside the whole log.
+        if (!unchanged && page.more === true) await this.#promote('reconcile:behind');
+        else if (!unchanged && !(await this.#reconcileFacts(page)))
           await this.#promote('reconcile:changed');
         else if (this.#reconnecting && !this.#closed) {
           this.#reconnecting = false;

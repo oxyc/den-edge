@@ -1735,6 +1735,70 @@ it('draws kept views before catching up when facts committed past them on the pr
   }
 });
 
+it('hands a library more than a page behind its kept views to the whole log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const kept = factTitle('watchlist', 10);
+  const before = await seal(keys, kept);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    1,
+    [{ k: before.k, seq: 1, value: before.v, row: kept }],
+    true,
+  );
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.close?.();
+
+  // A move wrote the library's rows through another authority: den-edge is thousands of rows past the kept views.
+  const moved = await seal(keys, factTitle('watched', 20));
+  const fetchImpl = vi.fn<typeof fetch>(
+    async () =>
+      new Response(
+        JSON.stringify({
+          generation: 'generation-a',
+          head: 6_133,
+          more: true,
+          entries: [{ k: moved.k, seq: 2, v: moved.v }],
+        }),
+        { status: 200 },
+      ),
+  );
+  const openFull = vi.fn(async () => fullAuthority());
+  const commitBatch = vi.spyOn(LibraryFactStore.prototype, 'commitBatch');
+  try {
+    const reopened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    expect(reopened?.views).toBe('saved');
+    await reopened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+    // One page was asked for, and none of it was read into the facts here.
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(commitBatch).not.toHaveBeenCalled();
+    await reopened!.authority.close?.();
+  } finally {
+    commitBatch.mockRestore();
+  }
+});
+
 it('reads Continue again from facts at the same head when the kept one is past its reconsider time', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
