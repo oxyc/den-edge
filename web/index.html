@@ -227,6 +227,13 @@
         }
       }
 
+      /* The phone billboard's height (Billboard.svelte), so the real one replaces this without a shift. */
+      @media (width < 600px) {
+        [data-den-early-billboard] {
+          height: 430px;
+        }
+      }
+
       @media (width >= 1000px) {
         [data-den-early-billboard] {
           height: max(clamp(420px, 76vh, 860px), min(56.25vw, 94vh));

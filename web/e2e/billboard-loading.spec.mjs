@@ -118,76 +118,80 @@ test('the early personalized shell image is adopted without another transfer', a
   expect(requests).toBe(1);
 });
 
-test('adopting the early personalized image preserves its painted geometry', async ({
-  browser,
-}) => {
-  const context = await browser.newContext({
-    // The retained-copy trace shifted at this content width when live controls occupied another row.
-    viewport: { width: 1092, height: 800 },
-    deviceScaleFactor: 2,
-    reducedMotion: 'no-preference',
-  });
-  const page = await context.newPage();
-  try {
-    await guardNetwork(page);
-    await page.route('https://image.tmdb.org/t/p/w1280/early.jpg', (route) =>
-      route.fulfill({
-        headers: { 'cache-control': 'public, max-age=600' },
-        contentType: 'image/svg+xml',
-        body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
-      }),
-    );
-    await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
-    await page.goto(`${E2E_ORIGIN}/test/billboard.html?preload=1&wait-for-mount=1`, {
-      waitUntil: 'commit',
+// 1092: the retained-copy trace shifted at this content width when live controls occupied another row.
+// 393: a phone, whose billboard is a fixed height rather than a share of the window.
+for (const width of [1092, 393]) {
+  test(`adopting the early personalized image preserves its painted geometry at ${width}px`, async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      viewport: { width, height: 800 },
+      deviceScaleFactor: 2,
+      reducedMotion: 'no-preference',
     });
-    // Home is scrollable once its rows mount. Give the retained fixture that same scrollbar before comparing
-    // viewport-unit geometry, so this isolates the shell/live handoff rather than scrollbar admission.
-    await page.evaluate(() => (document.body.style.minHeight = '1800px'));
-    const shellImage = page.locator('[data-den-early-backdrop][data-path]');
-    await expect(shellImage).toBeVisible();
-    const before = await shellImage.boundingBox();
-    const earlyTitle = await page.locator('[data-den-early-title]').boundingBox();
-    const earlyFacts = await page.locator('[data-den-early-facts]').boundingBox();
-    const earlyActions = await page.locator('[data-den-early-actions]').boundingBox();
-    expect(before).not.toBeNull();
-    expect(earlyTitle).not.toBeNull();
-    expect(earlyFacts).not.toBeNull();
-    expect(earlyActions).not.toBeNull();
+    const page = await context.newPage();
+    try {
+      await guardNetwork(page);
+      await page.route('https://image.tmdb.org/t/p/w1280/early.jpg', (route) =>
+        route.fulfill({
+          headers: { 'cache-control': 'public, max-age=600' },
+          contentType: 'image/svg+xml',
+          body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+        }),
+      );
+      await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
+      await page.goto(`${E2E_ORIGIN}/test/billboard.html?preload=1&wait-for-mount=1`, {
+        waitUntil: 'commit',
+      });
+      // Home is scrollable once its rows mount. Give the retained fixture that same scrollbar before comparing
+      // viewport-unit geometry, so this isolates the shell/live handoff rather than scrollbar admission.
+      await page.evaluate(() => (document.body.style.minHeight = '1800px'));
+      const shellImage = page.locator('[data-den-early-backdrop][data-path]');
+      await expect(shellImage).toBeVisible();
+      const before = await shellImage.boundingBox();
+      const earlyTitle = await page.locator('[data-den-early-title]').boundingBox();
+      const earlyFacts = await page.locator('[data-den-early-facts]').boundingBox();
+      const earlyActions = await page.locator('[data-den-early-actions]').boundingBox();
+      expect(before).not.toBeNull();
+      expect(earlyTitle).not.toBeNull();
+      expect(earlyFacts).not.toBeNull();
+      // A phone's early copy draws no action buttons; the live ones then fill the reserved text block.
+      if (width > 759) expect(earlyActions).not.toBeNull();
 
-    await page.evaluate(() => window.dispatchEvent(new Event('fixture:mount')));
-    const adopted = page.locator('.billboard img.backdrop.lit');
-    await expect(adopted).toHaveAttribute('data-fixture-shell-node', 'true');
-    const mounted = await adopted.boundingBox();
-    expect(mounted).not.toBeNull();
-    for (const edge of ['x', 'y', 'width', 'height']) {
-      expect(Math.abs(mounted[edge] - before[edge]), `adoption ${edge}`).toBeLessThan(8);
-    }
-    await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
-    await expect(page.locator('.slide')).toHaveCount(2);
-    await expect(page.locator('[data-den-early-copy]')).toHaveCount(0);
-    await page.evaluate(
-      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-    );
-    const after = await adopted.boundingBox();
-    expect(after).not.toBeNull();
-    for (const edge of ['x', 'y', 'width', 'height']) {
-      expect(Math.abs(after[edge] - before[edge]), edge).toBeLessThan(8);
-    }
-    for (const [early, live] of [
-      [earlyTitle, await page.locator('.slide').first().locator('h2').boundingBox()],
-      [earlyFacts, await page.locator('.slide').first().locator('.facts').boundingBox()],
-      [earlyActions, await page.locator('.slide').first().locator('.actions').boundingBox()],
-    ]) {
-      expect(live).not.toBeNull();
+      await page.evaluate(() => window.dispatchEvent(new Event('fixture:mount')));
+      const adopted = page.locator('.billboard img.backdrop.lit');
+      await expect(adopted).toHaveAttribute('data-fixture-shell-node', 'true');
+      const mounted = await adopted.boundingBox();
+      expect(mounted).not.toBeNull();
       for (const edge of ['x', 'y', 'width', 'height']) {
-        expect(Math.abs(live[edge] - early[edge]), edge).toBeLessThan(8);
+        expect(Math.abs(mounted[edge] - before[edge]), `adoption ${edge}`).toBeLessThan(8);
       }
+      await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
+      await expect(page.locator('.slide')).toHaveCount(2);
+      await expect(page.locator('[data-den-early-copy]')).toHaveCount(0);
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+      const after = await adopted.boundingBox();
+      expect(after).not.toBeNull();
+      for (const edge of ['x', 'y', 'width', 'height']) {
+        expect(Math.abs(after[edge] - before[edge]), edge).toBeLessThan(8);
+      }
+      for (const [early, live] of [
+        [earlyTitle, await page.locator('.slide').first().locator('h2').boundingBox()],
+        [earlyFacts, await page.locator('.slide').first().locator('.facts').boundingBox()],
+        [earlyActions, await page.locator('.slide').first().locator('.actions').boundingBox()],
+      ].filter(([early]) => early)) {
+        expect(live).not.toBeNull();
+        for (const edge of ['x', 'y', 'width', 'height']) {
+          expect(Math.abs(live[edge] - early[edge]), edge).toBeLessThan(8);
+        }
+      }
+    } finally {
+      await context.close();
     }
-  } finally {
-    await context.close();
-  }
-});
+  });
+}
 
 test('the responsive hero preload and image choose one smaller mobile candidate', async ({
   page,
