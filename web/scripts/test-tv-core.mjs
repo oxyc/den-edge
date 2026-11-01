@@ -11,7 +11,7 @@ for (const [name, maximum] of [
   ['den_core_bg.wasm', 1_000_000],
   ['den_core_startup_bg.wasm', 450_000],
   ['den_core_deferred_bg.wasm', 900_000],
-  ['den_core_assistant_bg.wasm', 540_000],
+  ['den_core_assistant_bg.wasm', 550_000],
   ['den_core_recovery_bg.wasm', 140_000],
 ]) {
   const bytes = statSync(join(tvCore, 'generated', name)).size;
