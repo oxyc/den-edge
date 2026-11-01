@@ -1219,6 +1219,14 @@
     }
   }
 
+  /* A phone gets the iPhone app's billboard height (MobileHomeGeometry.billboardHeight), so Continue Watching
+     shows beneath it without a scroll; three quarters of a phone screen hid every row. */
+  @media (width < 600px) {
+    .billboard {
+      min-height: var(--stable-hero-height, 430px);
+    }
+  }
+
   /* On a wide screen a height capped in pixels turns the billboard into a letterbox slot — 3:1 and wider —
      while what it frames is 16:9. Past this width it therefore never falls below nine sixteenths of the
      width, bounded by the window so the rows beneath it still show.
