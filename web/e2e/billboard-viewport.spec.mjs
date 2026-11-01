@@ -8,8 +8,11 @@ for (const touch of [true, false])
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     });
     try {
+      // A phone-width billboard has a fixed height, so the desktop case resizes a window wide enough to
+      // take its height from the viewport.
+      const width = touch ? 390 : 700;
       const page = await browser.newPage({
-        viewport: { width: 390, height: 800 },
+        viewport: { width, height: 800 },
         hasTouch: touch,
       });
       await guardNetwork(page);
@@ -17,7 +20,8 @@ for (const touch of [true, false])
       const hero = page.locator('.billboard');
       await expect(hero).toBeVisible();
       const before = await hero.boundingBox();
-      expect(before).toMatchObject({ x: 0, width: 390 });
+      expect(before).toMatchObject({ x: 0, width });
+      if (touch) expect(before.height).toBe(430);
       expect(
         await page.evaluate(() =>
           getComputedStyle(document.documentElement).getPropertyValue('--page-max').trim(),
@@ -36,7 +40,7 @@ for (const touch of [true, false])
             addEventListener('resize', () => requestAnimationFrame(resolve), { once: true }),
           ),
       );
-      await page.setViewportSize({ width: 390, height: 950 });
+      await page.setViewportSize({ width, height: 950 });
       await resized;
       const after = await hero.boundingBox();
       if (touch) {
