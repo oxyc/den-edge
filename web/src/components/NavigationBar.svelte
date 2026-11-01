@@ -1055,31 +1055,6 @@
     }
   }
 
-  /* Phone viewports put the compact bar within thumb reach. The 600px boundary deliberately excludes even the
-     744px iPad mini; tablets keep the compact economies above, but retain their bar and search history at the top.
-     Dynamic viewport height lifts the phone bar with the software keyboard instead of hiding the field under it. */
-  @media (width <= 600px) {
-    .bar-anchor {
-      top: calc(100vh - 46px - max(12px, env(safe-area-inset-bottom)));
-      top: calc(100dvh - 46px - max(12px, env(safe-area-inset-bottom)));
-    }
-
-    .recent {
-      top: auto;
-      bottom: calc(100% + 12px);
-      max-height: calc(
-        100dvh - 46px - max(12px, env(safe-area-inset-top)) -
-          max(12px, env(safe-area-inset-bottom)) - 24px
-      );
-      overflow-y: auto;
-    }
-
-    .opening-label {
-      top: auto;
-      bottom: calc(100% + 8px);
-    }
-  }
-
   @media (width <= 359px) {
     .bar {
       gap: 6px;
