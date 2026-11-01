@@ -134,7 +134,7 @@ const HEARTH = `${E2E_ORIGIN}/den/hearthcfg/manifest.json`;
  * A library kept in this browser that has watched season 1, with the combined Den addon installed: its list for
  * S2E1 is empty until a fresh search (`?fresh=1`) finds a release. Every search for S2E1 is kept on the result.
  */
-async function followedLibrary(page, { started = false } = {}) {
+async function followedLibrary(page, { started = false, caughtUp = false } = {}) {
   const searches = [];
   await routeSeries(page);
   await page.route(`${E2E_ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
@@ -176,7 +176,7 @@ async function followedLibrary(page, { started = false } = {}) {
   await page.goto(`${E2E_ORIGIN}/test/seed-library.html`);
   await page.waitForFunction(() => typeof window.denSeed === 'function');
   await page.evaluate(
-    ({ install, id, started }) => {
+    ({ install, id, started, caughtUp }) => {
       const at = [Date.now() - 86_400_000, 0, 'aaaaaaaaaaaaaaaa'];
       const progress = (value) => ({
         progress: { value, at, viewing: 0 },
@@ -186,7 +186,7 @@ async function followedLibrary(page, { started = false } = {}) {
       });
       const watched = progress(1);
       return window.denSeed([
-        ...(started
+        ...(started || caughtUp
           ? [
               {
                 format: 4,
@@ -194,7 +194,7 @@ async function followedLibrary(page, { started = false } = {}) {
                 title: { type: 'tv', id },
                 season: 2,
                 seasonReset: null,
-                episodes: { 1: progress(0.3) },
+                episodes: { 1: progress(caughtUp ? 1 : 0.3) },
               },
             ]
           : []),
@@ -221,10 +221,29 @@ async function followedLibrary(page, { started = false } = {}) {
         },
       ]);
     },
-    { install: HEARTH, id: ID, started },
+    { install: HEARTH, id: ID, started, caughtUp },
   );
   return searches;
 }
+
+test('a caught-up series stays in Continue Watching while its next episode is due', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(SATURDAY);
+  // S2E1, the only episode of season 2 out, was watched yesterday; atlas dates S2E2 Friday 6 Nov.
+  await followedLibrary(page, { caughtUp: true });
+  await page.goto(`${E2E_ORIGIN}/`);
+
+  const shelf = page.locator('section, div').filter({
+    has: page.getByRole('heading', { name: 'Continue Watching' }),
+  });
+  const card = shelf.locator('.poster-card, a').filter({ hasText: 'Out Fri, Nov 6' }).first();
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).not.toContainText('New');
+  // Nothing of it is out to play: the card opens the series page.
+  await expect(shelf.locator(`a[href="/tv/${ID}-dexter-resurrection"]`).first()).toBeVisible();
+  await expect(page.locator('.billboard')).not.toContainText('New episode');
+});
 
 test('a followed series’ new episode leads the billboard and Continue Watching, marked new', async ({
   page,

@@ -178,12 +178,27 @@ type EpisodeAction =
  * dismissed series was once put back on the row. `episode` is null exactly when the action is `none`.
  */
 type ContinueAnswer = {
-  action: 'resume' | 'next' | 'start' | 'none';
+  action: 'resume' | 'next' | 'start' | 'upcoming' | 'none';
   code: string;
   episode: { season: number; episode: number } | null;
   fraction: number;
+  /** For `upcoming`: the calendar day (`YYYY-MM-DD`) the episode comes out. */
+  date?: string;
   reason: string;
 };
+
+/**
+ * When the followed series' episodes come out, as `continue_entry` weighs them for a series caught up to its newest
+ * aired episode: den-atlas's dated episodes by series key (`tv:1399`), and the viewer's calendar day they are
+ * counted from.
+ */
+export interface ContinueAiring {
+  today: string;
+  series: ReadonlyMap<
+    string,
+    { episodes: ReadonlyArray<{ season: number; episode: number; date: string }>; ended: boolean }
+  >;
+}
 
 export interface ContinueEntry {
   title: Title;
@@ -207,6 +222,8 @@ export interface ContinueEntry {
   here?: true;
   /** The series has a new episode out (`withNewEpisodes`): drawn first, with a "New" badge. */
   isNew?: true;
+  /** Caught up, waiting for `episode`: the calendar day (`YYYY-MM-DD`) it comes out. */
+  upcoming?: string;
 }
 
 /** A Continue Watching decision before the title's late TMDB display fields are laid over it. */
@@ -219,6 +236,23 @@ export interface ContinueCandidate extends Omit<
   by?: string;
   /** A started series takes its display from its latest mark; a bare flag and a film take it from the record. */
   display: 'mark' | 'record';
+}
+
+/** An `airing` observation as `ContinueProjector.setAiring` takes it. */
+export function continueAiring(observed: {
+  today: string;
+  series: ReadonlyArray<{
+    title: { type: string; id: number };
+    episodes: ReadonlyArray<{ season: number; episode: number; date: string }>;
+    ended: boolean;
+  }>;
+}): ContinueAiring {
+  return {
+    today: observed.today,
+    series: new Map(
+      observed.series.map(({ title, episodes, ended }) => [titleKey(title), { episodes, ended }]),
+    ),
+  };
 }
 
 export function emptyLibrary(): Library {
@@ -644,10 +678,33 @@ export class ContinueProjector {
   /** Each entry's time in the row's newest-first order: a series' latest mark, a film's resume. */
   private activity = new Map<string, number>();
   private candidates: ContinueCandidate[] = [];
+  /** The release dates `continue_entry` weighs (`setAiring`), and the series whose dates changed since last asked. */
+  private airing?: ContinueAiring;
+  private airingChanged = new Set<string>();
 
   constructor(
     private readonly decide: ContinueDecision = (request) => syncPolicy<ContinueAnswer>(request),
   ) {}
+
+  /**
+   * The followed series' release dates from now on. Returns whether any series' dates, or the day they are counted
+   * from, changed: those series are decided again on the next projection.
+   */
+  setAiring(airing: ContinueAiring): boolean {
+    const previous = this.airing;
+    const keys = new Set([...airing.series.keys(), ...(previous?.series.keys() ?? [])]);
+    for (const key of keys) {
+      const before = previous?.series.get(key);
+      const after = airing.series.get(key);
+      if (
+        (before || after) &&
+        (previous?.today !== airing.today || JSON.stringify(before) !== JSON.stringify(after))
+      )
+        this.airingChanged.add(key);
+    }
+    this.airing = airing;
+    return this.airingChanged.size > 0;
+  }
 
   project(library: Library): ContinueCandidate[] {
     const previous = this.library;
@@ -657,8 +714,13 @@ export class ContinueProjector {
       previous.marks === library.marks &&
       previous.flags === library.flags &&
       previous.dismissed === library.dismissed
-    )
-      return this.projectKnownShapeChanges(library, changedShapes(this.shapes, library.shapes));
+    ) {
+      const changes = changedShapes(this.shapes, library.shapes);
+      for (const key of this.airingChanged) changes.add(key);
+      this.airingChanged.clear();
+      return this.projectKnownShapeChanges(library, changes);
+    }
+    this.airingChanged.clear();
 
     const live = new Set<string>();
     const decision = (key: string, request: Record<string, unknown>): ContinueAnswer => {
@@ -670,7 +732,7 @@ export class ContinueProjector {
       this.decisions.set(key, { input, answer });
       return answer;
     };
-    const candidates = continueCandidates(library, decision);
+    const candidates = continueCandidates(library, decision, this.airing);
     for (const key of this.decisions.keys()) if (!live.has(key)) this.decisions.delete(key);
     this.rememberProjection(library, candidates);
     return candidates;
@@ -692,7 +754,12 @@ export class ContinueProjector {
       previous.dismissed !== library.dismissed
     )
       return this.project(library);
-    const changes = new Set([...changed, ...changedShapes(this.shapes, library.shapes)]);
+    const changes = new Set([
+      ...changed,
+      ...changedShapes(this.shapes, library.shapes),
+      ...this.airingChanged,
+    ]);
+    this.airingChanged.clear();
     return this.projectKnownShapeChanges(library, changes);
   }
 
@@ -716,14 +783,18 @@ export class ContinueProjector {
         shapes: current ? new Map([[key, current]]) : new Map(),
         dismissed: dismissed === undefined ? new Map() : new Map([[key, dismissed]]),
       };
-      const candidate = continueCandidates(one, (candidateKey, request) => {
-        const input = JSON.stringify(request);
-        const known = this.decisions.get(candidateKey);
-        if (known?.input === input) return known.answer;
-        const answer = this.decide(request);
-        this.decisions.set(candidateKey, { input, answer });
-        return answer;
-      })[0];
+      const candidate = continueCandidates(
+        one,
+        (candidateKey, request) => {
+          const input = JSON.stringify(request);
+          const known = this.decisions.get(candidateKey);
+          if (known?.input === input) return known.answer;
+          const answer = this.decide(request);
+          this.decisions.set(candidateKey, { input, answer });
+          return answer;
+        },
+        this.airing,
+      )[0];
       if (candidate) this.seriesCandidates.set(key, candidate);
       else this.seriesCandidates.delete(key);
     }
@@ -825,6 +896,7 @@ function changedShapes(
 function continueCandidates(
   library: Library,
   decide: (key: string, request: Record<string, unknown>) => ContinueAnswer,
+  airing?: ContinueAiring,
 ): ContinueCandidate[] {
   const dismissedSince = (key: string, activity: number) =>
     (library.dismissed.get(key) ?? -Infinity) >= activity;
@@ -858,6 +930,7 @@ function continueCandidates(
     const ref = mark ? { type: mark.type as MediaType, id: mark.id } : records.get(key)?.title;
     if (!ref || (ref.type !== 'movie' && ref.type !== 'tv')) continue;
     const shape = library.shapes.get(key);
+    const dated = airing?.series.get(key);
     // Branch on `code`, never on `reason`: matching the prose swallowed "dismissed" once and put a dismissed
     // series back on the row.
     const answer = decide(key, {
@@ -879,6 +952,9 @@ function continueCandidates(
       last_aired: shape?.lastAired ?? null,
       dismissed_at: library.dismissed.get(key) ?? null,
       title_watched: watchedTitles.has(key),
+      ...(dated && airing
+        ? { airing: dated.episodes, today: airing.today, ended: dated.ended }
+        : {}),
     });
     if (answer.action === 'none' || !answer.episode || seen.has(key)) continue;
     seen.add(key);
@@ -892,6 +968,7 @@ function continueCandidates(
       display: mark ? 'mark' : 'record',
       fraction: answer.fraction,
       episode: answer.episode,
+      ...(answer.action === 'upcoming' && answer.date ? { upcoming: answer.date } : {}),
       ...(positioned
         ? {
             seconds: mark.seconds,

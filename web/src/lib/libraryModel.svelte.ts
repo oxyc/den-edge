@@ -1150,6 +1150,12 @@ export class LibraryModel {
     });
   }
 
+  /** The followed series' release dates, for Continue Watching's caught-up series (`airing` observation). */
+  observeAiring(airing: Omit<Observation<'airing'>, 'kind'>): Promise<LibraryVersion> {
+    this.#assertOpen();
+    return this.service.observe({ kind: 'airing', ...airing });
+  }
+
   observeLifecycle(lifecycle: Omit<Observation<'lifecycle'>, 'kind'>): Promise<LibraryVersion> {
     this.#assertOpen();
     return this.service.observe({ kind: 'lifecycle', ...lifecycle });

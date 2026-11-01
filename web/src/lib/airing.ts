@@ -359,6 +359,7 @@ export function withNewEpisodes<
     fraction: number;
     episode?: { season: number; episode: number };
     isNew?: true;
+    upcoming?: string;
   },
 >(
   entries: readonly E[],
@@ -380,12 +381,46 @@ export function withNewEpisodes<
       : make(one);
     if (!entry) continue;
     taken.add(one.series);
-    lead.push({ ...entry, isNew: true });
+    // An entry waiting for an episode is not waiting once one is out.
+    const { upcoming: _waiting, ...out } = entry;
+    lead.push({ ...out, isNew: true } as E);
   }
   return [
     ...lead,
     ...entries.filter((entry) => !(entry.title.type === 'tv' && taken.has(entry.title.id))),
   ];
+}
+
+/** `now`'s calendar day where the viewer is, `YYYY-MM-DD`. */
+export function localDay(now = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
+ * The followed series' release dates as Continue Watching's policy weighs them (den-core `continue_entry`): every
+ * episode atlas dates, a season premiere as that season's first episode, whether the series ended, and the viewer's
+ * calendar day. Which of them keeps a caught-up series on the row is the policy's to say.
+ */
+export function continueAiringFacts(airings: ReadonlyMap<number, Airing>, now = new Date()) {
+  return {
+    today: localDay(now),
+    series: [...airings].map(([id, airing]) => {
+      const episodes = dated(airing).map(({ season, episode, date }) => ({
+        season,
+        episode,
+        date,
+      }));
+      const premiere = airing.seasonPremiere;
+      if (premiere && !episodes.some((one) => one.season === premiere.season && one.episode === 1))
+        episodes.push({ season: premiere.season, episode: 1, date: premiere.date });
+      return {
+        title: { type: 'tv' as const, id },
+        episodes,
+        ended: airing.status === 'ended',
+      };
+    }),
+  };
 }
 
 /** Followed series whose next season starts within this many days ("Coming back soon"). */

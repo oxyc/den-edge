@@ -118,6 +118,7 @@
     airedThrough,
     airingEpisode,
     comingBackSoon,
+    continueAiringFacts,
     NewEpisodes,
     outDay,
     releasedEpisode,
@@ -686,6 +687,7 @@
           title,
           fraction: entry.fraction,
           ...(entry.episode ? { episode: entry.episode } : {}),
+          ...(entry.upcoming ? { upcoming: entry.upcoming } : {}),
           ...(entry.seconds === undefined ? {} : { seconds: entry.seconds }),
           ...(entry.playing === undefined ? {} : { playing: entry.playing }),
           ...(entry.updatedAt === undefined ? {} : { at: entry.updatedAt }),
@@ -851,8 +853,14 @@
       ? { title, fraction: 0, episode: { season: released.season, episode: released.episode } }
       : undefined;
   };
+  /**
+   * The resume points playback and title actions act on. A series waiting for an episode not out yet has none: it is
+   * on the shelf (`continueShelfEntries`), captioned with the day, and opens its page.
+   */
   const continueEntries = $derived(
-    withNewEpisodes(continuePresentation.entries, newEpisodeList, newEntry),
+    withNewEpisodes(continuePresentation.entries, newEpisodeList, newEntry).filter(
+      (entry) => !entry.upcoming,
+    ),
   );
   const continueShelfEntries = $derived(
     withNewEpisodes(continuePresentation.shelf, newEpisodeList, newEntry),
@@ -2499,6 +2507,15 @@
     }
     return map;
   });
+  // The library decides Continue Watching: a caught-up series whose next episode these dates put within its window
+  // stays on the row. Sent again on each tick, so a new day is counted from.
+  $effect(() => {
+    void airingTick;
+    const library = model;
+    const facts = continueAiringFacts(followedAirings);
+    if (!library || !active) return;
+    void library.observeAiring(facts).catch(() => {});
+  });
   /** Followed series whose next season starts within a month, soonest first. */
   const comingBack = $derived(
     facet === 'movie'
@@ -2530,6 +2547,11 @@
   const shelfMounted = (shelf: Shelf) => shelvesReady && (lowerShelvesReady || shelf === topShelf);
 
   function caption(entry: ContinueEntry): string | undefined {
+    // A caught-up series waiting for its next episode says when that is out.
+    if (entry.upcoming)
+      return i18n.format('episode.out', 'Out {date}', {
+        date: outDay(entry.upcoming, i18n.language),
+      });
     // Otherwise the card's own year line.
     return entry.episode ? `S${entry.episode.season} · E${entry.episode.episode}` : undefined;
   }

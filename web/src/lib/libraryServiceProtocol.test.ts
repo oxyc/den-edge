@@ -980,6 +980,30 @@ describe('library service client protocol', () => {
       ),
     ).toMatchObject({ ok: false, error: { code: 'invalid-request' } });
   });
+
+  it('accepts the followed series’ release dates as calendar days, once per series', () => {
+    const observe = (today: unknown, series: unknown[]) =>
+      decodeLibraryServiceClientMessage({
+        type: 'observe',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'request-airing',
+        observation: { kind: 'airing', today, series },
+      });
+    const dexter = {
+      title: { type: 'tv', id: 259909 },
+      episodes: [{ season: 2, episode: 2, date: '2026-11-06' }],
+      ended: false,
+    };
+    expect(observe('2026-10-31', [dexter])).toMatchObject({ ok: true });
+    expect(observe('2026-10-31T12:00', [dexter])).toMatchObject({ ok: false });
+    expect(observe('2026-10-31', [dexter, dexter])).toMatchObject({ ok: false });
+    expect(observe('2026-10-31', [{ ...dexter, title: { type: 'movie', id: 1 } }])).toMatchObject({
+      ok: false,
+    });
+    expect(
+      observe('2026-10-31', [{ ...dexter, episodes: [{ season: 2, episode: 2, date: 'Fri' }] }]),
+    ).toMatchObject({ ok: false });
+  });
 });
 
 describe('library service server protocol', () => {

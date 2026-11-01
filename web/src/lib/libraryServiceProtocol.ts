@@ -5,8 +5,11 @@
  * implementation that projects them are private to the service.
  */
 
-/** Version 10 makes History a revision-bound, materialized keyset page instead of one whole-library reply. */
-export const LIBRARY_SERVICE_PROTOCOL = 10 as const;
+/**
+ * Version 10 makes History a revision-bound, materialized keyset page instead of one whole-library reply. Version 11
+ * adds the `airing` observation and Continue Watching's `upcoming` day.
+ */
+export const LIBRARY_SERVICE_PROTOCOL = 11 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -15,6 +18,8 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   presenceTitles: 512,
   shapeSeasons: 256,
   seasonEpisodes: 2_048,
+  airingSeries: 4_096,
+  airingEpisodes: 128,
   downloadSources: 512,
   retainedTitles: 64,
   routeServices: 64,
@@ -390,6 +395,8 @@ export interface ContinueItem {
   title: TitleRef;
   fraction: number;
   episode?: { season: number; episode: number };
+  /** A caught-up series waiting for `episode`: the calendar day (`YYYY-MM-DD`) it comes out. */
+  upcoming?: string;
   seconds?: number;
   /** Explicit producer state at `updatedAt`; absent on positions from older clients. */
   playing?: boolean;
@@ -1063,6 +1070,19 @@ export type LibraryObservation =
       title: TitleRef & { type: 'tv' };
       seasons: Array<{ season: number; episodes: number }>;
       lastAired?: { season: number; episode: number };
+    }
+  /**
+   * The followed series' release dates (den-atlas's airing answers), replacing any sent before, and the viewer's
+   * calendar day: Continue Watching keeps a caught-up series whose next episode comes out soon (`continue_entry`).
+   */
+  | {
+      kind: 'airing';
+      today: string;
+      series: Array<{
+        title: TitleRef & { type: 'tv' };
+        episodes: Array<{ season: number; episode: number; date: string }>;
+        ended: boolean;
+      }>;
     }
   | {
       kind: 'lifecycle';

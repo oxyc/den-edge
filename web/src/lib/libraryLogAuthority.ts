@@ -46,6 +46,7 @@ import {
 import { FinishedLibraryViewWriter } from './finishedLibraryViewWriter';
 import { validProfilePreferenceValues } from './profilePreferenceSchema';
 import {
+  continueAiring,
   ContinueProjector,
   isAired,
   titleKey,
@@ -1360,6 +1361,10 @@ export class LibraryLogAuthority {
   async observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult> {
     if (observation.kind === 'lifecycle' || observation.kind === 'foreground-ready')
       return { outcome: 'unchanged', affected: [] };
+    if (observation.kind === 'airing')
+      return this.#continueProjector.setAiring(continueAiring(observation))
+        ? { outcome: 'applied', affected: [{ kind: 'continue' }] }
+        : { outcome: 'unchanged', affected: [] };
     const counts = new Map<number, number>();
     for (const { season, episodes } of observation.seasons) {
       if (season < 0 || episodes < 0)
