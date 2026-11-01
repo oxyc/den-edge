@@ -122,5 +122,8 @@ if (process.argv.includes('--capture')) {
   // their compressed size separately so adding copy can never disguise growth in application code, while the
   // unchanged initial-graph ceiling above remains the English startup contract.
   if (current.translationGzip > 51200) throw new Error('Lazy translation catalog budget exceeded');
-  if (coreTotalDelta > 60416) throw new Error('Browser total JS/CSS budget exceeded');
+  // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
+  // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
+  // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
+  if (coreTotalDelta > 61440) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -26,6 +26,17 @@
     title: 'Continuing title',
     posterUrl: 'https://images.metahub.space/poster/medium/tt50/img',
   };
+  /** Familjen Andersson: on the owner's Watchlist, and every stream list for it is empty. */
+  const series: Title[] = [
+    {
+      type: 'tv',
+      id: 233351,
+      title: 'Familjen Andersson',
+      releaseDate: '2024-01-05',
+      posterPath: '/andersson.jpg',
+    },
+    { type: 'tv', id: 1399, title: 'Playable series', releaseDate: '2011-04-17' },
+  ];
   const services = createWorkerServiceSession();
   const content = services.content;
   setContentServiceContext(content);
@@ -59,6 +70,11 @@
   </PosterRow>
   <PosterRow heading="Continue Watching">
     <PosterCard title={continuing} stillPath="/landscape.jpg" landscape />
+  </PosterRow>
+  <PosterRow heading="Series">
+    {#each series as title (title.id)}
+      <PosterCard {title} />
+    {/each}
   </PosterRow>
   <div style="height:4000px"></div>
   <PosterRow heading="Far below">

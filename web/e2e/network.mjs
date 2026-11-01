@@ -85,6 +85,13 @@ export async function guardNetwork(target, origin = E2E_ORIGIN) {
         headers: { 'cache-control': 'public, max-age=21600' },
         json: { error: 'not_found' },
       });
+    // A series poster's fade looks up the series' IMDb id and asks scout's stream list for one episode
+    // (`availability.svelte.ts`). Unless a spec answers, a fixture series has neither, and nothing fades.
+    const seriesProbe =
+      /^\/tmdb\/3\/tv\/\d+\/external_ids$/.test(url.pathname) ||
+      /\/stream\/series\/[^/]+\.json$/.test(url.pathname);
+    if (url.origin === origin && seriesProbe)
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
     // A library's recovery codes are checked at launch and when Settings opens (`recovery.ts`): none, unless a spec
     // says otherwise.
     if (url.origin === origin && url.pathname === '/recovery')

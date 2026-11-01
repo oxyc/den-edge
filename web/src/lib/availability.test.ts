@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Availability, KEPT_MS, RETRY_MS, UNAVAILABLE_MS } from './availability.svelte';
+import {
+  Availability,
+  KEPT_MS,
+  RETRY_MS,
+  UNAVAILABLE_MS,
+  listVerdict,
+  seriesAvailabilityEpisode,
+} from './availability.svelte';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 
@@ -34,7 +41,7 @@ describe('Availability', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('fades what scout says has nothing, asks again about what it was still checking, and skips series', async () => {
+  it('fades what scout says has nothing, asks again about what it was still checking, and keeps series out of the batch', async () => {
     let second = 'unknown';
     const { calls, fetchImpl } = fake(() => ({
       tt0000001: 'unavailable',
@@ -319,5 +326,165 @@ describe('Availability', () => {
       vi.unstubAllGlobals();
     }
     expect(sent).toEqual(['lib:tok']);
+  });
+});
+
+/** The vectors DenKit's `SeriesAvailabilityTests` holds the TV and iOS to: the same rule on every client. */
+describe('seriesAvailabilityEpisode', () => {
+  const now = new Date(2026, 4, 28, 12);
+  const day = (offset: number) => {
+    const d = new Date(now);
+    d.setDate(d.getDate() + offset);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  const ask = (input: Parameters<typeof seriesAvailabilityEpisode>[0]) =>
+    seriesAvailabilityEpisode(input, now);
+
+  it('takes a new episode, then the Continue Watching entry, then S1E1', () => {
+    const newEpisode = { season: 3, episode: 1 };
+    const continuing = { season: 2, episode: 4, out: true };
+    expect(ask({ newEpisode, continuing, firstAired: day(-900) })).toEqual(newEpisode);
+    expect(ask({ continuing, firstAired: day(-900) })).toEqual({ season: 2, episode: 4 });
+    expect(ask({ firstAired: day(-900) })).toEqual({ season: 1, episode: 1 });
+  });
+
+  it('never asks about an episode not out yet', () => {
+    expect(
+      ask({ continuing: { season: 2, episode: 5, out: false }, firstAired: day(-900) }),
+    ).toBeUndefined();
+    expect(ask({ firstAired: day(3) })).toBeUndefined();
+    expect(ask({ firstAired: day(60) })).toBeUndefined();
+    expect(ask({ firstAired: day(0) })).toEqual({ season: 1, episode: 1 });
+    expect(ask({})).toEqual({ season: 1, episode: 1 });
+  });
+});
+
+describe('listVerdict', () => {
+  it('reads a stream list as the TV reads its addons', () => {
+    expect(listVerdict({ streams: [{ url: 'x' }] })).toBe('available');
+    expect(listVerdict({ streams: [] })).toBe('unavailable');
+    expect(listVerdict({ streams: [], den: { answerKind: 'empty' } })).toBe('unavailable');
+    expect(listVerdict({ streams: [], den: { answerKind: 'unknown' } })).toBe('unknown');
+    expect(listVerdict({ streams: [], den: { answerKind: 'partial' } })).toBe('unknown');
+    expect(
+      listVerdict({
+        streams: [],
+        den: { answerKind: 'live', coverage: { sources: [{ outcome: 'timeout' }] } },
+      }),
+    ).toBe('unknown');
+    expect(listVerdict({ error: 'nope' })).toBe('unknown');
+  });
+});
+
+describe('Availability — series', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** Familjen Andersson (TMDB tv 233351, IMDb tt28784095): every stream list it gets is empty. */
+  const andersson = { type: 'tv' as const, id: 233351, releaseDate: '2024-01-05' };
+  const LIST = (season: number, episode: number) =>
+    `/scout/sealed-cfg/stream/series/${encodeURIComponent(`tt28784095:${season}:${episode}`)}.json`;
+  const seriesContent = {
+    query: async () => ({
+      kind: 'title.external-id' as const,
+      imdbId: { state: 'ready', value: 'tt28784095' } as const,
+    }),
+    onStatus: () => () => {},
+  } as unknown as ContentServiceClientPort;
+  function scout(answer: (url: string) => Response) {
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return answer(String(input));
+    };
+    return { calls, fetchImpl };
+  }
+  const empty = () =>
+    Response.json({ streams: [], den: { answerKind: 'empty', coverage: { sources: [] } } });
+
+  it('fades Familjen Andersson — every stream list empty — after one list search at S1E1', async () => {
+    const { calls, fetchImpl } = scout(empty);
+    const availability = new Availability();
+    availability.connect(SCOUT, seriesContent, fetchImpl);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toEqual([LIST(1, 1)]);
+    expect(availability.unavailable(andersson)).toBe(true);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls, 'the verdict stands for its ten minutes').toHaveLength(1);
+  });
+
+  it('asks about the Continue Watching entry, and nothing while it waits for an episode', async () => {
+    const { calls, fetchImpl } = scout((url) =>
+      url === LIST(1, 3) ? Response.json({ streams: [{ url: '/scout/p/x' }] }) : empty(),
+    );
+    const availability = new Availability();
+    availability.connect(SCOUT, seriesContent, fetchImpl);
+    const entry = (episode: number, upcoming?: string) => ({
+      title: andersson,
+      episode: { season: 1, episode },
+      upcoming,
+    });
+    availability.follow([entry(3)], []);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toEqual([LIST(1, 3)]);
+    expect(availability.unavailable(andersson)).toBe(false);
+
+    availability.follow([entry(4, '2026-12-01')], []);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls, 'an episode not out is not asked about').toHaveLength(1);
+    expect(availability.unavailable(andersson)).toBe(false);
+  });
+
+  it('a new episode found with sources clears the fade', async () => {
+    const { fetchImpl } = scout(empty);
+    const availability = new Availability();
+    availability.connect(SCOUT, seriesContent, fetchImpl);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(availability.unavailable(andersson)).toBe(true);
+
+    const released = { series: andersson.id, season: 2, episode: 1 };
+    availability.confirm(andersson, released, true);
+    availability.follow([], [released]);
+    expect(availability.unavailable(andersson)).toBe(false);
+  });
+
+  it('a failed search is unknown, never fades, and is asked again', async () => {
+    let down = true;
+    const { calls, fetchImpl } = scout(() =>
+      down ? new Response('{}', { status: 502 }) : empty(),
+    );
+    const availability = new Availability();
+    availability.connect(SCOUT, seriesContent, fetchImpl);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(availability.unavailable(andersson)).toBe(false);
+    down = false;
+    await vi.advanceTimersByTimeAsync(RETRY_MS + 100);
+    expect(calls).toEqual([LIST(1, 1), LIST(1, 1)]);
+    expect(availability.unavailable(andersson)).toBe(true);
+  });
+
+  it('opening the Sources heals a stale fade, and verdicts are kept for the next visit', async () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+    } as Storage;
+    const { fetchImpl } = scout(empty);
+    const availability = new Availability(storage);
+    availability.connect(SCOUT, seriesContent, fetchImpl);
+    availability.want(andersson);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(new Availability(storage).unavailable(andersson), 'kept').toBe(true);
+
+    availability.confirm(andersson, { season: 1, episode: 1 }, true);
+    expect(availability.unavailable(andersson)).toBe(false);
+    expect(new Availability(storage).unavailable(andersson)).toBe(false);
   });
 });

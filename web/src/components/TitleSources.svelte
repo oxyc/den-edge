@@ -14,6 +14,7 @@
     DownloadViewItem,
   } from '../lib/libraryServiceProtocol';
   import { ageOf } from '../lib/titleSources';
+  import { availability } from '../lib/availability.svelte';
   import { DownloadSourceLoader } from '../lib/downloadSourceLoader';
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
@@ -158,6 +159,14 @@
       sources = loaded?.sources ?? null;
       answer = loaded?.answer;
       failure = loaded?.failure;
+      // An authoritative list heals the poster's fade, for the film or the series' episode shown here.
+      const { target } = requested;
+      if (loaded?.sources?.length)
+        availability.confirm(
+          target,
+          target.type === 'tv' ? { season: target.season, episode: target.episode } : undefined,
+          true,
+        );
     });
     return () => sourceLoader.cancel();
   });

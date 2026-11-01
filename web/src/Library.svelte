@@ -54,6 +54,7 @@
   } from './lib/livePosition';
   import { blockedTitles } from './lib/blockedTitles.svelte';
   import { libraryShapes, libraryStandings } from './lib/standing.svelte';
+  import { availability } from './lib/availability.svelte';
   import { libraryUpdateRequired } from './lib/libraryUpdateRequired';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
@@ -838,6 +839,8 @@
               ).catch(() => null)
             : null;
         newEpisodes.checked(released, found);
+        // Found with sources: the verdict its series' poster then asks about (`availability.follow`).
+        if (found) availability.confirm({ type: 'tv', id: released.series }, released, true);
         newEpisodesVersion++;
       }
     })();
@@ -883,9 +886,12 @@
   );
   // And a series poster says how many seasons it has, where the library already holds its layout.
   $effect(() => libraryShapes.set(session.shapes));
+  // A series poster's fade asks about its new episode, else its Continue Watching entry, else S1E1.
+  $effect(() => availability.follow(continuePresentation.entries, newEpisodeList));
   $effect(() => () => {
     libraryStandings.set(new Map());
     libraryShapes.set(new Map());
+    availability.follow([], []);
     blockedTitles.reset();
   });
 
