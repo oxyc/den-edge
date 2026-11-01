@@ -1735,6 +1735,70 @@ it('draws kept views before catching up when facts committed past them on the pr
   }
 });
 
+it('hands a library more than a page behind its kept views to the whole log', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const kept = factTitle('watchlist', 10);
+  const before = await seal(keys, kept);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    1,
+    [{ k: before.k, seq: 1, value: before.v, row: kept }],
+    true,
+  );
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.close?.();
+
+  // A move wrote the library's rows through another authority: den-edge is thousands of rows past the kept views.
+  const moved = await seal(keys, factTitle('watched', 20));
+  const fetchImpl = vi.fn<typeof fetch>(
+    async () =>
+      new Response(
+        JSON.stringify({
+          generation: 'generation-a',
+          head: 6_133,
+          more: true,
+          entries: [{ k: moved.k, seq: 2, v: moved.v }],
+        }),
+        { status: 200 },
+      ),
+  );
+  const openFull = vi.fn(async () => fullAuthority());
+  const commitBatch = vi.spyOn(LibraryFactStore.prototype, 'commitBatch');
+  try {
+    const reopened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    expect(reopened?.views).toBe('saved');
+    await reopened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await waitFor(() => expect(openFull).toHaveBeenCalledOnce());
+    // One page was asked for, and none of it was read into the facts here.
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(commitBatch).not.toHaveBeenCalled();
+    await reopened!.authority.close?.();
+  } finally {
+    commitBatch.mockRestore();
+  }
+});
+
 it('reads Continue again from facts at the same head when the kept one is past its reconsider time', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
@@ -1950,6 +2014,49 @@ it('decides a first open’s preference seed from its settings facts, opening th
   const undecided = { 'den.hideWatched': { value: { bool: true }, at: [1, 0, 'household'] } };
   await opened!.authority.command({ kind: 'preferences.seed', household: undecided }, 'seed-2');
   expect(openFull).toHaveBeenCalledOnce();
+});
+
+it('decides a preference seed from its settings facts on an open drawn from saved views', async () => {
+  await ensureSyncPolicy();
+  const vault = new FactVault();
+  const keys = await deriveKeys(raw);
+  const title = factTitle('watchlist', 10);
+  const sealed = await seal(keys, title);
+  const facts = (await LibraryFactStore.open(libraryKey, vault))!;
+  await facts.commitBatch(
+    'generation-a',
+    12,
+    [{ k: sealed.k, seq: 12, value: sealed.v, row: title }],
+    true,
+  );
+  const first = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    vi.fn(async () => fullAuthority()),
+    content,
+    vi.fn(),
+  );
+  for (const kind of roots) await first!.authority.select({ kind });
+  await first!.authority.close?.();
+
+  // The seed the previous page sent failed, so nothing kept says it was made.
+  const openFull = vi.fn(async () => fullAuthority());
+  const reopened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    vi.fn(),
+  );
+  expect(reopened?.views).toBe('saved');
+  await expect(
+    reopened!.authority.command({ kind: 'preferences.seed', household: {} }, 'seed-1'),
+  ).resolves.toEqual({ outcome: 'unchanged', delivery: 'synced', affected: [] });
+  expect(openFull).not.toHaveBeenCalled();
+  const undecided = { 'den.hideWatched': { value: { bool: true }, at: [1, 0, 'household'] } };
+  await reopened!.authority.command({ kind: 'preferences.seed', household: undecided }, 'seed-2');
+  expect(openFull).toHaveBeenCalledOnce();
+  await reopened!.authority.close?.();
 });
 
 it('keeps matching TV layouts lazy and promotes a changed layout', async () => {
