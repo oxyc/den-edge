@@ -2,7 +2,7 @@
      TMDB's image CDN, which needs no key. The whole card is a link to the title, which is what lets it be
      opened in a new tab, copied, or middle-clicked like any other link on the web; the router intercepts the
      ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
-     faded, as on the TV. -->
+     faded, as on the TV, and so is a series with nothing for the episode its poster asks about. -->
 <script module lang="ts">
   const LANDSCAPE_STILL_SIZES = 'clamp(203px, 55.1vw, 275.5px)';
   const landscapeStillSrcset = (path: string) =>
