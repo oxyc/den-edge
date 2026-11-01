@@ -372,8 +372,8 @@ async function faces(
  * their titles among it — and TMDB draws what atlas has no picture of. atlas knows its own titles by every name
  * but the rest only by TMDB's original title ("Pernille" is "Pørni" there), and only the people its titles credit:
  * when it names nothing, TMDB's search is asked whether the query is a title or a person by name, and one it finds
- * leads. An atlas without `/index/query` leaves search to the lanes it replaced (`lanesStream`). Rejects only when
- * nothing answered. `signal` says the query has been typed past: nothing more is asked of TMDB for it.
+ * leads; TMDB's other titles follow atlas's. An atlas without `/index/query` leaves search to the lanes it replaced
+ * (`lanesStream`). Rejects only when nothing answered. `signal` says the query has been typed past: nothing more is asked of TMDB for it.
  */
 export async function* searchStream(
   query: string,
@@ -393,17 +393,17 @@ export async function* searchStream(
     yield batch;
   }
   if (found.named) return;
-  const byName = await sources
-    .multi(text)
-    .then((hits) =>
-      hits.filter((hit) =>
-        hit.kind === 'person'
-          ? foldedTitle(hit.person.name) === foldedTitle(text)
-          : isExact(hit, text),
-      ),
-    )
-    .catch((): Hit[] => []);
-  if (byName.length) yield dedupe([...(await expandTopPerson(byName, sources)), ...answer]);
+  const tmdb = await sources.multi(text).catch((): Hit[] => []);
+  const byName = tmdb.filter((hit) =>
+    hit.kind === 'person' ? foldedTitle(hit.person.name) === foldedTitle(text) : isExact(hit, text),
+  );
+  // A person by name leads with their films, then atlas's answer. Otherwise an exact title leads, atlas's answer
+  // follows, and TMDB's other titles come last: atlas holds only its corpus, and a title outside it — Greetings
+  // from the North, or the same film asked for by its Swedish name — is TMDB's alone. The Apple clients rank it so
+  // (`TitleSearchService.searchItems`).
+  const rest = byName[0]?.kind === 'person' ? [] : tmdb.filter((hit) => hit.kind === 'title');
+  const fused = dedupe([...(await expandTopPerson(byName, sources)), ...answer, ...rest]);
+  if (fused.length > answer.length) yield fused;
 }
 
 /** The lanes `/index/query` replaced, fused as the TV fuses them: a first paint, then the final list. */
