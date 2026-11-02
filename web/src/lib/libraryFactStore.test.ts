@@ -23,6 +23,7 @@ class MemoryVault implements Vault {
     return this.values.get(key)?.slice();
   }
   async entries(prefix: string) {
+    this.gets.push(prefix);
     return [...this.values].filter(([key]) => key.startsWith(prefix));
   }
   async page(prefix: string, after: string | undefined, limit: number) {
@@ -198,7 +199,7 @@ describe('library fact store', () => {
 
     await store.commitBatch('generation-a', seasons.length, [], true);
 
-    expect(vault.gets.filter((key) => key.includes(':snapshot'))).toEqual([]);
+    expect(vault.gets.filter((key) => key.includes(':kept:'))).toEqual([]);
     expect(vault.pages).toEqual([]);
     expect(policy.mock.calls.filter(([request]) => request.op === 'season_state_v4')).toHaveLength(
       seasons.length,
@@ -238,7 +239,7 @@ describe('library fact store', () => {
     vault.gets.length = 0;
     await resumed.commitBatch('generation-a', 1, [], true);
 
-    expect(vault.gets.some((key) => key.includes(':snapshot'))).toBe(true);
+    expect(vault.gets.some((key) => key.includes(':kept:'))).toBe(true);
     expect((await resumed.history((await resumed.manifest())!))?.page()?.items).toEqual([
       {
         title: { type: 'tv', id: 90 },
@@ -664,5 +665,49 @@ describe('the snapshot layout', () => {
       status: { value: 'watched' },
     });
     expect((await store.document('generation-a', entry(7).k))?.seq).toBe(41);
+  });
+
+  it('reads every document while another writer folds the journal mid-read', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const entry = (id: number) => ({
+      k: String(id).padStart(64, '0'),
+      seq: id,
+      value: `ciphertext-${id}`,
+      row: title(id, 'watchlist', id),
+    });
+    // One batch short of the fold.
+    for (let id = 1; id <= 31; id++)
+      await store.commitBatch('generation-a', id, [entry(id)], false);
+    const reader = (await LibraryFactStore.open(libraryKey, vault))!;
+    await reader.manifest();
+    // The reader yields once after its first read of the kept documents, and the writer's fold lands in that gap.
+    const journals = () => [...vault.values.keys()].filter((key) => key.includes(':journal:'));
+    let folded: Promise<void> | undefined;
+    const fold = () => store.commitBatch('generation-a', 32, [entry(32)], false);
+    const get = vault.get.bind(vault);
+    const entries = vault.entries.bind(vault);
+    const gap = async () => {
+      folded ??= fold();
+      await folded;
+    };
+    vault.get = async (key) => {
+      const value = await get(key);
+      if (key.endsWith(':snapshot') && !folded) await gap();
+      return value;
+    };
+    vault.entries = async (prefix) => {
+      const value = await entries(prefix);
+      if (/:(kept|journal):$/.test(prefix) && !folded) await gap();
+      return value;
+    };
+    const read = await reader.document('generation-a', entry(1).k);
+    expect(folded).toBeDefined();
+    expect(journals()).toHaveLength(0);
+    expect(read?.seq).toBe(1);
+    // The manifest has moved on since, so this reads again: the fold's snapshot, with the 32nd document in it.
+    const all: string[] = [];
+    for await (const { key } of reader.documents('generation-a')) all.push(key);
+    expect(all).toHaveLength(32);
   });
 });
