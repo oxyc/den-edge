@@ -32,11 +32,12 @@ import {
   type DownloadRaceEntry,
   type DownloadRelease,
 } from './downloadRows';
-import { seenEpisodesFor, watchedHistory } from './history';
+import { seenEpisodesFor } from './history';
 import { MaterializedHistoryIndex, type HistoryIndexSource } from './historyIndex';
 import { projectDocument } from './libraryV4';
 import { titleCoordinates, titleView } from './titleView';
-import { continueItems, projectHomeLibraryView, type HomeLibraryView } from './homeLibraryView';
+import { continueItems, type HomeLibraryView } from './homeLibraryView';
+import { homeFromColumns, historyItemsFromColumns } from './libraryColumns';
 import { noteLibraryFold } from './libraryStartupMetrics';
 import {
   libraryMetadataShape,
@@ -52,7 +53,6 @@ import {
   titleKey,
   type Shape,
   type Standing as ProjectedStanding,
-  type Title,
 } from './library';
 import {
   LIBRARY_SERVICE_WIRE_LIMITS,
@@ -145,11 +145,9 @@ import {
 } from '../settings/values';
 import {
   compareStamps,
-  rowName,
   type ConfigValue,
   type DocumentRow,
   type EpisodeRow,
-  type Row,
   type SettingsRow,
   type Stamp,
   type TitleRow,
@@ -367,7 +365,7 @@ export class LibraryLogAuthority {
    * in place of a freshly issued one, so it never overrides a change made after it.
    */
   #asOf: Stamp | null = null;
-  #projection?: { rows: Row[]; home: HomeLibraryView };
+  #projection?: { version: number; at: number; until: number; home: HomeLibraryView };
   /** Compact one-pass index of authoritative documents; exact episode arrays are still projected only on demand. */
   #historyDocuments?: { version: number; byTitle: Map<string, DocumentRow[]> };
   #historyIndex?: MaterializedHistoryIndex;
@@ -622,9 +620,7 @@ export class LibraryLogAuthority {
     this.#writable();
     await ensureDeferredSyncPolicy();
     try {
-      const result = await this.#command(command, operationId);
-      if (result.outcome === 'applied') this.#updateHistoryIndex(result.affected, command);
-      return result;
+      return await this.#command(command, operationId);
     } finally {
       this.#scheduleProjectionReconsideration();
     }
@@ -1141,7 +1137,7 @@ export class LibraryLogAuthority {
   async #createHousehold(
     task: Extract<LibraryTask, { kind: 'household.create' }>,
   ): Promise<LibraryAuthorityTaskResult> {
-    if (task.ifKept && !keptSomething(this.#log.rows()))
+    if (task.ifKept && !keptSomething(this.#log.storedRows()))
       return { result: { kind: 'household.create', outcome: 'empty' }, affected: [] };
     const household = await LibraryLog.destination(
       task.householdKey,
@@ -1543,67 +1539,25 @@ export class LibraryLogAuthority {
   }
 
   #historySource(): HistoryIndexSource {
-    // Some test/embedding authorities deliberately provide only the narrow LibraryLog surface their view uses.
-    // They can still materialize History: rowsVersion invalidates the in-memory index after each write, while the
-    // full production log supplies the exact head/future-stamp deadline used by durable checkpoints.
-    const summary = (this.#log as Partial<LibraryLog>).currentSummary?.();
+    const summary = this.#log.currentSummary();
     return {
       generation: this.generation,
       version: this.#log.rowsVersion,
-      revision: `${this.#log.logHead}:${JSON.stringify(summary?.stamp ?? this.#log.newestStamp())}`,
-      reconsiderAt: summary && Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
+      revision: `${this.#log.logHead}:${JSON.stringify(summary.stamp)}`,
+      reconsiderAt: Number.isFinite(summary.reconsiderAt) ? summary.reconsiderAt : null,
     };
   }
 
   #materializedHistory(): MaterializedHistoryIndex {
     const source = this.#historySource();
     if (this.#historyIndex?.hasSource(source)) return this.#historyIndex;
-    // A few in-memory and embedding authorities expose projected rows but no document-by-name lookup. Preserve that
-    // supported narrow surface without making their initial read load mutation policy merely to synthesize v4 docs.
-    if (typeof (this.#log as Partial<LibraryLog>).documentNamed !== 'function') {
-      const rows = this.#log.rows();
-      const names = new Map<string, Title>();
-      for (const row of rows) {
-        if (row.kind !== 'rec' && row.kind !== 'ep') continue;
-        const key = titleKey(row.title);
-        if (!names.has(key)) names.set(key, { ...row.title, title: key });
-      }
-      this.#historyIndex = MaterializedHistoryIndex.fromItems(
-        source,
-        watchedHistory(rows, names).map(({ title, at, episode, episodes }) => ({
-          title: { type: title.type, id: title.id },
-          watchedAt: at,
-          ...(episode ? { episode } : {}),
-          episodes,
-        })),
-      );
-      return this.#historyIndex;
-    }
-    const documents = [...this.#historyDocumentsByTitle().values()].flat();
-    this.#historyIndex = new MaterializedHistoryIndex(source, documents, Date.now());
+    const now = Date.now();
+    this.#historyIndex = MaterializedHistoryIndex.fromItems(
+      source,
+      historyItemsFromColumns(this.#log.columns(), now),
+      now,
+    );
     return this.#historyIndex;
-  }
-
-  /** Keep a foreground edit O(one title) once History has been materialized. */
-  #updateHistoryIndex(
-    affected: readonly LibraryAffectedSelection[],
-    command: LibraryCommand,
-  ): void {
-    if (!this.#historyIndex || !affected.some(({ kind }) => kind === 'history')) return;
-    if (typeof (this.#log as Partial<LibraryLog>).documentNamed !== 'function') {
-      this.#historyIndex = undefined;
-      return;
-    }
-    const titles = new Map<string, TitleRef>();
-    for (const scope of affected)
-      if (scope.kind === 'title') titles.set(titleKey(scope.title), scope.title);
-    if (titles.size !== 1 || affected.some(({ kind }) => kind === 'all')) {
-      this.#historyIndex = undefined;
-      return;
-    }
-    const title = [...titles.values()][0]!;
-    const documents = this.#refreshHistoryDocuments(title, command);
-    this.#historyIndex.update(title, documents, this.#historySource());
   }
 
   #historyDocumentsByTitle(): ReadonlyMap<string, DocumentRow[]> {
@@ -1619,26 +1573,6 @@ export class LibraryLogAuthority {
     }
     this.#historyDocuments = { version, byTitle };
     return byTitle;
-  }
-
-  #refreshHistoryDocuments(title: TitleRef, command: LibraryCommand): DocumentRow[] {
-    const key = titleKey(title);
-    const current = this.#historyDocuments?.byTitle ?? new Map<string, DocumentRow[]>();
-    const names = new Set((current.get(key) ?? []).map(rowName));
-    names.add(`title:${title.type}:${title.id}`);
-    if (title.type === 'tv') {
-      if (command.kind === 'episode-watched.set')
-        names.add(`season:tv:${title.id}:${command.episode.season}`);
-      if (command.kind === 'season-watched.set')
-        names.add(`season:tv:${title.id}:${command.season}`);
-      if (command.kind === 'progress.record' && command.episode)
-        names.add(`season:tv:${title.id}:${command.episode.season}`);
-    }
-    const documents = [...names].flatMap((name) => this.#log.documentNamed(name) ?? []);
-    if (documents.length) current.set(key, documents);
-    else current.delete(key);
-    this.#historyDocuments = { version: this.#log.rowsVersion, byTitle: current };
-    return documents;
   }
 
   async #settings(): Promise<Extract<LibrarySelectionValue, { kind: 'settings' }>> {
@@ -1729,7 +1663,7 @@ export class LibraryLogAuthority {
   #downloads(): Extract<LibrarySelectionValue, { kind: 'downloads' }> {
     return {
       kind: 'downloads',
-      items: readDownloads(this.#log.rows()).map((download) => {
+      items: readDownloads(this.#log.storedRows()).map((download) => {
         const durable = this.#downloadsCoordinator.status(download);
         const live = this.#downloadsCoordinator.answers.get(download.name);
         const fetch = providerFetch(live?.fetch);
@@ -1889,13 +1823,19 @@ export class LibraryLogAuthority {
   }
 
   #projected(): HomeLibraryView {
-    const rows = this.#log.rows();
     this.#scheduleProjectionReconsideration();
-    if (this.#projection?.rows === rows) return this.#projection.home;
+    const version = this.#log.rowsVersion;
+    const now = Date.now();
+    const held = this.#projection;
+    // Unchanged rows answer the same until a future stamp is believed, or the clock moves back past the fold.
+    if (held && held.version === version && now >= held.at && now < held.until) return held.home;
+    const until = this.#log.currentSummary(now).reconsiderAt;
     const foldedAt = performance.now();
-    const home = projectHomeLibraryView(rows);
-    noteLibraryFold(rows.length, performance.now() - foldedAt);
-    this.#projection = { rows, home };
+    // den-core's whole-library fold over the documents it holds; the downloads are settings rows.
+    const columns = this.#log.columns();
+    const home = homeFromColumns(columns, now, readDownloads(this.#log.storedRows()));
+    noteLibraryFold(columns.len(), performance.now() - foldedAt);
+    this.#projection = { version, at: now, until, home };
     return home;
   }
 
@@ -2421,7 +2361,7 @@ export class LibraryLogAuthority {
     const device = readDevices(this.#log.settings('devices')).some(({ id }) => id === deviceId);
     const suffix = `:${deviceId}`;
     const handoffs = this.#log
-      .rows()
+      .storedRows()
       .filter(
         (row): row is SettingsRow =>
           row.kind === 'set' && row.name.startsWith('handoff:') && row.name.endsWith(suffix),

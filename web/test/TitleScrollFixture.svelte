@@ -7,6 +7,7 @@
   import type { LibraryLog } from '../src/lib/log';
   import type { Explore, Route } from '../src/lib/route';
   import { rowName, type Row, type SettingsRow, type Stamp, type TitleRow } from '../src/lib/wire';
+  import { fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
 
   const device = 'aaaaaaaaaaaaaaaa';
@@ -33,6 +34,7 @@
     refresh: async () => false,
     readToHead: async () => true,
     rows: () => stored,
+    ...fixtureLog(() => stored),
     seqOf: () => 0,
     newestStamp: () => stamp,
     kept: async (name: string) =>

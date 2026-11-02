@@ -36,7 +36,8 @@ export function testLog(rows: SettingsRow[] = []): TestLog {
     ({
       readOnly: false,
       wireMinimum: 4,
-      rows: (): Row[] => [...held.values()].map(({ row }) => row),
+      storedRows: (): Row[] => [...held.values()].map(({ row }) => row),
+      documentNamed: () => undefined,
       settings: (name: string) => held.get(`set:${name}`)?.row,
       seqOf: (name: string) => held.get(name)?.seq ?? 0,
       newestStamp: newest,

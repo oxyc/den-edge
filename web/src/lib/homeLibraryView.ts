@@ -2,10 +2,9 @@
 // TMDB later. Continue Watching keeps only the policy inputs that can still be affected by those late TV shapes.
 
 import { deviceName, readDownloads, type Download } from './downloadRows';
+import { compareHistoryTitleKeys } from './history';
 import {
-  applyLog,
   ContinueSummaries,
-  emptyLibrary,
   standings,
   titleKey,
   type ContinueProjector,
@@ -13,7 +12,7 @@ import {
   type Standing,
 } from './library';
 import type { LibrarySelectionValue } from './libraryServiceProtocol';
-import { wellFormed, type Row, type SettingsRow, type TitleRow } from './wire';
+import type { Row, SettingsRow, TitleRow } from './wire';
 
 export interface HomeLibraryView {
   /** Every active library title; Home uses this to keep discovery and billboard candidates novel. */
@@ -41,11 +40,6 @@ export interface HomeLibraryView {
   downloads: Download[];
 }
 
-export interface HomeLibraryViewProof {
-  view: HomeLibraryView;
-  digest: { hash: string; bytes: number };
-}
-
 function activeTitleRows(rows: Row[]): TitleRow[] {
   return rows.filter((row): row is TitleRow => row.kind === 'rec' && !row.deleted.value);
 }
@@ -53,7 +47,7 @@ function activeTitleRows(rows: Row[]): TitleRow[] {
 function selectedSeeds(rows: TitleRow[]) {
   const recency = (row: TitleRow) => Math.max(row.watchedAt ?? 0, row.reaction.at[0], row.addedAt);
   const compare = (a: TitleRow, b: TitleRow) =>
-    recency(b) - recency(a) || titleKey(a.title).localeCompare(titleKey(b.title));
+    recency(b) - recency(a) || compareHistoryTitleKeys(titleKey(a.title), titleKey(b.title));
   const watched: TitleRow[] = [];
   const watchlisted: TitleRow[] = [];
   const offer = (selected: TitleRow[], row: TitleRow) => {
@@ -206,40 +200,4 @@ export function continueItems(
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
   return selectHomeLibraryViewFromFold(library, activeTitleRows(rows), readDownloads(rows));
-}
-
-/**
- * `selectHomeLibraryView` of `LibraryLog.rows()` without the full fold: the title rows are folded first, so a series
- * reset drops the marks and flags it outdates before Continue's summaries keep at most two per series. The rows hold
- * one episode per name, so no episode has another mark to be merged with. History reads the same rows, so whichever
- * of the two comes first, each document is projected through den-core once.
- */
-export function projectHomeLibraryView(rows: Row[]): HomeLibraryView {
-  const titles = rows.filter((row): row is TitleRow => row.kind === 'rec');
-  const resets = new Map(titles.map((row) => [titleKey(row.title), row.episodesReset?.[0]]));
-  const summaries = new ContinueSummaries();
-  for (const row of rows)
-    if (row.kind === 'ep' && wellFormed(row))
-      summaries.addEpisode(row, resets.get(titleKey(row.title)));
-  const { marks, flags } = summaries.compact();
-  return selectHomeLibraryView({ ...applyLog(emptyLibrary(), titles), marks, flags }, rows);
-}
-
-/** A small synchronous fingerprint for development parity checks, not a persistence or security boundary. */
-export function digestHomeLibraryView(view: HomeLibraryView): HomeLibraryViewProof['digest'] {
-  const json = JSON.stringify(view);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < json.length; index++) {
-    hash ^= json.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return {
-    hash: (hash >>> 0).toString(16).padStart(8, '0'),
-    bytes: new TextEncoder().encode(json).byteLength,
-  };
-}
-
-export function proveHomeLibraryView(library: Library, rows: Row[]): HomeLibraryViewProof {
-  const view = selectHomeLibraryView(library, rows);
-  return { view, digest: digestHomeLibraryView(view) };
 }

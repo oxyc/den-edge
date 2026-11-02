@@ -8,12 +8,10 @@ import {
   historyItemFromProjections,
   historySeasonProjection,
 } from './historyIndex';
-import {
-  compactContinueLibrary,
-  projectHomeLibraryView,
-  selectHomeLibraryView,
-} from './homeLibraryView';
+import { compactContinueLibrary, selectHomeLibraryView } from './homeLibraryView';
 import { applyLog, ContinueSummaries, emptyLibrary, type Library } from './library';
+import { historyItemsFromColumns, homeFromColumns } from './libraryColumns';
+import { LibraryColumns } from '../vendor/den-core/startup.js';
 import { forEachProjectedEpisode, projectDocument } from './libraryV4';
 import { ensureSyncPolicy } from './syncLoader';
 import { isDocument, type DocumentRow, type Row } from './wire';
@@ -285,35 +283,40 @@ function household(): Row[] {
 
 test('Home and History in one library Worker', async () => {
   if (process.env.DEN_FACT_ALLOCATION_AUDIT !== '1') return;
-  // Fresh document objects per run, as a newly opened Worker holds: projectDocument's WeakMap starts empty.
-  // `rows` is `LibraryLog.rows()`; History reads it as `LibraryLogAuthority.#history` does.
+  // Fresh document objects per run, as a newly opened Worker holds. `rows` is `LibraryLog.rows()`, each document
+  // projected through den-core; `indexed` is the log's held `LibraryColumns`, as `LibraryLogAuthority` reads it.
   const rows = (stored: Row[]) =>
     stored.flatMap((row) => (isDocument(row) ? projectDocument(row, NOW) : [row]));
   const history = (held: Row[]) => watchedHistory(held, new Map());
-  // Before: History asked for Home's view, which folded the whole `rows()` projection.
   const foldedHome = (held: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), held), held);
+  const indexed = <T>(stored: Row[], read: (index: LibraryColumns) => T): T => {
+    const index = new LibraryColumns();
+    try {
+      index.upsert(JSON.stringify(stored));
+      return read(index);
+    } finally {
+      index.free();
+    }
+  };
   const work = {
     'Home only: rows() + full fold': () => foldedHome(rows(household())),
-    'Home only: rows() + one pass': () => projectHomeLibraryView(rows(household())),
-    'History only: rows() + full fold': () => {
-      const held = rows(household());
-      foldedHome(held);
-      return history(held);
-    },
+    'Home only: held index': () => indexed(household(), (index) => homeFromColumns(index, NOW)),
     'History only: rows()': () => history(rows(household())),
+    'History only: held index': () =>
+      indexed(household(), (index) => historyItemsFromColumns(index, NOW)),
     'Home then History: rows() + full fold': () => {
       const held = rows(household());
       foldedHome(held);
       return history(held);
     },
-    'Home then History: rows() + one pass': () => {
-      const held = rows(household());
-      projectHomeLibraryView(held);
-      return history(held);
-    },
+    'Home then History: held index': () =>
+      indexed(household(), (index) => {
+        homeFromColumns(index, NOW);
+        return historyItemsFromColumns(index, NOW);
+      }),
   };
   const stored = household();
-  expect(projectHomeLibraryView(rows(stored))).toEqual(foldedHome(rows(stored)));
+  expect(indexed(stored, (index) => homeFromColumns(index, NOW))).toEqual(foldedHome(rows(stored)));
   expect(rows(stored)).toHaveLength(18_000);
 
   const entries = Object.entries(work);

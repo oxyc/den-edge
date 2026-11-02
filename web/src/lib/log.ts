@@ -69,6 +69,8 @@ import { ensureDeferredSyncPolicy, ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy } from './syncCore';
 import { openKeptInWorker } from './libraryWorkerClient';
 import type { LibraryWire } from './libraryServiceProtocol';
+import { LibraryColumns } from '../vendor/den-core/startup.js';
+import { newestFromColumns } from './libraryColumns';
 
 interface Entry {
   seq: number;
@@ -77,26 +79,27 @@ interface Entry {
 
 /** Every mutation advances a version, including conflict replacement and generation reset paths. */
 class ChangedMap<K, V> extends Map<K, V> {
-  constructor(private readonly changed: () => void) {
+  /** `changed(key, removed)` after each change; `key` is undefined when the map was cleared. */
+  constructor(private readonly changed: (key: K | undefined, removed: boolean) => void) {
     super();
   }
 
   override set(key: K, value: V): this {
     super.set(key, value);
-    this.changed();
+    this.changed(key, false);
     return this;
   }
 
   override delete(key: K): boolean {
     const deleted = super.delete(key);
-    if (deleted) this.changed();
+    if (deleted) this.changed(key, true);
     return deleted;
   }
 
   override clear(): void {
     if (!this.size) return;
     super.clear();
-    this.changed();
+    this.changed(undefined, true);
   }
 }
 
@@ -394,7 +397,17 @@ const text = new TextDecoder();
 export class LibraryLog {
   private entriesVersion = 0;
   /** Each row as last read or written, by the name its key is the HMAC of. */
-  private readonly entries = new ChangedMap<string, Entry>(() => this.entriesVersion++);
+  private readonly entries = new ChangedMap<string, Entry>((name, removed) =>
+    this.entryChanged(name, removed),
+  );
+  /**
+   * The held v4 documents in den-core (`columns()`), in the order `entries` holds them. Brought up to date when asked
+   * for: `columnsPending` names what changed since, each with whether it was removed (so a name removed and set again
+   * moves to the end, as it does in `entries`); a cleared map rebuilds it whole.
+   */
+  private columnsIndex?: LibraryColumns;
+  private columnsRebuild = true;
+  private readonly columnsPending = new Map<string, boolean>();
   /** Read-only household control state; it is never projected into an activity library. */
   private profileDirectoryEntry?: { seq: number; document: ProfileDirectoryDocument };
   /** Highest transport sequence seen for the control row, including an invalid replacement. */
@@ -405,9 +418,7 @@ export class LibraryLog {
   >();
   /** A page of den-edge's log was read in the generation it now answers at, by this instance (not only a kept copy). */
   private readCurrentGeneration = false;
-  /** Projecting v4 documents allocates rows. Every consumer of one unchanged log shares the completed snapshot. */
-  private rowsCache?: { version: number; at: number; reconsiderAt: number; rows: Row[] };
-  /** One whole-log maximum, prepared with the sliced first projection and invalidated by every entries mutation. */
+  /** One whole-log maximum, invalidated by every entries mutation. */
   private newestCache?: {
     version: number;
     at: number;
@@ -850,6 +861,9 @@ export class LibraryLog {
   close(): void {
     this.runtimeChannel?.close();
     this.runtimeChannel = undefined;
+    // den-core's memory is not the garbage collector's: a read after closing builds the index again.
+    this.columnsIndex?.free();
+    this.columnsIndex = undefined;
   }
 
   /**
@@ -2526,22 +2540,72 @@ export class LibraryLog {
     }
   }
 
-  /** Every row, a v4 document shown as the title or season row it stands for (`projectDocument`). */
+  /**
+   * Every row, a v4 document shown as the title or season rows it stands for (`projectDocument`). A policy call per
+   * document: the library's lists read `columns()` instead, and this is only for a reader that needs the rows themselves.
+   */
   rows(): Row[] {
-    const version = this.entriesVersion;
     const now = Date.now();
-    if (
-      this.rowsCache?.version === version &&
-      now >= this.rowsCache.at &&
-      now < this.rowsCache.reconsiderAt
-    )
-      return this.rowsCache.rows;
-    const rows = [...this.entries.values()].flatMap(({ row }) =>
+    return [...this.entries.values()].flatMap(({ row }) =>
       isDocument(row) ? projectDocument(row, now) : [row],
     );
-    const { reconsiderAt } = this.currentSummary(now);
-    this.rowsCache = { version, at: now, reconsiderAt, rows };
-    return rows;
+  }
+
+  /** The held v4 documents in den-core, up to date with every change to the rows held. */
+  columns(): LibraryColumns {
+    if (this.columnsRebuild || !this.columnsIndex) {
+      this.columnsIndex?.free();
+      this.columnsIndex = new LibraryColumns();
+      this.columnsRebuild = false;
+      this.columnsPending.clear();
+      this.addColumns(
+        [...this.entries.values()].flatMap(({ row }) => (isDocument(row) ? [row] : [])),
+      );
+      return this.columnsIndex;
+    }
+    if (!this.columnsPending.size) return this.columnsIndex;
+    const changed: DocumentRow[] = [];
+    for (const [name, removed] of this.columnsPending) {
+      if (removed) this.columnsIndex.remove(name);
+      const row = this.entries.get(name)?.row;
+      if (row && isDocument(row)) changed.push(row);
+    }
+    this.columnsPending.clear();
+    this.addColumns(changed);
+    return this.columnsIndex;
+  }
+
+  /** Add or replace `documents` in `columnsIndex`, in one call; a document den-core cannot read is left out, and said. */
+  private addColumns(documents: DocumentRow[]): void {
+    if (!documents.length) return;
+    try {
+      this.columnsIndex!.upsert(JSON.stringify(documents));
+    } catch {
+      // One refused document refuses its whole batch: add the rest one at a time.
+      for (const document of documents)
+        try {
+          this.columnsIndex!.upsert(JSON.stringify([document]));
+        } catch (error) {
+          console.warn(`den: ${rowName(document)} is left out of the library's lists`, error);
+        }
+    }
+  }
+
+  private entryChanged(name: string | undefined, removed: boolean): void {
+    this.entriesVersion++;
+    if (name === undefined) {
+      this.columnsRebuild = true;
+      this.columnsPending.clear();
+      return;
+    }
+    if (this.columnsRebuild) return;
+    const held = this.columnsPending.get(name);
+    if (removed) this.columnsPending.set(name, true);
+    else if (held) {
+      // Removed and set again: `entries` holds it at the end now, and so must the index.
+      this.columnsPending.delete(name);
+      this.columnsPending.set(name, true);
+    } else if (held === undefined) this.columnsPending.set(name, false);
   }
 
   /** The v4 documents and settings exactly as this log holds them, for moving without a lossy projection. */
@@ -2943,18 +3007,12 @@ export class LibraryLog {
   }
 
   /** What `keep` kept under `name`; undefined when nothing was, or it doesn't open under this library's key. */
-  async kept<T>(name: string, projectRows = false): Promise<T | undefined> {
+  async kept<T>(name: string): Promise<T | undefined> {
     if (!this.local) return undefined;
     try {
       const bytes = await this.local.vault.get(`${this.keys.id}:${name}`);
       if (!bytes) return undefined;
-      const opened = await openKeptInWorker<T>(
-        this.local.key,
-        name,
-        bytes,
-        name === SNAPSHOT,
-        projectRows ? Date.now() : undefined,
-      );
+      const opened = await openKeptInWorker<T>(this.local.key, name, bytes);
       if (opened !== undefined) return opened;
       return (await openLibraryLocalValue(this.local.key, name, bytes)) as T;
     } catch (error) {
@@ -3244,9 +3302,7 @@ export class LibraryLog {
           })),
         );
         // Until the last batch the cursor stays at 0: a move cut off resumes as a first read, never above a row.
-        await store.commitBatch(generation, last ? saved.head : 0, entries, last, {
-          retainEpisodeProjection: true,
-        });
+        await store.commitBatch(generation, last ? saved.head : 0, entries, last);
       }
       const manifest = await store.manifest();
       if (!manifest?.complete || manifest.generation !== generation || manifest.head !== saved.head)
@@ -3302,7 +3358,7 @@ export class LibraryLog {
           last ? head : batch.at(-1)!.seq,
           batch,
           complete && last,
-          { profileTopology, retainEpisodeProjection: true },
+          { profileTopology },
         );
       }
     } catch (error) {
@@ -3404,9 +3460,14 @@ export class LibraryLog {
       now < cached.reconsiderAt
     )
       return { stamp: cached.stamp, reconsiderAt: cached.reconsiderAt, at: cached.at };
+    // The documents' newest stamp and reconsider time are den-core's (which also counts a play still more than a day
+    // ahead); the settings rows' are their own stamps.
+    const documents = newestFromColumns(this.columns(), now);
     let latest = this.narrowNewest ?? ZERO_STAMP;
-    let reconsiderAt = Infinity;
+    if (compareStamps(documents.stamp, latest) > 0) latest = documents.stamp;
+    let reconsiderAt = documents.reconsiderAt;
     for (const { row } of this.entries.values()) {
+      if (isDocument(row)) continue;
       const summary = newestSummary(row, now);
       if (compareStamps(summary.stamp, latest) > 0) latest = summary.stamp;
       reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);

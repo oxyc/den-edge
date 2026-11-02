@@ -171,10 +171,7 @@ function continueAndHistoryOfSeason(
   return { library: summaries.compact(), history: historySeasonProjection(season, watched) };
 }
 
-function facts(
-  row: Row | null,
-  retainEpisodeProjection = false,
-): {
+function facts(row: Row | null): {
   selected: Partial<Record<LibraryFactCapability, TitleFact | ContinueFact | SettingsFact>>;
   history: HistoryDocumentProjection | null;
   reconsiderAt: number | null;
@@ -183,26 +180,14 @@ function facts(
   const now = Date.now();
   const reconsiderAt = newestSummary(row, now).reconsiderAt ?? null;
   // A season document is only ever Continue's input, so its episodes are folded one at a time instead of held.
-  const season = isDocument(row) && row.kind === 'season' && !retainEpisodeProjection ? row : null;
+  const season = isDocument(row) && row.kind === 'season' ? row : null;
   const rows = season ? [] : projected(row, now);
   const library = applyLog(emptyLibrary(), rows);
   const seasonFacts = season ? continueAndHistoryOfSeason(season, now) : null;
   const folded = seasonFacts?.library ?? compactContinueLibrary(library);
   const projectedTitle = rows.find((candidate): candidate is TitleRow => candidate.kind === 'rec');
-  const retainedSeason =
-    isDocument(row) && row.kind === 'season'
-      ? historySeasonProjection(
-          row,
-          rows.flatMap((candidate) =>
-            candidate.kind === 'ep' && candidate.progress.value >= WATCHED
-              ? [candidate.episode, candidate.progress.at[0]]
-              : [],
-          ),
-        )
-      : null;
   const history =
     seasonFacts?.history ??
-    retainedSeason ??
     (projectedTitle && isDocument(row) && row.kind === 'title'
       ? { kind: 'title', title: projectedTitle }
       : null);
@@ -480,8 +465,6 @@ export class LibraryFactStore {
     options: {
       readonly profileTopology?: boolean;
       readonly floor?: number;
-      /** Populate projectDocument's row cache when this caller will immediately need the full episode projection. */
-      readonly retainEpisodeProjection?: boolean;
     } = {},
   ): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
@@ -504,7 +487,7 @@ export class LibraryFactStore {
       (!complete || (await this.history(held)) !== null)
     )
       return;
-    const derived = await this.changes(generation, entries, options.retainEpisodeProjection);
+    const derived = await this.changes(generation, entries);
     const retainedHistory =
       held?.generation === generation &&
       !held.complete &&
@@ -572,7 +555,7 @@ export class LibraryFactStore {
   async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation || !entries.length) return;
-    const derived = await this.changes(generation, entries, true);
+    const derived = await this.changes(generation, entries);
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
     const held = await this.readManifest();
     if (held?.generation === generation) {
@@ -615,7 +598,6 @@ export class LibraryFactStore {
   private async changes(
     generation: string,
     entries: readonly LibraryFactEntry[],
-    retainEpisodeProjection = false,
   ): Promise<{
     changes: VaultChange[];
     history: Map<string, ImportedHistoryProjection>;
@@ -633,7 +615,7 @@ export class LibraryFactStore {
           row: entry.row,
         }).then((value) => ({ kind: 'put', key: `${this.libraryId}:${document}`, value })),
       );
-      const derived = facts(entry.row, retainEpisodeProjection);
+      const derived = facts(entry.row);
       const selected = derived.selected;
       history.set(entry.k, {
         projection: derived.history,

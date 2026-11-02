@@ -1,16 +1,17 @@
-import { expect, it, vi } from 'vitest';
-import { blankEpisode, blankTitle, markEpisode } from './actions';
+import { beforeAll, expect, it, vi } from 'vitest';
+import { LibraryColumns } from '../vendor/den-core/startup.js';
 import { applyLog, emptyLibrary, ContinueProjector, type Library } from './library';
-import {
-  continueItems,
-  digestHomeLibraryView,
-  projectHomeLibraryView,
-  selectHomeLibraryView,
-} from './homeLibraryView';
+import { continueItems, selectHomeLibraryView } from './homeLibraryView';
+import { homeFromColumns } from './libraryColumns';
 import { applyOps, projectDocument } from './libraryV4';
 import { syncPolicy } from './syncCore';
-import { startRow } from './downloadRows';
+import { ensureSyncPolicy } from './syncLoader';
+import { readDownloads, startRow } from './downloadRows';
 import { isDocument, type DocumentRow, type Row, type SettingsRow, type TitleRow } from './wire';
+
+beforeAll(async () => ensureSyncPolicy());
+
+const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 
 const titleRow = (
   id: number,
@@ -86,11 +87,10 @@ it('selects the fixed Home view from rows once', () => {
     ],
     seeds: { watched: ['movie:1'], watchlisted: ['tv:2'] },
   });
-  expect(digestHomeLibraryView(worker)).toMatchObject({ hash: expect.any(String) });
   expect(worker).not.toHaveProperty('continue');
 });
 
-it('projects v4 documents to the exact full-fold Home view without the full fold', () => {
+it('reads the exact full-fold Home view from the held v4 documents', () => {
   const now = 1_800_000_000_000;
   const stamp = (value: number): [number, number, string] => [value, 0, 'aaaaaaaaaaaaaaaa'];
   const resetAt = now - 2500;
@@ -209,21 +209,21 @@ it('projects v4 documents to the exact full-fold Home view without the full fold
   const projected = (held: Row[]) =>
     held.flatMap((row) => (isDocument(row) ? projectDocument(row, now) : [row]));
   const fullFold = (rows: Row[]) => selectHomeLibraryView(applyLog(emptyLibrary(), rows), rows);
-  const rows = projected(stored);
-  const direct = projectHomeLibraryView(rows);
+  const held = (documents: Row[]) => {
+    const index = new LibraryColumns();
+    try {
+      index.upsert(JSON.stringify(documents.filter(isDocument)));
+      return homeFromColumns(index, now, readDownloads(documents));
+    } finally {
+      index.free();
+    }
+  };
+  const direct = held(stored);
 
-  expect(direct).toEqual(fullFold(rows));
+  expect(direct).toEqual(fullFold(projected(stored)));
   // Season documents held before their series' title document: the reset still drops their stale inputs.
-  const seasonsFirst = projected([...stored].reverse());
-  expect(projectHomeLibraryView(seasonsFirst)).toEqual(fullFold(seasonsFirst));
-  // v2 rows, as a narrow log's `rows()` holds them, fold the same way.
-  const legacy: Row[] = [
-    { ...blankTitle({ type: 'tv', id: 50 }, now - 9000), episodesReset: stamp(now - 4000) },
-    markEpisode(blankEpisode({ type: 'tv', id: 50 }, 1, 1), true, stamp(now - 5000)),
-    markEpisode(blankEpisode({ type: 'tv', id: 50 }, 1, 2), true, stamp(now - 3000)),
-    markEpisode(blankEpisode({ type: 'tv', id: 51 }, 1, 1), true, [0, 0, '']),
-  ];
-  expect(projectHomeLibraryView(legacy)).toEqual(fullFold(legacy));
+  const seasonsFirst = [...stored].reverse();
+  expect(held(seasonsFirst)).toEqual(fullFold(projected(seasonsFirst)));
   expect(direct.owned).toEqual(['tv:40', 'movie:41']);
   expect(direct.watchlist).toEqual(['movie:41']);
   expect(direct.downloads.map(({ title }) => title.mediaId)).toEqual([40]);
@@ -474,11 +474,7 @@ it('is materially smaller than the representative projection graph it describes'
     ),
   );
   const library = foldFor(rows);
-  const graphBytes = new TextEncoder().encode(JSON.stringify({ rows, library })).byteLength;
-  const proof = selectHomeLibraryView(library, rows);
-  const proofBytes = digestHomeLibraryView(proof).bytes;
-
-  expect(proofBytes).toBeLessThan(graphBytes / 4);
+  expect(bytes(selectHomeLibraryView(library, rows))).toBeLessThan(bytes({ rows, library }) / 4);
 });
 
 it('marks the Continue items this device wrote, so its own playback is not read as another device’s', () => {

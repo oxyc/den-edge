@@ -4,9 +4,14 @@
 
 import { compareStamps, isDocument, mergeDocument, rowName, type Row, type Stamp } from './wire';
 
-/** Whether rows kept here hold anything a person kept: not only what the page writes by itself. */
+/**
+ * Whether rows kept here hold anything a person kept: not only what the page writes by itself. A delivery document is
+ * a receipt of something kept elsewhere, not a thing kept.
+ */
 export function keptSomething(rows: readonly Row[]): boolean {
-  return rows.some((row) => row.kind !== 'set' || !SELF_WRITTEN.has(row.name));
+  return rows.some((row) =>
+    row.kind === 'set' ? !SELF_WRITTEN.has(row.name) : row.kind !== 'delivery',
+  );
 }
 
 /** Rows the page writes with no one keeping anything: this device's entry, and a recovery code (never moved). */

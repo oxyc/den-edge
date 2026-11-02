@@ -10,10 +10,12 @@
   import {
     rowName,
     type ConfigValue,
+    type DocumentRow,
     type Row,
     type SettingsRow,
     type Stamp,
   } from '../src/lib/wire';
+  import { fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
@@ -98,31 +100,9 @@
     refresh: async () => false,
     readToHead: async () => true,
     rows: () => stored,
+    ...fixtureLog(() => stored, historyDocuments),
     seqOf: () => 0,
-    // One film seen twice and one on the watchlist, for the history export.
-    documents: () => [
-      {
-        seq: 1,
-        document: {
-          format: 4,
-          kind: 'title',
-          title: { type: 'movie', id: 550 },
-          status: { value: 'watched', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
-          resume: { value: 1, at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'], viewing: 1 },
-          reaction: { value: 'love', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
-          watch: { plays: { '0': 1_760_000_000_000, '1': 1_789_000_000_000 }, cleared: null },
-        },
-      },
-      {
-        seq: 2,
-        document: {
-          format: 4,
-          kind: 'title',
-          title: { type: 'movie', id: 603 },
-          status: { value: 'watchlist', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
-        },
-      },
-    ],
+    documents: historyDocuments,
     newestStamp: () => at,
     currentSummary: () => ({ stamp: at, reconsiderAt: Infinity, at: Date.now() }),
     kept: async () => undefined,
@@ -148,6 +128,33 @@
     profileDirectory: () => null,
     close() {},
   } as unknown as LibraryLog;
+
+  // One film seen twice and one on the watchlist, for the history export.
+  function historyDocuments(): { seq: number; document: DocumentRow }[] {
+    return [
+      {
+        seq: 1,
+        document: {
+          format: 4,
+          kind: 'title',
+          title: { type: 'movie', id: 550 },
+          status: { value: 'watched', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
+          resume: { value: 1, at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'], viewing: 1 },
+          reaction: { value: 'love', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
+          watch: { plays: { '0': 1_760_000_000_000, '1': 1_789_000_000_000 }, cleared: null },
+        },
+      },
+      {
+        seq: 2,
+        document: {
+          format: 4,
+          kind: 'title',
+          title: { type: 'movie', id: 603 },
+          status: { value: 'watchlist', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
+        },
+      },
+    ];
+  }
 
   const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
   const library = fixtureLibraryService({

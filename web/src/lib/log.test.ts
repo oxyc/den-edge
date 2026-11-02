@@ -1797,17 +1797,22 @@ describe('LibraryLog', () => {
     expect(log.newestStamp()).toEqual(at(11_000, 'import'));
   });
 
-  it('shares one projected row snapshot until an entry changes', async () => {
+  it('holds one column index that follows every entry change', async () => {
     const server = await edge([row(1)]);
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
-    const projected = log.rows();
-
-    expect(log.rows()).toBe(projected);
-    expect(log.rows()).toBe(projected);
+    const index = log.columns();
+    expect(index.len()).toBe(1);
 
     await server.append(row(2));
     expect(await log.refresh()).toBe(true);
-    expect(log.rows()).not.toBe(projected);
+    expect(log.columns()).toBe(index);
+    expect(index.len()).toBe(2);
+
+    const [held] = log.documents();
+    expect(index.document(rowName(held!.document))).toBeDefined();
+    await log.write(react(log.title({ type: 'movie', id: 1 })!, 'love', at(12_000, 'web1')));
+    expect(log.columns().len()).toBe(2);
+    expect(log.newestStamp()).toEqual(at(12_000, 'web1'));
   });
 
   it('reconsiders unchanged document rows at their future-stamp deadline and on clock rollback', async () => {
@@ -1834,22 +1839,19 @@ describe('LibraryLog', () => {
       const log = (await LibraryLog.openLocal(LIBRARY_KEY, memoryVault().vault))!;
       expect(await log.writeRows([document])).toBe(true);
 
-      const before = log.rows();
-      expect(before[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
+      expect(log.rows()[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
+      expect(log.currentSummary().reconsiderAt).toBe(base + 5_000);
       vi.setSystemTime(base + 4_999);
-      expect(log.rows()).toBe(before);
+      expect(log.rows()[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
 
       vi.setSystemTime(base + 5_000);
-      const current = log.rows();
-      expect(current).not.toBe(before);
-      expect(current[0]).toMatchObject({
+      expect(log.rows()[0]).toMatchObject({
         progress: { value: 0.5, viewing: 7, seconds: 900, at: at(future) },
       });
+      expect(log.currentSummary()).toMatchObject({ stamp: at(future), reconsiderAt: Infinity });
 
       vi.setSystemTime(base);
-      const rolledBack = log.rows();
-      expect(rolledBack).not.toBe(current);
-      expect(rolledBack[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
+      expect(log.rows()[0]).toMatchObject({ progress: { value: 0, viewing: 7 } });
       log.close();
     } finally {
       vi.useRealTimers();
@@ -1997,7 +1999,7 @@ describe('a library kept only in this browser', () => {
     );
   });
 
-  it('prepares the newest maximum while projecting, so reads do not rescan the log', async () => {
+  it('keeps the newest maximum, so a second read does not rescan the log', async () => {
     const { vault } = memoryVault();
     const log = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
     let traversals = 0;
@@ -2016,11 +2018,12 @@ describe('a library kept only in this browser', () => {
     const settings: SettingsRow = { kind: 'set', schema: 2, name: 'counted', values };
     expect(await log.writeRows([settings])).toBe(true);
     expect(log.rows()).toHaveLength(1);
+    expect(log.newestStamp()).toEqual(at(14_000, 'tv01'));
     traversals = 0;
 
     expect(log.newestStamp()).toEqual(at(14_000, 'tv01'));
     expect(log.newestStamp()).toEqual(at(14_000, 'tv01'));
-    // Before the cache, those two reads touched all 1,000 values twice; the prepared answer touches none.
+    // Until an entry changes, the kept answer touches none of the 1,000 values.
     expect(traversals).toBe(0);
   });
 
