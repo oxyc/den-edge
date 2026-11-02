@@ -462,6 +462,12 @@ fn record_builds() -> &'static Arc<tokio::sync::Semaphore> {
     BUILDS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RECORD_BUILD_BYTES)))
 }
 
+type Boxed<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// What `Detail::ask` got: this question's answer, whether it was a `miss` or `revalidated`, how long it is fresh
+/// for, and TMDB's whole body.
+type Asked = Result<(Prepared, &'static str, Duration, Bytes), Box<Response>>;
+
 /// What the cache holds for a detail question.
 enum Kept {
     /// Fresh, with how long it is fresh for, its age and when it was kept.
@@ -682,7 +688,15 @@ impl Detail {
 
     /// The freshest kept answer to this question: from the title's record; else from its whole detail kept before
     /// records, cut into one now; else, for a title too large to fetch whole, from the question kept as asked.
-    async fn kept(&self, metrics: &Arc<crate::metrics::Metrics>) -> Kept {
+    ///
+    /// Boxed, like `ask`: the lookup's state is several kilobytes, and inline it was carried by every request future
+    /// that can reach it (the billboard holds several `tmdb::ask`s at once), which overflowed a 2 MiB test thread's
+    /// stack in a debug build.
+    fn kept<'a>(&'a self, metrics: &'a Arc<crate::metrics::Metrics>) -> Boxed<'a, Kept> {
+        Box::pin(self.kept_inline(metrics))
+    }
+
+    async fn kept_inline(&self, metrics: &Arc<crate::metrics::Metrics>) -> Kept {
         if let Some(found) = self.recorded(metrics).await {
             return found;
         }
@@ -860,13 +874,12 @@ impl Detail {
     /// When the whole is too large to take, the question is asked exactly as it was, as it was before the whole
     /// existed: one title's size must not fail every question about it. Any other failure — TMDB down, slow or
     /// refusing, the day spent — is the answer: asking again for less would fail the same way and spend twice. A
-    /// 404 is kept as one.
-    async fn ask(
-        &self,
-        state: &AppState,
-        key: &str,
-        rid: &str,
-    ) -> Result<(Prepared, &'static str, Duration, Bytes), Box<Response>> {
+    /// 404 is kept as one. Boxed, for the reason `kept` is.
+    fn ask<'a>(&'a self, state: &'a AppState, key: &'a str, rid: &'a str) -> Boxed<'a, Asked> {
+        Box::pin(self.ask_inline(state, key, rid))
+    }
+
+    async fn ask_inline(&self, state: &AppState, key: &str, rid: &str) -> Asked {
         if self.oversize().await {
             return self.ask_exact(state, key, rid).await;
         }
@@ -919,12 +932,7 @@ impl Detail {
     }
 
     /// The question exactly as asked, kept as TMDB answers it (`kept_exact`).
-    async fn ask_exact(
-        &self,
-        state: &AppState,
-        key: &str,
-        rid: &str,
-    ) -> Result<(Prepared, &'static str, Duration, Bytes), Box<Response>> {
+    async fn ask_exact(&self, state: &AppState, key: &str, rid: &str) -> Asked {
         let (query, file) = self.exact();
         let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
         let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
@@ -1545,7 +1553,8 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
                 return None;
             }
-            Kept::Stale(body, ..) => Some(body),
+            // Read now: an open file is not carried across the asks below.
+            Kept::Stale(body, ..) => body.bytes().await,
             Kept::Nothing => None,
         };
         // Past the minute's questions, or TMDB failing, a title kept past its freshness is still the better preview.
@@ -1572,7 +1581,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                         break 'asked None;
                     }
                     match detail.ask(state, key, "meta").await {
-                        Ok((body, ..)) => Some(body),
+                        Ok((body, ..)) => body.bytes().await,
                         Err(refusal) => {
                             let absent = refusal.status() == StatusCode::NOT_FOUND;
                             asking.failed(refusal).await;
@@ -1594,8 +1603,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
             CacheAccess::Cold
         };
         state.metrics.provider_cache_access(Provider::Tmdb, access);
-        let body = asked.or(stale)?.bytes().await?;
-        return serde_json::from_slice(&body).ok();
+        return serde_json::from_slice(&asked.or(stale)?).ok();
     }
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
     let mut stale = None;
