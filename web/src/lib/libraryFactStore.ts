@@ -218,13 +218,20 @@ const sameDocument = (left: StoredLibraryDocument, right: StoredLibraryDocument 
   JSON.stringify(left.row) === JSON.stringify(right.row) &&
   (left.row !== null || left.value === right.value);
 
-/** Journal names sort in the order they were written, so a later batch's document replaces an earlier one's. */
+/**
+ * Journal names sort by the millisecond they were written in. Two batches of one millisecond sort in no particular
+ * order, so a document replaces the one held only when its sequence is not older (`replaces`).
+ */
 const journalName = (generation: string) =>
   `${journalPrefix(generation)}${Date.now().toString().padStart(15, '0')}:${[
     ...crypto.getRandomValues(new Uint8Array(6)),
   ]
     .map((value) => value.toString(16).padStart(2, '0'))
     .join('')}`;
+
+/** Whether journal document `held` replaces what is held for its key, at sequence `seq`. */
+const replaces = (held: HeldDocument, seq: number | undefined) =>
+  seq === undefined || held[1] >= seq;
 
 const byKey = <T>(entries: Array<[string, T]>) =>
   entries.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
@@ -553,7 +560,9 @@ export class LibraryFactStore {
     for (const held of snapshot?.batch.documents ?? [])
       documents.set(held[0], storedDocument(held));
     for (const { batch } of journals)
-      for (const held of batch.documents) documents.set(held[0], storedDocument(held));
+      for (const held of batch.documents)
+        if (replaces(held, documents.get(held[0])?.seq))
+          documents.set(held[0], storedDocument(held));
     this.held = { generation, revision: current?.revision, documents, journals: journals.length };
     return documents;
   }
@@ -671,7 +680,8 @@ export class LibraryFactStore {
     const documents = new Map<string, HeldDocument>();
     for (const held of snapshot?.batch.documents ?? []) documents.set(held[0], held);
     for (const { batch } of journals)
-      for (const held of batch.documents) documents.set(held[0], held);
+      for (const held of batch.documents)
+        if (replaces(held, documents.get(held[0])?.[1])) documents.set(held[0], held);
     const sealed = await sealLibraryLocalValue(this.key, name, {
       schema: LIBRARY_FACT_SCHEMA,
       documents: [...documents.values()],

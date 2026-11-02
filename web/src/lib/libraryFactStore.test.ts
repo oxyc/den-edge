@@ -593,6 +593,29 @@ describe('the snapshot layout', () => {
     { k: 'c'.repeat(64), seq: 3, value: 'ciphertext-3', row: null },
   ];
 
+  it('replays the journal by each document’s sequence, not by when its batch was named', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const now = vi.spyOn(Date, 'now');
+    try {
+      // A clock set back between two batches: the newer one's name sorts first.
+      now.mockReturnValue(2_000_000);
+      await store.commitBatch('generation-a', 1, [documents[0]!], false);
+      now.mockReturnValue(1_000_000);
+      await store.commitBatch(
+        'generation-a',
+        4,
+        [{ ...documents[0]!, seq: 4, row: title(1, 'watched', 40) }],
+        false,
+      );
+    } finally {
+      now.mockRestore();
+    }
+    const reader = (await LibraryFactStore.open(libraryKey, vault))!;
+    await reader.manifest();
+    expect((await reader.document('generation-a', documents[0]!.k))?.seq).toBe(4);
+  });
+
   it('converts a store the earlier build wrote, verified, then removes the old records', async () => {
     const vault = new MemoryVault();
     await earlierLayout(vault, documents);
