@@ -13,6 +13,8 @@ test('a household page that crashes mid-move fails the big household at once, sa
   const edge = newEdge({ profiles: true });
   let crashedAt = 0;
   context.once('page', async (page) => {
+    // From when Playwright reports the crash: how long Chromium takes to tear a renderer down is not the setup's.
+    page.once('crash', () => (crashedAt = Date.now()));
     // Once the Owner library holds part of the history: the move is under way.
     await expect
       .poll(
@@ -23,7 +25,6 @@ test('a household page that crashes mid-move fails the big household at once, sa
       )
       .toBeGreaterThan(500);
     const cdp = await context.newCDPSession(page);
-    crashedAt = Date.now();
     await cdp.send('Page.crash').catch(() => {});
   });
   await expect(bigHousehold(context, edge)).rejects.toThrow(/household page crashed/);

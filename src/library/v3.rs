@@ -22,8 +22,12 @@ use std::sync::{OnceLock, Weak};
 const FORMAT_VERSION: u64 = 3;
 /// `metadata-u64-v3["charge"]`: how `charges-v3` and `live-bytes` are counted. Absent (stores written before it
 /// existed) is v2's in-memory formula `2(k + v) + fragment + 192` plus a 512-byte base, which overstated a v3
-/// library about threefold; `CHARGE_STORED` is the stored bytes, `k + v`. Opening an older store recounts it once.
+/// library about threefold; `CHARGE_STORED` is the stored bytes, `k + v`, kept in `charges-v3`. Opening an older
+/// store recounts it once. `CHARGE_PACKED` is the same bytes packed into `keys-v3` beside each row's sequence
+/// (`packed`), with no `charges-v3`: this release reads and writes such a store in that layout but never makes one,
+/// so the release that does can be rolled back to this one.
 const CHARGE_STORED: u64 = 2;
+const CHARGE_PACKED: u64 = 3;
 /// Clients carry the persistent exclusive-operation fence under its historical migration field name as an
 /// integer. Refuse a mutation rather than wrap or emit a value they cannot compare exactly.
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -42,10 +46,33 @@ const PREPARED_PAGE_BYTES: usize = PAGE_BYTES + 64 * 1024;
 /// Redb's measured handle/cache/mapping residency plus one worst-case exact prepared identity page.
 pub(crate) const OPEN_DATABASE_BYTES: usize = DATABASE_HANDLE_BYTES + PREPARED_PAGE_BYTES;
 const RETAINED_DATABASES: usize = 2;
+/// Each live row's sequence; in a `CHARGE_PACKED` store, its sequence and charge as `packed`.
 const KEYS: TableDefinition<&str, u64> = TableDefinition::new("keys-v3");
 /// Each live row's charge, `stored_charge`. Keeping this beside the key index lets a write enforce the library's
 /// bound (`Limits::stored_bytes`) without parsing canonical JSON or confusing redb's cache with live data.
 const CHARGES: TableDefinition<&str, u64> = TableDefinition::new("charges-v3");
+/// A charge is a key (`valid_hex_id`, at most 128 bytes) and a value (at most `MAX_VALUE_V4`, 256 KiB), so it fits
+/// 20 bits; that leaves 44 for the sequence, which at the write budget's most (`WRITE_PER_MINUTE` batches of
+/// `MAX_WRITES`) lasts over a million years. Both are checked, never assumed.
+const CHARGE_BITS: u32 = 20;
+const MAX_CHARGE: u64 = (1 << CHARGE_BITS) - 1;
+const MAX_SEQUENCE: u64 = (1 << (64 - CHARGE_BITS)) - 1;
+
+/// A packed `KEYS` value: the row's sequence above its charge.
+fn packed(sequence: u64, charge: u64) -> Result<u64, StoreError> {
+    if sequence > MAX_SEQUENCE {
+        return Err(StoreError::Invalid("v3 head overflow".into()));
+    }
+    if charge > MAX_CHARGE {
+        return Err(StoreError::TooLarge);
+    }
+    Ok(sequence << CHARGE_BITS | charge)
+}
+
+/// The sequence and the charge of a packed `KEYS` value.
+fn unpacked(value: u64) -> (u64, u64) {
+    (value >> CHARGE_BITS, value & MAX_CHARGE)
+}
 const SEQUENCE: TableDefinition<u64, &[u8]> = TableDefinition::new("sequence-v3");
 const META_U64: TableDefinition<&str, u64> = TableDefinition::new("metadata-u64-v3");
 const META_BYTES: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata-bytes-v3");
@@ -432,6 +459,9 @@ struct RedbLibrary {
     prepared: Mutex<Option<PreparedPage>>,
     /// When this handle last measured its file for compaction (`now` of the caller's clock); 0 is never.
     compaction_checked: AtomicU64,
+    /// The store keeps its charges packed into `KEYS` (`CHARGE_PACKED`) rather than in `CHARGES`. Fixed at open:
+    /// this release writes each store in the layout it found it in.
+    packed: bool,
 }
 
 /// A read guard that derefs to the open database. Hold it for as long as any transaction begun from it lives.
@@ -514,7 +544,7 @@ fn recharge(transaction: &redb::WriteTransaction) -> Result<(), StoreError> {
         .get("charge")
         .map_err(StoreError::redb)?
         .map(|value| value.value());
-    if charged == Some(CHARGE_STORED) {
+    if matches!(charged, Some(CHARGE_STORED | CHARGE_PACKED)) {
         return Ok(());
     }
     let mut live_bytes = 0u64;
@@ -571,6 +601,7 @@ impl RedbLibrary {
             value
         };
         let member_hash;
+        let mut packed = false;
         if let Some(version) = version {
             if version != FORMAT_VERSION {
                 return Err(StoreError::Invalid(format!("unsupported library format {version}")));
@@ -602,6 +633,12 @@ impl RedbLibrary {
                 }
             }
             recharge(&transaction)?;
+            packed = transaction
+                .open_table(META_U64)
+                .map_err(StoreError::redb)?
+                .get("charge")
+                .map_err(StoreError::redb)?
+                .is_some_and(|value| value.value() == CHARGE_PACKED);
             transaction.commit().map_err(StoreError::redb)?;
         } else {
             member_hash = initial_member_hash;
@@ -633,7 +670,39 @@ impl RedbLibrary {
             member_hash: Mutex::new(member_hash),
             prepared: Mutex::new(None),
             compaction_checked: AtomicU64::new(0),
+            packed,
         })
+    }
+
+    /// A `KEYS` value as its sequence and, when the store keeps it there (`packed`), its charge.
+    fn key_entry(&self, value: u64) -> (u64, Option<u64>) {
+        if self.packed {
+            let (sequence, charge) = unpacked(value);
+            (sequence, Some(charge))
+        } else {
+            (value, None)
+        }
+    }
+
+    /// Keep a live row's sequence and charge in the store's own layout.
+    fn put_key(
+        &self,
+        keys: &mut redb::Table<&str, u64>,
+        charges: Option<&mut redb::Table<&str, u64>>,
+        key: &str,
+        sequence: u64,
+        charge: u64,
+    ) -> Result<(), StoreError> {
+        match charges {
+            Some(charges) => {
+                keys.insert(key, sequence).map_err(StoreError::redb)?;
+                charges.insert(key, charge).map_err(StoreError::redb)?;
+            }
+            None => {
+                keys.insert(key, packed(sequence, charge)?).map_err(StoreError::redb)?;
+            }
+        }
+        Ok(())
     }
 
     fn reconcile_protocol(
@@ -807,11 +876,18 @@ impl LibraryStore for RedbLibrary {
         };
         {
             let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-            let charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
+            // Opened only where it exists: opening it in a write transaction would make it.
+            let charges = (!self.packed)
+                .then(|| transaction.open_table(CHARGES))
+                .transpose()
+                .map_err(StoreError::redb)?;
             let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
             for write in writes {
-                let current_sequence =
-                    keys.get(write.key.as_str()).map_err(StoreError::redb)?.map(|v| v.value());
+                let current = keys
+                    .get(write.key.as_str())
+                    .map_err(StoreError::redb)?
+                    .map(|v| self.key_entry(v.value()));
+                let current_sequence = current.map(|(sequence, _)| sequence);
                 if current_sequence.unwrap_or(0) != write.base {
                     let current = current_sequence
                         .map(|current| {
@@ -827,10 +903,15 @@ impl LibraryStore for RedbLibrary {
                 }
                 head = head.checked_add(1).ok_or_else(|| StoreError::Invalid("v3 head overflow".into()))?;
                 let fragment = row_fragment(head, &write.key, &write.value);
-                let old_charge = charges
-                    .get(write.key.as_str())
-                    .map_err(StoreError::redb)?
-                    .map_or(0, |value| value.value());
+                let old_charge = match (current, &charges) {
+                    (None, _) => 0,
+                    (Some((_, Some(charge))), _) => charge,
+                    (Some((_, None)), Some(charges)) => charges
+                        .get(write.key.as_str())
+                        .map_err(StoreError::redb)?
+                        .map_or(0, |value| value.value()),
+                    (Some((_, None)), None) => unreachable!("a store without packed keys has a charge table"),
+                };
                 let charge = stored_charge(&write.key, &write.value);
                 live_bytes = live_bytes
                     .checked_sub(old_charge)
@@ -847,15 +928,17 @@ impl LibraryStore for RedbLibrary {
         }
         {
             let mut keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-            let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
+            let mut charges = (!self.packed)
+                .then(|| transaction.open_table(CHARGES))
+                .transpose()
+                .map_err(StoreError::redb)?;
             let mut sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
             for (write, old, new, fragment, charge) in &accepted {
                 if let Some(old) = old {
                     sequence.remove(*old).map_err(StoreError::redb)?;
                 }
                 sequence.insert(*new, fragment.as_ref()).map_err(StoreError::redb)?;
-                keys.insert(write.key.as_str(), *new).map_err(StoreError::redb)?;
-                charges.insert(write.key.as_str(), *charge).map_err(StoreError::redb)?;
+                self.put_key(&mut keys, charges.as_mut(), &write.key, *new, *charge)?;
             }
         }
         {
@@ -893,7 +976,8 @@ impl LibraryStore for RedbLibrary {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
         let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-        let Some(sequence_number) = keys.get(key).map_err(StoreError::redb)?.map(|value| value.value())
+        let Some((sequence_number, _)) =
+            keys.get(key).map_err(StoreError::redb)?.map(|value| self.key_entry(value.value()))
         else {
             return Ok(None);
         };
@@ -991,8 +1075,8 @@ impl LibraryStore for RedbLibrary {
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
         let mut entries = Vec::new();
         for key in keys {
-            let Some(sequence_number) =
-                index.get(key.as_str()).map_err(StoreError::redb)?.map(|value| value.value())
+            let Some((sequence_number, _)) =
+                index.get(key.as_str()).map_err(StoreError::redb)?.map(|value| self.key_entry(value.value()))
             else {
                 continue;
             };
@@ -1413,14 +1497,18 @@ impl LibraryStore for RedbLibrary {
         }
         {
             let mut keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-            let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
+            let mut charges = (!self.packed)
+                .then(|| transaction.open_table(CHARGES))
+                .transpose()
+                .map_err(StoreError::redb)?;
             let mut sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
             keys.retain(|_, _| false).map_err(StoreError::redb)?;
-            charges.retain(|_, _| false).map_err(StoreError::redb)?;
+            if let Some(charges) = charges.as_mut() {
+                charges.retain(|_, _| false).map_err(StoreError::redb)?;
+            }
             sequence.retain(|_, _| false).map_err(StoreError::redb)?;
             for (row, seq, fragment, charge) in &prepared_rows {
-                keys.insert(row.key.as_str(), *seq).map_err(StoreError::redb)?;
-                charges.insert(row.key.as_str(), *charge).map_err(StoreError::redb)?;
+                self.put_key(&mut keys, charges.as_mut(), &row.key, *seq, *charge)?;
                 sequence.insert(*seq, fragment.as_ref()).map_err(StoreError::redb)?;
             }
         }
@@ -2416,6 +2504,135 @@ mod tests {
         assert_eq!(store.live_bytes().unwrap(), K1.len() + "short".len());
         store.apply(&[Write { key: K1.into(), base: 1, value: "a longer value".into() }]).unwrap();
         assert_eq!(store.live_bytes().unwrap(), K1.len() + "a longer value".len());
+    }
+
+    /// What a store's file holds: whether it has `charges-v3`, its charge marker, and each live key's `KEYS` value.
+    fn layout(path: &Path) -> (bool, u64, Vec<(String, u64)>) {
+        let database = Database::open(path).unwrap();
+        let read = database.begin_read().unwrap();
+        let charges = read.open_table(CHARGES).is_ok();
+        let marker = read.open_table(META_U64).unwrap().get("charge").unwrap().unwrap().value();
+        let keys = read.open_table(KEYS).unwrap();
+        let values = keys
+            .iter()
+            .unwrap()
+            .map(|entry| entry.map(|(key, value)| (key.value().to_owned(), value.value())).unwrap())
+            .collect();
+        (charges, marker, values)
+    }
+
+    /// Rewrite a closed store into the layout the next release writes (`CHARGE_PACKED`): each row's charge packed
+    /// into `KEYS` beside its sequence, `charges-v3` deleted.
+    fn pack(path: &Path) {
+        let database = Database::open(path).unwrap();
+        let transaction = database.begin_write().unwrap();
+        {
+            let charges = transaction.open_table(CHARGES).unwrap();
+            let mut keys = transaction.open_table(KEYS).unwrap();
+            let rows: Vec<_> = keys
+                .iter()
+                .unwrap()
+                .map(|entry| entry.map(|(key, seq)| (key.value().to_owned(), seq.value())).unwrap())
+                .collect();
+            for (key, seq) in rows {
+                let charge = charges.get(key.as_str()).unwrap().unwrap().value();
+                keys.insert(key.as_str(), packed(seq, charge).unwrap()).unwrap();
+            }
+        }
+        transaction.delete_table(CHARGES).unwrap();
+        transaction.open_table(META_U64).unwrap().insert("charge", CHARGE_PACKED).unwrap();
+        transaction.commit().unwrap();
+    }
+
+    /// A store in the packed layout, as the release after this one writes it, opens, reads, pages, takes writes,
+    /// conflicts and a rewrite, and stays in that layout: a rollback to this release lands on a reader.
+    #[test]
+    fn a_store_written_packed_opens_reads_pages_and_stays_packed() {
+        let dir = temp_dir();
+        let id = "1111111111111111";
+        let first = manager(&dir, 2, 32 << 20, 8 << 20);
+        let path = first.path(id);
+        let store = first.library(id, TOKEN).unwrap();
+        store
+            .apply(&[
+                Write { key: K1.into(), base: 0, value: "one".into() },
+                Write { key: K2.into(), base: 0, value: "two!".into() },
+                Write { key: K3.into(), base: 0, value: "three".into() },
+            ])
+            .unwrap();
+        store.apply(&[Write { key: K1.into(), base: 1, value: "uno".into() }]).unwrap();
+        let before = (store.range(0, MAX_LIMIT).unwrap(), store.live_bytes().unwrap());
+        drop(store);
+        drop(first);
+        pack(&path);
+
+        let reopened = manager(&dir, 2, 32 << 20, 8 << 20);
+        let store = reopened.library(id, TOKEN).unwrap();
+        assert_eq!((store.range(0, MAX_LIMIT).unwrap(), store.live_bytes().unwrap()), before);
+        assert_eq!(store.latest(K1).unwrap().unwrap().sequence, 4);
+        assert_eq!(value(&store.latest(K2).unwrap().unwrap())["v"], "two!");
+        // Paged one row at a time, forwards and back.
+        let mut since = 0;
+        let mut forwards = Vec::new();
+        loop {
+            let page = store.range(since, 1).unwrap();
+            forwards.extend(page.entries.iter().map(|row| row.sequence));
+            if !page.more {
+                break;
+            }
+            since = page.entries.last().unwrap().sequence;
+        }
+        assert_eq!(forwards, [2, 3, 4]);
+        let back = store.range_before(4, 1).unwrap();
+        assert_eq!((back.entries[0].sequence, back.more, back.rows), (3, true, Some(3)));
+        let named = store.rows(&[K3.to_owned(), K1.to_owned()]).unwrap();
+        assert_eq!(named.entries.iter().map(|row| row.sequence).collect::<Vec<_>>(), [3, 4]);
+
+        let conflict = store.apply(&[Write { key: K2.into(), base: 0, value: "lost".into() }]).unwrap();
+        assert_eq!(conflict.conflicts[0].current.as_ref().unwrap().sequence, 2);
+        store.apply(&[Write { key: K2.into(), base: 2, value: "longer two".into() }]).unwrap();
+        assert_eq!(store.live_bytes().unwrap(), before.1 + "longer two".len() - "two!".len());
+        drop(store);
+        drop(reopened);
+        let (charges, marker, keys) = layout(&path);
+        assert!(!charges && marker == CHARGE_PACKED, "a packed store is written packed");
+        assert!(keys.contains(&(K2.to_owned(), packed(5, (K2.len() + 10) as u64).unwrap())));
+
+        let reopened = manager(&dir, 2, 32 << 20, 8 << 20);
+        let store = reopened.library(id, TOKEN).unwrap();
+        let rows = [RewriteRow { key: K3.into(), value: "kept".into() }];
+        let protocol = store.rewrite(5, &rows, 2, 32 << 20).unwrap();
+        assert_eq!(protocol.head, 6);
+        assert_eq!(store.live_bytes().unwrap(), K3.len() + 4);
+        drop(store);
+        drop(reopened);
+        let (charges, marker, keys) = layout(&path);
+        assert_eq!((charges, marker), (false, CHARGE_PACKED));
+        assert_eq!(keys, [(K3.to_owned(), packed(6, (K3.len() + 4) as u64).unwrap())]);
+    }
+
+    /// This release still makes and writes stores in the layout with `charges-v3`.
+    #[test]
+    fn a_store_this_release_makes_keeps_its_charge_table() {
+        let dir = temp_dir();
+        let id = "1111111111111111";
+        let manager = manager(&dir, 2, 32 << 20, 8 << 20);
+        let store = manager.library(id, TOKEN).unwrap();
+        store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        store.apply(&[Write { key: K1.into(), base: 1, value: "uno".into() }]).unwrap();
+        drop(store);
+        let path = manager.path(id);
+        drop(manager);
+        assert_eq!(layout(&path), (true, CHARGE_STORED, vec![(K1.to_owned(), 2)]));
+    }
+
+    #[test]
+    fn a_packed_key_refuses_what_its_bits_cannot_hold() {
+        assert_eq!(unpacked(packed(MAX_SEQUENCE, MAX_CHARGE).unwrap()), (MAX_SEQUENCE, MAX_CHARGE));
+        assert!(matches!(packed(MAX_SEQUENCE + 1, 0), Err(StoreError::Invalid(_))));
+        assert!(matches!(packed(1, MAX_CHARGE + 1), Err(StoreError::TooLarge)));
+        let largest = stored_charge(&"f".repeat(128), &"v".repeat(super::super::MAX_VALUE_V4));
+        assert!(largest <= MAX_CHARGE, "the largest row a client may store fits its charge bits");
     }
 
     /// A store written while `charges-v3` held v2's in-memory formula is recounted as stored bytes when it opens,
