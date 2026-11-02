@@ -1337,11 +1337,16 @@ pub fn internal(what: &str, e: std::io::Error) -> Response {
     bare_json(StatusCode::INTERNAL_SERVER_ERROR, &error("internal_error"))
 }
 
+/// The request body, within `cap` bytes. A body over the cap is a 413.
+pub async fn read_body(req: Request, cap: usize) -> Result<Bytes, Box<Response>> {
+    axum::body::to_bytes(req.into_body(), cap)
+        .await
+        .map_err(|_| Box::new(bare_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))))
+}
+
 /// The request body as JSON, within `cap` bytes. A body over the cap is a 413; one that isn't JSON a 400.
 pub async fn read_json(req: Request, cap: usize) -> Result<Value, Box<Response>> {
-    let bytes: Bytes = axum::body::to_bytes(req.into_body(), cap)
-        .await
-        .map_err(|_| Box::new(bare_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"))))?;
+    let bytes = read_body(req, cap).await?;
     serde_json::from_slice(&bytes)
         .map_err(|_| Box::new(json_reply(StatusCode::BAD_REQUEST, &error("bad_request"))))
 }
@@ -1659,11 +1664,13 @@ pub mod tests {
             state.tmdb_cache_dir = Some(cache.clone());
             state.web_dir = Some(web.clone());
         });
-        let kept = cache
-            .join(format!("{}.json", crate::hex(&<sha2::Sha256 as sha2::Digest>::digest(b"/3/movie/550?"))));
+        let kept = cache.join(format!(
+            "{}.json",
+            crate::hex(&<sha2::Sha256 as sha2::Digest>::digest(b"/3/genre/movie/list?"))
+        ));
         std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(kept, "{\"id\":550}").unwrap();
-        let hit = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
+        std::fs::write(kept, "{\"genres\":[]}").unwrap();
+        let hit = h.send("GET", "/tmdb/3/genre/movie/list", None, &[]).await;
         assert_eq!(hit.headers()["x-den-tmdb"], "hit");
 
         let served = |resp: &Response| resp.extensions().get::<crate::web::Served>().map(|s| s.0);
