@@ -1767,9 +1767,15 @@
       homeTaste = [];
       return;
     }
+    // Ties go by title key, so the pick does not depend on the list's order: the saved views hold it in key order, the
+    // whole log in record order.
     const entries = [...weighted]
       .filter(({ weight }) => Number.isFinite(weight) && weight !== 0)
-      .sort((left, right) => right.at - left.at)
+      .sort((left, right) => {
+        if (right.at !== left.at) return right.at - left.at;
+        const [a, b] = [titleKey(left.ref), titleKey(right.ref)];
+        return a < b ? -1 : a > b ? 1 : 0;
+      })
       .slice(0, 4);
     if (!entries.length) {
       homeTaste = [];
