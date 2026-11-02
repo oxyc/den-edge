@@ -65,13 +65,67 @@ export interface FinishedLibraryViews {
 }
 
 const storedKey = (libraryId: string) => `${libraryId}:${NAME}`;
-const pieceKey = (libraryId: string, revision: string, capability: FinishedLibraryViewCapability) =>
-  `${storedKey(libraryId)}:${revision}:${capability}`;
+const pieceKey = (libraryId: string, revision: string, part: PartName) =>
+  `${storedKey(libraryId)}:${revision}:${part}`;
 
-/** Where each piece is kept (`revision`) and the SHA-256 of what it says: a piece that says the same is kept as is. */
-type KeptPieces = Partial<
-  Record<FinishedLibraryViewCapability, { revision: string; digest: string }>
->;
+/**
+ * The recommendations piece names every title in the library, so it is kept as a head (`seeds`) and `SHARDS` parts by
+ * title: an edit of one title rewrites the one part that holds it, not the whole library's lists.
+ */
+const SHARDS = 32;
+type ShardName = `recommendations.${string}`;
+type PartName = FinishedLibraryViewCapability | ShardName;
+const shardName = (shard: number): ShardName => `recommendations.${String(shard).padStart(2, '0')}`;
+const SHARD_NAMES = Array.from({ length: SHARDS }, (_, shard) => shardName(shard));
+const refKey = (ref: { type: string; id: number }) => `${ref.type}:${ref.id}`;
+const shardOf = (ref: { type: string; id: number }) => {
+  let hash = 0x811c9dc5;
+  for (const character of refKey(ref)) hash = Math.imul(hash ^ character.charCodeAt(0), 0x01000193);
+  return (hash >>> 0) % SHARDS;
+};
+type Recommendations = FinishedLibraryViewPieces['recommendations'];
+type RecommendationLists = Omit<Recommendations, 'seeds'>;
+const LISTS = ['owned', 'watched', 'standings', 'weighted'] as const;
+const listRef = (entry: Recommendations[(typeof LISTS)[number]][number]) =>
+  'title' in entry ? entry.title : entry;
+
+/** A capability's piece as the parts it is kept in. */
+function partsOf(
+  capability: FinishedLibraryViewCapability,
+  piece: unknown,
+): Array<[PartName, unknown]> {
+  if (capability !== 'recommendations') return [[capability, piece]];
+  const { seeds, ...lists } = piece as Recommendations;
+  const shards = SHARD_NAMES.map((): RecommendationLists => ({
+    owned: [],
+    watched: [],
+    standings: [],
+    weighted: [],
+  }));
+  for (const name of LISTS)
+    for (const entry of lists[name])
+      (shards[shardOf(listRef(entry))]![name] as unknown[]).push(entry);
+  return [
+    ['recommendations', { seeds }],
+    ...shards.map((shard, index): [PartName, unknown] => [SHARD_NAMES[index]!, shard]),
+  ];
+}
+
+/** The recommendations piece from its head and parts: each list in title-key order, the order it is drawn in. */
+function wholeRecommendations(head: { seeds: Recommendations['seeds'] }, shards: unknown[]) {
+  const whole: RecommendationLists = { owned: [], watched: [], standings: [], weighted: [] };
+  for (const shard of shards as RecommendationLists[])
+    for (const name of LISTS) (whole[name] as unknown[]).push(...shard[name]);
+  for (const name of LISTS)
+    (whole[name] as Array<Recommendations[typeof name][number]>).sort((left, right) => {
+      const [a, b] = [refKey(listRef(left)), refKey(listRef(right))];
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+  return { ...whole, seeds: head.seeds };
+}
+
+/** Where each part is kept (`revision`) and the SHA-256 of what it says: a part that says the same is kept as is. */
+type KeptPieces = Partial<Record<PartName, { revision: string; digest: string }>>;
 
 interface FinishedLibraryViewManifest {
   schema: typeof FINISHED_LIBRARY_VIEWS_SCHEMA;
@@ -180,8 +234,9 @@ const validManifest = (value: unknown): value is FinishedLibraryViewManifest => 
     typeof held.pieces === 'object' &&
     !Array.isArray(held.pieces) &&
     Object.entries(held.pieces).every(
-      ([capability, piece]) =>
-        CAPABILITIES.includes(capability as FinishedLibraryViewCapability) &&
+      ([part, piece]) =>
+        (CAPABILITIES.includes(part as FinishedLibraryViewCapability) ||
+          SHARD_NAMES.includes(part as ShardName)) &&
         typeof piece?.revision === 'string' &&
         /^[0-9a-f]{32}$/.test(piece.revision) &&
         typeof piece.digest === 'string' &&
@@ -260,15 +315,22 @@ export async function readFinishedLibraryViews(
       manifest.identity.libraryId !== local.libraryId
     )
       return null;
-    if (capabilities.some((capability) => !manifest.pieces[capability])) return null;
+    const part = async (name: PartName): Promise<unknown> => {
+      const kept = manifest.pieces[name];
+      if (!kept) return undefined;
+      const bytes = await vault.get(pieceKey(local.libraryId, kept.revision, name));
+      if (!bytes) return undefined;
+      noteLibraryCacheIO('read', bytes.byteLength);
+      return openLibraryLocalValue(local.key, `${NAME}:${kept.revision}:${name}`, bytes);
+    };
     const pieces: Partial<FinishedLibraryViewPieces> = {};
     for (const capability of capabilities) {
-      const { revision } = manifest.pieces[capability]!;
-      const aad = `${NAME}:${revision}:${capability}`;
-      const bytes = await vault.get(pieceKey(local.libraryId, revision, capability));
-      if (!bytes) return null;
-      noteLibraryCacheIO('read', bytes.byteLength);
-      const piece = await openLibraryLocalValue(local.key, aad, bytes);
+      let piece = await part(capability);
+      if (piece && capability === 'recommendations') {
+        const shards = await Promise.all(SHARD_NAMES.map(part));
+        if (shards.some((shard) => !shard || typeof shard !== 'object')) return null;
+        piece = wholeRecommendations(piece as { seeds: Recommendations['seeds'] }, shards);
+      }
       if (!validPiece(capability, piece)) return null;
       Object.assign(pieces, { [capability]: piece });
     }
@@ -318,23 +380,25 @@ export async function writeFinishedLibraryViews(
 ): Promise<boolean> {
   const local = await libraryLocalMaterials(libraryKey);
   if (!local || !validEnvelope(value) || value.identity.libraryId !== local.libraryId) return false;
-  const capabilities = Object.keys(value.pieces) as FinishedLibraryViewCapability[];
+  const parts = new Map(
+    (Object.keys(value.pieces) as FinishedLibraryViewCapability[]).flatMap((capability) =>
+      partsOf(capability, value.pieces[capability]),
+    ),
+  );
   const { bytes: expected, manifest: kept } = await keptManifest(local, vault);
   const nextRevision = revision();
   const pieces: KeptPieces = {};
-  const changed: FinishedLibraryViewCapability[] = [];
-  for (const capability of capabilities) {
-    const digest = await pieceDigest(value.pieces[capability]);
-    const held = kept?.pieces[capability];
-    if (held?.digest === digest) pieces[capability] = held;
+  const changed: PartName[] = [];
+  for (const [part, piece] of parts) {
+    const digest = await pieceDigest(piece);
+    const held = kept?.pieces[part];
+    if (held?.digest === digest) pieces[part] = held;
     else {
-      pieces[capability] = { revision: nextRevision, digest };
-      changed.push(capability);
+      pieces[part] = { revision: nextRevision, digest };
+      changed.push(part);
     }
   }
-  const dropped = Object.keys(kept?.pieces ?? {}).filter(
-    (capability) => !capabilities.includes(capability as FinishedLibraryViewCapability),
-  );
+  const dropped = Object.keys(kept?.pieces ?? {}).filter((part) => !parts.has(part as PartName));
   const compareAndCommit = vault.compareAndCommit;
   if (!compareAndCommit) return false;
   const unchanged =
@@ -346,12 +410,12 @@ export async function writeFinishedLibraryViews(
   const changes: VaultChange[] = [];
   const writtenBytes: number[] = [];
   if (!unchanged) {
-    for (const capability of changed) {
-      const aad = `${NAME}:${nextRevision}:${capability}`;
-      const bytes = await sealLibraryLocalValue(local.key, aad, value.pieces[capability]);
+    for (const part of changed) {
+      const aad = `${NAME}:${nextRevision}:${part}`;
+      const bytes = await sealLibraryLocalValue(local.key, aad, parts.get(part));
       changes.push({
         kind: 'put',
-        key: pieceKey(local.libraryId, nextRevision, capability),
+        key: pieceKey(local.libraryId, nextRevision, part),
         value: bytes,
       });
       writtenBytes.push(bytes.byteLength);
@@ -367,8 +431,8 @@ export async function writeFinishedLibraryViews(
     if (changed.length || dropped.length) {
       // What the manifest no longer names: replaced pieces and leftovers from an older interrupted implementation.
       const active = new Set(
-        Object.entries(pieces).map(([capability, { revision }]) =>
-          pieceKey(local.libraryId, revision, capability as FinishedLibraryViewCapability),
+        Object.entries(pieces).map(([part, held]) =>
+          pieceKey(local.libraryId, held!.revision, part as PartName),
         ),
       );
       const storedPieces = await vault.entries(`${storedKey(local.libraryId)}:`);

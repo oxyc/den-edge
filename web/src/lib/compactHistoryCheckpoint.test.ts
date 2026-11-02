@@ -216,6 +216,79 @@ describe('compact History checkpoint', () => {
     ]);
   });
 
+  it('keeps an edit as a delta of its title, reads the same History as a rebuild, and folds past the limit', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    await store.commitBatch(
+      'generation-a',
+      40,
+      Array.from({ length: 40 }, (_, index) =>
+        entry(key(index + 1), index + 1, movie(index + 1, 1_000 + index)),
+      ),
+      true,
+    );
+    const historyKey = [...vault.values.keys()].find((storedKey) =>
+      storedKey.endsWith(':history'),
+    )!;
+    const checkpoint = vault.values.get(historyKey);
+    const deltas = () =>
+      [...vault.values.keys()].filter((storedKey) => storedKey.includes(':history-delta:'));
+
+    // Each edit writes one delta, of the one title it changed, and leaves the checkpoint as it was.
+    for (let edit = 1; edit <= 32; edit++)
+      await store.keepRows('generation-a', [
+        entry(key(edit), 40 + edit, movie(edit, 9_000 + edit)),
+      ]);
+    expect(deltas()).toHaveLength(32);
+    expect(vault.values.get(historyKey)).toBe(checkpoint);
+    const kept = (await store.history((await store.manifest())!))!.page()!.items;
+
+    // What the deltas say is what a rebuild from the documents says.
+    const rebuilt = (await LibraryFactStore.open(libraryKey, vault))!;
+    vault.values.delete(historyKey);
+    for (const delta of deltas()) vault.values.delete(delta);
+    await rebuilt.manifest();
+    await rebuilt.commitBatch('generation-a', 40, [], true);
+    expect((await rebuilt.history((await rebuilt.manifest())!))!.page()!.items).toEqual(kept);
+    expect(kept[0]).toMatchObject({ title: { type: 'movie', id: 32 }, watchedAt: 9_032 });
+
+    // Past the limit, the next edit writes the checkpoint whole and drops the deltas.
+    for (let edit = 1; edit <= 33; edit++)
+      await rebuilt.keepRows('generation-a', [
+        entry(key(edit), 80 + edit, movie(edit, 20_000 + edit)),
+      ]);
+    expect(deltas()).toHaveLength(0);
+    expect((await rebuilt.history((await rebuilt.manifest())!))!.page()!.items[0]).toMatchObject({
+      title: { type: 'movie', id: 33 },
+      watchedAt: 20_033,
+    });
+  });
+
+  it('builds History again when a delta does not follow the History before it', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    await store.commitBatch(
+      'generation-a',
+      2,
+      [entry(key(1), 1, movie(1, 1_000)), entry(key(2), 2, movie(2, 2_000))],
+      true,
+    );
+    await store.keepRows('generation-a', [entry(key(1), 3, movie(1, 3_000))]);
+    const first = [...vault.values].find(([storedKey]) => storedKey.includes(':history-delta:'))!;
+    await store.keepRows('generation-a', [entry(key(2), 4, movie(2, 4_000))]);
+    // The first delta is lost: the second one no longer follows the checkpoint.
+    vault.values.delete(first[0]);
+    const reader = (await LibraryFactStore.open(libraryKey, vault))!;
+    const manifest = (await reader.manifest())!;
+    await expect(reader.history(manifest)).resolves.toBeNull();
+
+    await reader.commitBatch('generation-a', manifest.head, [], true);
+    expect((await reader.history((await reader.manifest())!))!.page()!.items).toMatchObject([
+      { title: { type: 'movie', id: 2 }, watchedAt: 4_000 },
+      { title: { type: 'movie', id: 1 }, watchedAt: 3_000 },
+    ]);
+  });
+
   it('expires at a future-stamp deadline and rebuilds with the newly-effective projection', async () => {
     vi.useFakeTimers();
     try {

@@ -333,7 +333,8 @@ describe('finished library views', () => {
     );
     vault.interruptManifest = false;
     await writeFinishedLibraryViews(libraryKey, vault, replacement);
-    expect(vault.values.size).toBe(1 + Object.keys(replacement.pieces).length);
+    // The manifest and each piece; recommendations is a head and its 32 parts.
+    expect(vault.values.size).toBe(1 + Object.keys(replacement.pieces).length + 32);
   });
 
   it('lets a competing publisher win without publishing or deleting from the stale attempt', async () => {
@@ -356,10 +357,57 @@ describe('finished library views', () => {
     await expect(staleWrite).resolves.toBe(false);
 
     expect(shared.values).toEqual(afterWinner);
-    expect(shared.values.size).toBe(1 + Object.keys(newer.pieces).length);
+    expect(shared.values.size).toBe(1 + Object.keys(newer.pieces).length + 32);
     await expect(
       readFinishedLibraryViews(libraryKey, shared, ['watchlist', 'continue', 'recommendations']),
     ).resolves.toMatchObject({ identity: newer.identity, pieces: newer.pieces });
+  });
+
+  it('keeps recommendations by title, so an edit of one title rewrites only the part that holds it', async () => {
+    const vault = new MemoryVault();
+    const views = await fixture();
+    const refs = Array.from({ length: 3000 }, (_, index) => ({
+      type: index % 2 ? ('movie' as const) : ('tv' as const),
+      id: index + 1,
+    }));
+    const byKey = <T>(entries: T[], ref: (entry: T) => { type: string; id: number }) =>
+      entries.sort((left, right) => {
+        const [a, b] = [ref(left), ref(right)].map(({ type, id }) => `${type}:${id}`);
+        return a! < b! ? -1 : a! > b! ? 1 : 0;
+      });
+    views.pieces.recommendations = {
+      owned: byKey([...refs], (ref) => ref),
+      watched: byKey(
+        refs.filter(({ id }) => id % 3 === 0),
+        (ref) => ref,
+      ),
+      standings: byKey(
+        refs.map((title) => ({ title, standing: 'watchlist' as const })),
+        ({ title }) => title,
+      ),
+      weighted: byKey(
+        refs.map((title) => ({ title, weight: 0.6, updatedAt: title.id })),
+        ({ title }) => title,
+      ),
+      seeds: { watched: [], watchlisted: refs.slice(0, 2) },
+    };
+    await writeFinishedLibraryViews(libraryKey, vault, views);
+    await expect(
+      readFinishedLibraryViews(libraryKey, vault, ['recommendations']),
+    ).resolves.toMatchObject({ pieces: { recommendations: views.pieces.recommendations } });
+
+    const edited = structuredClone(views);
+    edited.identity.head += 1;
+    const standing = edited.pieces.recommendations!.standings.find(({ title }) => title.id === 7)!;
+    standing.standing = 'watched';
+    await writeFinishedLibraryViews(libraryKey, vault, edited);
+    const written = vault.commits
+      .at(-1)!
+      .filter((change) => change.kind === 'put' && /:recommendations/.test(change.key));
+    expect(written).toHaveLength(1);
+    await expect(
+      readFinishedLibraryViews(libraryKey, vault, ['recommendations']),
+    ).resolves.toMatchObject({ pieces: { recommendations: edited.pieces.recommendations } });
   });
 
   it('does not let a delayed stale marker hide a concurrently published manifest', async () => {
