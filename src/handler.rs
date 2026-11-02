@@ -1659,11 +1659,13 @@ pub mod tests {
             state.tmdb_cache_dir = Some(cache.clone());
             state.web_dir = Some(web.clone());
         });
-        let kept = cache
-            .join(format!("{}.json", crate::hex(&<sha2::Sha256 as sha2::Digest>::digest(b"/3/movie/550?"))));
+        let kept = cache.join(format!(
+            "{}.json",
+            crate::hex(&<sha2::Sha256 as sha2::Digest>::digest(b"/3/genre/movie/list?"))
+        ));
         std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(kept, "{\"id\":550}").unwrap();
-        let hit = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
+        std::fs::write(kept, "{\"genres\":[]}").unwrap();
+        let hit = h.send("GET", "/tmdb/3/genre/movie/list", None, &[]).await;
         assert_eq!(hit.headers()["x-den-tmdb"], "hit");
 
         let served = |resp: &Response| resp.extensions().get::<crate::web::Served>().map(|s| s.0);

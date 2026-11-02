@@ -14,6 +14,8 @@
 //! TMDB's terms are what set the ceiling: cached content may be kept for six months, so nothing here outlives
 //! that, and the attribution the app already shows is what licenses the rest.
 
+mod record;
+
 use crate::handler::{error, raw_json, retry_after};
 use crate::metrics::{
     ByteAdmission, BytePool, CacheAccess, CacheStore, Provider, ProviderUpstream, TmdbPrepared,
@@ -27,7 +29,6 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -431,52 +432,34 @@ const TV_APPENDS: [&str; 7] = [
     "watch/providers",
 ];
 
-/// The `append_to_response` values clients sent before every detail question was asked as the whole set, spelled
-/// exactly as they send them: a key keeps the value in its own order, so this is the only way to find what they
-/// left in the cache. An answer kept under one of these still answers any question it holds all of, so a title
-/// already kept is not asked for again. `""` is the bare record, the link preview's.
-const KEPT_MOVIE_APPENDS: [&str; 5] = [
-    "credits,recommendations,videos,external_ids,release_dates,watch/providers", // web detail page
-    "release_dates,watch/providers,credits,recommendations,videos",              // TV title screen
-    "release_dates,watch/providers",                                             // TV detail
-    "credits",                                                                   // web library naming
-    "",
-];
-const KEPT_TV_APPENDS: [&str; 5] = [
-    "aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers", // web detail page
-    "content_ratings,watch/providers,external_ids,credits,recommendations,videos", // TV title screen
-    "content_ratings,watch/providers,external_ids",                                // TV detail
-    "credits,external_ids",                                                        // web library naming
-    "",
-];
-
 /// A question for a film's or a series' own record (`/3/movie/550?append_to_response=credits`) whose sub-requests
 /// are all among the ones the whole detail carries.
+#[derive(Clone)]
 struct Detail {
     path: String,
-    /// Every sub-request the whole detail carries for this kind of title, and what was kept before it existed.
+    /// Every sub-request the whole detail carries for this kind of title.
     all: &'static [&'static str],
-    kept: &'static [&'static str],
-    asked: BTreeSet<String>,
+    /// The sub-requests asked, as a mask over `all` (`record`).
+    asked: u32,
     /// The question's other parameters (`language`, …): part of the key as they always were.
     rest: Vec<(String, String)>,
-    /// The question exactly as asked, which is what an answer kept before the whole set existed is under.
+    /// The question exactly as asked: what a title too large to fetch whole is asked and kept as.
     exact: Option<String>,
     dir: PathBuf,
 }
 
-/// Below this an answer is cut (`Detail::narrowed`) where it is: well under a millisecond, less than the hop to the
-/// blocking pool is worth.
+/// Below this a record is cut where its answer arrived: well under a millisecond, less than the hop to the blocking
+/// pool is worth.
 const NARROW_INLINE_BYTES: usize = 64 * 1024;
 
-fn narrowed(all: &[&str], asked: &BTreeSet<String>, body: Bytes) -> Bytes {
-    let Ok(serde_json::Value::Object(mut record)) = serde_json::from_slice(&body) else { return body };
-    for append in all {
-        if !asked.contains(*append) {
-            record.remove(*append);
-        }
-    }
-    serde_json::to_vec(&record).map_or(body, Bytes::from)
+/// TMDB bodies being cut into records at once, in bytes. Cutting parses the body, and a parse holds several times
+/// its body in `Value`s; this keeps the worst case to two 4 MiB series at a time while a cold screen of ordinary
+/// titles (~25 KB each) is cut in parallel.
+const RECORD_BUILD_BYTES: usize = 2 * MAX_ANSWER_BYTES;
+
+fn record_builds() -> &'static Arc<tokio::sync::Semaphore> {
+    static BUILDS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    BUILDS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RECORD_BUILD_BYTES)))
 }
 
 /// What the cache holds for a detail question.
@@ -490,34 +473,22 @@ enum Kept {
     Nothing,
 }
 
-/// What the cache holds when an internal caller will parse the answer itself. Link previews do not benefit from a
-/// prepared HTTP representation: entering the globally bounded representation builder here could make an otherwise
-/// hot preview miss its deadline behind unrelated response work, only to parse the prepared bytes immediately.
-enum KeptBytes {
-    Hit(Bytes),
-    Absent,
-    Stale(Bytes),
-    Nothing,
-}
-
 enum Prepared {
+    /// An answer in memory, tagged with its digest.
     Bytes(Bytes),
+    /// An answer cut from a record, with the tag naming it: the record's generation and what was asked.
+    Record(Bytes, HeaderValue),
+    /// A kept exact answer, streamed from its open file.
     File(crate::cache::JsonFile),
 }
 
 impl Prepared {
-    #[cfg(test)]
     async fn bytes(self) -> Option<Bytes> {
         match self {
-            Self::Bytes(bytes) => Some(bytes),
+            Self::Bytes(bytes) | Self::Record(bytes, _) => Some(bytes),
             Self::File(file) => file.bytes().await,
         }
     }
-}
-
-fn detail_builds() -> &'static Arc<tokio::sync::Semaphore> {
-    static BUILDS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    BUILDS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
 }
 
 /// A derived response which cannot be streamed from a prepared file is charged as the largest body it could own,
@@ -525,8 +496,7 @@ fn detail_builds() -> &'static Arc<tokio::sync::Semaphore> {
 /// question reserves its charge before asking TMDB, so this is also how many cold questions are asked at once. It
 /// was four: fifteen cold search results then went to TMDB in four waves, 11 of 15 waiting on this pool (measured on
 /// the box: its high water at the whole 16 MiB), 1.7 s a poster where TMDB answers one in 150-450 ms. Thirty-two
-/// covers a screen of results in one wave; with the single builder's buffers this path stays below 136 MiB even
-/// when every body is at the provider's 4 MiB ceiling, inside the container's 256 MiB.
+/// covers a screen of results in one wave.
 const DERIVED_RESPONSE_BUDGET_BYTES: usize = 32 * MAX_ANSWER_BYTES;
 const DERIVED_RESPONSE_CHARGE: u32 = MAX_ANSWER_BYTES as u32;
 
@@ -577,67 +547,36 @@ fn charged_derived(body: Bytes, charge: DerivedCharge) -> Bytes {
     Bytes::from_owner(ChargedDerived { body, _charge: charge })
 }
 
-#[cfg(test)]
-static VARIANT_WATCHES: OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, tokio::sync::oneshot::Sender<()>>>,
-> = OnceLock::new();
+/// Where whole details were kept before records, as prepared subsets beside each title. Nothing writes there now;
+/// the sweep removes what is left.
+const PREPARED_DIR: &str = ".tmdb-prepared";
 
-#[cfg(test)]
-fn watch_variant_owner(source: &Path) -> tokio::sync::oneshot::Receiver<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    crate::lock(VARIANT_WATCHES.get_or_init(Default::default)).insert(source.to_owned(), tx);
-    rx
-}
-
-#[cfg(test)]
-fn note_variant_owner(source: &Path) {
-    if let Some(tx) = crate::lock(VARIANT_WATCHES.get_or_init(Default::default)).remove(source) {
-        let _ = tx.send(());
-    }
-}
-
-fn response_sidecar(file: &Path) -> PathBuf {
-    let mut name = file.as_os_str().to_os_string();
-    name.push(".response");
-    PathBuf::from(name)
-}
-
-async fn remove_variant(file: &Path) {
-    let _ = tokio::fs::remove_file(file).await;
-    let _ = tokio::fs::remove_file(response_sidecar(file)).await;
-}
-
-fn variants_dir(source: &Path) -> PathBuf {
-    let parent = source.parent().unwrap_or_else(|| Path::new("."));
-    let stem = source.file_stem().unwrap_or_default();
-    parent.join(".tmdb-prepared").join(stem)
-}
-
-/// Keep at most the current source generation's prepared representations. Builds are globally serialized, so no
-/// newer variant publisher can race this pass; a concurrent canonical replacement can at worst leave the just-built
-/// digest orphaned until the next successful build, never make it answer for the replacement.
-async fn retire_obsolete_variants(source: &Path, keep_digest: &[u8; 16]) {
-    let keep = crate::hex(keep_digest);
-    let Ok(mut entries) = tokio::fs::read_dir(variants_dir(source)).await else { return };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(record) = name.strip_suffix(".tmdb.json") else {
-            continue;
-        };
-        let mut parts = record.split('.');
-        let (Some(question), Some(digest), Some(fresh), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let hex = |value: &str| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
-        let known_fresh =
-            fresh == LIST_TTL.as_secs().to_string() || fresh == DETAILS_TTL.as_secs().to_string();
-        if hex(question) && hex(digest) && known_fresh && digest != keep {
-            remove_variant(&entry.path()).await;
+/// Written beside and renamed over, like `write`, with the file's time set before it is in place: a record cut from
+/// an answer kept earlier keeps the age that answer had.
+async fn write_record(file: &Path, body: &Bytes, modified: Option<SystemTime>) -> bool {
+    let (file, body) = (file.to_owned(), body.clone());
+    let temp = file.with_extension(format!("{}.tmp", crate::hex(&crate::random_bytes::<8>())));
+    tokio::task::spawn_blocking(move || {
+        let Some(dir) = file.parent() else { return false };
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
         }
-    }
+        let written = std::fs::write(&temp, &body).is_ok()
+            && modified.is_none_or(|modified| {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&temp)
+                    .and_then(|f| f.set_modified(modified))
+                    .is_ok()
+            })
+            && std::fs::rename(&temp, &file).is_ok();
+        if !written {
+            let _ = std::fs::remove_file(&temp);
+        }
+        written
+    })
+    .await
+    .unwrap_or(false)
 }
 
 impl Detail {
@@ -652,30 +591,36 @@ impl Detail {
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let (all, kept): (&'static [&'static str], &'static [&'static str]) = match kind {
-            "movie" => (&MOVIE_APPENDS, &KEPT_MOVIE_APPENDS),
-            "tv" => (&TV_APPENDS, &KEPT_TV_APPENDS),
+        let all: &'static [&'static str] = match kind {
+            "movie" => &MOVIE_APPENDS,
+            "tv" => &TV_APPENDS,
             _ => return None,
         };
-        let (mut asked, mut rest) = (BTreeSet::new(), Vec::new());
+        let (mut asked, mut rest) = (0u32, Vec::new());
         for (name, value) in url::form_urlencoded::parse(query.unwrap_or("").as_bytes()) {
             match name.as_ref() {
                 "api_key" | "session_id" => {}
                 "append_to_response" => {
-                    asked.extend(value.split(',').map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned))
+                    for append in value.split(',').map(str::trim).filter(|a| !a.is_empty()) {
+                        asked |= 1 << all.iter().position(|known| *known == append)?;
+                    }
                 }
                 _ => rest.push((name.into_owned(), value.into_owned())),
             }
         }
-        asked.iter().all(|a| all.contains(&a.as_str())).then(|| Detail {
+        Some(Detail {
             path: path.to_owned(),
             all,
-            kept,
             asked,
             rest,
             exact: query.map(str::to_owned),
             dir: dir.to_owned(),
         })
+    }
+
+    /// Every sub-request, as a mask.
+    fn every(&self) -> u32 {
+        (1 << self.all.len()) - 1
     }
 
     /// This question's other parameters with `appends` as its sub-requests.
@@ -688,343 +633,207 @@ impl Detail {
         Some(out.finish()).filter(|q| !q.is_empty())
     }
 
-    /// The whole detail: the question TMDB is asked, and the key its answer is kept under.
+    /// The whole detail: the question TMDB is asked, and the key's file, where its plain answer was kept before
+    /// records (`migrated`).
     fn whole(&self) -> (Option<String>, PathBuf) {
         let query = self.query(&self.all.join(","));
         let file = cache_path(&self.dir, &cache_key(&self.path, query.as_deref()));
         (query, file)
     }
 
-    /// Where a kept answer to this question may be, and whether it is the question exactly: the question as asked,
-    /// then the whole detail, then what clients kept before it existed that holds everything asked.
-    fn candidates(&self) -> Vec<(PathBuf, bool)> {
-        let exact = cache_path(&self.dir, &cache_key(&self.path, self.exact.as_deref()));
-        let mut files = vec![(exact, true), (self.whole().1, false)];
-        for appends in self.kept {
-            let holds: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
-            if self.asked.iter().all(|a| holds.contains(a.as_str())) {
-                files.push((
-                    cache_path(&self.dir, &cache_key(&self.path, self.query(appends).as_deref())),
-                    false,
-                ));
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        files.retain(|(file, _)| seen.insert(file.clone()));
-        files
+    /// Where the whole detail is kept, cut into a record (`record`).
+    fn record_path(&self) -> PathBuf {
+        self.whole().1.with_extension("detail")
     }
 
-    fn variant(&self, source: &Path, source_digest: &[u8; 16], fresh: Duration) -> PathBuf {
-        let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
-        let question = cache_key(&self.path, self.query(&appends).as_deref());
-        let suffix = crate::hex(&Sha256::digest(question.as_bytes())[..16]);
-        variants_dir(source).join(format!(
-            "{suffix}.{}.{}.tmdb.json",
-            crate::hex(source_digest),
-            fresh.as_secs()
-        ))
+    /// The tag of this question's answer: the record's generation and what was asked of it.
+    fn tag(&self, header: &record::Header) -> HeaderValue {
+        HeaderValue::from_str(&format!("\"{}-{:x}\"", crate::hex(&header.digest), self.asked))
+            .expect("a quoted hex digest")
     }
 
-    /// Only representations used by a checked-in client become durable. An arbitrary public subset is still
-    /// answered, but reparsed on its next ask rather than multiplying files beside every canonical title.
-    fn durable_variant(&self) -> bool {
-        let supported_language = self.rest.is_empty()
-            || matches!(
-                self.rest.as_slice(),
-                [(name, value)]
-                    if name == "language" && matches!(value.as_str(), "en-US" | "es-ES" | "sv-SE")
-            );
-        supported_language
-            && self.kept.iter().any(|appends| {
-                let known: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
-                self.asked.len() == known.len() && self.asked.iter().all(|a| known.contains(a.as_str()))
-            })
-    }
-
-    async fn existing_variant(
+    /// An answer read from a record, judged: what it is worth now, by its own age and what it says.
+    fn judged(
         &self,
-        source: &Path,
-        source_digest: &[u8; 16],
-    ) -> Option<(Prepared, Duration)> {
-        // Prefer the conservative short freshness if a cache from an interrupted/older build somehow contains both.
-        for fresh in [LIST_TTL, DETAILS_TTL] {
-            if let Some(file) =
-                crate::cache::open_json(&self.variant(source, source_digest, fresh), MAX_ANSWER_BYTES).await
+        header: &record::Header,
+        (body, own): (Vec<u8>, Option<Vec<u8>>),
+        modified: SystemTime,
+        age: Duration,
+        charge: Option<DerivedCharge>,
+    ) -> Kept {
+        if header.absent() {
+            return if age < ABSENT_TTL { Kept::Absent } else { Kept::Nothing };
+        }
+        let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), own.as_deref().unwrap_or(&body))
+            .min(RETENTION);
+        let body = match charge {
+            Some(charge) => charged_derived(Bytes::from(body), charge),
+            None => Bytes::from(body),
+        };
+        let prepared = Prepared::Record(body, self.tag(header));
+        if age < fresh {
+            Kept::Hit(prepared, fresh, age, modified)
+        } else if age < RETENTION {
+            Kept::Stale(prepared, modified, fresh)
+        } else {
+            Kept::Nothing
+        }
+    }
+
+    /// The freshest kept answer to this question: from the title's record; else from its whole detail kept before
+    /// records, cut into one now; else, for a title too large to fetch whole, from the question kept as asked.
+    async fn kept(&self, metrics: &Arc<crate::metrics::Metrics>) -> Kept {
+        if let Some(found) = self.recorded(metrics).await {
+            return found;
+        }
+        if let Some(found) = self.migrated(metrics).await {
+            return found;
+        }
+        if self.oversize().await {
+            return self.kept_exact().await;
+        }
+        Kept::Nothing
+    }
+
+    /// The answer from the title's record: one open and, for a typical title, one read. An answer larger than the
+    /// first read is charged before it is read (`derived_response_charge`). `None` when there is no whole record.
+    async fn recorded(&self, metrics: &Arc<crate::metrics::Metrics>) -> Option<Kept> {
+        let (path, asked, every) = (self.record_path(), self.asked, self.every());
+        let begun = tokio::task::spawn_blocking(move || {
+            let Some(mut reading) = record::begin(&path)? else { return Ok(None) };
+            if reading.header.absent() {
+                return Ok(Some((reading, Some((Vec::new(), None)))));
+            }
+            if reading.header.answer_len(asked, every) > record::PREFIX_BYTES {
+                return Ok(Some((reading, None)));
+            }
+            let answer = reading.finish(asked, every)?;
+            Ok::<_, std::io::Error>(Some((reading, Some(answer))))
+        })
+        .await;
+        let unreadable = |error: &dyn std::fmt::Display| {
+            eprintln!("tmdb: detail record unreadable: {error}");
+            metrics.tmdb_prepared(TmdbPrepared::Unreadable);
+        };
+        let (reading, answer) = match begun {
+            Ok(Ok(Some(found))) => found,
+            Ok(Ok(None)) => return None,
+            Ok(Err(error)) => {
+                unreadable(&error);
+                return None;
+            }
+            Err(error) => {
+                unreadable(&error);
+                return None;
+            }
+        };
+        let (reading, answer, charge) = match answer {
+            Some(answer) => (reading, answer, None),
+            None => {
+                let charge = derived_response_charge(Some(metrics)).await?;
+                let mut reading = reading;
+                let read = tokio::task::spawn_blocking(move || {
+                    let answer = reading.finish(asked, every);
+                    (reading, answer)
+                })
+                .await;
+                match read {
+                    Ok((reading, Ok(answer))) => (reading, answer, Some(charge)),
+                    Ok((_, Err(error))) => {
+                        unreadable(&error);
+                        return None;
+                    }
+                    Err(error) => {
+                        unreadable(&error);
+                        return None;
+                    }
+                }
+            }
+        };
+        metrics.tmdb_prepared(TmdbPrepared::Read);
+        Some(self.judged(&reading.header, answer, reading.modified, reading.age, charge))
+    }
+
+    /// A whole detail kept as TMDB's plain answer before records existed: cut into a record once, keeping its age
+    /// and the ETag it was kept with, and the plain file removed. Nothing is asked of TMDB, so a title the household
+    /// already had is not fetched again because of the change.
+    async fn migrated(&self, metrics: &Arc<crate::metrics::Metrics>) -> Option<Kept> {
+        let legacy = self.whole().1;
+        let source = crate::cache::open_json(&legacy, MAX_ANSWER_BYTES).await?;
+        let (digest, modified, age) = (source.digest(), source.modified(), source.age());
+        let remove = || async {
+            for file in
+                [legacy.with_extension("etag"), legacy.with_extension("json.response"), legacy.clone()]
             {
-                // One fixed counter distinguishes the cheap repeat path from a rebuild without exposing a title.
-                // This method has no state, so the caller records the hit after receiving the file.
-                return Some((Prepared::File(file), fresh));
+                let _ = tokio::fs::remove_file(file).await;
             }
+        };
+        if source.matches(ABSENT) {
+            if age < ABSENT_TTL {
+                return Some(Kept::Absent);
+            }
+            remove().await;
+            return None;
         }
-        None
+        let etag = bound_etag(&legacy, &digest).await.map(|etag| etag.value);
+        let raw = source.bytes().await?;
+        let record = self.keep_record(raw, etag, Some(modified)).await?;
+        remove().await;
+        metrics.tmdb_prepared(TmdbPrepared::Migrated);
+        let (header, body, own) = record::answer_in(&record, self.asked, self.every())?;
+        Some(self.judged(&header, (body, own), modified, age, None))
     }
 
-    #[cfg(test)]
-    async fn prepared_variant(
+    /// Cut TMDB's whole answer into a record and keep it, timed `modified` when it was kept before. The record is
+    /// returned whether or not it could be kept: the question it was cut for is answered either way.
+    async fn keep_record(
         &self,
-        source_path: &Path,
-        source: crate::cache::JsonFile,
-    ) -> Option<(Prepared, Duration)> {
-        self.prepared_variant_with(source_path, source, self.durable_variant(), None).await
+        raw: Bytes,
+        etag: Option<String>,
+        modified: Option<SystemTime>,
+    ) -> Option<Bytes> {
+        let charge = u32::try_from(raw.len().clamp(1, RECORD_BUILD_BYTES)).expect("bounded by the budget");
+        let _turn = Arc::clone(record_builds()).acquire_many_owned(charge).await.ok()?;
+        let all = self.all;
+        let record = if raw.len() < NARROW_INLINE_BYTES {
+            record::build(&raw, all, etag.as_deref())
+        } else {
+            tokio::task::spawn_blocking(move || record::build(&raw, all, etag.as_deref())).await.ok()?
+        };
+        let record = Bytes::from(record);
+        write_record(&self.record_path(), &record, modified).await;
+        Some(record)
     }
 
-    async fn prepared_variant_with(
-        &self,
-        source_path: &Path,
-        source: crate::cache::JsonFile,
-        durable: bool,
-        metrics: Option<Arc<crate::metrics::Metrics>>,
-    ) -> Option<(Prepared, Duration)> {
-        let source_digest = source.digest();
-        if durable {
-            if let Some(found) = self.existing_variant(source_path, &source_digest).await {
-                if let Some(metrics) = &metrics {
-                    metrics.tmdb_prepared(TmdbPrepared::FileHit);
-                }
-                return Some(found);
-            }
+    /// The answer to this question from a record held in memory.
+    fn answered(&self, record: &[u8]) -> Option<(Prepared, Duration)> {
+        let (header, body, own) = record::answer_in(record, self.asked, self.every())?;
+        let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), own.as_deref().unwrap_or(&body));
+        Some((Prepared::Record(Bytes::from(body), self.tag(&header)), fresh))
+    }
+
+    /// A title too large to fetch whole has its questions kept as asked. Read once for what it says, under the
+    /// response budget, then streamed from its open file.
+    async fn kept_exact(&self) -> Kept {
+        let (_, file) = self.exact();
+        let Some(source) = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await else {
+            return Kept::Nothing;
+        };
+        let (age, modified) = (source.age(), source.modified());
+        if source.matches(ABSENT) {
+            return if age < ABSENT_TTL { Kept::Absent } else { Kept::Nothing };
         }
-
-        // Waiters remain ordinary request futures: cancellation drops their open source FD and queue position.
-        // Only the strict permit holder becomes a detached owner, so abandoned requests cannot accumulate queued
-        // tasks while a multi-megabyte parse is in progress.
-        // Reserve the worst-case response before allocating or taking the one build permit. Waiting slow clients
-        // therefore cannot leave completed, uncharged bodies queued behind the budget, and a budget wait never
-        // prevents an exact file-only inspection from using the builder.
-        let charge = derived_response_charge(metrics.as_ref()).await?;
-        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
-        let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
-        let question = cache_key(&self.path, self.query(&appends).as_deref());
-        let suffix = crate::hex(&Sha256::digest(question.as_bytes())[..16]);
-        let (all, asked, path, exact, source_path, durable, modified) = (
-            self.all,
-            self.asked.clone(),
-            self.path.clone(),
-            self.exact.clone(),
-            source_path.to_owned(),
-            durable,
-            source.modified(),
-        );
-        let task = tokio::spawn(async move {
-            let _permit = permit;
-            #[cfg(test)]
-            note_variant_owner(&source_path);
-            if durable {
-                for fresh in [LIST_TTL, DETAILS_TTL] {
-                    let variant = variants_dir(&source_path).join(format!(
-                        "{suffix}.{}.{}.tmdb.json",
-                        crate::hex(&source_digest),
-                        fresh.as_secs()
-                    ));
-                    if let Some(prepared) = crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
-                        if let Some(metrics) = &metrics {
-                            metrics.tmdb_prepared(TmdbPrepared::FileHit);
-                        }
-                        return Some((Prepared::File(prepared), fresh));
-                    }
-                }
-            }
-            let body = source.bytes().await?;
-            let fresh = fresh_for_answer(&path, exact.as_deref(), &body).min(RETENTION);
-            let narrowed = if all.iter().all(|append| asked.contains(*append)) {
-                body
-            } else if body.len() < NARROW_INLINE_BYTES {
-                narrowed(all, &asked, body)
-            } else {
-                let kept = body.clone();
-                tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
-            };
-            if !durable {
-                if let Some(metrics) = &metrics {
-                    metrics.tmdb_prepared(TmdbPrepared::TransientBuilt);
-                }
-                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
-            }
-            let variant = variants_dir(&source_path).join(format!(
-                "{suffix}.{}.{}.tmdb.json",
-                crate::hex(&source_digest),
-                fresh.as_secs()
-            ));
-            // Publication is useful only while this digest remains canonical. The digest-qualified pathname makes a
-            // replacement safe even across the final check; the post-check removes the now-orphaned generation.
-            let current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await?;
-            if current.digest() != source_digest {
-                if let Some(metrics) = &metrics {
-                    metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
-                }
-                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
-            }
-            if !crate::cache::write_json_at(&variant, &narrowed, Some(modified)).await {
-                if let Some(metrics) = &metrics {
-                    metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
-                }
-                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
-            }
-            let still_current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES)
-                .await
-                .is_some_and(|current| current.digest() == source_digest);
-            if !still_current {
-                remove_variant(&variant).await;
-                if let Some(metrics) = &metrics {
-                    metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
-                }
-                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
-            }
-            retire_obsolete_variants(&source_path, &source_digest).await;
-            let prepared = match crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
-                Some(prepared) => {
-                    if let Some(metrics) = &metrics {
-                        metrics.tmdb_prepared(TmdbPrepared::FileBuilt);
-                    }
-                    Prepared::File(prepared)
-                }
-                None => {
-                    if let Some(metrics) = &metrics {
-                        metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
-                    }
-                    Prepared::Bytes(charged_derived(narrowed, charge))
-                }
-            };
-            Some((prepared, fresh))
-        });
-        task.await.ok()?
-    }
-
-    /// Inspect an exact cache generation under the same single-owner bound as a derived representation, then stream
-    /// its still-open inode. Known client shapes take the durable variant path so legacy exact entries are migrated
-    /// lazily; arbitrary exact questions keep no second file and retain no body-sized response buffer.
-    async fn prepared_exact(
-        &self,
-        source_path: &Path,
-        source: crate::cache::JsonFile,
-        metrics: Option<Arc<crate::metrics::Metrics>>,
-    ) -> Option<(Prepared, Duration)> {
-        if self.durable_variant() {
-            return self.prepared_variant_with(source_path, source, true, metrics).await;
+        let Some(charge) = derived_response_charge(None).await else { return Kept::Nothing };
+        let Some((source, body)) = source.with_bytes().await else { return Kept::Nothing };
+        let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body).min(RETENTION);
+        drop((body, charge));
+        if age < fresh {
+            Kept::Hit(Prepared::File(source), fresh, age, modified)
+        } else if age < RETENTION {
+            Kept::Stale(Prepared::File(source), modified, fresh)
+        } else {
+            Kept::Nothing
         }
-        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
-        let (path, exact) = (self.path.clone(), self.exact.clone());
-        let task = tokio::spawn(async move {
-            let _permit = permit;
-            let (source, body) = source.with_bytes().await?;
-            let fresh = fresh_for_answer(&path, exact.as_deref(), &body).min(RETENTION);
-            Some((Prepared::File(source), fresh))
-        });
-        task.await.ok()?
-    }
-
-    /// An answer holding more than was asked, cut to what was: a record for a library's poster should not carry a
-    /// series' every guest actor. What it keeps is TMDB's own, so the narrower question gets the answer it would have.
-    ///
-    /// Cutting is a parse and a re-serialization of the whole record: measured at 18 ms for a 2 MB series detail
-    /// (6,000 aggregate cast, release build), time an async worker spent serving nothing else, once per library
-    /// title on a hit. A large answer is cut on the blocking pool; a question asking for everything is not cut at all.
-    async fn narrowed(&self, body: Bytes) -> Bytes {
-        if self.all.iter().all(|append| self.asked.contains(*append)) {
-            return body;
-        }
-        if body.len() < NARROW_INLINE_BYTES {
-            return narrowed(self.all, &self.asked, body);
-        }
-        let (all, asked, kept) = (self.all, self.asked.clone(), body.clone());
-        tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
-    }
-
-    /// Build an in-memory derived response under both bounds: only one parse at a time, and a fixed charge which
-    /// follows the returned bytes through the response's lifetime. The caller reserves the charge before fetching
-    /// or taking the build permit, so completed bodies cannot pile up unaccounted while the response budget waits.
-    async fn prepared_narrowed(
-        &self,
-        state: &AppState,
-        body: Bytes,
-        charge: DerivedCharge,
-    ) -> Option<Prepared> {
-        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
-        let metrics = Arc::clone(&state.metrics);
-        let (all, asked) = (self.all, self.asked.clone());
-        let task = tokio::spawn(async move {
-            let _permit = permit;
-            let narrowed = if all.iter().all(|append| asked.contains(*append)) {
-                body
-            } else if body.len() < NARROW_INLINE_BYTES {
-                narrowed(all, &asked, body)
-            } else {
-                let kept = body.clone();
-                tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
-            };
-            metrics.tmdb_prepared(TmdbPrepared::TransientBuilt);
-            Some(Prepared::Bytes(charged_derived(narrowed, charge)))
-        });
-        task.await.ok()?
-    }
-
-    /// The freshest kept answer to this question, from any entry that holds it; else the first one past its
-    /// freshness. Each is judged by its own age and what it says — an airing series stays fresh for hours.
-    #[cfg(test)]
-    async fn kept(&self) -> Kept {
-        self.kept_with_metrics(None).await
-    }
-
-    async fn kept_counted(&self, state: &AppState) -> Kept {
-        self.kept_with_metrics(Some(Arc::clone(&state.metrics))).await
-    }
-
-    async fn kept_with_metrics(&self, metrics: Option<Arc<crate::metrics::Metrics>>) -> Kept {
-        let mut stale = Kept::Nothing;
-        for (file, exact) in self.candidates() {
-            let Some(source) = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await else { continue };
-            let (age, modified) = (source.age(), source.modified());
-            if source.matches(ABSENT) {
-                if age < ABSENT_TTL {
-                    return Kept::Absent;
-                }
-                continue;
-            }
-            let (prepared, fresh) = if exact {
-                let Some(found) = self.prepared_exact(&file, source, metrics.clone()).await else {
-                    continue;
-                };
-                found
-            } else {
-                let Some(found) =
-                    self.prepared_variant_with(&file, source, self.durable_variant(), metrics.clone()).await
-                else {
-                    continue;
-                };
-                found
-            };
-            if age < fresh {
-                return Kept::Hit(prepared, fresh, age, modified);
-            }
-            if matches!(stale, Kept::Nothing) && age < RETENTION {
-                stale = Kept::Stale(prepared, modified, fresh);
-            }
-        }
-        stale
-    }
-
-    /// The same lookup semantics as `kept`, without publication or the prepared-response queue. This is reserved for
-    /// internal consumers which need a JSON value rather than an HTTP body.
-    async fn kept_bytes(&self) -> KeptBytes {
-        let mut stale = KeptBytes::Nothing;
-        for (file, exact) in self.candidates() {
-            let Some((body, age, _)) = read_answer(&file).await else { continue };
-            if body == ABSENT {
-                if age < ABSENT_TTL {
-                    return KeptBytes::Absent;
-                }
-                continue;
-            }
-            let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
-            let body = if exact { body } else { self.narrowed(body).await };
-            if age < fresh {
-                return KeptBytes::Hit(body);
-            }
-            if matches!(stale, KeptBytes::Nothing) && age < RETENTION {
-                stale = KeptBytes::Stale(body);
-            }
-        }
-        stale
     }
 
     /// The question exactly as asked, and where its answer is kept: what a title too large to fetch whole is asked
@@ -1044,38 +853,82 @@ impl Detail {
         read(&self.oversize_mark()).await.is_some_and(|(_, age, _)| age < OVERSIZE_TTL)
     }
 
-    /// Ask TMDB for the whole detail — again, naming its ETag, when one is kept — and keep it: the whole body, which
-    /// `narrowed` cuts to this question, whether it was a `miss` or `revalidated`, and how long it is fresh for.
+    /// Ask TMDB for the whole detail — again, naming the ETag its record was kept with, when there is one — and keep
+    /// it as a record. Returns this question's answer, whether it was a `miss` or `revalidated`, how long it is fresh
+    /// for, and TMDB's whole body.
     ///
     /// When the whole is too large to take, the question is asked exactly as it was, as it was before the whole
     /// existed: one title's size must not fail every question about it. Any other failure — TMDB down, slow or
-    /// refusing, the day spent — is the answer: asking again for less would fail the same way and spend twice.
+    /// refusing, the day spent — is the answer: asking again for less would fail the same way and spend twice. A
+    /// 404 is kept as one.
     async fn ask(
         &self,
         state: &AppState,
         key: &str,
         rid: &str,
-    ) -> Result<(Bytes, &'static str, Duration), Box<Response>> {
+    ) -> Result<(Prepared, &'static str, Duration, Bytes), Box<Response>> {
         if self.oversize().await {
-            let (query, file) = self.exact();
-            let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
-            return Ok((body.clone(), how, fresh_for_answer(&self.path, self.exact.as_deref(), &body)));
+            return self.ask_exact(state, key, rid).await;
         }
-        let (query, file) = self.whole();
-        let (body, how) = match ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await {
-            Ok(answer) => answer,
-            Err(response) => {
-                if !too_large(&response) {
-                    return Err(response);
-                }
-                write(&self.oversize_mark(), &Bytes::new()).await;
-                let (query, file) = self.exact();
-                let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
-                return Ok((body.clone(), how, fresh_for_answer(&self.path, self.exact.as_deref(), &body)));
+        let (query, _) = self.whole();
+        let path = self.record_path();
+        let opened = path.clone();
+        let kept = tokio::task::spawn_blocking(move || record::begin(&opened).ok().flatten())
+            .await
+            .ok()
+            .flatten()
+            .filter(|reading| !reading.header.absent());
+        let etag = kept.as_ref().and_then(|reading| reading.header.etag.clone());
+        let busy = || refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
+        match send(state, &self.path, query.as_deref(), key, rid, etag.as_deref()).await {
+            Ok(Fetched::Answer(raw, etag)) => {
+                let attempt = state.metrics.provider_store_started(Provider::Tmdb);
+                let record = self.keep_record(raw.clone(), etag, None).await;
+                attempt.finished(if record.is_some() { CacheStore::Stored } else { CacheStore::Failed });
+                state.metrics.tmdb_prepared(TmdbPrepared::Built);
+                let (answer, fresh) =
+                    record.as_deref().and_then(|record| self.answered(record)).ok_or_else(busy)?;
+                Ok((answer, "miss", fresh, raw))
             }
-        };
+            Ok(Fetched::Unchanged) => {
+                // TMDB confirmed the ETag of the record opened above: that generation is its answer for another while.
+                let Some(reading) = kept else {
+                    return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+                };
+                let record = match tokio::task::spawn_blocking(move || reading.renewed()).await {
+                    Ok(Ok(record)) => record,
+                    _ => return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable")),
+                };
+                let (answer, fresh) = self.answered(&record).ok_or_else(busy)?;
+                let whole = record::answer_in(&record, self.every(), self.every()).ok_or_else(busy)?.1;
+                Ok((answer, "revalidated", fresh, Bytes::from(whole)))
+            }
+            Err(response) if too_large(&response) => {
+                write(&self.oversize_mark(), &Bytes::new()).await;
+                self.ask_exact(state, key, rid).await
+            }
+            Err(response) => {
+                if response.status() == StatusCode::NOT_FOUND {
+                    let attempt = state.metrics.provider_store_started(Provider::Tmdb);
+                    let stored = write_record(&path, &Bytes::from(record::absent()), None).await;
+                    attempt.finished(if stored { CacheStore::Stored } else { CacheStore::Failed });
+                }
+                Err(response)
+            }
+        }
+    }
+
+    /// The question exactly as asked, kept as TMDB answers it (`kept_exact`).
+    async fn ask_exact(
+        &self,
+        state: &AppState,
+        key: &str,
+        rid: &str,
+    ) -> Result<(Prepared, &'static str, Duration, Bytes), Box<Response>> {
+        let (query, file) = self.exact();
+        let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
         let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
-        Ok((body, how, fresh))
+        Ok((Prepared::Bytes(body.clone()), how, fresh, body))
     }
 }
 
@@ -1424,7 +1277,7 @@ async fn detail_answer(
     key: &str,
     rid: &str,
 ) -> Response {
-    let mut asking = match detail.kept_counted(state).await {
+    let mut asking = match detail.kept(&state.metrics).await {
         Kept::Hit(body, fresh, age, modified) => {
             state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
             return answer_prepared(
@@ -1441,19 +1294,14 @@ async fn detail_answer(
             return *refused(StatusCode::NOT_FOUND, "not_found");
         }
         Kept::Stale(body, modified, fresh) if fresh != DETAILS_TTL => {
-            let (query, file) = if detail.oversize().await { detail.exact() } else { detail.whole() };
-            let cached = cache_key(&detail.path, query.as_deref());
-            refresh_behind(
-                state,
-                Refresh { cached, path: detail.path.clone(), query, key: key.to_owned(), file },
-            );
+            refresh_detail_behind(state, detail, key);
             state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Stale);
             return answer_prepared(body, "public, max-age=60", "stale", modified, asked, &state.mmaps);
         }
         // A settled record past its six months is asked again now, as it always was, without the allowance.
         Kept::Stale(..) => None,
         Kept::Nothing => {
-            let asking = match one_tmdb_asking(&detail.whole().1, key).await {
+            let asking = match one_tmdb_asking(&detail.record_path(), key).await {
                 Ok(asking) => asking,
                 Err(refusal) => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
@@ -1461,7 +1309,7 @@ async fn detail_answer(
                 }
             };
             // A question about this title that got here first has kept its answer by now.
-            match detail.kept_counted(state).await {
+            match detail.kept(&state.metrics).await {
                 Kept::Hit(body, fresh, age, modified) => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
                     return answer_prepared(
@@ -1495,11 +1343,14 @@ async fn detail_answer(
         return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
     };
     match detail.ask(state, key, rid).await {
-        Ok((whole, how, fresh)) => {
+        Ok((body, how, fresh, whole)) => {
             // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
             crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
-            let Some(body) = detail.prepared_narrowed(state, whole, charge).await else {
-                return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
+            drop(whole);
+            let body = match body {
+                Prepared::Bytes(bytes) => Prepared::Bytes(charged_derived(bytes, charge)),
+                Prepared::Record(bytes, tag) => Prepared::Record(charged_derived(bytes, charge), tag),
+                file @ Prepared::File(_) => file,
             };
             answer_prepared(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked, &state.mmaps)
         }
@@ -1685,21 +1536,21 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // A title's record is the same question the app asks next (`Detail`): answered from what the app keeps, and a
     // cold one fetched whole, so the page this preview was built for opens on a hit.
     if let Some(detail) = Detail::of(path, query, state.tmdb_cache_dir.as_deref()) {
-        let stale = match detail.kept_bytes().await {
-            KeptBytes::Hit(body) => {
+        let stale = match detail.kept(&state.metrics).await {
+            Kept::Hit(body, ..) => {
                 state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
-                return serde_json::from_slice(&body).ok();
+                return serde_json::from_slice(&body.bytes().await?).ok();
             }
-            KeptBytes::Absent => {
+            Kept::Absent => {
                 state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
                 return None;
             }
-            KeptBytes::Stale(body) => Some(body),
-            KeptBytes::Nothing => None,
+            Kept::Stale(body, ..) => Some(body),
+            Kept::Nothing => None,
         };
         // Past the minute's questions, or TMDB failing, a title kept past its freshness is still the better preview.
         let asked = 'asked: {
-            let mut asking = match one_tmdb_asking(&detail.whole().1, key).await {
+            let mut asking = match one_tmdb_asking(&detail.record_path(), key).await {
                 Ok(asking) => asking,
                 Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
@@ -1707,21 +1558,21 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 }
                 Err(_) => break 'asked None,
             };
-            match detail.kept_bytes().await {
-                KeptBytes::Hit(body) => {
+            match detail.kept(&state.metrics).await {
+                Kept::Hit(body, ..) => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
-                    return serde_json::from_slice(&body).ok();
+                    return serde_json::from_slice(&body.bytes().await?).ok();
                 }
-                KeptBytes::Absent => {
+                Kept::Absent => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
                     return None;
                 }
-                KeptBytes::Stale(..) | KeptBytes::Nothing => {
+                Kept::Stale(..) | Kept::Nothing => {
                     if preview_allowed(state).is_none() {
                         break 'asked None;
                     }
                     match detail.ask(state, key, "meta").await {
-                        Ok((whole, ..)) => Some(detail.narrowed(whole).await),
+                        Ok((body, ..)) => Some(body),
                         Err(refusal) => {
                             let absent = refusal.status() == StatusCode::NOT_FOUND;
                             asking.failed(refusal).await;
@@ -1743,7 +1594,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
             CacheAccess::Cold
         };
         state.metrics.provider_cache_access(Provider::Tmdb, access);
-        let body = asked.or(stale)?;
+        let body = asked.or(stale)?.bytes().await?;
         return serde_json::from_slice(&body).ok();
     }
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
@@ -2150,15 +2001,15 @@ async fn keep_counted(state: &AppState, file: &Path, body: &Bytes, etag: Option<
 /// Drop what is past TMDB's six-month ceiling. Runs on a timer rather than on a request: a sweep is a
 /// directory scan, and no one waiting for a page should pay for it.
 pub async fn sweep(dir: &Path, metrics: &crate::metrics::Metrics) {
-    let Some(mut inventory) = sweep_older_than(dir, RETENTION, metrics, Provider::Tmdb).await else {
+    match tokio::fs::remove_dir_all(dir.join(PREPARED_DIR)).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!("tmdb cache sweep: could not remove {PREPARED_DIR}: {error}"),
+    }
+    let Some(inventory) = sweep_older_than(dir, RETENTION, metrics, Provider::Tmdb).await else {
         metrics.provider_cache_scan(Provider::Tmdb, false);
         return;
     };
-    let Some(prepared) = sweep_prepared(dir, RETENTION, metrics).await else {
-        metrics.provider_cache_scan(Provider::Tmdb, false);
-        return;
-    };
-    inventory.add(prepared);
     metrics.provider_cache_inventory(
         Provider::Tmdb,
         inventory.bytes,
@@ -2181,37 +2032,13 @@ impl CacheInventory {
         Self { successful: true, ..Self::default() }
     }
 
-    fn add(&mut self, other: CacheInventory) {
-        self.bytes = self.bytes.saturating_add(other.bytes);
-        self.entries = self.entries.saturating_add(other.entries);
-        self.oldest_modified = match (self.oldest_modified, other.oldest_modified) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (left, right) => left.or(right),
-        };
-        self.successful &= other.successful;
-    }
-
-    fn record_bytes(&mut self, len: u64) {
-        self.bytes = self.bytes.saturating_add(len);
-    }
-
     fn record(&mut self, path: &Path, metadata: &std::fs::Metadata, provider: Provider) {
         let excluded = match provider {
             Provider::Warnings => path.file_name().is_some_and(|name| name == "topics.json"),
             _ => false,
         };
-        let serveable = path.extension().is_some_and(|extension| extension == "json") && !excluded;
-        self.record_file(metadata, serveable);
-    }
-
-    fn record_prepared(&mut self, path: &Path, metadata: &std::fs::Metadata) {
-        let serveable =
-            path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(".tmdb.json"));
-        self.record_file(metadata, serveable);
-    }
-
-    fn record_file(&mut self, metadata: &std::fs::Metadata, serveable: bool) {
-        self.record_bytes(metadata.len());
+        let serveable = serveable(path) && !excluded;
+        self.bytes = self.bytes.saturating_add(metadata.len());
         self.entries = self.entries.saturating_add(u64::from(serveable));
         if serveable {
             if let Ok(modified) = metadata.modified() {
@@ -2243,119 +2070,13 @@ fn provider_name(provider: Provider) -> &'static str {
     }
 }
 
-fn scan_failed(provider: Provider, path: &Path, error: &std::io::Error) {
-    eprintln!("{} cache inventory: could not scan {}: {error}", provider_name(provider), path.display());
+/// A file a hit is served from: a kept answer, or a title's record (`Detail`).
+fn serveable(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "json" || extension == "detail")
 }
 
-async fn sweep_prepared(
-    dir: &Path,
-    max_age: Duration,
-    metrics: &crate::metrics::Metrics,
-) -> Option<CacheInventory> {
-    let root = dir.join(".tmdb-prepared");
-    let mut inventory = CacheInventory::empty();
-    let mut sources = match tokio::fs::read_dir(&root).await {
-        Ok(sources) => sources,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(inventory),
-        Err(error) => {
-            scan_failed(Provider::Tmdb, &root, &error);
-            return None;
-        }
-    };
-    loop {
-        let source = match sources.next_entry().await {
-            Ok(Some(source)) => source,
-            Ok(None) => break,
-            Err(error) => {
-                scan_failed(Provider::Tmdb, &root, &error);
-                return None;
-            }
-        };
-        let kind = match source.file_type().await {
-            Ok(kind) => kind,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                scan_failed(Provider::Tmdb, &source.path(), &error);
-                return None;
-            }
-        };
-        if kind.is_file() {
-            let metadata = match source.metadata().await {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    scan_failed(Provider::Tmdb, &source.path(), &error);
-                    return None;
-                }
-            };
-            // Files directly under `.tmdb-prepared` are artifacts, never representations the serving path opens.
-            inventory.record_bytes(metadata.len());
-            continue;
-        }
-        if !kind.is_dir() {
-            continue;
-        }
-        let mut entries = match tokio::fs::read_dir(source.path()).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                scan_failed(Provider::Tmdb, &source.path(), &error);
-                return None;
-            }
-        };
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
-                    scan_failed(Provider::Tmdb, &source.path(), &error);
-                    return None;
-                }
-            };
-            let kind = match entry.file_type().await {
-                Ok(kind) => kind,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    scan_failed(Provider::Tmdb, &entry.path(), &error);
-                    return None;
-                }
-            };
-            if !kind.is_file() {
-                continue;
-            }
-            let metadata = match entry.metadata().await {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    scan_failed(Provider::Tmdb, &entry.path(), &error);
-                    return None;
-                }
-            };
-            let expired = metadata
-                .modified()
-                .ok()
-                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                .is_some_and(|age| age > max_age);
-            if expired {
-                let path = entry.path();
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) if path.extension().is_some_and(|extension| extension == "json") => {
-                        metrics.provider_cache_store(Provider::Tmdb, CacheStore::Expired);
-                    }
-                    Ok(()) => {}
-                    Err(error) => {
-                        inventory.deletion_failed(Provider::Tmdb, &path, &error);
-                        inventory.record_prepared(&path, &metadata);
-                    }
-                }
-            } else {
-                inventory.record_prepared(&entry.path(), &metadata);
-            }
-        }
-        let _ = tokio::fs::remove_dir(source.path()).await;
-    }
-    let _ = tokio::fs::remove_dir(root).await;
-    Some(inventory)
+fn scan_failed(provider: Provider, path: &Path, error: &std::io::Error) {
+    eprintln!("{} cache inventory: could not scan {}: {error}", provider_name(provider), path.display());
 }
 
 /// The same sweep for another cache with its own ceiling (`warnings.rs`).
@@ -2410,7 +2131,7 @@ pub(crate) async fn sweep_older_than(
         if expired {
             let path = entry.path();
             match tokio::fs::remove_file(&path).await {
-                Ok(()) if path.extension().is_some_and(|extension| extension == "json") => {
+                Ok(()) if serveable(&path) => {
                     metrics.provider_cache_store(provider, CacheStore::Expired);
                 }
                 Ok(()) => {}
@@ -2490,11 +2211,26 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
                     crate::title_metadata::observe_tmdb(&state, path, &body);
                 }
             }
-            // A whole detail too large to take (`Detail::oversize_mark`): its questions are asked one by one next.
-            Err(response) if too_large(&response) => {
-                write(&asking.file.with_extension("oversize"), &Bytes::new()).await;
-            }
             Err(_) => {}
+        }
+    });
+}
+
+/// `refresh_behind` for a title's detail: the whole asked again and its record replaced (`Detail::ask`).
+fn refresh_detail_behind(state: &Arc<AppState>, detail: &Detail, key: &str) {
+    if resting(state, key).is_some() {
+        return;
+    }
+    let mark = detail.record_path().to_string_lossy().into_owned();
+    if !crate::lock(&state.tmdb_refreshing).insert(mark.clone()) {
+        return;
+    }
+    let (state, detail, key) = (Arc::clone(state), detail.clone(), key.to_owned());
+    tokio::spawn(async move {
+        let _refreshing = Refreshing { set: &state.tmdb_refreshing, key: mark };
+        // Refused, over budget or unreachable: what is kept stays, and the next stale read asks again.
+        if let Ok((.., whole)) = detail.ask(&state, &key, "refresh").await {
+            crate::title_metadata::observe_tmdb(&state, &detail.path, &whole);
         }
     });
 }
@@ -2525,7 +2261,19 @@ fn fresh_policy(fresh: Duration, remaining: Duration) -> String {
 
 /// `modified` is when the answer was kept, which is what the browser counts TMDB's six months from.
 fn answer(body: Bytes, policy: &str, how: &'static str, modified: SystemTime, asked: &HeaderMap) -> Response {
-    let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
+    let tag = crate::cache::tag(&body);
+    answer_tagged(body, tag, policy, how, modified, asked)
+}
+
+fn answer_tagged(
+    body: Bytes,
+    tag: HeaderValue,
+    policy: &str,
+    how: &'static str,
+    modified: SystemTime,
+    asked: &HeaderMap,
+) -> Response {
+    let mut resp = raw_json(StatusCode::OK, Body::from(body), false);
     let headers = resp.headers_mut();
     // The browser keeps its own copy too (`tmdbCache.ts`), so this mostly spares the box a repeat question
     // from the same page.
@@ -2533,7 +2281,7 @@ fn answer(body: Bytes, policy: &str, how: &'static str, modified: SystemTime, as
         headers.insert(header::CACHE_CONTROL, value);
     }
     headers.insert("x-den-tmdb", HeaderValue::from_static(how));
-    headers.insert(header::ETAG, crate::cache::tag(&body));
+    headers.insert(header::ETAG, tag);
     if let Ok(value) = HeaderValue::from_str(&crate::cache::http_date(modified)) {
         headers.insert(header::LAST_MODIFIED, value);
     }
@@ -2550,6 +2298,7 @@ fn answer_prepared(
 ) -> Response {
     match body {
         Prepared::Bytes(body) => answer(body, policy, how, modified, asked),
+        Prepared::Record(body, tag) => answer_tagged(body, tag, policy, how, modified, asked),
         Prepared::File(body) => {
             let mut response = body.response_at(modified, mmaps);
             if let Ok(value) = HeaderValue::from_str(policy) {
@@ -3065,11 +2814,15 @@ mod tests {
     async fn a_kept_answer_carries_its_validators_and_a_title_no_stale_allowance() {
         let cache = temp_dir();
         let h = lending(&cache, None);
-        write(
-            &cache_path(&cache, &cache_key("/3/movie/550", None)),
-            &Bytes::from_static(br#"{"id":550,"status":"Released","release_date":"1999-10-15"}"#),
-        )
-        .await;
+        Detail::of("/3/movie/550", None, Some(&cache))
+            .unwrap()
+            .keep_record(
+                Bytes::from_static(br#"{"id":550,"status":"Released","release_date":"1999-10-15"}"#),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         let resp = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
@@ -3449,44 +3202,90 @@ mod tests {
         assert_eq!(crate::lock(&asked).len(), 3);
     }
 
+    /// Every question about a title is cut from its one record: no second file per subset, a tag that names the
+    /// record's generation and the question, and a replaced record answering with a new tag.
     #[tokio::test]
-    async fn a_narrow_detail_is_prepared_once_and_bound_to_the_whole_generation() {
+    async fn a_narrow_detail_is_cut_from_the_one_record() {
         let cache = temp_dir();
-        let h = lending_as(&cache, "prepared-detail");
-        let asked = tmdb_answering("prepared-detail", "Ended");
+        let h = lending_as(&cache, "record-detail");
+        let asked = tmdb_answering("record-detail", "Ended");
         assert_eq!(detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await.0, "miss");
-
-        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&cache)).unwrap();
-        let source = detail.whole().1;
-        let source_digest = crate::cache::open_json(&source, MAX_ANSWER_BYTES).await.unwrap().digest();
-        let variant = detail.variant(&source, &source_digest, DETAILS_TTL);
-        assert!(!variant.exists(), "the miss response is already resident and needs no second write");
 
         let first = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
         assert_eq!(first.headers()["x-den-tmdb"], "hit");
         let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
-        assert!(variant.exists());
         assert_eq!(body_json(first).await["credits"]["from"], "credits");
+        let bare = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
+        assert_ne!(
+            bare.headers()[header::ETAG],
+            etag.as_str(),
+            "each question is a representation of its own"
+        );
 
         let repeated = h
             .send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[("if-none-match", &etag)])
             .await;
         assert_eq!(repeated.status(), StatusCode::NOT_MODIFIED);
-        assert_eq!(crate::lock(&asked).len(), 1, "a prepared representation never asks TMDB");
+        assert_eq!(crate::lock(&asked).len(), 1, "a record never asks TMDB again");
+        let files: Vec<_> = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&cache)).unwrap();
+        let record = detail.record_path().file_name().unwrap().to_str().unwrap().to_owned();
+        assert_eq!(files, [record], "one record, and nothing beside it");
         let metrics = h.state.metrics.render();
-        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="transient_built"} 1"#));
-        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="file_built"} 1"#));
-        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="file_hit"} 1"#));
+        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="record_built"} 1"#));
+        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="record_read"} 3"#));
         assert!(metrics.contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#));
-        assert!(metrics.contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 2"#));
+        assert!(metrics.contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 3"#));
 
         let replacement = Bytes::from_static(
             br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"changed","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
-        keep(&source, &replacement, None).await;
+        detail.keep_record(replacement, None, None).await.unwrap();
         let changed = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
         assert_ne!(changed.headers()[header::ETAG], etag.as_str());
         assert_eq!(body_json(changed).await["credits"]["from"], "new");
+    }
+
+    /// Byte for byte what a subset was served when it was cut by parsing the whole and writing it back, for every
+    /// subset of a film's and a series' sub-requests, and TMDB's own bytes for all of them.
+    #[tokio::test]
+    async fn every_subset_from_a_record_is_the_bytes_a_reparse_served() {
+        let dir = temp_dir();
+        for (path, all) in [("/3/movie/550", &MOVIE_APPENDS[..]), ("/3/tv/1399", &TV_APPENDS[..])] {
+            let mut raw =
+                format!(r#"{{"zeta":1,"id":7,"status":"Ended","name":"Am{}u00e9lie","vote":7.50"#, '\\');
+            for (at, append) in all.iter().enumerate().rev() {
+                raw.push_str(&format!(r#","{append}":{{"results":[{{"n":{at},"path":"a\/b"}}]}}"#));
+            }
+            raw.push('}');
+            let whole = Detail::of(path, None, Some(&dir)).unwrap();
+            let record = whole.keep_record(Bytes::from(raw.clone()), None, None).await.unwrap();
+            for asked in 0..1u32 << all.len() {
+                let appends: Vec<_> = all
+                    .iter()
+                    .enumerate()
+                    .filter(|(at, _)| asked & (1 << at) != 0)
+                    .map(|(_, a)| *a)
+                    .collect();
+                let query = format!("append_to_response={}", appends.join(","));
+                let detail = Detail::of(path, Some(&query), Some(&dir)).unwrap();
+                let (answer, _) = detail.answered(&record).unwrap();
+                let served = answer.bytes().await.unwrap();
+                let expected = if asked == detail.every() {
+                    Bytes::from(raw.clone())
+                } else {
+                    let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                    for append in all.iter().filter(|a| !appends.contains(a)) {
+                        parsed.as_object_mut().unwrap().remove(*append);
+                    }
+                    Bytes::from(serde_json::to_vec(&parsed).unwrap())
+                };
+                assert_eq!(served, expected, "{path} {query}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -3502,31 +3301,30 @@ mod tests {
         assert!(metrics.render().contains(r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 0"#));
     }
 
+    /// A title too large to fetch whole is served its exact answer from the open file: 48 slow bulk responses hold
+    /// descriptors, not 48 multi-megabyte bodies.
     #[tokio::test]
     async fn slow_exact_hits_keep_open_files_not_body_sized_buffers() {
         let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let detail =
             Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
-        let exact = detail.exact().1;
+        write(&detail.oversize_mark(), &Bytes::new()).await;
         let cast: Vec<_> = (0..7000)
             .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(260)}))
             .collect();
         let body = Bytes::from(
-            serde_json::to_vec(&serde_json::json!({"id":550,"status":"Released","release_date":"1999-10-15","title":"legacy","credits":{"cast":cast}}))
+            serde_json::to_vec(&serde_json::json!({"id":550,"status":"Released","release_date":"1999-10-15","title":"large","credits":{"cast":cast}}))
                 .unwrap(),
         );
         assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
-        crate::cache::write_json(&exact, &body).await;
-        let digest = crate::cache::open_json(&exact, MAX_ANSWER_BYTES).await.unwrap().digest();
-        let variant = detail.variant(&exact, &digest, DETAILS_TTL);
+        crate::cache::write_json(&detail.exact().1, &body).await;
 
-        // Model the 48 slow bulk responses the server admits at once. Each result remains alive and unread: a
-        // Bytes-backed response would retain more than 96 MiB here; prepared hits retain only open descriptors.
+        let metrics = Arc::new(crate::metrics::Metrics::default());
         let mut requests = Vec::new();
         for _ in 0..crate::handler::BULK_REQUESTS {
-            let detail = Arc::clone(&detail);
-            requests.push(tokio::spawn(async move { detail.kept().await }));
+            let (detail, metrics) = (Arc::clone(&detail), Arc::clone(&metrics));
+            requests.push(tokio::spawn(async move { detail.kept(&metrics).await }));
         }
         let mut held = Vec::new();
         for request in requests {
@@ -3535,117 +3333,27 @@ mod tests {
                     assert_eq!(fresh, DETAILS_TTL);
                     held.push(prepared);
                 }
-                _ => panic!("an exact hit retained an allocated body instead of an open prepared file"),
+                _ => panic!("an exact hit retained an allocated body instead of an open file"),
             }
         }
         assert_eq!(held.len(), crate::handler::BULK_REQUESTS);
-        assert!(variant.exists(), "the legacy exact shape was not migrated lazily");
-        let bodies = std::fs::read_dir(variants_dir(&exact))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmdb.json"))
-            .count();
-        assert_eq!(bodies, 1, "concurrent owners published duplicate prepared generations");
-
-        // The internal canonical TV shape contains both credit forms and is intentionally not one of KEPT_TV's
-        // external client shapes. It is nevertheless a fixed shape and must not fall back to retained Bytes when a
-        // caller asks that exact question.
-        let canonical_query = format!("append_to_response={}", TV_APPENDS.join(","));
-        let canonical = Detail::of("/3/tv/1399", Some(&canonical_query), Some(&dir)).unwrap();
-        assert!(!canonical.durable_variant());
-        assert_eq!(canonical.exact().1, canonical.whole().1);
-        let canonical_file = canonical.whole().1;
-        let canonical_body = Bytes::from_static(
-            br#"{"id":1399,"status":"Ended","aggregate_credits":{},"content_ratings":{},"credits":{},"external_ids":{},"recommendations":{},"videos":{},"watch/providers":{}}"#,
-        );
-        crate::cache::write_json(&canonical_file, &canonical_body).await;
-        let canonical_digest =
-            crate::cache::open_json(&canonical_file, MAX_ANSWER_BYTES).await.unwrap().digest();
-        match canonical.kept().await {
-            Kept::Hit(Prepared::File(_), fresh, _, _) => assert_eq!(fresh, LIST_TTL),
-            _ => panic!("the exact canonical shape was not prepared as a streamed file"),
-        }
-        assert!(
-            !canonical.variant(&canonical_file, &canonical_digest, LIST_TTL).exists(),
-            "the canonical file itself is the prepared representation"
-        );
+        assert_eq!(derived_response_budget().available_permits(), DERIVED_RESPONSE_BUDGET_BYTES);
     }
 
-    /// How long one of the 48 responses may take to be built or to give its charge back. Each is a multi-megabyte
-    /// parse in a debug build, one at a time, so on a busy machine this is CPU time and not waiting: the bound is
-    /// only there to fail a build that never finishes.
+    /// How long one of the 48 responses may take to be read or to give its charge back: only there to fail a read
+    /// that never finishes.
     const BUILD_BOUND: Duration = Duration::from_secs(60);
 
-    async fn assert_slow_derived_responses_are_bounded(detail: Arc<Detail>, source_path: PathBuf) {
-        let capacity = DERIVED_RESPONSE_BUDGET_BYTES / MAX_ANSWER_BYTES;
-        assert_eq!(capacity, 32, "keep this test's expected response ceiling explicit");
-        assert!(crate::handler::BULK_REQUESTS > capacity, "more requests than the ceiling, so one must wait");
-        let mut requests = tokio::task::JoinSet::new();
-        for _ in 0..crate::handler::BULK_REQUESTS {
-            let detail = Arc::clone(&detail);
-            let source_path = source_path.clone();
-            requests.spawn(async move {
-                let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-                detail.prepared_variant(&source_path, source).await.unwrap()
-            });
-        }
-
-        let mut held = Vec::new();
-        let mmaps = crate::mmap::Cache::new(Arc::new(crate::metrics::Metrics::default()));
-        for _ in 0..capacity {
-            let (prepared, _) = tokio::time::timeout(BUILD_BOUND, requests.join_next())
-                .await
-                .expect("a derived response never acquired its bounded charge")
-                .expect("a derived response task vanished")
-                .unwrap();
-            assert!(matches!(prepared, Prepared::Bytes(_)));
-            held.push(answer_prepared(
-                prepared,
-                "public, max-age=60",
-                "hit",
-                SystemTime::now(),
-                &HeaderMap::new(),
-                &mmaps,
-            ));
-        }
-        assert_eq!(derived_response_budget().available_permits(), 0);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), requests.join_next()).await.is_err(),
-            "a slow response past the ceiling retained an uncharged derived body"
-        );
-
-        // The charge follows the response body: releasing one unread response lets exactly one waiting builder
-        // finish. The remaining waiters are request-owned and cancellation removes them from the build queue.
-        drop(held.pop());
-        let (next, _) = tokio::time::timeout(BUILD_BOUND, requests.join_next())
-            .await
-            .expect("dropping a response did not release its charge")
-            .expect("the next derived response task vanished")
-            .unwrap();
-        assert!(matches!(next, Prepared::Bytes(_)));
-        drop(next);
-        requests.abort_all();
-        while requests.join_next().await.is_some() {}
-        drop(held);
-
-        // An owner detached between taking the build permit and observing cancellation may finish once the held
-        // responses leave. Reacquiring the whole budget proves it did not leak either its task or its charge.
-        let all = tokio::time::timeout(
-            BUILD_BOUND,
-            Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_BUDGET_BYTES as u32),
-        )
-        .await
-        .expect("cancelled derived responses retained their memory charge")
-        .unwrap();
-        drop(all);
-    }
-
+    /// An answer cut from a record larger than its first read is charged before it is read, and the charge follows
+    /// the response body: past 32 such responses held at once, the next waits rather than allocating.
     #[tokio::test]
-    async fn forty_eight_slow_arbitrary_and_failed_publication_responses_stay_bounded() {
+    async fn forty_eight_slow_large_record_answers_stay_bounded() {
         let _turn = SHARED_BUILDER.lock().await;
-        let body = Bytes::from(
+        let raw = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "id": 550,
+                "status": "Released",
+                "release_date": "1999-10-15",
                 "title": "large",
                 "credits": {"cast": (0..7000).map(|id| serde_json::json!({
                     "id": id,
@@ -3660,123 +3368,71 @@ mod tests {
             }))
             .unwrap(),
         );
-        assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
-
-        // An unknown subset is intentionally not durable, but its slow response still owns a large allocation.
-        let arbitrary_dir = temp_dir();
-        let arbitrary = Arc::new(
-            Detail::of("/3/movie/550", Some("append_to_response=credits,videos"), Some(&arbitrary_dir))
-                .unwrap(),
-        );
-        assert!(!arbitrary.durable_variant());
-        let arbitrary_source = arbitrary.whole().1;
-        crate::cache::write_json(&arbitrary_source, &body).await;
-        assert_slow_derived_responses_are_bounded(arbitrary, arbitrary_source).await;
-
-        // A normal durable shape must take the same bounded fallback when its prepared directory cannot be made.
-        let failed_dir = temp_dir();
-        std::fs::create_dir_all(&failed_dir).unwrap();
-        std::fs::write(failed_dir.join(".tmdb-prepared"), b"not a directory").unwrap();
-        let failed = Arc::new(
-            Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&failed_dir)).unwrap(),
-        );
-        assert!(failed.durable_variant());
-        let failed_source = failed.whole().1;
-        crate::cache::write_json(&failed_source, &body).await;
-        assert_slow_derived_responses_are_bounded(failed, failed_source).await;
-    }
-
-    #[tokio::test]
-    async fn a_late_old_generation_build_cannot_publish_for_a_new_source() {
-        let _turn = SHARED_BUILDER.lock().await;
+        assert!(raw.len() > 2 * 1024 * 1024 && raw.len() < MAX_ANSWER_BYTES);
         let dir = temp_dir();
-        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
-        let source_path = detail.whole().1;
-        let old = Bytes::from_static(
-            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"old","credits":{"from":"old"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        let detail = Arc::new(
+            Detail::of("/3/movie/550", Some("append_to_response=credits,videos"), Some(&dir)).unwrap(),
         );
-        keep(&source_path, &old, None).await;
-        let old_source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-        let old_digest = old_source.digest();
-        let old_variant = detail.variant(&source_path, &old_digest, DETAILS_TTL);
+        detail.keep_record(raw, None, None).await.unwrap();
 
-        let new = Bytes::from_static(
-            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"new","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
-        );
-        keep(&source_path, &new, None).await;
-        let new_source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-        let new_digest = new_source.digest();
-        let new_variant = detail.variant(&source_path, &new_digest, DETAILS_TTL);
-        assert_ne!(old_variant, new_variant);
-
-        let (old_answer, _) = detail.prepared_variant(&source_path, old_source).await.unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&old_answer.bytes().await.unwrap()).unwrap()["title"],
-            "old"
-        );
-        assert!(!old_variant.exists(), "a displaced generation was published late");
-
-        let (new_answer, _) = detail.prepared_variant(&source_path, new_source).await.unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&new_answer.bytes().await.unwrap()).unwrap()["title"],
-            "new"
-        );
-        assert!(new_variant.exists());
-    }
-
-    #[tokio::test]
-    async fn prepared_detail_replacements_keep_only_one_bounded_generation() {
-        let _turn = SHARED_BUILDER.lock().await;
-        let dir = temp_dir();
-        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
-        let source_path = detail.whole().1;
-        let mut expected_len = 0;
-
-        for generation in 0..24 {
-            let body = Bytes::from(
-                serde_json::to_vec(&serde_json::json!({
-                    "id": 550,
-                    "title": format!("generation-{generation}"),
-                    "credits": {"cast": [{"id": generation, "name": "actor"}]},
-                    "external_ids": {},
-                    "recommendations": {},
-                    "release_dates": {},
-                    "videos": {},
-                    "watch/providers": {}
-                }))
-                .unwrap(),
-            );
-            assert!(crate::cache::write_json(&source_path, &body).await);
-            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-            let (prepared, _) = detail.prepared_variant(&source_path, source).await.unwrap();
-            expected_len = prepared.bytes().await.unwrap().len() as u64;
-
-            let derived: Vec<_> = std::fs::read_dir(variants_dir(&source_path))
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmdb.json"))
-                .collect();
-            assert_eq!(derived.len(), 1, "generation {generation} left obsolete prepared bodies");
-            assert_eq!(derived[0].metadata().unwrap().len(), expected_len);
+        let capacity = DERIVED_RESPONSE_BUDGET_BYTES / MAX_ANSWER_BYTES;
+        assert_eq!(capacity, 32, "keep this test's expected response ceiling explicit");
+        assert!(crate::handler::BULK_REQUESTS > capacity, "more requests than the ceiling, so one must wait");
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..crate::handler::BULK_REQUESTS {
+            let (detail, metrics) = (Arc::clone(&detail), Arc::clone(&metrics));
+            requests.spawn(async move {
+                match detail.kept(&metrics).await {
+                    Kept::Hit(prepared, ..) => prepared,
+                    _ => panic!("a kept record was not a hit"),
+                }
+            });
         }
-
-        let derived_bytes: u64 = std::fs::read_dir(variants_dir(&source_path))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
-            .map(|entry| entry.metadata().unwrap().len())
-            .sum();
-        assert_eq!(derived_bytes, expected_len + 64, "one body and its fixed metadata sidecar are the bound");
-
-        let metrics = crate::metrics::Metrics::default();
-        let _ = sweep_prepared(&dir, Duration::ZERO, &metrics).await;
+        let mut held = Vec::new();
+        let mmaps = crate::mmap::Cache::new(Arc::new(crate::metrics::Metrics::default()));
+        for _ in 0..capacity {
+            let prepared = tokio::time::timeout(BUILD_BOUND, requests.join_next())
+                .await
+                .expect("a large answer never acquired its bounded charge")
+                .expect("a large answer task vanished")
+                .unwrap();
+            assert!(matches!(prepared, Prepared::Record(..)));
+            held.push(answer_prepared(
+                prepared,
+                "public, max-age=60",
+                "hit",
+                SystemTime::now(),
+                &HeaderMap::new(),
+                &mmaps,
+            ));
+        }
+        assert_eq!(derived_response_budget().available_permits(), 0);
         assert!(
-            !variants_dir(&source_path).exists(),
-            "retention cleanup left the per-source directory behind"
+            tokio::time::timeout(Duration::from_millis(100), requests.join_next()).await.is_err(),
+            "a slow response past the ceiling held an uncharged body"
         );
-        assert!(metrics
-            .render()
-            .contains(r#"den_edge_provider_cache_store_total{provider="tmdb",result="expired"} 1"#));
+
+        // Releasing one unread response lets exactly one waiting read finish.
+        drop(held.pop());
+        let next = tokio::time::timeout(BUILD_BOUND, requests.join_next())
+            .await
+            .expect("dropping a response did not release its charge")
+            .expect("the next large answer task vanished")
+            .unwrap();
+        assert!(matches!(next, Prepared::Record(..)));
+        drop(next);
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
+        drop(held);
+        let all = tokio::time::timeout(
+            BUILD_BOUND,
+            Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_BUDGET_BYTES as u32),
+        )
+        .await
+        .expect("cancelled large answers retained their memory charge")
+        .unwrap();
+        drop(all);
     }
 
     #[tokio::test]
@@ -3789,8 +3445,10 @@ mod tests {
         std::fs::write(dir.join("canonical.etag"), b"tag").unwrap();
         std::fs::write(dir.join("write.tmp"), b"temporary").unwrap();
         std::fs::write(dir.join("title.oversize"), b"x").unwrap();
+        std::fs::write(dir.join("title.detail"), b"record").unwrap();
 
-        let prepared = dir.join(".tmdb-prepared");
+        // What prepared subsets left before records is removed, links and all, and not counted.
+        let prepared = dir.join(PREPARED_DIR);
         let source = prepared.join("source");
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("variant.tmdb.json"), b"variant").unwrap();
@@ -3808,10 +3466,12 @@ mod tests {
         let metrics = crate::metrics::Metrics::default();
         sweep(&dir, &metrics).await;
         let rendered = metrics.render();
-        let expected_bytes = 4 + 4 + 3 + 9 + 1 + 7 + 6 + 7 + 6 + 9;
+        let expected_bytes = 4 + 4 + 3 + 9 + 1 + 6;
         assert!(rendered
             .contains(&format!(r#"den_edge_provider_cache_bytes{{provider="tmdb"}} {expected_bytes}"#)));
         assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="tmdb"} 2"#));
+        assert!(!prepared.exists());
+        assert!(outside.join("outside.json").exists(), "a link out of the cache was not followed");
         let oldest = rendered
             .lines()
             .find_map(|line| {
@@ -3840,10 +3500,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_incomplete_inventory_is_reported_and_does_not_publish_partial_totals() {
+        // A cache directory that cannot be listed.
         let dir = temp_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("canonical.json"), b"body").unwrap();
-        std::fs::write(dir.join(".tmdb-prepared"), b"not a directory").unwrap();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
         let metrics = crate::metrics::Metrics::default();
 
         sweep(&dir, &metrics).await;
@@ -3855,183 +3515,53 @@ mod tests {
         );
     }
 
+    /// Any mix of sub-requests is answered from the one record: churn through subsets writes nothing beside it.
     #[tokio::test]
-    async fn cancelling_a_variant_request_does_not_release_its_build_owner() {
-        let _turn = SHARED_BUILDER.lock().await;
-        let dir = temp_dir();
-        let detail =
-            Detail::of("/3/tv/1399", Some("append_to_response=credits,external_ids"), Some(&dir)).unwrap();
-        let source_path = detail.whole().1;
-        let cast: Vec<_> = (0..9000)
-            .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(260)}))
-            .collect();
-        let mut record = serde_json::json!({"id":1399,"status":"Ended","credits":{"cast":cast}});
-        for append in TV_APPENDS {
-            if append != "credits" {
-                record[append] = serde_json::json!({"results":[]});
-            }
-        }
-        let body = Bytes::from(serde_json::to_vec(&record).unwrap());
-        assert!(body.len() < MAX_ANSWER_BYTES);
-        crate::cache::write_json(&source_path, &body).await;
-        let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-        let digest = source.digest();
-        let variant = detail.variant(&source_path, &digest, DETAILS_TTL);
-
-        let held = Arc::clone(detail_builds()).acquire_owned().await.unwrap();
-        let owner_started = watch_variant_owner(&source_path);
-        let build = tokio::spawn(async move { detail.prepared_variant(&source_path, source).await });
-        drop(held);
-        tokio::time::timeout(BUILD_BOUND, owner_started)
-            .await
-            .expect("the owner task never took its build permit")
-            .expect("the owner task dropped its start signal");
-        build.abort();
-        for _ in 0..200 {
-            if variant.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(variant.exists(), "the requester owned and cancelled parse/publication");
-        let permit = tokio::time::timeout(BUILD_BOUND, Arc::clone(detail_builds()).acquire_owned())
-            .await
-            .expect("the build owner retained its permit forever")
-            .unwrap();
-        drop(permit);
-    }
-
-    #[tokio::test]
-    async fn cancelled_variant_waiters_never_become_detached_builds() {
-        let _turn = SHARED_BUILDER.lock().await;
-        let dir = temp_dir();
-        let detail =
-            Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
-        let source_path = detail.whole().1;
-        let body = Bytes::from_static(
-            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
-        );
-        assert!(crate::cache::write_json(&source_path, &body).await);
-        let digest = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap().digest();
-        let variant = detail.variant(&source_path, &digest, DETAILS_TTL);
-        let held = Arc::clone(detail_builds()).acquire_owned().await.unwrap();
-
-        let mut waiters = Vec::new();
-        for _ in 0..64 {
-            let detail = Arc::clone(&detail);
-            let path = source_path.clone();
-            let source = crate::cache::open_json(&path, MAX_ANSWER_BYTES).await.unwrap();
-            waiters.push(tokio::spawn(async move { detail.prepared_variant(&path, source).await }));
-        }
-        tokio::task::yield_now().await;
-        for waiter in &waiters {
-            waiter.abort();
-        }
-        for waiter in waiters {
-            let _ = waiter.await;
-        }
-        drop(held);
-
-        let permit = tokio::time::timeout(BUILD_BOUND, Arc::clone(detail_builds()).acquire_owned())
-            .await
-            .expect("cancelled waiters left detached owners queued")
-            .unwrap();
-        assert!(!variant.exists(), "a cancelled waiter published after its request ended");
-        drop(permit);
-    }
-
-    #[tokio::test]
-    async fn arbitrary_append_subset_churn_does_not_create_derived_files() {
-        let _turn = SHARED_BUILDER.lock().await;
+    async fn append_subset_churn_writes_nothing_beside_the_record() {
         let dir = temp_dir();
         let whole = Detail::of("/3/movie/550", None, Some(&dir)).unwrap();
-        let source_path = whole.whole().1;
         let body = Bytes::from_static(
             br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
-        crate::cache::write_json(&source_path, &body).await;
+        whole.keep_record(body, None, None).await.unwrap();
+        let metrics = Arc::new(crate::metrics::Metrics::default());
         for query in [
             "append_to_response=credits,videos",
             "append_to_response=external_ids,videos",
             "append_to_response=credits,external_ids,videos",
             "append_to_response=recommendations,release_dates",
+            "append_to_response=credits",
         ] {
             let detail = Detail::of("/3/movie/550", Some(query), Some(&dir)).unwrap();
-            assert!(!detail.durable_variant(), "the test accidentally named a checked-in client shape");
-            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-            assert!(detail.prepared_variant(&source_path, source).await.is_some());
+            assert!(matches!(detail.kept(&metrics).await, Kept::Hit(Prepared::Record(..), ..)), "{query}");
         }
-        let derived = std::fs::read_dir(variants_dir(&source_path))
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
-            .count();
-        assert_eq!(derived, 0, "public subset churn amplified the durable cache");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1, "subset churn amplified the cache");
     }
 
-    #[tokio::test]
-    async fn checked_in_appends_with_arbitrary_rest_do_not_create_derived_files() {
-        let _turn = SHARED_BUILDER.lock().await;
-        let dir = temp_dir();
-        let body = Bytes::from_static(
-            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
-        );
-        for n in 0..32 {
-            let query = format!("append_to_response=credits&language=x-private-{n}");
-            let detail = Detail::of("/3/movie/550", Some(&query), Some(&dir)).unwrap();
-            assert!(!detail.durable_variant(), "an arbitrary complete query was called a checked-in shape");
-            let source_path = detail.whole().1;
-            crate::cache::write_json(&source_path, &body).await;
-            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
-            let (prepared, _) = detail.prepared_variant(&source_path, source).await.unwrap();
-            assert!(matches!(prepared, Prepared::Bytes(_)));
-            drop(prepared);
-        }
-        assert!(
-            !dir.join(".tmdb-prepared").exists(),
-            "arbitrary rest parameters amplified the durable cache"
-        );
-    }
-
-    #[test]
-    fn supported_language_variants_are_durable_and_bounded() {
-        let dir = temp_dir();
-        for language in ["en-US", "es-ES", "sv-SE"] {
-            let query = format!("append_to_response=credits&language={language}");
-            let detail = Detail::of("/3/movie/550", Some(&query), Some(&dir)).unwrap();
-            assert!(detail.durable_variant(), "{language}");
-        }
-        for query in [
-            "append_to_response=credits&language=fr-FR",
-            "append_to_response=credits&language=es-ES&region=ES",
-        ] {
-            let detail = Detail::of("/3/movie/550", Some(query), Some(&dir)).unwrap();
-            assert!(!detail.durable_variant(), "{query}");
-        }
-    }
-
+    /// A 304 renews the record whose ETag was sent and answers from it, even when another record took its name
+    /// while TMDB was being asked.
     #[tokio::test]
     async fn a_304_renews_and_returns_only_the_generation_whose_tag_was_sent() {
         let cache = temp_dir();
-        let file = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
+        let detail = Detail::of("/3/movie/550", None, Some(&cache)).unwrap();
         let old = Bytes::from_static(
             br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"old","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
-        keep(&file, &old, Some("W/\"old\"")).await;
+        detail.keep_record(old, Some("W/\"old\"".into()), None).await.unwrap();
+        let file = detail.record_path();
         aged(&file, DETAILS_TTL + Duration::from_secs(60));
 
-        let replacement = file.with_extension("replacement");
-        let current = file.clone();
+        let new = record::build(
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"new","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            &MOVIE_APPENDS,
+            None,
+        );
+        let (replacement, current) = (file.with_extension("replacement"), file.clone());
         crate::lock(&UPSTREAMS).push((
             "304-generation-race".to_owned(),
             Arc::new(move |_: &str| {
-                std::fs::write(
-                    &replacement,
-                    br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"new","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
-                )
-                .unwrap();
+                std::fs::write(&replacement, &new).unwrap();
                 std::fs::rename(&replacement, &current).unwrap();
                 Ok(Fetched::Unchanged)
             }) as Upstream,
@@ -4045,10 +3575,8 @@ mod tests {
         let response = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
         assert_eq!(response.headers()["x-den-tmdb"], "revalidated");
         assert_eq!(body_json(response).await["title"], "old", "304 returned bytes from another generation");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&file).unwrap()).unwrap()["title"],
-            "new"
-        );
+        let on_disk = record::answer_in(&std::fs::read(&file).unwrap(), 0, detail.every()).unwrap().1;
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&on_disk).unwrap()["title"], "new");
     }
 
     #[tokio::test]
@@ -4071,65 +3599,98 @@ mod tests {
         assert!(repeated.into_body().collect().await.unwrap().to_bytes().is_empty());
     }
 
-    /// Manual release-mode probe for the expensive real-world shape this cache is meant to remove. Ignored in CI:
-    /// run with `cargo test --release tmdb_detail_variant_benchmark -- --ignored --nocapture`.
+    /// Manual release-mode probe of detail questions end to end: a cold subset (a miss), its first hit and repeated
+    /// hits, for a typical film and a 2 MB series. Ignored in CI: run with
+    /// `cargo test --release tmdb_detail_request_benchmark -- --ignored --nocapture`. Opening a path containing
+    /// `__den_mark_<label>` is a no-op here; a syscall counter preloaded into the test process can use it to cut
+    /// its counts per phase.
     #[tokio::test]
     #[ignore]
-    async fn tmdb_detail_variant_benchmark() {
-        let dir = temp_dir();
-        let detail =
-            Detail::of("/3/tv/1399", Some("append_to_response=credits,external_ids"), Some(&dir)).unwrap();
-        let source = detail.whole().1;
-        let cast: Vec<_> = (0..6000)
-            .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(240)}))
-            .collect();
-        let mut record = serde_json::json!({"id":1399,"status":"Ended","credits":{"cast":cast}});
-        for append in TV_APPENDS {
-            if append != "credits" {
-                record[append] = serde_json::json!({"results":[]});
+    async fn tmdb_detail_request_benchmark() {
+        fn mark(label: &str) {
+            let _ = std::fs::File::open(format!("/nonexistent/__den_mark_{label}"));
+        }
+        fn film(id: u64) -> serde_json::Value {
+            let person = |n: u64| serde_json::json!({"id": n, "name": format!("Person {n}"), "character": "Somebody", "profile_path": "/abcdefghijklmnop.jpg", "order": n, "popularity": 3.25, "known_for_department": "Acting", "credit_id": "52fe4250c3a36847f80149f3"});
+            let title = |n: u64| serde_json::json!({"id": n, "title": format!("Title {n}"), "poster_path": "/abcdefghijklmnop.jpg", "vote_average": 6.5, "overview": "o".repeat(200), "release_date": "2001-01-01"});
+            serde_json::json!({
+                "id": id, "title": "A Film", "status": "Released", "release_date": "1999-10-15", "overview": "x".repeat(600),
+                "genres": [{"id": 18, "name": "Drama"}], "runtime": 139, "vote_average": 8.4, "popularity": 61.416,
+                "credits": {"cast": (0..60).map(person).collect::<Vec<_>>(), "crew": (100..140).map(person).collect::<Vec<_>>()},
+                "external_ids": {"imdb_id": "tt0137523", "wikidata_id": "Q190050"},
+                "recommendations": {"page": 1, "results": (0..20).map(title).collect::<Vec<_>>()},
+                "release_dates": {"results": (0..30).map(|n| serde_json::json!({"iso_3166_1": "US", "release_dates": [{"certification": "R", "type": n % 6}]})).collect::<Vec<_>>()},
+                "videos": {"results": (0..8).map(|n| serde_json::json!({"key": format!("video{n}"), "site": "YouTube", "type": "Trailer"})).collect::<Vec<_>>()},
+                "watch/providers": {"results": {"US": {"flatrate": [{"provider_id": 8, "provider_name": "Netflix"}]}}}
+            })
+        }
+        fn series(id: u64) -> serde_json::Value {
+            let cast: Vec<_> = (0..6000)
+                .map(|n| serde_json::json!({"id": n, "name": format!("actor-{n}"), "roles": [{"character": "x".repeat(240)}]}))
+                .collect();
+            let mut record = serde_json::json!({"id": id, "name": "A Series", "status": "Ended", "aggregate_credits": {"cast": cast}});
+            for append in TV_APPENDS {
+                if append != "aggregate_credits" {
+                    record[append] = serde_json::json!({"results": []});
+                }
             }
+            record
         }
-        let body = Bytes::from(serde_json::to_vec(&record).unwrap());
-        assert!(body.len() > 1024 * 1024 && body.len() < MAX_ANSWER_BYTES, "{} bytes", body.len());
-        crate::cache::write_json(&source, &body).await;
-
-        let old_started = std::time::Instant::now();
-        for _ in 0..10 {
-            std::hint::black_box(detail.narrowed(body.clone()).await);
+        let key = "bench-requests";
+        let tmdb: Upstream = Arc::new(|url: &str| {
+            let url = url::Url::parse(url).unwrap();
+            let id: u64 = url.path().rsplit('/').next().unwrap().parse().unwrap();
+            let body = if url.path().starts_with("/3/movie/") { film(id) } else { series(id) };
+            Ok(Fetched::Answer(Bytes::from(body.to_string()), Some(format!("\"tag-{id}\""))))
+        });
+        crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
+        let cache = temp_dir();
+        let h = lending_as(&cache, key);
+        for (name, kind, appends, titles) in [
+            ("film-credits", "movie", "credits", 100u64),
+            ("film-tvdetail", "movie", "release_dates,watch/providers", 100),
+            ("series-credits+ids", "tv", "credits,external_ids", 20),
+        ] {
+            let first_id = if appends == "credits" { 1 } else { 1001 };
+            let mut timings = Vec::new();
+            let mut size = 0;
+            for (label, repeat) in [("miss", 1u32), ("first-hit", 1), ("hit", 5)] {
+                // A fresh minute of the per-address allowance for each phase's cold questions.
+                h.advance(61_000);
+                mark("reset");
+                let started = std::time::Instant::now();
+                for _ in 0..repeat {
+                    for id in first_id..first_id + titles {
+                        let url = format!("/tmdb/3/{kind}/{id}?append_to_response={appends}");
+                        let resp = h.send("GET", &url, None, &[]).await;
+                        assert_eq!(resp.status(), StatusCode::OK);
+                        size = resp.into_body().collect().await.unwrap().to_bytes().len();
+                    }
+                }
+                timings.push(started.elapsed() / (titles as u32 * repeat));
+                mark(&format!("{name}:{label}:per-{}", titles as u32 * repeat));
+            }
+            eprintln!(
+                "BENCH {name} ({size} B response): miss {:?}; first hit {:?}; repeat hit {:?}",
+                timings[0], timings[1], timings[2]
+            );
         }
-        let old = old_started.elapsed() / 10;
-
-        let first_started = std::time::Instant::now();
-        let canonical = crate::cache::open_json(&source, MAX_ANSWER_BYTES).await.unwrap();
-        std::hint::black_box(detail.prepared_variant(&source, canonical).await.unwrap());
-        let first = first_started.elapsed();
-
-        let repeat_started = std::time::Instant::now();
-        for _ in 0..1000 {
-            let canonical = crate::cache::open_json(&source, MAX_ANSWER_BYTES).await.unwrap();
-            std::hint::black_box(detail.prepared_variant(&source, canonical).await.unwrap());
-        }
-        let repeat = repeat_started.elapsed() / 1000;
-        eprintln!(
-            "{} bytes: prior reparse {old:?}; first prepared {first:?}; repeat metadata hit {repeat:?}",
-            body.len()
-        );
     }
 
-    /// The cache on the box is not started over: an answer kept under the question a client asked before the whole
-    /// detail existed answers that question, and any narrower one, with no call to TMDB — and keeps the age it was
-    /// kept with.
+    /// The cache on the box is not started over: a whole detail kept as TMDB's plain answer before records is cut
+    /// into a record on its first question, keeping the age and the ETag it was kept with, and nothing is asked of
+    /// TMDB.
     #[tokio::test]
-    async fn a_title_kept_before_the_upgrade_is_a_hit_without_asking() {
+    async fn a_whole_detail_kept_before_records_is_a_hit_without_asking() {
         let cache = temp_dir();
         let h = lending_as(&cache, "kept-before");
         let asked = tmdb_answering("kept-before", "Ended");
-        let kept =
-            cache_path(&cache, &cache_key("/3/movie/550", Some(&format!("append_to_response={WEB_MOVIE}"))));
+        let whole = Detail::of("/3/movie/550", None, Some(&cache)).unwrap();
+        let kept = whole.whole().1;
         let body = serde_json::json!({
             "id": 550, "title": "Fight Club", "status": "Released", "release_date": "1999-10-15", "credits": {}, "videos": {}
         });
-        write(&kept, &Bytes::from(body.to_string())).await;
+        keep(&kept, &Bytes::from(body.to_string()), Some("W/\"kept\"")).await;
         aged(&kept, Duration::from_secs(30 * 86_400));
 
         // Asked for without what moves (`MOVING`), which keeps the months of the title itself.
@@ -4148,6 +3709,16 @@ mod tests {
         );
         assert!(ask(&h.state, "/3/movie/550", None).await.is_some());
         assert!(crate::lock(&asked).is_empty(), "nothing was asked of TMDB");
+        for gone in [kept.clone(), kept.with_extension("etag"), kept.with_extension("json.response")] {
+            assert!(!gone.exists(), "{} was left beside the record", gone.display());
+        }
+        let reading = record::begin(&whole.record_path()).unwrap().unwrap();
+        assert_eq!(
+            reading.header.etag.as_deref(),
+            Some("W/\"kept\""),
+            "revalidated with the tag it was kept with"
+        );
+        assert!(reading.age > Duration::from_secs(30 * 86_400 - 60), "kept its age: {:?}", reading.age);
     }
 
     /// A detail answer carrying where a title streams was kept, and served, for the six months of the title itself:
@@ -4159,8 +3730,8 @@ mod tests {
         let h = lending_as(&cache, "moving");
         let asked = tmdb_answering("moving", "Ended");
         assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "miss");
-        let whole = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
-        aged(&whole, LIST_TTL + Duration::from_secs(60));
+        let record = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().record_path();
+        aged(&record, LIST_TTL + Duration::from_secs(60));
 
         assert_eq!(detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await.0, "hit");
         let web = format!("/tmdb/3/movie/550?append_to_response={WEB_MOVIE}");
@@ -4189,8 +3760,8 @@ mod tests {
         assert_eq!(fresh_for("/3/movie/550/videos"), LIST_TTL);
     }
 
-    /// A large record is cut on the blocking pool to the same answer as a small one is cut in place, and a question
-    /// for everything the whole detail holds is served its bytes as kept.
+    /// A large record is cut on the blocking pool and read past its first read to the same answers as a small one,
+    /// and a question for everything the whole detail holds is served TMDB's bytes as kept.
     #[tokio::test]
     async fn a_record_is_cut_to_the_question_wherever_it_is_cut() {
         let dir = temp_dir();
@@ -4199,13 +3770,17 @@ mod tests {
         let whole =
             serde_json::json!({ "id": 1, "status": "Ended", "credits": { "cast": cast }, "videos": {} });
         let whole = Bytes::from(whole.to_string());
-        assert!(whole.len() > NARROW_INLINE_BYTES);
+        assert!(whole.len() > record::PREFIX_BYTES);
         let bare = Detail::of("/3/tv/1", None, Some(&dir)).unwrap();
-        let cut: serde_json::Value = serde_json::from_slice(&bare.narrowed(whole.clone()).await).unwrap();
+        bare.keep_record(whole.clone(), None, None).await.unwrap();
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let Kept::Hit(cut, ..) = bare.kept(&metrics).await else { panic!("the record was not a hit") };
+        let cut: serde_json::Value = serde_json::from_slice(&cut.bytes().await.unwrap()).unwrap();
         assert_eq!(cut, serde_json::json!({ "id": 1, "status": "Ended" }));
         let everything =
             Detail::of("/3/tv/1", Some(&format!("append_to_response={}", TV_APPENDS.join(","))), Some(&dir));
-        assert_eq!(everything.unwrap().narrowed(whole.clone()).await, whole, "not parsed at all");
+        let Kept::Hit(all, ..) = everything.unwrap().kept(&metrics).await else { panic!("not a hit") };
+        assert_eq!(all.bytes().await.unwrap(), whole, "TMDB's bytes as kept");
     }
 
     /// A cold title asked for by several callers at once was asked of TMDB once per caller.
@@ -4489,21 +4064,20 @@ mod tests {
         );
     }
 
-    /// A kept answer holding less than was asked is no answer to it: the whole detail is fetched. And a sub-request
-    /// the whole detail does not carry is asked for as it always was.
+    /// An answer kept under one client's own question before the whole detail existed is no answer now: the whole
+    /// is fetched once, and a sub-request it does not carry is asked for as it always was.
     #[tokio::test]
-    async fn a_question_for_more_than_a_kept_answer_holds_is_not_served_from_it() {
+    async fn a_question_kept_before_the_whole_detail_is_not_served_from() {
         let cache = temp_dir();
         let h = lending_as(&cache, "narrower");
         let asked = tmdb_answering("narrower", "Ended");
         let kept = cache_path(&cache, &cache_key("/3/movie/603", Some("append_to_response=credits")));
         write(&kept, &Bytes::from_static(br#"{"id":603,"title":"The Matrix","credits":{}}"#)).await;
 
-        assert_eq!(detail(&h, "/tmdb/3/movie/603?append_to_response=credits").await.0, "hit");
+        assert_eq!(detail(&h, "/tmdb/3/movie/603?append_to_response=credits").await.0, "miss");
         assert_eq!(detail(&h, "/tmdb/3/movie/603").await.0, "hit");
-        assert!(crate::lock(&asked).is_empty());
         let (how, more) = detail(&h, "/tmdb/3/movie/603?append_to_response=credits,videos").await;
-        assert_eq!(how, "miss");
+        assert_eq!(how, "hit");
         assert!(more.get("videos").is_some() && more.get("recommendations").is_none(), "{more}");
         assert_eq!(crate::lock(&asked).len(), 1);
 
@@ -4519,8 +4093,8 @@ mod tests {
         let h = lending_as(&cache, "airing");
         let asked = tmdb_answering("airing", "Returning Series");
         assert_eq!(detail(&h, "/tmdb/3/tv/1399").await.0, "miss");
-        let whole = Detail::of("/3/tv/1399", None, Some(&cache)).unwrap().whole().1;
-        aged(&whole, LIST_TTL + Duration::from_secs(60));
+        let record = Detail::of("/3/tv/1399", None, Some(&cache)).unwrap().record_path();
+        aged(&record, LIST_TTL + Duration::from_secs(60));
 
         assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await.0, "stale");
         for _ in 0..200 {
@@ -4532,9 +4106,10 @@ mod tests {
         assert_eq!(crate::lock(&asked).len(), 2, "asked again behind the stale answer");
         assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await.0, "hit");
 
-        let ended = cache_path(&cache, &cache_key("/3/tv/1396", None));
-        write(&ended, &Bytes::from_static(br#"{"id":1396,"name":"Breaking Bad","status":"Ended"}"#)).await;
-        aged(&ended, LIST_TTL + Duration::from_secs(60));
+        let ended = Detail::of("/3/tv/1396", None, Some(&cache)).unwrap();
+        let body = Bytes::from_static(br#"{"id":1396,"name":"Breaking Bad","status":"Ended"}"#);
+        ended.keep_record(body, None, None).await.unwrap();
+        aged(&ended.record_path(), LIST_TTL + Duration::from_secs(60));
         assert_eq!(detail(&h, "/tmdb/3/tv/1396").await.0, "hit");
         assert_eq!(crate::lock(&asked).len(), 2);
     }

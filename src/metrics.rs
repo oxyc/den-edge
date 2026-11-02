@@ -312,15 +312,17 @@ impl Drop for ProviderStoreAttempt {
 }
 
 #[derive(Clone, Copy)]
+/// What happened to a title's detail record (`tmdb::Detail`): read for a question, cut from TMDB's answer, cut from a
+/// whole detail kept before records, or found unreadable.
 pub enum TmdbPrepared {
-    FileHit = 0,
-    FileBuilt = 1,
-    TransientBuilt = 2,
-    PublishFailed = 3,
+    Read = 0,
+    Built = 1,
+    Migrated = 2,
+    Unreadable = 3,
 }
 
 impl TmdbPrepared {
-    const LABELS: [&'static str; 4] = ["file_hit", "file_built", "transient_built", "publish_failed"];
+    const LABELS: [&'static str; 4] = ["record_read", "record_built", "record_migrated", "record_unreadable"];
 }
 
 #[derive(Clone, Copy)]
@@ -822,7 +824,7 @@ impl Metrics {
             }
         }
         out.push_str(
-            "# HELP den_edge_tmdb_prepared_total TMDB prepared-response reuse and build outcomes.\n\
+            "# HELP den_edge_tmdb_prepared_total TMDB detail records read, built, migrated and found unreadable.\n\
              # TYPE den_edge_tmdb_prepared_total counter\n",
         );
         for (result, label) in TmdbPrepared::LABELS.into_iter().enumerate() {
@@ -998,7 +1000,7 @@ mod tests {
             r#"den_edge_provider_cache_entries{provider="tmdb"} 0"#,
             r#"den_edge_provider_cache_oldest_age_seconds{provider="tmdb"} 0"#,
             r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="failed"} 0"#,
-            r#"den_edge_tmdb_prepared_total{result="transient_built"} 0"#,
+            r#"den_edge_tmdb_prepared_total{result="record_migrated"} 0"#,
             r#"den_edge_title_metadata_observation_admission_total{result="busy"} 0"#,
             r#"den_edge_title_metadata_observation_completion_total{result="stored"} 0"#,
             "den_edge_library_replay_busy_total 0",
@@ -1037,7 +1039,7 @@ mod tests {
         metrics.provider_cache_store(Provider::Warnings, CacheStore::Expired);
         metrics.provider_cache_inventory(Provider::Skipdb, 8192, 7, 3600);
         metrics.provider_cache_scan(Provider::Skipdb, true);
-        metrics.tmdb_prepared(TmdbPrepared::FileBuilt);
+        metrics.tmdb_prepared(TmdbPrepared::Built);
         metrics.stream_terminated(StreamClass::Media, StreamTermination::Lifetime);
         metrics.compression_busy();
         let job = metrics.compression_started();
@@ -1051,7 +1053,7 @@ mod tests {
             r#"den_edge_provider_cache_entries{provider="skipdb"} 7"#,
             r#"den_edge_provider_cache_oldest_age_seconds{provider="skipdb"} 3600"#,
             r#"den_edge_provider_cache_scan_total{provider="skipdb",outcome="success"} 1"#,
-            r#"den_edge_tmdb_prepared_total{result="file_built"} 1"#,
+            r#"den_edge_tmdb_prepared_total{result="record_built"} 1"#,
             r#"den_edge_stream_terminated_total{class="media",reason="lifetime"} 1"#,
             r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="success"} 1"#,
         ] {
