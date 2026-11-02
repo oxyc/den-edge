@@ -2354,7 +2354,8 @@ export class LibraryLog {
   /**
    * Every row in the log, or null when den-edge can't be reached. A row that doesn't open is skipped. A library
    * that moved to a new key comes back empty and `moved`. With a copy kept from an earlier visit it opens from that
-   * at once, `fromCache`, and asks den-edge nothing until `refresh`.
+   * at once, `fromCache`, and asks den-edge nothing until `refresh`. `pageKept`: told, after each page of a history
+   * read from den-edge that more pages follow, how far through it the read is (0–1, never 1).
    */
   static async open(
     libraryKey: string,
@@ -2367,6 +2368,7 @@ export class LibraryLog {
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
     vault: Vault | null = libraryVault,
     wire: LibraryWire = WIRE,
+    pageKept?: (progress: number) => void,
   ): Promise<LibraryLog | null> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
@@ -2537,6 +2539,7 @@ export class LibraryLog {
       // following request starts, a restart must be able to resume at this page rather than decrypt it again.
       if (!(await log.keepPartial())) return null;
       since = page.entries.at(-1)?.seq ?? page.head;
+      pageKept?.(Math.min(0.99, since / Math.max(1, page.head)));
     }
   }
 
