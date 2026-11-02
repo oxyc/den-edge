@@ -1,5 +1,10 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
+import {
+  libraryLocalMaterials,
+  openLibraryLocalValue,
+  sealLibraryLocalValue,
+} from './libraryLocalValue';
 import type { Vault, VaultChange } from './localVault';
 import { ensureSyncPolicy } from './syncLoader';
 import type { DocumentRow, Stamp } from './wire';
@@ -284,6 +289,61 @@ describe('compact History checkpoint', () => {
 
     await reader.commitBatch('generation-a', manifest.head, [], true);
     expect((await reader.history((await reader.manifest())!))!.page()!.items).toMatchObject([
+      { title: { type: 'movie', id: 2 }, watchedAt: 4_000 },
+      { title: { type: 'movie', id: 1 }, watchedAt: 3_000 },
+    ]);
+  });
+
+  it('carries a checkpoint and its deltas through the conversion of a store the earlier build wrote', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    await store.commitBatch(
+      'generation-a',
+      2,
+      [entry(key(1), 1, movie(1, 1_000)), entry(key(2), 2, movie(2, 2_000))],
+      true,
+    );
+    await store.keepRows('generation-a', [entry(key(1), 3, movie(1, 3_000))]);
+    const deltas = () =>
+      [...vault.values.keys()].filter((storedKey) => storedKey.includes(':history-delta:'));
+    expect(deltas()).toHaveLength(1);
+    const before = (await store.history((await store.manifest())!))!.page()!.items;
+
+    // The same store as the earlier build kept it: a record per document, and a manifest that names no layout. Its
+    // History checkpoint and delta are left exactly as they were.
+    const { libraryId, key: local } = (await libraryLocalMaterials(libraryKey))!;
+    const seal = async (name: string, value: unknown) =>
+      vault.values.set(`${libraryId}:${name}`, await sealLibraryLocalValue(local, name, value));
+    const documents: Array<[string, unknown]> = [];
+    for await (const { key: documentKey, document } of store.documents('generation-a'))
+      documents.push([documentKey, document]);
+    for (const storedKey of [...vault.values.keys()])
+      if (storedKey.includes(':kept:')) vault.values.delete(storedKey);
+    for (const [documentKey, document] of documents)
+      await seal(`library-facts.v1:generation-a:document:${documentKey}`, document);
+    const manifestKey = `${libraryId}:library-facts.v1:manifest`;
+    const { layout: _, ...earlier } = (await openLibraryLocalValue(
+      local,
+      'library-facts.v1:manifest',
+      vault.values.get(manifestKey)!,
+    )) as Record<string, unknown>;
+    await seal('library-facts.v1:manifest', earlier);
+
+    const reopened = (await LibraryFactStore.open(libraryKey, vault))!;
+    const converting = (await reopened.manifest())!;
+    expect(converting.layout).toBeUndefined();
+    expect((await reopened.history(converting))!.page()!.items).toEqual(before);
+
+    // An edit converts the documents first, then keeps its title as one more delta over the same checkpoint.
+    await reopened.keepRows('generation-a', [entry(key(2), 4, movie(2, 4_000))]);
+    expect([...vault.values.keys()].some((storedKey) => storedKey.includes(':document:'))).toBe(
+      false,
+    );
+    expect(deltas()).toHaveLength(2);
+    const converted = (await reopened.manifest())!;
+    expect(converted.layout).toBe(2);
+    const fresh = (await LibraryFactStore.open(libraryKey, vault))!;
+    expect((await fresh.history((await fresh.manifest())!))!.page()!.items).toMatchObject([
       { title: { type: 'movie', id: 2 }, watchedAt: 4_000 },
       { title: { type: 'movie', id: 1 }, watchedAt: 3_000 },
     ]);

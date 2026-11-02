@@ -51,10 +51,11 @@ test('a returning Owner’s page opened hidden starts the app without waiting to
       if (match) started.push(Number(match[1]));
     });
     await page.goto(`${E2E_ORIGIN}/`);
-    // The case under test: the page holds a retained billboard, which is what made it wait for frames.
-    await expect(
-      page.locator('[data-den-early-billboard]:not([hidden]) [data-den-early-backdrop][data-path]'),
-    ).toHaveCount(1);
+    // The case under test: the page holds a retained billboard, which is what made it wait for frames. Its image is
+    // named (`data-path`) only by the document's own script, and the app's billboard adopts that very node and removes
+    // the shell around it (`Billboard.svelte`): a hidden page's app can do so before this first looks, so the image is
+    // counted wherever it is by then.
+    await expect(page.locator('img[data-den-early-backdrop][data-path]')).toHaveCount(1);
     await expect.poll(() => started.length, { timeout: 5_000 }).toBe(1);
     expect(started[0]).toBeLessThan(2_000);
   } finally {
