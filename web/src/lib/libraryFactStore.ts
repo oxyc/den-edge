@@ -127,6 +127,34 @@ export interface StoredLibraryDocument {
 const generationPart = (generation: string) => encodeURIComponent(generation);
 const manifestName = `${ROOT}:manifest`;
 const historyName = `${ROOT}:history`;
+/**
+ * A commit that changes some titles' History writes their entries as one delta beside the checkpoint, not the whole
+ * library's checkpoint again; past `HISTORY_DELTA_LIMIT` deltas the next commit writes the checkpoint whole.
+ */
+const historyDeltaPrefix = `${ROOT}:history-delta:`;
+const HISTORY_DELTA_LIMIT = 32;
+
+interface HistoryDelta {
+  schema: typeof COMPACT_HISTORY_CHECKPOINT_SCHEMA;
+  /** The revision of the History it changes: the checkpoint's, or the delta's before it. */
+  from: string;
+  source: CompactHistoryCheckpoint['snapshot']['source'];
+  builtAt: number;
+  /** Each changed title's entry, or null where it has none now. */
+  items: Array<[title: string, item: CompactHistoryCheckpoint['snapshot']['items'][number] | null]>;
+  /** Each changed title's document keys, or null where it has none now. */
+  documents: Array<[title: string, keys: string[] | null]>;
+}
+
+const validDelta = (value: unknown): value is HistoryDelta =>
+  !!value &&
+  typeof value === 'object' &&
+  (value as HistoryDelta).schema === COMPACT_HISTORY_CHECKPOINT_SCHEMA &&
+  typeof (value as HistoryDelta).from === 'string' &&
+  !!(value as HistoryDelta).source &&
+  Number.isFinite((value as HistoryDelta).builtAt) &&
+  Array.isArray((value as HistoryDelta).items) &&
+  Array.isArray((value as HistoryDelta).documents);
 const namespace = (generation: string) => `${ROOT}:${generationPart(generation)}`;
 const documentName = (generation: string, key: string) =>
   `${namespace(generation)}:document:${key}`;
@@ -332,7 +360,11 @@ export class LibraryFactStore {
   private readonly listeners = new Set<() => void>();
   private historyCache?: {
     identity: string;
-    value: { checkpoint: CompactHistoryCheckpoint; index: MaterializedHistoryIndex };
+    value: {
+      checkpoint: CompactHistoryCheckpoint;
+      index: MaterializedHistoryIndex;
+      deltas: string[];
+    };
   };
   /** Complete only while this instance performs an uninterrupted first import; never authoritative or persisted. */
   private historyImport?: {
@@ -517,7 +549,7 @@ export class LibraryFactStore {
       newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
     };
     derived.changes.push(
-      await this.historyCheckpointChange(held, manifest, entries, importedHistory),
+      ...(await this.historyCheckpointChange(held, manifest, entries, importedHistory)),
     );
     derived.changes.push({
       kind: 'put',
@@ -564,7 +596,7 @@ export class LibraryFactStore {
         ...nextIdentity(held, generation, held.head, entries),
         newest: withNewest(held.newest, entries),
       };
-      derived.changes.push(await this.historyCheckpointChange(held, manifest, entries));
+      derived.changes.push(...(await this.historyCheckpointChange(held, manifest, entries)));
       derived.changes.push({
         kind: 'put',
         key: `${this.libraryId}:${manifestName}`,
@@ -646,19 +678,73 @@ export class LibraryFactStore {
     return { changes: await Promise.all(pending), history };
   }
 
+  /** The History deltas kept beside the checkpoint, oldest first. */
+  private async historyDeltas(): Promise<Array<[key: string, bytes: Uint8Array]>> {
+    return (await this.vault.entries(`${this.libraryId}:${historyDeltaPrefix}`)).sort(
+      ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+    );
+  }
+
   private async readHistoryCheckpoint(manifest: LibraryFactManifest): Promise<{
     checkpoint: CompactHistoryCheckpoint;
     index: MaterializedHistoryIndex;
+    deltas: string[];
   } | null> {
     const identity = `${manifest.generation}\n${manifest.head}\n${manifest.rowsVersion ?? manifest.head}\n${manifest.revision ?? ''}`;
     if (this.historyCache?.identity === identity) return this.historyCache.value;
     const bytes = await this.vault.get(`${this.libraryId}:${historyName}`);
     if (!bytes) return null;
     try {
-      const value = restoreHistoryCheckpoint(
-        await openLibraryLocalValue(this.key, historyName, bytes),
-        manifest,
-      );
+      const base = (await openLibraryLocalValue(
+        this.key,
+        historyName,
+        bytes,
+      )) as CompactHistoryCheckpoint;
+      const deltas = await this.historyDeltas();
+      let checkpoint = base;
+      if (deltas.length) {
+        if (
+          !base?.snapshot ||
+          !Array.isArray(base.snapshot.items) ||
+          !Array.isArray(base.documents)
+        )
+          return null;
+        const items = new Map(
+          base.snapshot.items.map((item) => [`${item.title.type}:${item.title.id}`, item]),
+        );
+        const documents = new Map(base.documents);
+        let { source, builtAt } = base.snapshot;
+        for (const [key, held] of deltas) {
+          const delta = await openLibraryLocalValue(
+            this.key,
+            key.slice(this.libraryId.length + 1),
+            held,
+          );
+          // Each delta extends the revision before it; one that does not is not History, and it is built again.
+          if (!validDelta(delta) || delta.from !== source.revision) return null;
+          for (const [title, item] of delta.items)
+            if (item) items.set(title, item);
+            else items.delete(title);
+          for (const [title, keys] of delta.documents)
+            if (keys) documents.set(title, keys);
+            else documents.delete(title);
+          ({ source, builtAt } = delta);
+        }
+        checkpoint = {
+          ...base,
+          snapshot: {
+            ...base.snapshot,
+            source,
+            builtAt,
+            items: [...items.values()].sort(compareHistoryItems),
+          },
+          documents: [...documents].sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        };
+      }
+      const restored = restoreHistoryCheckpoint(checkpoint, manifest);
+      const value = restored && { ...restored, deltas: deltas.map(([key]) => key) };
       if (value) this.historyCache = { identity, value };
       return value;
     } catch {
@@ -672,9 +758,11 @@ export class LibraryFactStore {
     manifest: LibraryFactManifest,
     entries: readonly LibraryFactEntry[],
     importedHistory: Map<string, ImportedHistoryProjection> | null = null,
-  ): Promise<VaultChange> {
+  ): Promise<VaultChange[]> {
     const key = `${this.libraryId}:${historyName}`;
-    if (!manifest.complete) return { kind: 'delete', key };
+    const dropDeltas = async (): Promise<VaultChange[]> =>
+      (await this.historyDeltas()).map(([delta]) => ({ kind: 'delete', key: delta }));
+    if (!manifest.complete) return [{ kind: 'delete', key }, ...(await dropDeltas())];
 
     const openedPrior =
       held?.complete && held.generation === manifest.generation
@@ -821,11 +909,38 @@ export class LibraryFactStore {
     };
     if (!historyCheckpointMatches(checkpoint, manifest))
       throw new Error('History checkpoint source does not match its fact manifest');
-    return {
-      kind: 'put',
-      key,
-      value: await sealLibraryLocalValue(this.key, historyName, checkpoint),
-    };
+    if (prior && prior.deltas.length < HISTORY_DELTA_LIMIT) {
+      const name = `${historyDeltaPrefix}${Date.now().toString().padStart(15, '0')}:${[
+        ...crypto.getRandomValues(new Uint8Array(6)),
+      ]
+        .map((value) => value.toString(16).padStart(2, '0'))
+        .join('')}`;
+      const changed = [...affected].sort();
+      const delta: HistoryDelta = {
+        schema: COMPACT_HISTORY_CHECKPOINT_SCHEMA,
+        from: prior.checkpoint.snapshot.source.revision,
+        source: checkpoint.snapshot.source,
+        builtAt: checkpoint.snapshot.builtAt,
+        items: changed.map((title) => [title, items.get(title) ?? null]),
+        documents: changed.map((title) => [
+          title,
+          documents.has(title) ? [...documents.get(title)!].sort() : null,
+        ]),
+      };
+      return [
+        {
+          kind: 'put',
+          key: `${this.libraryId}:${name}`,
+          value: await sealLibraryLocalValue(this.key, name, delta),
+        },
+      ];
+    }
+    return [
+      { kind: 'put', key, value: await sealLibraryLocalValue(this.key, historyName, checkpoint) },
+      ...(prior
+        ? prior.deltas.map((delta): VaultChange => ({ kind: 'delete', key: delta }))
+        : await dropDeltas()),
+    ];
   }
 
   async *read<T extends TitleFact | ContinueFact | SettingsFact>(
