@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { LibraryFactStore } from './libraryFactStore';
+import { libraryLocalMaterials, sealLibraryLocalValue } from './libraryLocalValue';
 import type { Vault, VaultChange } from './localVault';
 import { ensureSyncPolicy } from './syncLoader';
 import { syncPolicy } from './syncCore';
@@ -96,9 +97,11 @@ describe('library fact store', () => {
       complete: false,
       profileTopology: false,
       newest: { stamp: [70, 0, 'device'], reconsiderAt: null },
+      layout: 2,
     });
     const names = [...vault.values.keys()];
-    expect(names.some((name) => name.includes(':document:'))).toBe(true);
+    expect(names.filter((name) => name.includes(':journal:'))).toHaveLength(1);
+    expect(names.some((name) => name.includes(':document:'))).toBe(false);
     expect(names.some((name) => name.includes(':fact:watchlist:'))).toBe(true);
     expect(names.some((name) => name.includes(':fact:recommendations:'))).toBe(true);
     expect(names.some((name) => name.includes(':history:'))).toBe(false);
@@ -195,8 +198,8 @@ describe('library fact store', () => {
 
     await store.commitBatch('generation-a', seasons.length, [], true);
 
-    expect(vault.gets.filter((key) => key.includes(':document:'))).toEqual([]);
-    expect(vault.pages.filter((key) => key.includes(':document:'))).toEqual([]);
+    expect(vault.gets.filter((key) => key.includes(':snapshot'))).toEqual([]);
+    expect(vault.pages).toEqual([]);
     expect(policy.mock.calls.filter(([request]) => request.op === 'season_state_v4')).toHaveLength(
       seasons.length,
     );
@@ -232,10 +235,10 @@ describe('library fact store', () => {
 
     const resumed = (await LibraryFactStore.open(libraryKey, vault))!;
     await resumed.manifest();
-    vault.pages.length = 0;
+    vault.gets.length = 0;
     await resumed.commitBatch('generation-a', 1, [], true);
 
-    expect(vault.pages.some((prefix) => prefix.includes(':document:'))).toBe(true);
+    expect(vault.gets.some((key) => key.includes(':snapshot'))).toBe(true);
     expect((await resumed.history((await resumed.manifest())!))?.page()?.items).toEqual([
       {
         title: { type: 'tv', id: 90 },
@@ -550,5 +553,116 @@ describe('library fact store', () => {
     expect([...vault.values.keys()].some((key) => key.includes('generation-old'))).toBe(true);
     await store.commitBatch('generation-new', 1, [], true);
     expect([...vault.values.keys()].some((key) => key.includes('generation-old'))).toBe(false);
+  });
+});
+
+/** A store as the build before the snapshot layout wrote it: one sealed record per document, a manifest without it. */
+async function earlierLayout(
+  vault: MemoryVault,
+  documents: Array<{ k: string; seq: number; value: string; row: Row | null }>,
+) {
+  const { libraryId, key } = (await libraryLocalMaterials(libraryKey))!;
+  const put = async (name: string, value: unknown) =>
+    vault.put(`${libraryId}:${name}`, await sealLibraryLocalValue(key, name, value));
+  for (const { k, seq, value, row } of documents)
+    await put(`library-facts.v1:generation-a:document:${k}`, { schema: 1, seq, value, row });
+  await put('library-facts.v1:manifest', {
+    schema: 1,
+    generation: 'generation-a',
+    head: documents.length,
+    rowsVersion: documents.length,
+    revision: 'earlier',
+    complete: true,
+    profileTopology: false,
+  });
+}
+
+const read = async (store: LibraryFactStore) => {
+  const held: Array<[string, { seq: number; row: Row | null; value: string }]> = [];
+  for await (const { key, document } of store.documents('generation-a'))
+    held.push([key, { seq: document.seq, row: document.row, value: document.value }]);
+  return held;
+};
+
+describe('the snapshot layout', () => {
+  const documents = [
+    { k: 'a'.repeat(64), seq: 1, value: 'ciphertext-1', row: title(1, 'watchlist', 10) },
+    { k: 'b'.repeat(64), seq: 2, value: 'ciphertext-2', row: title(3, 'watched', 20) },
+    // A row this build could not read is kept as its server ciphertext.
+    { k: 'c'.repeat(64), seq: 3, value: 'ciphertext-3', row: null },
+  ];
+
+  it('converts a store the earlier build wrote, verified, then removes the old records', async () => {
+    const vault = new MemoryVault();
+    await earlierLayout(vault, documents);
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+
+    expect(await read(store)).toEqual([
+      ['a'.repeat(64), { seq: 1, row: documents[0]!.row, value: '' }],
+      ['b'.repeat(64), { seq: 2, row: documents[1]!.row, value: '' }],
+      ['c'.repeat(64), { seq: 3, row: null, value: 'ciphertext-3' }],
+    ]);
+    const keys = [...vault.values.keys()];
+    expect(keys.some((key) => key.includes(':document:'))).toBe(false);
+    expect(keys.filter((key) => key.endsWith(':snapshot'))).toHaveLength(1);
+    expect(await store.manifest()).toMatchObject({ layout: 2, revision: 'earlier', head: 3 });
+
+    // A new instance reads the snapshot alone.
+    const reopened = (await LibraryFactStore.open(libraryKey, vault))!;
+    vault.pages.length = 0;
+    expect(await read(reopened)).toEqual(await read(store));
+    expect(vault.pages).toEqual([]);
+  });
+
+  it('keeps the old records, and refuses a write, when the snapshot does not read back', async () => {
+    const vault = new MemoryVault();
+    await earlierLayout(vault, documents);
+    const before = new Map(vault.values);
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    // The snapshot is lost as it is written: what reads back is not what was sealed.
+    const put = vault.put.bind(vault);
+    vault.put = async (key, value) => (key.endsWith(':snapshot') ? undefined : put(key, value));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await read(store)).map(([key]) => key)).toEqual(documents.map(({ k }) => k));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(new Map(vault.values)).toEqual(before);
+    await store.manifest();
+    await expect(
+      store.keepRows('generation-a', [
+        { k: 'd'.repeat(64), seq: 4, value: '', row: title(5, 'watched', 40) },
+      ]),
+    ).rejects.toThrow('earlier layout');
+    expect(new Map(vault.values)).toEqual(before);
+  });
+
+  it('folds the journal into the snapshot past its limit, and another writer sees every document', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    const entry = (id: number) => ({
+      k: String(id).padStart(64, '0'),
+      seq: id,
+      value: `ciphertext-${id}`,
+      row: title(id, 'watchlist', id),
+    });
+    await store.commitBatch('generation-a', 1, [entry(1)], false);
+    const other = (await LibraryFactStore.open(libraryKey, vault))!;
+    expect(await read(other)).toHaveLength(1);
+    for (let id = 2; id <= 40; id++)
+      await store.commitBatch('generation-a', id, [entry(id)], id === 40);
+
+    const journals = [...vault.values.keys()].filter((key) => key.includes(':journal:'));
+    expect(journals.length).toBeLessThan(32);
+    expect(await read(other)).toHaveLength(40);
+    // A document written again replaces its earlier form, here and in a third reader.
+    await other.manifest();
+    await other.keepRows('generation-a', [{ ...entry(7), seq: 41, row: title(7, 'watched', 41) }]);
+    const third = (await LibraryFactStore.open(libraryKey, vault))!;
+    expect((await third.document('generation-a', entry(7).k))?.row).toMatchObject({
+      status: { value: 'watched' },
+    });
+    expect((await store.document('generation-a', entry(7).k))?.seq).toBe(41);
   });
 });

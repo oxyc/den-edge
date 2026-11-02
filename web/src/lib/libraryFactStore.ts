@@ -51,9 +51,16 @@ import {
 
 export const LIBRARY_FACT_SCHEMA = 1;
 const ROOT = 'library-facts.v1';
-/** Documents a read takes a transaction: an open of the whole library reads every one of them. */
+/** Documents a read of an earlier build's per-document records takes a transaction (`recordDocuments`). */
 const DOCUMENT_PAGE = 512;
 const FACT_PAGE = 256;
+/**
+ * The documents' layout: one sealed snapshot of a generation's documents and a journal of sealed batches since. A
+ * manifest without it names one record per document, which is read once to convert it (`convert`).
+ */
+const SNAPSHOT_LAYOUT = 2;
+/** Journal batches past which a commit folds them into the snapshot (`compact`). */
+const JOURNAL_LIMIT = 32;
 
 export type LibraryFactCapability =
   'watchlist' | 'continue' | 'recommendations' | 'settings' | 'runtime' | 'devices';
@@ -106,6 +113,8 @@ export interface LibraryFactManifest {
    * in a manifest an earlier build kept.
    */
   newest?: { stamp: Stamp; reconsiderAt: number | null };
+  /** `SNAPSHOT_LAYOUT` when the documents are a snapshot and journal; absent for one record per document. */
+  layout?: typeof SNAPSHOT_LAYOUT;
 }
 
 export interface LibraryFactEntry {
@@ -156,8 +165,64 @@ const validDelta = (value: unknown): value is HistoryDelta =>
   Array.isArray((value as HistoryDelta).items) &&
   Array.isArray((value as HistoryDelta).documents);
 const namespace = (generation: string) => `${ROOT}:${generationPart(generation)}`;
-const documentName = (generation: string, key: string) =>
-  `${namespace(generation)}:document:${key}`;
+const recordPrefix = (generation: string) => `${namespace(generation)}:document:`;
+const snapshotName = (generation: string) => `${namespace(generation)}:snapshot`;
+const journalPrefix = (generation: string) => `${namespace(generation)}:journal:`;
+
+/**
+ * One document as the snapshot and journal hold it: its key, sequence and row. The server ciphertext is kept only for
+ * a row this build cannot read, which is the one thing that reads it again (`LibraryLog.restoreFacts`).
+ */
+type HeldDocument = [key: string, seq: number, row: Row | null, value?: string];
+
+interface DocumentBatch {
+  schema: typeof LIBRARY_FACT_SCHEMA;
+  documents: HeldDocument[];
+}
+
+const heldDocument = (key: string, document: { seq: number; row: Row | null; value: string }) =>
+  (document.row
+    ? [key, document.seq, document.row]
+    : [key, document.seq, null, document.value]) as HeldDocument;
+
+const storedDocument = ([, seq, row, value]: HeldDocument): StoredLibraryDocument => ({
+  schema: LIBRARY_FACT_SCHEMA,
+  seq,
+  value: value ?? '',
+  row,
+});
+
+const validBatch = (value: unknown): value is DocumentBatch =>
+  !!value &&
+  typeof value === 'object' &&
+  (value as DocumentBatch).schema === LIBRARY_FACT_SCHEMA &&
+  Array.isArray((value as DocumentBatch).documents) &&
+  (value as DocumentBatch).documents.every(
+    (held) =>
+      Array.isArray(held) &&
+      typeof held[0] === 'string' &&
+      Number.isSafeInteger(held[1]) &&
+      (held[2] === null || (typeof held[2] === 'object' && !Array.isArray(held[2]))) &&
+      (held[3] === undefined || typeof held[3] === 'string'),
+  );
+
+/** The same document: the snapshot drops the server ciphertext of a row it holds (`HeldDocument`). */
+const sameDocument = (left: StoredLibraryDocument, right: StoredLibraryDocument | undefined) =>
+  !!right &&
+  left.seq === right.seq &&
+  JSON.stringify(left.row) === JSON.stringify(right.row) &&
+  (left.row !== null || left.value === right.value);
+
+/** Journal names sort in the order they were written, so a later batch's document replaces an earlier one's. */
+const journalName = (generation: string) =>
+  `${journalPrefix(generation)}${Date.now().toString().padStart(15, '0')}:${[
+    ...crypto.getRandomValues(new Uint8Array(6)),
+  ]
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('')}`;
+
+const byKey = <T>(entries: Array<[string, T]>) =>
+  entries.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
 const factPrefix = (generation: string, capability: LibraryFactCapability) =>
   `${namespace(generation)}:fact:${capability}:`;
 const factName = (generation: string, capability: LibraryFactCapability, key: string) =>
@@ -277,7 +342,8 @@ const validManifest = (value: unknown): value is LibraryFactManifest => {
     typeof held.complete === 'boolean' &&
     typeof held.profileTopology === 'boolean' &&
     (held.floor === undefined || (Number.isSafeInteger(held.floor) && held.floor >= 0)) &&
-    (held.newest === undefined || validNewest(held.newest))
+    (held.newest === undefined || validNewest(held.newest)) &&
+    (held.layout === undefined || held.layout === SNAPSHOT_LAYOUT)
   );
 };
 
@@ -349,8 +415,8 @@ export function mergeFactRows(previous: Row | null, replacement: Row | null): Ro
 }
 
 /**
- * This browser's one copy of a library on den-edge: each document individually encrypted, beside the capability facts
- * selected from it. Every batch publishes its rows and cursor in one IndexedDB transaction; a Vault without that
+ * This browser's one copy of a library on den-edge: its documents sealed as one snapshot and a journal of the batches
+ * kept since, beside the capability facts selected from each document. Every batch publishes its rows and cursor in one IndexedDB transaction; a Vault without that
  * contract keeps no copy, and every visit reads den-edge.
  */
 export class LibraryFactStore {
@@ -370,6 +436,16 @@ export class LibraryFactStore {
   private historyImport?: {
     generation: string;
     documents: Map<string, ImportedHistoryProjection>;
+  };
+  /**
+   * The documents of `generation` as of manifest `revision`: the snapshot with its journal replayed. A commit by this
+   * instance adds to it; a manifest another writer moved on reads them again.
+   */
+  private held?: {
+    generation: string;
+    revision: string | undefined;
+    documents: Map<string, StoredLibraryDocument>;
+    journals: number;
   };
   private constructor(
     readonly libraryId: string,
@@ -443,24 +519,162 @@ export class LibraryFactStore {
   }
 
   async document(generation: string, key: string): Promise<StoredLibraryDocument | null> {
-    const name = documentName(generation, key);
-    const bytes = await this.vault.get(`${this.libraryId}:${name}`);
-    if (!bytes) return null;
-    try {
-      const opened = (await openLibraryLocalValue(this.key, name, bytes)) as StoredLibraryDocument;
-      return opened?.schema === LIBRARY_FACT_SCHEMA && Number.isSafeInteger(opened.seq)
-        ? opened
-        : null;
-    } catch {
-      return null;
-    }
+    return (await this.heldDocuments(generation)).get(key) ?? null;
   }
 
+  /** Every document of `generation`, in key order. */
   async *documents(
     generation: string,
   ): AsyncGenerator<{ key: string; document: StoredLibraryDocument }> {
+    for (const [key, document] of byKey([...(await this.heldDocuments(generation))]))
+      yield { key, document };
+  }
+
+  /** The documents of `generation` as its manifest names them now, converting a store an earlier build wrote first. */
+  private async heldDocuments(generation: string): Promise<Map<string, StoredLibraryDocument>> {
+    const manifest = await this.readManifest();
+    const current = manifest?.generation === generation ? manifest : null;
+    if (
+      current?.revision !== undefined &&
+      this.held?.generation === generation &&
+      this.held.revision === current.revision
+    )
+      return this.held.documents;
+    if (current && current.layout !== SNAPSHOT_LAYOUT) return this.convert(current);
+    const documents = new Map<string, StoredLibraryDocument>();
+    const snapshot = await this.readBatch(snapshotName(generation));
+    for (const held of snapshot?.documents ?? []) documents.set(held[0], storedDocument(held));
+    const journals = await this.journals(generation);
+    for (const { batch } of journals)
+      for (const held of batch.documents) documents.set(held[0], storedDocument(held));
+    this.held = { generation, revision: current?.revision, documents, journals: journals.length };
+    return documents;
+  }
+
+  private async readBatch(name: string, bytes?: Uint8Array): Promise<DocumentBatch | null> {
+    const held = bytes ?? (await this.vault.get(`${this.libraryId}:${name}`));
+    if (!held) return null;
+    const opened = await openLibraryLocalValue(this.key, name, held).catch(() => null);
+    if (!validBatch(opened)) throw new Error('Individual library authority is corrupt');
+    return opened;
+  }
+
+  /** The journal of `generation`, oldest batch first. */
+  private async journals(
+    generation: string,
+  ): Promise<Array<{ key: string; batch: DocumentBatch }>> {
+    const held = byKey(await this.vault.entries(`${this.libraryId}:${journalPrefix(generation)}`));
+    return Promise.all(
+      held.map(async ([key, bytes]) => ({
+        key,
+        batch: (await this.readBatch(key.slice(this.libraryId.length + 1), bytes))!,
+      })),
+    );
+  }
+
+  /**
+   * A store an earlier build wrote, one record per document, made one snapshot: read whole, sealed once, read back and
+   * compared document by document, and only then named by the manifest and the old records removed. Until all of that
+   * holds, the old records stay and are what is read; a write is refused rather than kept beside them.
+   */
+  private async convert(
+    manifest: LibraryFactManifest,
+  ): Promise<Map<string, StoredLibraryDocument>> {
+    const { generation } = manifest;
+    const old = new Map<string, StoredLibraryDocument>();
+    for await (const { key, document } of this.recordDocuments(generation)) old.set(key, document);
+    // Read as it is until a later open converts it; a write before then is refused (`writable`).
+    this.held = { generation, revision: manifest.revision, documents: old, journals: 0 };
+    try {
+      const name = snapshotName(generation);
+      const batch: DocumentBatch = {
+        schema: LIBRARY_FACT_SCHEMA,
+        documents: [...old].map(([key, document]) => heldDocument(key, document)),
+      };
+      await this.vault.put(
+        `${this.libraryId}:${name}`,
+        await sealLibraryLocalValue(this.key, name, batch),
+      );
+      const read = new Map(
+        ((await this.readBatch(name))?.documents ?? []).map((held) => [
+          held[0],
+          storedDocument(held),
+        ]),
+      );
+      if (
+        read.size !== old.size ||
+        [...old].some(([key, held]) => !sameDocument(held, read.get(key)))
+      )
+        throw new Error('the snapshot does not read back as the documents it was made from');
+      const manifestKey = `${this.libraryId}:${manifestName}`;
+      const expected = await this.vault.get(manifestKey);
+      const opened = expected
+        ? await openLibraryLocalValue(this.key, manifestName, expected).catch(() => null)
+        : null;
+      // Another writer moved the manifest on meanwhile: convert on a later read, from what it wrote.
+      if (!validManifest(opened) || opened.revision !== manifest.revision) return old;
+      const flipped = await this.commitIf(manifestKey, expected, [
+        {
+          kind: 'put',
+          key: manifestKey,
+          value: await sealLibraryLocalValue(this.key, manifestName, {
+            ...manifest,
+            layout: SNAPSHOT_LAYOUT,
+          }),
+        },
+      ]);
+      if (!flipped) return old;
+      await this.vault.remove(`${this.libraryId}:${recordPrefix(generation)}`);
+      this.held = { generation, revision: manifest.revision, documents: read, journals: 0 };
+      return read;
+    } catch (error) {
+      console.warn(
+        'den: the library kept here could not be made one snapshot; it is read as it is',
+        error,
+      );
+      return old;
+    }
+  }
+
+  /** `changes` in one transaction when `key` still holds `expected`; a vault without the comparison commits them. */
+  private async commitIf(
+    key: string,
+    expected: Uint8Array | undefined,
+    changes: VaultChange[],
+  ): Promise<boolean> {
+    if (this.vault.compareAndCommit) return this.vault.compareAndCommit(key, expected, changes);
+    await this.vault.commit!(changes);
+    return true;
+  }
+
+  /** The journal folded into the snapshot, unless another writer replaced the snapshot first. */
+  private async compact(generation: string): Promise<void> {
+    const name = snapshotName(generation);
+    const key = `${this.libraryId}:${name}`;
+    const expected = await this.vault.get(key);
+    const documents = new Map<string, HeldDocument>();
+    for (const held of (await this.readBatch(name, expected))?.documents ?? [])
+      documents.set(held[0], held);
+    const journals = await this.journals(generation);
+    for (const { batch } of journals)
+      for (const held of batch.documents) documents.set(held[0], held);
+    const sealed = await sealLibraryLocalValue(this.key, name, {
+      schema: LIBRARY_FACT_SCHEMA,
+      documents: [...documents.values()],
+    } satisfies DocumentBatch);
+    const folded = await this.commitIf(key, expected, [
+      { kind: 'put', key, value: sealed },
+      ...journals.map(({ key: journal }) => ({ kind: 'delete' as const, key: journal })),
+    ]);
+    if (folded && this.held?.generation === generation) this.held.journals = 0;
+  }
+
+  /** An earlier build's per-document records, read only to convert them (`convert`). */
+  private async *recordDocuments(
+    generation: string,
+  ): AsyncGenerator<{ key: string; document: StoredLibraryDocument }> {
     if (!this.vault.page) return;
-    const namePrefix = `${namespace(generation)}:document:`;
+    const namePrefix = recordPrefix(generation);
     const prefix = `${this.libraryId}:${namePrefix}`;
     let after: string | undefined;
     for (;;) {
@@ -505,7 +719,7 @@ export class LibraryFactStore {
       this.generation = generation;
       this.profileTopology = false;
     }
-    const held = await this.readManifest();
+    const held = await this.writable(generation);
     if (held?.generation === generation) this.profileTopology ||= held.profileTopology;
     this.profileTopology ||= options.profileTopology === true;
     const floor = options.floor !== undefined && !complete ? options.floor : undefined;
@@ -547,6 +761,7 @@ export class LibraryFactStore {
       profileTopology: this.profileTopology,
       ...(floor !== undefined ? { floor } : {}),
       newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
+      layout: SNAPSHOT_LAYOUT,
     };
     derived.changes.push(
       ...(await this.historyCheckpointChange(held, manifest, entries, importedHistory)),
@@ -557,6 +772,7 @@ export class LibraryFactStore {
       value: await sealLibraryLocalValue(this.key, manifestName, manifest),
     });
     await this.vault.commit(derived.changes);
+    await this.kept(generation, held, manifest.revision, entries);
     if (complete) this.historyImport = undefined;
     else if (retainedHistory) {
       for (const entry of entries)
@@ -587,15 +803,17 @@ export class LibraryFactStore {
   async keepRows(generation: string, entries: readonly LibraryFactEntry[]): Promise<void> {
     if (!this.vault.commit) throw new Error('Atomic library storage is unavailable');
     if (this.generation !== generation || !entries.length) return;
+    const held = await this.writable(generation);
     const derived = await this.changes(generation, entries);
     // The cursor stays; the newest stamp takes these rows in, so a narrow edit is stamped after them too.
-    const held = await this.readManifest();
+    let revision = held?.revision;
     if (held?.generation === generation) {
       const manifest: LibraryFactManifest = {
         ...held,
         ...nextIdentity(held, generation, held.head, entries),
         newest: withNewest(held.newest, entries),
       };
+      revision = manifest.revision;
       derived.changes.push(...(await this.historyCheckpointChange(held, manifest, entries)));
       derived.changes.push({
         kind: 'put',
@@ -604,6 +822,7 @@ export class LibraryFactStore {
       });
     }
     await this.vault.commit(derived.changes);
+    await this.kept(generation, held, revision, entries);
     this.historyCache = undefined;
     this.historyImport = undefined;
     noteLibraryFactCommit(entries.length);
@@ -618,7 +837,52 @@ export class LibraryFactStore {
     this.staleGenerations.clear();
     this.historyCache = undefined;
     this.historyImport = undefined;
+    this.held = undefined;
     this.changed();
+  }
+
+  /**
+   * The manifest a commit to `generation` builds on, once its documents are in the snapshot layout: converted first if
+   * an earlier build wrote them, refused if they could not be. A new generation starts its documents empty.
+   */
+  private async writable(generation: string): Promise<LibraryFactManifest | null> {
+    let held = await this.readManifest();
+    if (held?.generation === generation && held.layout !== SNAPSHOT_LAYOUT) {
+      await this.heldDocuments(generation);
+      held = await this.readManifest();
+      if (held?.generation === generation && held.layout !== SNAPSHOT_LAYOUT)
+        throw new Error(
+          'The library kept here is in an earlier layout that could not be converted',
+        );
+    }
+    if (held?.generation !== generation && this.held?.generation !== generation)
+      this.held = { generation, revision: undefined, documents: new Map(), journals: 0 };
+    return held;
+  }
+
+  /**
+   * `entries` kept by a commit from manifest `held` to `revision`: added to the documents held, or those dropped when
+   * another writer had moved the manifest on before it. Past `JOURNAL_LIMIT` batches the journal is folded.
+   */
+  private async kept(
+    generation: string,
+    held: LibraryFactManifest | null,
+    revision: string | undefined,
+    entries: readonly LibraryFactEntry[],
+  ): Promise<void> {
+    if (this.held?.generation !== generation) return;
+    if (this.held.revision !== (held?.generation === generation ? held.revision : undefined)) {
+      this.held = undefined;
+      return;
+    }
+    for (const entry of entries)
+      this.held.documents.set(entry.k, storedDocument(heldDocument(entry.k, entry)));
+    this.held.revision = revision;
+    if (entries.length) this.held.journals++;
+    if (this.held.journals < JOURNAL_LIMIT) return;
+    await this.compact(generation).catch((error: unknown) =>
+      console.warn('den: the library journal could not be folded; it is read as it is', error),
+    );
   }
 
   /** Release disposable one-pass import state when its owner gives up before reaching a complete manifest. */
@@ -626,7 +890,7 @@ export class LibraryFactStore {
     this.historyImport = undefined;
   }
 
-  /** Each entry's document and facts, sealed. */
+  /** The entries' documents as one sealed journal batch, and each entry's facts, sealed. */
   private async changes(
     generation: string,
     entries: readonly LibraryFactEntry[],
@@ -638,15 +902,6 @@ export class LibraryFactStore {
     const pending: Array<Promise<VaultChange>> = [];
     const history = new Map<string, ImportedHistoryProjection>();
     for (const entry of entries) {
-      const document = documentName(generation, entry.k);
-      pending.push(
-        sealLibraryLocalValue(this.key, document, {
-          schema: LIBRARY_FACT_SCHEMA,
-          seq: entry.seq,
-          value: entry.value,
-          row: entry.row,
-        }).then((value) => ({ kind: 'put', key: `${this.libraryId}:${document}`, value })),
-      );
       const derived = facts(entry.row);
       const selected = derived.selected;
       history.set(entry.k, {
@@ -674,6 +929,19 @@ export class LibraryFactStore {
             : Promise.resolve({ kind: 'delete', key }),
         );
       }
+    }
+    if (entries.length) {
+      const journal = journalName(generation);
+      pending.push(
+        sealLibraryLocalValue(this.key, journal, {
+          schema: LIBRARY_FACT_SCHEMA,
+          documents: entries.map((entry) => heldDocument(entry.k, entry)),
+        } satisfies DocumentBatch).then((value) => ({
+          kind: 'put',
+          key: `${this.libraryId}:${journal}`,
+          value,
+        })),
+      );
     }
     return { changes: await Promise.all(pending), history };
   }

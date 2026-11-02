@@ -1222,19 +1222,21 @@ describe('LibraryLog', () => {
     const changed = await rowKey(keys, 'title:movie:2');
     const library = written.filter((key) => !key.includes(':runtime:'));
     expect(library.filter((key) => key.includes(':library-facts.v1:'))).not.toEqual([]);
-    // The changed document, its title's History delta, finished-view marker, and manifest land atomically. No other
-    // authoritative document is rewritten, and the whole History checkpoint is not written again.
+    // The changed document's facts and one journal batch, its title's History delta, finished-view marker, and
+    // manifest land atomically. No snapshot of the whole library is rewritten, nor the whole History checkpoint.
     for (const key of library)
       expect(
         key.endsWith(':local-authority.v1') ||
           key.includes(':library-facts.v1:history-delta:') ||
           key.endsWith(':library-facts.v1:manifest') ||
+          key.includes(':journal:') ||
           key.endsWith(changed),
         key,
       ).toBe(true);
     expect(library.filter((key) => key.includes(':library-facts.v1:history-delta:'))).toHaveLength(
       1,
     );
+    expect(library.filter((key) => key.includes(':journal:'))).toHaveLength(1);
     expect([...data.keys()].filter((key) => /:log\.v[14]$/.test(key))).toEqual([]);
     log.close();
 
