@@ -167,6 +167,26 @@ function varied(): DocumentRow[] {
       dismissed: { value: true, at: at(future) },
       addedAt: NOW - 50,
     },
+    // A finished series listed again: it entered the library long ago, so only its status stamp says it is the newest.
+    {
+      format: 4,
+      kind: 'title',
+      title: { type: 'tv', id: 16 },
+      status: { value: 'watchlist', at: at(NOW - 20) },
+      watchedAt: NOW - 6000,
+      addedAt: NOW - 9500,
+    },
+    {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 16 },
+      season: 1,
+      seasonReset: null,
+      episodes: {
+        1: episode({ value: 1, at: at(NOW - 6000), viewing: 0 }, { plays: { 0: NOW - 6000 } }),
+        2: episode({ value: 1, at: at(NOW - 6000), viewing: 0 }, { plays: { 0: NOW - 6000 } }),
+      },
+    },
     // A series being watched: finished episodes, then a later partial one; a Special.
     {
       format: 4,
@@ -314,6 +334,8 @@ describe('library columns', () => {
     expect(expected.history.some((e) => e.title.id === 4)).toBe(false);
     expect(expected.history.some((e) => e.title.id === 5 && e.watchedAt === 0)).toBe(true);
     expect(expected.home.seeds.watchlisted).toEqual(['movie:6', 'movie:60']);
+    // The finished series listed again leads the watchlist, by when it was listed rather than its 9500-old `addedAt`.
+    expect(expected.home.watchlist[0]).toBe('tv:16');
     expect(expected.newest.reconsiderAt).toBe(NOW + 2 * DAY);
     expect(held(documents)).toEqual(expected);
   });
