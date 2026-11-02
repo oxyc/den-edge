@@ -10,7 +10,7 @@
   import PendingPosterRow from './components/PendingPosterRow.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import WindowedPosterRow from './components/WindowedPosterRow.svelte';
-  import { withoutSeenEpisodes, type SeenEpisode, type WatchedEntry } from './lib/history';
+  import { withoutContinuing, type SeenEpisode, type WatchedEntry } from './lib/history';
   import { HistoryDetailRequests } from './lib/historyDetailRequests';
   import {
     DetailScreen,
@@ -2473,11 +2473,21 @@
     );
     return counts;
   });
+  /**
+   * The Watchlist page's grid. Until its own selection answers, Overview's watchlist stands in, without what Continue
+   * shows, so a series being watched is not drawn and then taken away.
+   */
+  const pageWatchlist = $derived(
+    watchlistLease?.snapshot.value?.titles ??
+      (overview && continueView
+        ? withoutContinuing(overview.watchlist, continueView)
+        : (overview?.watchlist ?? [])),
+  );
   const savedCounts = $derived.by(() => {
     const counts = { all: 0, movie: 0, tv: 0 };
     const saved = profileActivity
-      ? withoutSeenEpisodes(profileActivity.watchlist, seenCounts)
-      : (watchlistLease?.snapshot.value?.titles ?? overview?.watchlist ?? []);
+      ? withoutContinuing(profileActivity.watchlist, { items: profileActivity.continueWatching })
+      : pageWatchlist;
     for (const ref of saved) {
       counts.all++;
       counts[ref.type]++;
@@ -2486,9 +2496,9 @@
   });
   const savedTitles = $derived(
     profileActivity
-      ? withoutSeenEpisodes(profileActivity.watchlist, seenCounts)
+      ? withoutContinuing(profileActivity.watchlist, { items: profileActivity.continueWatching })
       : (route.page === 'watchlist'
-          ? (watchlistLease?.snapshot.value?.titles ?? overview?.watchlist ?? [])
+          ? pageWatchlist
           : (overview?.watchlist ?? []).slice(0, watchlistNameLimit)
         ).flatMap((ref) => session.displayTitle(ref) ?? []),
   );

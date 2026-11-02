@@ -17,7 +17,7 @@ import {
   seenEpisodesFor,
   watchedHistory,
   watchedView,
-  withoutSeenEpisodes,
+  withoutContinuing,
   type WatchedEntry,
 } from './history';
 import type { Title } from './library';
@@ -31,13 +31,17 @@ const seen = (id: number, season: number, episode: number, t: number) =>
   markEpisode(blankEpisode({ type: 'tv', id }, season, episode), true, at(t));
 
 describe('watched history', () => {
-  it('uses summary episode counts to hide started series before exact coordinates load', () => {
-    const saved = [show(10), show(11), movie(1)];
-    const counts = new Map([
-      ['tv:10', 3],
-      ['tv:11', 0],
+  it('keeps a saved title out of the Watchlist grid only while Continue shows it or may yet', () => {
+    // 10 is on Continue, 11 finished (watched, not on Continue), 12 waits for its layout, 2 is a movie being watched.
+    const saved = [show(10), show(11), show(12), movie(1), movie(2)];
+    const continuing = {
+      items: [{ title: show(10) }, { title: movie(2) }],
+      needsShapes: [{ type: 'tv' as const, id: 12 }],
+    };
+    expect(withoutContinuing(saved, continuing).map((title) => title.id)).toEqual([11, 1]);
+    expect(withoutContinuing(saved, { items: [] }).map((title) => title.id)).toEqual([
+      10, 11, 12, 1, 2,
     ]);
-    expect(withoutSeenEpisodes(saved, counts).map((title) => title.id)).toEqual([11, 1]);
   });
 
   it('lists seen titles and part-watched series together, newest first', () => {

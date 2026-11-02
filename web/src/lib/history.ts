@@ -39,12 +39,23 @@ export interface EpisodeHistoryTally {
   latestEpisode?: SeenEpisode;
 }
 
-/** A saved series with watched episodes belongs under Continue/Watched, not in the unstarted Watchlist grid. */
-export function withoutSeenEpisodes<T extends { type: MediaType; id: number }>(
+/**
+ * The Watchlist grid: every saved title but those Continue Watching shows, as the TV and phone apps draw it. A finished
+ * series listed again stays. A series whose layout Continue still needs (`needsShapes`) is held back too: the layout
+ * may yet put it on Continue, and the grid would draw it only to take it away.
+ */
+export function withoutContinuing<T extends { type: MediaType; id: number }>(
   titles: readonly T[],
-  seenCounts: ReadonlyMap<string, number>,
+  continuing: {
+    items: readonly { title: { type: MediaType; id: number } }[];
+    needsShapes?: readonly { type: MediaType; id: number }[];
+  },
 ): T[] {
-  return titles.filter((title) => !(seenCounts.get(historyTitleKey(title)) ?? 0));
+  const shown = new Set([
+    ...continuing.items.map(({ title }) => historyTitleKey(title)),
+    ...(continuing.needsShapes ?? []).map(historyTitleKey),
+  ]);
+  return titles.filter((title) => !shown.has(historyTitleKey(title)));
 }
 
 interface SeenSeries {

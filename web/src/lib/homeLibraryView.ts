@@ -19,7 +19,7 @@ export interface HomeLibraryView {
   owned: string[];
   /** The subset hidden when Hide Watched is enabled. */
   watched: string[];
-  /** Watchlist shelf membership, newest addition first, before late title naming. */
+  /** Watchlist shelf membership, most recently listed first, before late title naming. */
   watchlist: string[];
   /** Poster-corner state, including episode-only in-progress series. */
   standings: Array<[key: string, standing: Standing]>;
@@ -118,6 +118,15 @@ export function selectHomeLibraryViewFromFold(
   for (const mark of library.marks)
     if (mark.type === 'tv')
       watchedAt.set(titleKey(mark), Math.max(watchedAt.get(titleKey(mark)) ?? 0, mark.updatedAt));
+  /**
+   * When each title was listed, as den-core's `listed_at`: the later of `addedAt` and the status stamp. `addedAt` alone
+   * is the first time the title entered the library, so a finished series listed again would sort as listed years ago.
+   */
+  const listedAt = new Map(
+    titles.map((row) => [titleKey(row.title), Math.max(row.addedAt, row.status.at[0])] as const),
+  );
+  const listed = (record: Library['records'][number]) =>
+    listedAt.get(titleKey(record.title)) ?? record.addedAt;
   return {
     owned: [...new Set(titles.map((row) => titleKey(row.title)))],
     watched: library.records
@@ -125,7 +134,7 @@ export function selectHomeLibraryViewFromFold(
       .map((record) => titleKey(record.title)),
     watchlist: library.records
       .filter((record) => !record.deleted && record.status === 'watchlist')
-      .sort((a, b) => b.addedAt - a.addedAt)
+      .sort((a, b) => listed(b) - listed(a))
       .map((record) => titleKey(record.title)),
     // In key order: `standings` keeps the order marks were made in, which an episode mark moves without changing one
     // title's standing, and a saved recommendations piece that says the same is not written again.

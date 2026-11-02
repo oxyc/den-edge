@@ -222,6 +222,26 @@
                 addToWatchlist(blankTitle({ type: 'tv', id }, id), [id, 0, 'test']),
               )
             : []),
+          // A finished series listed again: in the library since 1, every episode seen at 5000, listed at 9500.
+          ...(params.has('relisted')
+            ? [
+                addToWatchlist(
+                  markWatched(blankTitle({ type: 'tv', id: 2006 }, 1), [5000, 0, 'test']),
+                  [9500, 0, 'test'],
+                ),
+                ...[1, 2, 3].map((episode) =>
+                  markEpisode(blankEpisode({ type: 'tv', id: 2006 }, 1, episode), true, [
+                    5000,
+                    0,
+                    'test',
+                  ]),
+                ),
+                // On the Watchlist page the part-watched Series 2002 is listed too, at 9400.
+                ...(route.page === 'watchlist'
+                  ? [addToWatchlist(blankTitle({ type: 'tv', id: 2002 }, 2), [9400, 0, 'test'])]
+                  : []),
+              ]
+            : []),
           ...(params.has('series-continue')
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
             : []),
