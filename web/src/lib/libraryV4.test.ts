@@ -346,9 +346,51 @@ describe('Library v4 documents', () => {
     expect(ops[1]?.write.fields).toEqual({});
   });
 
-  // Needs den-core's `watchlist_remove` (den-core fix/watchlist-remove-keeps-watched), which the vendored build
-  // refuses as `invalid_write`. Drop `.fails` once that den-core is vendored.
-  it.fails('a watched film taken off the watchlist goes back to watched, with its play', () => {
+  // Parity with the TV: den's LibraryTitleEditTests takes the same series off the watchlist at the same moment ("a
+  // series taken off the watchlist ends with the document fields Den Web writes") and checks the same fields.
+  it('a series taken off the watchlist ends with the document fields the TV writes', async () => {
+    const listed = 1_789_000_000_000;
+    const removed = 1_789_000_600_000;
+    const web = (t: number): Stamp => [t, 0, 'web0000000000001'];
+    const episode = (t: number) => ({
+      progress: { value: 1, at: web(t), viewing: 0 },
+      imported: false,
+      plays: { 0: t },
+      cleared: null,
+    });
+    const season = {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 84773 },
+      season: 1,
+      seasonReset: null,
+      episodes: { 1: episode(listed + 100_000), 2: episode(listed + 101_000) },
+    } as DocumentRow;
+    const server = await edge([
+      {
+        format: 4,
+        kind: 'title',
+        title: { type: 'tv', id: 84773 },
+        status: { value: 'watchlist', at: web(listed) },
+        addedAt: listed,
+      },
+      season,
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const before = log.title({ type: 'tv', id: 84773 })!;
+    expect(await log.write(removeFromLibrary(before, at(removed)))).not.toBeNull();
+
+    const stored = await server.opened();
+    const title = document(stored, 'title:tv:84773')!;
+    expect(title.status).toEqual({
+      value: 'none',
+      at: [removed, expect.any(Number), expect.any(String)],
+    });
+    expect(title.deleted).toBeUndefined();
+    expect(document(stored, 'season:tv:84773:1')).toEqual(season);
+  });
+
+  it('a watched film taken off the watchlist goes back to watched, with its play', () => {
     const film = filmDocument(550, {
       resume: { value: 1, at: at(1000), viewing: 0 },
       watch: { imported: false, plays: { '0': 1000 }, cleared: null },

@@ -321,13 +321,8 @@ function varied(): DocumentRow[] {
   ] as DocumentRow[];
 }
 
-// History keeps a title `deleted` after it was watched (a watchlist removal never hides what was watched), and the
-// vendored den-core does not yet: these three need den-core fix/watchlist-remove-keeps-watched. Drop `.fails` once
-// that den-core is vendored.
-const untilVendored = test.fails;
-
 describe('library columns', () => {
-  untilVendored('Home, History and the newest stamp equal the per-document projection', () => {
+  test('Home, History and the newest stamp equal the per-document projection', () => {
     const documents = varied();
     const expected = perDocument(documents);
     // The fixture reaches the branches it is meant to: a resume mark beside a finished one, a timeless flag, a kept
@@ -345,7 +340,7 @@ describe('library columns', () => {
     expect(held(documents)).toEqual(expected);
   });
 
-  untilVendored('every list equals the projection once a future stamp is believed', () => {
+  test('every list equals the projection once a future stamp is believed', () => {
     const documents = varied();
     for (const now of [NOW + 2 * DAY - 1, NOW + 2 * DAY, NOW + 3 * DAY, NOW + 5 * DAY])
       expect(held(documents, now)).toEqual(perDocument(documents, now));
@@ -358,7 +353,7 @@ describe('library columns', () => {
     expect(held(documents)).toEqual(expected);
   }, 120_000);
 
-  untilVendored('a replaced document moves its answer', () => {
+  test('a replaced document moves its answer', () => {
     const documents = varied();
     const index = new LibraryColumns();
     try {
