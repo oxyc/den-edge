@@ -654,8 +654,10 @@ describe('the snapshot layout', () => {
     for (let id = 2; id <= 40; id++)
       await store.commitBatch('generation-a', id, [entry(id)], id === 40);
 
-    const journals = [...vault.values.keys()].filter((key) => key.includes(':journal:'));
-    expect(journals.length).toBeLessThan(32);
+    const journals = () => [...vault.values.keys()].filter((key) => key.includes(':journal:'));
+    // Not while the library was still incomplete: once, behind the commit that completed it.
+    expect(journals()).toHaveLength(40);
+    await vi.waitFor(() => expect(journals().length).toBeLessThan(32));
     expect(await read(other)).toHaveLength(40);
     // A document written again replaces its earlier form, here and in a third reader.
     await other.manifest();
@@ -676,15 +678,17 @@ describe('the snapshot layout', () => {
       value: `ciphertext-${id}`,
       row: title(id, 'watchlist', id),
     });
-    // One batch short of the fold.
-    for (let id = 1; id <= 31; id++)
-      await store.commitBatch('generation-a', id, [entry(id)], false);
+    // A complete library, one batch short of the fold.
+    for (let id = 1; id <= 31; id++) await store.commitBatch('generation-a', id, [entry(id)], true);
     const reader = (await LibraryFactStore.open(libraryKey, vault))!;
     await reader.manifest();
     // The reader yields once after its first read of the kept documents, and the writer's fold lands in that gap.
     const journals = () => [...vault.values.keys()].filter((key) => key.includes(':journal:'));
     let folded: Promise<void> | undefined;
-    const fold = () => store.commitBatch('generation-a', 32, [entry(32)], false);
+    const fold = async () => {
+      await store.commitBatch('generation-a', 32, [entry(32)], true);
+      await vi.waitFor(() => expect(journals()).toHaveLength(0));
+    };
     const get = vault.get.bind(vault);
     const entries = vault.entries.bind(vault);
     const gap = async () => {
