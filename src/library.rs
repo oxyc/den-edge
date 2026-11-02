@@ -173,8 +173,20 @@ fn value_fits(value: &str, wire_min: u64) -> bool {
     if wire_min < 4 {
         return value.len() <= MAX_VALUE;
     }
-    value.len() <= MAX_VALUE_V4
-        && serde_json::to_string(value).expect("a string always serialises").len() - 2 <= MAX_VALUE_V4
+    value.len() <= MAX_VALUE_V4 && escaped_len(value) <= MAX_VALUE_V4
+}
+
+/// How long `value` is inside a JSON string as `serde_json` escapes it, counted without writing it out: its length,
+/// for base64url.
+fn escaped_len(value: &str) -> usize {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
 }
 
 fn row_bytes(k: &str, v: &str, fragment_bytes: usize) -> usize {
@@ -1599,12 +1611,17 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     if requested_min.zip(wire).is_some_and(|(minimum, supported)| minimum > supported) {
         return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
     }
-    let body = match read_json(req, BATCH_MAX_BODY_BYTES).await {
+    let body = match crate::handler::read_body(req, BATCH_MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
     };
     let Some(writes) = parse_writes(&body) else {
-        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+        // A body that is not JSON at all is a bad request, as everywhere; JSON that is not a batch, an invalid one.
+        let json = serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_ok();
+        return json_reply(
+            StatusCode::BAD_REQUEST,
+            &error(if json { "invalid_batch" } else { "bad_request" }),
+        );
     };
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
@@ -2469,25 +2486,34 @@ fn log_line(seq: u64, k: &str, v: &str) -> String {
     format!("{}\n", serde_json::to_string(&line).expect("a log line always serialises"))
 }
 
-/// The batch's writes, or `None` if any is malformed or a key repeats.
-fn parse_writes(body: &Value) -> Option<Vec<Write>> {
-    let raw = body.get("writes")?.as_array()?;
+/// The batch's writes, or `None` if any is malformed or a key repeats. Read straight into the writes, borrowing from
+/// the body: no JSON tree is built for a 2 MiB batch, and each value is copied once, into its write.
+fn parse_writes(body: &[u8]) -> Option<Vec<Write>> {
+    #[derive(Deserialize)]
+    struct Batch<'a> {
+        #[serde(borrow)]
+        writes: Vec<Wire<'a>>,
+    }
+    #[derive(Deserialize)]
+    struct Wire<'a> {
+        #[serde(borrow)]
+        k: std::borrow::Cow<'a, str>,
+        base: u64,
+        #[serde(borrow)]
+        v: std::borrow::Cow<'a, str>,
+    }
+    let raw = serde_json::from_slice::<Batch>(body).ok()?.writes;
     if raw.is_empty() || raw.len() > MAX_WRITES {
         return None;
     }
-    let mut seen = HashSet::new();
-    let mut writes = Vec::with_capacity(raw.len());
-    for w in raw {
-        let k = w.get("k")?.as_str().filter(|k| valid_hex_id(k))?;
-        let base = w.get("base")?.as_u64()?;
+    {
+        let mut seen = HashSet::with_capacity(raw.len());
         // The largest cap; the library's own minimum is applied with the write (`v3::RedbLibrary::apply_bounded`).
-        let v = w.get("v")?.as_str().filter(|v| value_fits(v, 4))?;
-        if !seen.insert(k) {
+        if !raw.iter().all(|w| valid_hex_id(&w.k) && value_fits(&w.v, 4) && seen.insert(w.k.as_ref())) {
             return None;
         }
-        writes.push(Write { k: k.to_owned(), base, v: v.to_owned() });
     }
-    Some(writes)
+    Some(raw.into_iter().map(|w| Write { k: w.k.into_owned(), base: w.base, v: w.v.into_owned() }).collect())
 }
 
 /// A library id or record key: hex, as HKDF and HMAC outputs are written.
@@ -2531,6 +2557,70 @@ mod tests {
 
     async fn delete(h: &Harness, token: &str) -> StatusCode {
         h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", token)]).await.status()
+    }
+
+    /// Manual release-mode probe of parsing and checking a 2 MiB batch, as `batch` does before it takes the store.
+    /// Ignored in CI: `cargo test --release batch_parse_benchmark -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn batch_parse_benchmark() {
+        let writes: Vec<_> = (0..200)
+            .map(|n| json!({ "k": format!("{:032x}", n), "base": n, "v": format!("{n:04x}").repeat(2_600) }))
+            .collect();
+        let body = json!({ "writes": writes }).to_string().into_bytes();
+        assert!(body.len() > 2_000_000 && body.len() <= super::BATCH_MAX_BODY_BYTES, "{}", body.len());
+        let started = std::time::Instant::now();
+        for _ in 0..50 {
+            assert_eq!(super::parse_writes(&body).unwrap().len(), 200);
+        }
+        eprintln!("BENCH {} B batch parse {:?}", body.len(), started.elapsed() / 50);
+    }
+
+    /// The length a value is checked at is the length `serde_json` writes it at, for every byte that escapes.
+    #[test]
+    fn a_value_is_measured_as_it_is_stored() {
+        for byte in 0u8..0x80 {
+            let value = format!("a{}é", char::from(byte));
+            assert_eq!(
+                super::escaped_len(&value),
+                serde_json::to_string(&value).unwrap().len() - 2,
+                "{byte}"
+            );
+        }
+    }
+
+    /// A batch body that is not JSON is a bad request; JSON that is not a batch, or a batch with a malformed or
+    /// repeated write, is an invalid one.
+    #[tokio::test]
+    async fn a_batch_is_refused_for_what_is_wrong_with_it() {
+        let h = Harness::new();
+        let send = |body: &'static str| {
+            let h = &h;
+            async move {
+                let resp = h
+                    .send(
+                        "POST",
+                        &format!("/lib/{LIB}/batch"),
+                        Some(body.into()),
+                        &[("x-den-library-token", TOKEN)],
+                    )
+                    .await;
+                (resp.status(), body_json(resp).await["error"].clone())
+            }
+        };
+        assert_eq!(send("{not json").await, (StatusCode::BAD_REQUEST, json!("bad_request")));
+        for invalid in [
+            r#"{"writes":{}}"#,
+            r#"{"writes":[]}"#,
+            r#"{"writes":[{"k":"aaaaaaaaaaaaaaaa","base":1.5,"v":"x"}]}"#,
+            r#"{"writes":[{"k":"not-hex","base":0,"v":"x"}]}"#,
+            r#"{"writes":[{"k":"aaaaaaaaaaaaaaaa","base":0,"v":"x"},{"k":"aaaaaaaaaaaaaaaa","base":0,"v":"y"}]}"#,
+        ] {
+            assert_eq!(send(invalid).await, (StatusCode::BAD_REQUEST, json!("invalid_batch")), "{invalid}");
+        }
+        let (status, _) =
+            send(r#"{"writes":[{"k":"aaaaaaaaaaaaaaaa","base":0,"v":"a\"b"}],"extra":1}"#).await;
+        assert_eq!(status, StatusCode::OK, "an escaped value and an unknown field are still a batch");
     }
 
     async fn changes(h: &Harness, token: &str, query: &str) -> (StatusCode, Value) {
