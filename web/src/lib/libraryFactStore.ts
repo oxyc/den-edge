@@ -452,6 +452,8 @@ export class LibraryFactStore {
     documents: Map<string, StoredLibraryDocument>;
     journals: number;
   };
+  /** The fold under way (`kept`), so a commit while it runs starts no second one. */
+  private folding?: Promise<void>;
   private constructor(
     readonly libraryId: string,
     private readonly key: CryptoKey,
@@ -678,7 +680,9 @@ export class LibraryFactStore {
       { kind: 'put', key, value: sealed },
       ...journals.map(({ key: journal }) => ({ kind: 'delete' as const, key: journal })),
     ]);
-    if (folded && this.held?.generation === generation) this.held.journals = 0;
+    // Batches committed while the fold ran stay in the journal, and in the count.
+    if (folded && this.held?.generation === generation)
+      this.held.journals = Math.max(0, this.held.journals - journals.length);
   }
 
   /** An earlier build's per-document records, read only to convert them (`convert`). */
@@ -784,7 +788,7 @@ export class LibraryFactStore {
       value: await sealLibraryLocalValue(this.key, manifestName, manifest),
     });
     await this.vault.commit(derived.changes);
-    await this.kept(generation, held, manifest.revision, entries);
+    this.kept(generation, held, manifest.revision, entries, complete);
     if (complete) this.historyImport = undefined;
     else if (retainedHistory) {
       for (const entry of entries)
@@ -834,7 +838,7 @@ export class LibraryFactStore {
       });
     }
     await this.vault.commit(derived.changes);
-    await this.kept(generation, held, revision, entries);
+    this.kept(generation, held, revision, entries, held?.complete === true);
     this.historyCache = undefined;
     this.historyImport = undefined;
     noteLibraryFactCommit(entries.length);
@@ -874,14 +878,18 @@ export class LibraryFactStore {
 
   /**
    * `entries` kept by a commit from manifest `held` to `revision`: added to the documents held, or those dropped when
-   * another writer had moved the manifest on before it. Past `JOURNAL_LIMIT` batches the journal is folded.
+   * another writer had moved the manifest on before it. Past `JOURNAL_LIMIT` batches of a complete library the journal
+   * is folded, behind the commit rather than inside it: an open reading den-edge waits on each page's commit before it
+   * asks for the next, and a fold reseals the whole library. An incomplete one is still being read whole, and is folded
+   * once that read has completed it.
    */
-  private async kept(
+  private kept(
     generation: string,
     held: LibraryFactManifest | null,
     revision: string | undefined,
     entries: readonly LibraryFactEntry[],
-  ): Promise<void> {
+    complete: boolean,
+  ): void {
     if (this.held?.generation !== generation) return;
     if (this.held.revision !== (held?.generation === generation ? held.revision : undefined)) {
       this.held = undefined;
@@ -891,10 +899,12 @@ export class LibraryFactStore {
       this.held.documents.set(entry.k, storedDocument(heldDocument(entry.k, entry)));
     this.held.revision = revision;
     if (entries.length) this.held.journals++;
-    if (this.held.journals < JOURNAL_LIMIT) return;
-    await this.compact(generation).catch((error: unknown) =>
-      console.warn('den: the library journal could not be folded; it is read as it is', error),
-    );
+    if (!complete || this.held.journals < JOURNAL_LIMIT || this.folding) return;
+    this.folding = this.compact(generation)
+      .catch((error: unknown) =>
+        console.warn('den: the library journal could not be folded; it is read as it is', error),
+      )
+      .finally(() => (this.folding = undefined));
   }
 
   /** Release disposable one-pass import state when its owner gives up before reaching a complete manifest. */
