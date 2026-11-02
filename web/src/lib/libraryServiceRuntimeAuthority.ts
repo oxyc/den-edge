@@ -80,14 +80,31 @@ export async function openLibraryServiceAuthority(
   resetLibraryStartupMetrics();
   startupMark('log open requested', `${request.mode}, wire ${request.wire}`);
   const clock = await openClockStore(vault, { legacy: request.legacyClock });
-  const openFull = async (): Promise<LibraryServiceAuthority | null> => {
+  // `opening`, for the open that answers the hello: each page of a history read from den-edge is said, which keeps the
+  // hello's startup deadline from expiring while a long history is still arriving a page at a time (a phone takes a
+  // second or two a page), and a read that said anything ends with 1, as the fact import's does.
+  const openFull = async (
+    opening?: (progress: number) => void,
+  ): Promise<LibraryServiceAuthority | null> => {
     const openingAt = performance.now();
     let log: LibraryLog | null;
+    let paged = false;
     try {
       log =
         request.mode === 'local'
           ? await LibraryLog.openLocal(request.libraryKey, vault, undefined, request.wire)
-          : await LibraryLog.open(request.libraryKey, undefined, undefined, vault, request.wire);
+          : await LibraryLog.open(
+              request.libraryKey,
+              undefined,
+              undefined,
+              vault,
+              request.wire,
+              opening &&
+                ((value) => {
+                  paged = true;
+                  opening(value);
+                }),
+            );
     } catch (error) {
       if (error instanceof LibraryUpdateRequiredError)
         throw new LibraryServiceAuthorityError({
@@ -97,6 +114,8 @@ export async function openLibraryServiceAuthority(
           requiredWire: error.requiredWire,
         });
       throw error;
+    } finally {
+      if (paged) opening?.(1);
     }
     startupMark(
       'log opened',
@@ -187,7 +206,7 @@ export async function openLibraryServiceAuthority(
     openNarrow,
   );
   startupLibraryWorker(request.wire === 5 ? 'household' : 'profile', cached?.views ?? 'miss');
-  if (!cached) return openFull();
+  if (!cached) return openFull(progress);
   const releaseMembership = useLibraryRelayMembership(cached.membership);
   const releaseCredentials = contentCredentials?.bind({
     ready: () => Promise.resolve(),

@@ -9,9 +9,10 @@ import { bigHousehold, routeBigHousehold } from './big-library.mjs';
 // The Worker script itself is not counted: each library has a Worker of its own by design (one LibraryLog per
 // Worker), and the browser's HTTP cache gives the second the first's transfer of that immutable asset. Request
 // interception, which these specs use, turns that cache off, so here it would always read as two.
+// The dev server names den-core's wasm `den_core_startup_bg.wasm`; a build, `den_core_startup_bg-<hash>.wasm`.
 const kinds = {
-  startupWasm: (url) => url.pathname.endsWith('/den_core_startup_bg.wasm'),
-  deferredWasm: (url) => url.pathname.endsWith('/den_core_deferred_bg.wasm'),
+  startupWasm: (url) => /\/den_core_startup_bg(?:-[\w-]+)?\.wasm$/.test(url.pathname),
+  deferredWasm: (url) => /\/den_core_deferred_bg(?:-[\w-]+)?\.wasm$/.test(url.pathname),
   routes: (url) => url.pathname === '/routes',
   profiles: (url) => url.pathname === '/capabilities/profiles',
 };

@@ -30,6 +30,21 @@ const GB = 2 ** 30;
 const memory = Math.min(totalmem(), process.constrainedMemory() || Infinity);
 const WORKERS = Math.max(1, Math.min(4, Math.floor((memory - GB) / (1.5 * GB))));
 
+/**
+ * Specs that start a profile household through the real app, and so wait on its library Workers' startup deadlines:
+ * they run against the production build (`playwright.production.config.ts`). From the dev server a Worker evaluates
+ * some hundreds of unbundled modules before it answers, which on a loaded CI runner takes 3–19 s and runs out the
+ * supervisor's startup deadline, then the Owner profile's, which no shipped page pays.
+ */
+export const PRODUCTION_BUILD_SPECS = [
+  'big-library-crash.spec.mjs',
+  'continue-airing-tracker.spec.mjs',
+  'guest-library.spec.mjs',
+  'hidden-start.spec.mjs',
+  'household-downloads.spec.mjs',
+  'startup-fetches.spec.mjs',
+];
+
 export default defineConfig({
   testDir: './e2e',
   // Time budgets measure the production build on a runner of their own (`playwright.budgets.config.ts`).
@@ -39,6 +54,7 @@ export default defineConfig({
     'big-library-budgets.spec.mjs',
     'big-library-first-open.spec.mjs',
     'big-library-edit.spec.mjs',
+    ...PRODUCTION_BUILD_SPECS,
   ],
   timeout: 120_000,
   // Files are isolated by Playwright contexts and do not share mutable server state.

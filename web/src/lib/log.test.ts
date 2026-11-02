@@ -1606,6 +1606,27 @@ describe('LibraryLog', () => {
     expect(pages).toBe(2);
   });
 
+  /**
+   * The hello that opens a library times out after 10 s with no word from it. A long history read from den-edge took
+   * longer than that on a slow machine while every page arrived, and was cut off as a library that had stalled.
+   */
+  it('says how far a history read from den-edge has come after each page that more pages follow', async () => {
+    const { vault } = memoryVault();
+    const server = await edge([row(1), row(2), row(3), row(4), row(5)]);
+    const said: number[] = [];
+    const log = await LibraryLog.open(
+      LIBRARY_KEY,
+      server.fetchImpl,
+      undefined,
+      vault,
+      undefined,
+      (value) => said.push(value),
+    );
+    expect(log?.rows()).toHaveLength(5);
+    // Two rows a page: after rows 2 and 4 of 5, and nothing after the last page, which the open itself answers.
+    expect(said).toEqual([0.4, 0.8]);
+  });
+
   it('stops a cold import when its page checkpoint cannot be committed', async () => {
     const stored = memoryVault();
     const server = await edge([row(1), row(2), row(3)]);
