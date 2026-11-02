@@ -166,8 +166,13 @@ const validDelta = (value: unknown): value is HistoryDelta =>
   Array.isArray((value as HistoryDelta).documents);
 const namespace = (generation: string) => `${ROOT}:${generationPart(generation)}`;
 const recordPrefix = (generation: string) => `${namespace(generation)}:document:`;
-const snapshotName = (generation: string) => `${namespace(generation)}:snapshot`;
-const journalPrefix = (generation: string) => `${namespace(generation)}:journal:`;
+/**
+ * The snapshot and its journal share one prefix, so one read sees both as a single transaction did: read apart, a fold
+ * by another writer between them leaves the reader the snapshot before the fold and none of the journal it took in.
+ */
+const keptPrefix = (generation: string) => `${namespace(generation)}:kept:`;
+const snapshotName = (generation: string) => `${keptPrefix(generation)}snapshot`;
+const journalPrefix = (generation: string) => `${keptPrefix(generation)}journal:`;
 
 /**
  * One document as the snapshot and journal hold it: its key, sequence and row. The server ciphertext is kept only for
@@ -542,9 +547,9 @@ export class LibraryFactStore {
       return this.held.documents;
     if (current && current.layout !== SNAPSHOT_LAYOUT) return this.convert(current);
     const documents = new Map<string, StoredLibraryDocument>();
-    const snapshot = await this.readBatch(snapshotName(generation));
-    for (const held of snapshot?.documents ?? []) documents.set(held[0], storedDocument(held));
-    const journals = await this.journals(generation);
+    const { snapshot, journals } = await this.readKept(generation);
+    for (const held of snapshot?.batch.documents ?? [])
+      documents.set(held[0], storedDocument(held));
     for (const { batch } of journals)
       for (const held of batch.documents) documents.set(held[0], storedDocument(held));
     this.held = { generation, revision: current?.revision, documents, journals: journals.length };
@@ -559,17 +564,25 @@ export class LibraryFactStore {
     return opened;
   }
 
-  /** The journal of `generation`, oldest batch first. */
-  private async journals(
-    generation: string,
-  ): Promise<Array<{ key: string; batch: DocumentBatch }>> {
-    const held = byKey(await this.vault.entries(`${this.libraryId}:${journalPrefix(generation)}`));
-    return Promise.all(
-      held.map(async ([key, bytes]) => ({
-        key,
-        batch: (await this.readBatch(key.slice(this.libraryId.length + 1), bytes))!,
-      })),
-    );
+  /** The snapshot of `generation`, as stored and opened, and its journal oldest batch first, from one read. */
+  private async readKept(generation: string): Promise<{
+    snapshot?: { bytes: Uint8Array; batch: DocumentBatch };
+    journals: Array<{ key: string; batch: DocumentBatch }>;
+  }> {
+    const snapshotKey = `${this.libraryId}:${snapshotName(generation)}`;
+    const held = byKey(await this.vault.entries(`${this.libraryId}:${keptPrefix(generation)}`));
+    const open = (key: string, bytes: Uint8Array) =>
+      this.readBatch(key.slice(this.libraryId.length + 1), bytes) as Promise<DocumentBatch>;
+    const snapshot = held.find(([key]) => key === snapshotKey);
+    const [batch, journals] = await Promise.all([
+      snapshot && open(...snapshot),
+      Promise.all(
+        held
+          .filter(([key]) => key !== snapshotKey)
+          .map(async ([key, bytes]) => ({ key, batch: await open(key, bytes) })),
+      ),
+    ]);
+    return { ...(snapshot && batch ? { snapshot: { bytes: snapshot[1], batch } } : {}), journals };
   }
 
   /**
@@ -651,11 +664,10 @@ export class LibraryFactStore {
   private async compact(generation: string): Promise<void> {
     const name = snapshotName(generation);
     const key = `${this.libraryId}:${name}`;
-    const expected = await this.vault.get(key);
+    const { snapshot, journals } = await this.readKept(generation);
+    const expected = snapshot?.bytes;
     const documents = new Map<string, HeldDocument>();
-    for (const held of (await this.readBatch(name, expected))?.documents ?? [])
-      documents.set(held[0], held);
-    const journals = await this.journals(generation);
+    for (const held of snapshot?.batch.documents ?? []) documents.set(held[0], held);
     for (const { batch } of journals)
       for (const held of batch.documents) documents.set(held[0], held);
     const sealed = await sealLibraryLocalValue(this.key, name, {
