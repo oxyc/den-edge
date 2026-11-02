@@ -26,10 +26,16 @@ describe('actions, as the TV does them', () => {
     expect(addToWatchlist(playing, at(2000)).status.value).toBe('inProgress');
   });
 
-  it('removes with a tombstone that a later add undoes', () => {
-    const removed = removeFromLibrary(addToWatchlist(dune, at(2000)), at(3000));
-    expect(removed.deleted).toEqual({ value: true, at: at(3000) });
-    expect(addToWatchlist(removed, at(4000)).deleted.value).toBe(false);
+  it('takes a title off the watchlist without a tombstone, and leaves one not listed as it is', () => {
+    const listed = addToWatchlist(dune, at(2000));
+    const removed = removeFromLibrary(listed, at(3000));
+    expect([removed.status, removed.deleted]).toEqual([
+      { value: 'none', at: at(3000) },
+      listed.deleted,
+    ]);
+    expect(addToWatchlist(removed, at(4000)).status.value).toBe('watchlist');
+    const watched = markWatched(dune, at(2000));
+    expect(removeFromLibrary(watched, at(3000))).toBe(watched);
   });
 
   it('marks seen, and un-seeing starts a new viewing that beats the TV’s finished one', () => {

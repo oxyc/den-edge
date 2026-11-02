@@ -166,7 +166,7 @@ describe('materialized History index', () => {
 
     index.update(
       { type: 'movie', id: 2 },
-      [movie(2, 2_000, { deleted: { value: true, at: stamp(4_000) } })],
+      [movie(2, 2_000, { status: { value: 'none', at: stamp(4_000) } })],
       source('generation-a', 4),
       4_001,
     );
@@ -188,6 +188,23 @@ describe('materialized History index', () => {
           episodes: 1,
         },
         { title: { type: 'movie', id: 1 }, watchedAt: 3_000, episodes: 0 },
+      ],
+    });
+  });
+
+  it('keeps a finished series and a watched film that a watchlist removal tombstoned', () => {
+    const tombstone = { deleted: { value: true, at: stamp(9_000) } };
+    const [title, ...seasons] = series(84773, [
+      { season: 1, episode: 1, watchedAt: 1_000 },
+      { season: 1, episode: 2, watchedAt: 2_000 },
+    ]);
+    const documents = [{ ...title!, ...tombstone }, ...seasons, movie(2, 3_000, tombstone)];
+    const index = new MaterializedHistoryIndex(source('generation-a', 3), documents, 10_000);
+    expect(index.page({}, undefined, 48)).toMatchObject({
+      total: 2,
+      items: [
+        { title: { type: 'movie', id: 2 }, watchedAt: 3_000 },
+        { title: { type: 'tv', id: 84773 }, watchedAt: 2_000, episodes: 2 },
       ],
     });
   });

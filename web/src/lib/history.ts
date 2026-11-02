@@ -197,8 +197,8 @@ export function episodeHistoryTally(
 /**
  * The watched titles in `rows`, newest first, then those watched at a time the library doesn't know. A title TMDB
  * hasn't named yet (`names`, by `type:id`) waits, as the library's other lists make it wait. An episode from before a
- * series was un-seen (`episodesReset`) no longer counts, and a title removed from the library after it was last
- * watched is left out; watching it again brings it back.
+ * series was un-seen (`episodesReset`) no longer counts. A watchlist removal never hides what was watched, so a title
+ * `deleted` by one (before den-core's `watchlist_remove`) keeps its place.
  */
 export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): WatchedEntry[] {
   const titles = titleRows(rows);
@@ -214,7 +214,7 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
       row?.status.value === 'watched' ? Math.max(row.watchedAt ?? 0, row.status.at[0], 0) : -1;
     const episodes = series.get(key);
     const at = Math.max(seenAt, episodes ? Math.max(episodes.latestWatchedAt, 0) : -1);
-    if (at < 0 || (row?.deleted.value && row.deleted.at[0] >= at)) continue;
+    if (at < 0) continue;
     entries.push({
       title,
       at,

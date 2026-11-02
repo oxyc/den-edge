@@ -102,8 +102,9 @@ function projectTitle(document: DocumentRow, now: number): TitleRow {
 /**
  * The writes one edit made: `before` is the title or episode row as it was read, `after` what the action made of it
  * (`actions.ts`). Playback (a position in seconds) is `progress`; marking an episode seen or not is `mark_watched`
- * or `unwatch`; a film's resume point follows whichever of the three its action was; the title's other fields are
- * one `title` write per stamp; a series un-watched is `series_reset`.
+ * or `unwatch`; a film's resume point follows whichever of the three its action was; a status taken from the
+ * watchlist to none is `watchlist_remove`; the title's other fields are one `title` write per stamp; a series un-watched
+ * is `series_reset`.
  */
 export function opsFor(before: Row, after: Row): Op[] {
   if (before.kind === 'ep' && after.kind === 'ep') {
@@ -175,6 +176,11 @@ export function opsFor(before: Row, after: Row): Op[] {
   for (const field of ['status', 'reaction', 'deleted', 'dismissed'] as const) {
     if ((field === 'status' && statusWritten) || same(before[field], after[field])) continue;
     const { value, at } = after[field];
+    // Off the watchlist (`removeFromLibrary`): den-core decides the status it goes back to.
+    if (field === 'status' && before.status.value === 'watchlist' && value === 'none') {
+      ops.push({ target, write: { kind: 'watchlist_remove', at } });
+      continue;
+    }
     const group = byStamp.get(JSON.stringify(at)) ?? { at, fields: {} };
     group.fields[field] = value;
     byStamp.set(JSON.stringify(at), group);

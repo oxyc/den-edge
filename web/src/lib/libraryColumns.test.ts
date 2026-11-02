@@ -331,7 +331,7 @@ describe('library columns', () => {
     expect(continueLibrary.marks.some((m) => m.updatedBy === d)).toBe(true);
     expect(continueLibrary.flags!.size).toBeGreaterThan(0);
     expect([...continueLibrary.dismissed.keys()]).toContain('movie:2');
-    expect(expected.history.some((e) => e.title.id === 4)).toBe(false);
+    expect(expected.history.some((e) => e.title.id === 4)).toBe(true);
     expect(expected.history.some((e) => e.title.id === 5 && e.watchedAt === 0)).toBe(true);
     expect(expected.home.seeds.watchlisted).toEqual(['movie:6', 'movie:60']);
     // The finished series listed again leads the watchlist, by when it was listed rather than its 9500-old `addedAt`.

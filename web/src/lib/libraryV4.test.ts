@@ -6,6 +6,7 @@ import {
   markEpisode,
   markWatched,
   react,
+  removeFromLibrary,
 } from './actions';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
@@ -328,10 +329,80 @@ describe('Library v4 documents', () => {
   });
 
   it('a kept write sent late never sets a field back past a newer one', () => {
-    const film = filmDocument(550, { status: { value: 'watched', at: at(9000) } });
+    const film = filmDocument(550, { reaction: { value: 'love', at: at(9000) } });
     const before = rec('movie', 550);
-    const ops = opsFor(before, { ...before, status: { value: 'none', at: at(8000) } });
+    const ops = opsFor(before, react(before, 'like', at(8000)));
     expect(applyOps(ops, (name) => (name === 'title:movie:550' ? film : undefined))).toEqual([]);
+  });
+
+  it('sends a watchlist removal for den-core to decide, and never a tombstone', () => {
+    const before = rec('tv', 84773);
+    const ops = opsFor(before, removeFromLibrary(before, at(3000)));
+    expect(ops.map(({ write }) => write.kind)).toEqual(['watchlist_remove', 'title']);
+    expect(ops[0]).toEqual({
+      target: { type: 'tv', id: 84773 },
+      write: { kind: 'watchlist_remove', at: at(3000) },
+    });
+    expect(ops[1]?.write.fields).toEqual({});
+  });
+
+  // Parity with the TV: den's LibraryTitleEditTests takes the same series off the watchlist at the same moment ("a
+  // series taken off the watchlist ends with the document fields Den Web writes") and checks the same fields.
+  it('a series taken off the watchlist ends with the document fields the TV writes', async () => {
+    const listed = 1_789_000_000_000;
+    const removed = 1_789_000_600_000;
+    const web = (t: number): Stamp => [t, 0, 'web0000000000001'];
+    const episode = (t: number) => ({
+      progress: { value: 1, at: web(t), viewing: 0 },
+      imported: false,
+      plays: { 0: t },
+      cleared: null,
+    });
+    const season = {
+      format: 4,
+      kind: 'season',
+      title: { type: 'tv', id: 84773 },
+      season: 1,
+      seasonReset: null,
+      episodes: { 1: episode(listed + 100_000), 2: episode(listed + 101_000) },
+    } as DocumentRow;
+    const server = await edge([
+      {
+        format: 4,
+        kind: 'title',
+        title: { type: 'tv', id: 84773 },
+        status: { value: 'watchlist', at: web(listed) },
+        addedAt: listed,
+      },
+      season,
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const before = log.title({ type: 'tv', id: 84773 })!;
+    expect(await log.write(removeFromLibrary(before, at(removed)))).not.toBeNull();
+
+    const stored = await server.opened();
+    const title = document(stored, 'title:tv:84773')!;
+    expect(title.status).toEqual({
+      value: 'none',
+      at: [removed, expect.any(Number), expect.any(String)],
+    });
+    expect(title.deleted).toBeUndefined();
+    expect(document(stored, 'season:tv:84773:1')).toEqual(season);
+  });
+
+  it('a watched film taken off the watchlist goes back to watched, with its play', () => {
+    const film = filmDocument(550, {
+      resume: { value: 1, at: at(1000), viewing: 0 },
+      watch: { imported: false, plays: { '0': 1000 }, cleared: null },
+      status: { value: 'watchlist', at: at(2000) },
+    });
+    const before = rec('movie', 550, { status: { value: 'watchlist', at: at(2000) } });
+    const [written] = applyOps(opsFor(before, removeFromLibrary(before, at(3000))), (name) =>
+      name === 'title:movie:550' ? film : undefined,
+    );
+    expect(written?.status).toEqual({ value: 'watched', at: at(3000) });
+    expect(written?.deleted).toBeUndefined();
+    expect(written?.watch).toEqual(film.watch);
   });
 
   it('reads a newer-format document but writes nothing, and says an update is required', async () => {

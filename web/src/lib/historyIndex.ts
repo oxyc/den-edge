@@ -14,7 +14,7 @@ import type {
 import type { DocumentRow, TitleRow } from './wire';
 
 /** Changing projection or ordering semantics must invalidate every cursor. */
-export const HISTORY_INDEX_POLICY = 2;
+export const HISTORY_INDEX_POLICY = 3;
 export const HISTORY_INDEX_SCHEMA = 1;
 
 const DEFAULT_LIMIT = 48;
@@ -101,7 +101,8 @@ export const historyItemFromProjections = (
     seenAt,
     latestWatchedAt === undefined ? -1 : Math.max(latestWatchedAt, 0),
   );
-  if (watchedAt < 0 || (title?.deleted.value && title.deleted.at[0] >= watchedAt)) return undefined;
+  // A watchlist removal never hides what was watched, a title `deleted` by one included (`watchedHistory`).
+  if (watchedAt < 0) return undefined;
   return {
     title: { type: ref.type, id: ref.id },
     watchedAt,
@@ -237,7 +238,8 @@ export const historyItemFromDocuments = (
     seenAt,
     latestWatchedAt === undefined ? -1 : Math.max(latestWatchedAt, 0),
   );
-  if (watchedAt < 0 || (title?.deleted.value && title.deleted.at[0] >= watchedAt)) return undefined;
+  // A watchlist removal never hides what was watched, a title `deleted` by one included (`watchedHistory`).
+  if (watchedAt < 0) return undefined;
   return {
     title: { type: ref.type, id: ref.id },
     watchedAt,
