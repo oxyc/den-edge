@@ -344,11 +344,19 @@ it('serves exact History episode details from bounded checkpoint membership with
   });
   expect(openFull).not.toHaveBeenCalled();
 
-  // Losing a member document makes details stale; it must not silently scan/promote the full log.
-  const documentKey = [...vault.values.keys()].find((stored) => stored.endsWith(encrypted[1]!.k))!;
-  vault.values.delete(documentKey);
+  // Losing a member document makes details stale; it must not silently scan/promote the full log. The documents are
+  // one journal batch here, lost together, and a store holds what it read: a new open reads them again.
+  for (const stored of [...vault.values.keys()])
+    if (stored.includes(':journal:')) vault.values.delete(stored);
+  const reopened = await openFinishedLibraryViewAuthority(
+    request,
+    vault,
+    openFull,
+    content,
+    vi.fn(),
+  );
   await expect(
-    opened!.authority.query({
+    reopened!.authority.query({
       kind: 'history.episodes',
       revision: history.revision,
       titles: [title],
