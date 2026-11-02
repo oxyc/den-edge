@@ -1462,13 +1462,24 @@ struct Registry {
     bytes: usize,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct IndexedProtocol {
     generation: String,
     head: u64,
     wire_min: u64,
     #[serde(default)]
     migration_generation: u64,
+}
+
+impl IndexedProtocol {
+    fn of(protocol: &Protocol) -> Self {
+        Self {
+            generation: protocol.generation.clone(),
+            head: protocol.head,
+            wire_min: protocol.wire_min,
+            migration_generation: protocol.migration_generation,
+        }
+    }
 }
 
 struct ProtocolIndex {
@@ -1521,14 +1532,14 @@ impl ProtocolIndex {
             .map_err(|error| StoreError::Invalid(format!("invalid library protocol index: {error}")))
     }
 
+    /// Durably record what a library's file says, unless that is what is already recorded: a read that changed
+    /// nothing (a cold open, a batch of conflicts) commits nothing.
     fn record(&self, id: &str, protocol: &Protocol) -> Result<(), StoreError> {
-        let bytes = serde_json::to_vec(&IndexedProtocol {
-            generation: protocol.generation.clone(),
-            head: protocol.head,
-            wire_min: protocol.wire_min,
-            migration_generation: protocol.migration_generation,
-        })
-        .map_err(|error| StoreError::Failed(error.to_string()))?;
+        let indexed = IndexedProtocol::of(protocol);
+        if self.get(id)?.as_ref() == Some(&indexed) {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&indexed).map_err(|error| StoreError::Failed(error.to_string()))?;
         let transaction = self.database.begin_write().map_err(StoreError::redb)?;
         {
             transaction
@@ -2122,6 +2133,70 @@ mod tests {
         assert_eq!((current.head, current.wire_min, current.migration_generation), (8, 4, 3));
     }
 
+    /// Manual release-mode probe of what a household-sized library writes: a 200-row batch of updates, one of new
+    /// rows, a one-row batch, and a cold open after a restart. Ignored in CI, and the row cap of test builds
+    /// (`MAX_ROWS`) must be raised by hand to run it:
+    /// `cargo test --release library_v3_io_benchmark -- --ignored --nocapture`. Opening a path containing
+    /// `__den_mark_<label>` is a no-op here; a syscall counter preloaded into the test process can use it to cut its
+    /// counts per phase.
+    #[test]
+    #[ignore]
+    fn library_v3_io_benchmark() {
+        fn mark(label: &str) {
+            let _ = std::fs::File::open(format!("/nonexistent/__den_mark_{label}"));
+        }
+        let sealed = |n: usize| {
+            let seed = format!("{n:08x}");
+            seed.repeat(88)[..700].to_owned()
+        };
+        let dir = temp_dir();
+        let id = "1111111111111111";
+        let first = manager(&dir, 4, 1 << 30, 512 << 20);
+        let store = first.library(id, TOKEN).unwrap();
+        let mut seqs = HashMap::new();
+        for chunk in 0..25 {
+            let writes: Vec<_> = (chunk * 200..chunk * 200 + 200)
+                .map(|n| Write { key: format!("{:016x}", n * 7919), base: 0, value: sealed(n) })
+                .collect();
+            for (key, seq) in store.apply_bounded(&writes, 64 << 20, 2).unwrap().applied {
+                seqs.insert(key, seq);
+            }
+        }
+        let updates: Vec<_> = (0..200)
+            .map(|n| {
+                let key = format!("{:016x}", (n * 25) * 7919);
+                Write { base: seqs[&key], key, value: sealed(n + 9_000) }
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        mark("reset");
+        assert_eq!(store.apply_bounded(&updates, 64 << 20, 2).unwrap().applied.len(), 200);
+        mark("batch-200-updates");
+        let updated = started.elapsed();
+        let fresh: Vec<_> = (5_000..5_200)
+            .map(|n| Write { key: format!("{:016x}", n * 7919), base: 0, value: sealed(n) })
+            .collect();
+        mark("reset");
+        assert_eq!(store.apply_bounded(&fresh, 64 << 20, 2).unwrap().applied.len(), 200);
+        mark("batch-200-new");
+        let one = [Write {
+            key: format!("{:016x}", 7919),
+            base: seqs[&format!("{:016x}", 7919)],
+            value: sealed(1),
+        }];
+        mark("reset");
+        assert_eq!(store.apply_bounded(&one, 64 << 20, 2).unwrap().applied.len(), 1);
+        mark("batch-1");
+        drop(store);
+        drop(first);
+        let reopened = manager(&dir, 4, 1 << 30, 512 << 20);
+        let started = std::time::Instant::now();
+        mark("reset");
+        drop(reopened.library(id, TOKEN).unwrap());
+        mark("cold-open");
+        eprintln!("BENCH 200 updates {updated:?}; cold open {:?}", started.elapsed());
+    }
+
     #[test]
     fn a_library_commit_ahead_of_its_index_reopens_with_a_new_fence() {
         let dir = temp_dir();
@@ -2139,6 +2214,31 @@ mod tests {
         assert_eq!(current.head, 2);
         assert_ne!(current.generation, recorded.generation);
         assert!(current.migration_generation > recorded.migration_generation);
+    }
+
+    /// A cold open of a library whose index entry is current, and a batch that changes nothing, leave the index
+    /// file as it was: nothing is committed to it for them.
+    #[test]
+    fn a_cold_open_and_an_unchanged_batch_commit_nothing_to_the_index() {
+        let dir = temp_dir();
+        let id = "1111111111111111";
+        let first = manager(&dir, 4, 32 << 20, 8 << 20);
+        let store = first.library(id, TOKEN).unwrap();
+        store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        drop(store);
+        drop(first);
+        let index = dir.join("library-v3-index.redb");
+
+        let reopened = manager(&dir, 4, 32 << 20, 8 << 20);
+        let after_startup = std::fs::read(&index).unwrap();
+        let store = reopened.library(id, TOKEN).unwrap();
+        let unchanged = || std::fs::read(&index).unwrap() == after_startup;
+        assert!(unchanged(), "a cold open rewrote its current entry");
+        let conflict = store.apply(&[Write { key: K1.into(), base: 0, value: "lost".into() }]).unwrap();
+        assert!(conflict.applied.is_empty());
+        assert!(unchanged(), "a batch of conflicts rewrote the index");
+        store.apply(&[Write { key: K1.into(), base: 1, value: "two".into() }]).unwrap();
+        assert!(!unchanged(), "a new head is recorded");
     }
 
     #[test]
