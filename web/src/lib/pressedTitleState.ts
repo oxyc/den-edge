@@ -17,8 +17,8 @@ export interface Press {
 
 /**
  * `row`, as the title page reads it (`titleViewRows`), with `press` laid over it: what the press does to the title
- * when it is saved (`actions.ts`). Watchlist and Seen share the one status, and removing from the library hides the
- * opinion with it.
+ * when it is saved (`actions.ts`). Watchlist and Seen share the one status; taking a title off the watchlist leaves
+ * everything else as it was.
  *
  * The page's row is the library's view of the title, not the stored row: a title that is not held reads as removed,
  * and one with an opinion reads as held ("a reaction means held"). Pressing an opinion on a title that is not held
@@ -27,19 +27,17 @@ export interface Press {
 export function pressedTitleState(row: TitleRow | undefined, press: Press | null): TitleState {
   if (!press) return titleState(row);
   const held = row !== undefined && !row.deleted.value;
-  let removed = false;
   let status: TitleRow['status']['value'] = held ? row.status.value : 'none';
   let reaction: TitleRow['reaction']['value'] = held ? row.reaction.value : null;
   if (press.kind === 'reaction') reaction = press.value as Reaction | null;
   else if (press.kind === 'seen') status = press.value ? 'watched' : 'none';
-  else if (!press.value) removed = true;
+  else if (!press.value) status = status === 'watchlist' ? 'none' : status;
   else if (status === 'none' || status === 'watched') status = 'watchlist';
-  // As the page reads a stored row back: nothing of a removed title shows, and an opinion alone holds it.
-  const shownReaction = removed ? null : reaction;
-  const gone = (removed || status === 'none') && shownReaction === null;
+  // As the page reads a stored row back: an opinion alone holds a title.
+  const gone = status === 'none' && reaction === null;
   return {
     listed: !gone && status === 'watchlist',
     seen: !gone && status === 'watched',
-    reaction: gone || shownReaction === 'seen' ? null : shownReaction,
+    reaction: gone || reaction === 'seen' ? null : reaction,
   };
 }

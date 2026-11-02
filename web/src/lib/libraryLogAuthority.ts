@@ -637,7 +637,7 @@ export class LibraryLogAuthority {
           command.title,
           operationId,
           (row, at) => removeFromLibrary(row, at),
-          (row) => row.deleted.value,
+          (row) => row.deleted.value || row.status.value !== 'watchlist',
         );
       case 'reaction.set':
         return this.#titleAction(

@@ -61,7 +61,7 @@ describe('pressedTitleState', () => {
     }
   });
 
-  it('shows no opinion over a title removed from the library', () => {
+  it('takes a title off the watchlist and nothing else: its opinion and its Seen stay', () => {
     const loved = present({
       ...dune,
       status: { value: 'watchlist', at: at(2) },
@@ -70,8 +70,10 @@ describe('pressedTitleState', () => {
     expect(pressedTitleState(loved, { kind: 'watchlist', value: false })).toEqual({
       listed: false,
       seen: false,
-      reaction: null,
+      reaction: 'love',
     });
+    const watched = present({ ...dune, status: { value: 'watched', at: at(2) } });
+    expect(pressedTitleState(watched, { kind: 'watchlist', value: false }).seen).toBe(true);
   });
 
   // The state shown must be the one the write then leaves: each press is run through the real action it saves as,

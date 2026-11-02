@@ -321,8 +321,13 @@ function varied(): DocumentRow[] {
   ] as DocumentRow[];
 }
 
+// History keeps a title `deleted` after it was watched (a watchlist removal never hides what was watched), and the
+// vendored den-core does not yet: these three need den-core fix/watchlist-remove-keeps-watched. Drop `.fails` once
+// that den-core is vendored.
+const untilVendored = test.fails;
+
 describe('library columns', () => {
-  test('Home, History and the newest stamp equal the per-document projection', () => {
+  untilVendored('Home, History and the newest stamp equal the per-document projection', () => {
     const documents = varied();
     const expected = perDocument(documents);
     // The fixture reaches the branches it is meant to: a resume mark beside a finished one, a timeless flag, a kept
@@ -331,7 +336,7 @@ describe('library columns', () => {
     expect(continueLibrary.marks.some((m) => m.updatedBy === d)).toBe(true);
     expect(continueLibrary.flags!.size).toBeGreaterThan(0);
     expect([...continueLibrary.dismissed.keys()]).toContain('movie:2');
-    expect(expected.history.some((e) => e.title.id === 4)).toBe(false);
+    expect(expected.history.some((e) => e.title.id === 4)).toBe(true);
     expect(expected.history.some((e) => e.title.id === 5 && e.watchedAt === 0)).toBe(true);
     expect(expected.home.seeds.watchlisted).toEqual(['movie:6', 'movie:60']);
     // The finished series listed again leads the watchlist, by when it was listed rather than its 9500-old `addedAt`.
@@ -340,7 +345,7 @@ describe('library columns', () => {
     expect(held(documents)).toEqual(expected);
   });
 
-  test('every list equals the projection once a future stamp is believed', () => {
+  untilVendored('every list equals the projection once a future stamp is believed', () => {
     const documents = varied();
     for (const now of [NOW + 2 * DAY - 1, NOW + 2 * DAY, NOW + 3 * DAY, NOW + 5 * DAY])
       expect(held(documents, now)).toEqual(perDocument(documents, now));
@@ -353,7 +358,7 @@ describe('library columns', () => {
     expect(held(documents)).toEqual(expected);
   }, 120_000);
 
-  test('a replaced document moves its answer', () => {
+  untilVendored('a replaced document moves its answer', () => {
     const documents = varied();
     const index = new LibraryColumns();
     try {

@@ -6,6 +6,7 @@ import {
   markEpisode,
   markWatched,
   react,
+  removeFromLibrary,
 } from './actions';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
@@ -328,10 +329,38 @@ describe('Library v4 documents', () => {
   });
 
   it('a kept write sent late never sets a field back past a newer one', () => {
-    const film = filmDocument(550, { status: { value: 'watched', at: at(9000) } });
+    const film = filmDocument(550, { reaction: { value: 'love', at: at(9000) } });
     const before = rec('movie', 550);
-    const ops = opsFor(before, { ...before, status: { value: 'none', at: at(8000) } });
+    const ops = opsFor(before, react(before, 'like', at(8000)));
     expect(applyOps(ops, (name) => (name === 'title:movie:550' ? film : undefined))).toEqual([]);
+  });
+
+  it('sends a watchlist removal for den-core to decide, and never a tombstone', () => {
+    const before = rec('tv', 84773);
+    const ops = opsFor(before, removeFromLibrary(before, at(3000)));
+    expect(ops.map(({ write }) => write.kind)).toEqual(['watchlist_remove', 'title']);
+    expect(ops[0]).toEqual({
+      target: { type: 'tv', id: 84773 },
+      write: { kind: 'watchlist_remove', at: at(3000) },
+    });
+    expect(ops[1]?.write.fields).toEqual({});
+  });
+
+  // Needs den-core's `watchlist_remove` (den-core fix/watchlist-remove-keeps-watched), which the vendored build
+  // refuses as `invalid_write`. Drop `.fails` once that den-core is vendored.
+  it.fails('a watched film taken off the watchlist goes back to watched, with its play', () => {
+    const film = filmDocument(550, {
+      resume: { value: 1, at: at(1000), viewing: 0 },
+      watch: { imported: false, plays: { '0': 1000 }, cleared: null },
+      status: { value: 'watchlist', at: at(2000) },
+    });
+    const before = rec('movie', 550, { status: { value: 'watchlist', at: at(2000) } });
+    const [written] = applyOps(opsFor(before, removeFromLibrary(before, at(3000))), (name) =>
+      name === 'title:movie:550' ? film : undefined,
+    );
+    expect(written?.status).toEqual({ value: 'watched', at: at(3000) });
+    expect(written?.deleted).toBeUndefined();
+    expect(written?.watch).toEqual(film.watch);
   });
 
   it('reads a newer-format document but writes nothing, and says an update is required', async () => {

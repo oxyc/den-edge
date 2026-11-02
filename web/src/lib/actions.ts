@@ -88,9 +88,14 @@ export function addToWatchlist(row: TitleRow, at: Stamp): TitleRow {
   return { ...row, deleted: { value: false, at }, status };
 }
 
-/** Out of the library: a tombstone, which a later add undoes. */
+/**
+ * Off the watchlist, and nothing else: what was watched stays watched. `opsFor` sends it as den-core's
+ * `watchlist_remove`, which decides the status the title goes back to (a film it still shows a play of is `watched`).
+ * A title that is not listed is left as it is.
+ */
 export function removeFromLibrary(row: TitleRow, at: Stamp): TitleRow {
-  return { ...row, deleted: { value: true, at } };
+  if (row.deleted.value || row.status.value !== 'watchlist') return row;
+  return { ...row, status: { value: 'none', at } };
 }
 
 export function markWatched(row: TitleRow, at: Stamp): TitleRow {

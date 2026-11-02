@@ -71,24 +71,35 @@ describe('watched history', () => {
     ]);
   });
 
-  it('waits for a name, drops episodes from before a reset, and leaves out a title removed since', () => {
+  it('waits for a name, and drops episodes from before a reset', () => {
     const reset = {
       ...unwatch(markWatched(blankTitle({ type: 'tv', id: 10 }, 1), at(1000)), at(3000)),
       episodesReset: at(3000),
     };
-    const removed = removeFromLibrary(
-      markWatched(blankTitle({ type: 'movie', id: 2 }, 1), at(1000)),
-      at(2000),
-    );
     const rows: Row[] = [
       reset,
       seen(10, 1, 1, 2500),
-      removed,
       markWatched(blankTitle({ type: 'movie', id: 3 }, 1), at(1500)),
     ];
-    expect(watchedHistory(rows, named(show(10), movie(2)))).toEqual([]);
+    expect(watchedHistory(rows, named(show(10)))).toEqual([]);
     // Seen again after the reset, it's back.
     expect(watchedHistory([...rows, seen(10, 1, 2, 4000)], named(show(10))).length).toBe(1);
+  });
+
+  it('keeps what was watched through a watchlist removal, a tombstone of the old removal included', () => {
+    const series = blankTitle({ type: 'tv', id: 84773 }, 1);
+    const listed = { ...series, status: { value: 'watchlist' as const, at: at(3000) } };
+    const film = markWatched(blankTitle({ type: 'movie', id: 2 }, 1), at(1000));
+    const rows: Row[] = [
+      removeFromLibrary(listed, at(4000)),
+      seen(84773, 1, 1, 2000),
+      seen(84773, 1, 2, 2100),
+      { ...film, deleted: { value: true, at: at(5000) } },
+    ];
+    expect(watchedHistory(rows, named(show(84773), movie(2)))).toEqual([
+      { title: show(84773), at: 2100, episode: { season: 1, episode: 2 }, episodes: 2 },
+      { title: movie(2), at: 1000, episodes: 0 },
+    ]);
   });
 
   it('dates a title seen again by that watch, not its first', () => {
