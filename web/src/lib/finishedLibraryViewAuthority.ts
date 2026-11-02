@@ -74,7 +74,7 @@ import {
   shapeFromLayoutDigest,
 } from './libraryMetadata';
 import { continueAiring, ContinueProjector, titleKey, type Shape } from './library';
-import { seenEpisodesFor } from './history';
+import { seenEpisodesFor, withoutContinuing } from './history';
 import { projectDocument } from './libraryV4';
 import type { HomeLibraryView } from './homeLibraryView';
 import {
@@ -260,17 +260,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       };
     }
     if (selection.kind === 'watchlist') {
-      if (!(await this.#loadCapabilities(['watchlist'])))
+      if (!(await this.#loadCapabilities(['watchlist'])) || !(await this.#loadContinue()))
         return (await this.#promote('cache:watchlist')).select(selection);
-      const titles = pieces.watchlist!.titles;
-      const started = await this.#historyStartedSeries(
-        titles.filter((title): title is TitleRef & { type: 'tv' } => title.type === 'tv'),
-      );
-      if (!started) return (await this.#promote('cache:watchlist')).select(selection);
-      const hidden = new Set(started.map(titleKey));
       return {
         kind: 'watchlist',
-        titles: structuredClone(titles.filter((title) => !hidden.has(titleKey(title)))),
+        titles: structuredClone(withoutContinuing(pieces.watchlist!.titles, pieces.continue!.view)),
       };
     }
     if (selection.kind === 'recommendations') {
@@ -572,26 +566,6 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       return (await this.factStore.history(manifest))?.page(filter, cursor, limit) ?? null;
     } catch (error) {
       console.warn('den: the materialized History index could not be opened', error);
-      return null;
-    }
-  }
-
-  async #historyStartedSeries(titles: ReadonlyArray<TitleRef & { type: 'tv' }>) {
-    if (!this.factStore) return null;
-    try {
-      const manifest = await this.factStore.manifest();
-      if (
-        !manifest?.complete ||
-        manifest.generation !== this.cached.identity.generation ||
-        manifest.head !== this.cached.identity.head ||
-        (manifest.rowsVersion ?? manifest.head) !== this.cached.identity.rowsVersion
-      )
-        return null;
-      const index = await this.factStore.history(manifest);
-      if (!index) return null;
-      return titles.filter((title) => index.episodeCount(title) > 0);
-    } catch (error) {
-      console.warn('den: the materialized History membership could not be opened', error);
       return null;
     }
   }

@@ -611,8 +611,10 @@ function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection)
       selection.kind === 'watchlist' ||
       selection.kind === 'recommendations'
     );
+  // The Watchlist grid leaves out what Continue Watching shows (`withoutContinuing`).
+  if (scope.kind === 'continue')
+    return selection.kind === 'continue' || selection.kind === 'watchlist';
   if (
-    scope.kind === 'continue' ||
     scope.kind === 'history' ||
     scope.kind === 'settings' ||
     scope.kind === 'devices' ||

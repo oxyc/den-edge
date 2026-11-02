@@ -236,6 +236,10 @@
                     'test',
                   ]),
                 ),
+                // On the Watchlist page the part-watched Series 2002 is listed too, at 9400.
+                ...(route.page === 'watchlist'
+                  ? [addToWatchlist(blankTitle({ type: 'tv', id: 2002 }, 2), [9400, 0, 'test'])]
+                  : []),
               ]
             : []),
           ...(params.has('series-continue')

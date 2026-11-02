@@ -32,7 +32,7 @@ import {
   type DownloadRaceEntry,
   type DownloadRelease,
 } from './downloadRows';
-import { seenEpisodesFor } from './history';
+import { seenEpisodesFor, withoutContinuing } from './history';
 import { MaterializedHistoryIndex, type HistoryIndexSource } from './historyIndex';
 import { projectDocument } from './libraryV4';
 import { titleCoordinates, titleView } from './titleView';
@@ -572,16 +572,11 @@ export class LibraryLogAuthority {
     switch (selection.kind) {
       case 'overview':
         return this.#overview();
-      case 'watchlist': {
-        const overview = this.#overview();
-        const history = this.#materializedHistory();
+      case 'watchlist':
         return {
           kind: 'watchlist',
-          titles: overview.watchlist.filter(
-            (title) => title.type !== 'tv' || history.episodeCount(title) === 0,
-          ),
+          titles: withoutContinuing(this.#overview().watchlist, this.#continue()),
         };
-      }
       case 'recommendations': {
         const { kind: _kind, watchlist: _watchlist, ...recommendations } = this.#overview();
         return { kind: 'recommendations', ...recommendations };

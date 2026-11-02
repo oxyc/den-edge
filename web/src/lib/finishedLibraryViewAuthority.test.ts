@@ -244,6 +244,31 @@ it('serves capability-selected startup views without opening the document author
   expect(openFull).not.toHaveBeenCalled();
 });
 
+it('serves the Watchlist grid without what the kept Continue view shows or still needs a layout for', async () => {
+  const vault = new MemoryVault();
+  const value = await cached(vault);
+  const series = (id: number) => ({ type: 'tv' as const, id });
+  value.pieces.watchlist = {
+    titles: [{ type: 'movie', id: 7 }, series(20), series(21), series(22)],
+  };
+  value.pieces.continue = {
+    view: {
+      kind: 'continue',
+      items: [{ title: series(20), fraction: 0, episode: { season: 1, episode: 2 } }],
+      needsShapes: [series(22)],
+    },
+    layouts: {},
+  };
+  await writeFinishedLibraryViews(libraryKey, vault, value);
+  const openFull = vi.fn(async () => fullAuthority());
+  const opened = await openFinishedLibraryViewAuthority(request, vault, openFull, content, vi.fn());
+  await expect(opened!.authority.select({ kind: 'watchlist' })).resolves.toEqual({
+    kind: 'watchlist',
+    titles: [{ type: 'movie', id: 7 }, series(21)],
+  });
+  expect(openFull).not.toHaveBeenCalled();
+});
+
 it('opens completed capability facts without a monolithic snapshot or finished-view cache', async () => {
   await ensureSyncPolicy();
   const vault = new FactVault();
