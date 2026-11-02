@@ -246,8 +246,8 @@ async function routeLibraries(page, edge, origin) {
 /** A browser of the guest's, pointed at `edge` and with every other request refused. */
 export async function routeGuestEdge(page, edge, origin = E2E_ORIGIN) {
   await guardNetwork(page);
-  // The app's own pages and assets are the dev server's; any other call this origin could answer is "not here",
-  // unless a route below says otherwise (they are registered later, so they win).
+  // The app's own pages and assets are the server's, the dev server or a production build's preview; any other call
+  // this origin could answer is "not here", unless a route below says otherwise (they are registered later, so they win).
   await page.route(`${origin}/**`, (route) => {
     const path = new URL(route.request().url()).pathname;
     const api =

@@ -258,6 +258,40 @@ jobs:
           path: web/test-results
           if-no-files-found: ignore
           retention-days: 7
+  # The specs that start a profile household through the real app (`PRODUCTION_BUILD_SPECS` in playwright.config.ts)
+  # wait on its library Workers' startup deadlines, so they run against the production build: from the shards' dev
+  # server a loaded runner spent those deadlines evaluating unbundled modules.
+  e2e_production:
+    needs: scope
+    if: always() && needs.scope.outputs.source_changed == 'true'
+    runs-on: ubuntu-latest
+    name: e2e (production build)
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Browser behavior on the production build
+        run: npm run test:e2e:production
+      - name: Retain browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: browser-failures-production
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
   # Chromium already exercises every platform-neutral TV journey in web-checks. WebKit gets the engine-sensitive
   # playback, input, navigation and presentation surfaces on its own runner, so it neither repeats all 71 cases nor
   # extends shard 1's critical path.
@@ -341,7 +375,7 @@ jobs:
   # Timing budgets still run and retain evidence, but an over-budget measurement is advisory.
   web:
     if: always()
-    needs: [scope, web-checks, e2e, e2e_tv_webkit, android-tv]
+    needs: [scope, web-checks, e2e, e2e_production, e2e_tv_webkit, android-tv]
     runs-on: ubuntu-latest
     steps:
       - name: Require every web check
@@ -349,14 +383,15 @@ jobs:
           SOURCE_CHANGED: ${{ needs.scope.outputs.source_changed }}
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
+          E2E_PRODUCTION: ${{ needs.e2e_production.result }}
           TV_WEBKIT: ${{ needs.e2e_tv_webkit.result }}
           ANDROID_TV: ${{ needs.android-tv.result }}
           ANDROID_CHANGED: ${{ needs.scope.outputs.android_changed }}
         run: |
           if [ "$SOURCE_CHANGED" = false ]; then
-            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
+            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$E2E_PRODUCTION" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
           else
-            test "$CHECKS" = success && test "$E2E" = success && test "$TV_WEBKIT" = success
+            test "$CHECKS" = success && test "$E2E" = success && test "$E2E_PRODUCTION" = success && test "$TV_WEBKIT" = success
             if [ "$ANDROID_CHANGED" = true ]; then
               test "$ANDROID_TV" = success
             else

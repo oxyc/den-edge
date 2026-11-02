@@ -40,13 +40,14 @@ describe.each([false, true])('the dev server proxy under e2e (TV: %s)', (tv) => 
   });
 });
 
-// TV configs replace webServer rather than merging it. Both build and preview subprocesses must inherit
-// the guard; checking the Vite target alone would miss a Playwright configuration that never enables it.
-it.each(['../playwright.tv.config.ts', '../playwright.tv-package.config.ts'])(
-  '%s enables upstream isolation for its web server',
-  async (path) => {
-    const { default: config } = await import(path);
-    expect(config.webServer.env.DEN_E2E).toBe('1');
-    expect(config.webServer.reuseExistingServer).toBe(false);
-  },
-);
+// TV and production-build configs replace webServer rather than merging it. Both build and preview subprocesses must
+// inherit the guard; checking the Vite target alone would miss a Playwright configuration that never enables it.
+it.each([
+  '../playwright.tv.config.ts',
+  '../playwright.tv-package.config.ts',
+  '../playwright.production.config.ts',
+])('%s enables upstream isolation for its web server', async (path) => {
+  const { default: config } = await import(path);
+  expect(config.webServer.env.DEN_E2E).toBe('1');
+  expect(config.webServer.reuseExistingServer).toBe(false);
+});
