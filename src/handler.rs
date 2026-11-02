@@ -1765,9 +1765,11 @@ pub mod tests {
         }
 
         /// A request built by the test itself: a body that arrives late, say.
+        /// Boxed, as axum boxes the handler future in production (`Router::fallback`). Held by value, a debug build
+        /// kept a copy of the whole request future in every test future awaiting one, on the test thread's stack.
         pub async fn send_request(&self, mut req: Request) -> Response {
             req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 9], 5000))));
-            handle(State(Arc::clone(&self.state)), req).await
+            Box::pin(handle(State(Arc::clone(&self.state)), req)).await
         }
     }
 
