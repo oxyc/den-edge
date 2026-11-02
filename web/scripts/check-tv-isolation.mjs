@@ -125,5 +125,10 @@ if (process.argv.includes('--capture')) {
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
-  if (coreTotalDelta > 61440) throw new Error('Browser total JS/CSS budget exceeded');
+  // The library held in den-core (`LibraryColumns`) adds its generated bindings to the shared library Worker and
+  // the startup core, 3.1 KiB to the complete graph versus main after deleting the per-document projection, its
+  // WeakMaps and the Home re-projection paths. It replaces ~22k per-document JSON calls per open: Home + History
+  // 273 → 68 ms and 70 → 20 MiB. Allow four KiB including gzip variance; the initial and catalog ceilings are
+  // unchanged.
+  if (coreTotalDelta > 65536) throw new Error('Browser total JS/CSS budget exceeded');
 }

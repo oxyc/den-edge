@@ -144,7 +144,7 @@ export class DownloadCoordinator {
   }
 
   list(): Download[] {
-    return readDownloads(this.log.rows()).map((download) => ({
+    return readDownloads(this.log.storedRows()).map((download) => ({
       ...download,
       seq: this.log.seqOf(`set:${download.name}`),
     }));

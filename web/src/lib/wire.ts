@@ -155,20 +155,30 @@ export type Row = TitleRow | EpisodeRow | SettingsRow | DocumentRow;
 export const isDocument = (row: Row): row is DocumentRow =>
   row.kind === 'title' || row.kind === 'season' || row.kind === 'delivery';
 
-// Documents are immutable snapshots: merges and writes return a new object. Opening a document asks its policy
-// name several times (lookup, insert, acknowledgement), so keep that synchronous JSON/WASM result with the exact
-// object. A changed document has a different identity and is named again.
-const documentNames = new WeakMap<DocumentRow, string>();
+const safeCount = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * A well-formed document's name (library-v4 §3), formatted from its identity members as den-core's `doc_name` does;
+ * undefined for any identity den-core would refuse, which is left to `doc_name` to refuse.
+ */
+function documentName(row: DocumentRow): string | undefined {
+  const { type, id } = row.title ?? {};
+  if ((type !== 'movie' && type !== 'tv') || !safeCount(id) || id === 0) return undefined;
+  if (row.kind === 'title') return `title:${type}:${id}`;
+  if (row.season !== undefined && (!safeCount(row.season) || type !== 'tv')) return undefined;
+  const coordinate = row.season === undefined ? `${type}:${id}` : `${type}:${id}:${row.season}`;
+  if (row.kind === 'season') return row.season === undefined ? undefined : `season:${coordinate}`;
+  const { provider, account } = row;
+  if (typeof provider !== 'string' || !provider || provider.includes(':')) return undefined;
+  if (typeof account !== 'string' || !/^[A-Za-z0-9_-]+$/.test(account)) return undefined;
+  return `dlv:${provider}:${account}:${coordinate}`;
+}
 
 /** The name a row's key is the HMAC of. */
 export function rowName(row: Row): string {
-  if (isDocument(row)) {
-    const known = documentNames.get(row);
-    if (known) return known;
-    const name = syncPolicy<string>({ op: 'doc_name', document: row });
-    documentNames.set(row, name);
-    return name;
-  }
+  if (isDocument(row))
+    return documentName(row) ?? syncPolicy<string>({ op: 'doc_name', document: row });
   if (row.kind === 'set') return `set:${row.name}`;
   const title = `${row.title.type}:${row.title.id}`;
   return row.kind === 'rec' ? `rec:${title}` : `ep:${title}:${row.season}:${row.episode}`;

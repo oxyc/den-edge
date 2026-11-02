@@ -139,6 +139,8 @@
     wireMinimum: 4,
     pendingActions: 0,
     rows: (): Row[] => [...held.values()],
+    storedRows: (): Row[] => [...held.values()],
+    documentNamed: () => undefined,
     settings: (name: string) => held.get(`set:${name}`),
     seqOf: () => 0,
     newestStamp: newest,

@@ -9,7 +9,7 @@ import { checkSeasonProjection } from './season-projection-parity.mjs';
 verifyTvCore();
 for (const [name, maximum] of [
   ['den_core_bg.wasm', 1_000_000],
-  ['den_core_startup_bg.wasm', 450_000],
+  ['den_core_startup_bg.wasm', 555_000],
   ['den_core_deferred_bg.wasm', 900_000],
   ['den_core_assistant_bg.wasm', 550_000],
   ['den_core_recovery_bg.wasm', 140_000],
@@ -43,6 +43,11 @@ const cores = await Promise.all(
       if (request.op.startsWith('assistant_'))
         return JSON.parse(assistant.evaluateAssistant(input));
       if (request.op === 'recovery_derive') return JSON.parse(recovery.evaluateRecovery(input));
+      // The column index is the startup module's alone: the full core refuses it.
+      if (request.op === 'library_columns') {
+        assert.equal(JSON.parse(main.evaluate(input)).error, 'invalid_request', request.op);
+        return JSON.parse(startup.evaluateStartup(input));
+      }
       const full = JSON.parse(main.evaluate(input));
       const split = JSON.parse(
         lifecycle.isStartupOperation(request.op)

@@ -19,6 +19,7 @@ import {
 } from './downloadRows';
 import { wantedItems, type WantedStatus } from './hearthWanted';
 import { applyLog, contentWatched, emptyLibrary } from './library';
+import { projectDocument } from './libraryV4';
 import { syncPolicy } from './syncCore';
 import { ensureDeferredSyncPolicy } from './syncLoader';
 import { answerOf, rankable, type SourceAnswer, type TitleSource } from './titleSources';
@@ -342,7 +343,19 @@ export class DownloadCoordinatorDriver {
     }
 
     if (current() && this.#stillHeld(now)) {
-      const library = applyLog(emptyLibrary(), this.queue.log.rows());
+      // Only the downloaded titles' documents decide whether they were watched: a title's and its episode's season's.
+      const log = this.queue.log;
+      const names = new Set(
+        decided.flatMap(({ title }) => [
+          `title:${title.mediaType}:${title.mediaId}`,
+          ...(title.season !== undefined ? [`season:tv:${title.mediaId}:${title.season}`] : []),
+        ]),
+      );
+      const rows = [...names].flatMap((name) => {
+        const document = log.documentNamed(name);
+        return document ? projectDocument(document, now) : [];
+      });
+      const library = applyLog(emptyLibrary(), rows);
       const watched: Record<string, boolean> = {};
       for (const download of decided)
         if (

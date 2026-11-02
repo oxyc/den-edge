@@ -301,7 +301,7 @@ describe('LibraryLogAuthority', () => {
     },
   );
 
-  it('asks den-core about each document once whether History opens alone or after Home', async () => {
+  it('reads Home and History from the held index, asking den-core about no single document', async () => {
     await ensureSyncPolicy();
     const stamp = (at: number): [number, number, string] => [at, 0, 'aaaaaaaaaaaaaaaa'];
     const episode = (value: number, at: number) => ({
@@ -378,7 +378,7 @@ describe('LibraryLogAuthority', () => {
     const history = await visit(['history']);
     const home = await visit(['overview', 'continue']);
     const homeThenHistory = await visit(['overview', 'continue', 'history']);
-    expect(history.calls).toEqual({ title_state: 2, season_state_v4: 2 });
+    expect(history.calls).toEqual({});
     expect(home.calls).toEqual(history.calls);
     expect(homeThenHistory.calls).toEqual(history.calls);
     expect(homeThenHistory.values.slice(0, 2)).toEqual(home.values);

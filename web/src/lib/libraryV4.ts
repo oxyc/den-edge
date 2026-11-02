@@ -7,7 +7,6 @@ import { WATCHED } from './actions';
 import { syncPolicy } from './syncCore';
 import {
   compareStamps,
-  newestSummary,
   ZERO_STAMP,
   type DocumentRow,
   type EpisodeRow,
@@ -31,8 +30,6 @@ const sorted = (value: unknown) =>
       : v,
   );
 
-const projected = new WeakMap<DocumentRow, { rows: Row[]; at: number; reconsiderAt: number }>();
-
 interface EpisodeState {
   watched: boolean;
   resume: EpisodeRow['progress'] | null;
@@ -45,14 +42,10 @@ interface EpisodeState {
  * document as its individual `ep` projections. A delivery document has no row to show.
  */
 export function projectDocument(document: DocumentRow, now = Date.now()): Row[] {
-  const known = projected.get(document);
-  if (known && now >= known.at && now < known.reconsiderAt) return known.rows;
-  const reconsiderAt = newestSummary(document, now).reconsiderAt ?? Infinity;
   const rows: Row[] = [];
   if (document.kind === 'title') rows.push(projectTitle(document, now));
   else if (document.kind === 'season')
     forEachProjectedEpisode(document, (row) => rows.push(row), now);
-  projected.set(document, { rows, at: now, reconsiderAt });
   return rows;
 }
 
@@ -65,13 +58,6 @@ export function forEachProjectedEpisode(
   visit: (row: EpisodeRow) => void,
   now: number,
 ): void {
-  // Reuse a projection another consumer already paid for (for example Home immediately before History). Consumers
-  // that arrive first still stream directly and never retain an episode-row array merely to fold it.
-  const known = projected.get(document);
-  if (known && now >= known.at && now < known.reconsiderAt) {
-    for (const row of known.rows) if (row.kind === 'ep') visit(row);
-    return;
-  }
   const season = document.season ?? 0;
   const states = syncPolicy<Record<string, EpisodeState>>({
     op: 'season_state_v4',

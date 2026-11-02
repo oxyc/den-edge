@@ -7,6 +7,7 @@
   import type { LibraryLog } from '../src/lib/log';
   import { legacyProfileSession } from '../src/lib/profileSession.svelte';
   import type { Row, SettingsRow, Stamp, TitleRow } from '../src/lib/wire';
+  import { fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
   import { fixtureContentServiceContext } from './contentService';
   import '../src/app.css';
@@ -71,6 +72,7 @@
     refresh: async () => false,
     readToHead: async () => true,
     rows: () => rows,
+    ...fixtureLog(() => rows),
     seqOf: () => 0,
     newestStamp: () => at,
     title: (ref: { type: string; id: number }) =>
