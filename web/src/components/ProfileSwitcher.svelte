@@ -15,6 +15,8 @@
   let pin = $state('');
   let denied = $state(false);
   let failed = $state(false);
+  /** Why the last switch failed, when it said. */
+  let reason = $state<string | null>(null);
   let switching = $state(false);
   let pending = $state<ProfileChoice | null>(null);
   // The first switch to Kid with no Owner PIN yet sets one: entered, then entered again.
@@ -36,6 +38,7 @@
   function show(opener: HTMLElement, restoreFocus: boolean) {
     denied = false;
     failed = false;
+    reason = null;
     pin = '';
     pending = null;
     settingPin = false;
@@ -62,6 +65,9 @@
     switching = true;
     denied = false;
     failed = false;
+    reason = null;
+    // Only a switch that asked for the PIN is refused for it; any other refusal is a switch that failed.
+    const askedPin = profiles.requiresPin(choice.role);
     try {
       const switched =
         choice.role === 'owner'
@@ -73,8 +79,14 @@
         dialog?.close();
         return;
       }
-      denied = true;
-    } catch {
+      if (askedPin) denied = true;
+      else {
+        console.error(`den: the switch to ${choice.name} was refused`);
+        failed = true;
+      }
+    } catch (error) {
+      console.error(`den: the switch to ${choice.name} failed`, error);
+      reason = error instanceof Error ? error.message : null;
       failed = true;
     } finally {
       switching = false;
@@ -106,7 +118,9 @@
     let saved: boolean;
     try {
       saved = await profiles.setOwnerPin(value);
-    } catch {
+    } catch (error) {
+      console.error('den: the Owner PIN could not be saved', error);
+      reason = error instanceof Error ? error.message : null;
       saved = false;
     } finally {
       switching = false;
@@ -186,6 +200,7 @@
   onclose={() => {
     denied = false;
     failed = false;
+    reason = null;
     pending = null;
     settingPin = false;
     firstPin = null;
@@ -209,7 +224,8 @@
     <h2 id="profile-switcher-title">Who’s watching?</h2>
     {#if failed}<p class="denied" role="alert">
         The profile switch couldn’t be completed. Try again.
-      </p>{/if}
+      </p>
+      {#if reason}<p class="reason">{reason}</p>{/if}{/if}
     {#if pending && settingPin}
       <button
         class="back"
@@ -464,6 +480,10 @@
 
   .denied {
     color: var(--bad, #ff9a9a);
+  }
+
+  .reason {
+    font-size: 12px;
   }
 
   .preview-pin {

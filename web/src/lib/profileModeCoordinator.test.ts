@@ -855,6 +855,42 @@ describe('ProfileModeCoordinator', () => {
     expect(models.handles[1]!.close).not.toHaveBeenCalled();
   });
 
+  it('fails a switch whose library cannot open with that cause, not as a refused PIN', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
+    );
+    const ownerOpening = deferred<unknown>();
+    const kidOpening = deferred<unknown>();
+    const models = profileModels(
+      new Map([
+        [ownerProfile.libraryKey, ownerOpening],
+        [kid.libraryKey, kidOpening],
+      ]),
+    );
+    const directory = profileDirectoryChoices(view)!;
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    ownerOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+
+    const kidChoice = directory.profiles.find((choice) => choice.role === 'kid')!;
+    const switching = first.coordinator.switchToPersistent(kidChoice.id!);
+    await vi.waitFor(() => expect(models.handles).toHaveLength(2));
+    const unavailable = new Error('library service startup timed out');
+    kidOpening.reject(unavailable);
+
+    await expect(switching).rejects.toMatchObject({
+      message: expect.stringContaining('library could not be opened'),
+      cause: unavailable,
+    });
+    expect(first.coordinator.mode).toBe('owner');
+    expect(models.handles[1]!.close).toHaveBeenCalledOnce();
+  });
+
   it('keeps Kid active until Owner is ready, then commits the marker and closes only Kid activity', async () => {
     const storage = memoryStorage();
     const view = realDirectoryView();
