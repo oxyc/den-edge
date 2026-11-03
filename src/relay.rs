@@ -4219,6 +4219,23 @@ mod tests {
         assert!(!received.recv().await.unwrap().1.contains_key("x-den-early-answer"));
         h.send("GET", "/scout/cfg/stream/movie/tt1.json", None, &[lan]).await;
         assert!(!received.recv().await.unwrap().1.contains_key("x-den-early-answer"));
+
+        // A viewer's Play through Hearth carries it too, for Hearth to ask its own list early.
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("edge-secret".into());
+        let play = h
+            .send(
+                "POST",
+                "/den/cfg/playback",
+                Some("{}".into()),
+                &[lan, ("content-type", "application/json"), ("x-den-early-answer", "1")],
+            )
+            .await;
+        assert_eq!(play.status(), StatusCode::OK);
+        let (asked, headers) = received.recv().await.unwrap();
+        assert!(asked.ends_with("/playback"), "{asked}");
+        assert_eq!(headers["x-den-early-answer"], "1");
     }
 
     #[tokio::test]

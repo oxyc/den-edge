@@ -19,6 +19,12 @@ export interface SourceAnswer {
   outage?: { builtAt: number };
 }
 
+/**
+ * The request header saying a viewer is waiting on a stream list (the Sources panel) or a Play: scout, directly or
+ * through Hearth's `/playback`, may answer before its slowest indexer (`fetchSourceList`'s `early`).
+ */
+export const EARLY_ANSWER_HEADER = 'X-Den-Early-Answer';
+
 const answerKinds = new Set(['live', 'partial', 'empty', 'unknown', 'stale']);
 // A source that answered, or that can never be asked, is not one the list is waiting on.
 const notMissing = new Set(['answered', 'skipped_misconfigured', 'quarantined']);

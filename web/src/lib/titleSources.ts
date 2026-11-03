@@ -3,7 +3,7 @@ import { releaseIdentity } from './downloadRows';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
 import { retryAfterMs } from './retryAfter';
-import { parseAnswer, type SourceAnswer } from './sourceAnswer';
+import { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 
 export interface TitleSource {
   filename: string;
@@ -113,10 +113,7 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
   });
 }
 
-export { parseAnswer, type SourceAnswer } from './sourceAnswer';
-
-/** The request header asking scout for an early stream list (`fetchSourceList`'s `early`). */
-export const EARLY_ANSWER_HEADER = 'X-Den-Early-Answer';
+export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 
 /**
  * Scout's list for a title and what it says about it; `sources` is null when scout could not be reached.

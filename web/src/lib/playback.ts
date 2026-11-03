@@ -4,6 +4,7 @@
 import { retryAfterMs } from './retryAfter';
 import { relayFetch } from './relayFetch';
 import type { Failure, Session, Want } from './remux';
+import { EARLY_ANSWER_HEADER } from './sourceAnswer';
 import { directSubtitles } from './directSubtitles';
 import { apiUrl, serviceOrigin } from './runtimeUrl';
 import { debridPlayCodeOf, type DebridPlayCode } from './debridStatus';
@@ -380,6 +381,9 @@ export async function startPlayback(
           accept: 'application/json',
           'content-type': 'application/json',
           'idempotency-key': idempotencyKey,
+          // A viewer pressed Play: Hearth may choose from a stream list that went out before the slowest indexer,
+          // and asks again for every indexer before it says nothing plays (`fetchSourceList`'s `early`).
+          [EARLY_ANSWER_HEADER]: '1',
         },
         body,
         cache: 'no-store',

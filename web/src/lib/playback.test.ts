@@ -144,6 +144,8 @@ describe('startPlayback', () => {
     expect(new Headers(init.headers).get('idempotency-key')).toBe(
       '00000000-0000-4000-8000-000000000001',
     );
+    // A viewer pressed Play: Hearth may choose from a list sent before the slowest indexer.
+    expect(new Headers(init.headers).get('x-den-early-answer')).toBe('1');
     expect(init.cache).toBe('no-store');
   });
 
