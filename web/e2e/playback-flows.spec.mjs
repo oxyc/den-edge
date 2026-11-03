@@ -378,8 +378,11 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
     const onRemux = await playsFrom(video, 'lan.test', from);
     expect(onRemux).toBeGreaterThan(at - 1);
     expect(onRemux).toBeLessThan(at + 15);
-    expect(segmentHostsSince(from)).toEqual(new Set(['lan.test']));
+    // The session being replaced plays on until the new one is adopted ("this one carries on"), so it may fetch a
+    // segment or two after the switch began. Once the new one plays, the old one fetches nothing more.
+    let since = served.length;
     await playingPast(video, onRemux + 1);
+    expect(segmentHostsSince(since).has('flux.wnam.tb-cdn.io')).toBe(false);
 
     // Den Remux → TorBox: TorBox alone, so Hearth can't answer with a Remux session in the playing one's slot.
     from = served.length;
@@ -394,8 +397,9 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
     const onTorbox = await playsFrom(video, 'flux.wnam.tb-cdn.io', from);
     expect(onTorbox).toBeGreaterThan(back - 1);
     expect(onTorbox).toBeLessThan(back + 15);
-    expect(segmentHostsSince(from)).toEqual(new Set(['flux.wnam.tb-cdn.io']));
+    since = served.length;
     await playingPast(video, onTorbox + 1);
+    expect(segmentHostsSince(since).has('lan.test')).toBe(false);
   } finally {
     await browser.close();
   }
