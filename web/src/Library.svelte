@@ -852,23 +852,17 @@
     void newEpisodesVersion;
     return unstartedEpisodes.filter((episode) => newEpisodes.has(episode));
   });
-  const newEntry = (released: NewEpisode): ContinueEntry | undefined => {
-    const title = session.displayTitle({ type: 'tv', id: released.series });
-    return title
-      ? { title, fraction: 0, episode: { season: released.season, episode: released.episode } }
-      : undefined;
-  };
   /**
    * The resume points playback and title actions act on. A series waiting for an episode not out yet has none: it is
    * on the shelf (`continueShelfEntries`), captioned with the day, and opens its page.
    */
   const continueEntries = $derived(
-    withNewEpisodes(continuePresentation.entries, newEpisodeList, newEntry).filter(
+    withNewEpisodes(continuePresentation.entries, newEpisodeList).filter(
       (entry) => !entry.upcoming,
     ),
   );
   const continueShelfEntries = $derived(
-    withNewEpisodes(continuePresentation.shelf, newEpisodeList, newEntry),
+    withNewEpisodes(continuePresentation.shelf, newEpisodeList),
   );
   /** The billboard's lead slides: each new episode's series, "New episode · S2E1" with Play. */
   const newEpisodeSlides = $derived(

@@ -275,36 +275,48 @@ describe('new episodes', () => {
     expect(news.has(episode)).toBe(false);
   });
 
-  it('leads Continue Watching with the series, marked new', () => {
+  it('leads Continue Watching with a series caught up to its new season, marked new', () => {
     const other = { title: { type: 'movie', id: 1 }, fraction: 0.4 };
+    // Season 1 finished: the library offers S2E1, the episode just out.
     const caughtUp = {
       title: { type: 'tv', id: DEXTER },
       fraction: 0,
-      episode: { season: 1, episode: 10 },
+      episode: { season: 2, episode: 1 },
     };
     const news = [{ series: DEXTER, season: 2, episode: 1 }];
-    expect(withNewEpisodes([other, caughtUp], news, () => undefined)).toEqual([
-      { ...caughtUp, episode: { season: 2, episode: 1 }, isNew: true },
-      other,
-    ]);
-    // Not in Continue Watching yet: TMDB had not dated it out, so the library saw nothing to continue.
-    expect(
-      withNewEpisodes([other], news, (one) => ({
-        title: { type: 'tv', id: one.series },
-        fraction: 0,
-        episode: { season: one.season, episode: one.episode },
-      })),
-    ).toEqual([
-      {
-        title: { type: 'tv', id: DEXTER },
-        fraction: 0,
-        episode: { season: 2, episode: 1 },
-        isNew: true,
-      },
-      other,
-    ]);
+    expect(withNewEpisodes([other, caughtUp], news)).toEqual([{ ...caughtUp, isNew: true }, other]);
     const list = [other];
-    expect(withNewEpisodes(list, [], () => undefined)).toBe(list);
+    expect(withNewEpisodes(list, [])).toBe(list);
+  });
+
+  it('leaves a series the viewer is part way through where their own activity put it', () => {
+    const GREYS = 1416;
+    const recent = { title: { type: 'movie', id: 1 }, fraction: 0.4 };
+    // Grey's Anatomy, left at S10E3 years ago, while S22E5 comes out.
+    const greys = {
+      title: { type: 'tv', id: GREYS },
+      fraction: 0,
+      episode: { season: 10, episode: 3 },
+    };
+    expect(withNewEpisodes([recent, greys], [{ series: GREYS, season: 22, episode: 5 }])).toEqual([
+      recent,
+      greys,
+    ]);
+    // On S4E2 (part way, or next) when S4E5 comes out: S4E3 and S4E4 are aired and unwatched.
+    for (const fraction of [0, 0.4]) {
+      const behind = {
+        title: { type: 'tv', id: GREYS },
+        fraction,
+        episode: { season: 4, episode: 2 },
+      };
+      expect(withNewEpisodes([recent, behind], [{ series: GREYS, season: 4, episode: 5 }])).toEqual(
+        [recent, behind],
+      );
+    }
+    // Not on the row at all is not caught up either: nothing is added.
+    expect(withNewEpisodes([recent], [{ series: GREYS, season: 22, episode: 5 }])).toEqual([
+      recent,
+    ]);
   });
 
   it('is no longer waiting once the episode it waited for is new', () => {
@@ -314,9 +326,7 @@ describe('new episodes', () => {
       episode: { season: 2, episode: 2 },
       upcoming: '2026-11-06',
     };
-    expect(
-      withNewEpisodes([waiting], [{ series: DEXTER, season: 2, episode: 2 }], () => undefined),
-    ).toEqual([
+    expect(withNewEpisodes([waiting], [{ series: DEXTER, season: 2, episode: 2 }])).toEqual([
       { title: waiting.title, fraction: 0, episode: { season: 2, episode: 2 }, isNew: true },
     ]);
   });

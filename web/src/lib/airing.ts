@@ -376,40 +376,35 @@ export class NewEpisodes {
 }
 
 /**
- * Continue Watching with each new episode's series first, marked new. A series already there keeps its entry and
- * moves up — to the new episode unless it is part way into another; one that is not there (TMDB had not dated the
- * episode out yet, so the library saw nothing to continue) is added by `make`.
+ * Continue Watching with the series caught up to a new episode first, marked new. Caught up is the library's own
+ * answer (den-core `continue_entry`): the entry offers the episode after the one finished last, so an entry on the
+ * new episode has nothing aired before it left unwatched. A series whose entry is any other episode — still on S4E2
+ * when S4E5 comes out — is left where the viewer's own activity puts it, unmarked.
  */
 export function withNewEpisodes<
   E extends {
     title: { type: string; id: number };
-    fraction: number;
     episode?: { season: number; episode: number };
     isNew?: true;
     upcoming?: string;
   },
->(
-  entries: readonly E[],
-  news: readonly NewEpisode[],
-  make: (news: NewEpisode) => E | undefined,
-): E[] {
+>(entries: readonly E[], news: readonly NewEpisode[]): E[] {
   if (!news.length) return entries as E[];
   const lead: E[] = [];
   const taken = new Set<number>();
   for (const one of news) {
     if (taken.has(one.series)) continue;
     const held = entries.find(
-      (entry) => entry.title.type === 'tv' && entry.title.id === one.series,
+      (entry) =>
+        entry.title.type === 'tv' &&
+        entry.title.id === one.series &&
+        entry.episode?.season === one.season &&
+        entry.episode.episode === one.episode,
     );
-    const entry = held
-      ? held.fraction > 0
-        ? held
-        : { ...held, episode: { season: one.season, episode: one.episode }, fraction: 0 }
-      : make(one);
-    if (!entry) continue;
+    if (!held) continue;
     taken.add(one.series);
     // An entry waiting for an episode is not waiting once one is out.
-    const { upcoming: _waiting, ...out } = entry;
+    const { upcoming: _waiting, ...out } = held;
     lead.push({ ...out, isNew: true } as E);
   }
   return [
