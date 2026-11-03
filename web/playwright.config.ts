@@ -54,6 +54,7 @@ export default defineConfig({
     'big-library-budgets.spec.mjs',
     'big-library-first-open.spec.mjs',
     'big-library-edit.spec.mjs',
+    'big-library-airing.spec.mjs',
     ...PRODUCTION_BUILD_SPECS,
   ],
   timeout: 120_000,

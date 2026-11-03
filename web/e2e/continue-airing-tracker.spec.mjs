@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { assistantRows } from './big-library.mjs';
 import { CODE, newEdge, routeGuestEdge } from './guest-edge.mjs';
-import { routeTmdb } from './network.mjs';
+import { airingBatch, routeTmdb } from './network.mjs';
 
 test.use({ timezoneId: 'America/Sao_Paulo' });
 
@@ -57,7 +57,7 @@ const dexter = {
   aggregate_credits: { cast: [] },
   recommendations: { results: [] },
 };
-/** den-atlas's live answers (`GET /airing/tv/{id}`). Tracker's S4E5 stays `next` on its own release day. */
+/** den-atlas's live answers (`POST /airing`). Tracker's S4E5 stays `next` on its own release day. */
 const AIRING = {
   [TRACKER]: {
     next: {
@@ -92,8 +92,12 @@ const AIRING = {
 /** The first of the series the library has watched an episode of besides these two (`seed`). */
 const OTHER = 900001;
 
-/** TMDB and atlas as recorded for Tracker and Dexter; every other series is a named one atlas does not know. */
+/**
+ * TMDB and atlas as recorded for Tracker and Dexter; every other series is a named one atlas does not know. Returns
+ * how many series each `POST /airing` named.
+ */
 async function routeSeries(page, { airingDelayMs = 0 } = {}) {
+  const airingPosts = [];
   await routeTmdb(page, (route) => {
     const path = new URL(route.request().url()).pathname;
     const season = path.match(/\/tv\/(\d+)\/season\/(\d+)$/);
@@ -133,6 +137,11 @@ async function routeSeries(page, { airingDelayMs = 0 } = {}) {
     const url = new URL(route.request().url());
     if (url.pathname === '/atlas/manifest.json')
       return route.fulfill({ json: { id: 'com.den.atlas', name: 'Atlas', catalogs: [] } });
+    if (url.pathname === '/atlas/airing') {
+      airingPosts.push(route.request().postDataJSON().series.length);
+      if (airingDelayMs) await new Promise((resolve) => setTimeout(resolve, airingDelayMs));
+      return route.fulfill({ json: airingBatch(route.request(), (tmdb) => AIRING[tmdb]) });
+    }
     const series = url.pathname.match(/^\/atlas\/airing\/tv\/(\d+)$/)?.[1];
     if (series && AIRING[series]) {
       if (airingDelayMs) await new Promise((resolve) => setTimeout(resolve, airingDelayMs));
@@ -148,6 +157,7 @@ async function routeSeries(page, { airingDelayMs = 0 } = {}) {
     });
   });
   await page.route(`${E2E_ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
+  return airingPosts;
 }
 
 /**
@@ -257,7 +267,7 @@ test('Home lists the followed series’ episodes this week for a library followi
   page,
 }) => {
   await page.clock.install({ time: NOW });
-  await routeSeries(page);
+  const airingPosts = await routeSeries(page);
   // More followed series than one request to the content worker may name (its wire's 512 titles).
   await seed(page, { others: 520 });
   await page.goto(`${E2E_ORIGIN}/`);
@@ -270,4 +280,8 @@ test('Home lists the followed series’ episodes this week for a library followi
   await expect(week.locator(`a[href*="/tv/${DEXTER}-dexter-resurrection"]`)).toContainText(
     'S2 · E2 · Fri, Nov 6',
   );
+  // All 522 asked once, a request's worth (at most 512) at a time, not one request each.
+  expect(airingPosts.reduce((sum, n) => sum + n, 0)).toBe(522);
+  expect(Math.max(...airingPosts)).toBeLessThanOrEqual(512);
+  expect(airingPosts.length).toBeLessThanOrEqual(4);
 });

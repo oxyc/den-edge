@@ -1,4 +1,5 @@
-// Episode release dates from den-atlas's `POST /airing` (TVmaze's schedule): the one date every series surface reads.
+// Episode release dates from den-atlas's `GET /airing/tv/{id}` (TVmaze's schedule): the one date every series surface
+// reads.
 //
 // TMDB dates an episode by its broadcaster's slot, which for a streaming release is often days late (Dexter:
 // Resurrection S2E1 was on Paramount+ on Friday 30 Oct; TMDB said Sunday 1 Nov). Atlas answers with TVmaze's
@@ -35,13 +36,13 @@ export interface AiringSeries {
   imdb?: string;
 }
 
-/**
- * Series asked for at once. One `GET /airing/tv/{id}` per series, so each answer is shared by every HTTP cache in front
- * of atlas; this bounds how many of a large library's are in flight together.
- */
-export const AIRING_CONCURRENCY = 6;
 /** How long an answer is kept when it names no `max-age`. */
 export const AIRING_MAX_AGE_SECONDS = 3600;
+/**
+ * The longest an answer is kept. Atlas keeps a settled series (ended with nothing dated ahead, or one TVmaze has no
+ * show for) fresh for five to nine days, which is what spares a large library most of its requests.
+ */
+export const AIRING_LONGEST_SECONDS = 10 * 86_400;
 
 const STATUSES = new Set<AiringStatus>(['running', 'ended', 'tbd', 'development', 'unknown']);
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -103,8 +104,35 @@ export function airingPath(series: AiringSeries): string {
 export function airingMaxAge(cacheControl: string | null): number {
   if (/(?:^|,)\s*no-store/i.test(cacheControl ?? '')) return 0;
   const match = /(?:^|,)\s*max-age=(\d+)/i.exec(cacheControl ?? '');
-  const seconds = match ? Number(match[1]) : AIRING_MAX_AGE_SECONDS;
-  return Math.min(Math.max(seconds, 60), 86_400);
+  return airingKeptFor(match ? Number(match[1]) : AIRING_MAX_AGE_SECONDS);
+}
+
+/** Seconds an answer atlas said may be kept `seconds` is kept: at least a minute, at most `AIRING_LONGEST_SECONDS`. */
+export function airingKeptFor(seconds: number): number {
+  return Math.min(Math.max(seconds, 60), AIRING_LONGEST_SECONDS);
+}
+
+/** One series' answer and how many seconds it may be kept. */
+export interface AiringAnswer {
+  airing: Airing | null;
+  maxAge: number;
+}
+
+/**
+ * Atlas's `POST /airing` answer, by TMDB id. A series whose first lookup is still running (`pending`) is left out, so
+ * it is asked again on the next pass; so is anything atlas would not send.
+ */
+export function parseAiringBatch(value: unknown): Map<number, AiringAnswer> {
+  const answers = new Map<number, AiringAnswer>();
+  const list = record(value) && Array.isArray(value.airing) ? value.airing : [];
+  for (const one of list.slice(0, 1024)) {
+    if (!record(one) || !Number.isSafeInteger(one.tmdb) || (one.tmdb as number) <= 0) continue;
+    if (one.pending === true || typeof one.maxAge !== 'number') continue;
+    const airing = one.airing === null ? null : parseAiring(one.airing);
+    if (airing === undefined) continue;
+    answers.set(one.tmdb as number, { airing, maxAge: airingKeptFor(one.maxAge) });
+  }
+  return answers;
 }
 
 interface Kept {
@@ -113,9 +141,9 @@ interface Kept {
 }
 
 /**
- * Atlas's answers, each kept for as long as its answer said. A series atlas does not know is kept as `null` for the
- * same time (atlas answers it 404), so it is not asked again on every visit. A failed request keeps whatever was held
- * before it. This only saves the round trip: each answer is also an ordinary cacheable GET.
+ * Atlas's answers, each kept for as long as its answer said: hours while a series can still move, days once it is
+ * settled. A series atlas does not know is kept as `null` for the same time, so it is not asked again on every visit.
+ * A failed request keeps whatever was held before it.
  */
 export class AiringCache {
   readonly #kept = new Map<string, Kept>();
@@ -123,13 +151,14 @@ export class AiringCache {
   constructor(private readonly now: () => number = Date.now) {}
 
   /**
-   * The answers for `series` from `atlas`, asking only for those not held fresh, `AIRING_CONCURRENCY` at a time.
-   * `null` when nothing could be asked and nothing is held.
+   * The answers for `series` from `atlas`, asking `ask` once for all of those not held fresh (`POST /airing`, or a
+   * lone series' cacheable GET). A series it leaves out is asked again next time. `null` when nothing could be asked
+   * and nothing is held.
    */
   async lookup(
     atlas: string,
     series: readonly AiringSeries[],
-    ask: (one: AiringSeries) => Promise<{ airing: Airing | null; maxAge: number }>,
+    ask: (stale: AiringSeries[]) => Promise<Map<number, AiringAnswer>>,
   ): Promise<Map<number, Airing> | null> {
     const key = (id: number) => `${atlas}\0${id}`;
     const wanted = new Map<number, AiringSeries>();
@@ -139,24 +168,22 @@ export class AiringCache {
       return (!kept || kept.expires <= this.now()) && !this.#asking.has(key(tmdb));
     });
     let failed = false;
-    let next = 0;
-    const settled = new Map<number, () => void>();
-    for (const { tmdb } of stale)
-      this.#asking.set(key(tmdb), new Promise<void>((resolve) => settled.set(tmdb, resolve)));
-    const worker = async () => {
-      for (let one = stale[next++]; one; one = stale[next++]) {
-        try {
-          const { airing, maxAge } = await ask(one);
-          this.#kept.set(key(one.tmdb), { value: airing, expires: this.now() + maxAge * 1000 });
-        } catch {
+    if (stale.length) {
+      const asked = ask(stale).then(
+        (answers) => {
+          for (const [tmdb, { airing, maxAge }] of answers)
+            if (wanted.has(tmdb))
+              this.#kept.set(key(tmdb), { value: airing, expires: this.now() + maxAge * 1000 });
+        },
+        () => {
           failed = true;
-        } finally {
-          this.#asking.delete(key(one.tmdb));
-          settled.get(one.tmdb)?.();
-        }
-      }
-    };
-    void Promise.all(Array.from({ length: Math.min(AIRING_CONCURRENCY, stale.length) }, worker));
+        },
+      );
+      const done = asked.finally(() => {
+        for (const { tmdb } of stale) this.#asking.delete(key(tmdb));
+      });
+      for (const { tmdb } of stale) this.#asking.set(key(tmdb), done);
+    }
     await Promise.all([...wanted.keys()].map((id) => this.#asking.get(key(id))));
     const found = new Map<number, Airing>();
     let held = false;

@@ -11,12 +11,15 @@ import {
   continueAiringFacts,
   localDay,
   parseAiring,
+  parseAiringBatch,
   releasedEpisode,
   seriesStatusBadge,
   thisWeek,
   withAiring,
   withNewEpisodes,
   type Airing,
+  type AiringAnswer,
+  type AiringSeries,
 } from './airing';
 import { airWindow } from './detailPresentation';
 import type { Episode } from './detail';
@@ -102,12 +105,23 @@ describe('one release date per episode', () => {
 });
 
 describe('AiringCache', () => {
-  it('keeps each answer for its max-age, a 404 included, and asks only stale series', async () => {
+  /** An asker answering every series it is given with `answer(tmdb)`, as atlas's `POST /airing` does. */
+  const answering = (answer: (tmdb: number) => AiringAnswer | undefined) =>
+    vi.fn(async (stale: AiringSeries[]) => {
+      const answers = new Map<number, AiringAnswer>();
+      for (const { tmdb } of stale) {
+        const one = answer(tmdb);
+        if (one) answers.set(tmdb, one);
+      }
+      return answers;
+    });
+
+  it('keeps each answer for its max-age, a 404 included, and asks only stale series, all at once', async () => {
     let now = 0;
     const cache = new AiringCache(() => now);
-    const ask = vi.fn(async ({ tmdb }: { tmdb: number }) => ({
+    const ask = answering((tmdb) => ({
       airing: tmdb === DEXTER ? airing : null,
-      maxAge: airingMaxAge('public, max-age=3600'),
+      maxAge: tmdb === DEXTER ? 3600 : 619_200,
     }));
     const first = await cache.lookup(
       '/atlas',
@@ -115,32 +129,29 @@ describe('AiringCache', () => {
       ask,
     );
     expect([...first!.keys()]).toEqual([DEXTER]);
-    expect(ask).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(ask.mock.calls[0]![0]).toEqual([{ tmdb: DEXTER }, { tmdb: 7 }]);
     now = 3_599_000;
     await cache.lookup('/atlas', [{ tmdb: DEXTER }, { tmdb: 7 }], ask);
-    expect(ask).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledTimes(1);
     now = 3_600_000;
-    await cache.lookup('/atlas', [{ tmdb: DEXTER }], ask);
-    expect(ask).toHaveBeenCalledTimes(3);
+    await cache.lookup('/atlas', [{ tmdb: DEXTER }, { tmdb: 7 }], ask);
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(ask.mock.calls[1]![0], 'the settled series is still fresh').toEqual([{ tmdb: DEXTER }]);
   });
 
-  it('joins a lookup already in flight and bounds how many are asked at once', async () => {
+  it('joins a lookup already in flight, asking each series once', async () => {
     const cache = new AiringCache();
-    let inFlight = 0,
-      most = 0;
-    const ask = vi.fn(async () => {
-      most = Math.max(most, ++inFlight);
+    const ask = vi.fn(async (stale: AiringSeries[]) => {
       await new Promise((resolve) => setTimeout(resolve, 1));
-      inFlight--;
-      return { airing, maxAge: 3600 };
+      return new Map(stale.map(({ tmdb }) => [tmdb, { airing, maxAge: 3600 }]));
     });
     const series = Array.from({ length: 20 }, (_, i) => ({ tmdb: i + 1 }));
     const [a, b] = await Promise.all([
       cache.lookup('/atlas', series, ask),
       cache.lookup('/atlas', series, ask),
     ]);
-    expect(ask).toHaveBeenCalledTimes(20);
-    expect(most).toBeLessThanOrEqual(6);
+    expect(ask).toHaveBeenCalledTimes(1);
     expect(a!.size).toBe(20);
     expect(b!.size).toBe(20);
   });
@@ -152,7 +163,11 @@ describe('AiringCache', () => {
       throw new Error('offline');
     };
     expect(await cache.lookup('/atlas', [{ tmdb: DEXTER }], failing)).toBeNull();
-    await cache.lookup('/atlas', [{ tmdb: DEXTER }], async () => ({ airing, maxAge: 60 }));
+    await cache.lookup(
+      '/atlas',
+      [{ tmdb: DEXTER }],
+      answering(() => ({ airing, maxAge: 60 })),
+    );
     now = 120_000;
     const stale = await cache.lookup('/atlas', [{ tmdb: DEXTER }], failing);
     expect(stale!.get(DEXTER)).toEqual(airing);
@@ -162,6 +177,9 @@ describe('AiringCache', () => {
     expect(airingMaxAge('public, max-age=3600')).toBe(3600);
     expect(airingMaxAge(null)).toBe(3600);
     expect(airingMaxAge('max-age=1')).toBe(60);
+    // A settled series is kept for days, as atlas says, up to ten.
+    expect(airingMaxAge('public, max-age=619200')).toBe(619_200);
+    expect(airingMaxAge('public, max-age=99999999')).toBe(864_000);
     // A 404 whose first lookup is still running.
     expect(airingMaxAge('no-store')).toBe(0);
   });
@@ -170,10 +188,26 @@ describe('AiringCache', () => {
     const cache = new AiringCache(() => 0);
     const ask = vi
       .fn()
-      .mockResolvedValueOnce({ airing: null, maxAge: airingMaxAge('no-store') })
-      .mockResolvedValueOnce({ airing, maxAge: 21_600 });
+      .mockResolvedValueOnce(new Map())
+      .mockResolvedValueOnce(new Map([[DEXTER, { airing, maxAge: 21_600 }]]));
     expect((await cache.lookup('/atlas', [{ tmdb: DEXTER }], ask))!.size).toBe(0);
     expect((await cache.lookup('/atlas', [{ tmdb: DEXTER }], ask))!.get(DEXTER)).toEqual(airing);
+  });
+
+  it('reads atlas’s batch: each answer with its freshness, a pending one left to ask again', () => {
+    const answers = parseAiringBatch({
+      airing: [
+        { tmdb: DEXTER, maxAge: 21_600, airing: dexter },
+        { tmdb: 1396, maxAge: 619_200, airing: null },
+        { tmdb: 2, pending: true },
+        { tmdb: -1, maxAge: 60, airing: null },
+        { tmdb: 3, maxAge: 60, airing: 'nonsense' },
+      ],
+    });
+    expect([...answers.keys()]).toEqual([DEXTER, 1396]);
+    expect(answers.get(DEXTER)).toEqual({ airing, maxAge: 21_600 });
+    expect(answers.get(1396)).toEqual({ airing: null, maxAge: 619_200 });
+    expect(parseAiringBatch(null).size).toBe(0);
   });
 
   it('reads atlas’s nulls as absent', () => {

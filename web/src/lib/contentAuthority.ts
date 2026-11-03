@@ -66,7 +66,9 @@ import {
   airingMaxAge,
   airingPath,
   parseAiring,
+  parseAiringBatch,
   type Airing,
+  type AiringAnswer,
   type AiringSeries,
 } from './airing';
 import { atlasHeadingOf } from './atlasHeading';
@@ -1612,9 +1614,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
 
   /**
    * Atlas's release dates for `series`, from the realm's one `airingCache`: only series not held fresh are asked
-   * for, one `GET /airing/tv/{id}` each. The answer is public and the same for every household, so it is asked
-   * without the profile's content policy in its query: one address per series is what lets Cloudflare, den-edge and
-   * the browser share it. Any failure leaves the page on TMDB's dates.
+   * for, all in one `POST /airing` — a household follows hundreds, and one GET each was hundreds of round trips and
+   * past den-edge's per-member budget. A lone series (a title page) is its `GET /airing/tv/{id}`, which is the same
+   * for every household and so asked without the profile's content policy: one address that Cloudflare, den-edge and
+   * the browser share. Any failure leaves the page on TMDB's dates.
    */
   async #atlasAiring(
     series: AiringSeries[],
@@ -1622,12 +1625,25 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   ): Promise<OptionalContent<Array<{ tmdb: number; airing: Airing }>>> {
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     if (!atlas) return { state: 'not-configured' };
-    const ask = async (one: AiringSeries) => {
-      const response = await this.#providerFetch(`${atlas}${airingPath(one)}`);
-      const maxAge = airingMaxAge(response.headers.get('cache-control'));
-      if (response.status === 404) return { airing: null, maxAge };
+    const ask = async (stale: AiringSeries[]): Promise<Map<number, AiringAnswer>> => {
+      if (stale.length === 1) {
+        const [one] = stale as [AiringSeries];
+        const response = await this.#providerFetch(`${atlas}${airingPath(one)}`);
+        const maxAge = airingMaxAge(response.headers.get('cache-control'));
+        if (response.status === 404)
+          return new Map(maxAge ? [[one.tmdb, { airing: null, maxAge }]] : []);
+        if (!response.ok) throw new Error(`atlas answered ${response.status}`);
+        return new Map([
+          [one.tmdb, { airing: parseAiring(await response.json()) ?? null, maxAge }],
+        ]);
+      }
+      const response = await this.#providerFetch(`${atlas}/airing`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ series: stale }),
+      });
       if (!response.ok) throw new Error(`atlas answered ${response.status}`);
-      return { airing: parseAiring(await response.json()) ?? null, maxAge };
+      return parseAiringBatch(await response.json());
     };
     try {
       const found = await this.#wait(airingCache.lookup(atlas, series, ask), signal);
