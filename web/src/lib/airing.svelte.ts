@@ -21,9 +21,9 @@ export class AiringStore {
   }
 
   /**
-   * Ask for `series`' dates. The worker asks atlas only for those it does not hold fresh; a failure changes nothing.
-   * Asked a request's worth at a time: one past the wire's title limit is refused whole, which left a library following
-   * more series than that with no dates at all.
+   * Ask for `series`' dates. The worker asks atlas only for those it does not hold fresh, in one request; a failure
+   * changes nothing. Asked a request's worth at a time: one past the wire's title limit (atlas's `POST /airing` takes
+   * the same 512) is refused whole, which left a library following more series than that with no dates at all.
    */
   async follow(series: readonly AiringSeries[]): Promise<void> {
     for (let at = 0; at < series.length; at += CONTENT_SERVICE_WIRE_LIMITS.titles) {

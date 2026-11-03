@@ -39,6 +39,20 @@ export async function routeHostGrantList(page, { libraryId, memberToken, grants 
   return calls;
 }
 
+/**
+ * Atlas's `POST /airing` answer for the series `request` names: `schedule(tmdb)` is that series' answer, or null when
+ * TVmaze has no show for it; `maxAge(tmdb, schedule)` how many seconds it may be kept (atlas's six hours by default).
+ */
+export function airingBatch(request, schedule, maxAge = () => 21_600) {
+  const { series } = request.postDataJSON();
+  return {
+    airing: series.map(({ tmdb }) => {
+      const airing = schedule(tmdb) ?? null;
+      return { tmdb, maxAge: maxAge(tmdb, airing), airing };
+    }),
+  };
+}
+
 /** `origin` is where the page is served from: the dev server's address, or a name a spec points at it. */
 export async function guardNetwork(target, origin = E2E_ORIGIN) {
   // Page-specific fixture mocks take precedence over this context-level fallback.
@@ -85,6 +99,8 @@ export async function guardNetwork(target, origin = E2E_ORIGIN) {
         headers: { 'cache-control': 'public, max-age=21600' },
         json: { error: 'not_found' },
       });
+    if (url.origin === origin && /\/atlas\/airing$/.test(url.pathname))
+      return route.fulfill({ json: airingBatch(route.request(), () => null) });
     // A series poster's fade looks up the series' IMDb id and asks scout's stream list for one episode
     // (`availability.svelte.ts`). Unless a spec answers, a fixture series has neither, and nothing fades.
     const seriesProbe =

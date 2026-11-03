@@ -21,6 +21,7 @@ export default defineConfig({
     'big-library-budgets.spec.mjs',
     'big-library-first-open.spec.mjs',
     'big-library-edit.spec.mjs',
+    'big-library-airing.spec.mjs',
   ],
   timeout: 300_000,
   // A budget is time on this machine: nothing else runs beside it.

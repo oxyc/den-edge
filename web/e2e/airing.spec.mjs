@@ -1,11 +1,12 @@
-// Episode release dates from atlas (`GET /airing/tv/{id}`, TVmaze's schedule) through the real app, with the clock on
+// Episode release dates from atlas (`GET /airing/tv/{id}` for one series, `POST /airing` for a followed library; TVmaze's
+// schedule) through the real app, with the clock on
 // Saturday 31 Oct 2026. Dexter: Resurrection's S2E1 was on Paramount+ on Friday 30 Oct while TMDB dated it by the
 // broadcaster's Sunday slot, 1 Nov. Every answer is a recorded fixture; nothing leaves the browser.
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge, routeGuestEdge } from './guest-edge.mjs';
-import { routeTmdb } from './network.mjs';
+import { airingBatch, routeTmdb } from './network.mjs';
 
 const ID = 259909;
 const IMDB = 'tt33043892';
@@ -48,11 +49,32 @@ const seasons = {
   ],
 };
 
-/** TMDB as recorded for the series, and atlas's manifest and airing answer for it; every other atlas route is 404. */
+/** A finished series the followed library has watched too, which TVmaze has no show for. */
+const ENDED = 1396;
+const ended = {
+  id: ENDED,
+  name: 'Breaking Bad',
+  first_air_date: '2008-01-20',
+  status: 'Ended',
+  poster_path: '/ended.jpg',
+  vote_average: 8.9,
+  vote_count: 9000,
+  seasons: [{ season_number: 1, name: 'Season 1', episode_count: 7 }],
+  last_episode_to_air: { season_number: 1, episode_number: 7 },
+  aggregate_credits: { cast: [] },
+  recommendations: { results: [] },
+};
+
+/**
+ * TMDB as recorded for the series, and atlas's manifest and airing answers for it (the GET for one series, the batch
+ * for a followed library); every other atlas route is 404. Returns each airing request, as `<METHOD> <path>` and, for
+ * the batch, the series it named.
+ */
 async function routeSeries(page) {
   const airing = [];
   await routeTmdb(page, (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path.endsWith(`/tv/${ENDED}`)) return route.fulfill({ json: ended });
     const season = path.match(new RegExp(`/tv/${ID}/season/(\\d+)$`));
     if (season)
       return route.fulfill({
@@ -68,6 +90,16 @@ async function routeSeries(page) {
     const url = new URL(route.request().url());
     if (url.pathname === '/atlas/manifest.json')
       return route.fulfill({ json: { id: 'com.den.atlas', name: 'Atlas', catalogs: [] } });
+    if (url.pathname === '/atlas/airing' && route.request().method() === 'POST') {
+      const named = route
+        .request()
+        .postDataJSON()
+        .series.map(({ tmdb }) => tmdb);
+      airing.push(`POST /atlas/airing ${named.join(',')}`);
+      return route.fulfill({
+        json: airingBatch(route.request(), (tmdb) => (tmdb === ID ? AIRING : null)),
+      });
+    }
     if (url.pathname === `/atlas/airing/tv/${ID}`) {
       airing.push(`${route.request().method()} ${url.pathname}${url.search}`);
       return route.fulfill({
@@ -131,12 +163,13 @@ test('without atlas’s answer the page keeps TMDB’s dates', async ({ page }) 
 const HEARTH = `${E2E_ORIGIN}/den/hearthcfg/manifest.json`;
 
 /**
- * A library kept in this browser that has watched season 1, with the combined Den addon installed: its list for
- * S2E1 is empty until a fresh search (`?fresh=1`) finds a release. Every search for S2E1 is kept on the result.
+ * A library kept in this browser that has watched season 1, and all of a finished series, with the combined Den addon
+ * installed: its list for S2E1 is empty until a fresh search (`?fresh=1`) finds a release. Every search for S2E1 is
+ * kept on `searches`, every airing request on `airing`.
  */
 async function followedLibrary(page, { started = false, caughtUp = false } = {}) {
   const searches = [];
-  await routeSeries(page);
+  const airing = await routeSeries(page);
   await page.route(`${E2E_ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${E2E_ORIGIN}/routes`, (route) =>
     route.fulfill({ json: { v: 1, addons: { den: [{ url: `${E2E_ORIGIN}/den` }] } } }),
@@ -176,7 +209,7 @@ async function followedLibrary(page, { started = false, caughtUp = false } = {})
   await page.goto(`${E2E_ORIGIN}/test/seed-library.html`);
   await page.waitForFunction(() => typeof window.denSeed === 'function');
   await page.evaluate(
-    ({ install, id, started, caughtUp }) => {
+    ({ install, id, ended, started, caughtUp }) => {
       const at = [Date.now() - 86_400_000, 0, 'aaaaaaaaaaaaaaaa'];
       const progress = (value) => ({
         progress: { value, at, viewing: 0 },
@@ -219,11 +252,18 @@ async function followedLibrary(page, { started = false, caughtUp = false } = {})
           seasonReset: null,
           episodes: { 1: watched, 2: watched },
         },
+        {
+          format: 4,
+          kind: 'title',
+          title: { type: 'tv', id: ended },
+          status: { value: 'watched', at },
+          addedAt: Date.now() - 400 * 86_400_000,
+        },
       ]);
     },
-    { install: HEARTH, id: ID, started, caughtUp },
+    { install: HEARTH, id: ID, ended: ENDED, started, caughtUp },
   );
-  return searches;
+  return { searches, airing };
 }
 
 test('a caught-up series stays in Continue Watching while its next episode is due', async ({
@@ -231,7 +271,7 @@ test('a caught-up series stays in Continue Watching while its next episode is du
 }) => {
   await page.clock.setFixedTime(SATURDAY);
   // S2E1, the only episode of season 2 out, was watched yesterday; atlas dates S2E2 Friday 6 Nov.
-  await followedLibrary(page, { caughtUp: true });
+  const { airing } = await followedLibrary(page, { caughtUp: true });
   await page.goto(`${E2E_ORIGIN}/`);
 
   const shelf = page.locator('section, div').filter({
@@ -243,13 +283,20 @@ test('a caught-up series stays in Continue Watching while its next episode is du
   // Nothing of it is out to play: the card opens the series page.
   await expect(shelf.locator(`a[href="/tv/${ID}-dexter-resurrection"]`).first()).toBeVisible();
   await expect(page.locator('.billboard')).not.toContainText('New episode');
+  // Home asked for each followed series once: both in one batch, unless the library named them one at a time.
+  const asked = airing.flatMap((line) =>
+    line.startsWith('POST ')
+      ? line.split(' ')[2].split(',').map(Number)
+      : [Number(/\/tv\/(\d+)/.exec(line)?.[1])],
+  );
+  expect(asked.sort((a, b) => a - b)).toEqual([ENDED, ID]);
 });
 
 test('a followed series’ new episode leads the billboard and Continue Watching, marked new', async ({
   page,
 }) => {
   await page.clock.setFixedTime(SATURDAY);
-  const searches = await followedLibrary(page);
+  const { searches, airing } = await followedLibrary(page);
   await page.goto(`${E2E_ORIGIN}/`);
 
   // A fresh search, the list only, found S2E1: the billboard's first slide says so, with Play.
@@ -272,13 +319,14 @@ test('a followed series’ new episode leads the billboard and Continue Watching
   await expect(card).toContainText('New');
   // Found once is enough: the episode is not searched for afresh again while Home stays open.
   expect(searches.filter((search) => search === '?fresh=1')).toHaveLength(1);
+  expect(airing.some((asked) => asked.startsWith('POST /atlas/airing '))).toBe(true);
 });
 
 test('a new episode the viewer has started is not new: no slide, no badge, no search', async ({
   page,
 }) => {
   await page.clock.setFixedTime(SATURDAY);
-  const searches = await followedLibrary(page, { started: true });
+  const { searches } = await followedLibrary(page, { started: true });
   await page.goto(`${E2E_ORIGIN}/`);
   // It is simply being watched: Continue Watching resumes it, unbadged.
   const card = page.locator('.poster-card, a').filter({ hasText: 'S2 · E1' }).first();
