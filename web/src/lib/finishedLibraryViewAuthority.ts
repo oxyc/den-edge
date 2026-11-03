@@ -83,7 +83,7 @@ import {
   factViewIdentity,
   FinishedLibraryViewWriter,
 } from './finishedLibraryViewWriter';
-import { episodeRow, episodeRowNames, titleCoordinates, titleRow, titleView } from './titleView';
+import { episodeRow, episodeRowNames, laidOutCoordinates, titleRow, titleView } from './titleView';
 import {
   believe,
   deriveKeys,
@@ -353,7 +353,8 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       const names = new Set([
         `title:${ref.type}:${ref.id}`,
         `rec:${ref.type}:${ref.id}`,
-        ...titleCoordinates(ref, shape).flatMap(({ season, episode }) =>
+        // Every laid-out season's: the view lists an episode past TMDB's newest aired that has been watched.
+        ...laidOutCoordinates(ref, shape).flatMap(({ season, episode }) =>
           episodeRowNames(ref, season, episode),
         ),
       ]);

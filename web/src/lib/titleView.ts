@@ -46,8 +46,8 @@ export function episodeRow(
     : undefined;
 }
 
-/** Every aired episode of a series' shape, in order; none for a film or a series whose shape is not known yet. */
-export function titleCoordinates(
+/** Every episode of a series' shape, aired or not, in order; none for a film or a series whose shape is not known yet. */
+export function laidOutCoordinates(
   ref: TitleRef,
   shape: Shape | undefined,
 ): Array<{ season: number; episode: number }> {
@@ -57,8 +57,15 @@ export function titleCoordinates(
     .sort(([a], [b]) => a - b)
     .flatMap(([season, count]) =>
       Array.from({ length: count }, (_, index) => ({ season, episode: index + 1 })),
-    )
-    .filter((episode) => isAired(episode, shape.lastAired));
+    );
+}
+
+/** Every aired episode of a series' shape, in order; none for a film or a series whose shape is not known yet. */
+export function titleCoordinates(
+  ref: TitleRef,
+  shape: Shape | undefined,
+): Array<{ season: number; episode: number }> {
+  return laidOutCoordinates(ref, shape).filter((episode) => isAired(episode, shape?.lastAired));
 }
 
 const effectiveStanding = (
@@ -82,7 +89,12 @@ export function titleView(
   episode: (season: number, episode: number) => EpisodeRow | undefined,
   shape: Shape | undefined,
 ): TitleView {
-  const coordinates = titleCoordinates(ref, shape);
+  // The aired episodes, and one past TMDB's newest aired that the viewer has watched or started: atlas dated it out
+  // before TMDB counted it (`airing.ts`), and leaving it out hid the mark just made on it.
+  const coordinates = laidOutCoordinates(ref, shape).filter(
+    (at) =>
+      isAired(at, shape?.lastAired) || (episode(at.season, at.episode)?.progress.value ?? 0) > 0,
+  );
   const episodes = coordinates.map(({ season, episode: number }) => {
     const held = episode(season, number);
     const fraction = episodeProgress(held, row);
