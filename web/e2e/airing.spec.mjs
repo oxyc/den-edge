@@ -459,9 +459,14 @@ test('a season out at once leads for a viewer who finished the one before', asyn
     upcoming: [],
     seasonPremiere: { season: 2, date: '2026-10-30' },
   };
-  const { searches } = await followedLibrary(page, { recent: true, answer: drop, searched: 3 });
+  // S2E1 is what plays, so it is what is searched for and what the billboard names, never the finale.
+  const { searches } = await followedLibrary(page, { recent: true, answer: drop, searched: 1 });
   await page.goto(`${E2E_ORIGIN}/`);
-  await expectLeads(page, searches, 'S2E3', 'S2 · E1');
+  await expectLeads(page, searches, 'S2E1', 'S2 · E1');
+  await expect(page.locator('.billboard')).not.toContainText('S2E3');
+  await expect(
+    page.locator('.billboard .slide').first().getByRole('link', { name: 'Play', exact: true }),
+  ).toHaveAttribute('href', `/tv/${ID}-dexter-resurrection?play=1`);
 });
 
 test('a new episode the viewer has started is not new: no slide, no badge, no search', async ({

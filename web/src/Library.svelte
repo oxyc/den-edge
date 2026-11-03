@@ -776,31 +776,37 @@
   });
   /** Which released episodes have sources. Searched for afresh, never more than every half hour each. */
   const newEpisodes = new NewEpisodes();
-  /** Released episodes the viewer has not started, whose library row has been read. */
+  /**
+   * For each released episode a viewer is caught up to, the episode that plays: their Continue Watching entry, which
+   * is the released one itself week to week and where they are in a season that came out at once (S2E1, never the
+   * finale). It is what is searched for, and what the billboard and the row name. Only those not started, whose
+   * library row has been read.
+   */
   const unstartedEpisodes = $derived(
-    releasedEpisodes.filter((released) => {
+    releasedEpisodes.flatMap((released): NewEpisode[] => {
       const view = releasedViews.get(released.series)?.snapshot.value;
       // Both reads are needed to say it is unstarted: an unread one is no evidence, and searching on it is wasted.
       // A followed series' view lists its watched episodes once the library knows its layout; before that, neither it
       // nor Continue Watching can say whether the new one was started.
-      if (!view || !view.episodes.length || (!profileActivity && !continueView)) return false;
-      const same = (at: { season: number; episode: number } | undefined) =>
-        at?.season === released.season && at.episode === released.episode;
-      const row = view.episodes.find((item) => same(item));
-      // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
-      // Continue Watching's resume point instead.
+      if (!view || !view.episodes.length || (!profileActivity && !continueView)) return [];
       // Read before naming: an entry whose title is not named yet is already a resume point.
       const continued = (profileActivity?.continueWatching ?? continueView?.items ?? []).find(
         ({ title }) => title.type === 'tv' && title.id === released.series,
       );
-      const resuming = same(continued?.episode) && (continued?.fraction ?? 0) > 0;
+      const at = continued?.episode;
       // A viewer behind on the series is told of no new episode anywhere: not on the billboard, not on the row.
-      const behind = !caughtUpTo(continued?.episode, released, airings.get(released.series));
-      if (resuming || behind || (row && (row.watched || row.fraction > 0))) {
-        newEpisodes.clear(released);
-        return false;
+      if (!at || !caughtUpTo(at, released, airings.get(released.series))) return [];
+      const next = { series: released.series, season: at.season, episode: at.episode };
+      const row = view.episodes.find(
+        (item) => item.season === at.season && item.episode === at.episode,
+      );
+      // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
+      // Continue Watching's resume point instead.
+      if ((continued.fraction ?? 0) > 0 || (row && (row.watched || row.fraction > 0))) {
+        newEpisodes.clear(next);
+        return [];
       }
-      return true;
+      return [next];
     }),
   );
   let newEpisodesVersion = $state(0);
