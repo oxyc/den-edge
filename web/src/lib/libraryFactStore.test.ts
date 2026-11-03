@@ -163,6 +163,46 @@ describe('library fact store', () => {
     await expect(store.manifest()).resolves.toEqual(before);
   });
 
+  it('keeps a row den-edge acknowledged once: the read that reaches it moves only the cursor', async () => {
+    const vault = new MemoryVault();
+    const store = (await LibraryFactStore.open(libraryKey, vault))!;
+    await store.commitBatch(
+      'generation-a',
+      1,
+      [{ k: 'a'.repeat(64), seq: 1, value: 'one', row: title(1, 'watchlist', 10) }],
+      true,
+    );
+    const own = { k: 'b'.repeat(64), seq: 2, value: 'two', row: title(3, 'watched', 20) };
+    await store.keepRows('generation-a', [own]);
+    const kept = (await store.manifest())!;
+    const history = await store.history(kept);
+    expect(history).not.toBeNull();
+
+    const commit = vi.spyOn(vault, 'commit');
+    await store.commitBatch('generation-a', 2, [structuredClone(own)], true);
+    expect(
+      commit.mock.calls.flatMap(([changes]) =>
+        changes.map((change) => change.key.split(':').at(-1)),
+      ),
+    ).toEqual(['manifest']);
+    const read = (await store.manifest())!;
+    expect(read).toMatchObject({ head: 2, revision: kept.revision, rowsVersion: 2 });
+    await expect(store.history(read)).resolves.toEqual(history);
+
+    // A row that says something new is still kept with its read.
+    commit.mockClear();
+    await store.commitBatch(
+      'generation-a',
+      3,
+      [{ ...own, seq: 3, value: 'three', row: title(3, 'watched', 30) }],
+      true,
+    );
+    expect((await store.manifest())!.revision).not.toBe(kept.revision);
+    expect(commit.mock.calls.flatMap(([changes]) => changes.map((change) => change.key))).toEqual(
+      expect.arrayContaining([expect.stringContaining(':journal:')]),
+    );
+  });
+
   it('derives Continue and the first History checkpoint in one projection pass', async () => {
     const vault = new MemoryVault();
     const store = (await LibraryFactStore.open(libraryKey, vault))!;

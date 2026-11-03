@@ -6,6 +6,8 @@ import { deriveKeys } from './wire';
 
 export interface Vault {
   get(key: string): Promise<Uint8Array | undefined>;
+  /** The values of `keys`, in their order, from one transaction. */
+  getMany?(keys: readonly string[]): Promise<Array<Uint8Array | undefined>>;
   /** Every key/value pair whose key starts with `prefix`, in IndexedDB key order. */
   entries(prefix: string): Promise<Array<[key: string, value: Uint8Array]>>;
   /** One bounded page whose keys start with `prefix`, strictly after `after` when supplied. */
@@ -217,6 +219,13 @@ export function indexedVault(factory: IDBFactory): Vault {
   );
   return {
     get: (key) => run('readonly', (kept) => kept.get(key) as IDBRequest<Uint8Array | undefined>),
+    getMany: async (keys) => {
+      const found = await run('readonly', (kept) => {
+        const requests = keys.map((key) => kept.get(key) as IDBRequest<Uint8Array | undefined>);
+        return () => requests.map((request) => request.result);
+      });
+      return found ?? [];
+    },
     entries: async (prefix) => {
       const found = await run('readonly', (kept) => {
         const range = prefixRange(prefix);

@@ -120,6 +120,9 @@ test('two tabs publish saved views atomically without Web Locks', async ({ conte
         continue: { view: { items: [] } },
       },
     });
-    expect(await tab.evaluate(async () => (await window.savedViewRace.pieces()).length)).toBe(2);
+    // The watchlist, and Continue's head and its 32 parts.
+    expect(await tab.evaluate(async () => (await window.savedViewRace.pieces()).length)).toBe(
+      2 + 32,
+    );
   }
 });

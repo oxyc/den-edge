@@ -18,9 +18,16 @@ class MemoryVault implements Vault {
   readonly values = new Map<string, Uint8Array>();
   readonly reads: string[] = [];
   readonly commits: VaultChange[][] = [];
+  readonly transactions: string[][] = [];
   async get(key: string) {
     this.reads.push(key);
+    this.transactions.push([key]);
     return this.values.get(key)?.slice();
+  }
+  async getMany(keys: readonly string[]) {
+    this.reads.push(...keys);
+    this.transactions.push([...keys]);
+    return keys.map((key) => this.values.get(key)?.slice());
   }
   async entries(prefix: string) {
     return [...this.values].filter(([key]) => key.startsWith(prefix));
@@ -142,12 +149,14 @@ describe('finished library views', () => {
     await expect(writeFinishedLibraryViews(libraryKey, vault, value)).resolves.toBe(true);
 
     vault.reads.length = 0;
+    vault.transactions.length = 0;
     const opened = await readFinishedLibraryViews(libraryKey, vault, ['watchlist', 'continue']);
     expect(opened?.pieces).toEqual({
       watchlist: value.pieces.watchlist,
       continue: value.pieces.continue,
     });
-    expect(vault.reads).toHaveLength(3);
+    // The manifest, then the watchlist and Continue's head and 32 parts together.
+    expect(vault.transactions.map((keys) => keys.length)).toEqual([1, 2 + 32]);
     expect(vault.reads.some((key) => key.endsWith(':recommendations'))).toBe(false);
     await expect(readFinishedLibraryViews(libraryKey, vault, ['settings'])).resolves.toBeNull();
   });
@@ -333,8 +342,8 @@ describe('finished library views', () => {
     );
     vault.interruptManifest = false;
     await writeFinishedLibraryViews(libraryKey, vault, replacement);
-    // The manifest and each piece; recommendations is a head and its 32 parts.
-    expect(vault.values.size).toBe(1 + Object.keys(replacement.pieces).length + 32);
+    // The manifest and each piece; recommendations and Continue are each a head and its 32 parts.
+    expect(vault.values.size).toBe(1 + Object.keys(replacement.pieces).length + 64);
   });
 
   it('lets a competing publisher win without publishing or deleting from the stale attempt', async () => {
@@ -357,7 +366,7 @@ describe('finished library views', () => {
     await expect(staleWrite).resolves.toBe(false);
 
     expect(shared.values).toEqual(afterWinner);
-    expect(shared.values.size).toBe(1 + Object.keys(newer.pieces).length + 32);
+    expect(shared.values.size).toBe(1 + Object.keys(newer.pieces).length + 64);
     await expect(
       readFinishedLibraryViews(libraryKey, shared, ['watchlist', 'continue', 'recommendations']),
     ).resolves.toMatchObject({ identity: newer.identity, pieces: newer.pieces });
@@ -408,6 +417,46 @@ describe('finished library views', () => {
     await expect(
       readFinishedLibraryViews(libraryKey, vault, ['recommendations']),
     ).resolves.toMatchObject({ pieces: { recommendations: edited.pieces.recommendations } });
+  });
+
+  it('keeps Continue by title in its order, so a watch rewrites its head and the one part that holds it', async () => {
+    const vault = new MemoryVault();
+    const views = await fixture();
+    const items = Array.from({ length: 380 }, (_, index) => ({
+      title: { type: 'tv' as const, id: index + 1 },
+      fraction: 0,
+      episode: { season: 1, episode: 2 },
+      updatedAt: 1_000_000 - index,
+    }));
+    views.pieces.continue = {
+      view: { kind: 'continue', items, needsShapes: [{ type: 'tv', id: 3 }] },
+      layouts: Object.fromEntries(
+        items.map(({ title }) => [`tv:${title.id}`, `digest-${title.id}`]),
+      ),
+    };
+    await writeFinishedLibraryViews(libraryKey, vault, views);
+    await expect(readFinishedLibraryViews(libraryKey, vault, ['continue'])).resolves.toMatchObject({
+      pieces: { continue: views.pieces.continue },
+    });
+
+    // The last series is watched on: its next episode, and to the front of the row.
+    const watched = structuredClone(views);
+    watched.identity.head += 1;
+    const [last] = watched.pieces.continue!.view.items.splice(-1);
+    watched.pieces.continue!.view.items.unshift({
+      ...last!,
+      episode: { season: 1, episode: 3 },
+      updatedAt: 2_000_000,
+    });
+    await writeFinishedLibraryViews(libraryKey, vault, watched);
+    const written = vault.commits
+      .at(-1)!
+      .filter((change) => change.kind === 'put' && /:continue/.test(change.key))
+      .map((change) => change.key.split(':').at(-1));
+    expect(written).toHaveLength(2);
+    expect(written).toContain('continue');
+    const opened = await readFinishedLibraryViews(libraryKey, vault, ['continue']);
+    expect(opened?.pieces.continue).toEqual(watched.pieces.continue);
   });
 
   it('does not let a delayed stale marker hide a concurrently published manifest', async () => {
