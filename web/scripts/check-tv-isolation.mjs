@@ -141,5 +141,9 @@ if (process.argv.includes('--capture')) {
   // An early stream list where a viewer waits (the `late` outcome, the early flag through the download query, and
   // the viewer and download lists kept apart) adds 46 bytes. A list whose slow source takes 4.1 s arrives at 1.8 s.
   // Allow a quarter KiB more; the initial and catalog ceilings are unchanged.
-  if (coreTotalDelta > 67584) throw new Error('Browser total JS/CSS budget exceeded');
+  // Waiting for an opening connection instead of a 1 s retry, the catalogue at once where it is Home's first row, a
+  // first open that keeps everyone's picks, and a switch failure that says why add 0.3 KiB. Home's first poster on
+  // WebKit iPhone moves from ~1.2 s to ~0.24 s, and a slow first visit's billboard from 23 s to 3.4 s. Allow half a
+  // KiB more; the initial and catalog ceilings are unchanged.
+  if (coreTotalDelta > 68096) throw new Error('Browser total JS/CSS budget exceeded');
 }
