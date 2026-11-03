@@ -220,7 +220,10 @@
       // Provider/catalogue metadata sits below every personal shelf. On paired Home, keep its parsing and the two
       // Browse rows it mounts out of the hero and first-poster path. The bounded fallback in this scheduler also
       // admits a Home with neither a poster nor hero detail; guests and direct browse routes still load it immediately.
-      if (model && home && document.visibilityState === 'visible')
+      // Where the catalogue is the first row there is no shelf for it to stand behind, and its poster is Home's first:
+      // a Kid's Home, and a Home whose shelves came out empty. Decided once, as the shelves are ready.
+      const catalogueFirst = untrack(() => session.kid || topShelf === undefined);
+      if (model && home && !catalogueFirst && document.visibilityState === 'visible')
         await new Promise<void>((resolve) =>
           scheduleAfterStartupMilestone(resolve, ['first poster', 'billboard detail'], {
             timeoutMs: 3_000,

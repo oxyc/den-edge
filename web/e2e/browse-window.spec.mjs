@@ -30,6 +30,35 @@ test('an Atlas row waits for acknowledged Worker configuration without showing a
   expect(await page.evaluate(() => window.fixture.atlasQueries())).toBeGreaterThan(0);
 });
 
+// A Kid's Home mounts its catalogue before atlas has named its rows: the rows that arrive later are shown, though
+// the end-of-rows marker was already seen with none.
+test('rows that arrive after the catalogue mounted are shown', async ({ page }) => {
+  await guardNetwork(page);
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+  await page.addInitScript(() => {
+    const Native = window.IntersectionObserver;
+    window.fixtureSeen = 0;
+    window.IntersectionObserver = class extends Native {
+      constructor(callback, options) {
+        super((entries, observer) => {
+          window.fixtureSeen += entries.length;
+          callback(entries, observer);
+        }, options);
+      }
+    };
+  });
+  await page.goto(`${E2E_ORIGIN}/test/browse-window.html?late-rows`);
+  // The empty catalogue's marker has been seen before any row exists.
+  await expect.poll(() => page.evaluate(() => window.fixtureSeen)).toBeGreaterThan(0);
+  await page.evaluate(() => window.fixture.supplyRows());
+  await expect(page.getByRole('region', { name: 'Catalog row 1' })).toBeVisible();
+});
+
 test('a retained hidden browse page owns no viewport observers or idle expansion', async ({
   page,
 }) => {
