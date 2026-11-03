@@ -118,6 +118,7 @@
   import {
     airedThrough,
     airingEpisode,
+    caughtUpTo,
     comingBackSoon,
     continueAiringFacts,
     NewEpisodes,
@@ -789,11 +790,13 @@
       // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
       // Continue Watching's resume point instead.
       // Read before naming: an entry whose title is not named yet is already a resume point.
-      const resuming = (profileActivity?.continueWatching ?? continueView?.items ?? []).some(
-        ({ title, episode, fraction }) =>
-          title.type === 'tv' && title.id === released.series && same(episode) && fraction > 0,
+      const continued = (profileActivity?.continueWatching ?? continueView?.items ?? []).find(
+        ({ title }) => title.type === 'tv' && title.id === released.series,
       );
-      if (resuming || (row && (row.watched || row.fraction > 0))) {
+      const resuming = same(continued?.episode) && (continued?.fraction ?? 0) > 0;
+      // A viewer behind on the series is told of no new episode anywhere: not on the billboard, not on the row.
+      const behind = !caughtUpTo(continued?.episode, released, airings.get(released.series));
+      if (resuming || behind || (row && (row.watched || row.fraction > 0))) {
         newEpisodes.clear(released);
         return false;
       }

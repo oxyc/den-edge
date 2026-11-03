@@ -84,7 +84,7 @@ const film = {
  * for a followed library); every other atlas route is 404. Returns each airing request, as `<METHOD> <path>` and, for
  * the batch, the series it named.
  */
-async function routeSeries(page) {
+async function routeSeries(page, answer = AIRING) {
   const airing = [];
   await routeTmdb(page, (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -112,14 +112,14 @@ async function routeSeries(page) {
         .series.map(({ tmdb }) => tmdb);
       airing.push(`POST /atlas/airing ${named.join(',')}`);
       return route.fulfill({
-        json: airingBatch(route.request(), (tmdb) => (tmdb === ID ? AIRING : null)),
+        json: airingBatch(route.request(), (tmdb) => (tmdb === ID ? answer : null)),
       });
     }
     if (url.pathname === `/atlas/airing/tv/${ID}`) {
       airing.push(`${route.request().method()} ${url.pathname}${url.search}`);
       return route.fulfill({
         headers: { 'cache-control': 'public, max-age=21600' },
-        json: AIRING,
+        json: answer,
       });
     }
     return route.fulfill({ status: 404, json: { error: 'not_found' } });
@@ -179,16 +179,24 @@ const HEARTH = `${E2E_ORIGIN}/den/hearthcfg/manifest.json`;
 
 /**
  * A library kept in this browser that has watched season 1, and all of a finished series, with the combined Den addon
- * installed: its list for S2E1 is empty until a fresh search (`?fresh=1`) finds a release. Every search for S2E1 is
- * kept on `searches`, every airing request on `airing`. `behind` leaves S1E2 unwatched; `recent` has a film part
- * watched an hour ago, so its Continue Watching entry is newer than the followed series'.
+ * installed: its list for S2E`searched` (the newest released) is empty until a fresh search (`?fresh=1`) finds a
+ * release. Every search for it is kept on `searches`, every airing request on `airing`. `behind` leaves S1E2
+ * unwatched; `recent` has a film part watched an hour ago, so its Continue Watching entry is newer than the followed
+ * series'; `answer` is atlas's airing answer for it.
  */
 async function followedLibrary(
   page,
-  { started = false, caughtUp = false, behind = false, recent = false } = {},
+  {
+    started = false,
+    caughtUp = false,
+    behind = false,
+    recent = false,
+    answer = AIRING,
+    searched = 1,
+  } = {},
 ) {
   const searches = [];
-  const airing = await routeSeries(page);
+  const airing = await routeSeries(page, answer);
   await page.route(`${E2E_ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${E2E_ORIGIN}/routes`, (route) =>
     route.fulfill({ json: { v: 1, addons: { den: [{ url: `${E2E_ORIGIN}/den` }] } } }),
@@ -203,7 +211,10 @@ async function followedLibrary(
     // The addon plays through den-edge's unified playback, so the billboard offers Play.
     if (url.pathname === '/den/hearthcfg/playback' && route.request().method() === 'OPTIONS')
       return route.fulfill({ status: 204 });
-    if (decodeURIComponent(url.pathname) === `/den/hearthcfg/stream/series/${IMDB}:2:1.json`) {
+    const stream = decodeURIComponent(url.pathname).match(
+      new RegExp(`^/den/hearthcfg/stream/series/${IMDB}:2:(\\d+)\\.json$`),
+    );
+    if (stream && Number(stream[1]) === searched) {
       searches.push(url.search);
       const fresh = url.searchParams.get('fresh') === '1';
       return route.fulfill({
@@ -365,22 +376,92 @@ test('a followed series’ new episode leads the billboard and Continue Watching
   expect(airing.some((asked) => asked.startsWith('POST /atlas/airing '))).toBe(true);
 });
 
-test('a new episode does not move a series the viewer is behind on', async ({ page }) => {
-  await page.clock.setFixedTime(SATURDAY);
-  // S1E2 is aired and unwatched when S2E1 comes out: Dexter keeps its place after the film, watched more recently.
-  const { searches } = await followedLibrary(page, { behind: true, recent: true });
-  await page.goto(`${E2E_ORIGIN}/`);
+/**
+ * A viewer behind on Dexter, whose entry is `caption`: told of no new episode anywhere. Not searched for, no billboard
+ * slide, no badge, and Dexter stays after the film watched more recently.
+ */
+async function expectBehind(page, searches, caption) {
   const shelf = page.locator('section, div').filter({
     has: page.getByRole('heading', { name: 'Continue Watching' }),
   });
-  const card = shelf.locator('.poster-card, a').filter({ hasText: 'S1 · E2' }).first();
+  const card = shelf.locator('.poster-card, a').filter({ hasText: caption }).first();
   await expect(card).toBeVisible({ timeout: 30_000 });
-  // The search for S2E1 ran and found it, so the old code would have bumped and relabelled the card by now.
-  await expect.poll(() => searches.includes('?fresh=1'), { timeout: 30_000 }).toBe(true);
-  await expect(page.locator('.billboard .slide').first()).toContainText('New episode · S2E1');
-  expect(await continueOrder(page)).toEqual([`movie:${FILM}`, `tv:${ID}`]);
+  await expect.poll(() => continueOrder(page)).toEqual([`movie:${FILM}`, `tv:${ID}`]);
+  // Past the moment Home lets Continue Watching land before it searches (`SEARCH_SETTLE_MS`).
+  await page.waitForTimeout(3_000);
+  expect(searches).not.toContain('?fresh=1');
+  await expect(page.locator('.billboard')).not.toContainText('New episode');
   await expect(card).not.toContainText('New');
-  await expect(shelf.locator('.poster-card, a').filter({ hasText: 'S2 · E1' })).toHaveCount(0);
+  expect(await continueOrder(page)).toEqual([`movie:${FILM}`, `tv:${ID}`]);
+}
+
+/** Dexter caught up to its new episode `code`: the billboard leads with it and so does the row, `caption`, badged New. */
+async function expectLeads(page, searches, code, caption) {
+  await expect(page.locator('.billboard .slide').first()).toContainText(`New episode · ${code}`, {
+    timeout: 30_000,
+  });
+  expect(searches).toContain('?fresh=1');
+  const shelf = page.locator('section, div').filter({
+    has: page.getByRole('heading', { name: 'Continue Watching' }),
+  });
+  const card = shelf.locator('.poster-card, a').filter({ hasText: caption }).first();
+  await expect(card).toContainText('New');
+  await expect.poll(() => continueOrder(page)).toEqual([`tv:${ID}`, `movie:${FILM}`]);
+}
+
+test('a new episode is not announced for a series the viewer is behind on', async ({ page }) => {
+  await page.clock.setFixedTime(SATURDAY);
+  // S1E2 is aired and unwatched when S2E1 comes out, as Grey's Anatomy was left seasons back.
+  const { searches } = await followedLibrary(page, { behind: true, recent: true });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expectBehind(page, searches, 'S1 · E2');
+});
+
+/**
+ * Season 2 a week further on: S2E1 out Friday 23 Oct, S2E2 Friday 30 Oct. The clock stays on the 31st rather than
+ * moving a week on: with the page clock past the real date the seeded marks fell off the row, presumably because the
+ * library Worker does not share the page's fixed clock.
+ */
+const WEEKLY = {
+  ...AIRING,
+  next: { season: 2, episode: 3, name: 'Three', date: '2026-11-06' },
+  previous: { season: 2, episode: 2, name: 'Young Blood', date: '2026-10-30' },
+  upcoming: [{ season: 2, episode: 3, date: '2026-11-06' }],
+  seasonPremiere: { season: 2, date: '2026-10-23' },
+};
+
+test('weekly, behind: S2E1 unwatched when S2E2 comes out is not new', async ({ page }) => {
+  await page.clock.setFixedTime(SATURDAY);
+  const { searches } = await followedLibrary(page, { recent: true, answer: WEEKLY, searched: 2 });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expectBehind(page, searches, 'S2 · E1');
+});
+
+test('weekly, caught up: S2E1 watched, S2E2 leads', async ({ page }) => {
+  await page.clock.setFixedTime(SATURDAY);
+  const { searches } = await followedLibrary(page, {
+    caughtUp: true,
+    recent: true,
+    answer: WEEKLY,
+    searched: 2,
+  });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expectLeads(page, searches, 'S2E2', 'S2 · E2');
+});
+
+test('a season out at once leads for a viewer who finished the one before', async ({ page }) => {
+  await page.clock.setFixedTime(SATURDAY);
+  // All of season 2 out on Friday 30 Oct: the newest out is S2E3, and the row offers S2E1.
+  const drop = {
+    ...AIRING,
+    next: null,
+    previous: { season: 2, episode: 3, name: 'Three', date: '2026-10-30' },
+    upcoming: [],
+    seasonPremiere: { season: 2, date: '2026-10-30' },
+  };
+  const { searches } = await followedLibrary(page, { recent: true, answer: drop, searched: 3 });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expectLeads(page, searches, 'S2E3', 'S2 · E1');
 });
 
 test('a new episode the viewer has started is not new: no slide, no badge, no search', async ({

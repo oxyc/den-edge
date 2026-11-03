@@ -7,6 +7,7 @@ import {
   airedThrough,
   airingMaxAge,
   airingPath,
+  caughtUpTo,
   comingBackSoon,
   continueAiringFacts,
   localDay,
@@ -275,48 +276,63 @@ describe('new episodes', () => {
     expect(news.has(episode)).toBe(false);
   });
 
-  it('leads Continue Watching with a series caught up to its new season, marked new', () => {
+  it('is new only to a viewer caught up to it: weekly on the episode itself, or a season out at once', () => {
+    const at = (season: number, episode: number) => ({ season, episode });
+    // Dexter weekly, as recorded: S2E1 out 30 Oct, S2E2 on 6 Nov, the season's premiere 30 Oct.
+    expect(caughtUpTo(at(2, 1), at(2, 1), airing), 'season 1 finished: on the premiere').toBe(true);
+    expect(caughtUpTo(at(2, 2), at(2, 2), airing), 'S2E1 watched: on S2E2').toBe(true);
+    expect(caughtUpTo(at(2, 1), at(2, 2), airing), 'S2E1 came out a week earlier, unwatched').toBe(
+      false,
+    );
+    expect(caughtUpTo(at(1, 2), at(2, 1), airing), 'season 1 unfinished').toBe(false);
+    expect(caughtUpTo(undefined, at(2, 1), airing), 'not on the row').toBe(false);
+
+    // A season released in one day: all of S2 on 30 Oct.
+    const drop: Airing = {
+      source: 'tvmaze',
+      status: 'running',
+      service: 'Netflix',
+      previous: { season: 2, episode: 10, date: '2026-10-30' },
+      upcoming: [],
+      seasonPremiere: { season: 2, date: '2026-10-30' },
+    };
+    expect(caughtUpTo(at(2, 1), at(2, 10), drop), 'season 1 finished').toBe(true);
+    expect(caughtUpTo(at(2, 4), at(2, 10), drop), 'part way into the dropped season').toBe(true);
+    expect(caughtUpTo(at(1, 9), at(2, 10), drop), 'season 1 unfinished').toBe(false);
+    expect(caughtUpTo(at(2, 1), at(2, 10), undefined), 'no dates: only the episode itself').toBe(
+      false,
+    );
+
+    // Weekly, behind: on S4E2 when S4E5 comes out, the season having premiered a month earlier.
+    const weekly: Airing = {
+      ...drop,
+      previous: { season: 4, episode: 5, date: '2026-10-30' },
+      seasonPremiere: { season: 4, date: '2026-10-02' },
+    };
+    expect(caughtUpTo(at(4, 2), at(4, 5), weekly)).toBe(false);
+    // Grey's Anatomy, left at S10E3 while S22E5 comes out.
+    const greys: Airing = {
+      ...drop,
+      previous: { season: 22, episode: 5, date: '2026-10-30' },
+      seasonPremiere: { season: 22, date: '2026-10-02' },
+    };
+    expect(caughtUpTo(at(10, 3), at(22, 5), greys)).toBe(false);
+  });
+
+  it('leads Continue Watching with each new episode’s series, its entry as the library offers it', () => {
     const other = { title: { type: 'movie', id: 1 }, fraction: 0.4 };
-    // Season 1 finished: the library offers S2E1, the episode just out.
+    // A season out at once, season 1 finished: the library offers S2E1 while the newest out is S2E10.
     const caughtUp = {
       title: { type: 'tv', id: DEXTER },
       fraction: 0,
       episode: { season: 2, episode: 1 },
     };
-    const news = [{ series: DEXTER, season: 2, episode: 1 }];
+    const news = [{ series: DEXTER, season: 2, episode: 10 }];
     expect(withNewEpisodes([other, caughtUp], news)).toEqual([{ ...caughtUp, isNew: true }, other]);
+    // A series not on the row is not added.
+    expect(withNewEpisodes([other], news)).toEqual([other]);
     const list = [other];
     expect(withNewEpisodes(list, [])).toBe(list);
-  });
-
-  it('leaves a series the viewer is part way through where their own activity put it', () => {
-    const GREYS = 1416;
-    const recent = { title: { type: 'movie', id: 1 }, fraction: 0.4 };
-    // Grey's Anatomy, left at S10E3 years ago, while S22E5 comes out.
-    const greys = {
-      title: { type: 'tv', id: GREYS },
-      fraction: 0,
-      episode: { season: 10, episode: 3 },
-    };
-    expect(withNewEpisodes([recent, greys], [{ series: GREYS, season: 22, episode: 5 }])).toEqual([
-      recent,
-      greys,
-    ]);
-    // On S4E2 (part way, or next) when S4E5 comes out: S4E3 and S4E4 are aired and unwatched.
-    for (const fraction of [0, 0.4]) {
-      const behind = {
-        title: { type: 'tv', id: GREYS },
-        fraction,
-        episode: { season: 4, episode: 2 },
-      };
-      expect(withNewEpisodes([recent, behind], [{ series: GREYS, season: 4, episode: 5 }])).toEqual(
-        [recent, behind],
-      );
-    }
-    // Not on the row at all is not caught up either: nothing is added.
-    expect(withNewEpisodes([recent], [{ series: GREYS, season: 22, episode: 5 }])).toEqual([
-      recent,
-    ]);
   });
 
   it('is no longer waiting once the episode it waited for is new', () => {

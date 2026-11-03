@@ -376,15 +376,36 @@ export class NewEpisodes {
 }
 
 /**
- * Continue Watching with the series caught up to a new episode first, marked new. Caught up is the library's own
- * answer (den-core `continue_entry`): the entry offers the episode after the one finished last, so an entry on the
- * new episode has nothing aired before it left unwatched. A series whose entry is any other episode — still on S4E2
- * when S4E5 comes out — is left where the viewer's own activity puts it, unmarked.
+ * Whether a viewer whose Continue Watching entry is `entry` is caught up to a series' new episode: nothing aired and
+ * unwatched predates the release that brought it. Only then is it announced as new anywhere (DenKit
+ * `NewEpisodePolicy.caughtUp`, the same rule).
+ *
+ * The entry is den-core `continue_entry`'s answer, the episode after the one finished last. On the new episode itself,
+ * the viewer is caught up. Earlier in the same season, they are caught up when that season came out in one release —
+ * atlas dates its premiere the new episode's day — since everything they have left came out with it. Weekly, on S4E2
+ * when S4E5 comes out, they are behind; with no entry nothing says they are caught up.
+ */
+export function caughtUpTo(
+  entry: At | undefined,
+  released: At,
+  airing: Airing | undefined,
+): boolean {
+  if (!entry) return false;
+  if (entry.season === released.season && entry.episode === released.episode) return true;
+  if (entry.season !== released.season || entry.episode > released.episode) return false;
+  const premiere = airing?.seasonPremiere;
+  const date = airingEpisode(airing, released.season, released.episode)?.date;
+  return premiere?.season === released.season && !!date && premiere.date === date;
+}
+
+/**
+ * Continue Watching with each new episode's series first, marked new, its entry kept as the library offers it. The new
+ * episodes are only those the viewer is caught up to (`caughtUpTo`), so a series still behind is never among them; a
+ * series not on the row is not added.
  */
 export function withNewEpisodes<
   E extends {
     title: { type: string; id: number };
-    episode?: { season: number; episode: number };
     isNew?: true;
     upcoming?: string;
   },
@@ -395,11 +416,7 @@ export function withNewEpisodes<
   for (const one of news) {
     if (taken.has(one.series)) continue;
     const held = entries.find(
-      (entry) =>
-        entry.title.type === 'tv' &&
-        entry.title.id === one.series &&
-        entry.episode?.season === one.season &&
-        entry.episode.episode === one.episode,
+      (entry) => entry.title.type === 'tv' && entry.title.id === one.series,
     );
     if (!held) continue;
     taken.add(one.series);
