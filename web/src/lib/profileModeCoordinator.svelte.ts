@@ -666,10 +666,14 @@ export class ProfileModeCoordinator {
   /** Replace the validated control-plane projection. A changed/removed active entry is never kept alive. */
   updateDirectory(directory: PreviewProfileDirectory | null): void {
     this.#assertOpen();
-    // The page hands over the directory it constructed this coordinator with as soon as it holds it. While the profile
-    // it remembered is still opening, nothing has changed: cancelling then made a remembered Kid's library open twice,
-    // the first one thrown away.
-    if (this.#restoring > 0 && JSON.stringify(directory) === JSON.stringify(this.#directory))
+    // The page hands over every replacement of the directory's lease, including ones equal to what it holds (the
+    // household's other writes republish it: setting the Owner PIN on the way to a Kid does). While a profile is
+    // opening, an equal one changes nothing: cancelling then threw a remembered Kid's open away and opened it twice, and
+    // failed a switch to a Kid outright, which the switcher showed as a wrong PIN.
+    if (
+      (this.#restoring > 0 || this.#openingModels.size > 0) &&
+      JSON.stringify(directory) === JSON.stringify(this.#directory)
+    )
       return;
     const current = this.#session;
     const previousChoice =
