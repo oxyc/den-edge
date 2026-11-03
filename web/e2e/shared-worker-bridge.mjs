@@ -49,10 +49,14 @@ const forwarded = (headers) =>
     ),
   );
 
-/** Start the bridge. `served`: every path it answered, so a spec can show the SharedWorker's requests reached it. */
+/**
+ * Start the bridge. `served`: every path it answered, so a spec can show the SharedWorker's requests reached it.
+ * `log`: each request with its time and status, or why it failed, for a spec to keep beside a failure.
+ */
 export async function sharedWorkerBridge() {
   let page = null;
   const served = [];
+  const log = [];
   const server = createHttpServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -84,12 +88,14 @@ export async function sharedWorkerBridge() {
         },
       );
       served.push(request.url);
+      log.push(`${Date.now()} ${request.method} ${request.url} ${answer.status}`);
       const headers = Object.fromEntries(
         answer.headers.filter(([name]) => name !== 'content-encoding' && name !== 'content-length'),
       );
       response.writeHead(answer.status, headers).end(Buffer.from(answer.body, 'base64'));
-    } catch {
+    } catch (error) {
       // The page's routes refused it (an unexpected request), or the page has gone.
+      log.push(`${Date.now()} ${request.method} ${request.url} failed: ${error?.message}`);
       if (!response.headersSent) response.writeHead(502);
       response.end();
     }
@@ -99,6 +105,7 @@ export async function sharedWorkerBridge() {
   );
   return {
     served,
+    log,
     /** Answer through `routed`, a page already given the routes to answer with. */
     async answerFrom(routed) {
       await routed.route(`${E2E_ORIGIN}/__shared-worker-bridge`, (route) =>

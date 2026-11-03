@@ -49,12 +49,14 @@ function markReady() {
   requestAnimationFrame(frame);
 }
 
-async function switchProfile(context, edge, profile) {
+async function switchProfile(context, edge, profile, bridge) {
   const page = await context.newPage();
   await routeBigHousehold(page, edge);
+  // Kept beside a failed switch: the page's startup lines and what the SharedWorker asked den-edge meanwhile.
   const lines = [];
-  page.on('console', (message) => lines.push(`${message.type()} ${message.text()}`));
-  page.on('pageerror', (error) => lines.push(`pageerror ${error.message}`));
+  const bridged = bridge.log.length;
+  page.on('console', (message) => lines.push(`${Date.now()} ${message.type()} ${message.text()}`));
+  page.on('pageerror', (error) => lines.push(`${Date.now()} pageerror ${error.message}`));
   await page.goto(`${E2E_ORIGIN}/settings`);
   await page.getByRole('button', { name: /^Switch profile, current / }).click();
   await page.getByRole('button', { name: `Use ${profile}` }).click();
@@ -75,9 +77,11 @@ async function switchProfile(context, edge, profile) {
     await expect(switcher).toHaveCount(0, { timeout: 30_000 });
   } catch (error) {
     await page.screenshot({ path: test.info().outputPath(`switch-${profile}.png`) });
+    const text = await page.evaluate(() => document.body.innerText);
+    const asked = bridge.log.slice(bridged).join('\n');
     writeFileSync(
       test.info().outputPath(`switch-${profile}.txt`),
-      `${await page.evaluate(() => document.body.innerText)}\n\n${lines.join('\n')}`,
+      `${text}\n\n${lines.join('\n')}\n\nbridge:\n${asked}`,
     );
     throw error;
   }
@@ -166,7 +170,7 @@ for (const [label, type, device, options] of ENGINES) {
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {
-          await switchProfile(context, edge, surface.profile);
+          await switchProfile(context, edge, surface.profile, bridge);
           await visit(context, edge, bridge, surface, options);
         }
         const result = await visit(context, edge, bridge, surface, options);
