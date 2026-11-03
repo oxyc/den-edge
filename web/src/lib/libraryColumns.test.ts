@@ -371,10 +371,7 @@ describe('library columns', () => {
     }
   });
 
-  // den-core keeps a Seen series' dismissal in `home` from fix/seen-series-keeps-dismissal on; until it is vendored
-  // the held answer drops it while the per-document projection keeps it.
-  const untilVendored = test.fails;
-  untilVendored('a series marked Seen as a whole keeps its dismissal in both', () => {
+  test('a series marked Seen as a whole keeps its dismissal in both', () => {
     const documents = [
       {
         format: 4,

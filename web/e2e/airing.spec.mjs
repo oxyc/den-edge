@@ -400,11 +400,8 @@ test('a series marked Seen as a whole is followed: its new season is coming up',
   ).toEqual([`tv:${ID}`, `tv:${ENDED}`]);
 });
 
-// Home's dismissals come from den-core's `home`, which keeps a Seen series' dismissal only from den-core
-// fix/seen-series-keeps-dismissal on; until that is vendored, the removed series comes straight back.
-const untilVendored = test.fail;
-
-untilVendored('Remove takes a series marked Seen as a whole off Coming up', async ({ page }) => {
+// Home's dismissals come from den-core's `home`, which keeps a Seen series' dismissal too.
+test('Remove takes a series marked Seen as a whole off Coming up', async ({ page }) => {
   const coming = await seenSeriesComingUp(page);
   await coming.getByRole('button', { name: 'Actions for Breaking Bad' }).click();
   await page
