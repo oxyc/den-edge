@@ -231,7 +231,11 @@ export default defineConfig({
     __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(''),
     __DEN_TV_WEB_ORIGIN__: JSON.stringify(''),
     __DEN_TRANSLATIONS_REVISION__: JSON.stringify(translationsRevision),
-    'import.meta.env.DEN_E2E': JSON.stringify(process.env.DEN_E2E === '1'),
+    // A routed e2e build leaves the SharedWorker out: Playwright's routes never see its requests. One whose preview
+    // proxies them to the spec's bridge (`DEN_E2E_SHARED_WORKER=1`, e2e/shared-worker-bridge.mjs) keeps it, as shipped.
+    'import.meta.env.DEN_E2E': JSON.stringify(
+      process.env.DEN_E2E === '1' && process.env.DEN_E2E_SHARED_WORKER !== '1',
+    ),
     'import.meta.env.DEN_ALLOCATION_AUDIT': JSON.stringify(
       process.env.DEN_ALLOCATION_AUDIT === '1',
     ),
