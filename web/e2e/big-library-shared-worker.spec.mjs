@@ -89,7 +89,7 @@ async function switchProfile(context, edge, profile, bridge) {
 }
 
 /** One returning visit: when its content drew, its `shelves ready`, and what answered its library. */
-async function visit(context, edge, bridge, surface, { cpu = 1 } = {}) {
+async function visit(context, edge, surface, { cpu = 1 } = {}) {
   const page = await context.newPage();
   await routeBigHousehold(page, edge);
   if (cpu > 1) {
@@ -106,7 +106,6 @@ async function visit(context, edge, bridge, surface, { cpu = 1 } = {}) {
     const match = /^den: startup \+(\d+)ms ([^[(][^(]*?)(?: \(.*\))?$/.exec(message.text());
     if (match && marks[match[2]] === undefined) marks[match[2]] = Number(match[1]);
   });
-  const bridged = bridge.served.length;
   await page.goto(`${E2E_ORIGIN}${surface.path}`);
   const drawn = (ready) =>
     surface.content.every((name) => ready?.[name] !== undefined) &&
@@ -125,7 +124,6 @@ async function visit(context, edge, bridge, surface, { cpu = 1 } = {}) {
     ...(surface.shelves ? { shelvesMs: marks['shelves ready'] ?? Infinity } : {}),
     firstPosterMs: marks['first poster'] ?? null,
     dedicated,
-    libraryReads: bridge.served.slice(bridged).filter((path) => path.startsWith('/lib/')).length,
     drawnAt: ready,
   };
 }
@@ -167,25 +165,29 @@ for (const [label, type, device, options] of ENGINES) {
       await bridge.answerFrom(forwarder);
       await bigHousehold(context, edge);
       await forwarder.evaluate(() => localStorage.setItem('den.e2e.sharedWorker', '1'));
+      const sharedFrom = bridge.served.length;
       const measured = [];
       for (const surface of SURFACES) {
         if (surface.profile) {
           await switchProfile(context, edge, surface.profile, bridge);
-          await visit(context, edge, bridge, surface, options);
+          await visit(context, edge, surface, options);
         }
-        const result = await visit(context, edge, bridge, surface, options);
+        const result = await visit(context, edge, surface, options);
         measured.push({ surface: surface.name, ...result });
         expect.soft(result.contentMs, `${surface.name}: ms to content`).toBeLessThan(READY_MS);
         if (surface.shelves)
           expect
             .soft(result.shelvesMs, `${surface.name}: ms to shelves ready`)
             .toBeLessThan(SHELVES_MS);
-        // Never a budget met by the fallback: the SharedWorker answered, and read den-edge through the bridge.
+        // Never a budget met by the fallback: no visit started a dedicated library Worker.
         expect.soft(result.dedicated, `${surface.name}: dedicated library Workers`).toBe(0);
-        expect
-          .soft(result.libraryReads, `${surface.name}: library reads through the bridge`)
-          .toBeGreaterThan(0);
       }
+      // And the SharedWorker read den-edge through the bridge. Not per visit: a realm a closing page left running has
+      // already caught up, and the next visit's library may read nothing.
+      expect(
+        bridge.served.slice(sharedFrom).filter((path) => path.startsWith('/lib/')).length,
+        'library reads through the bridge',
+      ).toBeGreaterThan(0);
       console.log(`${label}, SharedWorker\n${measured.map((m) => JSON.stringify(m)).join('\n')}`);
     } finally {
       await browser.close();
