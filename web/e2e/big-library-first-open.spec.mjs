@@ -147,3 +147,101 @@ test('a first open shows its progress before den-edge has answered', async () =>
     await browser.close();
   }
 });
+
+/** atlas's rankings, told apart: everyone's for the day (`GET`), and this library's own (`POST`). */
+const SHARED_PICKS = [400_101, 400_102, 400_103];
+const PERSONAL_PICKS = [400_001, 400_002, 400_003];
+const pickNames = (ids) => ids.map((id) => `Film ${id}`);
+
+async function routeRankings(page) {
+  await page.route('**/atlas/recommend**', (route) =>
+    route.fulfill({
+      json: {
+        version: 1,
+        slides: (route.request().method() === 'POST' ? PERSONAL_PICKS : SHARED_PICKS).map((id) => ({
+          type: 'movie',
+          id,
+        })),
+      },
+    }),
+  );
+}
+
+/** In the page: when the billboard first showed text, each lead it showed in turn, and every slide it ever drew. */
+function watchBillboard() {
+  const seen = (window.__billboard = { textMs: null, leads: [], slides: [] });
+  const frame = () => {
+    const slides = [...document.querySelectorAll('main .billboard article.slide')];
+    const lead = slides[0]?.getAttribute('aria-label');
+    if (lead && seen.leads.at(-1) !== lead) seen.leads.push(lead);
+    for (const slide of slides) {
+      const name = slide.getAttribute('aria-label');
+      if (name && !seen.slides.includes(name)) seen.slides.push(name);
+    }
+    if (
+      seen.textMs === null &&
+      slides.some((slide) => slide.querySelector('.overview')?.textContent?.trim())
+    )
+      seen.textMs = Math.round(performance.now());
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+// A first open waits for its whole history before it can rank the billboard for this library: ~13 s at 150 ms and
+// 1.6 Mbps for this household. It shows everyone's picks for the day as soon as atlas answers and keeps them for the
+// visit, never swapping slides under the viewer; the library's own ranking is kept for the next visit.
+test('a first open shows everyone’s picks at once, keeps them, and the next visit opens with its own', async () => {
+  test.setTimeout(300_000);
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript(watchBillboard);
+    const edge = newEdge({ profiles: true });
+    await bigHousehold(context, edge);
+    await forgetLibraries(context, edge);
+
+    edge.changesLatencyMs = 150;
+    edge.changesBitsPerSecond = 1_600_000;
+    const first = await context.newPage();
+    await routeBigHousehold(first, edge);
+    await routeRankings(first);
+    let ranked = false;
+    first.on('requestfinished', (request) => {
+      if (request.method() === 'POST' && /\/atlas\/recommend$/.test(request.url())) ranked = true;
+    });
+    const started = Date.now();
+    await first.goto(`${E2E_ORIGIN}/`);
+    const line = first.getByRole('progressbar', { name: 'Loading your library' });
+    await expect(line).toBeVisible({ timeout: 30_000 });
+    await expect(line).toHaveCount(0, { timeout: 120_000 });
+    const historyMs = Date.now() - started;
+    // The library's own ranking is asked once the history has landed, and kept; give its naming time to finish.
+    await expect.poll(() => ranked, { timeout: 30_000 }).toBe(true);
+    await first.waitForTimeout(3_000);
+    const visit = await first.evaluate(() => window.__billboard);
+    console.log(
+      `first open: billboard text at ${visit.textMs} ms, history read by ~${historyMs} ms`,
+    );
+    expect(visit.textMs, 'billboard text before the history is read').toBeLessThan(historyMs);
+    // One lead for the whole visit, everyone's, and nothing of the library's own ranking on screen.
+    expect(visit.leads).toEqual([pickNames(SHARED_PICKS)[0]]);
+    expect(visit.slides.filter((name) => pickNames(PERSONAL_PICKS).includes(name))).toEqual([]);
+    await first.close();
+
+    edge.changesLatencyMs = 0;
+    edge.changesBitsPerSecond = 0;
+    const next = await context.newPage();
+    await routeBigHousehold(next, edge);
+    await routeRankings(next);
+    await next.goto(`${E2E_ORIGIN}/`);
+    await expect
+      .poll(() => next.evaluate(() => window.__billboard.leads[0]), { timeout: 30_000 })
+      .toBe(pickNames(PERSONAL_PICKS)[0]);
+    await next.close();
+  } finally {
+    await browser.close();
+  }
+});

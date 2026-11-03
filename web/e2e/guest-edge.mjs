@@ -230,14 +230,16 @@ async function routeLibraries(page, edge, origin) {
         const after = rows.filter((entry) => entry.seq > since).sort((a, b) => a.seq - b.seq);
         read = { entries: after.slice(0, limit), more: after.length > limit };
       }
-      if (edge.changesLatencyMs)
-        await new Promise((resolve) => setTimeout(resolve, edge.changesLatencyMs));
-      return json(
-        route,
-        200,
-        { generation: GENERATION, head: library.head, ...read },
-        { ...HEADERS, 'x-den-wire-min': String(library.wireMin) },
-      );
+      const body = { generation: GENERATION, head: library.head, ...read };
+      // A link's round trip, and with `changesBitsPerSecond` its bandwidth: a page arrives once its bytes have.
+      const transferMs = edge.changesBitsPerSecond
+        ? (Buffer.byteLength(JSON.stringify(body)) * 8 * 1000) / edge.changesBitsPerSecond
+        : 0;
+      if (edge.changesLatencyMs || transferMs)
+        await new Promise((resolve) =>
+          setTimeout(resolve, (edge.changesLatencyMs ?? 0) + transferMs),
+        );
+      return json(route, 200, body, { ...HEADERS, 'x-den-wire-min': String(library.wireMin) });
     }
     return route.abort('blockedbyclient');
   });
