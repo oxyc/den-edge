@@ -762,4 +762,26 @@ describe('a caught-up series waiting for its next episode', () => {
       upcoming: undefined,
     });
   });
+
+  it('names a series dropped for being watched up to its newest episode as caught up, and only that one', () => {
+    const projector = new ContinueProjector();
+    projector.setAiring(airing('2026-11-20'));
+    row(projector);
+    // Dexter waits 20 days out (`not_aired`); the other series is mid-season, on the row.
+    expect(projector.caughtUp()).toEqual([{ type: 'tv', id: 7 }]);
+    projector.setAiring(airing('2026-11-06'));
+    row(projector);
+    expect(projector.caughtUp(), 'waiting on the row now').toEqual([]);
+  });
+
+  it('names a series taken off the row since last watched as dismissed, until it is watched again', () => {
+    const dismissed = (at: number): Library => ({ ...dexter, dismissed: new Map([['tv:7', at]]) });
+    const projector = new ContinueProjector();
+    projector.project(dismissed(2500));
+    expect(projector.dismissed()).toEqual([{ type: 'tv', id: 7 }]);
+    expect(projector.caughtUp(), 'a dismissed series is not caught up').toEqual([]);
+    // Watched again after it was taken off: no longer dismissed.
+    projector.project(dismissed(1500));
+    expect(projector.dismissed()).toEqual([]);
+  });
 });

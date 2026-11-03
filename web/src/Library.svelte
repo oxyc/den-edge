@@ -119,14 +119,16 @@
     airedThrough,
     airingEpisode,
     caughtUpTo,
-    comingBackSoon,
+    comingUp,
     continueAiringFacts,
+    followCandidates,
+    followedOf,
     NewEpisodes,
     outDay,
     releasedEpisode,
-    thisWeek,
     withNewEpisodes,
     type Airing,
+    type FollowCandidates,
     type NewEpisode,
   } from './lib/airing';
   import { airingStore } from './lib/airing.svelte';
@@ -721,25 +723,32 @@
   });
   /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
   const airings = $derived(airingStore(session.content));
-  /**
-   * The series this viewer follows: in Continue Watching, on the Watchlist, or with any of it watched. Their release
-   * dates are asked for while Home is open, and again as each answer's hour runs out.
-   */
-  const followedSeries = $derived.by(() => {
-    const standings = profileActivity ? profileActivity.standings : overviewPresentation.standings;
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one derived value and never mutated after.
-    const ids = new Set<number>();
-    for (const { title } of continuePresentation.entries)
-      if (title.type === 'tv') ids.add(title.id);
-    for (const key of standings.keys()) if (key.startsWith('tv:')) ids.add(Number(key.slice(3)));
-    return [...ids].filter((id) => Number.isSafeInteger(id) && id > 0).sort((a, b) => a - b);
+  /** What the library says of each series this viewer might follow (`airing.ts` `followedOf`). */
+  const followFacts = $derived.by((): FollowCandidates => {
+    const series = (refs: ReadonlyArray<{ type: string; id: number }> | undefined) =>
+      (refs ?? []).flatMap((ref) => (ref.type === 'tv' ? [ref.id] : []));
+    const continuing = (profileActivity?.continueWatching ?? continueView?.items ?? []).flatMap(
+      ({ title, episode, upcoming }) =>
+        title.type === 'tv' && episode ? [{ series: title.id, episode, upcoming: !!upcoming }] : [],
+    );
+    return {
+      watchlist: series(profileActivity ? profileActivity.watchlist : overview?.watchlist),
+      continuing,
+      caughtUp: series(continueView?.caughtUp),
+      dismissed: series(continueView?.dismissed),
+    };
   });
-  const followedKey = $derived(followedSeries.join(','));
+  /** Every series that might be followed: their release dates are asked for while Home is open, and again as each
+   * answer's hour runs out. */
+  const followCandidateSeries = $derived(followCandidates(followFacts).sort((a, b) => a - b));
+  /** The series this viewer follows (`airing.ts` `followedOf`): what Coming up and new episodes are about. */
+  const followedSeries = $derived(followedOf(followFacts, airings));
+  const followedKey = $derived(followCandidateSeries.join(','));
   /** Ticks while Home is open so released episodes are looked for again (`NewEpisodes` holds each to `RECHECK_MS`). */
   let airingTick = $state(0);
   $effect(() => {
     void followedKey;
-    const ids = untrack(() => followedSeries);
+    const ids = untrack(() => followCandidateSeries);
     // Asked once the session has found its atlas: before that the worker has nowhere to ask.
     if (!active || !atlas || !ids.length) return;
     const store = untrack(() => airings);
@@ -1495,6 +1504,20 @@
             'Removed “{value}” from Continue Watching',
             { value: title.title },
           ),
+          {
+            label: 'Undo',
+            run: () => void restore(title),
+          },
+        ),
+      );
+    },
+    dismissComingUp: (title) => {
+      void dismiss(title).then((ok) =>
+        menuToast(
+          ok,
+          i18n.format('notice.removedComingUp', 'Removed “{value}” from Coming up', {
+            value: title.title,
+          }),
           {
             label: 'Undo',
             run: () => void restore(title),
@@ -2593,48 +2616,41 @@
     const led = new Set(leads.map(titleKey));
     return [...leads, ...ranked.filter((title) => !led.has(titleKey(title)))];
   });
-  /** The followed series' answers alone: a title page may have asked for one nobody follows. */
-  const followedAirings = $derived.by(() => {
+  /** These series' answers alone: a title page may have asked for one nobody follows. */
+  const airingsOf = (ids: readonly number[]) => {
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one derived value and never mutated after.
     const map = new Map<number, Airing>();
-    for (const id of followedSeries) {
+    for (const id of ids) {
       const airing = airings.get(id);
       if (airing) map.set(id, airing);
     }
     return map;
-  });
+  };
+  const followedAirings = $derived(airingsOf(followedSeries));
   // The library decides Continue Watching: a caught-up series whose next episode these dates put within its window
-  // stays on the row. Sent again on each tick, so a new day is counted from.
+  // stays on the row. Every candidate's dates go, so whether one is caught up never waits on whether it is followed.
+  // Sent again on each tick, so a new day is counted from.
   $effect(() => {
     void airingTick;
     const library = model;
-    const facts = continueAiringFacts(followedAirings);
+    const facts = continueAiringFacts(airingsOf(followCandidateSeries));
     if (!library || !active) return;
     void library.observeAiring(facts).catch(() => {});
   });
-  /** Followed series whose next season starts within a month, soonest first. */
-  const comingBack = $derived(
+  /** "Coming up": each followed series' next episode or season premiere within a month, soonest first. */
+  const comingUpRow = $derived(
     facet === 'movie'
       ? []
-      : comingBackSoon(followedAirings).flatMap(({ series, date }) => {
-          const title = session.displayTitle({ type: 'tv', id: series });
-          return title ? [{ ...title, releaseDate: date }] : [];
+      : comingUp(followedAirings).flatMap((release) => {
+          const title = session.displayTitle({ type: 'tv', id: release.series });
+          return title ? [{ title, release }] : [];
         }),
   );
-  /** Followed series' episodes due in the next week, soonest first. */
-  const dueThisWeek = $derived(
-    facet === 'movie'
-      ? []
-      : thisWeek(followedAirings).flatMap((episode) => {
-          const title = session.displayTitle({ type: 'tv', id: episode.series });
-          return title ? [{ title, episode }] : [];
-        }),
-  );
-  // The two rows name their own series: a followed series need not be on any shelf (most of a large library's are not),
-  // and a card is drawn only for a named one, so they stayed empty where the Apple apps listed them.
+  // The row names its own series: a followed series need not be on any shelf (most of a large library's are not),
+  // and a card is drawn only for a named one, so it stayed empty where the Apple apps listed them.
   $effect(() => {
     if (!active || facet === 'movie') return;
-    const refs = [...comingBackSoon(followedAirings), ...thisWeek(followedAirings)]
+    const refs = comingUp(followedAirings)
       .map(({ series }) => ({ type: 'tv' as const, id: series }))
       .filter((ref) => !session.displayTitle(ref) && !session.displayMissing(ref));
     if (refs.length) void nameLibraryTitles(session, refs).catch(() => {});
@@ -2995,34 +3011,28 @@
     {:else if !lowerShelvesReady && !facet && shelfPlan?.watchlist}
       <PendingPosterRow heading="Watchlist" />
     {/if}
-    {#if lowerShelvesReady && dueThisWeek.length}
+    {#if lowerShelvesReady && comingUpRow.length}
       <WindowedPosterRow
-        heading="This week"
-        items={dueThisWeek}
+        heading="Coming up"
+        items={comingUpRow}
         itemKey={({ title }) => `${title.type}:${title.id}`}
         itemHref={({ title }) => titleHref(title)}
         itemLabel={({ title }) => title.title}
       >
-        {#snippet children({ title, episode }, onscreen)}
+        {#snippet children({ title, release }, onscreen)}
+          {@const day = outDay(release.date, i18n.language)}
           <PosterCard
             {title}
-            caption={`S${episode.season} · E${episode.episode} · ${outDay(episode.date, i18n.language)}`}
-            href={titleHref({ ...title, season: episode.season, episode: episode.episode })}
+            caption={release.premiere
+              ? i18n.format('comingUp.season', 'Season {season} · {day}', {
+                  season: release.season,
+                  day,
+                })
+              : i18n.format('comingUp.episode', 'New episode · {day}', { day })}
+            href={titleHref({ ...title, season: release.season, episode: release.episode })}
+            comingUp
             {onscreen}
           />
-        {/snippet}
-      </WindowedPosterRow>
-    {/if}
-    {#if lowerShelvesReady && comingBack.length}
-      <WindowedPosterRow
-        heading="Coming back soon"
-        items={comingBack}
-        itemKey={(title) => `${title.type}:${title.id}`}
-        itemHref={titleHref}
-        itemLabel={(title) => title.title}
-      >
-        {#snippet children(title, onscreen)}
-          <PosterCard {title} href={titleHref(title)} {onscreen} />
         {/snippet}
       </WindowedPosterRow>
     {/if}

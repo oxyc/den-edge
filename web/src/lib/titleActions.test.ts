@@ -15,6 +15,7 @@ function context(approved: boolean) {
     toggleSeen: vi.fn(),
     setReaction: vi.fn(),
     dismissContinueWatching: vi.fn(),
+    dismissComingUp: vi.fn(),
     kids: [
       {
         id: '1'.repeat(32),
@@ -26,6 +27,23 @@ function context(approved: boolean) {
   } satisfies TitleActionsContext;
   return { ctx, changeKidAccess };
 }
+
+describe('poster Coming up action', () => {
+  it('offers Remove from Coming up only on a Coming up card, and asks the shared dismissal', () => {
+    const { ctx } = context(false);
+    const series: Title = { type: 'tv', id: 1416, title: 'Grey’s Anatomy' };
+    const label = 'Remove from Coming up';
+    expect(
+      titleMenuItems(series, ctx, { href: '/tv/1416' }).map((item) => item.label),
+    ).not.toContain(label);
+    const item = titleMenuItems(series, ctx, { href: '/tv/1416', comingUp: true }).find(
+      (one) => one.label === label,
+    );
+    if (item?.kind !== 'item') throw new Error('Remove from Coming up is not an item');
+    item.onselect();
+    expect(ctx.dismissComingUp).toHaveBeenCalledWith(series);
+  });
+});
 
 describe('poster Kid access action', () => {
   it('offers Allow, then asks the shared handler for this title and Kid', () => {

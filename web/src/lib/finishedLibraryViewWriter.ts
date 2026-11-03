@@ -76,6 +76,9 @@ export const factContinue = (
     self,
   ),
   needsShapes: home.requiredShapeRefs.filter((key) => !shapes.has(key)).map(factRef),
+  // After `continueItems`, which projects: these read the same decisions.
+  caughtUp: projector.caughtUp(),
+  dismissed: projector.dismissed(),
 });
 
 /** The one identity used by both the fact store's marker and its saved projections. */

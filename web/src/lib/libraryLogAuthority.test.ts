@@ -1731,6 +1731,8 @@ describe('LibraryLogAuthority', () => {
       kind: 'continue',
       items: [],
       needsShapes: [series],
+      caughtUp: [],
+      dismissed: [],
     });
     await expect(authority.select({ kind: 'history' })).resolves.toMatchObject({
       kind: 'history',
@@ -1760,6 +1762,8 @@ describe('LibraryLogAuthority', () => {
         },
       ],
       needsShapes: [],
+      caughtUp: [],
+      dismissed: [],
     });
   });
 
@@ -1793,6 +1797,8 @@ describe('LibraryLogAuthority', () => {
         },
       ],
       needsShapes: [],
+      caughtUp: [],
+      dismissed: [],
     });
     expect(
       decodeLibraryServiceServerMessage({

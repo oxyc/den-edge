@@ -8,14 +8,15 @@ import {
   airingMaxAge,
   airingPath,
   caughtUpTo,
-  comingBackSoon,
+  comingUp,
   continueAiringFacts,
+  followCandidates,
+  followedOf,
   localDay,
   parseAiring,
   parseAiringBatch,
   releasedEpisode,
   seriesStatusBadge,
-  thisWeek,
   withAiring,
   withNewEpisodes,
   type Airing,
@@ -238,9 +239,9 @@ describe('AiringCache', () => {
       season: 2,
       episode: 2,
     });
-    // Out today is still this week's, as the Apple apps list it (`NewEpisodePolicy.thisWeek`).
-    expect(thisWeek(new Map([[DEXTER, airing]]), releaseDay)).toMatchObject([
-      { series: DEXTER, season: 2, episode: 2, date: '2026-11-06' },
+    // Out today is still coming up, as the Apple apps list it (`NewEpisodePolicy.comingUp`).
+    expect(comingUp(new Map([[DEXTER, airing]]), releaseDay)).toMatchObject([
+      { series: DEXTER, season: 2, episode: 2, date: '2026-11-06', premiere: false },
     ]);
   });
 });
@@ -387,17 +388,109 @@ describe('Home rows', () => {
     upcoming: [],
     seasonPremiere: { season: 3, date: '2026-11-20' },
   };
-  it('lists series coming back within a month and episodes due this week', () => {
+  it('lists, in one row, each series’ next episode or season premiere within 30 days, soonest first', () => {
     const airings = new Map([
       [DEXTER, airing],
       [9, returning],
       [10, { ...returning, seasonPremiere: { season: 4, date: '2027-02-01' } }],
+      // The same day as 9: the lower TMDB id first.
+      [8, { ...returning, seasonPremiere: { season: 2, date: '2026-11-20' } }],
+      // Day 30, the window's last.
+      [11, { ...returning, seasonPremiere: { season: 5, date: '2026-11-30' } }],
+      [12, { ...returning, seasonPremiere: { season: 5, date: '2026-12-01' } }],
     ]);
-    expect(comingBackSoon(airings, saturday)).toEqual([
-      { series: 9, season: 3, date: '2026-11-20' },
+    expect(comingUp(airings, saturday)).toEqual([
+      { series: DEXTER, season: 2, episode: 2, date: '2026-11-06', premiere: false },
+      { series: 8, season: 2, episode: 1, date: '2026-11-20', premiere: true },
+      { series: 9, season: 3, episode: 1, date: '2026-11-20', premiere: true },
+      { series: 11, season: 5, episode: 1, date: '2026-11-30', premiere: true },
     ]);
-    expect(thisWeek(airings, saturday)).toEqual([
-      { series: DEXTER, season: 2, episode: 2, name: 'Young Blood', date: '2026-11-06' },
+  });
+
+  it('shows a premiere out today, and one card per series', () => {
+    const today = { ...returning, seasonPremiere: { season: 3, date: '2026-10-31' } };
+    expect(comingUp(new Map([[9, today]]), saturday)).toEqual([
+      { series: 9, season: 3, episode: 1, date: '2026-10-31', premiere: true },
     ]);
+    // S2E1 came out yesterday; S2E2 next Friday is the one coming up, alone.
+    expect(comingUp(new Map([[DEXTER, airing]]), saturday)).toHaveLength(1);
+  });
+});
+
+describe('following', () => {
+  const GREYS = 1416;
+  const greys: Airing = {
+    source: 'tvmaze',
+    status: 'running',
+    service: 'ABC',
+    previous: { season: 22, episode: 5, date: '2026-10-30' },
+    next: { season: 22, episode: 6, date: '2026-11-06' },
+    upcoming: [{ season: 22, episode: 6, date: '2026-11-06' }],
+    seasonPremiere: { season: 22, date: '2026-10-02' },
+  };
+  const airings = new Map<number, Airing>([
+    [DEXTER, airing],
+    [GREYS, greys],
+  ]);
+  const none = { watchlist: [], continuing: [], caughtUp: [], dismissed: [] };
+
+  it('follows a series caught up on the row, never one seasons behind', () => {
+    const facts = {
+      ...none,
+      continuing: [
+        // Dexter, season 1 finished: the row offers S2E1, the episode just out.
+        { series: DEXTER, episode: { season: 2, episode: 1 }, upcoming: false },
+        // Grey's Anatomy, left at S10E3.
+        { series: GREYS, episode: { season: 10, episode: 3 }, upcoming: false },
+      ],
+    };
+    expect(followedOf(facts, airings)).toEqual([DEXTER]);
+    // Both are still asked about: whether one is caught up rests on its dates.
+    expect(followCandidates(facts).sort()).toEqual([DEXTER, GREYS].sort());
+  });
+
+  it('follows one behind in the season it airs only when the season came out at once', () => {
+    const behind = (episode: number) => ({
+      ...none,
+      continuing: [{ series: GREYS, episode: { season: 22, episode }, upcoming: false }],
+    });
+    expect(followedOf(behind(2), airings)).toEqual([]);
+    const drop = new Map([
+      [
+        GREYS,
+        {
+          ...greys,
+          next: undefined,
+          upcoming: [],
+          seasonPremiere: { season: 22, date: '2026-10-30' },
+        },
+      ],
+    ]);
+    expect(followedOf(behind(2), drop)).toEqual([GREYS]);
+  });
+
+  it('follows a series waiting on the row, watched up to its last episode, or on the Watchlist', () => {
+    expect(
+      followedOf(
+        {
+          ...none,
+          continuing: [{ series: DEXTER, episode: { season: 2, episode: 2 }, upcoming: true }],
+          caughtUp: [9],
+          watchlist: [GREYS],
+        },
+        airings,
+      ),
+    ).toEqual([9, GREYS, DEXTER].sort((a, b) => a - b));
+  });
+
+  it('drops a dismissed series, Watchlist or not, until it is watched again', () => {
+    const facts = {
+      ...none,
+      watchlist: [GREYS],
+      caughtUp: [9],
+      continuing: [{ series: DEXTER, episode: { season: 2, episode: 1 }, upcoming: false }],
+    };
+    expect(followedOf({ ...facts, dismissed: [GREYS, 9] }, airings)).toEqual([DEXTER]);
+    expect(followCandidates({ ...facts, dismissed: [GREYS, 9] })).toEqual([DEXTER]);
   });
 });

@@ -33,6 +33,7 @@
     toggleSeen: 0,
     setReaction: 0,
     dismissContinueWatching: 0,
+    dismissComingUp: 0,
     play: 0,
     playHere: 0,
     changeKidAccess: 0,
@@ -95,6 +96,13 @@
       notify(`Removed “${title.title}” from Continue Watching`, {
         label: 'Undo',
         run: () => calls.dismissContinueWatching--,
+      });
+    },
+    dismissComingUp: (title) => {
+      calls.dismissComingUp += 1;
+      notify(`Removed “${title.title}” from Coming up`, {
+        label: 'Undo',
+        run: () => calls.dismissComingUp--,
       });
     },
     kids: [{ id: '1'.repeat(32), name: 'Kids', approvals: [] }],

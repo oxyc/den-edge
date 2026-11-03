@@ -462,46 +462,95 @@ export function continueAiringFacts(airings: ReadonlyMap<number, Airing>, now = 
   };
 }
 
-/** Followed series whose next season starts within this many days ("Coming back soon"). */
-export const COMING_BACK_DAYS = 30;
-/** Upcoming episodes within this many days ("This week"). */
-export const THIS_WEEK_DAYS = 7;
+/** How many days ahead "Coming up" looks, today included. */
+export const COMING_UP_DAYS = 30;
 
-/** Followed series whose next season premieres within `COMING_BACK_DAYS`, soonest first. */
-export function comingBackSoon(
-  airings: ReadonlyMap<number, Airing>,
-  now = new Date(),
-): Array<{ series: number; season: number; date: string }> {
+/** A followed series' next release on "Coming up": an episode, or a season's premiere (its first episode). */
+export interface ComingUp {
+  series: number;
+  season: number;
+  episode: number;
+  /** A calendar date (`YYYY-MM-DD`). */
+  date: string;
+  premiere: boolean;
+}
+
+/**
+ * "Coming up": each followed series' soonest release out today or within `COMING_UP_DAYS`, one per series, soonest
+ * first (date, then TMDB id). A season's first episode is its premiere. The Apple apps' rule (DenKit
+ * `NewEpisodePolicy.comingUp`).
+ */
+export function comingUp(airings: ReadonlyMap<number, Airing>, now = new Date()): ComingUp[] {
   return [...airings]
-    .flatMap(([series, airing]) => {
+    .flatMap(([series, airing]): ComingUp[] => {
       const premiere = airing.seasonPremiere;
-      const days = premiere && daysUntil(premiere.date, now);
-      return premiere && days !== undefined && days > 0 && days <= COMING_BACK_DAYS
-        ? [{ series, season: premiere.season, date: premiere.date }]
+      const releases: Array<{ season: number; episode: number; date: string }> = dated(airing);
+      if (premiere) releases.push({ season: premiere.season, episode: 1, date: premiere.date });
+      const soonest = releases
+        .filter((release) => {
+          const days = daysUntil(release.date, now);
+          return release.season > 0 && days !== undefined && days >= 0 && days <= COMING_UP_DAYS;
+        })
+        .sort(
+          (a, b) => a.date.localeCompare(b.date) || a.season - b.season || a.episode - b.episode,
+        )[0];
+      return soonest
+        ? [
+            {
+              series,
+              season: soonest.season,
+              episode: soonest.episode,
+              date: soonest.date,
+              premiere: soonest.episode === 1,
+            },
+          ]
         : [];
     })
     .sort((a, b) => a.date.localeCompare(b.date) || a.series - b.series);
 }
 
+/** What the library says of the series a viewer might follow (`followedOf`). */
+export interface FollowCandidates {
+  /** Listed on the Watchlist. */
+  watchlist: Iterable<number>;
+  /** On Continue Watching: the episode the row offers, and whether it waits for that episode to come out. */
+  continuing: Iterable<{ series: number; episode: At; upcoming: boolean }>;
+  /** Off the row, watched up to the newest aired episode (den-core `continue_entry` `finished`/`not_aired`). */
+  caughtUp: Iterable<number>;
+  /** Taken off Continue Watching or Coming up since last watched: not followed until watched again. */
+  dismissed: Iterable<number>;
+}
+
+/** Every series that might be followed, which atlas is asked about: `followedOf` needs their dates to decide. */
+export function followCandidates(candidates: FollowCandidates): number[] {
+  const dismissed = new Set(candidates.dismissed);
+  const ids = new Set([
+    ...candidates.watchlist,
+    ...[...candidates.continuing].map(({ series }) => series),
+    ...candidates.caughtUp,
+  ]);
+  return [...ids].filter((id) => Number.isSafeInteger(id) && id > 0 && !dismissed.has(id));
+}
+
 /**
- * Each followed series' first episode out today or within `THIS_WEEK_DAYS`, soonest first: the Apple apps' rule
- * (DenKit `NewEpisodePolicy.thisWeek`), so an episode out this evening is on the row the day it airs.
+ * The series a viewer follows: what "Coming up", new episodes and their announcements are about. One on the
+ * Watchlist, or one the viewer is caught up on — nothing aired and unwatched before the newest release: watched up
+ * to it, waiting on the row for the next episode, or on the row at an episode that came out with the newest one
+ * (`caughtUpTo`). A series sampled once or seasons behind is not followed, nor one taken off the row since last
+ * watched. Sorted by id.
  */
-export function thisWeek(
-  airings: ReadonlyMap<number, Airing>,
-  now = new Date(),
-): Array<{ series: number } & AiringEpisode> {
-  return [...airings]
-    .flatMap(([series, airing]) => {
-      const soonest = dated(airing)
-        .filter((episode) => {
-          const days = daysUntil(episode.date, now);
-          return days !== undefined && days >= 0 && days <= THIS_WEEK_DAYS;
-        })
-        .sort(
-          (a, b) => a.date.localeCompare(b.date) || a.season - b.season || a.episode - b.episode,
-        )[0];
-      return soonest ? [{ series, ...soonest }] : [];
-    })
-    .sort((a, b) => a.date.localeCompare(b.date) || a.series - b.series);
+export function followedOf(
+  candidates: FollowCandidates,
+  airings: { get(series: number): Airing | undefined },
+): number[] {
+  const followed = new Set([...candidates.watchlist, ...candidates.caughtUp]);
+  for (const { series, episode, upcoming } of candidates.continuing) {
+    const airing = airings.get(series);
+    const newest = airing?.previous;
+    // Past atlas's newest is out by TMDB's count only, so nothing came out after it either.
+    if (upcoming || (newest && (later(episode, newest) || caughtUpTo(episode, newest, airing))))
+      followed.add(series);
+  }
+  const allowed = new Set(followCandidates(candidates));
+  return [...followed].filter((id) => allowed.has(id)).sort((a, b) => a - b);
 }

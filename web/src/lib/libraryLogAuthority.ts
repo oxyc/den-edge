@@ -1512,6 +1512,9 @@ export class LibraryLogAuthority {
         this.#clock.device,
       ),
       needsShapes: home.requiredShapeRefs.filter((key) => !this.#shapes.has(key)).map(refFromKey),
+      // After `continueItems`, which projects: these read the same decisions.
+      caughtUp: this.#continueProjector.caughtUp(),
+      dismissed: this.#continueProjector.dismissed(),
     };
   }
 

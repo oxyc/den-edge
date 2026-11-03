@@ -417,6 +417,10 @@ export interface ContinueView {
   items: ContinueItem[];
   /** Series whose exact Continue decision needs a title-shape observation. */
   needsShapes: TitleRef[];
+  /** Series off the row because they are watched up to their newest aired episode (`ContinueProjector.caughtUp`). */
+  caughtUp?: TitleRef[];
+  /** Series taken off the row since last watched (`ContinueProjector.dismissed`). */
+  dismissed?: TitleRef[];
 }
 
 export interface HistoryItem {

@@ -28,6 +28,8 @@ export interface TitleActionsContext {
   toggleSeen: (title: Title, seen: boolean) => void;
   setReaction: (title: Title, reaction: Reaction | null) => void;
   dismissContinueWatching: (title: Title) => void;
+  /** Off Coming up: the same dismissal as Continue Watching's, so it is followed again once it is watched again. */
+  dismissComingUp: (title: Title) => void;
   /** Play it on the household TV with this id; absent for a guest, who has none. */
   play?: (title: Title, tv: string) => void;
   /** The household's TVs, the one used last first (`householdTvs`). */
@@ -89,9 +91,10 @@ export function titleMenuItems(
   ctx: TitleActionsContext | undefined,
   {
     continueWatching = false,
+    comingUp = false,
     href,
     notify,
-  }: { continueWatching?: boolean; href: string; notify?: Notify },
+  }: { continueWatching?: boolean; comingUp?: boolean; href: string; notify?: Notify },
 ): MenuItem[] {
   const items: MenuItem[] = [];
   if (ctx?.libraryOpen) {
@@ -151,6 +154,14 @@ export function titleMenuItems(
         label: i18n.phrase('Remove from Continue Watching'),
         disabled: busy,
         onselect: () => ctx.dismissContinueWatching(title),
+      });
+    }
+    if (comingUp) {
+      items.push({
+        kind: 'item',
+        label: i18n.phrase('Remove from Coming up'),
+        disabled: busy,
+        onselect: () => ctx.dismissComingUp(title),
       });
     }
     for (const kid of ctx.kids ?? []) {

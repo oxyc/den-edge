@@ -193,6 +193,7 @@ async function followedLibrary(
     recent = false,
     answer = AIRING,
     searched = 1,
+    dismissedAgo,
   } = {},
 ) {
   const searches = [];
@@ -239,13 +240,15 @@ async function followedLibrary(
   await page.goto(`${E2E_ORIGIN}/test/seed-library.html`);
   await page.waitForFunction(() => typeof window.denSeed === 'function');
   await page.evaluate(
-    ({ install, id, ended, film, started, caughtUp, behind, recent }) => {
+    ({ install, id, ended, film, started, caughtUp, behind, recent, dismissedAgo }) => {
       const at = [Date.now() - 86_400_000, 0, 'aaaaaaaaaaaaaaaa'];
       const hourAgo = [Date.now() - 3_600_000, 0, 'aaaaaaaaaaaaaaaa'];
       const progress = (value) => ({
         progress: { value, at, viewing: 0 },
         imported: false,
-        plays: {},
+        // Beside a dismissal, a finished episode carries its play: the time it was watched, which the dismissal is
+        // weighed against.
+        plays: dismissedAgo !== undefined && value >= 1 ? { 0: at[0] } : {},
         cleared: null,
       });
       const watched = progress(1);
@@ -274,6 +277,14 @@ async function followedLibrary(
           title: { type: 'tv', id },
           status: { value: 'watched', at },
           addedAt: Date.now() - 100 * 86_400_000,
+          ...(dismissedAgo === undefined
+            ? {}
+            : {
+                dismissed: {
+                  value: true,
+                  at: [Date.now() - dismissedAgo, 0, 'aaaaaaaaaaaaaaaa'],
+                },
+              }),
         },
         {
           format: 4,
@@ -304,7 +315,17 @@ async function followedLibrary(
           : []),
       ]);
     },
-    { install: HEARTH, id: ID, ended: ENDED, film: FILM, started, caughtUp, behind, recent },
+    {
+      install: HEARTH,
+      id: ID,
+      ended: ENDED,
+      film: FILM,
+      started,
+      caughtUp,
+      behind,
+      recent,
+      dismissedAgo,
+    },
   );
   return { searches, airing };
 }
@@ -326,13 +347,20 @@ test('a caught-up series stays in Continue Watching while its next episode is du
   // Nothing of it is out to play: the card opens the series page.
   await expect(shelf.locator(`a[href="/tv/${ID}-dexter-resurrection"]`).first()).toBeVisible();
   await expect(page.locator('.billboard')).not.toContainText('New episode');
-  // Home asked for each followed series once: both in one batch, unless the library named them one at a time.
+  // Coming up has it too: one row for episodes and premieres alike.
+  const coming = page.getByRole('region', { name: 'Coming up' });
+  await expect(
+    coming.locator('.poster-card, a').filter({ hasText: 'New episode · Fri, Nov 6' }),
+  ).toBeVisible();
+  await expect(page.getByRole('region', { name: /This week|Coming back soon/ })).toHaveCount(0);
+  // Home asked about each series it might follow, once. The finished series watched by its title alone, with no
+  // episode watched, is not one: nothing says it was watched up to its newest episode.
   const asked = airing.flatMap((line) =>
     line.startsWith('POST ')
       ? line.split(' ')[2].split(',').map(Number)
       : [Number(/\/tv\/(\d+)/.exec(line)?.[1])],
   );
-  expect(asked.sort((a, b) => a - b)).toEqual([ENDED, ID]);
+  expect(asked).toEqual([ID]);
 });
 
 /** Continue Watching's cards in order, as `tv:<id>`/`movie:<id>`. */
@@ -373,7 +401,7 @@ test('a followed series’ new episode leads the billboard and Continue Watching
   await expect.poll(() => continueOrder(page)).toEqual([`tv:${ID}`, `movie:${FILM}`]);
   // Found once is enough: the episode is not searched for afresh again while Home stays open.
   expect(searches.filter((search) => search === '?fresh=1')).toHaveLength(1);
-  expect(airing.some((asked) => asked.startsWith('POST /atlas/airing '))).toBe(true);
+  expect(airing.some((asked) => asked.includes(String(ID)))).toBe(true);
 });
 
 /**
@@ -393,6 +421,10 @@ async function expectBehind(page, searches, caption) {
   await expect(page.locator('.billboard')).not.toContainText('New episode');
   await expect(card).not.toContainText('New');
   expect(await continueOrder(page)).toEqual([`movie:${FILM}`, `tv:${ID}`]);
+  // Not followed: its next episode, out within the month, is on no airing row.
+  await expect(
+    page.getByRole('region', { name: /Coming up|This week|Coming back soon/ }),
+  ).toHaveCount(0);
 }
 
 /** Dexter caught up to its new episode `code`: the billboard leads with it and so does the row, `caption`, badged New. */
@@ -467,6 +499,60 @@ test('a season out at once leads for a viewer who finished the one before', asyn
   await expect(
     page.locator('.billboard .slide').first().getByRole('link', { name: 'Play', exact: true }),
   ).toHaveAttribute('href', `/tv/${ID}-dexter-resurrection?play=1`);
+});
+
+test('Remove on Coming up takes a series off every airing surface until it is watched again', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(SATURDAY);
+  // Season 1 finished, S2E1 just out and found: new, on Continue Watching and Coming up (S2E2 next Friday).
+  await followedLibrary(page, { recent: true });
+  await page.goto(`${E2E_ORIGIN}/`);
+  const billboard = page.locator('.billboard');
+  await expect(billboard.locator('.slide').first()).toContainText('New episode · S2E1', {
+    timeout: 30_000,
+  });
+  const coming = page.getByRole('region', { name: 'Coming up' });
+  await expect(
+    coming.locator('.poster-card, a').filter({ hasText: 'New episode · Fri, Nov 6' }),
+  ).toBeVisible();
+  await expect.poll(() => continueOrder(page)).toEqual([`tv:${ID}`, `movie:${FILM}`]);
+
+  await coming.getByRole('button', { name: 'Actions for Dexter: Resurrection' }).click();
+  await page
+    .getByRole('menu', { name: 'Actions for Dexter: Resurrection' })
+    .getByRole('menuitem', { name: 'Remove from Coming up' })
+    .click();
+  await expect(page.getByRole('status').or(page.getByRole('alert')).first()).toContainText(
+    'Removed “Dexter: Resurrection” from Coming up',
+  );
+  // Off Coming up, off Continue Watching, and no longer announced.
+  await expect(coming).toHaveCount(0);
+  await expect.poll(() => continueOrder(page)).toEqual([`movie:${FILM}`]);
+  await expect(billboard).not.toContainText('New episode');
+  // Kept: a reload still has it off every one of them.
+  await page.reload();
+  await expect.poll(() => continueOrder(page), { timeout: 30_000 }).toEqual([`movie:${FILM}`]);
+  await page.waitForTimeout(3_000);
+  await expect(page.getByRole('region', { name: 'Coming up' })).toHaveCount(0);
+  await expect(billboard).not.toContainText('New episode');
+});
+
+test('a series taken off before it was last watched is back on every airing surface', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(SATURDAY);
+  // Taken off two days ago, then season 1 finished yesterday: the dismissal is older than the viewer's last watch.
+  await followedLibrary(page, { recent: true, dismissedAgo: 2 * 86_400_000 });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expect(page.locator('.billboard .slide').first()).toContainText('New episode · S2E1', {
+    timeout: 30_000,
+  });
+  const coming = page.getByRole('region', { name: 'Coming up' });
+  await expect(
+    coming.locator('.poster-card, a').filter({ hasText: 'New episode · Fri, Nov 6' }),
+  ).toBeVisible();
+  await expect.poll(() => continueOrder(page)).toEqual([`tv:${ID}`, `movie:${FILM}`]);
 });
 
 test('a new episode the viewer has started is not new: no slide, no badge, no search', async ({
