@@ -1,7 +1,7 @@
 // What Home's release-date sweep costs a household the size of a long-lived one (`big-library.mjs`), over a slow
 // network: how many requests reach atlas, how long until the last is answered, and how many den-edge's relay refuses
-// (`MEMBER_PER_WINDOW`, 600 a minute per member). And that every followed series with a date shows it: This week and
-// Coming back soon. WebKit at an iPhone's size, and Chromium at a phone's with its page CPU slowed six times; every
+// (`MEMBER_PER_WINDOW`, 600 a minute per member). And that every followed series with a date shows it on Coming up.
+// WebKit at an iPhone's size, and Chromium at a phone's with its page CPU slowed six times; every
 // answer `AIRING_LATENCY_MS` (150 ms) late. It runs against the production build, alone, beside the budgets
 // (`playwright.budgets.config.ts`).
 //
@@ -144,8 +144,7 @@ async function visit(context, edge, { cpu = 1 } = {}) {
     (await page.getByRole('region', { name: row }).locator(`a[href^="/tv/${id}-"]`).count()) > 0;
   const missing = [];
   for (const id of dated) {
-    const row = kind(id) === 'week' ? 'This week' : 'Coming back soon';
-    if (!(await shown(row, id))) missing.push(`${row}: ${id}`);
+    if (!(await shown('Coming up', id))) missing.push(`Coming up: ${id}`);
   }
   const result = {
     requests: seen.requests.length,

@@ -227,6 +227,33 @@ describe('detail presentation', () => {
     );
     expect(presented).toMatchObject({ target: home!.episode, kind: 'resume', fraction: 0.45 });
   });
+  it('lists an episode past TMDB’s newest aired once it is watched, as atlas may date it out first', () => {
+    const series = { type: 'tv' as const, id: 1 };
+    // TMDB counts S1E2 as its newest aired; atlas dated S2E1 out, and it was marked watched.
+    const shape = {
+      counts: new Map([
+        [1, 2],
+        [2, 3],
+      ]),
+      lastAired: { season: 1, episode: 2 },
+    };
+    const watched = {
+      ...blankEpisode(series, 2, 1),
+      progress: { value: 1, at: [5_000, 0, 'web1'] as Stamp, viewing: 0 },
+    };
+    const view = titleView(
+      series,
+      undefined,
+      (season, number) => (season === 2 && number === 1 ? watched : undefined),
+      shape,
+    );
+    expect(view.episodes.map(({ season, episode }) => [season, episode])).toEqual([
+      [1, 1],
+      [1, 2],
+      [2, 1],
+    ]);
+    expect(view.episodes[2]).toMatchObject({ watched: true });
+  });
   it('selects regional certification and streaming providers and puts directors before the cast', () => {
     const d = parseDetail(
       { type: 'movie', id: 1 },

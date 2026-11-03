@@ -502,6 +502,11 @@ export class ContinueSummaries {
       );
     });
     const live = new Set([...kept.map((record) => titleKey(record.title)), ...active]);
+    // A series marked Seen as a whole is followed with no episode of it watched (`airing.ts` `followedOf`): its
+    // dismissal is what takes it off Coming up.
+    for (const record of records)
+      if (!record.deleted && record.title.type === 'tv' && record.status === 'watched')
+        live.add(titleKey(record.title));
     return {
       records: kept,
       marks: [...latest].flatMap(([key, newest]) => {
@@ -661,6 +666,10 @@ export function isAired(
 
 type ContinueDecision = (request: Record<string, unknown>) => ContinueAnswer;
 
+export type SeriesRef = { type: 'tv'; id: number };
+/** A series' ref from its `titleKey` (`tv:1399`). */
+const seriesRef = (key: string): SeriesRef => ({ type: 'tv', id: Number(key.slice(3)) });
+
 /**
  * The policy half of Continue Watching. Title names arrive in small TMDB batches, but they cannot change which
  * episode den-core chooses. Keeping these decisions by series means one late name or shape does not replay the
@@ -736,6 +745,35 @@ export class ContinueProjector {
     for (const key of this.decisions.keys()) if (!live.has(key)) this.decisions.delete(key);
     this.rememberProjection(library, candidates);
     return candidates;
+  }
+
+  /**
+   * The series watched up to their newest aired episode, as den-core last answered them (`continue_entry` code
+   * `finished` or `not_aired`): off the row with nothing to offer yet, and caught up. What following a series off
+   * the row rests on (`airing.ts` `followedOf`).
+   */
+  caughtUp(): SeriesRef[] {
+    const out: SeriesRef[] = [];
+    for (const [key, { answer }] of this.decisions)
+      if (key.startsWith('tv:') && (answer.code === 'finished' || answer.code === 'not_aired'))
+        out.push(seriesRef(key));
+    return out;
+  }
+
+  /**
+   * The series taken off Continue Watching since last watched (`dismissed_at` at or after the latest mark, as
+   * den-core weighs it): not followed until they are watched again.
+   */
+  dismissed(): SeriesRef[] {
+    const out: SeriesRef[] = [];
+    for (const [key, at] of this.library?.dismissed ?? []) {
+      if (!key.startsWith('tv:')) continue;
+      let latest = -Infinity;
+      for (const mark of this.series.get(key)?.marks ?? [])
+        latest = Math.max(latest, mark.updatedAt);
+      if (at >= latest) out.push(seriesRef(key));
+    }
+    return out;
   }
 
   /**

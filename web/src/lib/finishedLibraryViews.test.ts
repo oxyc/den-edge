@@ -429,7 +429,14 @@ describe('finished library views', () => {
       updatedAt: 1_000_000 - index,
     }));
     views.pieces.continue = {
-      view: { kind: 'continue', items, needsShapes: [{ type: 'tv', id: 3 }] },
+      view: {
+        kind: 'continue',
+        items,
+        needsShapes: [{ type: 'tv', id: 3 }],
+        // What following a series off the row rests on is kept with it (`ContinueProjector.caughtUp`).
+        caughtUp: [{ type: 'tv', id: 1399 }],
+        dismissed: [{ type: 'tv', id: 1416 }],
+      },
       layouts: Object.fromEntries(
         items.map(({ title }) => [`tv:${title.id}`, `digest-${title.id}`]),
       ),

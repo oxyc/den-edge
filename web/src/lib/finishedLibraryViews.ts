@@ -97,7 +97,9 @@ const shardOf = (key: string) => {
   return (hash >>> 0) % SHARDS;
 };
 type Continue = FinishedLibraryViewPieces['continue'];
-type ContinueHead = Pick<ContinueView, 'kind' | 'needsShapes'> & { order: string[] };
+type ContinueHead = Pick<ContinueView, 'kind' | 'needsShapes' | 'caughtUp' | 'dismissed'> & {
+  order: string[];
+};
 type ContinueShard = { items: ContinueView['items']; layouts: Record<string, string> };
 type Recommendations = FinishedLibraryViewPieces['recommendations'];
 type RecommendationLists = Omit<Recommendations, 'seeds'>;
@@ -119,6 +121,8 @@ function partsOf(
     const head: ContinueHead = {
       kind: view.kind,
       needsShapes: view.needsShapes,
+      ...(view.caughtUp ? { caughtUp: view.caughtUp } : {}),
+      ...(view.dismissed ? { dismissed: view.dismissed } : {}),
       order: view.items.map((item) => refKey(item.title)),
     };
     return [
@@ -169,7 +173,14 @@ function wholeContinue(head: unknown, shards: unknown[]): Continue | undefined {
   }
   if ([...items.values()].some((left) => left.length)) return undefined;
   return {
-    view: { kind: held.kind!, items: ordered, needsShapes: held.needsShapes },
+    view: {
+      kind: held.kind!,
+      items: ordered,
+      needsShapes: held.needsShapes,
+      // A view kept before these were is read without them: nothing off the row is then known caught up.
+      ...(Array.isArray(held.caughtUp) ? { caughtUp: held.caughtUp } : {}),
+      ...(Array.isArray(held.dismissed) ? { dismissed: held.dismissed } : {}),
+    },
     layouts,
   };
 }

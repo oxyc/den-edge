@@ -1838,10 +1838,12 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'continue':
       return (
-        exact(value, ['kind', 'items', 'needsShapes']) &&
+        exact(value, ['kind', 'items', 'needsShapes', 'caughtUp', 'dismissed']) &&
         list(value.items, continueItem) &&
         list(value.needsShapes, titleRef) &&
         value.needsShapes.every((title) => title.type === 'tv') &&
+        (value.caughtUp === undefined || list(value.caughtUp, titleRef)) &&
+        (value.dismissed === undefined || list(value.dismissed, titleRef)) &&
         unique(value.items, ({ title }) => titleIdentity(title)) &&
         unique(value.needsShapes, titleIdentity)
       );

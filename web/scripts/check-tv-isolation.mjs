@@ -145,5 +145,9 @@ if (process.argv.includes('--capture')) {
   // first open that keeps everyone's picks, and a switch failure that says why add 0.3 KiB. Home's first poster on
   // WebKit iPhone moves from ~1.2 s to ~0.24 s, and a slow first visit's billboard from 23 s to 3.4 s. Allow half a
   // KiB more; the initial and catalog ceilings are unchanged.
-  if (coreTotalDelta > 68096) throw new Error('Browser total JS/CSS budget exceeded');
+  // Coming up (one row in place of This week and Coming back soon, with Remove), new episodes only for a caught-up
+  // viewer, and following narrowed to the series the viewer is caught up on add 0.6 KiB. A series sampled once or
+  // seasons behind no longer reaches Home's airing row, billboard or Continue lead. Allow one KiB more; the initial
+  // and catalog ceilings are unchanged.
+  if (coreTotalDelta > 69120) throw new Error('Browser total JS/CSS budget exceeded');
 }

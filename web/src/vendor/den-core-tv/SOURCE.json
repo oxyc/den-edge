@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "sourceManifest": "../den-core/SOURCE.json",
-  "sourceDigest": "6600c5b0fadf9af1756a9ff6a16935ab223213f0f994e6475849da489285debe",
+  "sourceDigest": "56cea983ffcc2a18846880dc58d8a38fd264fec9ad27654bc65581ffcc3c976b",
   "rust": "1.95.0",
   "wasmBindgen": "0.2.129",
   "rustflags": "-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types",
@@ -35,7 +35,7 @@
     "generated/den_core_recovery_bg.wasm.d.ts": "863828fd10d2c7f7d45eabef19c59b9530521dcb2e1cef7a705e5725c5b4b799",
     "generated/den_core_startup.d.ts": "43d0cb3ff49bef267975dc0643bb74f896a66787a7408981082ee3bf80c950d3",
     "generated/den_core_startup.js": "b223ed48f093567de0218fa38b1d00bf7cfd2d518a69e72bdcca69c10d8fec2c",
-    "generated/den_core_startup_bg.wasm": "36bf384d37f74b2091f40a9934b940fedbd6b8b7411e1b44a7d65319c754c56a",
+    "generated/den_core_startup_bg.wasm": "82127433c17919f7e472e0d41a19254a1366904c1fe5f5e3b6bd3803f8ea45de",
     "generated/den_core_startup_bg.wasm.d.ts": "24fd6f7332ee7ae4dd8bc17857380ebd59c7be8193b1a7be0eab88820c9fe96c",
     "index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
     "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87",

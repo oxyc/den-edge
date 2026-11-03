@@ -1853,6 +1853,8 @@ it('reads Continue again from facts at the same head when the kept one is past i
     kind: 'continue',
     items: [],
     needsShapes: [],
+    caughtUp: [],
+    dismissed: [],
   });
   expect(openFull).not.toHaveBeenCalled();
   await opened!.authority.close?.();

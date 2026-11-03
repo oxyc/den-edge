@@ -263,23 +263,23 @@ test('a series caught up to its last season stays in Continue Watching after the
   await expect(card).toContainText('S4 · E1');
 });
 
-test('Home lists the followed series’ episodes this week for a library following hundreds of series', async ({
+test('Home lists the followed series’ coming episodes for a library asking about hundreds of series', async ({
   page,
 }) => {
   await page.clock.install({ time: NOW });
   const airingPosts = await routeSeries(page);
-  // More followed series than one request to the content worker may name (its wire's 512 titles).
+  // More series that might be followed than one request to the content worker may name (its wire's 512 titles).
   await seed(page, { others: 520 });
   await page.goto(`${E2E_ORIGIN}/`);
 
-  const week = page.getByRole('region', { name: 'This week' });
-  // Tracker's S4E5 is out this evening: today's episode is this week's, as the Apple apps list it.
-  await expect(week.locator(`a[href*="/tv/${TRACKER}-tracker"]`)).toContainText('S4 · E5', {
-    timeout: 60_000,
-  });
-  await expect(week.locator(`a[href*="/tv/${DEXTER}-dexter-resurrection"]`)).toContainText(
-    'S2 · E2 · Fri, Nov 6',
+  const coming = page.getByRole('region', { name: 'Coming up' });
+  // Dexter, caught up, waits for S2E2 on Friday.
+  await expect(coming.locator(`a[href*="/tv/${DEXTER}-dexter-resurrection"]`)).toContainText(
+    'New episode · Fri, Nov 6',
+    { timeout: 60_000 },
   );
+  // Tracker is four episodes of season 4 behind: S4E5 out this evening is not one it follows.
+  await expect(coming.locator(`a[href*="/tv/${TRACKER}-tracker"]`)).toHaveCount(0);
   // All 522 asked once, a request's worth (at most 512) at a time, not one request each.
   expect(airingPosts.reduce((sum, n) => sum + n, 0)).toBe(522);
   expect(Math.max(...airingPosts)).toBeLessThanOrEqual(512);

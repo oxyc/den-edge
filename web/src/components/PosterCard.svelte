@@ -40,6 +40,7 @@
     live,
     href,
     continueWatching = false,
+    comingUp = false,
     stillPath,
     landscape = false,
     badge,
@@ -66,6 +67,8 @@
     href?: string;
     /** This card is on the Continue Watching row: its ⋯ offers "Remove from Continue Watching". */
     continueWatching?: boolean;
+    /** This card is on the Coming up row: its ⋯ offers "Remove from Coming up". */
+    comingUp?: boolean;
     /** Episode artwork. Download cards use the same landscape visual language as episode/Continue cards. */
     stillPath?: string;
     landscape?: boolean;
@@ -414,7 +417,8 @@
     {@render card()}
     <ActionMenu
       bind:this={actionMenu}
-      items={() => titleMenuItems(title, titleActions, { continueWatching, href: href!, notify })}
+      items={() =>
+        titleMenuItems(title, titleActions, { continueWatching, comingUp, href: href!, notify })}
       label={i18n.format('actions.forTitle', 'Actions for {value}', { value: title.title })}
       heading={title.title}
       triggerClass={release ? 'action below' : 'action'}
