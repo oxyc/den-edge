@@ -43,8 +43,9 @@
     if (!page.active) return;
     return observeNearViewport(
       bottom,
+      // Never below STEP: rows that arrive after the marker was seen (a Kid's catalogue from atlas) still show.
       (near) => {
-        if (near) count = Math.min(rows.length, count + STEP);
+        if (near) count = Math.max(STEP, Math.min(rows.length, count + STEP));
       },
       '300px 0px',
     );
@@ -55,6 +56,7 @@
   // afresh as rows are added, since a marker still in range after a step changes no intersection.
   $effect(() => {
     void count;
+    void rows.length;
     if (!page.active) return;
     let live = true;
     let cancelIdle = () => {};
@@ -64,7 +66,7 @@
         if (!near || count >= rows.length) return;
         cancelIdle();
         cancelIdle = whenIdle(() => {
-          if (live) count = Math.min(rows.length, count + STEP);
+          if (live) count = Math.max(STEP, Math.min(rows.length, count + STEP));
         });
       },
       '300% 0px',

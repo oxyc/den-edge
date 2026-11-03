@@ -21,6 +21,7 @@
   const catalog = params.has('catalog');
   const below = params.has('below');
   const atlasConfig = params.has('atlas-config');
+  const late = params.has('late-rows');
   const titles: Title[] = Array.from({ length: 200 }, (_, index) => ({
     type: 'movie',
     id: index + 1,
@@ -37,6 +38,7 @@
     title: `Catalog row ${index + 1}`,
     load: async (page) => (page === 1 ? titles.slice(index, index + 4) : []),
   }));
+  let lateRows = $state.raw<RowDef[]>([]);
 
   let acknowledgeAtlas!: () => void;
   const atlasAcknowledged = new Promise<void>((resolve) => (acknowledgeAtlas = resolve));
@@ -84,11 +86,13 @@
         setActive: (next: boolean) => void;
         acknowledgeAtlas: () => void;
         atlasQueries: () => number;
+        supplyRows: () => void;
       };
     }
   ).fixture = {
     setActive: (next) => (active = next),
     acknowledgeAtlas,
+    supplyRows: () => (lateRows = rows),
     atlasQueries: () => atlasQueries,
   };
   onDestroy(() => atlasServices?.stop());
@@ -102,6 +106,8 @@
       {:else}
         <p role="status">Configuring Atlas…</p>
       {/if}
+    {:else if late}
+      <Browse rows={lateRows} shown={() => true} identity="home" />
     {:else if catalog}
       <Browse {rows} shown={() => true} />
     {:else if control}

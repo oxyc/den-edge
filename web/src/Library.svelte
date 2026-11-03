@@ -220,7 +220,10 @@
       // Provider/catalogue metadata sits below every personal shelf. On paired Home, keep its parsing and the two
       // Browse rows it mounts out of the hero and first-poster path. The bounded fallback in this scheduler also
       // admits a Home with neither a poster nor hero detail; guests and direct browse routes still load it immediately.
-      if (model && home && document.visibilityState === 'visible')
+      // Where the catalogue is the first row there is no shelf for it to stand behind, and its poster is Home's first:
+      // a Kid's Home, and a Home whose shelves came out empty. Decided once, as the shelves are ready.
+      const catalogueFirst = untrack(() => session.kid || topShelf === undefined);
+      if (model && home && !catalogueFirst && document.visibilityState === 'visible')
         await new Promise<void>((resolve) =>
           scheduleAfterStartupMilestone(resolve, ['first poster', 'billboard detail'], {
             timeoutMs: 3_000,
@@ -619,7 +622,6 @@
       startupRenderPhase('home_shelves');
       shelvesReady = true;
       rankingHomeNamesReady = true;
-      startupMarkOnce('shelves ready');
       if (retainedSent === plan.continue) return;
       retainedSent = plan.continue;
       void model.retainHomeContinue(plan.continue).catch((error: unknown) => {
@@ -2033,6 +2035,18 @@
   /** Discovery may settle before this encrypted first-paint answer; a generic fallback must wait for both. */
   let retainedBillboardReady = $state(model === null);
   /**
+   * A first open: no personal billboard kept, and the history still being read. Its billboard is atlas's shared daily
+   * ranking from as soon as that answers, for the whole visit; the personal ranking waits for the whole history
+   * (`initialHomeSettled`, ~13 s at 150 ms / 1.6 Mbps for a big household), and swapping it in then would change the
+   * slides under the viewer. It is ranked once the history settles and kept, so the next visit opens with it.
+   */
+  let coldVisit = $state(false);
+  /** The facets whose cold billboard is painted, and whose personal ranking is kept: once each per visit. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping the billboard effect reads, not state.
+  const coldPainted = new Set<string>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- as above.
+  const coldKept = new Set<string>();
+  /**
    * Read once per page: whether a library's billboard is ranked by atlas against it (`memberPostOn`), and whether
    * the billboard is only new titles (`freshOn`).
    */
@@ -2124,7 +2138,11 @@
     void readRetainedBillboard(scope)
       .then(
         (saved) => {
-          if (!current || !saved || featured.length) return;
+          if (!current) return;
+          // Nothing personal kept, and the history still being read: a first open (`coldVisit`), for the whole visit.
+          if (memberPost && !personalRetainedTitles(saved) && !untrack(() => initialHomeSettled))
+            coldVisit = true;
+          if (!saved || featured.length) return;
           if (saved.kind === 'personal') {
             const titles = displayableKept({
               at: saved.at,
@@ -2197,6 +2215,20 @@
       // or definitively found nothing before admitting trending to the billboard.
       if (model && !retainedBillboardReady) return;
       untrack(() => buildTrending(beginBillboard()));
+      return;
+    }
+    // A first open shows everyone's picks at once and keeps them for the visit (`coldVisit`); its personal ranking is
+    // only kept, for the next visit.
+    if (coldVisit) {
+      const key = facet ?? 'all';
+      if (!coldPainted.has(key)) {
+        coldPainted.add(key);
+        untrack(paintColdBillboard);
+      }
+      if (rankingReady && !coldKept.has(key)) {
+        coldKept.add(key);
+        untrack(keepPersonalForNextVisit);
+      }
       return;
     }
     // Its library vector is whole-library state, so the remaining first-read pages must also have landed. This does
@@ -2297,28 +2329,67 @@
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup);
         if (run !== billboardRun || !picked.length) return;
         stageFeatured(picked, !!personal);
-        if (model && keepsBillboard()) {
-          const keptAt = Date.now();
-          void replacePersonalBillboard(
-            session.identity.retainedScope,
-            type,
-            fresh,
-            picked,
-            async (kept) => {
-              const scope: RetainedBillboardScope = { kind: 'personal', facet: type, fresh };
-              await model.retainBillboard(scope, {
-                kind: 'personal',
-                at: kept.at,
-                titles: kept.titles,
-              });
-              forgetRetainedBillboard(scope);
-            },
-            keptAt,
-          ).catch(warnKeep);
-        }
+        keepPersonal(type, picked);
       })
       .catch(() => buildTrending(run))
       .finally(() => finishBillboard(run));
+  }
+
+  /** Keep `picked` as today's personal billboard for `type`: what the next visit opens with. */
+  function keepPersonal(type: typeof facet, picked: RecommendedTitle[]) {
+    if (!model || !keepsBillboard()) return;
+    void replacePersonalBillboard(
+      session.identity.retainedScope,
+      type,
+      fresh,
+      picked,
+      async (kept) => {
+        const scope: RetainedBillboardScope = { kind: 'personal', facet: type, fresh };
+        await model.retainBillboard(scope, {
+          kind: 'personal',
+          at: kept.at,
+          titles: kept.titles,
+        });
+        forgetRetainedBillboard(scope);
+      },
+      Date.now(),
+    ).catch(warnKeep);
+  }
+
+  /** A first open's billboard: everyone's picks, kept on screen for the visit (`coldVisit`). */
+  function paintColdBillboard() {
+    const run = beginBillboard();
+    stagedFeatured = null;
+    void paintShared(run)
+      .catch(() => buildTrending(run))
+      .finally(() => finishBillboard(run));
+  }
+
+  /**
+   * A first open's personal ranking, once its whole history is read: ranked and kept for the next visit, never put on
+   * this visit's billboard. Not tied to `billboardRun`, which belongs to what is on screen.
+   */
+  function keepPersonalForNextVisit() {
+    const type = facet;
+    if (!model || !overview || !memberPost) return;
+    void recommend(
+      session.content,
+      recommendBody({
+        facet: type,
+        prefs,
+        library: weighted,
+        named: session.displayTitles(),
+        owned: seeds.owned,
+        fresh,
+      }),
+    )
+      .then(async (slides) => {
+        if (!slides?.length) return;
+        const known = new Map(featured.map((title) => [titleKey(title), title] as const));
+        const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookupTitles);
+        if (picked.length) keepPersonal(type, picked);
+      })
+      .catch(warnKeep);
   }
 
   /** The shared billboard (`GET /recommend/<scope>.json`) as the first paint, less what the library holds. */
@@ -2576,6 +2647,19 @@
   /** The first shelf with anything on it: the one seen first, so the one mounted first. */
   const topShelf = $derived(shelves.find(({ filled }) => filled)?.id);
   const shelfMounted = (shelf: Shelf) => shelvesReady && (lowerShelvesReady || shelf === topShelf);
+  // `shelves ready` is the milestone the budgets time: a named card on a shelf, or nothing left to name. A naming pass
+  // the service refused readies the shelves with no card, which this must not count.
+  $effect(() => {
+    if (!model || !shelvesReady) return;
+    if (
+      continueShelf.length > 0 ||
+      watchlistShelf.length > 0 ||
+      (homeNamingRefs ?? []).every(
+        (ref) => session.displayTitle(ref) || session.displayMissing(ref),
+      )
+    )
+      startupMarkOnce('shelves ready');
+  });
 
   function caption(entry: ContinueEntry): string | undefined {
     // A caught-up series waiting for its next episode says when that is out.

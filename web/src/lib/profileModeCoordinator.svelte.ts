@@ -525,6 +525,10 @@ export class ProfileModeCoordinator {
     return true;
   }
 
+  /**
+   * False when the switch is refused (a PIN that didn't match); it throws when the switch failed: the profile's
+   * library couldn't be opened, or the selection changed while it opened. `switchToPersistent` is the same.
+   */
   async switchToOwner(pin?: string): Promise<boolean> {
     this.#assertOpen();
     if (this.mode === 'owner') return true;
@@ -537,7 +541,12 @@ export class ProfileModeCoordinator {
     const ownerChoice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
     const nextPersistent =
       this.#profileModels && ownerChoice ? await this.#preparePersistent(ownerChoice) : null;
-    if (this.#profileModels && !nextPersistent) return false;
+    if (this.#profileModels && !nextPersistent)
+      throw new Error(
+        ownerChoice
+          ? 'the profile selection changed while Owner’s library opened'
+          : 'the household directory names no Owner',
+      );
     const preparedAt = this.#transition;
     // Revocation and deletion take the same visit-wide lock as writes. A write wins before deletion or observes the
     // Owner marker afterward; no interleaving can recreate the namespace after the visit ends.
@@ -587,7 +596,8 @@ export class ProfileModeCoordinator {
     const previous = this.#session;
     const marker = { version: 1 as const, mode: 'persistent' as const, profileId: kid.id };
     const nextPersistent = this.#profileModels ? await this.#preparePersistent(kid) : null;
-    if (this.#profileModels && !nextPersistent) return false;
+    if (this.#profileModels && !nextPersistent)
+      throw new Error(`the profile selection changed while ${kid.name}’s library opened`);
     const preparedAt = this.#transition;
     if (previous?.identity.kind === 'visitor')
       try {
@@ -666,10 +676,14 @@ export class ProfileModeCoordinator {
   /** Replace the validated control-plane projection. A changed/removed active entry is never kept alive. */
   updateDirectory(directory: PreviewProfileDirectory | null): void {
     this.#assertOpen();
-    // The page hands over the directory it constructed this coordinator with as soon as it holds it. While the profile
-    // it remembered is still opening, nothing has changed: cancelling then made a remembered Kid's library open twice,
-    // the first one thrown away.
-    if (this.#restoring > 0 && JSON.stringify(directory) === JSON.stringify(this.#directory))
+    // The page hands over every replacement of the directory's lease, including ones equal to what it holds (the
+    // household's other writes republish it: setting the Owner PIN on the way to a Kid does). While a profile is
+    // opening, an equal one changes nothing: cancelling then threw a remembered Kid's open away and opened it twice, and
+    // failed a switch to a Kid outright, which the switcher showed as a wrong PIN.
+    if (
+      (this.#restoring > 0 || this.#openingModels.size > 0) &&
+      JSON.stringify(directory) === JSON.stringify(this.#directory)
+    )
       return;
     const current = this.#session;
     const previousChoice =
@@ -855,9 +869,11 @@ export class ProfileModeCoordinator {
     this.#openingModels.add(handle);
     try {
       await handle.model.ready;
-    } catch {
-      if (this.#openingModels.delete(handle)) handle.close();
-      return null;
+    } catch (error) {
+      // Cancelled by a later selection: nothing failed. Otherwise the library itself could not be opened.
+      if (!this.#openingModels.delete(handle)) return null;
+      handle.close();
+      throw new Error(`${choice.name}’s library could not be opened`, { cause: error });
     }
     if (!this.#openingModels.delete(handle)) return null;
     const current = this.#choice(choice.id);
@@ -894,7 +910,14 @@ export class ProfileModeCoordinator {
   }
 
   async #finishRestore(choice: ProfileChoice, acceptLegacyOwner: boolean): Promise<void> {
-    const next = await this.#preparePersistent(choice);
+    let next: ProfileSession | null;
+    try {
+      next = await this.#preparePersistent(choice);
+    } catch (error) {
+      // No one waits on a restore: the page stays at the profile gate, and the reason is logged.
+      console.warn('den: the remembered profile could not be opened', error);
+      return;
+    }
     if (!next || this.#disposed) return;
     const saved = readActiveProfile(this.#storage);
     const selected =

@@ -219,6 +219,10 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   async query(
     query: LibraryQuery,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
+    // A read asked while the connection opens waits for it instead of being refused `not-ready`: Home names its first
+    // shelves this early, and a refusal left them to a one-second retry. The connection settles on its own: its hello
+    // has the startup deadline, a Worker failure fails it, and its restarts are bounded. A failed one is thrown below.
+    if (this.#connecting) await this.#connecting.catch(() => undefined);
     return await this.#readyClient().query(query);
   }
 

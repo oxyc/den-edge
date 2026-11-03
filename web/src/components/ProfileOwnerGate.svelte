@@ -19,7 +19,8 @@
     failed = false;
     try {
       if (!(await profiles.switchToOwner(pin))) denied = true;
-    } catch {
+    } catch (error) {
+      console.error('den: Owner could not be opened', error);
       failed = true;
     } finally {
       establishing = false;
