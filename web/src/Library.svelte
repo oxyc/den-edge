@@ -619,7 +619,6 @@
       startupRenderPhase('home_shelves');
       shelvesReady = true;
       rankingHomeNamesReady = true;
-      startupMarkOnce('shelves ready');
       if (retainedSent === plan.continue) return;
       retainedSent = plan.continue;
       void model.retainHomeContinue(plan.continue).catch((error: unknown) => {
@@ -2576,6 +2575,19 @@
   /** The first shelf with anything on it: the one seen first, so the one mounted first. */
   const topShelf = $derived(shelves.find(({ filled }) => filled)?.id);
   const shelfMounted = (shelf: Shelf) => shelvesReady && (lowerShelvesReady || shelf === topShelf);
+  // `shelves ready` is the milestone the budgets time: a named card on a shelf, or nothing left to name. A naming pass
+  // the service refused readies the shelves with no card, which this must not count.
+  $effect(() => {
+    if (!model || !shelvesReady) return;
+    if (
+      continueShelf.length > 0 ||
+      watchlistShelf.length > 0 ||
+      (homeNamingRefs ?? []).every(
+        (ref) => session.displayTitle(ref) || session.displayMissing(ref),
+      )
+    )
+      startupMarkOnce('shelves ready');
+  });
 
   function caption(entry: ContinueEntry): string | undefined {
     // A caught-up series waiting for its next episode says when that is out.

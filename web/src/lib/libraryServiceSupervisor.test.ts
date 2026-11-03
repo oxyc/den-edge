@@ -674,6 +674,40 @@ it('publishes staggered initial Worker replacements independently', async () => 
   supervisor.close();
 });
 
+it('answers a read asked while the connection opens once it is ready, rather than refusing it', async () => {
+  const client = new StaggeredSubscriptionClient();
+  const answer = { kind: 'library.metadata', titles: [], shapes: [], retryable: [] };
+  client.query = vi.fn(async () => ({
+    result: answer as unknown as LibraryQueryResult,
+    version: client.version(1),
+  }));
+  const supervisor = new LibraryServiceSupervisor(() => client);
+  supervisor.subscribeSnapshot({ kind: 'overview' }, () => {});
+  const opening = supervisor.open(openOptions);
+  await vi.waitFor(() => expect(client.releaseSubscriptions).toHaveLength(1));
+
+  const read = supervisor.query({ kind: 'library.metadata', titles: [] });
+  await Promise.resolve();
+  expect(client.query).not.toHaveBeenCalled();
+
+  client.releaseSubscriptions[0]!();
+  await opening;
+  await expect(read).resolves.toEqual({ result: answer, version: client.version(1) });
+  supervisor.close();
+});
+
+it('refuses a read asked while the connection opens with the failure that ended it', async () => {
+  const client = new FakeClient();
+  client.openFailure = { code: 'internal', message: 'storage is gone', retryable: false };
+  const supervisor = new LibraryServiceSupervisor(() => client);
+  const opening = supervisor.open(openOptions);
+  const read = supervisor.query({ kind: 'library.metadata', titles: [] });
+
+  await expect(opening).rejects.toMatchObject({ failure: { code: 'internal' } });
+  await expect(read).rejects.toMatchObject({ failure: { code: 'internal' } });
+  supervisor.close();
+});
+
 it('starts lazy selections acquired during open after the required-root handoff', async () => {
   const client = new StaggeredSubscriptionClient();
   const supervisor = new LibraryServiceSupervisor(() => client);
