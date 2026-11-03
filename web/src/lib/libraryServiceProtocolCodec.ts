@@ -916,10 +916,11 @@ function query(value: unknown): value is LibraryQuery {
     return exact(value, ['kind', 'target']) && optional(value.target, downloadTarget);
   if (value.kind === 'download.sources')
     return (
-      exact(value, ['kind', 'title', 'refresh', 'fresh']) &&
+      exact(value, ['kind', 'title', 'refresh', 'fresh', 'early']) &&
       downloadTitle(value.title) &&
       optional(value.refresh, bool) &&
-      optional(value.fresh, bool)
+      optional(value.fresh, bool) &&
+      optional(value.early, bool)
     );
   if (value.kind === 'download.artwork')
     return exact(value, ['kind', 'target']) && downloadTarget(value.target);

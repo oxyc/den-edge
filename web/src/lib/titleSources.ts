@@ -115,12 +115,19 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
 
 export { parseAnswer, type SourceAnswer } from './sourceAnswer';
 
+/** The request header asking scout for an early stream list (`fetchSourceList`'s `early`). */
+export const EARLY_ANSWER_HEADER = 'X-Den-Early-Answer';
+
 /**
  * Scout's list for a title and what it says about it; `sources` is null when scout could not be reached.
  *
  * `fresh` asks scout to rebuild the list past its own caches (`?fresh=1`) and skips the browser's. The plain address
  * is then asked again with `reload`, which scout answers from the list it just rebuilt, so the copy the browser keeps
  * for it is that list rather than the one the viewer was checking past. A scout without `fresh` ignores it.
+ *
+ * `early` says a viewer is waiting on the list (`X-Den-Early-Answer: 1`): scout may then answer a second after its
+ * first indexer instead of on its slowest, naming what it went without as `late`, and sends that list `no-store`.
+ * Only a list a viewer looks at asks; one a download decides on waits for every indexer. Ignored by a scout without it.
  */
 export async function fetchSourceList(
   addon: Addon,
@@ -131,15 +138,15 @@ export async function fetchSourceList(
   signal?: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
   fresh = false,
+  early = false,
 ): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer }> {
   try {
     const id =
       season !== undefined && episode !== undefined ? `${imdb}:${season}:${episode}` : imdb;
     const url = `${addon.base}/stream/${season === undefined ? 'movie' : 'series'}/${encodeURIComponent(id)}.json`;
-    const response = await fetchImpl(
-      fresh ? `${url}?fresh=1` : url,
-      fresh ? { signal, cache: 'no-store' } : { signal },
-    );
+    const init: RequestInit = fresh ? { signal, cache: 'no-store' } : { signal };
+    if (early) init.headers = { [EARLY_ANSWER_HEADER]: '1' };
+    const response = await fetchImpl(fresh ? `${url}?fresh=1` : url, init);
     if (!response.ok) return { sources: null };
     const body: unknown = await response.json();
     if (fresh)

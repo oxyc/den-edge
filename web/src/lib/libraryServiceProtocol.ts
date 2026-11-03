@@ -960,8 +960,18 @@ export type LibraryQuery =
     }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
-  /** `fresh`: rebuilt by scout past its caches (`?fresh=1`) — a viewer checking for sources again. */
-  | { kind: 'download.sources'; title: DownloadTitleDescriptor; refresh?: boolean; fresh?: boolean }
+  /**
+   * `fresh`: rebuilt by scout past its caches (`?fresh=1`) — a viewer checking for sources again. `early`: the list a
+   * viewer is looking at, which scout may answer before its slowest indexer (`fetchSourceList`); never one a download
+   * decides on.
+   */
+  | {
+      kind: 'download.sources';
+      title: DownloadTitleDescriptor;
+      refresh?: boolean;
+      fresh?: boolean;
+      early?: boolean;
+    }
   | { kind: 'download.artwork'; target: DownloadTarget }
   /** The stored `set:prefs` values with their stamps, as profile seeding takes them. */
   | { kind: 'preferences.raw' }

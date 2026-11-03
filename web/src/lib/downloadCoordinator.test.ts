@@ -184,6 +184,58 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(2);
   });
 
+  it('keeps the viewer’s early list apart from the list a download decides on', async () => {
+    const shared = testLog();
+    const asked: boolean[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, _fresh, early) => {
+          asked.push(early === true);
+          if (early) {
+            await held;
+            return { sources: [second], answer: { kind: 'partial', missing: 0, late: 1 } };
+          }
+          return { sources: [first, second], answer: { kind: 'live', missing: 0 } };
+        },
+      },
+      { now: () => T0 },
+    );
+    // The Sources panel's early list is still out: a download's resolve neither joins it nor reads it after.
+    const shown = queue.sourcesForTitle(title, false, false, true);
+    const decided = await queue.sourcesForTitle(title, true);
+    expect(decided.answer?.kind).toBe('live');
+    release();
+    expect((await shown).answer).toMatchObject({ kind: 'partial', late: 1 });
+    expect((await queue.sourcesForTitle(title)).sources?.length).toBe(2);
+    expect((await queue.sourcesForTitle(title, false, false, true)).answer?.late).toBe(1);
+    expect(asked).toEqual([true, false]);
+  });
+
+  it('starts a download from the list the viewer was shown, without asking again', async () => {
+    const shared = testLog();
+    const asked: boolean[] = [];
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, _fresh, early) => {
+          asked.push(early === true);
+          return { sources: [second] };
+        },
+      },
+      { now: () => T0 },
+    );
+    await queue.sourcesForTitle(title, false, false, true);
+    await expect(queue.enqueueIdentity(title, second.identity, 1)).resolves.toBe(true);
+    expect(asked).toEqual([true]);
+  });
+
   it('asks afresh past its snapshot and past a plain ask in flight, and only a fresh ask says so', async () => {
     const shared = testLog();
     const asked: boolean[] = [];

@@ -884,13 +884,14 @@ export class LibraryModel {
     };
   }
 
-  downloadSources(title: DownloadTitleDescriptor, refresh = false, fresh = false) {
+  downloadSources(title: DownloadTitleDescriptor, refresh = false, fresh = false, early = false) {
     this.#assertOpen();
     return this.service.query({
       kind: 'download.sources',
       title: wireDownloadTitle(title),
       ...(refresh ? { refresh } : {}),
       ...(fresh ? { fresh } : {}),
+      ...(early ? { early } : {}),
     });
   }
 
