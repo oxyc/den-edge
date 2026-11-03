@@ -143,9 +143,12 @@ for (const profiles of [false, true]) {
       );
       await language.selectOption('es');
       await saved;
-      await expect(language).toHaveValue('es');
+      // The choice translates the page, the select's own label included, so it is found by its Spanish name.
       await expect(laptop.locator('html')).toHaveAttribute('lang', 'es');
       await expect(laptop.getByRole('heading', { name: 'Ajustes', level: 1 })).toBeVisible();
+      await expect(
+        laptop.getByRole('combobox', { name: 'Idioma de la interfaz', exact: true }),
+      ).toHaveValue('es');
 
       await laptop.reload();
       await expect(laptop.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });

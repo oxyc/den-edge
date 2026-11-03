@@ -2,6 +2,7 @@ import { expect, it } from 'vitest';
 import {
   ageOf,
   cancelSource,
+  EARLY_ANSWER_HEADER,
   fetchSourceList,
   parseAnswer,
   parseSources,
@@ -174,6 +175,31 @@ it('reads what scout says about its list, and nothing from an older scout or a m
     builtAt: Date.parse('2026-09-22T12:00:00Z'),
   });
   expect(parseAnswer(den({ answerKind: 'stale' }))?.outage).toBeUndefined();
+  // A late source is still answering: not missing, so no failure note, but counted, and the list is partial.
+  expect(
+    parseAnswer(
+      den({
+        answerKind: 'partial',
+        coverage: {
+          sources: [
+            { id: 'torrentio', outcome: 'answered' },
+            { id: 'mediafusion', outcome: 'late' },
+          ],
+        },
+      }),
+    ),
+  ).toMatchObject({ kind: 'partial', missing: 0, late: 1 });
+  expect(parseAnswer(den({ answerKind: 'live' }))).not.toHaveProperty('late');
+});
+it('only an early ask carries the header', async () => {
+  const sent: Array<string | null> = [];
+  const network = (async (_input, init) => {
+    sent.push(new Headers(init?.headers).get(EARLY_ANSWER_HEADER));
+    return Response.json({ streams: [raw] });
+  }) as typeof fetch;
+  await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network);
+  await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network, false, true);
+  expect(sent).toEqual([null, '1']);
 });
 it('hands the list and scout’s account of it back together', async () => {
   const network = (async () =>

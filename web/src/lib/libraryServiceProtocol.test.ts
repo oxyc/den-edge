@@ -1378,6 +1378,8 @@ describe('library service server protocol', () => {
       });
     expect(ask({ refresh: true, fresh: true })).toMatchObject({ ok: true });
     expect(ask({ fresh: 'yes' })).toMatchObject({ ok: false });
+    expect(ask({ early: true })).toMatchObject({ ok: true });
+    expect(ask({ early: 1 })).toMatchObject({ ok: false });
 
     expect(
       decodeLibraryServiceClientMessage({

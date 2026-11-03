@@ -138,5 +138,8 @@ if (process.argv.includes('--capture')) {
   // documents it does not hold add 0.3 KiB to the library Worker. An episode mark writes 8.5 KB of the library instead
   // of 55.5 KB, and each surface opens with ~60 fewer IndexedDB transactions. Allow half a KiB more; the initial and
   // catalog ceilings are unchanged.
-  if (coreTotalDelta > 67328) throw new Error('Browser total JS/CSS budget exceeded');
+  // An early stream list where a viewer waits (the `late` outcome, the early flag through the download query, and
+  // the viewer and download lists kept apart) adds 46 bytes. A list whose slow source takes 4.1 s arrives at 1.8 s.
+  // Allow a quarter KiB more; the initial and catalog ceilings are unchanged.
+  if (coreTotalDelta > 67584) throw new Error('Browser total JS/CSS budget exceeded');
 }

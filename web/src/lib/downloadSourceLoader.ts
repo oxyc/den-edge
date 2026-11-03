@@ -11,7 +11,10 @@ export type DownloadSourceLoad = {
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 };
 
-/** Publishes only the latest visible title request; service queries are not transport-abortable. */
+/**
+ * Publishes only the latest visible title request; service queries are not transport-abortable. The list it loads is
+ * the one the Sources panel shows, so it asks for an early answer (`download.sources`'s `early`).
+ */
 export class DownloadSourceLoader {
   #generation = 0;
 
@@ -26,7 +29,7 @@ export class DownloadSourceLoader {
   ): Promise<DownloadSourceLoad | null | undefined> {
     const generation = ++this.#generation;
     try {
-      const { result } = await model.downloadSources(title, refresh);
+      const { result } = await model.downloadSources(title, refresh, false, true);
       if (generation !== this.#generation) return undefined;
       return result.kind === 'download.sources'
         ? {

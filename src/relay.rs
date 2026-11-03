@@ -1260,6 +1260,11 @@ async fn relay_with(
     // The addon's bare name, for this relay's own error log (`log_relay_error`) — never the install segment
     // `control` itself may carry.
     let upstream = service_name(&control).to_owned();
+    // A viewer's stream list may be answered early (scout's `X-Den-Early-Answer`). Forwarded to scout only (its own
+    // install, or Hearth's combined one), and only as the one value it understands; scout sends such a list
+    // `no-store`, which the relay passes through.
+    let early_answer = matches!(upstream.as_str(), "scout" | "den")
+        && req.headers().get(EARLY_ANSWER).is_some_and(|v| v == "1");
     // Read before an upstream slot is taken, and within `TIMEOUT`: a slow upload must not hold the addons' slots.
     // It takes its own admission slot first, so arbitrarily many callers cannot each buffer 256 KiB outside every
     // global cap and exceed this container's memory limit.
@@ -1569,6 +1574,9 @@ async fn relay_with(
     }
     for (name, value) in conditions {
         out = out.header(name, value);
+    }
+    if early_answer {
+        out = out.header(EARLY_ANSWER, "1");
     }
     let Ok(out) = out.body(Full::new(body)) else { return bad_request("upstream_request") };
     // One deadline for the head and the body: an addon that answered its head and then stalled held a relay slot
@@ -2989,6 +2997,10 @@ fn with_why(mut resp: Response, why: &'static str) -> Response {
 /// The relayed service a path names, from its leading segment (`/scout/…` → `scout`): never the install segment
 /// or anything after it, which `log_relay_error`'s own `upstream` must not carry. `relay` for a path naming none,
 /// which should not happen but must not panic the line that reports it either.
+/// The request header asking scout for an early stream list, forwarded by the relay to scout alone (`/scout`, or
+/// Hearth's combined `/den` install).
+const EARLY_ANSWER: &str = "x-den-early-answer";
+
 fn service_name(path: &str) -> &str {
     path.trim_start_matches('/').split('/').next().filter(|s| !s.is_empty()).unwrap_or("relay")
 }
@@ -4167,6 +4179,63 @@ mod tests {
         assert!(!headers.contains_key(header::IF_NONE_MATCH));
         assert!(!headers.contains_key("x-den-owner"));
         assert!(!headers.contains_key("x-den-public-session"));
+    }
+
+    #[tokio::test]
+    async fn an_early_stream_list_is_asked_of_scout_alone_and_stays_unstored() {
+        use axum::http::{header, HeaderValue};
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move |req: Request| {
+            let sent = sent.clone();
+            async move {
+                sent.send((req.uri().path().to_owned(), req.headers().clone())).unwrap();
+                let mut reply = crate::handler::json_reply(StatusCode::OK, &json!({ "streams": [] }));
+                reply.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                reply
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays =
+            crate::parse_relays(&format!("/scout=http://{addr},/den=http://{addr},/atlas=http://{addr}"));
+        let lan = ("host", "192.168.86.193:8094");
+        for (path, forwarded) in [
+            ("/scout/cfg/stream/movie/tt1.json", true),
+            ("/den/cfg/stream/movie/tt1.json", true),
+            ("/atlas/cfg/stream/movie/tt1.json", false),
+        ] {
+            let early = h.send("GET", path, None, &[lan, ("x-den-early-answer", "1")]).await;
+            assert_eq!(early.status(), StatusCode::OK, "{path}");
+            assert_eq!(early.headers()[header::CACHE_CONTROL], "no-store", "{path}");
+            let (asked, headers) = received.recv().await.unwrap();
+            assert!(asked.ends_with("/stream/movie/tt1.json"), "{asked}");
+            assert_eq!(headers.contains_key("x-den-early-answer"), forwarded, "{path}");
+        }
+        // Only the one value scout reads, and nothing on a request that did not ask.
+        h.send("GET", "/scout/cfg/stream/movie/tt1.json", None, &[lan, ("x-den-early-answer", "yes")]).await;
+        assert!(!received.recv().await.unwrap().1.contains_key("x-den-early-answer"));
+        h.send("GET", "/scout/cfg/stream/movie/tt1.json", None, &[lan]).await;
+        assert!(!received.recv().await.unwrap().1.contains_key("x-den-early-answer"));
+
+        // A viewer's Play through Hearth carries it too, for Hearth to ask its own list early.
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.den_playback_enabled = true;
+        state.remux_edge_secret = Some("edge-secret".into());
+        let play = h
+            .send(
+                "POST",
+                "/den/cfg/playback",
+                Some("{}".into()),
+                &[lan, ("content-type", "application/json"), ("x-den-early-answer", "1")],
+            )
+            .await;
+        assert_eq!(play.status(), StatusCode::OK);
+        let (asked, headers) = received.recv().await.unwrap();
+        assert!(asked.ends_with("/playback"), "{asked}");
+        assert_eq!(headers["x-den-early-answer"], "1");
     }
 
     #[tokio::test]

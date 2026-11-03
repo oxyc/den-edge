@@ -60,10 +60,14 @@ export interface DownloadStatus {
   announce: boolean;
 }
 
-/** `fresh` asks scout to rebuild the list past its caches (`?fresh=1`), for a viewer checking again by hand. */
+/**
+ * `fresh` asks scout to rebuild the list past its caches (`?fresh=1`), for a viewer checking again by hand. `early` is a
+ * list a viewer is looking at, which scout may answer before its slowest indexer (`fetchSourceList`).
+ */
 export type DownloadResolve = (
   title: DownloadTitle,
   fresh?: boolean,
+  early?: boolean,
 ) => Promise<{
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
@@ -97,6 +101,9 @@ const FOREIGN = 'Another device’s ticket.';
 
 /** A race entry's key in the per-entry maps: its row and its identity. */
 export const raceKey = (name: string, identity: string) => `${name}\n${identity}`;
+
+/** A source snapshot's key: the content, and whether it is a viewer's early list (`sourcesForTitle`). */
+const sourceKey = (content: string, early: boolean) => (early ? `${content}\nearly` : content);
 
 /**
  * Worker-safe state for the download domain. Durable rows are authoritative; answers and tickets are deliberately
@@ -211,7 +218,13 @@ export class DownloadCoordinator {
     identity: string,
     candidates?: number,
   ): Promise<boolean> {
-    const { sources } = await this.sourcesForTitle(title);
+    // The click came from a list the viewer was shown, which is the early one: its release is picked from it rather
+    // than asked for again. A release only a complete list has is found in that list.
+    const shown = this.#sourceCache.get(sourceKey(contentKeyOf(title), true));
+    const kept = shown && shown.expiresAt > this.now() ? shown.snapshot.sources : null;
+    const sources = kept?.some((candidate) => candidate.identity === identity)
+      ? kept
+      : (await this.sourcesForTitle(title)).sources;
     const source = sources?.find((candidate) => candidate.identity === identity);
     return source ? this.enqueue(title, source, candidates) : false;
   }
@@ -380,20 +393,25 @@ export class DownloadCoordinator {
   /**
    * One short-lived worker-owned snapshot backs display and the action selected from it. Tickets never leave this
    * object, and a click does not repeat the provider request that produced the visible list.
+   *
+   * `early` is the list a viewer looks at (the Sources panel), which scout may answer before its slowest indexer. It
+   * has a snapshot and a request of its own: every other caller (a download's search, race, fallback or renewal)
+   * decides on what it reads, so it waits for every indexer and is never handed the viewer's list.
    */
   async sourcesForTitle(
     title: DownloadTitle,
     refresh = false,
     fresh = false,
+    early = false,
   ): Promise<DownloadSourceSnapshot> {
-    const key = contentKeyOf(title);
+    const key = sourceKey(contentKeyOf(title), early);
     const now = this.now();
     const cached = this.#sourceCache.get(key);
     if (!refresh && !fresh && cached && cached.expiresAt > now) return cached.snapshot;
     // A fresh ask never joins a plain one already running: that one may be answered from the caches it skips.
     const pending = this.#sourcePending.get(key);
     if (pending && !fresh) return pending;
-    const run = this.effects.resolve(title, fresh).then(({ sources, answer, failure }) => {
+    const run = this.effects.resolve(title, fresh, early).then(({ sources, answer, failure }) => {
       const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
       const ordered = preferred
         ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]

@@ -10,13 +10,26 @@ export interface SourceAnswer {
   kind: 'live' | 'partial' | 'empty' | 'unknown' | 'stale';
   /** Sources that could have been asked and did not answer. */
   missing: number;
+  /**
+   * Sources still answering when a list asked for early (`fetchSourceList`'s `early`) went out without them: no
+   * failure to tell the viewer of, but the list is not complete (scout calls it `partial`). Absent when none.
+   */
+  late?: number;
   /** A held list served in an outage, and when it was built (ms). */
   outage?: { builtAt: number };
 }
 
+/**
+ * The request header saying a viewer is waiting on a stream list (the Sources panel) or a Play: scout, directly or
+ * through Hearth's `/playback`, may answer before its slowest indexer (`fetchSourceList`'s `early`).
+ */
+export const EARLY_ANSWER_HEADER = 'X-Den-Early-Answer';
+
 const answerKinds = new Set(['live', 'partial', 'empty', 'unknown', 'stale']);
 // A source that answered, or that can never be asked, is not one the list is waiting on.
 const notMissing = new Set(['answered', 'skipped_misconfigured', 'quarantined']);
+/** A source the list went out without because it asked for an early answer; it is still answering. */
+const LATE = 'late';
 
 export function parseAnswer(body: unknown): SourceAnswer | undefined {
   const den = (body as { den?: unknown } | null)?.den as
@@ -31,11 +44,12 @@ export function parseAnswer(body: unknown): SourceAnswer | undefined {
     return undefined;
   const sources: unknown[] = Array.isArray(den.coverage?.sources) ? den.coverage.sources : [];
   const builtAt = typeof den.generatedAt === 'string' ? Date.parse(den.generatedAt) : NaN;
+  const outcomes = sources.map((s) => (s as { outcome?: unknown } | null)?.outcome as string);
+  const late = outcomes.filter((outcome) => outcome === LATE).length;
   return {
     kind: den.answerKind as SourceAnswer['kind'],
-    missing: sources.filter(
-      (s) => !notMissing.has((s as { outcome?: unknown } | null)?.outcome as string),
-    ).length,
+    missing: outcomes.filter((outcome) => outcome !== LATE && !notMissing.has(outcome)).length,
+    ...(late ? { late } : {}),
     outage: den.degraded === 'stale_list' && Number.isFinite(builtAt) ? { builtAt } : undefined,
   };
 }

@@ -249,33 +249,39 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
   async select(selection: LibrarySelection): Promise<LibrarySelectionValue> {
     if (this.#full) return this.#full.select(selection);
     const pieces = this.cached.pieces;
+    // A finished import or a refill drops the loaded views and reads them again, and can do so while this read waits
+    // on its own load. A view gone by the time the read resumes is selected again rather than read as missing.
     if (selection.kind === 'overview') {
       if (!(await this.#loadCapabilities(['watchlist', 'recommendations'])))
         return (await this.#promote('cache:overview')).select(selection);
-      const recommendations = pieces.recommendations!;
+      if (!pieces.watchlist || !pieces.recommendations) return this.select(selection);
+      const recommendations = pieces.recommendations;
       return {
         kind: 'overview',
         ...structuredClone(recommendations),
-        watchlist: structuredClone(pieces.watchlist!.titles),
+        watchlist: structuredClone(pieces.watchlist.titles),
       };
     }
     if (selection.kind === 'watchlist') {
       if (!(await this.#loadCapabilities(['watchlist'])) || !(await this.#loadContinue()))
         return (await this.#promote('cache:watchlist')).select(selection);
+      if (!pieces.watchlist || !pieces.continue) return this.select(selection);
       return {
         kind: 'watchlist',
-        titles: structuredClone(withoutContinuing(pieces.watchlist!.titles, pieces.continue!.view)),
+        titles: structuredClone(withoutContinuing(pieces.watchlist.titles, pieces.continue.view)),
       };
     }
     if (selection.kind === 'recommendations') {
       if (!(await this.#loadCapabilities(['recommendations'])))
         return (await this.#promote('cache:recommendations')).select(selection);
-      return { kind: 'recommendations', ...structuredClone(pieces.recommendations!) };
+      if (!pieces.recommendations) return this.select(selection);
+      return { kind: 'recommendations', ...structuredClone(pieces.recommendations) };
     }
     if (selection.kind === 'continue') {
       if (!(await this.#loadContinue()))
         return (await this.#promote('cache:continue')).select(selection);
-      return structuredClone(pieces.continue!.view);
+      if (!pieces.continue) return this.select(selection);
+      return structuredClone(pieces.continue.view);
     }
     if (selection.kind === 'history') {
       // History needs the complete materialized index. A lazy screen can be acquired from an early Home root while
@@ -294,17 +300,20 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     if (selection.kind === 'settings') {
       if (!(await this.#loadCapabilities(['settings'])))
         return (await this.#promote('cache:settings')).select(selection);
-      return structuredClone(pieces.settings!);
+      if (!pieces.settings) return this.select(selection);
+      return structuredClone(pieces.settings);
     }
     if (selection.kind === 'runtime') {
       if (!(await this.#loadCapabilities(['runtime'])))
         return (await this.#promote('cache:runtime')).select(selection);
-      return structuredClone(pieces.runtime!);
+      if (!pieces.runtime) return this.select(selection);
+      return structuredClone(pieces.runtime);
     }
     if (selection.kind === 'devices') {
       if (!(await this.#loadCapabilities(['devices'])))
         return (await this.#promote('cache:devices')).select(selection);
-      return structuredClone(pieces.devices!);
+      if (!pieces.devices) return this.select(selection);
+      return structuredClone(pieces.devices);
     }
     if (selection.kind === 'title') {
       // A first open answers after its newest page while the rest is still arriving. A title cannot be projected from

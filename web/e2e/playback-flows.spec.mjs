@@ -35,6 +35,33 @@ const CHROME_MAC =
 
 /** Every media request the server answered, by the host it was asked as. */
 const served = [];
+/** This test's page console and media requests, as they happened (`open`). */
+const trail = [];
+
+/** What the player was doing when a wait on it ran out: the element's own state, and the page's trail. */
+async function attachTrail(video) {
+  const state = await video
+    .evaluate(
+      (v) => ({
+        currentTime: v.currentTime,
+        paused: v.paused,
+        readyState: v.readyState,
+        networkState: v.networkState,
+        error: v.error?.code ?? null,
+        buffered: Array.from({ length: v.buffered.length }, (_, i) => [
+          v.buffered.start(i),
+          v.buffered.end(i),
+        ]),
+      }),
+      undefined,
+      { timeout: 5_000 },
+    )
+    .catch((error) => ({ unreadable: String(error) }));
+  await test.info().attach('player trail', {
+    contentType: 'text/plain',
+    body: [JSON.stringify(state), JSON.stringify(served), ...trail].join('\n'),
+  });
+}
 
 /** One https server standing in for every media host; the browser maps each name to it. */
 function mediaServer(dir) {
@@ -102,6 +129,7 @@ test.afterAll(() => {
 });
 test.beforeEach(() => {
   served.length = 0;
+  trail.length = 0;
 });
 
 /** Den Hearth's Remux answer: the playlist on the public listener, controls as paths, no `playlist` in `session`. */
@@ -194,6 +222,16 @@ async function open({
     ...(userAgent ? { userAgent } : {}),
   });
   const page = await context.newPage();
+  // The browser is launched here rather than by Playwright's fixture, so its trace holds none of the page's console or
+  // network: keep them, for a failure to say what the player was doing (`attachTrail`).
+  const t0 = Date.now();
+  const note = (line) => trail.push(`${((Date.now() - t0) / 1000).toFixed(1)}s ${line}`);
+  page.on('console', (m) => note(`console.${m.type()} ${m.text()}`));
+  page.on('pageerror', (e) => note(`pageerror ${e.message}`));
+  context.on('requestfailed', (r) => note(`failed ${r.url()} ${r.failure()?.errorText}`));
+  context.on('requestfinished', (r) => {
+    if (/\.(m4s|m3u8)|\/remux\/health/.test(r.url())) note(`finished ${r.url()}`);
+  });
   if (linkLimit)
     await page.addInitScript((maxBitrate) => {
       if (window === window.top)
@@ -249,9 +287,14 @@ async function open({
 
 /** The video that plays this session, in the cast page or in the page itself, once it is past `seconds`. */
 async function playingPast(video, seconds) {
-  await expect
-    .poll(() => video.evaluate((v) => (v.paused ? -1 : v.currentTime)), { timeout: 30_000 })
-    .toBeGreaterThan(seconds);
+  try {
+    await expect
+      .poll(() => video.evaluate((v) => (v.paused ? -1 : v.currentTime)), { timeout: 30_000 })
+      .toBeGreaterThan(seconds);
+  } catch (error) {
+    await attachTrail(video);
+    throw error;
+  }
 }
 
 const castVideo = (page) => page.frameLocator('iframe[title="Den Cast player"]').locator('video');
@@ -350,7 +393,12 @@ const segmentHostsSince = (from) =>
 const position = (video) => video.evaluate((v) => v.currentTime);
 /** Where the video plays once media from `host` has arrived since `from`: the new session's own position. */
 async function playsFrom(video, host, from) {
-  await expect.poll(() => segmentHostsSince(from).has(host), { timeout: 30_000 }).toBe(true);
+  try {
+    await expect.poll(() => segmentHostsSince(from).has(host), { timeout: 30_000 }).toBe(true);
+  } catch (error) {
+    await attachTrail(video);
+    throw error;
+  }
   await expect
     .poll(() => video.evaluate((v) => (v.paused || v.readyState < 3 ? -1 : v.currentTime)), {
       timeout: 30_000,
@@ -378,8 +426,11 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
     const onRemux = await playsFrom(video, 'lan.test', from);
     expect(onRemux).toBeGreaterThan(at - 1);
     expect(onRemux).toBeLessThan(at + 15);
-    expect(segmentHostsSince(from)).toEqual(new Set(['lan.test']));
+    // The session being replaced plays on until the new one is adopted ("this one carries on"), so it may fetch a
+    // segment or two after the switch began. Once the new one plays, the old one fetches nothing more.
+    let since = served.length;
     await playingPast(video, onRemux + 1);
+    expect(segmentHostsSince(since).has('flux.wnam.tb-cdn.io')).toBe(false);
 
     // Den Remux → TorBox: TorBox alone, so Hearth can't answer with a Remux session in the playing one's slot.
     from = served.length;
@@ -394,8 +445,9 @@ test('owner with TorBox switches to Den Remux and back from the stamp, at the sa
     const onTorbox = await playsFrom(video, 'flux.wnam.tb-cdn.io', from);
     expect(onTorbox).toBeGreaterThan(back - 1);
     expect(onTorbox).toBeLessThan(back + 15);
-    expect(segmentHostsSince(from)).toEqual(new Set(['flux.wnam.tb-cdn.io']));
+    since = served.length;
     await playingPast(video, onTorbox + 1);
+    expect(segmentHostsSince(since).has('lan.test')).toBe(false);
   } finally {
     await browser.close();
   }

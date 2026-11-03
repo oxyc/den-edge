@@ -812,6 +812,7 @@ export class LibraryLogAuthority {
           title,
           query.refresh,
           query.fresh,
+          query.early,
         );
         const sources = Array.isArray(snapshot.sources)
           ? snapshot.sources
