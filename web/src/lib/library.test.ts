@@ -784,4 +784,25 @@ describe('a caught-up series waiting for its next episode', () => {
     projector.project(dismissed(1500));
     expect(projector.dismissed()).toEqual([]);
   });
+
+  it('keeps the dismissal of a series marked Seen as a whole, with no episode watched', () => {
+    const seen: Library = {
+      ...emptyLibrary(),
+      records: [
+        {
+          title: { type: 'tv', id: 9, title: 'Seen' },
+          status: 'watched',
+          progress: 0,
+          progressAt: 0,
+          addedAt: 0,
+          deleted: false,
+        },
+      ],
+      dismissed: new Map([['tv:9', 3000]]),
+    };
+    const compact = new ContinueSummaries(seen).compact(seen.records, seen.dismissed);
+    const projector = new ContinueProjector();
+    projector.project(compact);
+    expect(projector.dismissed()).toEqual([{ type: 'tv', id: 9 }]);
+  });
 });

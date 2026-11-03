@@ -432,7 +432,20 @@ describe('following', () => {
     [DEXTER, airing],
     [GREYS, greys],
   ]);
-  const none = { watchlist: [], continuing: [], caughtUp: [], dismissed: [] };
+  const none = { watchlist: [], continuing: [], caughtUp: [], seen: [], dismissed: [] };
+
+  it('follows a series marked Seen as a whole, unless the row says it is behind', () => {
+    expect(followedOf({ ...none, seen: [9] }, airings)).toEqual([9]);
+    expect(followCandidates({ ...none, seen: [9] })).toEqual([9]);
+    // Seen, then rewatched from the start: Continue Watching offers S10E3, and that decides.
+    const rewatching = {
+      ...none,
+      seen: [GREYS],
+      continuing: [{ series: GREYS, episode: { season: 10, episode: 3 }, upcoming: false }],
+    };
+    expect(followedOf(rewatching, airings)).toEqual([]);
+    expect(followedOf({ ...none, seen: [9], dismissed: [9] }, airings)).toEqual([]);
+  });
 
   it('follows a series caught up on the row, never one seasons behind', () => {
     const facts = {

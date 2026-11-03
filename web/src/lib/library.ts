@@ -502,6 +502,11 @@ export class ContinueSummaries {
       );
     });
     const live = new Set([...kept.map((record) => titleKey(record.title)), ...active]);
+    // A series marked Seen as a whole is followed with no episode of it watched (`airing.ts` `followedOf`): its
+    // dismissal is what takes it off Coming up.
+    for (const record of records)
+      if (!record.deleted && record.title.type === 'tv' && record.status === 'watched')
+        live.add(titleKey(record.title));
     return {
       records: kept,
       marks: [...latest].flatMap(([key, newest]) => {

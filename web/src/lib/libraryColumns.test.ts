@@ -371,6 +371,25 @@ describe('library columns', () => {
     }
   });
 
+  // den-core keeps a Seen series' dismissal in `home` from fix/seen-series-keeps-dismissal on; until it is vendored
+  // the held answer drops it while the per-document projection keeps it.
+  const untilVendored = test.fails;
+  untilVendored('a series marked Seen as a whole keeps its dismissal in both', () => {
+    const documents = [
+      {
+        format: 4,
+        kind: 'title',
+        title: { type: 'tv', id: 1396 },
+        status: { value: 'watched', at: at(NOW - 4000) },
+        dismissed: { value: true, at: at(NOW - 1000) },
+        addedAt: NOW - 4000,
+      },
+    ] as DocumentRow[];
+    const expected = perDocument(documents);
+    expect([...expected.home.continueLibrary.dismissed.keys()]).toEqual(['tv:1396']);
+    expect(held(documents)).toEqual(expected);
+  });
+
   test('document names equal den-core’s, and a malformed identity is still refused', () => {
     const named = varied().concat([
       {

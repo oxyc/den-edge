@@ -731,10 +731,17 @@
       ({ title, episode, upcoming }) =>
         title.type === 'tv' && episode ? [{ series: title.id, episode, upcoming: !!upcoming }] : [],
     );
+    // Marked Seen as a whole: the visitor's by its activity key (`tv:1399`), a library's from its overview.
+    const seen = profileActivity
+      ? [...profileActivity.watchedKeys].flatMap((key) =>
+          key.startsWith('tv:') ? [Number(key.slice(3))] : [],
+        )
+      : series(overview?.watched);
     return {
       watchlist: series(profileActivity ? profileActivity.watchlist : overview?.watchlist),
       continuing,
       caughtUp: series(continueView?.caughtUp),
+      seen,
       dismissed: series(continueView?.dismissed),
     };
   });

@@ -517,6 +517,11 @@ export interface FollowCandidates {
   continuing: Iterable<{ series: number; episode: At; upcoming: boolean }>;
   /** Off the row, watched up to the newest aired episode (den-core `continue_entry` `finished`/`not_aired`). */
   caughtUp: Iterable<number>;
+  /**
+   * Marked Seen as a whole: caught up, unless Continue Watching offers one of its episodes, which then decides (a
+   * series watched on past the episodes it was marked Seen with, or rewatched).
+   */
+  seen: Iterable<number>;
   /** Taken off Continue Watching or Coming up since last watched: not followed until watched again. */
   dismissed: Iterable<number>;
 }
@@ -528,6 +533,7 @@ export function followCandidates(candidates: FollowCandidates): number[] {
     ...candidates.watchlist,
     ...[...candidates.continuing].map(({ series }) => series),
     ...candidates.caughtUp,
+    ...candidates.seen,
   ]);
   return [...ids].filter((id) => Number.isSafeInteger(id) && id > 0 && !dismissed.has(id));
 }
@@ -535,15 +541,20 @@ export function followCandidates(candidates: FollowCandidates): number[] {
 /**
  * The series a viewer follows: what "Coming up", new episodes and their announcements are about. One on the
  * Watchlist, or one the viewer is caught up on — nothing aired and unwatched before the newest release: watched up
- * to it, waiting on the row for the next episode, or on the row at an episode that came out with the newest one
- * (`caughtUpTo`). A series sampled once or seasons behind is not followed, nor one taken off the row since last
- * watched. Sorted by id.
+ * to it, marked Seen as a whole, waiting on the row for the next episode, or on the row at an episode that came out
+ * with the newest one (`caughtUpTo`). A series sampled once or seasons behind is not followed, nor one taken off the
+ * row since last watched. Sorted by id.
  */
 export function followedOf(
   candidates: FollowCandidates,
   airings: { get(series: number): Airing | undefined },
 ): number[] {
-  const followed = new Set([...candidates.watchlist, ...candidates.caughtUp]);
+  const onRow = new Set([...candidates.continuing].map(({ series }) => series));
+  const followed = new Set([
+    ...candidates.watchlist,
+    ...candidates.caughtUp,
+    ...[...candidates.seen].filter((series) => !onRow.has(series)),
+  ]);
   for (const { series, episode, upcoming } of candidates.continuing) {
     const airing = airings.get(series);
     const newest = airing?.previous;
