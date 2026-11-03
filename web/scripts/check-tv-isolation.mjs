@@ -134,5 +134,9 @@ if (process.argv.includes('--capture')) {
   // per document) adds 1.2 KiB to the library Worker versus its base. It turns a returning open's ~6,000 IndexedDB
   // records into one read: with a 6,155-document library opened whole, WebKit's shelves are ready at 222–258 ms
   // instead of 366–462 ms. Allow 1.25 KiB more; the initial and catalog ceilings are unchanged.
-  if (coreTotalDelta > 66816) throw new Error('Browser total JS/CSS budget exceeded');
+  // Continue kept by title in 32 parts, saved-view parts read in one transaction, and a log read that keeps only the
+  // documents it does not hold add 0.3 KiB to the library Worker. An episode mark writes 8.5 KB of the library instead
+  // of 55.5 KB, and each surface opens with ~60 fewer IndexedDB transactions. Allow half a KiB more; the initial and
+  // catalog ceilings are unchanged.
+  if (coreTotalDelta > 67328) throw new Error('Browser total JS/CSS budget exceeded');
 }

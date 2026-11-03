@@ -732,7 +732,7 @@ export class LibraryFactStore {
   async commitBatch(
     generation: string,
     head: number,
-    entries: readonly LibraryFactEntry[],
+    read: readonly LibraryFactEntry[],
     complete: boolean,
     options: {
       readonly profileTopology?: boolean;
@@ -749,6 +749,13 @@ export class LibraryFactStore {
     if (held?.generation === generation) this.profileTopology ||= held.profileTopology;
     this.profileTopology ||= options.profileTopology === true;
     const floor = options.floor !== undefined && !complete ? options.floor : undefined;
+    // The read that reaches rows this browser kept when den-edge acknowledged them (`keepRows`) brings the same
+    // documents back: only what is not held already is kept again.
+    const documents = held?.generation === generation ? await this.heldDocuments(generation) : null;
+    const entries = read.filter(
+      (entry) =>
+        !sameDocument(storedDocument(heldDocument(entry.k, entry)), documents?.get(entry.k)),
+    );
     if (
       !entries.length &&
       held?.generation === generation &&
@@ -759,6 +766,15 @@ export class LibraryFactStore {
       (!complete || (await this.history(held)) !== null)
     )
       return;
+    // Nothing new, and no further rows than the documents already say: the same fact snapshot under a moved cursor.
+    // Its revision stays, and with it the History checkpoint, which names that revision.
+    const sameFacts =
+      !entries.length &&
+      held?.generation === generation &&
+      held.revision !== undefined &&
+      held.complete === complete &&
+      head <= (held.rowsVersion ?? held.head) &&
+      (!complete || (await this.history(held)) !== null);
     const derived = await this.changes(generation, entries);
     const retainedHistory =
       held?.generation === generation &&
@@ -782,16 +798,19 @@ export class LibraryFactStore {
       schema: LIBRARY_FACT_SCHEMA,
       generation,
       head,
-      ...nextIdentity(held, generation, head, entries),
+      ...(sameFacts
+        ? { revision: held.revision, rowsVersion: held.rowsVersion ?? held.head }
+        : nextIdentity(held, generation, head, entries)),
       complete,
       profileTopology: this.profileTopology,
       ...(floor !== undefined ? { floor } : {}),
       newest: withNewest(held?.generation === generation ? held.newest : undefined, entries),
       layout: SNAPSHOT_LAYOUT,
     };
-    derived.changes.push(
-      ...(await this.historyCheckpointChange(held, manifest, entries, importedHistory)),
-    );
+    if (!sameFacts)
+      derived.changes.push(
+        ...(await this.historyCheckpointChange(held, manifest, entries, importedHistory)),
+      );
     derived.changes.push({
       kind: 'put',
       key: `${this.libraryId}:${manifestName}`,

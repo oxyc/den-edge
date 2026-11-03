@@ -287,6 +287,18 @@ describe('indexedVault', () => {
     expect(await vault.get('lib:meta')).toEqual(bytes(8));
   });
 
+  it('reads many keys, in their order, in one transaction', async () => {
+    const idb = fakeIndexedDB();
+    const vault = indexedVault(idb.factory);
+    const bytes = (value: number) => new Uint8Array([value]);
+    await vault.put('b', bytes(2));
+    await vault.put('a', bytes(1));
+
+    const before = idb.transactions.length;
+    expect(await vault.getMany?.(['b', 'missing', 'a'])).toEqual([bytes(2), undefined, bytes(1)]);
+    expect(idb.transactions).toHaveLength(before + 1);
+  });
+
   it('compares one value and applies every prepared change in the same transaction', async () => {
     const idb = fakeIndexedDB();
     vi.stubGlobal('IDBKeyRange', {

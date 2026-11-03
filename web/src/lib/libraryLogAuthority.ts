@@ -716,7 +716,11 @@ export class LibraryLogAuthority {
   }
 
   async query(query: LibraryQuery): Promise<LibraryQueryResult> {
-    if (query.kind === 'profile-create.status' || query.kind === 'key-reset.prepare')
+    if (
+      query.kind === 'profile-create.status' ||
+      query.kind === 'key-reset.prepare' ||
+      query.kind === 'history.export'
+    )
       await ensureDeferredSyncPolicy();
     switch (query.kind) {
       case 'playback.prepare':
