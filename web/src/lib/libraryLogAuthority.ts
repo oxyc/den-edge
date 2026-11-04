@@ -1837,7 +1837,7 @@ export class LibraryLogAuthority {
     // den-core's whole-library fold over the documents it holds; the downloads are settings rows.
     const columns = this.#log.columns();
     const home = homeFromColumns(columns, now, readDownloads(this.#log.storedRows()));
-    noteLibraryFold(columns.len(), performance.now() - foldedAt);
+    noteLibraryFold(columns.len(), performance.now() - foldedAt, __DEN_TV_LEGACY_JS_CORE__);
     this.#projection = { version, at: now, until, home };
     return home;
   }

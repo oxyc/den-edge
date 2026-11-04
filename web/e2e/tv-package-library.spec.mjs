@@ -80,6 +80,11 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   // The pressed state is optimistic. Keep this page alive until its durable write finishes, or the hard
   // navigation below can cancel the write before the linked package has anything to sync.
   await expect(saved).not.toHaveAttribute('data-saving', 'true');
+  await host.goto(`${ENTRY}#/movie/1003`);
+  const seen = host.getByRole('button', { name: 'Seen', exact: true });
+  await seen.click();
+  await expect(seen).toHaveAttribute('aria-pressed', 'true');
+  await expect(seen).not.toHaveAttribute('data-saving', 'true');
   // An invite is consumed on application startup, not by an in-document fragment change.
   await host.goto('about:blank');
   await host.goto(`${ENTRY}#invite=${CODE}`);
@@ -113,8 +118,14 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     await tv.getByRole('link', { name: 'Watchlist', exact: true }).click();
     await expect(tv).toHaveURL(`${ENTRY}#/watchlist`);
     await expect(tv.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible();
+    await expect(
+      tv.getByRole('region', { name: 'Watched', exact: true }).getByText('Movie 1003'),
+    ).toBeVisible();
     await tv.reload();
     await expect(tv.getByRole('link', { name: /Movie 1002/ }).first()).toBeVisible();
+    await expect(
+      tv.getByRole('region', { name: 'Watched', exact: true }).getByText('Movie 1003'),
+    ).toBeVisible();
     await tv
       .getByRole('link', { name: /Movie 1002/ })
       .last()

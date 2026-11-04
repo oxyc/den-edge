@@ -3,6 +3,7 @@ import { LibraryColumns } from '../vendor/den-core/startup.js';
 import { watchedHistory } from './history';
 import { selectHomeLibraryView } from './homeLibraryView';
 import { applyLog, emptyLibrary, type Title } from './library';
+import { LibraryColumns as Tizen3LibraryColumns } from './libraryColumns-tizen3';
 import { historyItemsFromColumns, homeFromColumns, newestFromColumns } from './libraryColumns';
 import { household } from './libraryColumns.fixture';
 import { projectDocument } from './libraryV4';
@@ -322,6 +323,51 @@ function varied(): DocumentRow[] {
 }
 
 describe('library columns', () => {
+  test('the Tizen 3 projection preserves every shared list and incremental document change', () => {
+    const documents = varied();
+    const modern = new LibraryColumns();
+    const legacy = new Tizen3LibraryColumns();
+    try {
+      const upsert = (batch: DocumentRow[]) => {
+        const json = JSON.stringify(batch);
+        expect(legacy.upsert(json)).toBe(modern.upsert(json));
+        expect(legacy.len()).toBe(modern.len());
+        expect(JSON.parse(legacy.documents())).toEqual(JSON.parse(modern.documents()));
+      };
+      upsert(documents);
+      expect(lists(legacy as unknown as LibraryColumns)).toEqual(lists(modern));
+      expect(lists(legacy as unknown as LibraryColumns)).toEqual(perDocument(documents));
+
+      const removed = documents[0]!;
+      const name = rowName(removed);
+      expect(legacy.document(name)).toBe(modern.document(name));
+      for (let change = 1; change <= 3; change++)
+        upsert([
+          {
+            ...removed,
+            status: { value: 'watchlist', at: at(NOW - change) },
+          } as DocumentRow,
+        ]);
+      expect(legacy.remove(name)).toBe(modern.remove(name));
+      expect(JSON.parse(legacy.documents())).toEqual(JSON.parse(modern.documents()));
+      expect(lists(legacy as unknown as LibraryColumns)).toEqual(lists(modern));
+      upsert([removed]);
+
+      const relaunched = new Tizen3LibraryColumns();
+      try {
+        expect(relaunched.upsert(legacy.documents())).toBe(legacy.len());
+        expect(lists(relaunched as unknown as LibraryColumns)).toEqual(
+          lists(legacy as unknown as LibraryColumns),
+        );
+      } finally {
+        relaunched.free();
+      }
+    } finally {
+      modern.free();
+      legacy.free();
+    }
+  });
+
   test('Home, History and the newest stamp equal the per-document projection', () => {
     const documents = varied();
     const expected = perDocument(documents);
@@ -351,6 +397,13 @@ describe('library columns', () => {
     const expected = perDocument(documents);
     expect(expected.history).toHaveLength(1_500);
     expect(held(documents)).toEqual(expected);
+    const legacy = new Tizen3LibraryColumns();
+    try {
+      legacy.upsert(JSON.stringify(documents));
+      expect(lists(legacy as unknown as LibraryColumns)).toEqual(expected);
+    } finally {
+      legacy.free();
+    }
   }, 120_000);
 
   test('a replaced document moves its answer', () => {

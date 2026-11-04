@@ -76,7 +76,9 @@ export function homeFromColumns(
     ];
     const continueLibrary: Library = {
       records: r.refs('records').map((ref, i): LibraryRecord => ({
-        title: { ...ref, title: '' },
+        // Object spread is ES2018. Keep this title projection ES2015-compatible; the explicit fields also avoid a
+        // helper allocation on every Continue record in modern clients.
+        title: { type: ref.type, id: ref.id, title: '' },
         status: status[i] as LibraryRecord['status'],
         progress: progress[i]!,
         progressAt: progressAt[i]!,

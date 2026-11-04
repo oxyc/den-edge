@@ -1,4 +1,5 @@
 import { evaluate, initialize } from '../vendor/den-core-tizen3/index.js';
+export { LibraryColumns } from './libraryColumns-tizen3';
 
 // Tizen 3 keeps one JavaScript policy core, but exposes both lifecycle-shaped APIs so shared Workers do not need a
 // platform branch. Initializing either side initializes the same classic-script module.

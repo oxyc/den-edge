@@ -27,6 +27,10 @@ async function modernSyntax(code, fileName) {
           Function(path) {
             if (path.node.async) found ??= 'an async function';
           },
+          ObjectExpression(path) {
+            if (path.node.properties.some((property) => property.type === 'SpreadElement'))
+              found ??= 'an object spread';
+          },
         },
       }),
     ],
