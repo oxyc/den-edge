@@ -27,6 +27,7 @@ export interface SeasonTitle {
 }
 
 export type EpisodeDownloadResult = 'queued' | 'ready' | 'searching' | 'waiting' | 'uncertain';
+export type EpisodeSourceRecheckResult = { kind: 'found'; count: number } | { kind: 'limited' };
 
 interface SharedSeasonRun {
   latest: SeasonJob;
@@ -114,15 +115,44 @@ export async function recheckEpisode(
   season: number,
   episode: Episode,
   title: SeasonTitle,
-): Promise<number | null> {
+): Promise<EpisodeSourceRecheckResult | null> {
   const { result } = await model.downloadSources(
     descriptor(imdb, season, episode, title),
     true,
     true,
   );
   if (result.kind !== 'download.sources' || !result.sources) return null;
+  if (result.fresh === 'limited') return { kind: 'limited' };
   if (result.sources.length === 0 && result.answer?.kind === 'unknown') return null;
-  return result.sources.length;
+  return { kind: 'found', count: result.sources.length };
+}
+
+/**
+ * One visible episode action at a time. Library queries are not transport-abortable, so a generation fences their
+ * presentation across navigation, profile/model replacement and a newer press.
+ */
+export class EpisodeSourceRechecker {
+  #generation = 0;
+
+  cancel(): void {
+    this.#generation++;
+  }
+
+  async load(
+    model: LibraryModel,
+    imdb: string,
+    season: number,
+    episode: Episode,
+    title: SeasonTitle,
+  ): Promise<EpisodeSourceRecheckResult | null | undefined> {
+    const generation = ++this.#generation;
+    try {
+      const result = await recheckEpisode(model, imdb, season, episode, title);
+      return generation === this.#generation ? result : undefined;
+    } catch {
+      return generation === this.#generation ? null : undefined;
+    }
+  }
 }
 
 export async function downloadEpisode(

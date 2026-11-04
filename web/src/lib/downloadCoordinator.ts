@@ -24,6 +24,7 @@ import {
   rankable,
   type Preparation,
   type SourceAnswer,
+  type FreshAnswer,
   type TitleSource,
 } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped } from './wire';
@@ -71,12 +72,14 @@ export type DownloadResolve = (
 ) => Promise<{
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
+  fresh?: FreshAnswer;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 }>;
 
 export interface DownloadSourceSnapshot {
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
+  fresh?: FreshAnswer;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 }
 
@@ -126,7 +129,10 @@ export class DownloadCoordinator {
     string,
     { expiresAt: number; snapshot: DownloadSourceSnapshot }
   >();
-  readonly #sourcePending = new Map<string, Promise<DownloadSourceSnapshot>>();
+  readonly #sourcePending = new Map<
+    string,
+    { run: Promise<DownloadSourceSnapshot>; fresh: boolean }
+  >();
   readonly now: () => number;
   readonly monotonicNow: () => number;
   readonly startedAt: number;
@@ -410,31 +416,47 @@ export class DownloadCoordinator {
     if (!refresh && !fresh && cached && cached.expiresAt > now) return cached.snapshot;
     // A fresh ask never joins a plain one already running: that one may be answered from the caches it skips.
     const pending = this.#sourcePending.get(key);
-    if (pending && !fresh) return pending;
-    const run = this.effects.resolve(title, fresh, early).then(({ sources, answer, failure }) => {
-      const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
-      const ordered = preferred
-        ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]
-        : sources;
-      const snapshot: DownloadSourceSnapshot = {
-        sources: ordered ?? null,
-        ...(answer ? { answer } : {}),
-        ...(failure ? { failure } : {}),
-      };
-      this.#sourceCache.delete(key);
-      this.#sourceCache.set(key, {
-        expiresAt: this.now() + DOWNLOAD_SOURCE_SNAPSHOT_MS,
-        snapshot,
+    // Nor may a new plain viewer join a fresh action: a limited marker belongs only to that action, and handing it
+    // to an uninitialized Sources panel would leave the panel with no concrete list to draw.
+    if (pending && !fresh && !pending.fresh) return pending.run;
+    const run: Promise<DownloadSourceSnapshot> = this.effects
+      .resolve(title, fresh, early)
+      .then(({ sources, answer, fresh: admission, failure }) => {
+        const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
+        const ordered = preferred
+          ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]
+          : sources;
+        const snapshot: DownloadSourceSnapshot = {
+          sources: ordered ?? null,
+          ...(answer ? { answer } : {}),
+          ...(admission ? { fresh: admission } : {}),
+          ...(failure ? { failure } : {}),
+        };
+        // A refused rebuild is the prior plain list, not a replacement. Prefer the exact worker snapshot already
+        // shown, and do not extend its TTL. The admission marker belongs only to this action's reply.
+        if (admission === 'limited') return { ...(cached?.snapshot ?? snapshot), fresh: 'limited' };
+        // A fresh request starts past a plain request already in flight. Only the latest run may publish its answer;
+        // otherwise that older plain result can replace the newer rebuilt list after it finishes.
+        if (this.#sourcePending.get(key)?.run !== run) return snapshot;
+        this.#sourceCache.delete(key);
+        const retained: DownloadSourceSnapshot = {
+          sources: snapshot.sources,
+          ...(snapshot.answer ? { answer: snapshot.answer } : {}),
+          ...(snapshot.failure ? { failure: snapshot.failure } : {}),
+        };
+        this.#sourceCache.set(key, {
+          expiresAt: this.now() + DOWNLOAD_SOURCE_SNAPSHOT_MS,
+          snapshot: retained,
+        });
+        while (this.#sourceCache.size > DOWNLOAD_SOURCE_SNAPSHOTS)
+          this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
+        return snapshot;
       });
-      while (this.#sourceCache.size > DOWNLOAD_SOURCE_SNAPSHOTS)
-        this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
-      return snapshot;
-    });
-    this.#sourcePending.set(key, run);
+    this.#sourcePending.set(key, { run, fresh });
     try {
       return await run;
     } finally {
-      if (this.#sourcePending.get(key) === run) this.#sourcePending.delete(key);
+      if (this.#sourcePending.get(key)?.run === run) this.#sourcePending.delete(key);
     }
   }
 

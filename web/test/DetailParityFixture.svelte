@@ -46,7 +46,11 @@
   });
   // What `Library.svelte` does with a toast: shows it. Detail's episode actions report through it.
   let toast = $state('');
-  setToastContext((message) => (toast = message));
+  let toastAction = $state<{ label: string; run: () => void }>();
+  setToastContext((message, action) => {
+    toast = message;
+    toastAction = action;
+  });
   // Production's library service schedules download maintenance; this in-process fixture drives the same query.
   const downloadPoll = setInterval(() => void library.model.refreshDownloads(), 300);
   onDestroy(() => clearInterval(downloadPoll));
@@ -146,5 +150,9 @@
       {/if}
     {/snippet}
   </Router>
-  {#if toast}<p class="fixture-toast" role="status">{toast}</p>{/if}
+  {#if toast}<div class="fixture-toast" role="status">
+      <span>{toast}</span>{#if toastAction}<button type="button" onclick={toastAction.run}
+          >{toastAction.label}</button
+        >{/if}
+    </div>{/if}
 </main>

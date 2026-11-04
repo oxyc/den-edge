@@ -236,7 +236,7 @@ describe('DownloadCoordinator', () => {
     expect(asked).toEqual([true]);
   });
 
-  it('asks afresh past its snapshot and past a plain ask in flight, and only a fresh ask says so', async () => {
+  it('asks afresh past a plain ask in flight and fences its late result from the rebuilt snapshot', async () => {
     const shared = testLog();
     const asked: boolean[] = [];
     let release!: () => void;
@@ -249,17 +249,76 @@ describe('DownloadCoordinator', () => {
         resolve: async (_title, fresh) => {
           asked.push(fresh === true);
           if (!fresh) await held;
-          return { sources: [first] };
+          return { sources: fresh ? [second] : [first], ...(fresh ? { fresh: 'rebuilt' } : {}) };
         },
       },
       { now: () => T0 },
     );
     const plain = queue.sourcesForTitle(title);
-    await queue.sourcesForTitle(title, false, true);
+    expect((await queue.sourcesForTitle(title, false, true)).sources?.[0]?.identity).toBe(
+      second.identity,
+    );
     release();
     await plain;
-    await queue.sourcesForTitle(title);
+    expect((await queue.sourcesForTitle(title)).sources?.[0]?.identity).toBe(second.identity);
     expect(asked).toEqual([false, true]);
+  });
+
+  it('reports limited separately and retains the exact cached list and coverage without extending it', async () => {
+    let asks = 0;
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asks++;
+          return fresh
+            ? {
+                sources: [second],
+                answer: { kind: 'partial', missing: 2 },
+                fresh: 'limited',
+              }
+            : { sources: [first], answer: { kind: 'live', missing: 0 } };
+        },
+      },
+      { now: () => T0 },
+    );
+    const prior = await queue.sourcesForTitle(title);
+    const limited = await queue.sourcesForTitle(title, false, true);
+    expect(limited).toEqual({ ...prior, fresh: 'limited' });
+    expect(await queue.sourcesForTitle(title)).toEqual(prior);
+    expect(asks).toBe(2);
+  });
+
+  it('does not hand an action-only limited marker to a plain viewer arriving during the refresh', async () => {
+    const asked: boolean[] = [];
+    let releaseFresh!: () => void;
+    const freshHeld = new Promise<void>((resolve) => (releaseFresh = resolve));
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asked.push(fresh === true);
+          if (fresh) {
+            await freshHeld;
+            return { sources: [second], fresh: 'limited' };
+          }
+          return { sources: [first], answer: { kind: 'live', missing: 0 } };
+        },
+      },
+      { now: () => T0 },
+    );
+    const limited = queue.sourcesForTitle(title, false, true);
+    const viewer = await queue.sourcesForTitle(title);
+    expect(viewer).toEqual({ sources: [first], answer: { kind: 'live', missing: 0 } });
+    expect(viewer).not.toHaveProperty('fresh');
+    releaseFresh();
+    await expect(limited).resolves.toMatchObject({ fresh: 'limited' });
+    expect(await queue.sourcesForTitle(title)).toEqual(viewer);
+    expect(asked).toEqual([true, false]);
   });
 
   it('downloads Rebecka Martinsson S02E01 as an uncached 1080p, not the cached SD AVI', async () => {

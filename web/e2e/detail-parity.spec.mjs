@@ -240,6 +240,7 @@ async function setup(
     return r.fulfill({
       json: {
         title: 'A Film',
+        external_ids: { imdb_id: 'tt42' },
         poster_path: '/poster.jpg',
         overview: 'A feature film.',
         credits: { cast: [{ id: 7, name: 'A Person', profile_path: '/person.jpg' }] },
@@ -679,6 +680,145 @@ test('Check for sources again asks scout afresh, past the cached list, and says 
     expect(asked).toContain('?fresh=1');
     // The browser's copy of the plain address is replaced too, so a later ordinary look sees the new list.
     await expect.poll(() => asked.filter((q) => q === '').length).toBeGreaterThan(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a title refresh keeps its prior list when limited, exposes Retry, then admits and warms once', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    let admitted = false;
+    let freshRequests = 0;
+    let plainRequests = 0;
+    const listed = (name) => [
+      {
+        title: name,
+        url: 'http://scout.internal/p/ready',
+        behaviorHints: { filename: name },
+        attributes: { cached: true, resolution: '1080p' },
+      },
+    ];
+    await page.route('**/scout/config/stream/movie/**', (route) => {
+      const fresh = new URL(route.request().url()).searchParams.get('fresh') === '1';
+      if (!fresh) plainRequests++;
+      else freshRequests++;
+      if (fresh && freshRequests === 1)
+        return route.fulfill({
+          headers: { 'x-den-fresh': 'limited' },
+          json: {
+            streams: listed('Prior.Movie.1080p.mkv'),
+            den: { answerKind: 'stale', coverage: { sources: [] } },
+          },
+        });
+      if (fresh) admitted = true;
+      return route.fulfill({
+        headers: fresh ? { 'x-den-fresh': 'rebuilt' } : {},
+        json: {
+          streams: listed(admitted ? 'New.Movie.1080p.mkv' : 'Prior.Movie.1080p.mkv'),
+          den: { answerKind: 'live', coverage: { sources: [] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = page.locator('[data-active="true"]');
+    await active
+      .locator('header.hero')
+      .getByRole('button', { name: 'Sources', exact: true })
+      .click();
+    const panel = active.locator('.source-panel');
+    await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+    const plainBefore = plainRequests;
+    await panel.getByRole('button', { name: 'Check for sources again', exact: true }).click();
+    await expect(
+      panel.getByRole('status').filter({ hasText: 'Sources were checked recently' }),
+    ).toBeVisible();
+    await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+    await expect(panel.getByText('New.Movie.1080p.mkv')).toHaveCount(0);
+    expect({ freshRequests, plainRequests }).toEqual({
+      freshRequests: 1,
+      plainRequests: plainBefore,
+    });
+
+    const retry = panel.getByRole('button', { name: 'Try again', exact: true });
+    await retry.focus();
+    await retry.press('Enter');
+    await expect(panel.getByText('New.Movie.1080p.mkv')).toBeVisible();
+    await expect.poll(() => plainRequests).toBe(plainBefore + 1);
+    expect(freshRequests).toBe(2);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a limited empty episode never claims fresh absence; failure and admitted retry recover', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    let freshRequests = 0;
+    let plainRequests = 0;
+    await page.route('**/scout/config/stream/series/**', (route) => {
+      const fresh = new URL(route.request().url()).searchParams.get('fresh') === '1';
+      if (!fresh) plainRequests++;
+      else freshRequests++;
+      if (freshRequests === 1 && fresh)
+        return route.fulfill({
+          headers: { 'x-den-fresh': 'limited' },
+          json: {
+            streams: [],
+            den: {
+              answerKind: 'stale',
+              degraded: 'stale_list',
+              generatedAt: '2026-01-01T00:00:00Z',
+              coverage: { sources: [] },
+            },
+          },
+        });
+      if (freshRequests === 2 && fresh) return route.fulfill({ status: 503, json: {} });
+      return route.fulfill({
+        headers: fresh ? { 'x-den-fresh': 'rebuilt' } : {},
+        json: {
+          streams: [],
+          den: { answerKind: 'empty', coverage: { sources: [] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9?season=2'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = page.locator('[data-active="true"]');
+    const row = active.locator('.episode').first();
+    const action = async () => {
+      await row.getByRole('button', { name: 'Options for episode 1', exact: true }).click();
+      await row.getByRole('menuitem', { name: 'Check for sources again', exact: true }).click();
+    };
+    await expect.poll(() => plainRequests).toBeGreaterThan(0);
+    const plainBefore = plainRequests;
+    await action();
+    const status = page.getByRole('status').filter({ hasText: 'Sources were checked recently' });
+    await expect(status).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: 'Still nothing' })).toHaveCount(0);
+    expect({ freshRequests, plainRequests }).toEqual({
+      freshRequests: 1,
+      plainRequests: plainBefore,
+    });
+
+    const retry = status.getByRole('button', { name: 'Try again', exact: true });
+    await retry.click();
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Couldn’t check the sources' }),
+    ).toBeVisible();
+    await action();
+    await expect(page.getByRole('status').filter({ hasText: 'Still nothing' })).toBeVisible();
+    await expect.poll(() => plainRequests).toBe(plainBefore + 1);
+    expect(freshRequests).toBe(3);
   } finally {
     await browser.close();
   }

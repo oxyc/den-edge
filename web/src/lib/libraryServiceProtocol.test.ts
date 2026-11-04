@@ -1359,9 +1359,19 @@ describe('library service server protocol', () => {
             },
           ],
           answer: { kind: 'partial', missing: 1 },
+          fresh: 'limited',
         },
       });
     expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-sources',
+        version,
+        result: { kind: 'download.sources', sources: [], fresh: 'invented' },
+      }),
+    ).toMatchObject({ ok: false });
     expect(result({ url: '/scout/p/private-ticket' })).toMatchObject({ ok: false });
     expect(result({ attributes: { provider: 'private' } })).toMatchObject({ ok: false });
 

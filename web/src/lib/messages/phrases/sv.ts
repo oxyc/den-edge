@@ -887,6 +887,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Sort people': 'Sortera folk',
   Sources: 'Källor',
   'Sources for S': 'Källor för S',
+  'Sources were checked recently, so these are the previous results. Try again shortly.':
+    'Källorna kontrollerades nyligen, så detta är de tidigare resultaten. Försök igen om en stund.',
   Spanish: 'spanska',
   'Spanish-language Thriller': 'Spanskspråkig thriller',
   Spoiler: 'Spoiler',
