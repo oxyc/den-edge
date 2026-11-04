@@ -18,7 +18,11 @@ import {
 } from './profileModeCoordinator.svelte';
 import { ProfileSession } from './profileSession.svelte';
 import { profileHouseholdSettingsModel, profileSettingsRoute } from './profileSettingsRoute';
-import type { VisitorActivityLock, VisitorProfileSession } from './visitorProfileSession.svelte';
+import {
+  visitorNamespaceIds,
+  type VisitorActivityLock,
+  type VisitorProfileSession,
+} from './visitorProfileSession.svelte';
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -43,6 +47,9 @@ const immediateLock: VisitorActivityLock = {
 };
 const capabilityResponse = (body: string, status = 200, cacheControl = 'no-store'): Response =>
   new Response(body, { status, headers: { 'cache-control': cacheControl } });
+
+const switchToKid = (coordinator: ProfileModeCoordinator, pin?: string) =>
+  coordinator.switchToPersistent(coordinator.choices.find(({ role }) => role === 'kid')!.id!, pin);
 
 function storageEvent(key: string): Event {
   const event = new Event('storage');
@@ -285,24 +292,275 @@ describe('ProfileModeCoordinator', () => {
       },
     };
     const first = owner(storage, false, null, lock);
-    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    await expect(first.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'success',
+    });
     const visitor = first.coordinator.session as VisitorProfileSession;
     const marker = storage.getItem('den.profile.active.v1');
     storage.setItem(`${visitor.activity.prefix}activity`, JSON.stringify({ retained: true }));
 
-    await expect(first.coordinator.switchToOwner()).rejects.toThrow('lock refused');
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({
+      outcome: 'failed',
+      cause: expect.objectContaining({ message: 'lock refused' }),
+    });
     expect(first.coordinator.session).toBe(visitor);
     expect(first.coordinator.mode).toBe('visitor');
     expect(storage.getItem('den.profile.active.v1')).toBe(marker);
     expect(storage.getItem(`${visitor.activity.prefix}activity`)).not.toBeNull();
     expect(visitor.activity.get('activity')).toEqual({ retained: true });
 
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.mode).toBe('owner');
     expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
     expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'success' });
     expect(attempts).toBe(3);
+  });
+
+  it('gives the latest profile transition ownership of an in-flight Visitor disposal', async () => {
+    const storage = memoryStorage();
+    const directory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let runs = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        if (runs++ === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        return work();
+      },
+    };
+    const first = owner(storage, true, null, lock, directory);
+    await expect(first.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'success',
+    });
+    const visitor = first.coordinator.session;
+    const kid = directory.profiles.find((choice) => choice.role === 'kid')!;
+
+    const staleOwner = first.coordinator.switchToOwner('1234');
+    await entered.promise;
+    const latestKid = first.coordinator.switchToPersistent(kid.id!);
+    release.resolve();
+
+    await expect(staleOwner).resolves.toMatchObject({ outcome: 'superseded' });
+    await expect(latestKid).resolves.toMatchObject({ outcome: 'success' });
+    expect(first.coordinator.session).not.toBe(visitor);
+    expect(first.coordinator.activeChoice?.id).toBe(kid.id);
+    expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
+      mode: 'persistent',
+      profileId: kid.id,
+    });
+  });
+
+  it('publishes only the latest cross-tab marker after overlapping Visitor cleanup', async () => {
+    const storage = memoryStorage();
+    const events = new EventTarget();
+    const directory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let runs = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        if (runs++ === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        return work();
+      },
+    };
+    const first = owner(storage, true, events, lock, directory);
+    await first.coordinator.switchToVisitor();
+    const kid = directory.profiles.find((choice) => choice.role === 'kid')!;
+
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    await entered.promise;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    release.resolve();
+
+    await vi.waitFor(() => expect(first.coordinator.activeChoice?.id).toBe(kid.id));
+    expect(first.coordinator.mode).toBe('kid');
+  });
+
+  it('retires a losing Visitor namespace before adopting another tab’s visit', async () => {
+    const storage = memoryStorage();
+    const firstEvents = new EventTarget();
+    const directory = previewProfileDirectory();
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let runs = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        if (runs++ === 2) {
+          entered.resolve();
+          await release.promise;
+        }
+        return work();
+      },
+    };
+    const first = owner(storage, true, firstEvents, lock, directory);
+    const second = owner(storage, true, new EventTarget(), lock, directory);
+    await first.coordinator.switchToVisitor();
+    const losing = first.coordinator.session as VisitorProfileSession;
+    storage.setItem(`${losing.activity.prefix}activity`, JSON.stringify({ private: true }));
+
+    await second.coordinator.switchToVisitor();
+    const winningId = second.coordinator.session!.identity.id;
+    const winningMarker = storage.getItem('den.profile.active.v1');
+    expect(winningId).not.toBe(losing.identity.id);
+    firstEvents.dispatchEvent(storageEvent('den.profile.active.v1'));
+    await entered.promise;
+    expect(first.coordinator.session).toBe(losing);
+    expect(storage.getItem(`${losing.activity.prefix}activity`)).not.toBeNull();
+    release.resolve();
+
+    await vi.waitFor(() => expect(first.coordinator.session?.identity.id).toBe(winningId));
+    expect(storage.getItem(`${losing.activity.prefix}activity`)).toBeNull();
+    expect(storage.getItem('den.profile.active.v1')).toBe(winningMarker);
+    expect(first.coordinator.mode).toBe('visitor');
+  });
+
+  it('finishes losing-Visitor cleanup across a directory withdrawal and restores the winner', async () => {
+    const storage = memoryStorage();
+    const events = new EventTarget();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = directory.profiles.find((profile) => profile.role === 'owner')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
+    );
+    const ownerOpening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey!, ownerOpening]]));
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let runs = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        if (runs++ === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        return work();
+      },
+    };
+    const first = owner(storage, true, events, lock, directory, models.factory);
+    ownerOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    await first.coordinator.switchToVisitor();
+    const losing = first.coordinator.session as VisitorProfileSession;
+    storage.setItem(`${losing.activity.prefix}activity`, JSON.stringify({ private: true }));
+    const winner = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const winnerMarker = JSON.stringify({
+      version: 1,
+      mode: 'visitor',
+      visitorNamespace: winner,
+    });
+
+    storage.setItem('den.profile.active.v1', winnerMarker);
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    await entered.promise;
+    first.coordinator.updateDirectory(null);
+    expect(first.coordinator.session).toBeNull();
+    release.resolve();
+    await vi.waitFor(() => expect(storage.getItem(`${losing.activity.prefix}activity`)).toBeNull());
+
+    first.coordinator.updateDirectory(directory);
+    await vi.waitFor(() => expect(first.coordinator.session?.identity.id).toBe(winner));
+    expect(storage.getItem('den.profile.active.v1')).toBe(winnerMarker);
+    expect(first.coordinator.mode).toBe('visitor');
+  });
+
+  it('does not hide a latest local marker-write failure behind stale Visitor cleanup', async () => {
+    const base = memoryStorage();
+    const events = new EventTarget();
+    const directory = previewProfileDirectory();
+    const kid = directory.profiles.find((profile) => profile.role === 'kid')!;
+    let refuseKidMarker = false;
+    const storage: Storage = {
+      get length() {
+        return base.length;
+      },
+      clear: () => base.clear(),
+      getItem: (key) => base.getItem(key),
+      key: (index) => base.key(index),
+      removeItem: (key) => base.removeItem(key),
+      setItem(key, value) {
+        if (
+          refuseKidMarker &&
+          key === 'den.profile.active.v1' &&
+          JSON.parse(value).profileId === kid.id
+        )
+          throw new Error('marker write failed');
+        base.setItem(key, value);
+      },
+    };
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: directory.owner }),
+    );
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let runs = 0;
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        if (runs++ === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        return work();
+      },
+    };
+    const first = owner(storage, true, events, lock, directory);
+    await first.coordinator.switchToVisitor();
+    const losing = first.coordinator.session as VisitorProfileSession;
+    storage.setItem(`${losing.activity.prefix}activity`, JSON.stringify({ private: true }));
+    const winnerMarker = JSON.stringify({
+      version: 1,
+      mode: 'visitor',
+      visitorNamespace: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    storage.setItem('den.profile.active.v1', winnerMarker);
+    events.dispatchEvent(storageEvent('den.profile.active.v1'));
+    await entered.promise;
+
+    refuseKidMarker = true;
+    const switching = first.coordinator.switchToPersistent(kid.id!);
+    release.resolve();
+
+    await expect(switching).resolves.toMatchObject({
+      outcome: 'failed',
+      cause: expect.objectContaining({ message: 'marker write failed' }),
+    });
+    expect(first.coordinator.session).toBe(losing);
+    expect(storage.getItem('den.profile.active.v1')).toBe(winnerMarker);
+    expect(storage.getItem(`${losing.activity.prefix}activity`)).not.toBeNull();
   });
 
   it('does not enter or restore Visitor when cross-tab locking is unavailable', async () => {
@@ -324,7 +582,9 @@ describe('ProfileModeCoordinator', () => {
     const ownerStorage = memoryStorage();
     ownerStorage.setItem('den.profile.active.v1', JSON.stringify({ mode: 'owner' }));
     const activeOwner = owner(ownerStorage, false, null, unavailable);
-    await expect(activeOwner.coordinator.switchToVisitor()).resolves.toBe(false);
+    await expect(activeOwner.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'failed',
+    });
     expect(activeOwner.coordinator.mode).toBe('owner');
     expect(ownerStorage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
 
@@ -346,6 +606,98 @@ describe('ProfileModeCoordinator', () => {
     expect(enabled).toHaveBeenCalledTimes(2);
   });
 
+  it('supersedes a Visitor waiting for its lock before a newer selection can write or replace Owner', async () => {
+    const storage = memoryStorage();
+    const ownerMarker = JSON.stringify({ mode: 'owner' });
+    storage.setItem('den.profile.active.v1', ownerMarker);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        entered.resolve();
+        await release.promise;
+        return work();
+      },
+    };
+    const first = owner(storage, false, null, lock);
+    const ownerSession = first.coordinator.session;
+
+    const visitor = first.coordinator.switchToVisitor();
+    await entered.promise;
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({
+      outcome: 'success',
+    });
+    release.resolve();
+
+    await expect(visitor).resolves.toMatchObject({ outcome: 'superseded' });
+    expect(first.coordinator.session).toBe(ownerSession);
+    expect(storage.getItem('den.profile.active.v1')).toBe(ownerMarker);
+    expect(visitorNamespaceIds(storage)).toEqual([]);
+    expect(first.close).not.toHaveBeenCalled();
+  });
+
+  it('supersedes a Visitor lock wait and every later switch after disposal without writing a marker', async () => {
+    const storage = memoryStorage();
+    const ownerMarker = JSON.stringify({ mode: 'owner' });
+    storage.setItem('den.profile.active.v1', ownerMarker);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+        entered.resolve();
+        await release.promise;
+        return work();
+      },
+    };
+    const first = owner(storage, true, null, lock);
+    const ownerSession = first.coordinator.session;
+
+    const visitor = first.coordinator.switchToVisitor();
+    await entered.promise;
+    first.coordinator.dispose();
+    release.resolve();
+
+    await expect(visitor).resolves.toMatchObject({ outcome: 'superseded' });
+    await expect(
+      first.coordinator.switchToPersistent(previewProfileDirectory().profiles[1]!.id!),
+    ).resolves.toMatchObject({
+      outcome: 'superseded',
+    });
+    expect(first.coordinator.session).toBe(ownerSession);
+    expect(storage.getItem('den.profile.active.v1')).toBe(ownerMarker);
+    expect(visitorNamespaceIds(storage)).toEqual([]);
+  });
+
+  it('prefers superseded when a held Visitor lock rejects after a newer selection', async () => {
+    const storage = memoryStorage();
+    const ownerMarker = JSON.stringify({ mode: 'owner' });
+    storage.setItem('den.profile.active.v1', ownerMarker);
+    const entered = deferred<void>();
+    const rejected = deferred<void>();
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(): Promise<T> {
+        entered.resolve();
+        await rejected.promise;
+        throw new Error('the obsolete lock failed');
+      },
+    };
+    const first = owner(storage, true, null, lock);
+    const ownerSession = first.coordinator.session;
+
+    const visitor = first.coordinator.switchToVisitor();
+    await entered.promise;
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'success' });
+    rejected.reject(new Error('the obsolete lock failed'));
+
+    await expect(visitor).resolves.toMatchObject({ outcome: 'superseded' });
+    expect(first.coordinator.session).toBe(ownerSession);
+    expect(storage.getItem('den.profile.active.v1')).toBe(ownerMarker);
+    expect(visitorNamespaceIds(storage)).toEqual([]);
+  });
+
   it('serializes shared-tab activity and revokes a stale tab before it can recreate an ended visit', async () => {
     const storage = memoryStorage();
     const events = new EventTarget();
@@ -365,7 +717,7 @@ describe('ProfileModeCoordinator', () => {
     expect(a.profileActivity!.watchlist.map(({ title }) => title).sort()).toEqual(['One', 'Two']);
     expect(b.profileActivity!.watchlist.map(({ title }) => title).sort()).toEqual(['One', 'Two']);
 
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'success' });
     expect(storage.getItem(`${a.activity.prefix}activity`)).toBeNull();
     await expect(
       b.profileActivity!.setWatchlisted({ type: 'movie', id: 3, title: 'Three' }, true),
@@ -425,9 +777,13 @@ describe('ProfileModeCoordinator', () => {
       expect(first.coordinator.mode).toBeNull();
       expect(first.coordinator.session).toBeNull();
       expect(storage.getItem('den.profile.active.v1')).toBe(marker);
-      await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+      await expect(first.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+        outcome: 'denied',
+      });
       expect(first.coordinator.session).toBeNull();
-      await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+      await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+        outcome: 'success',
+      });
       expect(first.coordinator.mode).toBe('owner');
       expect(storage.getItem('den.profile.active.v1')).toBe(JSON.stringify({ mode: 'owner' }));
     },
@@ -444,11 +800,15 @@ describe('ProfileModeCoordinator', () => {
       storage.setItem('den.profile.personal.v1:activity', 'personal');
       const first = owner(storage);
 
-      await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+      await expect(first.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+        outcome: 'denied',
+      });
       expect(storage.getItem(`den.profile.visitor.v1:${orphan}:activity`)).toBe('private visit');
       expect(first.coordinator.session).toBeNull();
 
-      await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+      await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+        outcome: 'success',
+      });
       expect(first.coordinator.mode).toBe('owner');
       expect(storage.getItem(`den.profile.visitor.v1:${orphan}:activity`)).toBeNull();
       expect(storage.getItem(`den.profile.visitor.v1:${orphan}:preferences`)).toBeNull();
@@ -474,7 +834,7 @@ describe('ProfileModeCoordinator', () => {
 
     expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
     expect(first.coordinator.session).toBeNull();
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.mode).toBe('owner');
     expect(storage.getItem(`den.profile.visitor.v1:${orphan}:activity`)).toBeNull();
   });
@@ -501,15 +861,18 @@ describe('ProfileModeCoordinator', () => {
     };
     const first = owner(storage);
 
-    await expect(first.coordinator.switchToOwner('1234')).rejects.toThrow(
-      'storage refused deletion',
-    );
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'failed',
+      cause: expect.objectContaining({ message: 'storage refused deletion' }),
+    });
     expect(first.coordinator.session).toBeNull();
     expect(storage.getItem('den.profile.active.v1')).toBe('{broken');
     expect(storage.getItem(orphanKey)).toBe('private visit');
 
     refuseDeletion = false;
-    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(first.coordinator.mode).toBe('owner');
     expect(storage.getItem(orphanKey)).toBeNull();
   });
@@ -527,11 +890,15 @@ describe('ProfileModeCoordinator', () => {
     await activity.activity.set('progress', 1);
     storage.setItem('den.profile.visitor.v1:ffffffffffffffffffffffffffffffff:progress', '2');
 
-    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+      outcome: 'denied',
+    });
     expect(first.coordinator.mode).toBe('visitor');
     expect(storage.getItem(`den.profile.visitor.v1:${endedId}:progress`)).toBe('1');
 
-    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(first.coordinator.mode).toBe('owner');
     expect(first.verifyParentalPin).toHaveBeenNthCalledWith(1, '0000');
     expect(first.verifyParentalPin).toHaveBeenNthCalledWith(2, '1234');
@@ -548,7 +915,7 @@ describe('ProfileModeCoordinator', () => {
     const first = owner(storage, false);
     await first.coordinator.switchToVisitor();
 
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'success' });
     expect(first.verifyParentalPin).not.toHaveBeenCalled();
     expect(first.close).not.toHaveBeenCalled();
     first.coordinator.dispose();
@@ -600,15 +967,17 @@ describe('ProfileModeCoordinator', () => {
 
     expect(first.coordinator.parentalPinConfigured).toBe(true);
     expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
-    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'denied' });
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+      outcome: 'denied',
+    });
     expect(first.activityVerifyParentalPin).not.toHaveBeenCalled();
     expect(first.verifyParentalPin).toHaveBeenCalledWith('0000');
 
     const switching = first.coordinator.switchToOwner('1234');
     await vi.waitFor(() => expect(models.handles).toHaveLength(1));
     opening.resolve({});
-    await expect(switching).resolves.toBe(true);
+    await expect(switching).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.mode).toBe('owner');
     expect(profileSettingsRoute(first.coordinator.session!, first.coordinator.mode)).toBe(
       'household',
@@ -651,19 +1020,29 @@ describe('ProfileModeCoordinator', () => {
       profileHouseholdSettingsModel(first.coordinator.session!, first.coordinator.mode),
     ).toBeNull();
 
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
-    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'denied' });
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+      outcome: 'denied',
+    });
     const fromKid = first.coordinator.switchToOwner('1234');
     ownerOpening.resolve({});
-    await expect(fromKid).resolves.toBe(true);
-    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
-    await expect(first.coordinator.switchToOwner()).resolves.toBe(false);
-    await expect(first.coordinator.switchToOwner('0000')).resolves.toBe(false);
-    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    await expect(fromKid).resolves.toMatchObject({ outcome: 'success' });
+    await expect(first.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'success',
+    });
+    await expect(first.coordinator.switchToOwner()).resolves.toMatchObject({ outcome: 'denied' });
+    await expect(first.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+      outcome: 'denied',
+    });
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(profileHouseholdSettingsModel(first.coordinator.session!, first.coordinator.mode)).toBe(
       first.householdModel,
     );
-    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    await expect(first.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(profileSettingsRoute(first.coordinator.session!, first.coordinator.mode)).toBe(
       'personal',
     );
@@ -713,7 +1092,7 @@ describe('ProfileModeCoordinator', () => {
 
     const switching = first.coordinator.switchToPersistent(secondChoice.id!);
     secondOpening.resolve({});
-    await expect(switching).resolves.toBe(true);
+    await expect(switching).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.activeChoice?.id).toBe(secondChoice.id);
     expect(first.coordinator.session!.identity.libraryKey).toBe(secondKid.libraryKey);
     expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
@@ -821,6 +1200,55 @@ describe('ProfileModeCoordinator', () => {
     expect(models.handles[0]!.close).not.toHaveBeenCalled();
   });
 
+  it('compares maximum approval lists with bounded work and keeps an equal active profile', async () => {
+    const storage = memoryStorage();
+    const approvals = Array.from({ length: 10_000 }, (_, id) => ({
+      type: id % 2 ? ('movie' as const) : ('tv' as const),
+      id,
+    }));
+    const view = realDirectoryView();
+    const profiles = view.profiles.map((profile) =>
+      profile.role === 'owner' ? { ...profile, approvals } : profile,
+    );
+    const directory = profileDirectoryChoices({ ...view, profiles })!;
+    const ownerProfile = directory.profiles.find((profile) => profile.role === 'owner')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey!, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    const active = first.coordinator.session;
+
+    let reads = 0;
+    const replacement = [...approvals].reverse().map(({ type, id }) => ({
+      get type() {
+        if (++reads > 30_000) throw new Error('approval comparison exceeded its linear bound');
+        return type;
+      },
+      get id() {
+        if (++reads > 30_000) throw new Error('approval comparison exceeded its linear bound');
+        return id;
+      },
+    }));
+    first.coordinator.updateDirectory(
+      profileDirectoryChoices({
+        ...view,
+        profiles: view.profiles.map((profile) =>
+          profile.role === 'owner' ? { ...profile, approvals: replacement } : profile,
+        ),
+      })!,
+    );
+
+    expect(reads).toBe(20_000);
+    expect(first.coordinator.session).toBe(active);
+    expect(models.handles).toHaveLength(1);
+    expect(models.handles[0]!.close).not.toHaveBeenCalled();
+  });
+
   it('finishes a switch to Kid when the same directory is handed over while Kid opens', async () => {
     const storage = memoryStorage();
     const view = realDirectoryView();
@@ -850,7 +1278,7 @@ describe('ProfileModeCoordinator', () => {
     first.coordinator.updateDirectory(profileDirectoryChoices(view)!);
     kidOpening.resolve({});
 
-    await expect(switching).resolves.toBe(true);
+    await expect(switching).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.mode).toBe('kid');
     expect(models.handles[1]!.close).not.toHaveBeenCalled();
   });
@@ -883,12 +1311,118 @@ describe('ProfileModeCoordinator', () => {
     const unavailable = new Error('library service startup timed out');
     kidOpening.reject(unavailable);
 
-    await expect(switching).rejects.toMatchObject({
-      message: expect.stringContaining('library could not be opened'),
-      cause: unavailable,
+    await expect(switching).resolves.toMatchObject({
+      outcome: 'failed',
+      cause: {
+        message: expect.stringContaining('library could not be opened'),
+        cause: unavailable,
+      },
     });
     expect(first.coordinator.mode).toBe('owner');
     expect(models.handles[1]!.close).toHaveBeenCalledOnce();
+  });
+
+  it('fails a profile that names no library without opening, publishing or superseding', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const valid = profileDirectoryChoices(view)!;
+    const ownerProfile = valid.profiles.find((profile) => profile.role === 'owner')!;
+    const kid = valid.profiles.find((profile) => profile.role === 'kid')!;
+    const directory: PreviewProfileDirectory = {
+      ...valid,
+      profiles: valid.profiles.map((profile) =>
+        profile === kid ? { ...profile, libraryKey: undefined } : profile,
+      ),
+    };
+    const ownerMarker = JSON.stringify({
+      version: 1,
+      mode: 'persistent',
+      profileId: ownerProfile.id,
+    });
+    storage.setItem('den.profile.active.v1', ownerMarker);
+    const ownerOpening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey!, ownerOpening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    ownerOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    const ownerSession = first.coordinator.session;
+
+    await expect(first.coordinator.switchToPersistent(kid.id!)).resolves.toMatchObject({
+      outcome: 'failed',
+      cause: expect.objectContaining({ message: expect.stringContaining('no activity library') }),
+    });
+    expect(first.coordinator.session).toBe(ownerSession);
+    expect(storage.getItem('den.profile.active.v1')).toBe(ownerMarker);
+    expect(models.handles).toHaveLength(1);
+  });
+
+  it('reports a key-rotated or disposed opening as superseded without publishing it', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    const ownerMarker = JSON.stringify({
+      version: 1,
+      mode: 'persistent',
+      profileId: ownerProfile.id,
+    });
+    storage.setItem('den.profile.active.v1', ownerMarker);
+    const ownerOpening = deferred<unknown>();
+    const firstKidOpening = deferred<unknown>();
+    const secondKidOpening = deferred<unknown>();
+    const models = profileModels(
+      new Map([
+        [ownerProfile.libraryKey, ownerOpening],
+        [kid.libraryKey, firstKidOpening],
+        ['rotated-kid-key', secondKidOpening],
+      ]),
+    );
+    const directory = profileDirectoryChoices(view)!;
+    const first = owner(storage, true, null, undefined, directory, models.factory);
+    ownerOpening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('owner'));
+    const ownerSession = first.coordinator.session;
+
+    const kidChoice = directory.profiles.find((choice) => choice.role === 'kid')!;
+    const rotatedAway = first.coordinator.switchToPersistent(kidChoice.id!);
+    await vi.waitFor(() => expect(models.handles).toHaveLength(2));
+    first.coordinator.updateDirectory(
+      profileDirectoryChoices(realDirectoryView(ownerProfile.libraryKey, 'rotated-kid-key'))!,
+    );
+    firstKidOpening.resolve({});
+
+    await expect(rotatedAway).resolves.toMatchObject({ outcome: 'superseded' });
+    expect(first.coordinator.session).toBe(ownerSession);
+    expect(storage.getItem('den.profile.active.v1')).toBe(ownerMarker);
+    expect(models.handles[1]!.close).toHaveBeenCalledOnce();
+
+    const rotatedChoice = first.coordinator.choices.find((choice) => choice.role === 'kid')!;
+    const disposed = first.coordinator.switchToPersistent(rotatedChoice.id!);
+    await vi.waitFor(() => expect(models.handles).toHaveLength(3));
+    first.coordinator.dispose();
+    secondKidOpening.resolve({});
+
+    await expect(disposed).resolves.toMatchObject({ outcome: 'superseded' });
+    expect(storage.getItem('den.profile.active.v1')).toBe(ownerMarker);
+    expect(models.handles[2]!.close).toHaveBeenCalledOnce();
+  });
+
+  it('reports a disposed Kid selection as superseded even when no Kid exists', async () => {
+    const storage = memoryStorage();
+    const preview = previewProfileDirectory();
+    const directory = {
+      ...preview,
+      profiles: preview.profiles.filter((profile) => profile.role === 'owner'),
+    };
+    const first = owner(storage, true, null, undefined, directory);
+
+    first.coordinator.dispose();
+
+    await expect(
+      first.coordinator.switchToPersistent(preview.profiles[1]!.id!),
+    ).resolves.toMatchObject({
+      outcome: 'superseded',
+    });
   });
 
   it('keeps Kid active until Owner is ready, then commits the marker and closes only Kid activity', async () => {
@@ -922,7 +1456,7 @@ describe('ProfileModeCoordinator', () => {
     });
 
     ownerOpening.resolve({});
-    await expect(switching).resolves.toBe(true);
+    await expect(switching).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.mode).toBe('owner');
     expect(first.coordinator.session!.identity.libraryKey).toBe(ownerProfile.libraryKey);
     expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
@@ -993,7 +1527,9 @@ describe('ProfileModeCoordinator', () => {
     })!;
     first.coordinator.updateDirectory(ownerOnly);
     expect(first.coordinator.session).toBe(ownerSession);
-    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    await expect(first.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'success',
+    });
     const visitor = first.coordinator.session;
     expect(visitor?.preferences).not.toBeNull();
     first.coordinator.updateDirectory(ownerOnly);
@@ -1050,7 +1586,7 @@ describe('ProfileModeCoordinator', () => {
     );
     const first = owner(storage, true, null, undefined, directory);
     expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(true);
-    await first.coordinator.switchToKid();
+    await switchToKid(first.coordinator);
     expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(false);
     await first.coordinator.switchToVisitor('1234');
     expect(allowsImplicitAssistant(first.coordinator, first.coordinator.session!)).toBe(false);
@@ -1065,7 +1601,7 @@ describe('ProfileModeCoordinator', () => {
     );
     const preview = owner(storage, true, null, undefined, previewDirectory).coordinator;
     expect(preview.session!.administersHousehold).toBe(true);
-    await preview.switchToKid();
+    await switchToKid(preview);
     expect(preview.session!.administersHousehold).toBe(false);
     await preview.switchToVisitor('1234');
     expect(preview.session!.administersHousehold).toBe(false);
@@ -1095,7 +1631,9 @@ describe('ProfileModeCoordinator', () => {
     expect(real.coordinator.session!.administersHousehold).toBe(false);
 
     ownerOpening.resolve({});
-    await expect(real.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    await expect(real.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(real.coordinator.session!.administersHousehold).toBe(true);
   });
 
@@ -1134,7 +1672,9 @@ describe('ProfileModeCoordinator', () => {
 
     // Owner is restricted by its own ceiling, but is not a Kid catalogue.
     openings.get(ownerProfile.libraryKey)!.resolve({});
-    await expect(first.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    await expect(first.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     const ownerSession = first.coordinator.session!;
     expect(ownerSession).not.toBe(kidSession);
     expect(ownerSession.content).not.toBe(kidSession.content);
@@ -1152,7 +1692,9 @@ describe('ProfileModeCoordinator', () => {
     expect(allowsImplicitAssistant(first.coordinator, ownerSession)).toBe(true);
 
     // Visitor inherits Owner's policy; it is never looser than the profile the household set.
-    await expect(first.coordinator.switchToVisitor()).resolves.toBe(true);
+    await expect(first.coordinator.switchToVisitor()).resolves.toMatchObject({
+      outcome: 'success',
+    });
     const visitor = first.coordinator.session!;
     await ask(visitor);
     expect(first.householdContent.query).toHaveBeenLastCalledWith(expect.anything(), undefined, {
@@ -1215,7 +1757,7 @@ describe('ProfileModeCoordinator', () => {
     const first = owner(storage, true, null, undefined, directory);
 
     expect(first.coordinator.choices.map(({ name }) => name)).toEqual(['Owner', 'Kids', 'Visitor']);
-    await expect(first.coordinator.switchToKid()).resolves.toBe(true);
+    await expect(switchToKid(first.coordinator)).resolves.toMatchObject({ outcome: 'success' });
     expect(first.coordinator.mode).toBe('kid');
     expect(first.coordinator.activeChoice?.name).toBe('Kids');
     expect(storage.getItem('den.profile.active.v1')).toBe(
@@ -1226,9 +1768,13 @@ describe('ProfileModeCoordinator', () => {
       }),
     );
 
-    await expect(first.coordinator.switchToVisitor('0000')).resolves.toBe(false);
+    await expect(first.coordinator.switchToVisitor('0000')).resolves.toMatchObject({
+      outcome: 'denied',
+    });
     expect(first.coordinator.mode).toBe('kid');
-    await expect(first.coordinator.switchToVisitor('1234')).resolves.toBe(true);
+    await expect(first.coordinator.switchToVisitor('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(first.coordinator.mode).toBe('visitor');
     expect(JSON.parse(storage.getItem('den.profile.active.v1')!)).toMatchObject({
       version: 1,
@@ -1238,15 +1784,21 @@ describe('ProfileModeCoordinator', () => {
     first.coordinator.dispose();
     const restoredVisitor = owner(storage, true, null, undefined, directory);
     expect(restoredVisitor.coordinator.mode).toBe('visitor');
-    await expect(restoredVisitor.coordinator.switchToKid()).resolves.toBe(true);
+    await expect(switchToKid(restoredVisitor.coordinator)).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(restoredVisitor.coordinator.mode).toBe('kid');
     restoredVisitor.coordinator.dispose();
 
     const restoredKid = owner(storage, true, null, undefined, directory);
     expect(restoredKid.coordinator.mode).toBe('kid');
-    await expect(restoredKid.coordinator.switchToOwner('0000')).resolves.toBe(false);
+    await expect(restoredKid.coordinator.switchToOwner('0000')).resolves.toMatchObject({
+      outcome: 'denied',
+    });
     expect(restoredKid.coordinator.mode).toBe('kid');
-    await expect(restoredKid.coordinator.switchToOwner('1234')).resolves.toBe(true);
+    await expect(restoredKid.coordinator.switchToOwner('1234')).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(restoredKid.coordinator.mode).toBe('owner');
   });
 });
@@ -1406,10 +1958,14 @@ describe('a browser whose household is not made yet (den#295)', () => {
     expect(coordinator.setsPin('kid')).toBe(true);
     const kid = coordinator.choices.find((choice) => choice.role === 'kid')!;
     // No PIN chosen: nothing is made.
-    await expect(coordinator.switchToPersistent(kid.id!)).resolves.toBe(false);
+    await expect(coordinator.switchToPersistent(kid.id!)).resolves.toMatchObject({
+      outcome: 'denied',
+    });
     expect(startsKid).not.toHaveBeenCalled();
     await expect(coordinator.setOwnerPin('4321')).resolves.toBe(true);
-    await expect(coordinator.switchToPersistent(kid.id!)).resolves.toBe(true);
+    await expect(coordinator.switchToPersistent(kid.id!)).resolves.toMatchObject({
+      outcome: 'success',
+    });
     expect(startsKid).toHaveBeenCalledWith('4321');
     coordinator.dispose();
   });

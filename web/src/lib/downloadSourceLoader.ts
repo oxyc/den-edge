@@ -13,36 +13,18 @@ export type DownloadSourceLoad = {
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 };
 
-/**
- * Publishes only the latest visible title request; service queries are not transport-abortable. The list it loads is
- * the one the Sources panel shows, so it asks for an early answer (`download.sources`'s `early`).
- */
-export class DownloadSourceLoader {
-  #generation = 0;
-
-  cancel(): void {
-    this.#generation++;
-  }
-
-  async load(
-    model: LibraryModel,
-    title: DownloadTitleDescriptor,
-    refresh = false,
-  ): Promise<DownloadSourceLoad | null | undefined> {
-    const generation = ++this.#generation;
-    try {
-      const { result } = await model.downloadSources(title, refresh, refresh, true);
-      if (generation !== this.#generation) return undefined;
-      return result.kind === 'download.sources'
-        ? {
-            sources: result.sources,
-            ...(result.answer ? { answer: result.answer } : {}),
-            ...(result.fresh ? { fresh: result.fresh } : {}),
-            ...(result.failure ? { failure: result.failure } : {}),
-          }
-        : null;
-    } catch {
-      return generation === this.#generation ? null : undefined;
-    }
+/** Normalize the command boundary, including implementations that throw before returning their promise. */
+export async function loadDownloadSources(
+  model: LibraryModel,
+  title: DownloadTitleDescriptor,
+  refresh = false,
+): Promise<DownloadSourceLoad | null> {
+  try {
+    const { result } = await model.downloadSources(title, refresh, refresh, true);
+    if (result.kind !== 'download.sources') return null;
+    const { kind: _, ...loaded } = result;
+    return loaded;
+  } catch {
+    return null;
   }
 }

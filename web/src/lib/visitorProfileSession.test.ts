@@ -3,14 +3,14 @@ import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import { visitorVisitId } from './profileIdentity';
 import {
-  NoSyncVisitorWriter,
+  crossTabVisitorActivityLock,
   purgeOrphanVisitorNamespaces,
   randomVisitorVisitId,
+  VISITOR_CLEANUP_SUPERSEDED,
   visitorNamespaceIds,
   visitorProfileSession,
   type VisitorActivityLock,
 } from './visitorProfileSession.svelte';
-import type { TrackerEvent } from './trackerEvents';
 
 const FIRST = visitorVisitId('11111111111111111111111111111111');
 const SECOND = visitorVisitId('22222222222222222222222222222222');
@@ -30,13 +30,110 @@ function memoryStorage(): Storage {
 }
 
 const content = () => ({ query: vi.fn(), onStatus: vi.fn(() => () => {}) });
+const immediateLock: VisitorActivityLock = {
+  available: () => true,
+  async run<T>(_name: string, work: () => Promise<T> | T): Promise<T> {
+    return work();
+  },
+};
 
 describe('VisitorProfileSession', () => {
+  it('defers Web Lock admission and holds it through async completion', async () => {
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => (enter = resolve));
+    const release = new Promise<void>((resolve) => (resume = resolve));
+    const order: string[] = [];
+    const name = `den:visitor:test:${crypto.randomUUID()}`;
+    const first = crossTabVisitorActivityLock.run(name, async () => {
+      order.push('first');
+      enter();
+      await release;
+    });
+    const second = crossTabVisitorActivityLock.run(name, () => {
+      order.push('second');
+    });
+
+    expect(order).toEqual([]);
+    await entered;
+    expect(order).toEqual(['first']);
+    resume();
+    await Promise.all([first, second]);
+    expect(order).toEqual(['first', 'second']);
+  });
+
+  it('finalizes synchronous fallback disposal before a revoke-queued microtask', async () => {
+    const storage = memoryStorage();
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      { close: vi.fn() } as unknown as LibraryModel,
+      content(),
+    );
+    const visitor = visitorProfileSession(household, storage, FIRST);
+    storage.setItem(`${visitor.activity.prefix}activity`, JSON.stringify({ private: true }));
+    let observedDisposed = false;
+    let observed!: () => void;
+    const observation = new Promise<void>((resolve) => (observed = resolve));
+    vi.stubGlobal('navigator', undefined);
+    vi.stubGlobal('window', undefined);
+    try {
+      const ending = visitor.endVisit(() => {
+        queueMicrotask(() => {
+          try {
+            visitor.activity.get('activity');
+          } catch {
+            observedDisposed = true;
+          }
+          observed();
+        });
+      });
+      await observation;
+      expect(observedDisposed).toBe(true);
+      await ending;
+      expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('holds the fallback lock until a returned thenable settles', async () => {
+    const order: string[] = [];
+    let settle!: () => void;
+    let entered!: () => void;
+    const admission = new Promise<void>((resolve) => (entered = resolve));
+    const thenable = {
+      then(resolve: () => void) {
+        settle = () => resolve();
+        entered();
+      },
+    } as unknown as PromiseLike<void>;
+    const name = `den:visitor:test:${crypto.randomUUID()}`;
+    vi.stubGlobal('navigator', undefined);
+    vi.stubGlobal('window', undefined);
+    try {
+      const first = crossTabVisitorActivityLock.run(name, () => {
+        order.push('first');
+        return thenable;
+      });
+      await admission;
+      const second = crossTabVisitorActivityLock.run(name, () => {
+        order.push('second');
+      });
+      await Promise.resolve();
+      expect(order).toEqual(['first']);
+      settle();
+      await Promise.all([first, second]);
+      expect(order).toEqual(['first', 'second']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('discovers and purges only exact orphan Visitor namespaces under their visit locks', async () => {
     const storage = memoryStorage();
+    storage.setItem(`den.profile.visitor.v1:${SECOND}:activity`, 'two');
     storage.setItem(`den.profile.visitor.v1:${FIRST}:activity`, 'one');
     storage.setItem(`den.profile.visitor.v1:${FIRST}:preferences`, 'prefs');
-    storage.setItem(`den.profile.visitor.v1:${SECOND}:activity`, 'two');
     storage.setItem('den.profile.visitor.v1:not-a-visit:activity', 'future');
     storage.setItem('den.profile.kid.v1:11111111111111111111111111111111:activity', 'kid');
     storage.setItem('den.profile.active.v1', '{broken');
@@ -51,7 +148,11 @@ describe('VisitorProfileSession', () => {
     };
 
     expect(visitorNamespaceIds(storage)).toEqual([FIRST, SECOND]);
-    await purgeOrphanVisitorNamespaces(storage, lock);
+    await purgeOrphanVisitorNamespaces(storage, lock, () => {
+      expect(locked).toEqual([`den:visitor:${FIRST}`, `den:visitor:${SECOND}`]);
+      expect(storage.getItem(`den.profile.visitor.v1:${FIRST}:activity`)).toBe('one');
+      expect(storage.getItem(`den.profile.visitor.v1:${SECOND}:activity`)).toBe('two');
+    });
 
     expect(locked).toEqual([`den:visitor:${FIRST}`, `den:visitor:${SECOND}`]);
     expect(storage.getItem(`den.profile.visitor.v1:${FIRST}:activity`)).toBeNull();
@@ -63,6 +164,34 @@ describe('VisitorProfileSession', () => {
     );
     expect(storage.getItem('den.profile.active.v1')).toBe('{broken');
     expect(storage.getItem('den.owner.untouched')).toBe('owner');
+  });
+
+  it('purges many Visitor keys with bounded storage traversal', async () => {
+    const base = memoryStorage();
+    let keyReads = 0;
+    const storage: Storage = {
+      ...base,
+      get length() {
+        return base.length;
+      },
+      key(index) {
+        keyReads++;
+        return base.key(index);
+      },
+    };
+    for (let index = 0; index < 128; index++) {
+      const id = index.toString(16).padStart(32, '0');
+      storage.setItem(`den.profile.visitor.v1:${id}:activity`, 'activity');
+      storage.setItem(`den.profile.visitor.v1:${id}:preferences`, 'preferences');
+    }
+    storage.setItem('den.owner.untouched', 'owner');
+    const initialKeys = storage.length;
+
+    await purgeOrphanVisitorNamespaces(storage, immediateLock);
+
+    expect(storage.length).toBe(1);
+    expect(storage.getItem('den.owner.untouched')).toBe('owner');
+    expect(keyReads).toBeLessThanOrEqual(initialKeys * 2);
   });
 
   it('shares an in-flight disposal and remains retryable when acquiring its lock fails', async () => {
@@ -105,6 +234,63 @@ describe('VisitorProfileSession', () => {
     expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
     await expect(visitor.endVisit(revoke)).resolves.toBeUndefined();
     expect(runCalls).toBe(2);
+  });
+
+  it('applies a newer dispose callback submitted reentrantly before deleting the namespace', async () => {
+    const storage = memoryStorage();
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      { close: vi.fn() } as unknown as LibraryModel,
+      content(),
+    );
+    const lock: VisitorActivityLock = {
+      available: () => true,
+      async run<T>(_name: string, work: () => PromiseLike<T> | T): Promise<T> {
+        await Promise.resolve();
+        return work();
+      },
+    };
+    const visitor = visitorProfileSession(household, storage, FIRST, { lock });
+    storage.setItem(`${visitor.activity.prefix}activity`, JSON.stringify({ private: true }));
+    const newer = vi.fn();
+    const older = vi.fn(() => void visitor.endVisit(newer));
+
+    await visitor.endVisit(older);
+
+    expect(older).toHaveBeenCalledOnce();
+    expect(newer).toHaveBeenCalledOnce();
+    expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
+  });
+
+  it('preserves an authoritative visit on callback failure but retires one the marker abandoned', async () => {
+    const storage = memoryStorage();
+    const household = new HouseholdSession(
+      { kind: 'profiles', libraryKey: 'household-key', configurationOnly: true },
+      { close: vi.fn() } as unknown as LibraryModel,
+      content(),
+    );
+    let active = true;
+    const visitor = visitorProfileSession(household, storage, FIRST, {
+      active: () => active,
+      lock: immediateLock,
+    });
+    storage.setItem(`${visitor.activity.prefix}activity`, JSON.stringify({ retained: true }));
+    const failed = () => {
+      throw new Error('marker write failed');
+    };
+
+    await expect(visitor.endVisit(failed)).rejects.toThrow('marker write failed');
+    expect(visitor.activity.get('activity')).toEqual({ retained: true });
+
+    active = false;
+    await expect(visitor.endVisit(failed)).rejects.toThrow('marker write failed');
+    expect(visitor.activity.get('activity')).toEqual({ retained: true });
+    await expect(
+      visitor.endVisit(() => {
+        throw VISITOR_CLEANUP_SUPERSEDED;
+      }),
+    ).resolves.toBeUndefined();
+    expect(storage.getItem(`${visitor.activity.prefix}activity`)).toBeNull();
   });
 
   it('projects watchlist, watched, progress, resume, and history durably without Owner writes', async () => {
@@ -198,23 +384,6 @@ describe('VisitorProfileSession', () => {
     expect(second.activity.get('progress:movie:550')).toEqual({ fraction: 0.75 });
     expect(storage.getItem('den.owner.untouched')).toBe('owner');
     expect(householdClose).not.toHaveBeenCalled();
-  });
-
-  it('gives Visitor no sync or tracker delivery capability', async () => {
-    const writer = new NoSyncVisitorWriter();
-    const command = {
-      kind: 'progress.record' as const,
-      title: { type: 'movie' as const, id: 550 },
-      fraction: 0.5,
-      seconds: 60,
-      observedAt: 1,
-    };
-    const event = { schema: 1 } as TrackerEvent;
-
-    await expect(writer.write(command)).resolves.toEqual({ outcome: 'suppressed' });
-    await expect(writer.track(event)).resolves.toEqual({ outcome: 'suppressed' });
-    expect(writer.syncEnabled).toBe(false);
-    expect(writer.trackerEnabled).toBe(false);
   });
 
   it('ignores a malformed durable activity projection instead of exposing partial state', () => {

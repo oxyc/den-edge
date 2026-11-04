@@ -381,7 +381,7 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   expect(simkl.snapshot.value).toMatchObject({ connected: true, account: '42' });
   await model.connectSimkl('token', 'connect-simkl');
   await model.approveSimklRemovals('shown-batch', 'approve-simkl');
-  await model.observeForegroundReady();
+  await model.foregroundReady();
   expect(service.commands.slice(-2)).toEqual([
     {
       command: { kind: 'simkl.connect', token: 'token' },
@@ -664,12 +664,11 @@ it('deep-copies a retained Home billboard onto the service wire', async () => {
   model.close();
 });
 
-it('shares exact keyed title and ordered-presence subscriptions until their last lease releases', async () => {
+it('shares exact keyed title subscriptions until their last lease releases', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);
   await model.ready;
   const movie: TitleRef = { type: 'movie', id: 7 };
-  const series: TitleRef = { type: 'tv', id: 8 };
 
   const first = model.title(movie);
   const second = model.title(movie);
@@ -699,25 +698,10 @@ it('shares exact keyed title and ordered-presence subscriptions until their last
   expect(service.subscriptions.find(({ selection }) => selection.kind === 'title')?.stopped).toBe(
     true,
   );
-
-  const ordered = model.presence([movie, series]);
-  const shared = model.presence([movie, series]);
-  const reversed = model.presence([series, movie]);
-  const presences = service.subscriptions.filter(({ selection }) => selection.kind === 'presence');
-  expect(presences).toHaveLength(2);
-  expect(presences.map(({ selection }) => selection)).toEqual([
-    { kind: 'presence', titles: [movie, series] },
-    { kind: 'presence', titles: [series, movie] },
-  ]);
-  ordered.release();
-  expect(presences[0]?.stopped).toBe(false);
-  shared.release();
-  expect(presences[0]?.stopped).toBe(true);
-  reversed.release();
   model.close();
 });
 
-it('forwards semantic commands, playback queries, and observations without UI policy', async () => {
+it('forwards semantic commands and active observations without UI policy', async () => {
   const service = new FakeService();
   const model = new LibraryModel(service, options);
   await model.ready;
@@ -795,23 +779,9 @@ it('forwards semantic commands, playback queries, and observations without UI po
       operationId: 'download-remove',
     },
   ]);
-  await expect(model.preparePlayback(title, episode)).resolves.toMatchObject({
-    result: { kind: 'playback.prepare', action: 'resume', target: episode },
-  });
-  await model.observeTitleShape({
-    title,
-    seasons: [{ season: 2, episodes: 8 }],
-    lastAired: { season: 2, episode: 6 },
-  });
   await model.observeLifecycle({ visible: true, online: true, playbackActive: false });
-  await model.observeForegroundReady();
+  await model.foregroundReady();
   expect(service.observations).toEqual([
-    {
-      kind: 'title-shape',
-      title,
-      seasons: [{ season: 2, episodes: 8 }],
-      lastAired: { season: 2, episode: 6 },
-    },
     { kind: 'lifecycle', visible: true, online: true, playbackActive: false },
     { kind: 'foreground-ready' },
   ]);
@@ -826,27 +796,17 @@ it('narrows rich display titles to the strict service wire references', async ()
   const episode = { ...title, season: 2, episode: 3, name: 'Rich episode' };
 
   const lease = model.title(title);
-  const presence = model.presence([title]);
   await model.setContinueDismissed(title, true, 'dismiss-rich-title');
   await model.setReaction(title, 'love', 'react-rich-title');
   await model.setEpisodeWatched(episode, true, 'watch-rich-episode');
-  await model.preparePlayback(title, episode);
   await expect(model.libraryMetadata([title, title])).resolves.toEqual({
     titles: [{ type: 'tv', id: 11, title: '#11' }],
     shapes: [],
     retryable: [],
   });
-  await model.observeTitleShape({
-    title,
-    seasons: [{ season: 2, episodes: 8 }],
-  });
-
   const ref = { type: 'tv' as const, id: 11 };
   const episodeRef = { ...ref, season: 2, episode: 3 };
-  expect(service.subscriptions.slice(-2).map(({ selection }) => selection)).toEqual([
-    { kind: 'title', title: ref },
-    { kind: 'presence', titles: [ref] },
-  ]);
+  expect(service.subscriptions.at(-1)?.selection).toEqual({ kind: 'title', title: ref });
   expect(service.commands.slice(-3)).toEqual([
     {
       command: { kind: 'continue-dismissed.set', title: ref, dismissed: true },
@@ -865,13 +825,7 @@ it('narrows rich display titles to the strict service wire references', async ()
     kind: 'library.metadata',
     titles: [ref],
   });
-  expect(service.observations.at(-1)).toEqual({
-    kind: 'title-shape',
-    title: ref,
-    seasons: [{ season: 2, episodes: 8 }],
-  });
   lease.release();
-  presence.release();
   model.close();
 });
 

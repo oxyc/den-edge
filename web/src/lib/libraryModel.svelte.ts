@@ -33,7 +33,6 @@ import type {
   LibrarySessionStatus,
   LibraryVersion,
   MediaServerKind,
-  PresenceView,
   ProfileDirectoryView,
   Reaction,
   RecoveryView,
@@ -118,7 +117,6 @@ type LeasedView =
   | SimklView
   | RecoveryView
   | TitleView
-  | PresenceView
   | ProfileDirectoryView;
 
 /* eslint-disable svelte/prefer-svelte-reactivity -- The maps are subscription ownership indexes; reactive state lives in each source snapshot. */
@@ -141,7 +139,6 @@ export class LibraryModel {
   #recovery?: SharedSelection<RecoveryView>;
   #profiles?: SharedSelection<ProfileDirectoryView>;
   readonly #titles = new Map<string, SharedSelection<TitleView>>();
-  readonly #presences = new Map<string, SharedSelection<PresenceView>>();
   readonly #stopStatus: () => void;
   readonly #readyWaiters = new Set<() => void>();
   #settleInitialRead = () => {};
@@ -428,22 +425,6 @@ export class LibraryModel {
     return source.acquire();
   }
 
-  /** Presence order is part of the wire contract, so only an identical ordered key shares a subscription. */
-  presence(titles: readonly TitleRef[]): LibraryModelLease<PresenceView> {
-    this.#assertOpen();
-    const key = JSON.stringify(titles.map(({ type, id }) => [type, id]));
-    let source = this.#presences.get(key);
-    if (!source) {
-      source = new SharedSelection<PresenceView>(
-        this.service,
-        { kind: 'presence', titles: titles.map(wireTitleRef) },
-        () => this.#presences.delete(key),
-      );
-      this.#presences.set(key, source);
-    }
-    return source.acquire();
-  }
-
   async retry(): Promise<LibraryVersion> {
     this.#assertOpen();
     this.#openFailure = undefined;
@@ -600,21 +581,6 @@ export class LibraryModel {
     return result.matches;
   }
 
-  async profileCreateStatus() {
-    this.#assertOpen();
-    const { result } = await this.service.query({ kind: 'profile-create.status' });
-    if (result.kind !== 'profile-create.status') throw wrongQueryResult('profile create status');
-    if (result.phase === 'created') await this.#ackProfileCreate(result.receipt!);
-    return result;
-  }
-
-  async createKidProfile(name: string, maximumAge: number, pin: string, operationId?: string) {
-    const created = await this.task({ kind: 'profile.create', name, maximumAge, pin }, operationId);
-    if (created.result.kind !== 'profile.create') throw wrongQueryResult('profile create');
-    await this.#ackProfileCreate(created.result.receipt);
-    return created;
-  }
-
   /** Change a Kid's content policy behind the Owner PIN; resolves once the directory holds it. */
   async setKidPolicy(
     profile: string,
@@ -651,12 +617,6 @@ export class LibraryModel {
     const { result } = await this.task({ kind: 'profile.create-default' });
     if (result.kind !== 'profile.create-default') throw wrongQueryResult('default Kid profile');
     return result.outcome;
-  }
-
-  async #ackProfileCreate(receipt: string): Promise<void> {
-    const acknowledged = await this.task({ kind: 'profile.create.ack', receipt });
-    if (acknowledged.result.kind !== 'profile.create.ack')
-      throw wrongQueryResult('profile create acknowledgement');
   }
 
   setRemoteAccess(
@@ -973,18 +933,6 @@ export class LibraryModel {
     return this.task({ kind: 'profile-key-reset.confirm', destinationLibraryKey }, operationId);
   }
 
-  recoverProfileKeyReset(
-    pin: string,
-    recoveryAttempt: string,
-    successorKey: string | null,
-    operationId?: string,
-  ) {
-    return this.task(
-      { kind: 'profile-key-reset.recover', pin, recoveryAttempt, successorKey },
-      operationId,
-    );
-  }
-
   mergeLocalLibrary(
     sourceLibraryKey: string,
     operationId?: string,
@@ -1130,27 +1078,6 @@ export class LibraryModel {
     });
   }
 
-  preparePlayback(
-    title: TitleRef,
-    episode?: EpisodeRef,
-  ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
-    this.#assertOpen();
-    return this.service.query({
-      kind: 'playback.prepare',
-      title: wireTitleRef(title),
-      ...(episode ? { episode: wireEpisodeRef(episode) } : {}),
-    });
-  }
-
-  observeTitleShape(shape: Omit<Observation<'title-shape'>, 'kind'>): Promise<LibraryVersion> {
-    this.#assertOpen();
-    return this.service.observe({
-      kind: 'title-shape',
-      ...shape,
-      title: { type: 'tv', id: shape.title.id },
-    });
-  }
-
   /** The followed series' release dates, for Continue Watching's caught-up series (`airing` observation). */
   observeAiring(airing: Omit<Observation<'airing'>, 'kind'>): Promise<LibraryVersion> {
     this.#assertOpen();
@@ -1167,11 +1094,6 @@ export class LibraryModel {
     return this.service.observe({ kind: 'foreground-ready' });
   }
 
-  /** @deprecated Use foregroundReady. */
-  observeForegroundReady(): Promise<LibraryVersion> {
-    return this.foregroundReady();
-  }
-
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -1181,9 +1103,7 @@ export class LibraryModel {
     for (const stop of this.#rootStops.splice(0)) stop();
     this.#stopStatus();
     for (const source of this.#titles.values()) source.close();
-    for (const source of this.#presences.values()) source.close();
     this.#titles.clear();
-    this.#presences.clear();
     this.#overview = closedSnapshot(this.#overview);
     this.#continue = closedSnapshot(this.#continue);
     this.#devices = closedSnapshot(this.#devices);
