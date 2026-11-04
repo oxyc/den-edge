@@ -827,6 +827,7 @@ export class LibraryLogAuthority {
         return {
           kind: 'download.sources',
           sources,
+          ...(snapshot.fresh ? { fresh: snapshot.fresh } : {}),
           ...(snapshot.answer && missing !== undefined
             ? {
                 answer: {

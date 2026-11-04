@@ -128,12 +128,28 @@ it('scopes series sources to the exact requested episode', async () => {
 });
 it('a fresh ask goes past every cache, then reloads the plain address the browser keeps', async () => {
   const asked: Array<[string, RequestCache | undefined]> = [];
+  let finishWarm!: () => void;
+  let warmSettled = false;
   const network = (async (input, init) => {
     asked.push([String(input), init?.cache]);
-    return Response.json({ streams: [raw] });
+    if (init?.cache === 'reload')
+      return new Promise<Response>((resolve) => {
+        finishWarm = () => {
+          warmSettled = true;
+          resolve(Response.json({ streams: [raw] }));
+        };
+      });
+    return Response.json(
+      { streams: [raw] },
+      { headers: init?.cache === 'no-store' ? { 'x-den-fresh': 'rebuilt' } : {} },
+    );
   }) as typeof fetch;
   const got = await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network, true);
   expect(got.sources).toHaveLength(1);
+  expect(got.fresh).toBe('rebuilt');
+  // The cache warm is intentionally outside the foreground latency of the viewer's admitted refresh.
+  expect(warmSettled).toBe(false);
+  finishWarm();
   await Promise.resolve();
   expect(asked).toEqual([
     ['/scout/config/stream/series/tt1%3A3%3A7.json?fresh=1', 'no-store'],
@@ -143,6 +159,23 @@ it('a fresh ask goes past every cache, then reloads the plain address the browse
   asked.length = 0;
   await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network);
   expect(asked).toEqual([['/scout/config/stream/series/tt1%3A3%3A7.json', undefined]]);
+});
+it('keeps refresh admission separate from coverage and skips the plain warm when limited', async () => {
+  const asked: string[] = [];
+  const network = (async (input) => {
+    asked.push(String(input));
+    return Response.json(
+      {
+        streams: [raw],
+        den: { answerKind: 'partial', coverage: { sources: [{ outcome: 'timeout' }] } },
+      },
+      { headers: { 'x-den-fresh': 'limited' } },
+    );
+  }) as typeof fetch;
+  const got = await fetchSourceList(addon, 'tt1', routes, 3, 7, undefined, network, true);
+  await Promise.resolve();
+  expect(got).toMatchObject({ fresh: 'limited', answer: { kind: 'partial', missing: 1 } });
+  expect(asked).toEqual(['/scout/config/stream/series/tt1%3A3%3A7.json?fresh=1']);
 });
 it('reads what scout says about its list, and nothing from an older scout or a malformed one', () => {
   const den = (extra: object) => ({

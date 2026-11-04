@@ -66,6 +66,8 @@
   /** What scout said about the list: whether empty means none exist, and whether it is old or short. */
   let answer = $state<DownloadSourceAnswer | undefined>();
   let failure = $state<'not-configured' | 'unmatched' | 'unreachable' | undefined>();
+  let fresh = $state<'rebuilt' | 'limited' | undefined>();
+  let refreshing = $state(false);
   let open = $state(false),
     retry = $state(0);
   let message = $state('');
@@ -123,6 +125,9 @@
       state === 'starting' || state === 'fetching' || state === 'not-started' || state === 'paused'
     );
   }
+  function retrySources() {
+    if (!refreshing) retry++;
+  }
   async function download(source: DownloadSourceOption) {
     if (!descriptor || !model) return;
     message = '';
@@ -149,13 +154,23 @@
     const [service, requested, visible, refresh] = [model, descriptor, active, retry];
     // A Detail first created in the retained history stack must not start its source request before it is shown.
     if (!visible) return;
-    sources = undefined;
-    answer = undefined;
-    failure = undefined;
+    const rechecking = refresh > 0;
+    if (!rechecking) {
+      sources = undefined;
+      answer = undefined;
+      failure = undefined;
+    }
+    fresh = undefined;
+    refreshing = rechecking;
     message = '';
     if (!service || !requested) return;
-    void sourceLoader.load(service, requested, refresh > 0).then((loaded) => {
+    void sourceLoader.load(service, requested, rechecking).then((loaded) => {
       if (loaded === undefined) return;
+      refreshing = false;
+      fresh = loaded?.fresh;
+      // A limited rebuild is the list already on screen. Keep its exact render state and say why the explicit check
+      // produced no fresh verdict; the retry remains a native button for touch, keyboard and TV navigation.
+      if (loaded?.fresh === 'limited') return;
       sources = loaded?.sources ?? null;
       answer = loaded?.answer;
       failure = loaded?.failure;
@@ -168,7 +183,10 @@
           true,
         );
     });
-    return () => sourceLoader.cancel();
+    return () => {
+      sourceLoader.cancel();
+      refreshing = false;
+    };
   });
   export async function show() {
     open = true;
@@ -219,6 +237,19 @@
         {/if}
       </div>
     {/if}
+    {#if fresh === 'limited'}<p class="note" role="status">
+        {i18n.phrase(
+          'Sources were checked recently, so these are the previous results. Try again shortly.',
+        )}
+      </p>
+      <Button
+        variant="secondary"
+        icon="retry"
+        label="Try again"
+        disabled={refreshing}
+        onclick={retrySources}
+      />
+    {/if}
     {#if failure === 'not-configured'}<p class="note">
         Add Den Scout in <a href="/settings">Settings</a> to browse sources.
       </p>
@@ -227,11 +258,23 @@
       </p>
     {:else if sources === undefined}<Loading label="Loading sources" />
     {:else if sources === null}<p class="note">Couldn’t reach the source service.</p>
-      <Button variant="secondary" icon="retry" label="Try again" onclick={() => retry++} />
+      {#if fresh !== 'limited'}<Button
+          variant="secondary"
+          icon="retry"
+          label={refreshing ? 'Trying again…' : 'Try again'}
+          disabled={refreshing}
+          onclick={retrySources}
+        />{/if}
     {:else if sources.length === 0 && answer?.kind === 'unknown'}<p class="note">
         Your sources didn’t answer, so there may be releases this couldn’t see.
       </p>
-      <Button variant="secondary" icon="retry" label="Try again" onclick={() => retry++} />
+      {#if fresh !== 'limited'}<Button
+          variant="secondary"
+          icon="retry"
+          label={refreshing ? 'Trying again…' : 'Try again'}
+          disabled={refreshing}
+          onclick={retrySources}
+        />{/if}
     {:else if sources.length === 0}<p class="note">
         No sources found for this {season === undefined ? 'movie' : 'episode'}.
       </p>
@@ -320,6 +363,17 @@
         {/each}
       </ul>
     {/if}
+    {#if model && descriptor && sources !== null && sources !== undefined && failure !== 'not-configured' && failure !== 'unmatched' && fresh !== 'limited'}
+      <div class="source-refresh">
+        <Button
+          variant="tertiary"
+          icon="retry"
+          label={refreshing ? 'Trying again…' : 'Check for sources again'}
+          disabled={refreshing}
+          onclick={retrySources}
+        />
+      </div>
+    {/if}
   </div>
 {/if}
 {#if title && best && best.cached === false && best.seeders !== 0}
@@ -354,6 +408,10 @@
 
   .source-accordion.open {
     margin-bottom: 0;
+  }
+
+  .source-refresh {
+    margin-top: 16px;
   }
 
   .source-accordion :global(.den-button.sources-disclosure) {

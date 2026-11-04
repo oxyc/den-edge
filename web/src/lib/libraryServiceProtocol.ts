@@ -7,9 +7,10 @@
 
 /**
  * Version 10 makes History a revision-bound, materialized keyset page instead of one whole-library reply. Version 11
- * adds the `airing` observation and Continue Watching's `upcoming` day.
+ * adds the `airing` observation and Continue Watching's `upcoming` day. Version 12 carries fresh-source admission
+ * separately from the source list's coverage.
  */
-export const LIBRARY_SERVICE_PROTOCOL = 11 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 12 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -204,6 +205,9 @@ export interface DownloadSourceAnswer {
   missing: number;
   outageBuiltAt?: number;
 }
+
+/** Admission of the explicit source-list rebuild, separate from the returned list's coverage. */
+export type DownloadSourceFreshAnswer = 'rebuilt' | 'limited';
 
 export type LibraryCommand =
   | { kind: 'watchlist.add'; title: TitleRef }
@@ -1059,6 +1063,7 @@ export type LibraryQueryResult =
       kind: 'download.sources';
       sources: DownloadSourceOption[] | null;
       answer?: DownloadSourceAnswer;
+      fresh?: DownloadSourceFreshAnswer;
       failure?: 'not-configured' | 'unmatched' | 'unreachable';
     }
   | { kind: 'download.artwork'; stillPath: string | null }

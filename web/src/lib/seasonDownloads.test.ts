@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { downloadEpisode, downloadSeason } from './seasonDownloads.svelte';
+import {
+  downloadEpisode,
+  downloadSeason,
+  EpisodeSourceRechecker,
+  recheckEpisode,
+} from './seasonDownloads.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import type { DownloadViewItem } from './libraryServiceProtocol';
 
@@ -47,6 +52,54 @@ function model(resolve = vi.fn(async () => [source])) {
 }
 
 describe('semantic season downloads', () => {
+  it('keeps refresh admission separate from an empty or nonempty source verdict', async () => {
+    const { library } = model();
+    (library as unknown as { downloadSources: unknown }).downloadSources = vi
+      .fn()
+      .mockResolvedValueOnce({
+        result: { kind: 'download.sources', sources: [source], fresh: 'limited' },
+        version: {},
+      })
+      .mockResolvedValueOnce({
+        result: { kind: 'download.sources', sources: [], fresh: 'rebuilt' },
+        version: {},
+      });
+    await expect(recheckEpisode(library, 'tt1', 1, episodes[0]!, title)).resolves.toEqual({
+      kind: 'limited',
+    });
+    await expect(recheckEpisode(library, 'tt1', 1, episodes[0]!, title)).resolves.toEqual({
+      kind: 'found',
+      count: 0,
+    });
+  });
+
+  it('fences an episode action across a newer refresh, profile replacement and cancellation', async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    const oldModel = {
+      downloadSources: vi.fn(() => new Promise((resolve) => pending.push(resolve))),
+    } as unknown as LibraryModel;
+    const newModel = {
+      downloadSources: vi.fn(async () => ({
+        result: { kind: 'download.sources', sources: [], fresh: 'rebuilt' },
+        version: {},
+      })),
+    } as unknown as LibraryModel;
+    const loader = new EpisodeSourceRechecker();
+    const old = loader.load(oldModel, 'tt1', 1, episodes[0]!, title);
+    const replacement = loader.load(newModel, 'tt1', 1, episodes[0]!, title);
+    await expect(replacement).resolves.toEqual({ kind: 'found', count: 0 });
+    pending[0]?.({
+      result: { kind: 'download.sources', sources: [source], fresh: 'limited' },
+      version: {},
+    });
+    await expect(old).resolves.toBeUndefined();
+
+    const left = loader.load(oldModel, 'tt1', 1, episodes[0]!, title);
+    loader.cancel();
+    pending[1]?.({ result: { kind: 'download.sources', sources: null }, version: {} });
+    await expect(left).resolves.toBeUndefined();
+  });
+
   it('queues the service-ranked identity without receiving a ticket', async () => {
     const { library } = model();
     await expect(downloadEpisode(library, 'tt1', 1, episodes[1]!, title)).resolves.toBe('queued');

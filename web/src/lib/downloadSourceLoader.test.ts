@@ -33,4 +33,23 @@ describe('DownloadSourceLoader', () => {
     reject(new Error('late'));
     await expect(loading).resolves.toBeUndefined();
   });
+
+  it('asks a retry to rebuild and drops an older retry for the same title', async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    const model = {
+      downloadSources: vi.fn(() => new Promise((resolve) => pending.push(resolve))),
+    } as unknown as LibraryModel;
+    const loader = new DownloadSourceLoader();
+    const old = loader.load(model, title(1), true);
+    const latest = loader.load(model, title(1), true);
+    pending[1]?.({
+      result: { kind: 'download.sources', sources: [], fresh: 'limited' },
+      version: {},
+    });
+    await expect(latest).resolves.toEqual({ sources: [], fresh: 'limited' });
+    pending[0]?.({ result: { kind: 'download.sources', sources: null }, version: {} });
+    await expect(old).resolves.toBeUndefined();
+    expect(model.downloadSources).toHaveBeenCalledTimes(2);
+    expect(model.downloadSources).toHaveBeenNthCalledWith(1, title(1), true, true, true);
+  });
 });

@@ -1,6 +1,7 @@
 import type { LibraryModel } from './libraryModel.svelte';
 import type {
   DownloadSourceAnswer,
+  DownloadSourceFreshAnswer,
   DownloadSourceOption,
   DownloadTitleDescriptor,
 } from './libraryServiceProtocol';
@@ -8,6 +9,7 @@ import type {
 export type DownloadSourceLoad = {
   sources: DownloadSourceOption[] | null;
   answer?: DownloadSourceAnswer;
+  fresh?: DownloadSourceFreshAnswer;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 };
 
@@ -29,12 +31,13 @@ export class DownloadSourceLoader {
   ): Promise<DownloadSourceLoad | null | undefined> {
     const generation = ++this.#generation;
     try {
-      const { result } = await model.downloadSources(title, refresh, false, true);
+      const { result } = await model.downloadSources(title, refresh, refresh, true);
       if (generation !== this.#generation) return undefined;
       return result.kind === 'download.sources'
         ? {
             sources: result.sources,
             ...(result.answer ? { answer: result.answer } : {}),
+            ...(result.fresh ? { fresh: result.fresh } : {}),
             ...(result.failure ? { failure: result.failure } : {}),
           }
         : null;

@@ -2231,10 +2231,11 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       candidate.missing >= 0 &&
       optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
     return (
-      exact(value, ['kind', 'sources', 'answer', 'failure']) &&
+      exact(value, ['kind', 'sources', 'answer', 'fresh', 'failure']) &&
       (value.sources === null ||
         list(value.sources, source, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)) &&
       optional(value.answer, answer) &&
+      optional(value.fresh, (item): item is string => item === 'rebuilt' || item === 'limited') &&
       optional(
         value.failure,
         (item): item is string =>

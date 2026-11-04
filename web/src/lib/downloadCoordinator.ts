@@ -24,6 +24,7 @@ import {
   rankable,
   type Preparation,
   type SourceAnswer,
+  type FreshAnswer,
   type TitleSource,
 } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped } from './wire';
@@ -71,13 +72,22 @@ export type DownloadResolve = (
 ) => Promise<{
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
+  fresh?: FreshAnswer;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 }>;
 
 export interface DownloadSourceSnapshot {
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
+  fresh?: FreshAnswer;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
+}
+
+interface SourcePending {
+  active: number;
+  freshGeneration: number;
+  publishedFreshGeneration: number;
+  plain?: Promise<DownloadSourceSnapshot>;
 }
 
 export interface DownloadCoordinatorEffects {
@@ -126,7 +136,7 @@ export class DownloadCoordinator {
     string,
     { expiresAt: number; snapshot: DownloadSourceSnapshot }
   >();
-  readonly #sourcePending = new Map<string, Promise<DownloadSourceSnapshot>>();
+  readonly #sourcePending = new Map<string, SourcePending>();
   readonly now: () => number;
   readonly monotonicNow: () => number;
   readonly startedAt: number;
@@ -408,33 +418,70 @@ export class DownloadCoordinator {
     const now = this.now();
     const cached = this.#sourceCache.get(key);
     if (!refresh && !fresh && cached && cached.expiresAt > now) return cached.snapshot;
+    let pending = this.#sourcePending.get(key);
     // A fresh ask never joins a plain one already running: that one may be answered from the caches it skips.
-    const pending = this.#sourcePending.get(key);
-    if (pending && !fresh) return pending;
-    const run = this.effects.resolve(title, fresh, early).then(({ sources, answer, failure }) => {
-      const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
-      const ordered = preferred
-        ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]
-        : sources;
-      const snapshot: DownloadSourceSnapshot = {
-        sources: ordered ?? null,
-        ...(answer ? { answer } : {}),
-        ...(failure ? { failure } : {}),
-      };
-      this.#sourceCache.delete(key);
-      this.#sourceCache.set(key, {
-        expiresAt: this.now() + DOWNLOAD_SOURCE_SNAPSHOT_MS,
-        snapshot,
+    // Plain viewers join one another, but not a fresh action: a limited marker belongs only to that action, and
+    // handing it to an uninitialized Sources panel would leave the panel with no concrete list to draw.
+    if (!fresh && pending?.plain) return pending.plain;
+    if (!pending) {
+      pending = { active: 0, freshGeneration: 0, publishedFreshGeneration: 0 };
+      this.#sourcePending.set(key, pending);
+    }
+    const freshGeneration = fresh ? ++pending.freshGeneration : undefined;
+    pending.active++;
+    const run: Promise<DownloadSourceSnapshot> = this.effects
+      .resolve(title, fresh, early)
+      .then(({ sources, answer, fresh: admission, failure }) => {
+        const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
+        const ordered = preferred
+          ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]
+          : sources;
+        const snapshot: DownloadSourceSnapshot = {
+          sources: ordered ?? null,
+          ...(answer ? { answer } : {}),
+          ...(admission ? { fresh: admission } : {}),
+          ...(failure ? { failure } : {}),
+        };
+        // A refused rebuild is the prior plain list, not a replacement. Prefer the exact worker snapshot already
+        // shown, and do not extend its TTL. The admission marker belongs only to this action's reply.
+        if (admission === 'limited') {
+          return {
+            ...(this.#sourceCache.get(key)?.snapshot ?? cached?.snapshot ?? snapshot),
+            fresh: 'limited',
+          };
+        }
+        if (freshGeneration !== undefined) {
+          // Only a newer admitted rebuild fences this answer. A newer refused ask must not suppress the only rebuild
+          // that was admitted, regardless of which response arrived first.
+          if (pending.publishedFreshGeneration > freshGeneration) return snapshot;
+          pending.publishedFreshGeneration = freshGeneration;
+        } else if (pending.publishedFreshGeneration > 0) {
+          // This plain request still returns its concrete answer to its waiter, but cannot replace a rebuilt list
+          // that completed while the two requests overlapped.
+          return snapshot;
+        }
+        this.#sourceCache.delete(key);
+        const retained: DownloadSourceSnapshot = {
+          sources: snapshot.sources,
+          ...(snapshot.answer ? { answer: snapshot.answer } : {}),
+          ...(snapshot.failure ? { failure: snapshot.failure } : {}),
+        };
+        this.#sourceCache.set(key, {
+          expiresAt: this.now() + DOWNLOAD_SOURCE_SNAPSHOT_MS,
+          snapshot: retained,
+        });
+        while (this.#sourceCache.size > DOWNLOAD_SOURCE_SNAPSHOTS)
+          this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
+        return snapshot;
       });
-      while (this.#sourceCache.size > DOWNLOAD_SOURCE_SNAPSHOTS)
-        this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
-      return snapshot;
-    });
-    this.#sourcePending.set(key, run);
+    if (!fresh) pending.plain = run;
     try {
       return await run;
     } finally {
-      if (this.#sourcePending.get(key) === run) this.#sourcePending.delete(key);
+      if (pending.plain === run) delete pending.plain;
+      pending.active--;
+      if (pending.active === 0 && this.#sourcePending.get(key) === pending)
+        this.#sourcePending.delete(key);
     }
   }
 

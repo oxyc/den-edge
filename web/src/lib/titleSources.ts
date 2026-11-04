@@ -115,6 +115,10 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
 
 export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 
+/** Scout's answer to an explicit `?fresh=1`: independent of whether the returned list is live, partial or stale. */
+export type FreshAnswer = 'rebuilt' | 'limited';
+export const FRESH_ANSWER_HEADER = 'X-Den-Fresh';
+
 /**
  * Scout's list for a title and what it says about it; `sources` is null when scout could not be reached.
  *
@@ -136,7 +140,7 @@ export async function fetchSourceList(
   fetchImpl: typeof fetch = relayFetch,
   fresh = false,
   early = false,
-): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer }> {
+): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer; fresh?: FreshAnswer }> {
   try {
     const id =
       season !== undefined && episode !== undefined ? `${imdb}:${season}:${episode}` : imdb;
@@ -146,12 +150,22 @@ export async function fetchSourceList(
     const response = await fetchImpl(fresh ? `${url}?fresh=1` : url, init);
     if (!response.ok) return { sources: null };
     const body: unknown = await response.json();
-    if (fresh)
+    const freshAnswer = fresh ? response.headers.get(FRESH_ANSWER_HEADER) : null;
+    const admission: FreshAnswer | undefined =
+      freshAnswer === 'rebuilt' || freshAnswer === 'limited' ? freshAnswer : undefined;
+    // A limited answer is the held plain list: warming its plain URL would repeat the same request and could make a
+    // browser cache that held a newer copy regress to it. Older Scouts send no admission header and keep the
+    // established warm-after-fresh behaviour.
+    if (fresh && admission !== 'limited')
       void fetchImpl(url, { cache: 'reload' }).then(
         (plain) => plain.body?.cancel(),
         () => {},
       );
-    return { sources: parseSources(body, addon, routes), answer: parseAnswer(body) };
+    return {
+      sources: parseSources(body, addon, routes),
+      answer: parseAnswer(body),
+      ...(admission ? { fresh: admission } : {}),
+    };
   } catch {
     return { sources: null };
   }

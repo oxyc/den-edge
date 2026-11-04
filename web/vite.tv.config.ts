@@ -481,7 +481,13 @@ export default mergeConfig(
       ...(tizen3 ? { cssMinify: 'lightningcss' as const } : {}),
       outDir,
       manifest: true,
-      ...(e2e ? { rolldownOptions: { input: ['index.html', 'test/player.html'] } } : {}),
+      ...(e2e
+        ? {
+            rolldownOptions: {
+              input: ['index.html', 'test/player.html', 'test/detail-parity.html'],
+            },
+          }
+        : {}),
     },
     server: { https, proxy: tvProxy, allowedHosts },
     preview: {

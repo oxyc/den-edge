@@ -236,7 +236,7 @@ describe('DownloadCoordinator', () => {
     expect(asked).toEqual([true]);
   });
 
-  it('asks afresh past its snapshot and past a plain ask in flight, and only a fresh ask says so', async () => {
+  it('asks afresh past a plain ask in flight and fences its late result from the rebuilt snapshot', async () => {
     const shared = testLog();
     const asked: boolean[] = [];
     let release!: () => void;
@@ -249,17 +249,260 @@ describe('DownloadCoordinator', () => {
         resolve: async (_title, fresh) => {
           asked.push(fresh === true);
           if (!fresh) await held;
-          return { sources: [first] };
+          return { sources: fresh ? [second] : [first], ...(fresh ? { fresh: 'rebuilt' } : {}) };
         },
       },
       { now: () => T0 },
     );
     const plain = queue.sourcesForTitle(title);
-    await queue.sourcesForTitle(title, false, true);
+    expect((await queue.sourcesForTitle(title, false, true)).sources?.[0]?.identity).toBe(
+      second.identity,
+    );
     release();
     await plain;
-    await queue.sourcesForTitle(title);
+    expect((await queue.sourcesForTitle(title)).sources?.[0]?.identity).toBe(second.identity);
     expect(asked).toEqual([false, true]);
+  });
+
+  it.each([
+    ['fresh completes first', true],
+    ['plain completes first', false],
+  ])(
+    'keeps a rebuilt refresh authoritative when an independent plain viewer overlaps after it starts: %s',
+    async (_order, freshFirst) => {
+      const asked: boolean[] = [];
+      let releaseFresh!: () => void;
+      let releasePlain!: () => void;
+      const freshHeld = new Promise<void>((resolve) => (releaseFresh = resolve));
+      const plainHeld = new Promise<void>((resolve) => (releasePlain = resolve));
+      const queue = new DownloadCoordinator(
+        testLog().log,
+        clock(),
+        {
+          ...effects(),
+          resolve: async (_title, fresh) => {
+            asked.push(fresh === true);
+            await (fresh ? freshHeld : plainHeld);
+            return fresh
+              ? { sources: [second], fresh: 'rebuilt' }
+              : { sources: [first], answer: { kind: 'live', missing: 0 } };
+          },
+        },
+        { now: () => T0 },
+      );
+
+      const refreshed = queue.sourcesForTitle(title, false, true);
+      const viewer = queue.sourcesForTitle(title);
+      if (freshFirst) {
+        releaseFresh();
+        await expect(refreshed).resolves.toMatchObject({ sources: [second], fresh: 'rebuilt' });
+        releasePlain();
+        await expect(viewer).resolves.toEqual({
+          sources: [first],
+          answer: { kind: 'live', missing: 0 },
+        });
+      } else {
+        releasePlain();
+        await expect(viewer).resolves.toEqual({
+          sources: [first],
+          answer: { kind: 'live', missing: 0 },
+        });
+        releaseFresh();
+        await expect(refreshed).resolves.toMatchObject({ sources: [second], fresh: 'rebuilt' });
+      }
+
+      expect(await queue.sourcesForTitle(title)).toEqual({ sources: [second] });
+      expect(asked).toEqual([true, false]);
+    },
+  );
+
+  it('publishes an admitted rebuild after a newer overlapping refresh is limited', async () => {
+    const asked: boolean[] = [];
+    let freshAsks = 0;
+    let releaseRebuild!: () => void;
+    const rebuildHeld = new Promise<void>((resolve) => (releaseRebuild = resolve));
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asked.push(fresh === true);
+          if (!fresh) return { sources: [first] };
+          if (freshAsks++ === 0) {
+            await rebuildHeld;
+            return { sources: [second], fresh: 'rebuilt' };
+          }
+          return { sources: [second], fresh: 'limited' };
+        },
+      },
+      { now: () => T0 },
+    );
+
+    const prior = await queue.sourcesForTitle(title);
+    const rebuilt = queue.sourcesForTitle(title, false, true);
+    await expect(queue.sourcesForTitle(title, false, true)).resolves.toEqual({
+      ...prior,
+      fresh: 'limited',
+    });
+    releaseRebuild();
+    await expect(rebuilt).resolves.toMatchObject({ sources: [second], fresh: 'rebuilt' });
+
+    expect(await queue.sourcesForTitle(title)).toEqual({ sources: [second] });
+    expect(asked).toEqual([false, true, true]);
+  });
+
+  it.each([
+    ['older admitted rebuild completes first', false],
+    ['newer admitted rebuild completes first', true],
+  ])('keeps the newer of two admitted rebuilds canonical: %s', async (_order, newerFirst) => {
+    const newest = source('Rebecka.S02E03.720p.WEB-DL.mkv', {
+      resolution: '720p',
+      cached: false,
+      seeders: 20,
+    });
+    let asks = 0;
+    let freshAsks = 0;
+    let releaseOlder!: () => void;
+    let releaseNewer!: () => void;
+    const olderHeld = new Promise<void>((resolve) => (releaseOlder = resolve));
+    const newerHeld = new Promise<void>((resolve) => (releaseNewer = resolve));
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asks++;
+          if (!fresh) return { sources: [first] };
+          const request = freshAsks++;
+          await (request === 0 ? olderHeld : newerHeld);
+          return {
+            sources: [request === 0 ? second : newest],
+            fresh: 'rebuilt',
+          };
+        },
+      },
+      { now: () => T0 },
+    );
+
+    await queue.sourcesForTitle(title);
+    const older = queue.sourcesForTitle(title, false, true);
+    const newer = queue.sourcesForTitle(title, false, true);
+    if (newerFirst) {
+      releaseNewer();
+      await expect(newer).resolves.toMatchObject({ sources: [newest], fresh: 'rebuilt' });
+      releaseOlder();
+      await expect(older).resolves.toMatchObject({ sources: [second], fresh: 'rebuilt' });
+    } else {
+      releaseOlder();
+      await expect(older).resolves.toMatchObject({ sources: [second], fresh: 'rebuilt' });
+      releaseNewer();
+      await expect(newer).resolves.toMatchObject({ sources: [newest], fresh: 'rebuilt' });
+    }
+
+    expect(await queue.sourcesForTitle(title)).toEqual({ sources: [newest] });
+    expect(asks).toBe(3);
+  });
+
+  it('keeps a published fresh result authoritative when a newer overlapping refresh is limited', async () => {
+    const asked: boolean[] = [];
+    let freshAsks = 0;
+    let releaseFirstFresh!: () => void;
+    let releasePlain!: () => void;
+    const firstFreshHeld = new Promise<void>((resolve) => (releaseFirstFresh = resolve));
+    const plainHeld = new Promise<void>((resolve) => (releasePlain = resolve));
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asked.push(fresh === true);
+          if (!fresh) {
+            await plainHeld;
+            return { sources: [first] };
+          }
+          if (freshAsks++ === 0) {
+            await firstFreshHeld;
+            return { sources: [second], fresh: 'rebuilt' };
+          }
+          return { sources: [first], fresh: 'limited' };
+        },
+      },
+      { now: () => T0 },
+    );
+
+    const rebuilt = queue.sourcesForTitle(title, false, true);
+    const viewer = queue.sourcesForTitle(title);
+    releaseFirstFresh();
+    await expect(rebuilt).resolves.toMatchObject({ sources: [second], fresh: 'rebuilt' });
+    await expect(queue.sourcesForTitle(title, false, true)).resolves.toEqual({
+      sources: [second],
+      fresh: 'limited',
+    });
+    releasePlain();
+    await expect(viewer).resolves.toEqual({ sources: [first] });
+
+    expect(await queue.sourcesForTitle(title)).toEqual({ sources: [second] });
+    expect(asked).toEqual([true, false, true]);
+  });
+
+  it('reports limited separately and retains the exact cached list and coverage without extending it', async () => {
+    let asks = 0;
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asks++;
+          return fresh
+            ? {
+                sources: [second],
+                answer: { kind: 'partial', missing: 2 },
+                fresh: 'limited',
+              }
+            : { sources: [first], answer: { kind: 'live', missing: 0 } };
+        },
+      },
+      { now: () => T0 },
+    );
+    const prior = await queue.sourcesForTitle(title);
+    const limited = await queue.sourcesForTitle(title, false, true);
+    expect(limited).toEqual({ ...prior, fresh: 'limited' });
+    expect(await queue.sourcesForTitle(title)).toEqual(prior);
+    expect(asks).toBe(2);
+  });
+
+  it('does not hand an action-only limited marker to a plain viewer arriving during the refresh', async () => {
+    const asked: boolean[] = [];
+    let releaseFresh!: () => void;
+    const freshHeld = new Promise<void>((resolve) => (releaseFresh = resolve));
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (_title, fresh) => {
+          asked.push(fresh === true);
+          if (fresh) {
+            await freshHeld;
+            return { sources: [second], fresh: 'limited' };
+          }
+          return { sources: [first], answer: { kind: 'live', missing: 0 } };
+        },
+      },
+      { now: () => T0 },
+    );
+    const limited = queue.sourcesForTitle(title, false, true);
+    const viewer = await queue.sourcesForTitle(title);
+    expect(viewer).toEqual({ sources: [first], answer: { kind: 'live', missing: 0 } });
+    expect(viewer).not.toHaveProperty('fresh');
+    releaseFresh();
+    await expect(limited).resolves.toMatchObject({ fresh: 'limited' });
+    expect(await queue.sourcesForTitle(title)).toEqual(viewer);
+    expect(asked).toEqual([true, false]);
   });
 
   it('downloads Rebecka Martinsson S02E01 as an uncached 1080p, not the cached SD AVI', async () => {
