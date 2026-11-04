@@ -2,11 +2,14 @@
 export interface LibraryStartupMetrics {
   documentsDecrypted: number;
   documentsFolded: number;
+  /** The subset folded through Tizen 3's per-document JavaScript fallback. */
+  fallbackDocumentsFolded: number;
   documentsHydrated: number;
   factsChanged: number;
   factTransactions: number;
   decryptMs: number;
   foldMs: number;
+  fallbackFoldMs: number;
   cacheBytesRead: number;
   cacheBytesWritten: number;
   viewSource: 'none' | 'cache' | 'authoritative';
@@ -25,11 +28,13 @@ declare global {
 const empty = (): LibraryStartupMetrics => ({
   documentsDecrypted: 0,
   documentsFolded: 0,
+  fallbackDocumentsFolded: 0,
   documentsHydrated: 0,
   factsChanged: 0,
   factTransactions: 0,
   decryptMs: 0,
   foldMs: 0,
+  fallbackFoldMs: 0,
   cacheBytesRead: 0,
   cacheBytesWritten: 0,
   viewSource: 'none',
@@ -48,10 +53,14 @@ export function noteLibraryDecrypt(documents: number, elapsedMs: number): void {
   held.decryptMs += elapsedMs;
 }
 
-export function noteLibraryFold(documents: number, elapsedMs: number): void {
+export function noteLibraryFold(documents: number, elapsedMs: number, fallback = false): void {
   const held = metrics();
   held.documentsFolded += documents;
   held.foldMs += elapsedMs;
+  if (fallback) {
+    held.fallbackDocumentsFolded += documents;
+    held.fallbackFoldMs += elapsedMs;
+  }
   held.viewSource = 'authoritative';
 }
 
