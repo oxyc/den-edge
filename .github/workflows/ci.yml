@@ -163,6 +163,8 @@ jobs:
         env:
           DEN_EDGE_REQUIRED: "1"
           DEN_EDGE_BIN: ${{ github.workspace }}/target/debug/den-edge
+          # Reuse this job's Rust target cache for the deterministic HTTP-body fixture and real client recovery.
+          DEN_EDGE_REAL_RECOVERY: "1"
       - run: node scripts/test-tv-core.mjs
       - run: npm run build
       - run: npm run check:tv-isolation
