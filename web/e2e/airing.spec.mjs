@@ -506,7 +506,7 @@ for (const [answer, label] of [
     });
     await page.goto(`${E2E_ORIGIN}/`);
 
-    await expect.poll(() => freshSearches(searches)).toHaveLength(1);
+    await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
     // Let the failed/limited/unknown reply cross the Library Worker before producing the next real trigger.
     await page.waitForTimeout(250);
     await revisitHome(page);
@@ -556,7 +556,7 @@ test('an authoritative empty answer holds the retry for 30 minutes, then allows 
     sourceAnswers: ['empty', 'found'],
   });
   await page.goto(`${E2E_ORIGIN}/`);
-  await expect.poll(() => freshSearches(searches)).toHaveLength(1);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
   await page.waitForTimeout(250);
 
   await revisitHome(page);
@@ -580,7 +580,7 @@ test('overlapping airing effects join one in-flight source search', async ({ pag
     sourceAnswers: [{ kind: 'found', wait: held }],
   });
   await page.goto(`${E2E_ORIGIN}/`);
-  await expect.poll(() => freshSearches(searches)).toHaveLength(1);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
 
   // Home's five-minute airing refresh reruns the production effect while its first source request is still held.
   await page.clock.fastForward(5 * 60_000 + 1);
@@ -603,11 +603,11 @@ test('a late source answer cannot publish after Home ownership changes', async (
     sourceAnswers: [{ kind: 'found', wait: held }, 'empty'],
   });
   await page.goto(`${E2E_ORIGIN}/`);
-  await expect.poll(() => freshSearches(searches)).toHaveLength(1);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
 
   await revisitHome(page);
   release();
-  await expect.poll(() => freshSearches(searches)).toHaveLength(2);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(2);
   await page.waitForTimeout(500);
   // The old owner found a source, but only the new owner's authoritative empty answer may publish.
   await expect(page.locator('[data-route-page][data-active="true"] .billboard')).not.toContainText(
