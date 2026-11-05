@@ -33,6 +33,8 @@ export const ENGLISH_MESSAGES = {
   'profile.ownerPinPrompt': 'Enter the Owner PIN to open this profile’s settings.',
   'profile.ownerPin': 'Owner PIN',
   'profile.pinMismatch': 'That PIN didn’t match.',
+  'profile.checkingOwnerPin': 'Checking Owner PIN…',
+  'profile.pinCheckFailed': 'Owner PIN couldn’t be checked. Try again.',
   'profile.openSettings': 'Open settings',
   'profile.visitor': 'Visitor profile',
   'profile.kid': 'Kid profile',

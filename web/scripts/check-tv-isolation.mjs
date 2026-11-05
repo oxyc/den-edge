@@ -159,5 +159,8 @@ if (process.argv.includes('--capture')) {
   // its release base. Keep that privacy boundary inside 128 bytes; the independent initial ceiling is unchanged.
   // Explicit Downloads opening/failure/stale/retry states add 387 bytes gzip on the merged profile-isolation base
   // and two bytes at startup. Keep that recovery UI inside half a KiB; the independent initial ceiling is fixed.
-  if (coreTotalDelta > 70144) throw new Error('Browser total JS/CSS budget exceeded');
+  // Kid Settings PIN service-failure, busy and retry states plus stale-attempt/profile fencing add 409 gzip bytes
+  // to the complete graph and 88 bytes to startup versus v0.271.195. They add no polling or background request,
+  // and busy state suppresses duplicate submissions. Allow half a KiB; the independent initial ceiling remains.
+  if (coreTotalDelta > 70656) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -11,6 +11,7 @@
     autocomplete = 'off',
     focusOnMount = false,
     engaged = true,
+    disabled = false,
     onvalue = () => {},
     oncomplete = () => {},
   }: {
@@ -21,6 +22,7 @@
     autocomplete?: 'off' | 'new-password';
     focusOnMount?: boolean;
     engaged?: boolean;
+    disabled?: boolean;
     onvalue?: (value: string) => void;
     oncomplete?: (value: string) => void;
   } = $props();
@@ -42,7 +44,7 @@
 
 <div class="pin-entry">
   <label for={id}>{i18n.phrase(label)}</label>
-  <div class="pin-control" class:invalid>
+  <div class="pin-control" class:invalid class:disabled>
     <input
       bind:this={input}
       {id}
@@ -52,6 +54,7 @@
       {autocomplete}
       maxlength="4"
       pattern="[0-9][0-9][0-9][0-9]"
+      {disabled}
       aria-invalid={invalid}
       oninput={changed}
       onfocus={() => (focused = true)}
@@ -141,6 +144,10 @@
   .pin-control.invalid .pin-slot {
     border-color: var(--bad, #ff9a9a);
     background: var(--pin-invalid-wash, transparent);
+  }
+
+  .pin-control.disabled {
+    opacity: 0.65;
   }
 
   @supports (color: color-mix(in srgb, white, black)) {

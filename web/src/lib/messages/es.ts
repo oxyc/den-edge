@@ -38,6 +38,8 @@ export const messages = {
     'Introduce el PIN del propietario para abrir los ajustes de este perfil.',
   'profile.ownerPin': 'PIN del propietario',
   'profile.pinMismatch': 'El PIN no coincide.',
+  'profile.checkingOwnerPin': 'Comprobando el PIN del propietario…',
+  'profile.pinCheckFailed': 'No se pudo comprobar el PIN del propietario. Inténtalo de nuevo.',
   'profile.openSettings': 'Abrir ajustes',
   'profile.visitor': 'Perfil de visitante',
   'profile.kid': 'Perfil infantil',
