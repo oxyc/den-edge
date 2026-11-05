@@ -51,7 +51,10 @@
     ...(download.stillPath ? { stillPath: download.stillPath } : {}),
   });
 
-  const list = $derived((lease?.snapshot.value?.items ?? []) as DownloadViewItem[]);
+  const selection = $derived(lease?.snapshot);
+  const selectionFailed = $derived(selection?.connection === 'failed');
+  const selectionHasValue = $derived(selection?.value !== undefined);
+  const list = $derived((selection?.value?.items ?? []) as DownloadViewItem[]);
   let recoveredArtwork = $state(new Map<string, string | null>());
   const artworkPending = new SvelteSet<string>();
   $effect(() => {
@@ -100,10 +103,32 @@
       },
     ].filter((group) => group.items.length),
   );
+  let refreshAttempt = 0;
+  let refreshing = $state(false);
+  let refreshFailed = $state(false);
+  async function refresh(userInitiated = true) {
+    const service = model;
+    if (!service || (userInitiated && refreshing)) return;
+    const attempt = ++refreshAttempt;
+    refreshing = true;
+    refreshFailed = false;
+    try {
+      await service.refreshDownloads();
+    } catch {
+      if (attempt === refreshAttempt && model === service) refreshFailed = true;
+    } finally {
+      if (attempt === refreshAttempt) refreshing = false;
+    }
+  }
+
   /** Asked once as the page shows, then by the library's own refresh: it opens on fresh figures. */
   $effect(() => {
-    if (!active) return;
-    if (model) void model.refreshDownloads().catch(() => undefined);
+    if (!active || !model) return;
+    void refresh(false);
+    return () => {
+      refreshAttempt++;
+      refreshing = false;
+    };
   });
   let busy = $state<string | null>(null);
   let message = $state('');
@@ -125,11 +150,42 @@
 <p class="note">{i18n.phrase('Your debrid fetches these — you can close Den, they keep going.')}</p>
 {#if message}<p class="note" role="status">{i18n.phrase(message)}</p>{/if}
 
-{#if !list.length}
+{#if selectionFailed}
+  <div class="selection-failure" role="alert">
+    <p>
+      {i18n.phrase(
+        selectionHasValue
+          ? 'Downloads may be out of date. The last available queue is shown.'
+          : 'Downloads couldn’t be opened. Try again.',
+      )}
+    </p>
+    <button
+      type="button"
+      class="control"
+      data-tv-focus-key="downloads-selection-retry"
+      onclick={() => lease?.rebind()}>{i18n.phrase('Try again')}</button
+    >
+  </div>
+{:else if !selectionHasValue}
+  <p class="note" role="status">{i18n.phrase('Opening downloads…')}</p>
+{:else if refreshFailed}
+  <div class="selection-failure" role="alert">
+    <p>{i18n.phrase('Downloads couldn’t be refreshed. Try again.')}</p>
+    <button
+      type="button"
+      class="control"
+      data-tv-focus-key="downloads-refresh-retry"
+      disabled={refreshing}
+      onclick={() => void refresh()}>{i18n.phrase('Try again')}</button
+    >
+  </div>
+{/if}
+
+{#if selectionHasValue && !list.length}
   <p class="note">
     {i18n.phrase('No downloads yet. Download a title from its Sources to see it here.')}
   </p>
-{:else}
+{:else if list.length}
   {#each groups as group (group.title)}
     <section>
       <h2>{i18n.phrase(group.title)}</h2>
@@ -184,6 +240,15 @@
   .note {
     margin: 0 0 24px;
     color: var(--muted);
+  }
+
+  .selection-failure {
+    margin: 0 0 24px;
+    color: var(--muted);
+  }
+
+  .selection-failure p {
+    margin: 0 0 8px;
   }
 
   section + section {

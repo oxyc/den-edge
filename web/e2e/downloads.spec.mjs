@@ -82,6 +82,62 @@ async function open(context, shared, query, tmdb = movie) {
   return page;
 }
 
+test('Downloads distinguishes opening, empty, failed, stale and refresh failure at its lazy selection boundary', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  const shared = store();
+  await page.route('**/fixture-store/rows', shared.route);
+  await page.route('**/tmdb/3/tv/1399/season/2', (route) =>
+    route.fulfill({
+      json: { episodes: [{ episode_number: 4, name: 'Four', still_path: '/four.jpg' }] },
+    }),
+  );
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"/>',
+    }),
+  );
+
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=downloads&selection=connecting`);
+  await expect(page.getByRole('status')).toHaveText('Opening downloads…');
+  await expect(page.getByText('No downloads yet.')).toHaveCount(0);
+  await page.evaluate(() => window.downloadsFixture.releaseSelection());
+  await expect(page.getByText(/No downloads yet/)).toBeVisible();
+
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=downloads&selection=fail`);
+  await expect(page.getByRole('alert')).toContainText('Downloads couldn’t be opened.');
+  await expect(page.getByText(/No downloads yet/)).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.downloadsFixture.selectionAttempts())).toBe(1);
+  await page.evaluate(async () => {
+    const { installTVNavigation } = await import('/src/tv/navigation.ts');
+    installTVNavigation();
+  });
+  await expect(page.getByRole('button', { name: 'Try again' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText(/No downloads yet/)).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.downloadsFixture.selectionAttempts())).toBe(2);
+
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=artwork`);
+  const retained = page.locator('[data-download="tv:1399:2:4"]');
+  await expect(retained).toContainText('Legacy episode');
+  await page.evaluate(() => window.downloadsFixture.failSelection());
+  await expect(page.getByRole('alert')).toContainText('Downloads may be out of date.');
+  await expect(retained).toContainText('Legacy episode');
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(retained).toContainText('Legacy episode');
+  await expect.poll(() => page.evaluate(() => window.downloadsFixture.selectionAttempts())).toBe(2);
+
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=downloads&refresh=fail`);
+  await expect(page.getByRole('alert')).toContainText('Downloads couldn’t be refreshed.');
+  await expect(page.getByText(/No downloads yet/)).toBeVisible();
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText(/No downloads yet/)).toBeVisible();
+});
+
 test('a download queued on a title page is a row every device reads', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

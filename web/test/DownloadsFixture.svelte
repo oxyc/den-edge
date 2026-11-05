@@ -24,6 +24,12 @@
     requestedPage === 'downloads' || requestedPage === 'artwork' || requestedPage === 'season'
       ? requestedPage
       : 'title';
+  let releaseSelection: (() => void) | undefined;
+  const downloadsSelectionGate =
+    params.get('selection') === 'connecting'
+      ? new Promise<void>((resolve) => (releaseSelection = resolve))
+      : undefined;
+  let refreshFailures = params.get('refresh') === 'fail' ? 1 : 0;
   const seasonEpisodes = [
     { number: 1, name: 'Part 1', airDate: '2020-01-06' },
     { number: 2, name: 'Part 2', airDate: '2020-01-13' },
@@ -90,11 +96,17 @@
         refreshIdentity: () => void;
         changeEpisode: () => void;
         refresh: () => Promise<unknown>;
+        releaseSelection: () => void;
+        failSelection: () => void;
+        selectionAttempts: () => number;
       };
     }
   ).downloadsFixture = {
     // One pass of the download queue, as the library service's scheduler runs it.
     refresh: () => library.model.refreshDownloads(),
+    releaseSelection: () => releaseSelection?.(),
+    failSelection: () => library.failDownloadsSelection(),
+    selectionAttempts: () => library.downloadsSelection.attempts,
     setActive: (active) => (artworkActive = active),
     setMounted: (mounted) => (artworkMounted = mounted),
     refreshIdentity: () => {
@@ -172,7 +184,19 @@
   const library = fixtureLibraryService({
     log,
     device,
-    ...(page === 'artwork' ? { refreshDownloads: async () => false } : {}),
+    ...(params.get('selection') === 'fail' ? { downloadsSelectionFailures: 1 } : {}),
+    ...(downloadsSelectionGate ? { downloadsSelectionGate } : {}),
+    ...(refreshFailures || page === 'artwork'
+      ? {
+          refreshDownloads: async () => {
+            if (refreshFailures > 0) {
+              refreshFailures--;
+              throw new Error('fixture Downloads refresh failed');
+            }
+            return false;
+          },
+        }
+      : {}),
     effects: {
       resolve: async (title) =>
         page === 'season'

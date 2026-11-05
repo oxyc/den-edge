@@ -157,5 +157,7 @@ if (process.argv.includes('--capture')) {
   // KiB for that audited parity contract; the initial and catalog ceilings stay unchanged.
   // Exact profile and Visitor-visit scoping for recent searches adds 94 bytes gzip to the complete graph versus
   // its release base. Keep that privacy boundary inside 128 bytes; the independent initial ceiling is unchanged.
-  if (coreTotalDelta > 69632) throw new Error('Browser total JS/CSS budget exceeded');
+  // Explicit Downloads opening/failure/stale/retry states add 387 bytes gzip on the merged profile-isolation base
+  // and two bytes at startup. Keep that recovery UI inside half a KiB; the independent initial ceiling is fixed.
+  if (coreTotalDelta > 70144) throw new Error('Browser total JS/CSS budget exceeded');
 }
