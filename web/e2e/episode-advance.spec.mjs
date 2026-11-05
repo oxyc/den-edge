@@ -367,6 +367,43 @@ for (const [name, browserType, available] of [
   });
 }
 
+test('replaying a finished episode cancels its advance, and a later finish advances once', async () => {
+  test.setTimeout(60_000);
+  const { browser, page, asked } = await open(chromium);
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 1);
+
+    // Reach a real media end. The desktop custom transport used to hide the only Stay action, while the timer
+    // continued to own the player even after Play from beginning had visibly resumed episode 1.
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect.poll(() => pageVideo(page).evaluate((video) => video.ended)).toBe(true);
+    await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible();
+    await page.getByRole('button', { name: 'Play from beginning' }).click();
+    await playingPast(page, 1);
+
+    // Wait beyond the complete ten-second countdown. Episode 1 remains active and its replay progress is durable.
+    await page.waitForTimeout(10_500);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
+    await expect(page).toHaveURL(
+      `${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=1&play=1`,
+    );
+    // Progress seconds are stored as whole seconds; a replay just beyond the 2% floor may persist as exactly 1.
+    await expect
+      .poll(async () => (await progressOf(page, 1))?.seconds ?? 0)
+      .toBeGreaterThanOrEqual(1);
+    expect((await progressOf(page, 1)).value).toBeLessThan(0.5);
+
+    // Completion still owns a fresh countdown after the replay, and that countdown advances exactly once.
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect.poll(() => asked.playback.map(itemOf), { timeout: 30_000 }).toEqual(['e1', 'e2']);
+    await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E2`);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('closing the player and playing another title opens a fresh player', async () => {
   const { browser, page, asked } = await open(chromium);
   try {
