@@ -4,10 +4,13 @@
   import { i18n } from '../lib/i18n.svelte';
   let {
     toast,
+    presentation = 0,
     alert,
     undo = null,
   }: {
     toast: string | null;
+    /** Changes for every notice, including equal text, so its live region is presented again. */
+    presentation?: number;
     alert: string | null;
     /** Offered on the toast itself — "Removed from watchlist · Undo" — for the two actions that take something away. */
     undo?: { label: string; run: () => void } | null;
@@ -15,11 +18,15 @@
 </script>
 
 {#if alert}<p class="library-status" role="alert">{i18n.phrase(alert)}</p>{/if}
-{#if toast}<p class="library-status toast" role="status">
-    <span>{i18n.phrase(toast)}</span>{#if undo}<button type="button" class="undo" onclick={undo.run}
-        >{i18n.phrase(undo.label)}</button
-      >{/if}
-  </p>{/if}
+{#key presentation}
+  {#if toast}<p class="library-status toast" role="status">
+      <span>{i18n.phrase(toast)}</span>{#if undo}<button
+          type="button"
+          class="undo"
+          onclick={undo.run}>{i18n.phrase(undo.label)}</button
+        >{/if}
+    </p>{/if}
+{/key}
 
 <style>
   .library-status {

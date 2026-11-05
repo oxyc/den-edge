@@ -69,6 +69,8 @@ export class ProfileSession {
   /** This browser's player is open: the library service pauses its maintenance meanwhile. */
   playerOpen = $state(false);
   toast = $state<string | null>(null);
+  /** Monotonic within this session so equal consecutive notices still create a new live-region presentation. */
+  toastPresentation = $state(0);
   undo = $state<{ label: string; run: () => void } | null>(null);
   /** The page has drawn what it opened for (`foregroundReady`): optional background work may start. */
   foregrounded = $state(false);
@@ -310,11 +312,13 @@ export class ProfileSession {
       undo = null,
     }: { holdMs?: number; undo?: { label: string; run: () => void } | null } = {},
   ): void {
+    const presentation = ++this.toastPresentation;
     this.toast = message;
     this.undo = undo;
     clearTimeout(this.#toastTimer);
     if (Number.isFinite(holdMs))
       this.#toastTimer = setTimeout(() => {
+        if (this.toastPresentation !== presentation) return;
         this.toast = null;
         this.undo = null;
       }, holdMs);
