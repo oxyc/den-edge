@@ -106,6 +106,7 @@
     watchedYear,
     titleSeason,
     onchange,
+    onprofilechange = () => {},
     onprofilecontrol = () => {},
     onprofilehint = () => {},
     onhouseholdadmin = () => {},
@@ -117,6 +118,8 @@
     watchedYear: string | undefined;
     titleSeason: TitleSeason | undefined;
     onchange: (route: Route) => void;
+    /** Retires route-derived presentation state owned by App when the exact active profile changes. */
+    onprofilechange?: () => void;
     onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
     /** The remembered Owner the bar draws until the profile coordinator takes over; null once it has. */
     onprofilehint?: (hint: ProfileHint | null) => void;
@@ -233,6 +236,10 @@
     untrack(() => open(libraryIdentity, !link && !ownHousehold && libraryIdentity !== null)),
   );
   let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
+  const resetProfilePresentation = () => {
+    resetProfileNavigation();
+    onprofilechange();
+  };
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
@@ -323,7 +330,9 @@
       profileMarkerPresent(),
     ),
   );
-  $effect.pre(() => scopeRecentSearches(householdAdmin));
+  // The identity is required even for two memory-only profiles: Kid A -> Kid B and one Visitor visit -> the next
+  // must rotate the list although household authority remains false throughout.
+  $effect.pre(() => scopeRecentSearches(householdAdmin, session.identity.id));
   $effect.pre(() => onhouseholdadmin(householdAdmin));
   onDestroy(() => onhouseholdadmin(true));
 
@@ -334,7 +343,7 @@
   $effect.pre(() => {
     const next = profileSessionKey(session.identity, session.policyKey);
     if (next === routedProfile) return;
-    resetProfileNavigation();
+    resetProfilePresentation();
     routedProfile = next;
   });
   const profileActivityReady = $derived(
@@ -673,7 +682,7 @@
       const next = profileSessionKey(active.identity, active.policyKey);
       // The new session's Router is built from the address as it is when `session` changes, so a later switch
       // retires the address here, first, not in the pre-effect below (which runs after that Router is built).
-      if (profileControlPublished && next !== routedProfile) resetProfileNavigation();
+      if (profileControlPublished && next !== routedProfile) resetProfilePresentation();
       routedProfile = next;
       session = active;
     }

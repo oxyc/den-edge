@@ -451,6 +451,67 @@ test('preview directory switches sticky Kids and Visitor without a launch picker
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
 });
 
+test('recent searches follow the exact profile and Visitor visit while Owner recents stay durable', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${FIXTURE}?pin=1234&twoKids&recentSearches`);
+  await page.getByLabel('Owner PIN').fill('1234');
+
+  const search = () => page.getByRole('searchbox', { name: /Search titles/ });
+  const remember = async (query) => {
+    await search().fill(query);
+    await search().press('Enter');
+  };
+  const expectOnlyRecent = async (query) => {
+    await search().fill('');
+    await search().focus();
+    await expect(page.getByRole('button', { name: query, exact: true })).toBeVisible();
+    await expect(page.locator('#recent-searches .recent-query')).toHaveCount(1);
+  };
+  const switchTo = async (current, next) => {
+    await page.getByRole('button', { name: `Switch profile, current ${current}` }).click();
+    await page.getByRole('button', { name: `Use ${next}`, exact: true }).click();
+  };
+
+  await remember('Owner durable search');
+  await expectOnlyRecent('Owner durable search');
+
+  await switchTo('Owner', 'Kids');
+  await expect(search()).toHaveValue('');
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Kid A search');
+  await expectOnlyRecent('Kid A search');
+
+  await switchTo('Kids', 'Kids Two');
+  await expect(search()).toHaveValue('');
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Kid B search');
+
+  await switchTo('Kids Two', 'Visitor');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(search()).toHaveValue('');
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Visitor search');
+
+  await switchTo('Visitor', 'Owner');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(search()).toHaveValue('');
+  await expectOnlyRecent('Owner durable search');
+  await expect(page.getByRole('button', { name: 'Kid A search', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Kid B search', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Visitor search', exact: true })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('den.recentSearches')))
+    .toBe(JSON.stringify(['Owner durable search']));
+});
+
 test('preview Kid and Visitor Settings are personal while household administration stays unreachable', async ({
   page,
 }) => {

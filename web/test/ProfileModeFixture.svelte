@@ -3,6 +3,7 @@
   import ProfileOwnerGate from '../src/components/ProfileOwnerGate.svelte';
   import ProfileSwitcher from '../src/components/ProfileSwitcher.svelte';
   import MobileProfileRow from '../src/components/MobileProfileRow.svelte';
+  import NavigationBar from '../src/components/NavigationBar.svelte';
   import ProfileSettings from '../src/ProfileSettings.svelte';
   import ContentSection from '../src/settings/ContentSection.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
@@ -12,7 +13,9 @@
     LibraryModelSnapshot,
   } from '../src/lib/libraryModel.svelte';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
-  import { legacyProfileIdentity } from '../src/lib/profileIdentity';
+  import { legacyProfileIdentity, profileId, profileSessionKey } from '../src/lib/profileIdentity';
+  import { scopeRecentSearches } from '../src/lib/recentSearches';
+  import { parseRoute } from '../src/lib/route';
   import {
     ProfileModeCoordinator,
     previewProfileDirectory,
@@ -172,6 +175,20 @@
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   let checked = $state(false);
   let capability = $state<ProfilesCapability | 'checking'>('checking');
+  const previewDirectory = previewProfileDirectory();
+  const fixtureDirectory = params.has('twoKids')
+    ? {
+        ...previewDirectory,
+        profiles: [
+          ...previewDirectory.profiles,
+          {
+            ...previewDirectory.profiles[1]!,
+            id: profileId('00000000000000000000000000000003'),
+            name: 'Kids Two',
+          },
+        ],
+      }
+    : previewDirectory;
 
   const fixture = {
     snapshot() {
@@ -266,7 +283,7 @@
           localStorage,
           window,
           visitorLock,
-          answer === 'preview' ? previewProfileDirectory() : null,
+          answer === 'preview' ? fixtureDirectory : null,
         );
       checked = true;
     });
@@ -282,6 +299,11 @@
   $effect(() => {
     if (profiles && !profiles.session) profiles.establishUnprotectedOwner();
   });
+  $effect(() => {
+    const active = profiles?.session;
+    if (active)
+      scopeRecentSearches(active.administersHousehold, profileSessionKey(active.identity));
+  });
 </script>
 
 <main>
@@ -293,6 +315,11 @@
       <p>The Owner library remains hidden. Reload Den to try again.</p>
     </section>
   {:else if profiles?.session}
+    {#if params.has('recentSearches')}
+      {#key profileSessionKey(profiles.session.identity)}
+        <NavigationBar route={parseRoute('/search')} />
+      {/key}
+    {/if}
     <ProfileSwitcher {profiles} hideOnMobile />
     <MobileProfileRow {profiles} />
     <p data-mode>

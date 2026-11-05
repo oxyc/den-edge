@@ -155,5 +155,7 @@ if (process.argv.includes('--capture')) {
   // The bounded structured-source allowlist shared by browser, webOS and Tizen adds 220 gzip bytes: one six-character
   // guard, a fixed token check and display normalization, with no network, storage or background work. Allow a quarter
   // KiB for that audited parity contract; the initial and catalog ceilings stay unchanged.
-  if (coreTotalDelta > 69504) throw new Error('Browser total JS/CSS budget exceeded');
+  // Exact profile and Visitor-visit scoping for recent searches adds 94 bytes gzip to the complete graph versus
+  // its release base. Keep that privacy boundary inside 128 bytes; the independent initial ceiling is unchanged.
+  if (coreTotalDelta > 69632) throw new Error('Browser total JS/CSS budget exceeded');
 }

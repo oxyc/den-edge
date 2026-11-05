@@ -150,6 +150,15 @@
   $effect(() => {
     if (route.page === 'title') titleSeason = seasonOf(route);
   });
+  function resetProfilePresentation() {
+    // Router's keyed pages are rebuilt by RoutedLibrary. These values live above it, including the shared search
+    // field, so retire them in the same transition before they can repaint the previous profile's presentation.
+    query = '';
+    explore = {};
+    people = {};
+    watchedYear = undefined;
+    titleSeason = undefined;
+  }
   // A title's, a person's and a service's page name themselves once they know what they are showing
   // (`tabName`); until then, and on every other page, the tab says what the address can.
   $effect(() => {
@@ -185,6 +194,7 @@
         {watchedYear}
         {titleSeason}
         onchange={(next) => (route = next)}
+        onprofilechange={resetProfilePresentation}
         onprofilecontrol={(control) => (profiles = control)}
         onprofilehint={(hint) => (profileHint = hint)}
         onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
@@ -201,6 +211,7 @@
       {watchedYear}
       {titleSeason}
       onchange={(next) => (route = next)}
+      onprofilechange={resetProfilePresentation}
       onprofilecontrol={(control) => (profiles = control)}
       onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
     />
