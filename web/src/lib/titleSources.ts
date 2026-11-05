@@ -43,21 +43,9 @@ const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith
 /** Structured source names are untrusted add-on display data, not release-name tokens to repair. */
 const sourceBadge = (value: unknown): string => {
   if (typeof value !== 'string' || value.length > 6) return '';
-  switch (value.toLowerCase()) {
-    case 'remux':
-      return 'REMUX';
-    case 'bluray':
-      return 'BluRay';
-    case 'webdl':
-    case 'web-dl':
-      return 'WEB-DL';
-    case 'web':
-      return 'WEB';
-    case 'hdtv':
-      return 'HDTV';
-    default:
-      return '';
-  }
+  const source = value.toLowerCase();
+  if (!/^(?:remux|bluray|web-?dl|web|hdtv)$/.test(source)) return '';
+  return source === 'bluray' ? 'BluRay' : source.replace('webdl', 'web-dl').toUpperCase();
 };
 
 /**

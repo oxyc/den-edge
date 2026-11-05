@@ -152,5 +152,8 @@ if (process.argv.includes('--capture')) {
   // Parental-control selection recovery and retryable new-episode source searches each passed from their own base,
   // but their merged graph is 91 gzip bytes over the preceding ceiling. Allow 128 bytes for that combined baseline;
   // the initial and catalog ceilings stay unchanged. Movie reactivation remains five bytes below that merged base.
-  if (coreTotalDelta > 69248) throw new Error('Browser total JS/CSS budget exceeded');
+  // The bounded structured-source allowlist shared by browser, webOS and Tizen adds 220 gzip bytes: one six-character
+  // guard, a fixed token check and display normalization, with no network, storage or background work. Allow a quarter
+  // KiB for that audited parity contract; the initial and catalog ceilings stay unchanged.
+  if (coreTotalDelta > 69504) throw new Error('Browser total JS/CSS budget exceeded');
 }
