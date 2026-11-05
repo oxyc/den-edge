@@ -35,9 +35,7 @@ test('equal notices receive a fresh live region, lifetime and Undo owner', async
   await expect(status).toHaveCount(0);
 
   await page.getByRole('button', { name: 'First Undo notice' }).click();
-  const firstUndo = await page
-    .getByRole('button', { name: 'Undo', exact: true })
-    .elementHandle();
+  const firstUndo = await page.getByRole('button', { name: 'Undo', exact: true }).elementHandle();
   await page.getByRole('button', { name: 'Replacement Undo notice' }).click();
   expect(await firstUndo.evaluate((node) => node.isConnected)).toBe(false);
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
