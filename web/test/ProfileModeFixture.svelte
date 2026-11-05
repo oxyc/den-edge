@@ -34,6 +34,8 @@
   const connectionFailures = Number(
     params.get('connectionFailures') ?? (connectionsMode === 'repeat' ? 1 : 0),
   );
+  let pinChecks = 0;
+  let releaseHeldPin: ((matches: boolean) => void) | null = null;
   if (params.has('orphan'))
     localStorage.setItem(
       'den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity',
@@ -145,7 +147,15 @@
       },
     },
     connections: () => connectionsLease,
-    verifyParentalPin: async (pin: string) => pin === '1234',
+    ready: Promise.resolve(),
+    verifyParentalPin: async (pin: string) => {
+      pinChecks++;
+      if (params.get('pinFailure') === 'once' && pinChecks === 1)
+        throw new Error('fixture household PIN query unavailable');
+      if (params.has('holdPin') && pinChecks === 1)
+        return new Promise<boolean>((resolve) => (releaseHeldPin = resolve));
+      return pin === '1234';
+    },
     close: () => {},
   } as unknown as LibraryModel;
   const household = new HouseholdSession(
@@ -189,6 +199,14 @@
         ],
       }
     : previewDirectory;
+  const realDirectory = {
+    ...fixtureDirectory,
+    profiles: fixtureDirectory.profiles.map((profile, index) => ({
+      ...profile,
+      libraryKey: `fixture-profile-${index + 1}`,
+      keyVersion: 1,
+    })),
+  };
 
   const fixture = {
     snapshot() {
@@ -225,6 +243,9 @@
         connectionSubscriptions,
         connectionRetries,
         connectionReleases,
+        pinChecks,
+        activeProfileId:
+          profiles?.session?.identity.kind === 'profile' ? profiles.session.identity.id : null,
         watchlist:
           (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.watchlist.map(
             ({ title }) => title,
@@ -268,6 +289,26 @@
         return error instanceof Error ? error.message : 'failed';
       }
     },
+    resolveHeldPin(matches: boolean) {
+      const resolve = releaseHeldPin;
+      releaseHeldPin = null;
+      resolve?.(matches);
+    },
+    replaceWithSecondKid() {
+      const secondKid = realDirectory.profiles.filter(({ role }) => role === 'kid')[1];
+      if (!secondKid?.id) throw new Error('fixture has no second Kid');
+      localStorage.setItem(
+        'den.profile.active.v1',
+        JSON.stringify({ version: 1, mode: 'persistent', profileId: secondKid.id }),
+      );
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'den.profile.active.v1',
+          storageArea: localStorage,
+        }),
+      );
+      return secondKid.id;
+    },
   };
 
   onMount(() => {
@@ -283,7 +324,12 @@
           localStorage,
           window,
           visitorLock,
-          answer === 'preview' ? fixtureDirectory : null,
+          params.has('realProfiles')
+            ? realDirectory
+            : answer === 'preview'
+              ? fixtureDirectory
+              : null,
+          params.has('realProfiles') ? () => ({ model, close: () => {} }) : null,
         );
       checked = true;
     });

@@ -37,6 +37,8 @@ export const messages = {
   'profile.ownerPinPrompt': 'Ange ägarens PIN-kod för att öppna profilens inställningar.',
   'profile.ownerPin': 'Ägarens PIN-kod',
   'profile.pinMismatch': 'PIN-koden stämde inte.',
+  'profile.checkingOwnerPin': 'Kontrollerar ägarens PIN-kod…',
+  'profile.pinCheckFailed': 'Det gick inte att kontrollera ägarens PIN-kod. Försök igen.',
   'profile.openSettings': 'Öppna inställningar',
   'profile.visitor': 'Besökarprofil',
   'profile.kid': 'Barnprofil',

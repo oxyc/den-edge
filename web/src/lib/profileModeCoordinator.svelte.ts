@@ -221,6 +221,8 @@ export class ProfileModeCoordinator {
   readonly #openingModels = new Set<ProfileActivityModelHandle>();
   #pendingOwner: ProfileSession | null;
   #transition = 0;
+  /** Newest-wins ownership for Settings PIN checks that share an unchanged active Kid session. */
+  #settingsUnlockAttempt = 0;
   #restoring = $state(0);
   #disposed = false;
   readonly #startsKid: ((pin: string) => Promise<boolean>) | null;
@@ -294,8 +296,11 @@ export class ProfileModeCoordinator {
     this.#assertOpen();
     const session = this.#session;
     if (this.mode !== 'kid' || !session) return true;
-    if (!(await this.#verifyPin(pin))) return false;
-    if (this.#session !== session) return false;
+    const attempt = ++this.#settingsUnlockAttempt;
+    const allowed = await this.#verifyPin(pin);
+    if (this.#disposed || attempt !== this.#settingsUnlockAttempt || this.#session !== session)
+      return false;
+    if (!allowed) return false;
     // Kept in memory for this unlock only: changing the Kid's policy from its Settings is authorized by the same PIN.
     this.#settingsPin = pin;
     return true;

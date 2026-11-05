@@ -24,6 +24,84 @@ async function open(page, enabled, suffix = '') {
     .toBe(true);
 }
 
+async function openRememberedKid(page, suffix = '') {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000002',
+      }),
+    ),
+  );
+  await open(page, true, `?realProfiles&settings&locked${suffix}`);
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+}
+
+test('Kid Settings reports a household PIN query rejection and accepts a later retry', async ({
+  page,
+}) => {
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await openRememberedKid(page, '&pinFailure=once');
+
+  const pin = page.getByRole('textbox', { name: 'Owner PIN', exact: true });
+  await pin.fill('1234');
+  await expect(page.getByRole('alert')).toHaveText('Owner PIN couldn’t be checked. Try again.');
+  await expect(pin).toBeEnabled();
+  await expect(pin).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+
+  await pin.fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(pin).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+
+  await pin.fill('1234');
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().pinChecks))
+    .toBe(3);
+  expect(pageErrors).toEqual([]);
+});
+
+test('a pending Kid Settings PIN check cannot overlap or unlock a replacement profile', async ({
+  page,
+}) => {
+  await openRememberedKid(page, '&twoKids&holdPin');
+
+  const pin = page.getByRole('textbox', { name: 'Owner PIN', exact: true });
+  await pin.fill('1234');
+  await expect(pin).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Checking Owner PIN…' })).toBeDisabled();
+  await expect(page.getByRole('status')).toHaveText('Checking Owner PIN…');
+  // Even a duplicate completion event cannot bypass the busy guard and start a second query.
+  await pin.evaluate((input) => {
+    input.value = '0000';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().pinChecks))
+    .toBe(1);
+
+  const replacement = await page.evaluate(() =>
+    window.denProfileModeFixture.replaceWithSecondKid(),
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().activeProfileId))
+    .toBe(replacement);
+  await page.evaluate(() => window.denProfileModeFixture.resolveHeldPin(true));
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByLabel('Owner PIN')).toBeEnabled();
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().pinChecks))
+    .toBe(1);
+});
+
 test('default-off capability leaves the legacy Owner path and storage untouched', async ({
   page,
 }) => {
