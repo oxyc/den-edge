@@ -829,7 +829,7 @@ export interface RowDef {
   headingLink?: { before: string; label: string; after: string; href: string };
   /** A quiet link beside the heading, to where the row's titles go on: "Explore similar". */
   aside?: { label: string; href: string; ariaLabel?: string };
-  load: (page: number) => Promise<Title[]>;
+  load: (page: number, signal?: AbortSignal) => Promise<Title[]>;
   /** A shelf's semantic membership, applied after loading so an all-secondary page can be skipped. */
   filter?: (title: Title) => boolean;
   /**
@@ -873,16 +873,24 @@ export async function runBounded<T>(
 }
 
 /** One semantic catalog page. Provider routes, parameters and fallback behavior stay inside ContentService. */
-export type Pages = (catalog: ContentCatalogSpec, page: number) => Promise<Title[]>;
+export type Pages = (
+  catalog: ContentCatalogSpec,
+  page: number,
+  signal?: AbortSignal,
+) => Promise<Title[]>;
 
 /** Domain-catalog adapter for row definitions; provider URLs and credentials remain inside the content Worker. */
 export function contentPages(content: ContentServiceClientPort): Pages {
-  return async (catalog, page) =>
-    (await content.query({ kind: 'catalog.page', catalog, page })).titles;
+  return async (catalog, page, signal) =>
+    (await content.query({ kind: 'catalog.page', catalog, page }, signal)).titles;
 }
 
-export const catalogPage = (pages: Pages, catalog: ContentCatalogSpec, page: number) =>
-  pages(catalog, page);
+export const catalogPage = (
+  pages: Pages,
+  catalog: ContentCatalogSpec,
+  page: number,
+  signal?: AbortSignal,
+) => pages(catalog, page, signal);
 
 export const discoverRow = (
   pages: Pages,
@@ -927,7 +935,8 @@ export const discoverRow = (
       query.primaryGenre === undefined
         ? undefined
         : (item) => matchesPrimaryGenre(item, query.primaryGenre!),
-    load: (page) => catalogPage(pages, { kind: 'discover', query: contentQuery }, page),
+    load: (page, signal) =>
+      catalogPage(pages, { kind: 'discover', query: contentQuery }, page, signal),
   };
 };
 
@@ -935,7 +944,7 @@ export const discoverRow = (
 export interface AtlasFilterSource {
   content: ContentServiceClientPort;
   /** A title as TMDB draws it, for an atlas card no browser has told den-edge a poster for yet. */
-  title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
+  title?: (ref: { type: MediaType; id: number }, signal?: AbortSignal) => Promise<Title | null>;
 }
 
 /**
@@ -954,12 +963,13 @@ export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
   let looking: Promise<Title[]> = Promise.resolve([]);
   return {
     ...row,
-    load: async (page) => {
+    load: async (page, signal) => {
       if (page === 1) looking = Promise.resolve([]);
-      const loaded = await row.load(page);
+      const loaded = await row.load(page, signal);
       const looked = lookUp(
         loaded.filter((title) => !title.posterPath),
         title,
+        signal,
       );
       const ready = [...(await looking), ...loaded.filter((title) => title.posterPath)];
       looking = ready.length ? looked : Promise.resolve([]);
@@ -972,28 +982,34 @@ export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
 async function lookUp(
   partials: Title[],
   title: NonNullable<AtlasFilterSource['title']>,
+  signal?: AbortSignal,
 ): Promise<Title[]> {
   const out = [...partials];
   const missing = partials.map((title, at) => ({ title, at }));
-  await runBounded(missing, 4, async ({ title: partial, at }) => {
-    try {
-      // The content wire intentionally accepts only a title reference. Atlas cards carry presentation fields
-      // too; passing the whole card made exact validation reject this local request before it reached the
-      // Worker, and a caller could mistake that programming error for a dead transport.
-      const full = await title({ type: partial.type, id: partial.id });
-      if (full)
-        out[at] = {
-          ...full,
-          primaryGenreName: partial.primaryGenreName ?? full.primaryGenreName,
-          likely: partial.likely,
-        };
-    } catch (error) {
-      console.warn('atlas row: no poster for', `${partial.type}:${partial.id}`, error);
-      // Leaving this page cancels the remaining speculative lookups. An ordinary failure still belongs only to
-      // this title, as before the queue was bounded; the other cards can still find their artwork.
-      if (error instanceof DOMException && error.name === 'AbortError') throw error;
-    }
-  }).catch(() => undefined);
+  await runBounded(
+    missing,
+    4,
+    async ({ title: partial, at }) => {
+      try {
+        // The content wire intentionally accepts only a title reference. Atlas cards carry presentation fields
+        // too; passing the whole card made exact validation reject this local request before it reached the
+        // Worker, and a caller could mistake that programming error for a dead transport.
+        const full = await title({ type: partial.type, id: partial.id }, signal);
+        if (full)
+          out[at] = {
+            ...full,
+            primaryGenreName: partial.primaryGenreName ?? full.primaryGenreName,
+            likely: partial.likely,
+          };
+      } catch (error) {
+        console.warn('atlas row: no poster for', `${partial.type}:${partial.id}`, error);
+        // Leaving this page cancels the remaining speculative lookups. An ordinary failure still belongs only to
+        // this title, as before the queue was bounded; the other cards can still find their artwork.
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+      }
+    },
+    () => signal?.aborted ?? false,
+  ).catch(() => undefined);
   return out;
 }
 
@@ -1013,10 +1029,10 @@ export function atlasFirst(atlas: RowDef, tmdb: RowDef): RowDef {
   return {
     ...tmdb,
     filter: (title) => from === undefined || (tmdb.filter?.(title) ?? true),
-    load: async (page) => {
+    load: async (page, signal) => {
       if (from === undefined) {
         try {
-          const titles = await atlas.load(page);
+          const titles = await atlas.load(page, signal);
           if (titles.length) {
             served = true;
             return titles;
@@ -1024,6 +1040,7 @@ export function atlasFirst(atlas: RowDef, tmdb: RowDef): RowDef {
           // atlas has no more: TMDB's row goes on from its own first page.
           from = page - 1;
         } catch (error) {
+          if (signal?.aborted) throw error;
           // A kind or value atlas doesn't hold is expected for some rows (a genre with no primary label there);
           // anything else that isn't the routes being absent is a failure worth a warning.
           if (!(error instanceof FilterUnavailable))
@@ -1033,7 +1050,7 @@ export function atlasFirst(atlas: RowDef, tmdb: RowDef): RowDef {
           from = served ? page - 1 : 0;
         }
       }
-      return tmdb.load(page - from);
+      return tmdb.load(page - from, signal);
     },
   };
 }
