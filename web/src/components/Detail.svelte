@@ -23,7 +23,7 @@
   import DetailTabs from './DetailTabs.svelte';
   import EpisodeCard from './EpisodeCard.svelte';
   import SeasonDownload from './SeasonDownload.svelte';
-  import { downloadEpisode, EpisodeSourceRechecker } from '../lib/seasonDownloads.svelte';
+  import { downloadEpisode, recheckEpisode } from '../lib/seasonDownloads.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import ContinuePlayback from './ContinuePlayback.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
@@ -296,16 +296,14 @@
   });
   let sourcesPanel = $state<TitleSources>();
   const notify = toastContext();
-  // Queries cannot be transport-aborted. Navigation, profile/model replacement and every newer press invalidate the
-  // action that was waiting, so an old answer cannot publish a toast into the new context.
-  const sourceRechecker = new EpisodeSourceRechecker();
+  let sourceRecheck = 0;
   $effect(() => {
     void active;
     void model;
     void ref.type;
     void ref.id;
     void displayedSeason;
-    sourceRechecker.cancel();
+    sourceRecheck++;
   });
   let transportBusy = $state(false);
   let optimisticPlaying = $state<boolean>();
@@ -840,18 +838,25 @@
   /** "Check for sources again": scout rebuilds the episode's list past its caches, and the toast says what it found. */
   async function recheckEpisodeSources(episode: Episode) {
     const d = untrack(() => detail),
-      picked = untrack(() => displayedSeason);
-    if (!d || !model || guestScout || !d.imdbId || picked === null) return;
-    const result = await sourceRechecker.load(model, d.imdbId, picked, episode, d.title);
-    if (result === undefined) return;
+      picked = untrack(() => displayedSeason),
+      library = model,
+      request = ++sourceRecheck;
+    if (!d || !library || guestScout || !d.imdbId || picked === null) return;
+    const result = await recheckEpisode(library, d.imdbId, picked, episode, d.title).catch(
+      () => null,
+    );
+    if (request !== sourceRecheck) return;
     if (result === null) notify?.('Couldn’t check the sources. Try again in a moment.');
-    else if (result.kind === 'limited')
+    else if (result === 'limited')
       notify?.(
         'Sources were checked recently, so these are the previous results. Try again shortly.',
-        { label: 'Try again', run: () => void recheckEpisodeSources(episode) },
+        {
+          label: 'Try again',
+          run: () => void recheckEpisodeSources(episode),
+        },
       );
-    else if (result.count === 0) notify?.('Still nothing for this episode.');
-    else notify?.(result.count === 1 ? 'Found 1 source.' : `Found ${result.count} sources.`);
+    else if (result === 0) notify?.('Still nothing for this episode.');
+    else notify?.(result === 1 ? 'Found 1 source.' : `Found ${result} sources.`);
   }
 
   async function seasonEpisodesForDownload(

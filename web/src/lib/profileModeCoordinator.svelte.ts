@@ -15,6 +15,7 @@ import {
   crossTabVisitorActivityLock,
   purgeOrphanVisitorNamespaces,
   randomVisitorVisitId,
+  VISITOR_CLEANUP_SUPERSEDED,
   visitorNamespaceIds,
   visitorProfileSession,
   type VisitorActivityLock,
@@ -31,9 +32,17 @@ const UNBORN_KID = {
   avatar: 'kid',
   policy: { maximumAge: 12, unknownRatings: 'block' as const },
 };
-
 export type ActiveProfileMode = 'owner' | 'kid' | 'visitor';
 
+export type ProfileTransitionResult =
+  | { readonly outcome: 'success' }
+  | { readonly outcome: 'denied' }
+  | { readonly outcome: 'failed'; readonly cause: unknown }
+  | { readonly outcome: 'superseded' };
+
+const TRANSITION_SUCCESS: ProfileTransitionResult = { outcome: 'success' };
+const TRANSITION_DENIED: ProfileTransitionResult = { outcome: 'denied' };
+const TRANSITION_SUPERSEDED: ProfileTransitionResult = VISITOR_CLEANUP_SUPERSEDED;
 export interface ProfileChoice {
   readonly id: ProfileId | null;
   readonly role: ActiveProfileMode;
@@ -63,11 +72,11 @@ export function profileDirectoryChoices(
   view: ProfileDirectoryView,
 ): PreviewProfileDirectory | null {
   if (!view.owner) return null;
-  const active = view.profiles.filter((profile) => !profile.deleted);
-  const owner = active.find((profile) => profile.id === view.owner && profile.role === 'owner');
-  const supported = active.filter((profile) => profile.role === 'owner' || profile.role === 'kid');
+  const supported = view.profiles.filter(
+    (profile) => !profile.deleted && (profile.role === 'owner' || profile.role === 'kid'),
+  );
   if (
-    !owner ||
+    !supported.some((profile) => profile.id === view.owner && profile.role === 'owner') ||
     supported.some(
       (profile) =>
         !profile.libraryKey || !Number.isSafeInteger(profile.keyVersion) || profile.keyVersion < 1,
@@ -75,24 +84,18 @@ export function profileDirectoryChoices(
   )
     return null;
   try {
-    const choice = (
-      profile: ProfileDirectoryView['profiles'][number],
-      role: 'owner' | 'kid',
-    ): ProfileChoice => ({
-      id: profileId(profile.id),
-      role,
-      name: profile.name,
-      avatar: profile.avatar ?? profile.role,
-      policy: profile.policy,
-      approvals: profile.approvals,
-      libraryKey: profile.libraryKey,
-      keyVersion: profile.keyVersion,
-    });
     return {
-      owner: profileId(owner.id),
-      profiles: supported.map((profile) =>
-        choice(profile, profile.role === 'owner' ? 'owner' : 'kid'),
-      ),
+      owner: profileId(view.owner),
+      profiles: supported.map((profile) => ({
+        id: profileId(profile.id),
+        role: profile.role as 'owner' | 'kid',
+        name: profile.name,
+        avatar: profile.avatar ?? profile.role,
+        policy: profile.policy,
+        approvals: profile.approvals,
+        libraryKey: profile.libraryKey,
+        keyVersion: profile.keyVersion,
+      })),
     };
   } catch {
     return null;
@@ -125,9 +128,7 @@ export function profileDirectoryState(
   view: ProfileDirectoryView | undefined,
 ): ProfileDirectoryState {
   if (!view) return { kind: 'pending' };
-  if (view.state === 'pending') return { kind: 'pending' };
-  if (view.state === 'absent') return { kind: 'absent' };
-  if (view.state === 'invalid') return { kind: 'invalid' };
+  if (view.state !== 'present') return { kind: view.state };
   const directory = profileDirectoryChoices(view);
   return directory ? { kind: 'present', directory } : { kind: 'invalid' };
 }
@@ -140,50 +141,35 @@ type StoredActiveProfile =
   | { readonly version: 1; readonly mode: 'persistent'; readonly profileId: string }
   | { readonly version: 1; readonly mode: 'visitor'; readonly visitorNamespace: string };
 
-export const readActiveProfile = (storage: Storage): StoredActiveProfile | null => {
+type ActiveProfile =
+  | { readonly mode: 'owner' }
+  | { readonly mode: 'visitor'; readonly visitId: string }
+  | { readonly mode: 'persistent'; readonly profileId: string };
+
+export const readActiveProfile = (storage: Storage): ActiveProfile | null => {
   try {
     const value: unknown = JSON.parse(storage.getItem(ACTIVE_PROFILE_KEY) ?? 'null');
-    if (value && typeof value === 'object' && 'mode' in value && value.mode === 'owner')
-      return { mode: 'owner' };
-    if (
-      value &&
-      typeof value === 'object' &&
-      'mode' in value &&
-      value.mode === 'visitor' &&
-      'visitId' in value &&
-      typeof value.visitId === 'string' &&
-      /^[0-9a-f]{32}$/.test(value.visitId)
-    )
-      return { mode: 'visitor', visitId: value.visitId };
-    if (
-      value &&
-      typeof value === 'object' &&
-      'version' in value &&
-      value.version === 1 &&
-      'mode' in value &&
-      value.mode === 'persistent' &&
-      'profileId' in value &&
-      typeof value.profileId === 'string' &&
-      /^[0-9a-f]{32}$/.test(value.profileId)
-    )
-      return { version: 1, mode: 'persistent', profileId: value.profileId };
-    if (
-      value &&
-      typeof value === 'object' &&
-      'version' in value &&
-      value.version === 1 &&
-      'mode' in value &&
-      value.mode === 'visitor' &&
-      'visitorNamespace' in value &&
-      typeof value.visitorNamespace === 'string' &&
-      /^[0-9a-f]{32}$/.test(value.visitorNamespace)
-    )
-      return { version: 1, mode: 'visitor', visitorNamespace: value.visitorNamespace };
+    if (!value || typeof value !== 'object') return null;
+    const marker = value as Record<string, unknown>;
+    if (marker.mode === 'owner') return { mode: 'owner' };
+    if (marker.mode === 'visitor') {
+      const visitId = validProfileId(marker.visitId)
+        ? marker.visitId
+        : marker.version === 1 && validProfileId(marker.visitorNamespace)
+          ? marker.visitorNamespace
+          : null;
+      return visitId ? { mode: 'visitor', visitId } : null;
+    }
+    if (marker.mode === 'persistent' && validProfileId(marker.profileId))
+      return marker.version === 1 ? { mode: 'persistent', profileId: marker.profileId } : null;
   } catch {
     // Missing and damaged preferences both require establishing an Owner below.
   }
   return null;
 };
+
+const validProfileId = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
 
 /**
  * After this browser's household joined another (den#295): the profile it had open is the one it became there, a Kid
@@ -215,11 +201,10 @@ const keepActiveProfile = (storage: Storage, value: StoredActiveProfile): void =
 export class ProfileModeCoordinator {
   #session = $state.raw<ProfileSession | null>(null);
   /**
-   * The Kid whose Settings the Owner PIN has opened, and the switch count it was opened under: any profile switch
-   * moves the count on, so it relocks. A session the directory replaces (its policy changed) is not a switch.
+   * The Owner PIN that opened the active Kid's Settings. A successful/local or cross-tab profile switch clears it;
+   * a session the directory replaces for that same Kid (its policy changed) is not a switch and keeps the unlock.
    */
-  #settingsUnlock = $state.raw<{ profile: string; epoch: number; pin: string } | null>(null);
-  #switches = $state(0);
+  #settingsPin = $state.raw<string | null>(null);
   readonly #ownerActivityModel;
   readonly #ownerIdentity;
   readonly #household;
@@ -273,53 +258,7 @@ export class ProfileModeCoordinator {
     // The Owner library the page already opened is a profile library too.
     if (profileModels) this.#seedPreferences(owner.model);
 
-    const saved = readActiveProfile(storage);
-    const savedVisit =
-      saved?.mode === 'visitor'
-        ? 'visitorNamespace' in saved
-          ? saved.visitorNamespace
-          : saved.visitId
-        : null;
-    if (savedVisit && visitorLock.available()) {
-      this.#session = this.#newVisitor(visitorVisitId(savedVisit));
-      this.#pendingOwner = null;
-      owner.close();
-    } else if (saved?.mode === 'persistent' && directory) {
-      const choice = this.#choice(saved.profileId);
-      if (choice?.role === 'owner' && !this.#profileModels) {
-        this.#session = owner;
-        this.#pendingOwner = null;
-      } else if (choice?.role === 'kid' && !this.#profileModels) {
-        this.#session = this.#newKid(choice);
-        this.#pendingOwner = null;
-        owner.close();
-      } else if (
-        choice?.role === 'owner' &&
-        this.#profileModels &&
-        owner.identity.kind === 'profile' &&
-        owner.identity.id === choice.id &&
-        owner.identity.libraryKey === choice.libraryKey
-      ) {
-        // The Owner library is already open for exactly this profile. Keeping that session, rather than closing it and
-        // opening a second one on the same key, leaves one sender of its kept work.
-        this.#session = owner;
-        this.#pendingOwner = null;
-      } else if (choice && this.#profileModels) {
-        owner.close();
-        this.#pendingOwner = null;
-        void this.#restorePersistent(choice);
-      }
-    } else if (saved?.mode === 'owner') {
-      if (this.#profileModels && directory) {
-        const choice = this.#choice(directory.owner);
-        owner.close();
-        this.#pendingOwner = null;
-        if (choice) void this.#restorePersistent(choice, true);
-      } else {
-        this.#session = owner;
-        this.#pendingOwner = null;
-      }
-    }
+    this.#storageChanged({ key: ACTIVE_PROFILE_KEY, storageArea: storage });
     this.#events?.addEventListener('storage', this.#storageChanged);
     // Reads no reactive state: the committed-household constructor runs inside a tracked effect.
     startupMark(
@@ -345,12 +284,8 @@ export class ProfileModeCoordinator {
    * the profile and coming back opens a new session, which is locked again. With no PIN set there is nothing to ask.
    */
   get settingsLocked(): boolean {
-    const session = this.#session;
-    const unlock = this.#settingsUnlock;
     return (
-      this.mode === 'kid' &&
-      this.parentalPinConfigured !== false &&
-      !(unlock && session?.identity.id === unlock.profile && unlock.epoch === this.#switches)
+      this.mode === 'kid' && this.parentalPinConfigured !== false && this.#settingsPin === null
     );
   }
 
@@ -362,7 +297,7 @@ export class ProfileModeCoordinator {
     if (!(await this.#verifyPin(pin))) return false;
     if (this.#session !== session) return false;
     // Kept in memory for this unlock only: changing the Kid's policy from its Settings is authorized by the same PIN.
-    this.#settingsUnlock = { profile: session.identity.id, epoch: this.#switches, pin };
+    this.#settingsPin = pin;
     return true;
   }
 
@@ -375,10 +310,11 @@ export class ProfileModeCoordinator {
     unknownRatings: 'allow' | 'block';
   }): Promise<boolean> {
     this.#assertOpen();
-    const unlock = this.#settingsUnlock;
-    if (this.mode !== 'kid' || this.settingsLocked || !unlock) return false;
+    const pin = this.#settingsPin;
+    const kid = this.#session;
+    if (this.mode !== 'kid' || this.settingsLocked || pin === null || !kid) return false;
     try {
-      return await this.#household.setKidPolicy(unlock.profile, policy, unlock.pin);
+      return await this.#household.setKidPolicy(kid.identity.id, policy, pin);
     } catch (error) {
       console.warn('den: the Kid’s content policy could not be changed', error);
       return false;
@@ -405,30 +341,28 @@ export class ProfileModeCoordinator {
   }
 
   get mode(): ActiveProfileMode | null {
-    if (this.session?.identity.kind === 'visitor') return 'visitor';
-    if (this.session?.identity.kind === 'profile')
-      return this.#choice(this.session.identity.id)?.role === 'owner' ? 'owner' : 'kid';
-    return this.session ? 'owner' : null;
+    const session = this.#session;
+    if (session?.identity.kind === 'visitor') return 'visitor';
+    if (session?.identity.kind === 'profile')
+      return this.#choice(session.identity.id)?.role === 'owner' ? 'owner' : 'kid';
+    return session ? 'owner' : null;
   }
 
   get choices(): readonly ProfileChoice[] {
     const choices: readonly ProfileChoice[] = this.#directory
-      ? [
-          ...this.#directory.profiles,
-          { id: null, role: 'visitor' as const, name: 'Visitor', avatar: 'visitor' },
-        ]
+      ? [...this.#directory.profiles, this.#visitorChoice()]
       : [
-          { id: null, role: 'owner' as const, name: 'Owner', avatar: 'owner' },
+          { id: null, role: 'owner', name: 'Owner', avatar: 'owner' },
           ...(this.#startsKid ? [UNBORN_KID] : []),
-          { id: null, role: 'visitor' as const, name: 'Visitor', avatar: 'visitor' },
+          this.#visitorChoice(),
         ];
     return choices.map((choice) => this.#publicChoice(choice)!);
   }
 
   get activeChoice(): ProfileChoice | null {
-    if (this.mode === 'visitor')
-      return { id: null, role: 'visitor', name: 'Visitor', avatar: 'visitor' };
-    if (this.mode === 'owner' && this.#directory)
+    const mode = this.mode;
+    if (mode === 'visitor') return this.#visitorChoice();
+    if (mode === 'owner' && this.#directory)
       return this.#publicChoice(this.#choice(this.#directory.owner));
     const id = this.session?.identity.id;
     return this.#directory && id ? this.#publicChoice(this.#choice(id)) : (this.choices[0] ?? null);
@@ -449,12 +383,10 @@ export class ProfileModeCoordinator {
    * first switch to it, with no PIN yet, makes the one that brings the Owner back.
    */
   setsPin(target: ActiveProfileMode): boolean {
-    if (this.#startsKid) return target === 'kid' && this.mode !== null && this.mode !== 'kid';
+    const mode = this.mode;
+    if (this.#startsKid) return target === 'kid' && mode !== null && mode !== 'kid';
     return (
-      target === 'kid' &&
-      !this.#preview &&
-      this.mode === 'owner' &&
-      this.parentalPinConfigured === false
+      target === 'kid' && !this.#preview && mode === 'owner' && this.parentalPinConfigured === false
     );
   }
 
@@ -488,10 +420,10 @@ export class ProfileModeCoordinator {
   }
 
   requiresPin(target: ActiveProfileMode): boolean {
-    if (target === this.mode || this.mode === 'owner') return false;
+    const mode = this.mode;
+    if (target === mode || mode === 'owner') return false;
     if (target === 'owner') return true;
-    if (!this.mode) return false;
-    if (this.mode !== 'kid' || target !== 'visitor') return false;
+    if (mode !== 'kid' || target !== 'visitor') return false;
     const kid = this.activeChoice?.policy;
     if (!kid) return true;
     // Visitor inherits Owner policy. The preview Owner is unrestricted, so leaving Kid is a policy loosening.
@@ -499,129 +431,120 @@ export class ProfileModeCoordinator {
     return !owner || this.#policyIsLooser(owner, kid);
   }
 
-  async switchToVisitor(pin?: string): Promise<boolean> {
-    this.#assertOpen();
-    if (this.mode === 'visitor') return true;
-    if (!this.#session || !this.#visitorLock.available()) return false;
-    if (this.requiresPin('visitor') && !(await this.#verifyPin(pin))) return false;
-    const previous = this.#session;
-    const next = this.#newVisitor(randomVisitorVisitId());
-    try {
-      await this.#visitorLock.run(`den:visitor:${next.identity.id}`, () =>
-        keepActiveProfile(
-          this.#storage,
-          this.#directory
-            ? { version: 1, mode: 'visitor', visitorNamespace: next.identity.id }
-            : { mode: 'visitor', visitId: next.identity.id },
-        ),
-      );
-    } catch (error) {
-      next.close();
-      throw error;
-    }
-    this.#switches += 1;
-    this.#session = next;
-    previous.close();
-    return true;
+  switchToVisitor(pin?: string): Promise<ProfileTransitionResult> {
+    return this.#switchProfile('visitor', pin);
   }
 
   /**
-   * False when the switch is refused (a PIN that didn't match); it throws when the switch failed: the profile's
-   * library couldn't be opened, or the selection changed while it opened. `switchToPersistent` is the same.
+   * A transition publishes exactly one explicit outcome. A wrong PIN is denied, an operational failure carries its
+   * cause, and cancellation/key rotation/disposal is superseded without changing the active session or marker.
    */
-  async switchToOwner(pin?: string): Promise<boolean> {
-    this.#assertOpen();
-    if (this.mode === 'owner') return true;
-    if (this.requiresPin('owner') && !(await this.#verifyPin(pin))) return false;
-
-    const previous = this.#session;
-    // With no selected session, this is explicit recovery from missing/corrupt/unsupported selection state. Its
-    // Visitor object no longer exists, so retire every exact orphan namespace before Owner can open or record.
-    if (!previous) await purgeOrphanVisitorNamespaces(this.#storage, this.#visitorLock);
-    const ownerChoice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
-    const nextPersistent =
-      this.#profileModels && ownerChoice ? await this.#preparePersistent(ownerChoice) : null;
-    if (this.#profileModels && !nextPersistent)
-      throw new Error(
-        ownerChoice
-          ? 'the profile selection changed while Owner’s library opened'
-          : 'the household directory names no Owner',
-      );
-    const preparedAt = this.#transition;
-    // Revocation and deletion take the same visit-wide lock as writes. A write wins before deletion or observes the
-    // Owner marker afterward; no interleaving can recreate the namespace after the visit ends.
-    if (previous?.identity.kind === 'visitor')
-      try {
-        await (previous as VisitorProfileSession).endVisit(() =>
-          this.#commitPrepared(preparedAt, previous, this.#ownerMarker()),
-        );
-      } catch (error) {
-        nextPersistent?.close();
-        throw error;
-      }
-    else {
-      try {
-        this.#commitPrepared(preparedAt, previous, this.#ownerMarker());
-      } catch (error) {
-        nextPersistent?.close();
-        throw error;
-      }
-    }
-    const next = nextPersistent ?? this.#pendingOwner ?? this.#newOwner();
-    this.#releasePendingOwner(next);
-    this.#switches += 1;
-    this.#session = next;
-    previous?.close();
-    return true;
+  switchToOwner(pin?: string): Promise<ProfileTransitionResult> {
+    return this.#switchProfile(null, pin);
   }
 
-  async switchToKid(pin?: string): Promise<boolean> {
-    this.#assertOpen();
-    const kid = this.#directory?.profiles.find((choice) => choice.role === 'kid');
-    return kid?.id ? this.switchToPersistent(kid.id, pin) : false;
+  switchToPersistent(target: ProfileId, pin?: string): Promise<ProfileTransitionResult> {
+    return this.#switchProfile(target, pin);
   }
 
-  async switchToPersistent(target: ProfileId, pin?: string): Promise<boolean> {
-    this.#assertOpen();
-    if (this.#startsKid && target === UNBORN_KID.id) {
-      const chosen = this.#startPin;
-      this.#startPin = null;
-      return chosen !== null && this.#startsKid(chosen);
-    }
-    const kid = this.#choice(target);
-    if (!kid?.id || kid.role !== 'kid') return false;
-    if (this.session?.identity.kind === 'profile' && this.session.identity.id === kid.id)
-      return true;
-    if (this.requiresPin('kid') && !(await this.#verifyPin(pin))) return false;
+  async #switchProfile(
+    target: ProfileId | 'visitor' | null,
+    pin?: string,
+  ): Promise<ProfileTransitionResult> {
+    let opened: ProfileSession | null = null;
+    if (this.#disposed) return TRANSITION_SUPERSEDED;
     const previous = this.#session;
-    const marker = { version: 1 as const, mode: 'persistent' as const, profileId: kid.id };
-    const nextPersistent = this.#profileModels ? await this.#preparePersistent(kid) : null;
-    if (this.#profileModels && !nextPersistent)
-      throw new Error(`the profile selection changed while ${kid.name}’s library opened`);
-    const preparedAt = this.#transition;
-    if (previous?.identity.kind === 'visitor')
-      try {
-        await (previous as VisitorProfileSession).endVisit(() =>
-          this.#commitPrepared(preparedAt, previous, marker),
-        );
-      } catch (error) {
-        nextPersistent?.close();
-        throw error;
+    this.#cancelOpenings();
+    const token = this.#transition;
+    const assertCurrent = () => this.#assertTransition(token, previous);
+    try {
+      const mode: ActiveProfileMode =
+        target === 'visitor' ? 'visitor' : target === null ? 'owner' : 'kid';
+      let choice: ProfileChoice | undefined;
+      if (mode === 'visitor') {
+        if (this.mode === mode) return TRANSITION_SUCCESS;
+        if (!previous || !this.#visitorLock.available())
+          throw new Error('Visitor activity is unavailable');
+      } else if (mode === 'owner') {
+        if (this.mode === 'owner') return TRANSITION_SUCCESS;
+      } else if (this.#startsKid && target === UNBORN_KID.id) {
+        const chosen = this.#startPin;
+        this.#startPin = null;
+        if (chosen === null) return TRANSITION_DENIED;
+        const started = await this.#startsKid(chosen);
+        assertCurrent();
+        if (!started) throw new Error('the profile household could not be started');
+        return TRANSITION_SUCCESS;
+      } else {
+        choice = this.#choice(target as ProfileId);
+        if (!choice?.id || choice.role !== 'kid') return TRANSITION_DENIED;
+        if (this.session?.identity.kind === 'profile' && this.session.identity.id === choice.id)
+          return TRANSITION_SUCCESS;
       }
-    else {
-      try {
-        this.#commitPrepared(preparedAt, previous, marker);
-      } catch (error) {
-        nextPersistent?.close();
-        throw error;
+      if (this.requiresPin(mode)) {
+        const allowed = await this.#verifyPin(pin);
+        assertCurrent();
+        if (!allowed) return TRANSITION_DENIED;
       }
+      if (mode === 'visitor') {
+        const visitor = this.#newVisitor(randomVisitorVisitId());
+        opened = visitor;
+        await this.#visitorLock.run(`den:visitor:${visitor.identity.id}`, () => {
+          assertCurrent();
+          keepActiveProfile(
+            this.#storage,
+            this.#directory
+              ? { version: 1, mode: 'visitor', visitorNamespace: visitor.identity.id }
+              : { mode: 'visitor', visitId: visitor.identity.id },
+          );
+          this.#settingsPin = null;
+          this.#session = visitor;
+          previous!.close();
+        });
+        return TRANSITION_SUCCESS;
+      }
+      const owner = mode === 'owner';
+      if (owner) {
+        // With no selected session, this is explicit recovery from missing/corrupt/unsupported selection state. Its
+        // Visitor object no longer exists, so retire every exact orphan namespace before Owner can open or record.
+        if (!previous)
+          await purgeOrphanVisitorNamespaces(this.#storage, this.#visitorLock, assertCurrent);
+        choice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
+        if (this.#profileModels && !choice)
+          throw new Error('the household directory names no Owner');
+      }
+      if (this.#profileModels && !choice?.libraryKey)
+        throw new Error(`${owner ? 'the Owner profile' : choice!.name} names no activity library`);
+      const marker = owner
+        ? this.#ownerMarker()
+        : { version: 1 as const, mode: 'persistent' as const, profileId: choice!.id! };
+      const nextPersistent =
+        this.#profileModels && choice ? await this.#preparePersistent(choice, false) : null;
+      opened = nextPersistent;
+      if (this.#profileModels && !nextPersistent) return TRANSITION_SUPERSEDED;
+      // Revocation and deletion take the same visit-wide lock as writes. A write wins before deletion or observes the
+      // next marker afterward; no interleaving can recreate the namespace after the visit ends.
+      const commit = () => {
+        assertCurrent();
+        keepActiveProfile(this.#storage, marker);
+      };
+      if (previous?.identity.kind === 'visitor')
+        await (previous as VisitorProfileSession).endVisit(commit).then(assertCurrent);
+      else commit();
+      const next =
+        nextPersistent ??
+        (owner ? (this.#pendingOwner ?? this.#newOwner()) : this.#newKid(choice!));
+      this.#releasePendingOwner(next);
+      this.#settingsPin = null;
+      this.#session = next;
+      previous?.close();
+      return TRANSITION_SUCCESS;
+    } catch (cause) {
+      opened?.close();
+      return this.#transitionCurrent(token, previous)
+        ? { outcome: 'failed', cause }
+        : TRANSITION_SUPERSEDED;
     }
-    const next = nextPersistent ?? this.#newKid(kid);
-    this.#releasePendingOwner(next);
-    this.#switches += 1;
-    this.#session = next;
-    previous?.close();
-    return true;
   }
 
   /** Establishes an absent/corrupt marker only after proving this household has no Owner PIN. */
@@ -630,26 +553,17 @@ export class ProfileModeCoordinator {
     // Namespace retirement is asynchronous and lock-protected. Leave the Owner gate visible so its explicit
     // `switchToOwner` path performs that cleanup before publishing Owner, even where no PIN exists.
     if (visitorNamespaceIds(this.#storage).length) return false;
-    // A real Owner must open its own encrypted activity library asynchronously; never reveal the household model.
     if (this.#profileModels) {
+      // A real Owner must open its own encrypted activity library asynchronously; never reveal the household model.
       const saved = readActiveProfile(this.#storage);
       if (saved?.mode === 'persistent' && this.#choice(saved.profileId)) return false;
       if (saved?.mode === 'owner' || saved?.mode === 'visitor') return false;
-      if (this.parentalPinConfigured !== false) return false;
-      if (this.#pendingOwner) {
-        try {
-          keepActiveProfile(this.#storage, this.#ownerMarker());
-        } catch {
-          return false;
-        }
-        this.#session = this.#pendingOwner;
-        this.#pendingOwner = null;
-        return true;
-      }
+    }
+    if (this.parentalPinConfigured !== false) return false;
+    if (this.#profileModels && !this.#pendingOwner) {
       void this.switchToOwner();
       return false;
     }
-    if (this.parentalPinConfigured !== false) return false;
     try {
       keepActiveProfile(this.#storage, this.#ownerMarker());
     } catch {
@@ -690,25 +604,14 @@ export class ProfileModeCoordinator {
       current?.identity.kind === 'profile' ? this.#choice(current.identity.id) : undefined;
     const previousOwner = this.#directory ? this.#choice(this.#directory.owner) : undefined;
     this.#directory = directory;
-    if (!this.#profileModels) return;
     this.#cancelOpenings();
+    if (!this.#profileModels) return;
     if (!current) {
       const saved = readActiveProfile(this.#storage);
-      // An Owner chosen before the household had a directory (`{mode: 'owner'}`) is its Owner: restored like the
-      // constructor restores it, since this update cancelled that opening.
-      const selected =
-        saved?.mode === 'persistent'
-          ? this.#choice(saved.profileId)
-          : saved?.mode === 'owner' && directory
-            ? this.#choice(directory.owner)
-            : undefined;
-      if (selected) void this.#restorePersistent(selected, saved?.mode === 'owner');
-      else if (saved?.mode === 'visitor' && directory && this.#visitorLock.available()) {
-        const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
-        const next = this.#newVisitor(visitorVisitId(visitId));
-        this.#releasePendingOwner(next);
-        this.#session = next;
-      }
+      // Reapply the same durable selection as a cross-tab marker change. A Visitor remains hidden while its directory
+      // is absent, matching the constructor's fail-closed recovery path.
+      if (saved?.mode !== 'visitor' || directory)
+        this.#storageChanged({ key: ACTIVE_PROFILE_KEY, storageArea: this.#storage });
       return;
     }
     if (current?.identity.kind === 'visitor') {
@@ -747,10 +650,7 @@ export class ProfileModeCoordinator {
       {
         active: () => {
           const current = readActiveProfile(this.#storage);
-          return (
-            current?.mode === 'visitor' &&
-            ('visitorNamespace' in current ? current.visitorNamespace : current.visitId) === visitId
-          );
+          return current?.mode === 'visitor' && current.visitId === visitId;
         },
         lock: this.#visitorLock,
         // Visitor preferences belong to the disposable visit namespace in both preview and real profile mode.
@@ -761,80 +661,88 @@ export class ProfileModeCoordinator {
     );
   }
 
-  readonly #storageChanged = (event: StorageEvent): void => {
+  readonly #storageChanged = (event: Pick<StorageEvent, 'key' | 'storageArea'>): void => {
     if (this.#disposed || (event.storageArea && event.storageArea !== this.#storage)) return;
     const current = this.#session;
+    const visitor =
+      current?.identity.kind === 'visitor' ? (current as VisitorProfileSession) : null;
     if (event.key !== ACTIVE_PROFILE_KEY) {
-      if (
-        current?.identity.kind === 'visitor' &&
-        (current as VisitorProfileSession).activity.ownsStorageKey(event.key)
-      )
-        (current as VisitorProfileSession).reloadActivity();
+      if (visitor?.activity.ownsStorageKey(event.key)) visitor.reloadActivity();
       return;
     }
+    this.#settingsPin = null;
+    this.#cancelOpenings();
+    const token = this.#transition;
     const saved = readActiveProfile(this.#storage);
-    if (saved?.mode === 'visitor') {
+    const visitId = saved?.mode === 'visitor' ? saved.visitId : null;
+    if (visitId) {
       if (!this.#visitorLock.available()) {
         this.#neutralize(current);
         return;
       }
-      const visitId = 'visitorNamespace' in saved ? saved.visitorNamespace : saved.visitId;
-      if (current?.identity.kind === 'visitor' && current.identity.id === visitId) {
-        (current as VisitorProfileSession).reloadActivity();
+      if (visitor?.identity.id === visitId) {
+        visitor.reloadActivity();
         return;
       }
-      current?.close();
-      this.#pendingOwner?.close();
-      this.#pendingOwner = null;
-      this.#session = this.#newVisitor(visitorVisitId(visitId));
-      return;
     }
-    const persistent = saved?.mode === 'persistent' ? this.#choice(saved.profileId) : null;
-    const ownerSelected = saved?.mode === 'owner' || persistent?.role === 'owner';
-    const kidSelected = persistent?.role === 'kid' ? persistent : null;
-    if (!ownerSelected && !kidSelected) {
+    const selected =
+      saved?.mode === 'persistent'
+        ? this.#choice(saved.profileId)
+        : saved?.mode === 'owner'
+          ? this.#directory
+            ? this.#choice(this.#directory.owner)
+            : { id: null, role: 'owner' as const, name: 'Owner', avatar: 'owner' }
+          : null;
+    if (!visitId && selected?.role !== 'owner' && selected?.role !== 'kid') {
       this.#neutralize(current);
       return;
     }
-    const realChoice = persistent ?? (this.#directory ? this.#choice(this.#directory.owner) : null);
-    if (this.#profileModels) {
-      this.#cancelOpenings();
-      const restore = () => {
-        if (this.#disposed || this.#session !== current) return;
-        current?.close();
-        this.#session = null;
-        if (realChoice) void this.#restorePersistent(realChoice, saved?.mode === 'owner');
-      };
-      if (current?.identity.kind === 'visitor')
-        void (current as VisitorProfileSession)
-          .endVisit()
-          .then(restore)
-          .catch(() => {});
-      else restore();
-      return;
-    }
     const activate = () => {
-      if (this.#disposed || this.#session !== current) return;
-      this.#session = kidSelected
-        ? this.#newKid(kidSelected)
-        : (this.#pendingOwner ?? this.#newOwner());
-      this.#pendingOwner = null;
+      if (!this.#transitionCurrent(token, current)) return;
+      current?.close();
+      if (visitId) {
+        const next = this.#newVisitor(visitorVisitId(visitId));
+        this.#releasePendingOwner(next);
+        this.#session = next;
+      } else if (this.#profileModels) {
+        const pending = this.#pendingOwner;
+        this.#pendingOwner = null;
+        if (
+          pending?.identity.kind === 'profile' &&
+          pending.identity.id === selected?.id &&
+          pending.identity.libraryKey === selected.libraryKey
+        ) {
+          this.#session = pending;
+        } else {
+          pending?.close();
+          this.#session = null;
+          if (selected?.id) void this.#restorePersistent(selected, saved?.mode === 'owner');
+        }
+      } else {
+        const next =
+          selected?.role === 'kid'
+            ? this.#newKid(selected)
+            : (this.#pendingOwner ?? this.#newOwner());
+        this.#releasePendingOwner(next);
+        this.#session = next;
+      }
     };
-    if (current?.identity.kind === 'visitor')
-      void (current as VisitorProfileSession)
-        .endVisit()
+    if (visitor)
+      void visitor
+        .endVisit(() => this.#assertTransition(token, current))
         .then(activate)
         .catch(() => {
-          // Keep the ended Visitor session visible so an explicit switch can retry the cleanup.
+          // Keep Visitor visible so an explicit switch can retry failed cleanup.
         });
-    else {
-      current?.close();
-      activate();
-    }
+    else activate();
   };
 
   #choice(id: string): ProfileChoice | undefined {
     return this.#directory?.profiles.find((choice) => choice.id === id);
+  }
+
+  #visitorChoice(): ProfileChoice {
+    return { id: null, role: 'visitor', name: 'Visitor', avatar: 'visitor' };
   }
 
   #publicChoice(choice: ProfileChoice | undefined): ProfileChoice | null {
@@ -860,9 +768,14 @@ export class ProfileModeCoordinator {
       .catch((error: unknown) => console.warn('den: profile preference seeding failed', error));
   }
 
-  async #preparePersistent(choice: ProfileChoice): Promise<ProfileSession | null> {
+  async #preparePersistent(
+    choice: ProfileChoice,
+    cancelExisting = true,
+  ): Promise<ProfileSession | null> {
     if (!choice.id || !choice.libraryKey || !this.#profileModels) return null;
-    this.#cancelOpenings();
+    // User selections already established their transition generation before any PIN or lock await. Restores have no
+    // such generation, so they cancel older restore work here before opening a model.
+    if (cancelExisting) this.#cancelOpenings();
     const token = this.#transition;
     const key = choice.libraryKey;
     const handle = this.#profileModels(key);
@@ -902,40 +815,29 @@ export class ProfileModeCoordinator {
 
   async #restorePersistent(choice: ProfileChoice, acceptLegacyOwner = false): Promise<void> {
     this.#restoring++;
-    try {
-      await this.#finishRestore(choice, acceptLegacyOwner);
-    } finally {
-      this.#restoring--;
-    }
-  }
-
-  async #finishRestore(choice: ProfileChoice, acceptLegacyOwner: boolean): Promise<void> {
-    let next: ProfileSession | null;
+    let next: ProfileSession | null = null;
     try {
       next = await this.#preparePersistent(choice);
-    } catch (error) {
-      // No one waits on a restore: the page stays at the profile gate, and the reason is logged.
-      console.warn('den: the remembered profile could not be opened', error);
-      return;
-    }
-    if (!next || this.#disposed) return;
-    const saved = readActiveProfile(this.#storage);
-    const selected =
-      (saved?.mode === 'persistent' && saved.profileId === choice.id) ||
-      (acceptLegacyOwner && saved?.mode === 'owner' && choice.role === 'owner');
-    if (!selected || this.#session !== null) {
-      next.close();
-      return;
-    }
-    if (saved?.mode === 'owner')
-      try {
-        keepActiveProfile(this.#storage, this.#ownerMarker());
-      } catch {
+      if (!next) return;
+      const saved = readActiveProfile(this.#storage);
+      const selected =
+        (saved?.mode === 'persistent' && saved.profileId === choice.id) ||
+        (acceptLegacyOwner && saved?.mode === 'owner' && choice.role === 'owner');
+      if (!selected || this.#session !== null) {
         next.close();
         return;
       }
-    this.#releasePendingOwner(next);
-    this.#session = next;
+      if (saved?.mode === 'owner') keepActiveProfile(this.#storage, this.#ownerMarker());
+      this.#releasePendingOwner(next);
+      this.#session = next;
+    } catch (error) {
+      // No one waits on a restore: the page stays at the profile gate, and the reason is logged. A failed legacy
+      // marker convergence also discards the session prepared above.
+      next?.close();
+      console.warn('den: the remembered profile could not be opened', error);
+    } finally {
+      this.#restoring--;
+    }
   }
 
   #samePersistentChoice(a: ProfileChoice | undefined, b: ProfileChoice | undefined): boolean {
@@ -951,12 +853,11 @@ export class ProfileModeCoordinator {
   }
 
   #sameApprovals(a: ProfileChoice['approvals'], b: ProfileChoice['approvals']): boolean {
-    const keys = (values: ProfileChoice['approvals']) =>
-      (values ?? [])
-        .map(({ type, id }) => `${type}:${id}`)
-        .sort()
-        .join(',');
-    return keys(a) === keys(b);
+    if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
+    if (!a?.length) return true;
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- One immutable comparison index.
+    const keys = new Set(a.map(({ type, id }) => `${type}:${id}`));
+    return b!.every(({ type, id }) => keys.has(`${type}:${id}`));
   }
 
   #sameContentPolicy(
@@ -968,19 +869,16 @@ export class ProfileModeCoordinator {
   }
 
   #neutralize(current: ProfileSession | null): void {
-    this.#cancelOpenings();
     current?.close();
     this.#session = null;
   }
 
-  #commitPrepared(
-    preparedAt: number,
-    previous: ProfileSession | null,
-    marker: StoredActiveProfile,
-  ): void {
-    if (this.#disposed || preparedAt !== this.#transition || this.#session !== previous)
-      throw new Error('Profile selection changed while its activity library was opening');
-    keepActiveProfile(this.#storage, marker);
+  #transitionCurrent(token: number, previous: ProfileSession | null): boolean {
+    return !this.#disposed && token === this.#transition && this.#session === previous;
+  }
+
+  #assertTransition(token: number, previous: ProfileSession | null): void {
+    if (!this.#transitionCurrent(token, previous)) throw TRANSITION_SUPERSEDED;
   }
 
   #cancelOpenings(): void {
@@ -1092,15 +990,11 @@ export function householdAdministration(
   activeOwner: boolean,
   markerPresent: boolean,
 ): boolean {
-  switch (capability) {
-    case 'disabled':
-      return true;
-    case 'enabled':
-    case 'preview':
-      return activeOwner;
-    default:
-      return !markerPresent;
-  }
+  return capability === 'disabled'
+    ? true
+    : capability === 'enabled' || capability === 'preview'
+      ? activeOwner
+      : !markerPresent;
 }
 
 export type ProfilesCapability = 'enabled' | 'preview' | 'disabled' | 'indeterminate';
@@ -1109,7 +1003,7 @@ export type ProfilesCapability = 'enabled' | 'preview' | 'disabled' | 'indetermi
  * directives such as `x-no-store` or `no-store-if`; only the actual no-store directive makes the capability
  * safe to use without surviving a host-gate rollback. */
 const hasNoStore = (value: string | null): boolean =>
-  value?.split(',').some((directive) => directive.trim().toLowerCase() === 'no-store') === true;
+  /(?:^|,)\s*no-store\s*(?:,|$)/i.test(value ?? '');
 
 export const previewProfileDirectory = (): PreviewProfileDirectory => {
   const owner = profileId('00000000000000000000000000000001');
@@ -1179,34 +1073,14 @@ async function readProfilesCapability(
     });
     if (!hasNoStore(response.headers.get('cache-control'))) return 'indeterminate';
     const value: unknown = await response.json();
-    const disabled =
-      response.status === 404 &&
-      value &&
-      typeof value === 'object' &&
-      Object.keys(value).length === 1 &&
-      'error' in value &&
-      value.error === 'not_found';
-    const enabled =
-      response.ok &&
-      value &&
-      typeof value === 'object' &&
-      Object.keys(value).length === 1 &&
-      'enabled' in value &&
-      value.enabled === true;
-    const preview =
-      response.ok &&
-      value &&
-      typeof value === 'object' &&
-      Object.keys(value).length === 2 &&
-      'enabled' in value &&
-      value.enabled === true &&
-      'preview' in value &&
-      value.preview === true;
-    if (disabled && !preview) return 'disabled';
+    if (!value || typeof value !== 'object') return 'indeterminate';
+    const body = value as Record<string, unknown>;
+    const keys = Object.keys(body).length;
+    if (response.status === 404 && keys === 1 && body.error === 'not_found') return 'disabled';
+    const preview = response.ok && keys === 2 && body.enabled === true && body.preview === true;
     if (
-      (!response.ok && !preview) ||
-      !(value && typeof value === 'object') ||
-      (!preview && !enabled) ||
+      !response.ok ||
+      (!preview && !(keys === 1 && body.enabled === true)) ||
       !visitorLock.available()
     )
       return 'indeterminate';

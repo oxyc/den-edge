@@ -18,10 +18,12 @@
     denied = false;
     failed = false;
     try {
-      if (!(await profiles.switchToOwner(pin))) denied = true;
-    } catch (error) {
-      console.error('den: Owner could not be opened', error);
-      failed = true;
+      const result = await profiles.switchToOwner(pin);
+      if (result.outcome === 'denied') denied = true;
+      else if (result.outcome === 'failed') {
+        console.error('den: Owner could not be opened', result.cause);
+        failed = true;
+      }
     } finally {
       establishing = false;
       pin = '';

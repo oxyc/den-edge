@@ -85,7 +85,6 @@ export interface DownloadSourceSnapshot {
 
 interface SourcePending {
   active: number;
-  freshGeneration: number;
   publishedFreshGeneration: number;
   plain?: Promise<DownloadSourceSnapshot>;
 }
@@ -137,6 +136,7 @@ export class DownloadCoordinator {
     { expiresAt: number; snapshot: DownloadSourceSnapshot }
   >();
   readonly #sourcePending = new Map<string, SourcePending>();
+  #sourceGeneration = 0;
   readonly now: () => number;
   readonly monotonicNow: () => number;
   readonly startedAt: number;
@@ -392,14 +392,6 @@ export class DownloadCoordinator {
     return true;
   }
 
-  async releases(download: Download): Promise<TitleSource[] | null> {
-    return (await this.sourcesForTitle(download.title)).sources;
-  }
-
-  async releasesForTitle(title: DownloadTitle): Promise<TitleSource[] | null> {
-    return (await this.sourcesForTitle(title)).sources;
-  }
-
   /**
    * One short-lived worker-owned snapshot backs display and the action selected from it. Tickets never leave this
    * object, and a click does not repeat the provider request that produced the visible list.
@@ -424,10 +416,10 @@ export class DownloadCoordinator {
     // handing it to an uninitialized Sources panel would leave the panel with no concrete list to draw.
     if (!fresh && pending?.plain) return pending.plain;
     if (!pending) {
-      pending = { active: 0, freshGeneration: 0, publishedFreshGeneration: 0 };
+      pending = { active: 0, publishedFreshGeneration: 0 };
       this.#sourcePending.set(key, pending);
     }
-    const freshGeneration = fresh ? ++pending.freshGeneration : undefined;
+    const freshGeneration = fresh ? ++this.#sourceGeneration : 0;
     pending.active++;
     const run: Promise<DownloadSourceSnapshot> = this.effects
       .resolve(title, fresh, early)
@@ -446,26 +438,22 @@ export class DownloadCoordinator {
         // shown, and do not extend its TTL. The admission marker belongs only to this action's reply.
         if (admission === 'limited') {
           return {
-            ...(this.#sourceCache.get(key)?.snapshot ?? cached?.snapshot ?? snapshot),
+            ...((this.#sourceCache.get(key) ?? cached)?.snapshot ?? snapshot),
             fresh: 'limited',
           };
         }
-        if (freshGeneration !== undefined) {
+        if (fresh) {
           // Only a newer admitted rebuild fences this answer. A newer refused ask must not suppress the only rebuild
           // that was admitted, regardless of which response arrived first.
           if (pending.publishedFreshGeneration > freshGeneration) return snapshot;
           pending.publishedFreshGeneration = freshGeneration;
-        } else if (pending.publishedFreshGeneration > 0) {
+        } else if (pending.publishedFreshGeneration) {
           // This plain request still returns its concrete answer to its waiter, but cannot replace a rebuilt list
           // that completed while the two requests overlapped.
           return snapshot;
         }
         this.#sourceCache.delete(key);
-        const retained: DownloadSourceSnapshot = {
-          sources: snapshot.sources,
-          ...(snapshot.answer ? { answer: snapshot.answer } : {}),
-          ...(snapshot.failure ? { failure: snapshot.failure } : {}),
-        };
+        const { fresh: _, ...retained } = snapshot;
         this.#sourceCache.set(key, {
           expiresAt: this.now() + DOWNLOAD_SOURCE_SNAPSHOT_MS,
           snapshot: retained,
@@ -486,7 +474,7 @@ export class DownloadCoordinator {
   }
 
   async tryReleaseIdentity(download: Download, identity: string): Promise<boolean> {
-    const sources = await this.releases(download);
+    const { sources } = await this.sourcesForTitle(download.title);
     const source = sources?.find((candidate) => candidate.identity === identity);
     return source ? this.tryRelease(download, source) : false;
   }

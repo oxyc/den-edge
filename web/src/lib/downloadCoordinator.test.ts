@@ -264,6 +264,50 @@ describe('DownloadCoordinator', () => {
     expect(asked).toEqual([false, true]);
   });
 
+  it('keeps the per-title fresh fence after its cache entry is evicted', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let plainCalls = 0;
+    const queue = new DownloadCoordinator(
+      testLog().log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async (requested, fresh) => {
+          if (requested.mediaId !== title.mediaId)
+            return {
+              sources: [
+                source(`Filler.${requested.mediaId}.mkv`, {
+                  resolution: '1080p',
+                  cached: true,
+                }),
+              ],
+            };
+          if (fresh) return { sources: [second], fresh: 'rebuilt' };
+          if (plainCalls++ === 0) {
+            await held;
+            return { sources: [first] };
+          }
+          return { sources: [second] };
+        },
+      },
+      { now: () => T0 },
+    );
+
+    const stale = queue.sourcesForTitle(title);
+    await expect(queue.sourcesForTitle(title, false, true)).resolves.toMatchObject({
+      sources: [second],
+      fresh: 'rebuilt',
+    });
+    for (let id = 0; id < 65; id++)
+      await queue.sourcesForTitle({ ...title, mediaId: 10_000 + id, imdbId: `tt${id}` });
+    release();
+    await expect(stale).resolves.toEqual({ sources: [first] });
+
+    await expect(queue.sourcesForTitle(title)).resolves.toEqual({ sources: [second] });
+    expect(plainCalls).toBe(2);
+  });
+
   it.each([
     ['fresh completes first', true],
     ['plain completes first', false],

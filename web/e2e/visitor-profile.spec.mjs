@@ -39,12 +39,10 @@ test('inactive Visitor sessions survive close and end only through explicit disp
         one: window.denVisitorFixture.get(first, 'progress:movie:550'),
         two: window.denVisitorFixture.get(second, 'progress:movie:550'),
       };
-      const outbound = await window.denVisitorFixture.outbound(first);
       await window.denVisitorFixture.endVisit(first);
       await window.denVisitorFixture.endVisit(first);
       return {
         restored,
-        outbound,
         keys: Object.keys(localStorage).sort(),
         survivor: window.denVisitorFixture.get(second, 'progress:movie:550'),
         owner: localStorage.getItem('den.owner.untouched'),
@@ -56,7 +54,6 @@ test('inactive Visitor sessions survive close and end only through explicit disp
   expect(created.one).toMatchObject({ kind: 'visitor', libraryKey: null, retainedScope: null });
   expect(created.one.prefix).not.toBe(created.two.prefix);
   expect(result.restored).toEqual({ one: { fraction: 0.25 }, two: { fraction: 0.75 } });
-  expect(result.outbound).toEqual([{ outcome: 'suppressed' }, { outcome: 'suppressed' }]);
   expect(result.keys).toEqual([
     'den.owner.untouched',
     `den.profile.visitor.v1:${SECOND}:progress:movie:550`,

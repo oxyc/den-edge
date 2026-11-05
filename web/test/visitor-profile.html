@@ -39,19 +39,6 @@
         endVisit(id) {
           return sessions.get(id).endVisit();
         },
-        outbound(id) {
-          const session = sessions.get(id);
-          return Promise.all([
-            session.outbound.write({
-              kind: 'progress.record',
-              title: { type: 'movie', id: 550 },
-              fraction: 0.5,
-              seconds: 60,
-              observedAt: 1,
-            }),
-            session.outbound.track({ schema: 1 }),
-          ]);
-        },
       };
     </script>
   </body>

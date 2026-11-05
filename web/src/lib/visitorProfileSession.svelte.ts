@@ -7,19 +7,25 @@ import {
   type VisitorProfileIdentity,
   type VisitorVisitId,
 } from './profileIdentity';
-import type { LibraryCommand } from './libraryServiceProtocol';
-import type { TrackerEvent } from './trackerEvents';
 import { VisitorActivityProjection } from './visitorActivity.svelte';
 import { PreviewProfilePreferences } from './profilePreferences.svelte';
 
 const VISITOR_STORAGE_PREFIX = 'den.profile.visitor.v1:';
 const VISITOR_NAMESPACE_KEY = /^den\.profile\.visitor\.v1:([0-9a-f]{32}):/;
+const NOOP = () => {};
+const RESOLVED = Promise.resolve();
+export const VISITOR_CLEANUP_SUPERSEDED = { outcome: 'superseded' } as const;
 // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Promise mutex bookkeeping is not presentation state.
 const localLocks = new Map<string, Promise<void>>();
 
 export interface VisitorActivityLock {
   available(): boolean;
-  run<T>(name: string, work: () => Promise<T> | T): Promise<T>;
+  /**
+   * Invoke admitted synchronous work after returning to the caller, and do not yield to another lock user between
+   * that work returning and finalizing its lock. A new caller in a post-work/pre-settlement gap is intentionally not
+   * admissible. Async work remains exclusive until its returned promise settles.
+   */
+  run<T>(name: string, work: () => PromiseLike<T> | T): Promise<T>;
 }
 
 /** Exact valid Visitor namespaces present on this browser. Similar-looking personal/future keys are not visits. */
@@ -37,25 +43,44 @@ export function visitorNamespaceIds(storage: Storage): VisitorVisitId[] {
  * Missing/corrupt-selection recovery has no active Visitor object to retire. Delete every exact orphan namespace
  * under the same per-visit lock used by activity writes, so another tab cannot resurrect a key during recovery.
  */
-export async function purgeOrphanVisitorNamespaces(
+export function purgeOrphanVisitorNamespaces(
   storage: Storage,
   lock: VisitorActivityLock = crossTabVisitorActivityLock,
+  beforeDelete: () => void = NOOP,
 ): Promise<void> {
-  for (const id of visitorNamespaceIds(storage))
-    await new VisitorActivityNamespace(id, storage, () => false, lock).dispose();
+  // Every tab acquires the complete set in the same order before deleting any of it.
+  const ids = visitorNamespaceIds(storage);
+  const locked = async (index: number): Promise<void> => {
+    if (index < ids.length) return lock.run(`den:visitor:${ids[index]}`, () => locked(index + 1));
+    // Hold every visit lock before checking authority and deleting. A superseded recovery therefore changes no
+    // namespace, while an admitted one cannot race a writer in any orphan it is about to retire.
+    beforeDelete();
+    deleteVisitorNamespaces(storage, ids);
+  };
+  return locked(0);
 }
+
+const deleteVisitorNamespaces = (storage: Storage, ids: readonly string[]): void => {
+  const visits = new Set(ids);
+  for (let index = storage.length - 1; index >= 0; index--) {
+    const key = storage.key(index);
+    const visit = key && VISITOR_NAMESPACE_KEY.exec(key)?.[1];
+    if (visit && visits.has(visit)) storage.removeItem(key);
+  }
+};
 
 const fallbackLock: VisitorActivityLock = {
   available: () => true,
-  async run<T>(name: string, work: () => Promise<T> | T): Promise<T> {
-    const previous = localLocks.get(name) ?? Promise.resolve();
+  async run<T>(name: string, work: () => PromiseLike<T> | T): Promise<T> {
+    const previous = localLocks.get(name) ?? RESOLVED;
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
     const queued = previous.then(() => held);
     localLocks.set(name, queued);
     await previous;
     try {
-      return await work();
+      const result = work();
+      return typeof (result as PromiseLike<T>)?.then === 'function' ? await result : result;
     } finally {
       release();
       if (localLocks.get(name) === queued) localLocks.delete(name);
@@ -67,9 +92,11 @@ export const crossTabVisitorActivityLock: VisitorActivityLock = {
   available: () =>
     typeof window === 'undefined' ||
     (typeof navigator !== 'undefined' && navigator.locks !== undefined),
-  run<T>(name: string, work: () => Promise<T> | T): Promise<T> {
+  run<T>(name: string, work: () => PromiseLike<T> | T): Promise<T> {
     if (typeof navigator !== 'undefined' && navigator.locks)
-      return navigator.locks.request(name, () => work());
+      // Some implementations invoke an uncontended callback before `request` returns. Defer admission one microtask
+      // so disposal can publish its shared promise before any durable revoke/delete work begins.
+      return navigator.locks.request(name, () => RESOLVED.then(work));
     // Tests and non-browser rendering share one process. A browser without Web Locks must fail closed instead of
     // pretending an in-process mutex excludes its other tabs and risking lost or resurrected activity.
     if (typeof window !== 'undefined')
@@ -94,6 +121,7 @@ export class VisitorActivityNamespace {
   readonly prefix: string;
   #disposed = false;
   #disposeInFlight: Promise<void> | null = null;
+  #disposeRevoke = NOOP;
 
   constructor(
     readonly visitId: VisitorVisitId,
@@ -116,14 +144,14 @@ export class VisitorActivityNamespace {
   }
 
   async set(key: string, value: VisitorActivityValue): Promise<void> {
-    await this.lock.run(`den:visitor:${this.visitId}`, () => {
+    return this.#run(() => {
       this.#assertWritable();
       this.storage.setItem(this.#key(key), JSON.stringify(value));
     });
   }
 
   async delete(key: string): Promise<void> {
-    await this.lock.run(`den:visitor:${this.visitId}`, () => {
+    return this.#run(() => {
       this.#assertWritable();
       this.storage.removeItem(this.#key(key));
     });
@@ -131,7 +159,7 @@ export class VisitorActivityNamespace {
 
   /** Reload and replace one document while the visit-wide Web Lock excludes every other tab's mutation. */
   async update<T>(key: string, change: (current: unknown) => T): Promise<T> {
-    return this.lock.run(`den:visitor:${this.visitId}`, () => {
+    return this.#run(() => {
       this.#assertWritable();
       const next = change(this.get(key));
       this.#assertWritable();
@@ -145,25 +173,32 @@ export class VisitorActivityNamespace {
   }
 
   /** Ending a visit serializes revocation and deletion with every activity write in every tab. */
-  dispose(revoke: () => void = () => {}): Promise<void> {
-    if (this.#disposed) return Promise.resolve();
+  dispose(revoke: () => void = NOOP): Promise<void> {
+    if (this.#disposed) return RESOLVED;
+    this.#disposeRevoke = revoke;
     if (this.#disposeInFlight) return this.#disposeInFlight;
-    const attempt = this.lock
-      .run(`den:visitor:${this.visitId}`, () => {
-        revoke();
-        for (let index = this.storage.length - 1; index >= 0; index--) {
-          const key = this.storage.key(index);
-          if (key?.startsWith(this.prefix)) this.storage.removeItem(key);
+    return (this.#disposeInFlight = this.#run(() => {
+      let applied = NOOP;
+      while (applied !== this.#disposeRevoke) {
+        applied = this.#disposeRevoke;
+        try {
+          applied();
+        } catch (error) {
+          // A superseded transition may still retire a visit whose durable marker moved elsewhere. If this visit is
+          // still authoritative, preserve its activity so the failed transition remains safely retryable.
+          if (error !== VISITOR_CLEANUP_SUPERSEDED || this.active()) throw error;
         }
-      })
-      .then(() => {
-        this.#disposed = true;
-      })
-      .finally(() => {
-        if (!this.#disposed) this.#disposeInFlight = null;
-      });
-    this.#disposeInFlight = attempt;
-    return attempt;
+      }
+      deleteVisitorNamespaces(this.storage, [this.visitId]);
+      this.#disposed = true;
+    }).finally(() => {
+      this.#disposeRevoke = NOOP;
+      this.#disposeInFlight = null;
+    }));
+  }
+
+  #run<T>(work: () => PromiseLike<T> | T): Promise<T> {
+    return this.lock.run(`den:visitor:${this.visitId}`, work);
   }
 
   #key(key: string): string {
@@ -181,28 +216,8 @@ export class VisitorActivityNamespace {
   }
 }
 
-export type SuppressedVisitorDelivery = Readonly<{ outcome: 'suppressed' }>;
-
-/**
- * A capability boundary, not a conditional around the household writer. Visitor receives no writer or tracker
- * transport to call, so even a future caller that reaches these methods cannot enqueue synced or external work.
- */
-export class NoSyncVisitorWriter {
-  readonly syncEnabled = false;
-  readonly trackerEnabled = false;
-
-  async write(_command: LibraryCommand): Promise<SuppressedVisitorDelivery> {
-    return { outcome: 'suppressed' };
-  }
-
-  async track(_event: TrackerEvent): Promise<SuppressedVisitorDelivery> {
-    return { outcome: 'suppressed' };
-  }
-}
-
 export class VisitorProfileSession extends ProfileSession {
   declare readonly identity: VisitorProfileIdentity;
-  readonly outbound = new NoSyncVisitorWriter();
 
   constructor(
     household: HouseholdSession,

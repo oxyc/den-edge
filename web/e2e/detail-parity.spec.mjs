@@ -635,6 +635,62 @@ test('episode Sources target the selected episode and downloads never requeue wh
   }
 });
 
+test('retained Detail drops a source answer that completes while another identity is active', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+    await setup(page);
+    let releaseFirst;
+    let releaseSecond;
+    let firstFinished;
+    const firstGate = new Promise((resolve) => (releaseFirst = resolve));
+    const secondGate = new Promise((resolve) => (releaseSecond = resolve));
+    const firstDone = new Promise((resolve) => (firstFinished = resolve));
+    let calls = 0;
+    await page.route('**/scout/config/stream/**', async (route) => {
+      const call = calls++;
+      await (call === 0 ? firstGate : secondGate);
+      await route.fulfill({
+        json: {
+          streams: [
+            {
+              title: call === 0 ? 'Stale.mkv' : 'Fresh.mkv',
+              url: 'http://scout.internal/p/ready',
+              behaviorHints: { filename: call === 0 ? 'Stale.mkv' : 'Fresh.mkv' },
+              attributes: { cached: true, resolution: '1080p' },
+            },
+          ],
+        },
+      });
+      if (call === 0) firstFinished();
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = () => page.locator('[data-active="true"]');
+    await active().getByRole('button', { name: 'Sources', exact: true }).click();
+    await expect.poll(() => calls).toBe(1);
+    await active().getByRole('link', { name: 'A Person Detective', exact: true }).click();
+    await expect(active().locator('h1')).toHaveText('A Person');
+    releaseFirst();
+    await firstDone;
+
+    await page.goBack();
+    await expect(active().locator('h1')).toHaveText('The Series');
+    const sources = active().getByRole('button', { name: 'Sources', exact: true });
+    if ((await sources.getAttribute('aria-expanded')) !== 'true') await sources.click();
+    await expect.poll(() => calls).toBe(2);
+    await expect(active().getByText('Stale.mkv', { exact: true })).toHaveCount(0);
+    await expect(active().getByText('Loading sources', { exact: true })).toBeVisible();
+    releaseSecond();
+    await expect(active().getByText('Fresh.mkv', { exact: true })).toBeVisible();
+    await expect(active().getByText('Stale.mkv', { exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('Check for sources again asks scout afresh, past the cached list, and says what it found', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -680,6 +736,69 @@ test('Check for sources again asks scout afresh, past the cached list, and says 
     expect(asked).toContain('?fresh=1');
     // The browser's copy of the plain address is replaced too, so a later ordinary look sees the new list.
     await expect.poll(() => asked.filter((q) => q === '').length).toBeGreaterThan(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an episode recheck cannot publish after its retained Detail loses and regains authority', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    let releaseFirst;
+    const firstHeld = new Promise((resolve) => (releaseFirst = resolve));
+    let freshRequests = 0;
+    let firstSettled = false;
+    await page.route('**/scout/config/stream/series/**', async (route) => {
+      const fresh = new URL(route.request().url()).searchParams.get('fresh') === '1';
+      if (fresh && ++freshRequests === 1) await firstHeld;
+      await route.fulfill({
+        headers: fresh ? { 'x-den-fresh': 'rebuilt' } : {},
+        json: {
+          streams: fresh
+            ? [
+                {
+                  title: 'Episode.1080p.WEB.mkv',
+                  url: 'http://scout.internal/p/ready',
+                  behaviorHints: { filename: 'Episode.1080p.WEB.mkv' },
+                  attributes: { cached: true, resolution: '1080p' },
+                },
+              ]
+            : [],
+          den: { answerKind: fresh ? 'live' : 'empty', coverage: { sources: [] } },
+        },
+      });
+      if (fresh && freshRequests === 1) firstSettled = true;
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = () => page.locator('[data-active="true"]');
+    const recheck = async () => {
+      const row = active().locator('.episode').first();
+      await row.getByRole('button', { name: 'Options for episode 1', exact: true }).click();
+      await row.getByRole('menuitem', { name: 'Check for sources again', exact: true }).click();
+    };
+
+    await recheck();
+    await expect.poll(() => freshRequests).toBe(1);
+    await active().getByRole('link', { name: 'A Person Detective', exact: true }).click();
+    await expect(active().locator('h1')).toHaveText('A Person');
+    await page.goBack();
+    await expect(active().locator('h1')).toHaveText('The Series');
+    await active().getByRole('tab', { name: 'Season 2', exact: true }).click();
+    await active().getByRole('tab', { name: 'Season 1', exact: true }).click();
+    releaseFirst();
+    await expect.poll(() => firstSettled).toBe(true);
+    await expect(page.getByRole('status').filter({ hasText: 'Found' })).toHaveCount(0);
+
+    await recheck();
+    await expect(page.getByRole('status').filter({ hasText: 'Found' })).toHaveText(
+      'Found 1 source.',
+    );
+    expect(freshRequests).toBe(2);
   } finally {
     await browser.close();
   }

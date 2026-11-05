@@ -729,6 +729,11 @@
         if (!saved) throw new Error('the Owner PIN was not saved');
         return coordinator.switchToPersistent(kid.id!);
       })
+      .then((result) => {
+        if (result.outcome === 'failed') throw result.cause;
+        if (result.outcome === 'denied')
+          throw new Error('the Kid transition was unexpectedly refused');
+      })
       .catch((error: unknown) =>
         console.warn('den: the Kid chosen before the household could not be opened', error),
       );

@@ -805,13 +805,6 @@ test('Visitor stays active across reload, PIN denial preserves it, and success d
     first.visitId,
   );
 
-  writes.length = 0;
-  await expect(page.evaluate(() => window.denProfileModeFixture.outbound())).resolves.toEqual([
-    { outcome: 'suppressed' },
-    { outcome: 'suppressed' },
-  ]);
-  expect(writes).toEqual([]);
-
   await page.getByRole('button', { name: 'Switch profile, current Visitor' }).click();
   await page.getByRole('button', { name: 'Use Owner' }).click();
   await page.getByLabel('Owner PIN').fill('0000');

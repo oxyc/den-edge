@@ -167,19 +167,6 @@
         return error instanceof Error ? error.message : 'failed';
       }
     },
-    outbound() {
-      const visitor = profiles?.session as VisitorProfileSession;
-      return Promise.all([
-        visitor.outbound.write({
-          kind: 'progress.record',
-          title: { type: 'movie', id: 550 },
-          fraction: 0.5,
-          seconds: 60,
-          observedAt: 1,
-        }),
-        visitor.outbound.track({ schema: 1 }),
-      ]);
-    },
   };
 
   onMount(() => {

@@ -15,7 +15,7 @@
   } from '../lib/libraryServiceProtocol';
   import { ageOf } from '../lib/titleSources';
   import { availability } from '../lib/availability.svelte';
-  import { DownloadSourceLoader } from '../lib/downloadSourceLoader';
+  import { loadDownloadSources } from '../lib/downloadSourceLoader';
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
   import { i18n } from '../lib/i18n.svelte';
@@ -62,7 +62,7 @@
     return () => downloadLease?.release();
   });
   let sources = $state<DownloadSourceOption[] | null | undefined>();
-  const sourceLoader = new DownloadSourceLoader();
+  let sourceGeneration = 0;
   /** What scout said about the list: whether empty means none exist, and whether it is old or short. */
   let answer = $state<DownloadSourceAnswer | undefined>();
   let failure = $state<'not-configured' | 'unmatched' | 'unreachable' | undefined>();
@@ -94,22 +94,19 @@
   /** This title's or episode's download, from the library: whichever device started it. */
   const current = $derived(
     title
-      ? ((downloadLease?.snapshot.value?.items.find(
+      ? (downloadLease?.snapshot.value?.items.find(
           (item) =>
             item.title.type === title.type &&
             item.title.id === title.id &&
             item.season === season &&
             item.episode === episode,
-        ) as DownloadViewItem | undefined) ?? undefined)
+        ) as DownloadViewItem | undefined)
       : undefined,
   );
   /** The download of `source`, when the one in the library is of this release. */
   const jobOf = (source: DownloadSourceOption) =>
     current && current.release?.identity === source.identity ? current : undefined;
-  const stateOf = (source: DownloadSourceOption) => {
-    const job = jobOf(source);
-    return job?.status.state;
-  };
+  const stateOf = (source: DownloadSourceOption) => jobOf(source)?.status.state;
   /** Everything this title has queued, for the line that says whether a press took (the TV's title note). */
   const summary = $derived(
     title
@@ -164,13 +161,14 @@
     refreshing = rechecking;
     message = '';
     if (!service || !requested) return;
-    void sourceLoader.load(service, requested, rechecking).then((loaded) => {
-      if (loaded === undefined) return;
+    const generation = ++sourceGeneration;
+    void loadDownloadSources(service, requested, rechecking).then((loaded) => {
+      if (generation !== sourceGeneration) return;
       refreshing = false;
       fresh = loaded?.fresh;
       // A limited rebuild is the list already on screen. Keep its exact render state and say why the explicit check
       // produced no fresh verdict; the retry remains a native button for touch, keyboard and TV navigation.
-      if (loaded?.fresh === 'limited') return;
+      if (fresh === 'limited') return;
       sources = loaded?.sources ?? null;
       answer = loaded?.answer;
       failure = loaded?.failure;
@@ -184,7 +182,7 @@
         );
     });
     return () => {
-      sourceLoader.cancel();
+      sourceGeneration++;
       refreshing = false;
     };
   });
@@ -257,16 +255,12 @@
         TMDB has no IMDb record for this title, so sources can’t be matched yet.
       </p>
     {:else if sources === undefined}<Loading label="Loading sources" />
-    {:else if sources === null}<p class="note">Couldn’t reach the source service.</p>
-      {#if fresh !== 'limited'}<Button
-          variant="secondary"
-          icon="retry"
-          label={refreshing ? 'Trying again…' : 'Try again'}
-          disabled={refreshing}
-          onclick={retrySources}
-        />{/if}
-    {:else if sources.length === 0 && answer?.kind === 'unknown'}<p class="note">
-        Your sources didn’t answer, so there may be releases this couldn’t see.
+    {:else if sources === null || (sources.length === 0 && answer?.kind === 'unknown')}<p
+        class="note"
+      >
+        {sources
+          ? 'Your sources didn’t answer, so there may be releases this couldn’t see.'
+          : 'Couldn’t reach the source service.'}
       </p>
       {#if fresh !== 'limited'}<Button
           variant="secondary"
@@ -347,7 +341,7 @@
                   variant="secondary"
                   icon="download"
                   label={source.seeders === 0 ? 'Download anyway' : 'Download'}
-                  disabled={inFlight(state ?? null)}
+                  disabled={inFlight(state)}
                   onclick={() => void download(source)}
                 />{/if}
 
@@ -363,16 +357,15 @@
         {/each}
       </ul>
     {/if}
-    {#if model && descriptor && sources !== null && sources !== undefined && failure !== 'not-configured' && failure !== 'unmatched' && fresh !== 'limited'}
-      <div class="source-refresh">
-        <Button
-          variant="tertiary"
-          icon="retry"
-          label={refreshing ? 'Trying again…' : 'Check for sources again'}
-          disabled={refreshing}
-          onclick={retrySources}
-        />
-      </div>
+    {#if model && descriptor && sources && failure !== 'not-configured' && failure !== 'unmatched' && fresh !== 'limited'}
+      <Button
+        class="source-refresh"
+        variant="tertiary"
+        icon="retry"
+        label={refreshing ? 'Trying again…' : 'Check for sources again'}
+        disabled={refreshing}
+        onclick={retrySources}
+      />
     {/if}
   </div>
 {/if}
@@ -389,7 +382,7 @@
           : state === 'starting' || state === 'paused'
             ? 'Checking download'
             : 'Download'}
-      disabled={inFlight(state ?? null) || state === 'ready'}
+      disabled={inFlight(state) || state === 'ready'}
       onclick={() => void download(best!)}
     />
   </div>
@@ -410,7 +403,7 @@
     margin-bottom: 0;
   }
 
-  .source-refresh {
+  :global(.den-button.source-refresh) {
     margin-top: 16px;
   }
 

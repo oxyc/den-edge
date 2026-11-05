@@ -867,7 +867,7 @@
             : null;
         // A limited rebuild returned the held list. It is no verdict about this just-released episode and must not
         // make the episode look freshly found (or freshly absent); NewEpisodes will try again on its normal cadence.
-        const found = checked?.kind === 'found' ? checked.count : null;
+        const found = typeof checked === 'number' ? checked : null;
         newEpisodes.checked(released, found);
         // Found with sources: the verdict its series' poster then asks about (`availability.follow`).
         if (found) availability.confirm({ type: 'tv', id: released.series }, released, true);
