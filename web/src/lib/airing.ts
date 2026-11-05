@@ -333,13 +333,23 @@ export interface NewEpisode {
   episode: number;
 }
 
+/** One attempt's ownership of a released episode. Only `NewEpisodes` can make one. */
+export interface NewEpisodeClaim {
+  readonly key: string;
+  readonly token: symbol;
+}
+
 /**
- * Which released episodes have sources: each searched for at most once per `RECHECK_MS` until something is found, then
- * kept. The viewer starting the episode clears it (`clear`), as does the episode no longer being the newest released.
+ * Which released episodes have sources. An in-flight claim coalesces overlapping effects without consuming the
+ * negative-result throttle. Only an authoritative found or empty answer records a check; abandoning an attempt or
+ * receiving no verdict releases its claim so the next real trigger may retry it.
+ *
+ * A found episode is kept until the viewer starts it (`clear`) or it is no longer the newest released episode.
  */
 export class NewEpisodes {
   readonly #checked = new Map<string, number>();
   readonly #found = new Set<string>();
+  readonly #claims = new Map<string, NewEpisodeClaim>();
   constructor(private readonly now: () => number = Date.now) {}
 
   static key(episode: NewEpisode): string {
@@ -349,21 +359,55 @@ export class NewEpisodes {
   /** Whether this episode's sources should be searched for now. */
   due(episode: NewEpisode): boolean {
     const key = NewEpisodes.key(episode);
-    if (this.#found.has(key)) return false;
+    if (this.#found.has(key) || this.#claims.has(key)) return false;
     const last = this.#checked.get(key);
     return last === undefined || this.now() - last >= RECHECK_MS;
   }
 
-  /** A search is starting: until it is answered, it is not due again. */
-  started(episode: NewEpisode): void {
-    this.#checked.set(NewEpisodes.key(episode), this.now());
+  /** Claim one due search. A concurrent caller gets no claim and therefore starts no duplicate request. */
+  claim(episode: NewEpisode): NewEpisodeClaim | null {
+    const key = NewEpisodes.key(episode);
+    if (!this.due(episode)) return null;
+    const claim = { key, token: Symbol(key) };
+    this.#claims.set(key, claim);
+    return claim;
   }
 
-  /** A search was made: `sources` were found (0 when none, null when the search itself failed). */
-  checked(episode: NewEpisode, sources: number | null): void {
+  /** Whether this attempt still owns the episode after a suspension. */
+  owns(episode: NewEpisode, claim: NewEpisodeClaim): boolean {
     const key = NewEpisodes.key(episode);
+    return claim.key === key && this.#claims.get(key) === claim;
+  }
+
+  /**
+   * Commit an authoritative answer and release its claim. Returns false when a newer lifecycle already abandoned or
+   * replaced this attempt, so a late answer cannot publish into that lifecycle.
+   */
+  complete(episode: NewEpisode, claim: NewEpisodeClaim, sources: number): boolean {
+    const key = NewEpisodes.key(episode);
+    if (claim.key !== key || this.#claims.get(key) !== claim) return false;
+    this.#claims.delete(key);
     this.#checked.set(key, this.now());
     if (sources && sources > 0) this.#found.add(key);
+    return true;
+  }
+
+  /** Release an abandoned or inconclusive attempt without consuming the throttle. */
+  release(episode: NewEpisode, claim: NewEpisodeClaim): boolean {
+    if (!this.owns(episode, claim)) return false;
+    this.#claims.delete(claim.key);
+    return true;
+  }
+
+  /** Release claims for episodes that disappeared while their prerequisites were settling. */
+  retain(episodes: readonly NewEpisode[]): void {
+    const kept = new Set(episodes.map(NewEpisodes.key));
+    for (const key of this.#claims.keys()) if (!kept.has(key)) this.#claims.delete(key);
+  }
+
+  /** Release every claim when this Home or profile ceases to own the work. */
+  releaseAll(): void {
+    this.#claims.clear();
   }
 
   has(episode: NewEpisode): boolean {

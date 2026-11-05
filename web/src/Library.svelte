@@ -130,6 +130,7 @@
     type Airing,
     type FollowCandidates,
     type NewEpisode,
+    type NewEpisodeClaim,
   } from './lib/airing';
   import { airingStore } from './lib/airing.svelte';
   import { recheckEpisode } from './lib/seasonDownloads.svelte';
@@ -827,50 +828,76 @@
   );
   let newEpisodesVersion = $state(0);
   const SEARCH_SETTLE_MS = 2_000;
+  // A retained Home owns source discovery only while it is visible. Leaving it, switching profiles or destroying its
+  // route releases every provisional claim; a late request can then return, but cannot publish into the new owner.
+  $effect(() => {
+    const ownsSearches = active && route.page === 'library';
+    if (!ownsSearches) newEpisodes.releaseAll();
+    return () => newEpisodes.releaseAll();
+  });
   $effect(() => {
     void airingTick;
-    const due = unstartedEpisodes.filter((episode) => newEpisodes.due(episode));
+    const candidates = unstartedEpisodes;
+    newEpisodes.retain(candidates);
     const library = downloadsModel;
-    if (!active || !library || !due.length) return;
-    // Marked before the first await, so this effect running again meanwhile does not search the same episodes twice.
-    // Each search runs to its answer, which is kept for whenever Home is shown next.
-    for (const released of due) newEpisodes.started(released);
+    if (!active || route.page !== 'library' || !library || !candidates.length) return;
+    const claimed = candidates.flatMap(
+      (episode): Array<{ episode: NewEpisode; claim: NewEpisodeClaim }> => {
+        const claim = newEpisodes.claim(episode);
+        return claim ? [{ episode, claim }] : [];
+      },
+    );
+    if (!claimed.length) return;
     void (async () => {
       // Continue Watching is published a moment after the layout that lets it name a resume point: let it land, then
       // search only what is still unstarted. Nothing waits on this search.
       await new Promise((resolve) => setTimeout(resolve, SEARCH_SETTLE_MS));
-      for (const released of due) {
+      for (const { episode: released, claim } of claimed) {
+        if (!newEpisodes.owns(released, claim)) continue;
         const key = NewEpisodes.key(released);
-        if (!untrack(() => unstartedEpisodes).some((one) => NewEpisodes.key(one) === key)) continue;
+        if (!untrack(() => unstartedEpisodes).some((one) => NewEpisodes.key(one) === key)) {
+          newEpisodes.release(released, claim);
+          continue;
+        }
         const imdb = await session.content
           .query({ kind: 'title.external-id', title: { type: 'tv', id: released.series } })
           .then((answer) => (answer.imdbId.state === 'ready' ? answer.imdbId.value : null))
           .catch(() => null);
+        if (!newEpisodes.owns(released, claim)) continue;
+        if (!imdb) {
+          newEpisodes.release(released, claim);
+          continue;
+        }
         // A followed series need not be on any shelf, so it may not be named yet; its slide and card need the name.
         if (!session.displayTitle({ type: 'tv', id: released.series }))
           await nameLibraryTitles(session, [{ type: 'tv', id: released.series }]).catch(() => {});
+        if (!newEpisodes.owns(released, claim)) continue;
         const title = session.displayTitle({ type: 'tv', id: released.series });
+        if (!title) {
+          newEpisodes.release(released, claim);
+          continue;
+        }
         const date = airingEpisode(
           airings.get(released.series),
           released.season,
           released.episode,
         )?.date;
-        const checked =
-          imdb && title
-            ? await recheckEpisode(
-                library,
-                imdb,
-                released.season,
-                { number: released.episode, name: '', ...(date ? { airDate: date } : {}) },
-                title,
-              ).catch(() => null)
-            : null;
-        // A limited rebuild returned the held list. It is no verdict about this just-released episode and must not
-        // make the episode look freshly found (or freshly absent); NewEpisodes will try again on its normal cadence.
-        const found = typeof checked === 'number' ? checked : null;
-        newEpisodes.checked(released, found);
+        const checked = await recheckEpisode(
+          library,
+          imdb,
+          released.season,
+          { number: released.episode, name: '', ...(date ? { airDate: date } : {}) },
+          title,
+        ).catch(() => null);
+        // A failed, unknown or limited rebuild is no verdict about this just-released episode. Release its claim so
+        // the next real Home trigger can retry; do not turn failure into a self-sustaining retry loop here.
+        if (typeof checked !== 'number') {
+          newEpisodes.release(released, claim);
+          continue;
+        }
+        if (!newEpisodes.complete(released, claim, checked)) continue;
         // Found with sources: the verdict its series' poster then asks about (`availability.follow`).
-        if (found) availability.confirm({ type: 'tv', id: released.series }, released, true);
+        if (checked) availability.confirm({ type: 'tv', id: released.series }, released, true);
         newEpisodesVersion++;
       }
     })();
