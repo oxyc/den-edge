@@ -52,21 +52,33 @@ describe('recent searches', () => {
     expect(() => rememberSearch('Arrival', blocked)).not.toThrow();
   });
 
-  it('keeps a profile that does not administer the household out of the saved list, in both directions', () => {
+  it('isolates each profile session while restoring the Owner saved list', () => {
     const saved = storage(JSON.stringify(['Owner search']));
     vi.stubGlobal('localStorage', saved);
     try {
+      scopeRecentSearches(true, 'owner:owner:household');
       expect(readRecentSearches()).toEqual(['Owner search']);
 
-      scopeRecentSearches(false);
+      scopeRecentSearches(false, 'profile:kid-a:kid-a-library');
       expect(readRecentSearches()).toEqual([]);
-      expect(rememberSearch('Kid cartoons')).toEqual(['Kid cartoons']);
+      expect(rememberSearch('Kid A cartoons')).toEqual(['Kid A cartoons']);
       expect(saved.setItem).not.toHaveBeenCalled();
 
-      scopeRecentSearches(true);
+      scopeRecentSearches(false, 'profile:kid-b:kid-b-library');
+      expect(readRecentSearches()).toEqual([]);
+      expect(rememberSearch('Kid B cartoons')).toEqual(['Kid B cartoons']);
+
+      scopeRecentSearches(false, 'visitor:first-visit:');
+      expect(readRecentSearches()).toEqual([]);
+      expect(rememberSearch('Visitor search')).toEqual(['Visitor search']);
+
+      scopeRecentSearches(false, 'visitor:second-visit:');
+      expect(readRecentSearches()).toEqual([]);
+
+      scopeRecentSearches(true, 'owner:owner:household');
       expect(readRecentSearches()).toEqual(['Owner search']);
     } finally {
-      scopeRecentSearches(true);
+      scopeRecentSearches(true, 'test:owner');
       vi.unstubAllGlobals();
     }
   });
