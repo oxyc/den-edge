@@ -40,6 +40,26 @@ export const rankable = (sources: TitleSource[]) =>
 /** Whether `addon` is the combined Den addon, asked under `/den` rather than Scout's `/scout`. */
 const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
 
+/** Structured source names are untrusted add-on display data, not release-name tokens to repair. */
+const sourceBadge = (value: unknown): string => {
+  if (typeof value !== 'string' || value.length > 6) return '';
+  switch (value.toLowerCase()) {
+    case 'remux':
+      return 'REMUX';
+    case 'bluray':
+      return 'BluRay';
+    case 'webdl':
+    case 'web-dl':
+      return 'WEB-DL';
+    case 'web':
+      return 'WEB';
+    case 'hdtv':
+      return 'HDTV';
+    default:
+      return '';
+  }
+};
+
 /**
  * Playback tickets stay on our own relay. Never follow the media redirect while queuing a download.
  *
@@ -99,7 +119,7 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',
           a.hdrFormat || (a.hdr ? 'HDR' : ''),
-          a.source,
+          sourceBadge(a.source),
           a.audio,
           a.hardcodedSubs ? 'Hardcoded subtitles' : '',
           a.threeD ? '3D' : '',

@@ -82,6 +82,57 @@ it('preserves unknown readiness and only trusts supplied display metadata', () =
   expect(sources[1]!.cached).toBeUndefined();
   expect(sources[1]!.probed).toBe(false);
 });
+it('maps only the bounded case-insensitive structured source badge contract', () => {
+  const sourceValues = ['remux', 'BLURAY', 'WebDl', 'WEB-dl', 'web', 'HdTv'];
+  const sources = parseSources(
+    {
+      streams: sourceValues.map((source, index) => ({
+        title: `Film-${index}.mkv`,
+        url: `http://lan:8080/p/source-${index}`,
+        attributes: { source },
+      })),
+    },
+    addon,
+    routes,
+  )!;
+  expect(sources.map((source) => source.badges)).toEqual([
+    ['REMUX'],
+    ['BluRay'],
+    ['WEB-DL'],
+    ['WEB-DL'],
+    ['WEB'],
+    ['HDTV'],
+  ]);
+});
+it('rejects rip, unknown, oversized, and malformed structured source badges without parsing filenames', () => {
+  const sourceValues: unknown[] = [
+    'rip',
+    'webrip',
+    'dvdrip',
+    'junk',
+    'unknown',
+    'w'.repeat(256),
+    ' webdl',
+    'web_dl',
+    'web.dl',
+    null,
+    { value: 'webdl' },
+  ];
+  const sources = parseSources(
+    {
+      streams: sourceValues.map((source, index) => ({
+        title: `Film-${index}.WEB-DL.mkv`,
+        url: `http://lan:8080/p/refused-source-${index}`,
+        attributes: { source },
+      })),
+    },
+    addon,
+    routes,
+  )!;
+  expect(sources.map(({ filename, badges }) => ({ filename, badges }))).toEqual(
+    sourceValues.map((_, index) => ({ filename: `Film-${index}.WEB-DL.mkv`, badges: [] })),
+  );
+});
 it('carries the season pack a probed episode came from as context, never in place of its own size', () => {
   const episode = {
     title: 'Show.S01E03.1080p.WEB-DL.mkv',
