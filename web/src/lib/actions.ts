@@ -52,22 +52,15 @@ export function updateProgress(
   playing?: boolean,
 ): TitleRow {
   const resume = moved(row.resume, fraction, seconds, at, playing);
+  const updated = { ...row, resume };
+  if (resume.value <= 0) return updated;
   // Positive playback is an explicit re-add. Keep a tombstone at the same or a later stamp so a delayed player
   // receipt cannot resurrect a title the viewer removed afterwards.
-  const deleted =
-    resume.value > 0 && compareStamps(at, row.deleted.at) > 0
-      ? { value: false as const, at }
-      : row.deleted;
-  if (resume.value >= WATCHED)
-    return {
-      ...row,
-      deleted,
-      resume,
-      status: { value: 'watched', at },
-      watchedAt: row.watchedAt ?? at[0],
-    };
-  if (resume.value > 0) return { ...row, deleted, resume, status: { value: 'inProgress', at } };
-  return { ...row, resume };
+  if (compareStamps(at, row.deleted.at) > 0) updated.deleted = { value: false, at };
+  const watched = resume.value >= WATCHED;
+  updated.status = { value: watched ? 'watched' : 'inProgress', at };
+  if (watched) updated.watchedAt ??= at[0];
+  return updated;
 }
 
 /** Where playback of an episode got to. */
