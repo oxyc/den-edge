@@ -1774,7 +1774,12 @@
           ondiscard={() => void discardLocalLegacyBackup()}
         />
       {:else}
-        <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+        <LibraryStatus
+          toast={shown.toast}
+          presentation={shown.toastPresentation}
+          alert={shown.alert}
+          undo={shown.undo}
+        />
       {/if}
       <Router
         profile={profileSessionKey(shown.identity)}
