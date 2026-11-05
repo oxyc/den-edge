@@ -16,6 +16,7 @@ import type {
   LibraryObservation,
   LibraryQuery,
   LibrarySelection,
+  LibrarySelectionValue,
   LibraryServiceCommandResult,
   LibrarySessionStatus,
   LibraryTask,
@@ -28,6 +29,13 @@ import { cancelSource, prepareSource } from '../src/lib/titleSources';
 import type { Stamp } from '../src/lib/wire';
 import { fixtureContentService } from './contentService';
 
+interface FixtureSubscription {
+  selection: LibrarySelection;
+  listener: (snapshot: LibrarySelectionSnapshot) => void;
+  failed: boolean;
+  retained?: LibrarySelectionValue;
+}
+
 class FixtureService {
   readonly historyDetails = {
     attempts: 0,
@@ -36,10 +44,8 @@ class FixtureService {
     lastError: '',
     lastItems: [] as { id: number; seen: number }[],
   };
-  readonly #subscriptions = new Map<
-    number,
-    { selection: LibrarySelection; listener: (snapshot: LibrarySelectionSnapshot) => void }
-  >();
+  readonly #subscriptions = new Map<number, FixtureSubscription>();
+  readonly downloadsSelection = { attempts: 0 };
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   #nextSubscription = 0;
   #revision = 0;
@@ -54,6 +60,8 @@ class FixtureService {
     private readonly openFailureMessage = 'fixture library service did not start',
     private readonly failHistoryDetails = false,
     private readonly settingsGate?: Promise<void>,
+    private downloadsSelectionFailures = 0,
+    private readonly downloadsSelectionGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -154,8 +162,17 @@ class FixtureService {
     listener: (snapshot: LibrarySelectionSnapshot) => void,
   ) {
     const id = ++this.#nextSubscription;
-    this.#subscriptions.set(id, { selection, listener });
-    if (this.#ready) void this.#publishOne(selection, listener);
+    const downloads = selection.kind === 'downloads';
+    if (downloads) this.downloadsSelection.attempts++;
+    const failed = downloads && this.downloadsSelectionFailures > 0;
+    if (failed) this.downloadsSelectionFailures--;
+    const subscription: FixtureSubscription = {
+      selection,
+      listener,
+      failed,
+    };
+    this.#subscriptions.set(id, subscription);
+    if (this.#ready) void this.#publishOne(subscription);
     else listener({ selection, connection: 'connecting' });
     return () => this.#subscriptions.delete(id);
   }
@@ -170,8 +187,16 @@ class FixtureService {
     await Promise.all(
       [...this.#subscriptions.values()]
         .filter(({ selection }) => affected.some((scope) => matches(scope, selection)))
-        .map(({ selection, listener }) => this.#publishOne(selection, listener)),
+        .map((subscription) => this.#publishOne(subscription)),
     );
+  }
+
+  failDownloadsSelection() {
+    for (const subscription of this.#subscriptions.values()) {
+      if (subscription.selection.kind !== 'downloads') continue;
+      subscription.failed = true;
+      this.#emitSelectionFailure(subscription);
+    }
   }
 
   close() {
@@ -188,16 +213,32 @@ class FixtureService {
     void this.publish(event.affected);
   }
 
-  async #publishOne(
-    selection: LibrarySelection,
-    listener: (snapshot: LibrarySelectionSnapshot) => void,
-  ) {
+  async #publishOne(subscription: FixtureSubscription) {
+    const { selection, listener } = subscription;
     if (selection.kind === 'settings') await this.settingsGate;
+    if (selection.kind === 'downloads') await this.downloadsSelectionGate;
+    if (subscription.failed) return this.#emitSelectionFailure(subscription);
+    const value = await this.authority.select(selection);
+    subscription.retained = value;
     listener({
       selection,
       connection: 'ready',
-      value: await this.authority.select(selection),
+      value,
       version: this.version,
+    });
+  }
+
+  #emitSelectionFailure(subscription: FixtureSubscription) {
+    subscription.listener({
+      selection: subscription.selection,
+      connection: 'failed',
+      ...(subscription.retained ? { value: subscription.retained } : {}),
+      version: this.version,
+      error: {
+        code: 'unavailable',
+        message: 'fixture Downloads selection failed',
+        retryable: true,
+      },
     });
   }
 }
@@ -236,6 +277,10 @@ export interface FixtureLibraryServiceOptions {
   failHistoryDetails?: boolean;
   /** Page fixture only: let other root snapshots publish while policy Settings stays authoritative-but-held. */
   settingsGate?: Promise<void>;
+  /** Downloads page fixture only: fail this many fresh lazy-selection subscriptions until the page rebinds. */
+  downloadsSelectionFailures?: number;
+  /** Downloads page fixture only: hold its real lazy selection at the service protocol boundary. */
+  downloadsSelectionGate?: Promise<void>;
 }
 
 /**
@@ -255,6 +300,8 @@ export function fixtureLibraryService({
   openGate,
   failHistoryDetails,
   settingsGate,
+  downloadsSelectionFailures,
+  downloadsSelectionGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -322,6 +369,8 @@ export function fixtureLibraryService({
     openFailureMessage,
     failHistoryDetails,
     settingsGate,
+    downloadsSelectionFailures,
+    downloadsSelectionGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
@@ -341,6 +390,8 @@ export function fixtureLibraryService({
     session,
     coordinator,
     historyDetails: fixtureService.historyDetails,
+    downloadsSelection: fixtureService.downloadsSelection,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
+    failDownloadsSelection: () => fixtureService.failDownloadsSelection(),
   };
 }

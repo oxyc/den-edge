@@ -339,8 +339,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Downloads: 'Hämtningar',
   'Downloads ›': 'Hämtningar ›',
   'Downloads are managed by the Owner.': 'Hämtningar hanteras av ägaren.',
+  'Downloads couldn’t be opened. Try again.': 'Hämtningarna kunde inte öppnas. Försök igen.',
+  'Downloads couldn’t be refreshed. Try again.': 'Hämtningarna kunde inte uppdateras. Försök igen.',
   'Downloads live in your library, which this browser can’t keep.':
     'Hämtningarna finns i ditt bibliotek, som den här webbläsaren inte kan behålla.',
+  'Downloads may be out of date. The last available queue is shown.':
+    'Hämtningarna kan vara inaktuella. Den senast tillgängliga kön visas.',
   Drama: 'Drama',
   Dreamlike: 'Drömlikt',
   'Drugs/Alcohol': 'Droger/Alkohol',
@@ -649,6 +653,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Open your Den library': 'Öppna ditt Den-bibliotek',
   'Opened more times than you expect? Turn it off, then reset the library key on your Apple TV under Settings › Linked devices: turning it off alone doesn’t take back a key already opened.':
     'Öppet fler gånger än du förväntat dig? Stäng av den och återställ sedan biblioteksnyckeln på din Apple TV under Inställningar › Länkade enheter: att stänga av den ensam tar inte tillbaka en nyckel som redan är öppen.',
+  'Opening downloads…': 'Öppnar hämtningar…',
   'Opening profile directory…': 'Öppnar profilkatalog...',
   'Opening profiles…': 'Öppnar profiler...',
   or: 'eller',

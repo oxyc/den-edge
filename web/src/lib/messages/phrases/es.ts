@@ -347,8 +347,14 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Downloads: 'Descargas',
   'Downloads ›': 'Descargas ›',
   'Downloads are managed by the Owner.': 'Las descargas son gestionadas por el Propietario.',
+  'Downloads couldn’t be opened. Try again.':
+    'No se pudieron abrir las descargas. Inténtalo de nuevo.',
+  'Downloads couldn’t be refreshed. Try again.':
+    'No se pudieron actualizar las descargas. Inténtalo de nuevo.',
   'Downloads live in your library, which this browser can’t keep.':
     'Las descargas se encuentran en su biblioteca, que este navegador no puede conservar.',
+  'Downloads may be out of date. The last available queue is shown.':
+    'Las descargas pueden estar desactualizadas. Se muestra la última cola disponible.',
   Drama: 'Drama',
   Dreamlike: 'De ensueño',
   'Drugs/Alcohol': 'Drogas/Alcohol',
@@ -660,6 +666,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Open your Den library': 'Abra su biblioteca Den',
   'Opened more times than you expect? Turn it off, then reset the library key on your Apple TV under Settings › Linked devices: turning it off alone doesn’t take back a key already opened.':
     '¿Abrió más veces de las que esperaba? Apáguelo, luego restablezca la clave de la biblioteca en su Apple TV en Configuración>Dispositivos vinculados: apagarlo por sí solo no recupera una clave ya abierta.',
+  'Opening downloads…': 'Abriendo descargas…',
   'Opening profile directory…': 'Abriendo directorio de perfiles…',
   'Opening profiles…': 'Abriendo perfiles…',
   or: 'o',
