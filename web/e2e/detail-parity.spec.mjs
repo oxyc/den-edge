@@ -678,8 +678,10 @@ test('retained Detail drops a source answer that completes while another identit
 
     await page.goBack();
     await expect(active().locator('h1')).toHaveText('The Series');
-    const sources = active().getByRole('button', { name: 'Sources', exact: true });
+    const sources = active().locator('.sources-disclosure');
+    await expect(sources).toBeVisible();
     if ((await sources.getAttribute('aria-expanded')) !== 'true') await sources.click();
+    await expect(sources).toHaveAttribute('aria-expanded', 'true');
     await expect.poll(() => calls).toBe(2);
     await expect(active().getByText('Stale.mkv', { exact: true })).toHaveCount(0);
     await expect(active().getByText('Loading sources', { exact: true })).toBeVisible();
