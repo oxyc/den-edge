@@ -1,7 +1,14 @@
 // What the web can do to a title, as the TV's LibraryStateMachine does it: each action is a "set" (never a toggle,
 // den-spec §6) stamped once, applied to the row as last read — or to a blank one for a title new to the library.
 
-import { ZERO_STAMP, type EpisodeRow, type Progress, type Stamp, type TitleRow } from './wire';
+import {
+  compareStamps,
+  ZERO_STAMP,
+  type EpisodeRow,
+  type Progress,
+  type Stamp,
+  type TitleRow,
+} from './wire';
 
 type Reaction = NonNullable<TitleRow['reaction']['value']>;
 
@@ -45,9 +52,21 @@ export function updateProgress(
   playing?: boolean,
 ): TitleRow {
   const resume = moved(row.resume, fraction, seconds, at, playing);
+  // Positive playback is an explicit re-add. Keep a tombstone at the same or a later stamp so a delayed player
+  // receipt cannot resurrect a title the viewer removed afterwards.
+  const deleted =
+    resume.value > 0 && compareStamps(at, row.deleted.at) > 0
+      ? { value: false as const, at }
+      : row.deleted;
   if (resume.value >= WATCHED)
-    return { ...row, resume, status: { value: 'watched', at }, watchedAt: row.watchedAt ?? at[0] };
-  if (resume.value > 0) return { ...row, resume, status: { value: 'inProgress', at } };
+    return {
+      ...row,
+      deleted,
+      resume,
+      status: { value: 'watched', at },
+      watchedAt: row.watchedAt ?? at[0],
+    };
+  if (resume.value > 0) return { ...row, deleted, resume, status: { value: 'inProgress', at } };
   return { ...row, resume };
 }
 

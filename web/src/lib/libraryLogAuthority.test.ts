@@ -1811,6 +1811,76 @@ describe('LibraryLogAuthority', () => {
     ).toBe(true);
   });
 
+  it('reactivates a removed movie through the durable progress path and keeps it after reopen', async () => {
+    const vault = memoryVault();
+    const log = (await LibraryLog.openLocal(KEY, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'movie-reactivation-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const opened = authority(log, clock, 'local');
+    await opened.command(
+      {
+        kind: 'progress.record',
+        title: movie,
+        fraction: 0.4,
+        seconds: 240,
+        playing: true,
+        observedAt: Date.now(),
+      },
+      'progress-before-removal',
+    );
+    const held = log.title(movie)!;
+    await expect(
+      log.write({
+        ...held,
+        deleted: { value: true, at: [Date.now() + 1, 0, 'fedcba9876543210'] },
+      }),
+    ).resolves.toMatchObject({ deleted: { value: true } });
+    expect(log.title(movie)?.deleted.value).toBe(true);
+    await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({ items: [] });
+
+    const write = vi.spyOn(log, 'write');
+    await opened.command(
+      {
+        kind: 'progress.record',
+        title: movie,
+        fraction: 0.4,
+        seconds: 240,
+        playing: true,
+        observedAt: Date.now(),
+      },
+      'play-removed-movie',
+    );
+    expect(write).toHaveBeenCalledOnce();
+    expect(write.mock.calls[0]?.[0]).toMatchObject({ kind: 'rec', title: movie });
+    await expect(opened.select({ kind: 'title', title: movie })).resolves.toMatchObject({
+      listed: true,
+      standing: 'in-progress',
+      progress: { fraction: 0.4, seconds: 240 },
+    });
+    await expect(opened.select({ kind: 'continue' })).resolves.toMatchObject({
+      items: [{ title: movie, fraction: 0.4, seconds: 240 }],
+    });
+    await opened.close();
+
+    const reopenedLog = (await LibraryLog.openLocal(KEY, vault))!;
+    const reopenedClock = await openClockStore(vault, {
+      key: 'movie-reactivation-reopen-clock',
+      createDevice: () => 'fedcba9876543210',
+    });
+    const reopened = authority(reopenedLog, reopenedClock, 'local');
+    await expect(reopened.select({ kind: 'title', title: movie })).resolves.toMatchObject({
+      listed: true,
+      standing: 'in-progress',
+      progress: { fraction: 0.4, seconds: 240 },
+    });
+    await expect(reopened.select({ kind: 'continue' })).resolves.toMatchObject({
+      items: [{ title: movie, fraction: 0.4, seconds: 240 }],
+    });
+    await reopened.close();
+  });
+
   it('owns every synced preference with semantic default and explicit-empty patches', async () => {
     const { log, authority } = await localAuthority();
 
