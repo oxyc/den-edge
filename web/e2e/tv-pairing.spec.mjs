@@ -2,6 +2,30 @@ import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { CODE, newEdge, routeGuestEdge } from './guest-edge.mjs';
 
+test('leaving typed-code pairing ends its relay and cannot install a late link', async ({
+  page,
+}) => {
+  const edge = newEdge();
+  const sid = '0123456789abcdef0123456789abcdef';
+  const pair = { nameplate: 'ABCD', claimed: false, ended: false, slots: new Map() };
+  edge.pairs.set(sid, pair);
+  await routeGuestEdge(page, edge);
+  await page.goto(E2E_ORIGIN);
+
+  await page.getByLabel('Link code, twelve characters').fill('ABCD-EFGH-JKLM');
+  await page.getByRole('button', { name: 'Link', exact: true }).click();
+  await expect.poll(() => pair.slots.has('a')).toBe(true);
+
+  await page.getByRole('button', { name: 'Look around instead' }).click();
+  await expect.poll(() => pair.ended).toBe(true);
+  // Give the abandoned protocol more than another polling interval. A stale completion must not add a link after
+  // the onboarding surface has gone; the successful encrypted pairing journey below covers a fresh retry.
+  await page.waitForTimeout(1_200);
+  await expect
+    .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('den.links') ?? '[]').length))
+    .toBe(0);
+});
+
 test('TV joins another device through encrypted pairing and retains its saved library', async ({
   browser,
   page: host,
