@@ -664,6 +664,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Ägarprofilinställningar kommer att visas här efter att hushållsdelningen har aktiverats.',
   pack: 'packa',
   Paranoia: 'Paranoia',
+  'Parental controls couldn’t be checked': 'Det gick inte att kontrollera föräldrakontrollen',
   'Paste a code or a link': 'Klistra in en kod eller en länk',
   'Paste the address above and add it.': 'Klistra in adressen ovan och lägg till den.',
   'Paste the address above and create it.': 'Klistra in adressen ovan och skapa den.',
@@ -952,6 +953,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'The Movie Database (TMDB)': 'The Movie Database (TMDB)',
   'The Owner library remains hidden. Reload Den to try again.':
     'Ägarbiblioteket förblir dolt. Ladda om Den för att försöka igen.',
+  'The Owner profile remains hidden. Check your connection and try again.':
+    'Ägarprofilen förblir dold. Kontrollera anslutningen och försök igen.',
   'The Owner PIN protects leaving a Kid profile and opens Kid Settings.':
     'Ägarens PIN-kod skyddar att lämna en barnprofil och öppnar barninställningar.',
   'The profile switch couldn’t be completed. Try again.':

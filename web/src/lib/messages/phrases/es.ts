@@ -675,6 +675,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'La configuración del perfil del propietario aparecerá aquí después de que se active la división del hogar.',
   pack: 'paquete',
   Paranoia: 'Paranoia',
+  'Parental controls couldn’t be checked': 'No se pudieron comprobar los controles parentales',
   'Paste a code or a link': 'Pega un código o un enlace',
   'Paste the address above and add it.': 'Pegue la dirección de arriba y agréguela.',
   'Paste the address above and create it.': 'Pega la dirección de arriba y créala.',
@@ -963,6 +964,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'The Movie Database (TMDB)': 'La base de datos de películas (TMDB)',
   'The Owner library remains hidden. Reload Den to try again.':
     'La biblioteca del propietario permanece oculta. Vuelva a cargar Den para intentarlo de nuevo.',
+  'The Owner profile remains hidden. Check your connection and try again.':
+    'El perfil del propietario permanece oculto. Comprueba tu conexión e inténtalo de nuevo.',
   'The Owner PIN protects leaving a Kid profile and opens Kid Settings.':
     'El PIN de propietario protege al dejar un perfil de niño y abre la configuración de niños.',
   'The profile switch couldn’t be completed. Try again.':

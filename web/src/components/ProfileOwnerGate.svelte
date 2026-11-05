@@ -10,7 +10,29 @@
   let failed = $state(false);
   let establishing = $state(false);
   let gate = $state<HTMLElement>();
-  let pinReady = $derived(profiles.parentalPinConfigured === false || /^\d{4}$/.test(pin));
+  let controls = $derived(profiles.parentalControls);
+  let pinReady = $derived(
+    controls.kind === 'ready' && (!controls.configured || /^\d{4}$/.test(pin)),
+  );
+  let retryRequested = false;
+
+  function focusGateAction() {
+    requestAnimationFrame(() =>
+      gate?.querySelector<HTMLElement>('input, button')?.focus({ preventScroll: true }),
+    );
+  }
+
+  function retryParentalControls() {
+    if (!profiles.retryParentalControls()) return;
+    retryRequested = true;
+  }
+
+  $effect(() => {
+    const state = controls.kind;
+    if (!retryRequested || state === 'loading') return;
+    retryRequested = false;
+    void tick().then(focusGateAction);
+  });
 
   async function establishOwner() {
     if (establishing) return;
@@ -29,22 +51,24 @@
       pin = '';
     }
     await tick();
-    requestAnimationFrame(() =>
-      gate?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }),
-    );
+    focusGateAction();
   }
 </script>
 
 <section bind:this={gate} class="owner-gate" aria-labelledby="owner-gate-title">
-  {#if profiles.parentalPinConfigured === undefined}
+  {#if controls.kind === 'loading'}
     <h1 id="owner-gate-title">Opening profiles…</h1>
     <p role="status">Checking parental controls…</p>
+  {:else if controls.kind === 'failed'}
+    <h1 id="owner-gate-title">Parental controls couldn’t be checked</h1>
+    <p role="alert">The Owner profile remains hidden. Check your connection and try again.</p>
+    <div class="actions">
+      <Button variant="primary" label="Try again" onclick={retryParentalControls} />
+    </div>
   {:else}
     <h1 id="owner-gate-title">Owner access</h1>
     <p>
-      {profiles.parentalPinConfigured
-        ? 'Enter the Owner PIN to continue.'
-        : 'Continue to the Owner profile.'}
+      {controls.configured ? 'Enter the Owner PIN to continue.' : 'Continue to the Owner profile.'}
     </p>
     <form
       onsubmit={(event) => {
@@ -52,7 +76,7 @@
         if (pinReady) void establishOwner();
       }}
     >
-      {#if profiles.parentalPinConfigured}
+      {#if controls.configured}
         <PinInput
           id="owner-gate-pin"
           label="Owner PIN"

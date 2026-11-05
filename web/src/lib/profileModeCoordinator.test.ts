@@ -72,6 +72,7 @@ function owner(
 ) {
   const authority = (configured: boolean) => {
     const release = vi.fn();
+    const rebind = vi.fn(() => false);
     const close = vi.fn();
     const verifyParentalPin = vi.fn(async (pin: string) => pin === '1234');
     const connections = vi.fn(
@@ -85,6 +86,7 @@ function owner(
               parentalPinDelivery: 'synced',
             },
           },
+          rebind,
           release,
         }) as unknown as LibraryModelLease<ConnectionsView>,
     );
@@ -97,7 +99,7 @@ function owner(
       },
     };
     const model = { close, connections, verifyParentalPin, settings } as unknown as LibraryModel;
-    return { model, close, connections, release, verifyParentalPin };
+    return { model, close, connections, rebind, release, verifyParentalPin };
   };
   const activity = authority(pinConfigured);
   const control =
@@ -132,6 +134,7 @@ function owner(
     close: activity.close,
     closeWorker,
     release: control.release,
+    rebind: control.rebind,
     verifyParentalPin: control.verifyParentalPin,
     activityRelease: activity.release,
     activityVerifyParentalPin: activity.verifyParentalPin,
@@ -1923,19 +1926,70 @@ describe('choosing Kid before the Owner PIN’s state is known (den#295)', () =>
     expect(coordinator.mode).toBe('owner');
     // A page that opens as the Owner it last was, while its connections view is still on its way.
     const lease = vi.mocked(householdModel.connections).mock.results[0]!.value as {
-      snapshot: { value: { parentalPinConfigured?: boolean } };
+      snapshot:
+        | { connection: 'connecting' }
+        | { connection: 'ready'; value: { parentalPinConfigured: boolean } };
     };
-    lease.snapshot.value.parentalPinConfigured = undefined;
+    lease.snapshot = { connection: 'connecting' };
     expect(coordinator.parentalPinConfigured).toBeUndefined();
     // Not known yet: choosing Kid would switch without the PIN that brings the Owner back.
     expect(coordinator.setsPin('kid')).toBe(false);
     expect(coordinator.waitsForPin('kid')).toBe(true);
     expect(coordinator.waitsForPin('visitor')).toBe(false);
 
-    lease.snapshot.value.parentalPinConfigured = false;
+    lease.snapshot = {
+      connection: 'ready',
+      value: { parentalPinConfigured: false },
+    };
     expect(coordinator.waitsForPin('kid')).toBe(false);
     expect(coordinator.setsPin('kid')).toBe(true);
     coordinator.dispose();
+  });
+});
+
+describe('household parental-control selection authority', () => {
+  it('distinguishes failed retained data, rebinds once and accepts only a fresh ready value', () => {
+    const first = owner(memoryStorage(), false);
+    const lease = vi.mocked(first.householdModel.connections).mock.results[0]!.value as {
+      snapshot: LibraryModelLease<ConnectionsView>['snapshot'];
+    };
+    lease.snapshot = {
+      connection: 'failed',
+      value: {
+        kind: 'connections',
+        parentalPinConfigured: false,
+        parentalPinDelivery: 'synced',
+      } as ConnectionsView,
+      error: { code: 'unavailable', message: 'control selection failed', retryable: true },
+    };
+    first.rebind.mockImplementation(() => {
+      lease.snapshot = { connection: 'connecting' };
+      return true;
+    });
+
+    expect(first.coordinator.parentalControls).toMatchObject({
+      kind: 'failed',
+      error: { message: 'control selection failed' },
+    });
+    expect(first.coordinator.parentalPinConfigured).toBeUndefined();
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    expect(first.coordinator.retryParentalControls()).toBe(true);
+    expect(first.rebind).toHaveBeenCalledOnce();
+    expect(first.coordinator.parentalControls).toEqual({ kind: 'loading' });
+    expect(first.coordinator.retryParentalControls()).toBe(false);
+
+    lease.snapshot = {
+      connection: 'ready',
+      value: {
+        kind: 'connections',
+        parentalPinConfigured: true,
+        parentalPinDelivery: 'synced',
+      } as ConnectionsView,
+    };
+    expect(first.coordinator.parentalControls).toEqual({ kind: 'ready', configured: true });
+    expect(first.coordinator.parentalPinConfigured).toBe(true);
+    expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
+    first.coordinator.dispose();
   });
 });
 

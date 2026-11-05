@@ -6,7 +6,11 @@
   import ProfileSettings from '../src/ProfileSettings.svelte';
   import ContentSection from '../src/settings/ContentSection.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
-  import type { LibraryModel, LibraryModelLease } from '../src/lib/libraryModel.svelte';
+  import type {
+    LibraryModel,
+    LibraryModelLease,
+    LibraryModelSnapshot,
+  } from '../src/lib/libraryModel.svelte';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
   import { legacyProfileIdentity } from '../src/lib/profileIdentity';
   import {
@@ -23,6 +27,81 @@
 
   const params = new URLSearchParams(location.search);
   const configured = params.get('pin') !== 'none';
+  const connectionsMode = params.get('connections');
+  const connectionFailures = Number(
+    params.get('connectionFailures') ?? (connectionsMode === 'repeat' ? 1 : 0),
+  );
+  if (params.has('orphan'))
+    localStorage.setItem(
+      'den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity',
+      JSON.stringify({ retained: true }),
+    );
+  let connectionSubscriptions = $state(1);
+  let connectionRetries = 0;
+  let connectionReleases = 0;
+  let connectionsSnapshot = $state.raw<LibraryModelSnapshot<ConnectionsView>>(
+    connectionsMode
+      ? {
+          connection: 'failed',
+          ...(connectionsMode === 'stale'
+            ? {
+                value: {
+                  kind: 'connections',
+                  parentalPinConfigured: false,
+                  parentalPinDelivery: 'synced',
+                } as ConnectionsView,
+              }
+            : {}),
+          error: {
+            code: 'unavailable',
+            message: 'fixture Connections selection failed',
+            retryable: true,
+          },
+        }
+      : {
+          connection: 'ready',
+          value: {
+            kind: 'connections',
+            parentalPinConfigured: configured,
+            parentalPinDelivery: 'synced',
+          } as ConnectionsView,
+        },
+  );
+  const connectionsLease: LibraryModelLease<ConnectionsView> = {
+    get snapshot() {
+      return connectionsSnapshot;
+    },
+    rebind() {
+      if (connectionsSnapshot.connection !== 'failed') return false;
+      connectionSubscriptions++;
+      const attempt = ++connectionRetries;
+      connectionsSnapshot = { connection: 'connecting' };
+      queueMicrotask(() => {
+        connectionsSnapshot =
+          attempt <= connectionFailures
+            ? {
+                connection: 'failed',
+                error: {
+                  code: 'unavailable',
+                  message: `fixture Connections selection failed ${attempt}`,
+                  retryable: true,
+                },
+              }
+            : {
+                connection: 'ready',
+                value: {
+                  kind: 'connections',
+                  parentalPinConfigured: configured,
+                  parentalPinDelivery: 'synced',
+                } as ConnectionsView,
+              };
+      });
+      return true;
+    },
+    release() {
+      connectionReleases++;
+    },
+  };
   let lockAttempts = 0;
   const visitorLock: VisitorActivityLock | undefined =
     params.has('rejectLock') || params.has('slowLock')
@@ -35,7 +114,6 @@
           },
         }
       : undefined;
-  const release = () => {};
   const model = {
     settings: {
       connection: 'ready',
@@ -63,18 +141,7 @@
         },
       },
     },
-    connections: () =>
-      ({
-        snapshot: {
-          connection: 'ready',
-          value: {
-            kind: 'connections',
-            parentalPinConfigured: configured,
-            parentalPinDelivery: 'synced',
-          },
-        },
-        release,
-      }) as unknown as LibraryModelLease<ConnectionsView>,
+    connections: () => connectionsLease,
     verifyParentalPin: async (pin: string) => pin === '1234',
     close: () => {},
   } as unknown as LibraryModel;
@@ -124,6 +191,10 @@
           : false,
         householdExposesModel: profiles?.session ? 'model' in profiles.session.household : false,
         servicesExposeModel: profiles?.session ? 'model' in profiles.session.services : false,
+        parentalControls: profiles?.parentalControls,
+        connectionSubscriptions,
+        connectionRetries,
+        connectionReleases,
         watchlist:
           (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.watchlist.map(
             ({ title }) => title,
