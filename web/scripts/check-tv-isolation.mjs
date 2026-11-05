@@ -149,5 +149,8 @@ if (process.argv.includes('--capture')) {
   // viewer, and following narrowed to the series the viewer is caught up on add 0.6 KiB. A series sampled once or
   // seasons behind no longer reaches Home's airing row, billboard or Continue lead. Allow one KiB more; the initial
   // and catalog ceilings are unchanged.
-  if (coreTotalDelta > 69120) throw new Error('Browser total JS/CSS budget exceeded');
+  // Parental-control selection recovery and retryable new-episode source searches each passed from their own base,
+  // but their merged graph is 91 gzip bytes over the preceding ceiling. Allow 128 bytes for that combined baseline;
+  // the initial and catalog ceilings stay unchanged. Movie reactivation remains five bytes below that merged base.
+  if (coreTotalDelta > 69248) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -2035,7 +2035,8 @@ export class LibraryLogAuthority {
     if (
       before.resume.value === command.fraction &&
       before.resume.seconds === command.seconds &&
-      before.resume.playing === command.playing
+      before.resume.playing === command.playing &&
+      !(before.deleted.value && command.fraction > 0)
     )
       return this.#unchanged();
     await this.#clock.see(this.#log.newestStamp());

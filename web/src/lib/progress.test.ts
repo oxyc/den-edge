@@ -31,6 +31,21 @@ describe('updateProgress', () => {
     ]);
   });
 
+  it('re-adds a deleted movie only for newer positive playback', () => {
+    const deleted = {
+      ...blankTitle(ref, 0),
+      deleted: { value: true, at: at(2000) },
+    };
+    const replayed = updateProgress(deleted, 0.4, 2880, at(3000));
+    expect([replayed.deleted, replayed.status.value, replayed.resume.value]).toEqual([
+      { value: false, at: at(3000) },
+      'inProgress',
+      0.4,
+    ]);
+    expect(updateProgress(deleted, 0.4, 2880, at(1000)).deleted).toEqual(deleted.deleted);
+    expect(updateProgress(deleted, 0, 0, at(3000)).deleted).toEqual(deleted.deleted);
+  });
+
   it('moves an episode, with the same replay rule', () => {
     const episode = updateEpisodeProgress(
       blankEpisode({ type: 'tv', id: 2 }, 1, 3),
