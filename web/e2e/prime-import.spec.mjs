@@ -7,7 +7,7 @@ no,2026-06-14T02:38:10Z,6000,A film,Goodrich`;
 const viewingHistory = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title","Video Duration in 1080p","City","ISP Name"
 Feature,2026-06-14T02:37:00Z,6000,Goodrich,6000000,Private City,Private ISP`;
 
-test('Prime import requires both schemas, previews locally, and writes the played film', async () => {
+test('provider imports recover a lost semantic reply with the same durable operation', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -75,6 +75,55 @@ test('Prime import requires both schemas, previews locally, and writes the playe
     await expect(importRow.getByText('Found 1 film and 0 episodes from 0 series.')).toBeVisible();
     await importRow.getByRole('button', { name: 'Import viewing history' }).click();
     await expect(importRow.getByRole('status')).toContainText('Saved 1 change');
+
+    // Lose Prime's semantic reply after the real fixture authority committed it. The same operation id is retried,
+    // so the authority applies the import once even though the page could not know whether the first call saved.
+    await page.goto(`${E2E_ORIGIN}/test/settings.html?lose-import-reply`);
+    const retryPrime = page.getByRole('region', { name: 'Prime Video viewing history' });
+    await retryPrime.getByRole('button', { name: /Prime Video viewing history/ }).click();
+    const retryPrimeInput = retryPrime.locator('input[type=file]');
+    await retryPrimeInput.setInputFiles([
+      { name: 'Watch Events.csv', mimeType: 'text/csv', buffer: Buffer.from(watchEvents) },
+      { name: 'Viewing History.csv', mimeType: 'text/csv', buffer: Buffer.from(viewingHistory) },
+    ]);
+    await retryPrime.getByRole('button', { name: 'Import viewing history' }).click();
+    await expect(retryPrime.getByRole('alert')).toContainText(
+      'Some changes may already have been saved',
+    );
+    await expect(retryPrime.getByText('Choose both files…')).toBeVisible();
+    await expect(retryPrime.getByRole('button', { name: 'Try again' })).toBeVisible();
+    expect(await page.evaluate(() => globalThis.fixtureHistoryImports)).toEqual({
+      attempts: 1,
+      applications: 1,
+      operationIds: [expect.any(String)],
+    });
+    await retryPrime.getByRole('button', { name: 'Try again' }).click();
+    await expect(retryPrime.getByRole('status')).toContainText('Saved 1 change');
+    const primeRetries = await page.evaluate(() => globalThis.fixtureHistoryImports);
+    expect(primeRetries.attempts).toBe(2);
+    expect(primeRetries.applications).toBe(1);
+    expect(new Set(primeRetries.operationIds).size).toBe(1);
+
+    // Netflix owns a separate retained session, but uses the same failure/replay boundary and recovery contract.
+    await page.goto(`${E2E_ORIGIN}/test/settings.html?lose-import-reply`);
+    const netflix = page.getByRole('region', { name: 'Netflix viewing history' });
+    await netflix.getByRole('button', { name: /Netflix viewing history/ }).click();
+    await netflix.locator('input[type=file]').setInputFiles({
+      name: 'NetflixViewingHistory.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from('Title,Date\nGoodrich,6/14/26\n'),
+    });
+    await netflix.getByRole('button', { name: 'Mark 1 film or series as seen' }).click();
+    await expect(netflix.getByRole('alert')).toContainText(
+      'Some changes may already have been saved',
+    );
+    await expect(netflix.getByText('Choose file…')).toBeVisible();
+    await netflix.getByRole('button', { name: 'Try again' }).click();
+    await expect(netflix.getByRole('status')).toContainText('Saved 1 change');
+    const netflixRetries = await page.evaluate(() => globalThis.fixtureHistoryImports);
+    expect(netflixRetries.attempts).toBe(2);
+    expect(netflixRetries.applications).toBe(1);
+    expect(new Set(netflixRetries.operationIds).size).toBe(1);
     expect(pageOwned, 'provider requests must stay inside the content Worker').toEqual([]);
   } finally {
     await browser.close();

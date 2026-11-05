@@ -157,11 +157,15 @@
   }
 
   const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+  const fixtureQuery = new URLSearchParams(location.search);
   const library = fixtureLibraryService({
     log,
     device: fixtureClock.device,
     libraryKey: fixtureLibraryKey,
+    loseHistoryImportReplyOnce: fixtureQuery.has('lose-import-reply'),
   });
+  (globalThis as { fixtureHistoryImports?: typeof library.historyImports }).fixtureHistoryImports =
+    library.historyImports;
   const { model, session } = library;
   const contentServices = createWorkerServiceSession();
   const contentModel = new LibraryModel(contentServices.library, {

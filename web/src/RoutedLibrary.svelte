@@ -1824,6 +1824,7 @@
                 <SettingsScreen.current
                   {link}
                   model={householdSettingsModel}
+                  activityModel={shown.model ?? householdSettingsModel}
                   preferences={session.preferences}
                   content={session.content}
                   local={session.local}

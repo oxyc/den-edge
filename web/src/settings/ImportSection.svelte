@@ -10,11 +10,27 @@
     | { step: 'preview'; plan: Plan; writes: PlannedHistoryImport[] }
     | { step: 'writing' }
     | { step: 'done'; written: number }
-    | { step: 'failed'; message: string };
-  /** Kept with the module, not the section: matching a long history goes on while the viewer is elsewhere. */
-  let state = $state.raw<State>({ step: 'idle' });
-  /** The films and series (`importKey`) the viewer unticked in the preview. */
-  const excluded = new SvelteSet<string>();
+    | {
+        step: 'failed';
+        message: string;
+        retry?: { writes: PlannedHistoryImport[]; operationId: string };
+      };
+  class ImportSession {
+    /** Matching a long history goes on while the viewer is elsewhere, but never follows another activity library. */
+    state = $state.raw<State>({ step: 'idle' });
+    /** The films and series (`importKey`) the viewer unticked in the preview. */
+    excluded = new SvelteSet<string>();
+  }
+
+  const sessions = new WeakMap<object, ImportSession>();
+  const sessionFor = (scope: object) => {
+    let session = sessions.get(scope);
+    if (!session) {
+      session = new ImportSession();
+      sessions.set(scope, session);
+    }
+    return session;
+  };
 </script>
 
 <script lang="ts">
@@ -38,30 +54,36 @@
 
   let {
     ready,
+    scope,
     content,
     watched,
     importHistory,
     exportHistory,
   }: {
     ready: boolean;
+    /** The active activity-library model; retained work is owned by this identity. */
+    scope: object;
     content: ContentServiceClientPort;
     watched: readonly TitleRef[];
     importHistory: (
       items: readonly HistoryImportItem[],
+      operationId: string,
     ) => Promise<{ written: number; total: number; complete: boolean }>;
     exportHistory: () => Promise<HistoryExport>;
   } = $props();
 
+  const session = sessionFor(scope);
+
   async function read(file: File) {
     if (!ready) return;
-    const viewings = parseCsv(await file.text());
-    if (!viewings.length) {
-      state = { step: 'failed', message: 'That file has no viewing history in it.' };
-      return;
-    }
-    state = { step: 'matching', done: 0, total: 0 };
-    excluded.clear();
     try {
+      const viewings = parseCsv(await file.text());
+      if (!viewings.length) {
+        session.state = { step: 'failed', message: 'That file has no viewing history in it.' };
+        return;
+      }
+      session.state = { step: 'matching', done: 0, total: 0 };
+      session.excluded.clear();
       // What the library already has as seen is found, and left: its episodes aren't looked up at all.
       const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
@@ -70,37 +92,52 @@
         viewings,
         lookups,
         (done, total) => {
-          if (state.step === 'matching') state = { ...state, done, total };
+          if (session.state.step === 'matching')
+            session.state = { ...session.state, done, total };
         },
         seen,
       );
-      state = {
+      session.state = {
         step: 'preview',
         plan: result,
         writes: historyImportItems(result.marks, result.shows),
       };
     } catch (error) {
       console.warn('den: Netflix import failed', error);
-      state = { step: 'failed', message: 'Couldn’t read that history. Please try again.' };
+      session.state = { step: 'failed', message: 'Couldn’t read that history. Please try again.' };
     }
   }
 
-  async function write(writes: PlannedHistoryImport[]) {
-    state = { step: 'writing' };
-    const result = await importHistory(writes.map((entry) => entry.item));
-    state = result.complete
-      ? { step: 'done', written: result.written }
-      : {
-          step: 'failed',
-          message: i18n.format(
-            'import.saved',
-            'Saved {written} of {total}. The rest couldn’t be saved; importing the file again picks up where this stopped.',
-            {
-              written: result.written.toLocaleString(),
-              total: result.total.toLocaleString(),
-            },
-          ),
-        };
+  async function write(writes: PlannedHistoryImport[], operationId = crypto.randomUUID()) {
+    session.state = { step: 'writing' };
+    try {
+      const result = await importHistory(
+        writes.map((entry) => entry.item),
+        operationId,
+      );
+      session.state = result.complete
+        ? { step: 'done', written: result.written }
+        : {
+            step: 'failed',
+            message: i18n.format(
+              'import.saved',
+              'Saved {written} of {total}. The rest couldn’t be saved; importing the file again picks up where this stopped.',
+              {
+                written: result.written.toLocaleString(),
+                total: result.total.toLocaleString(),
+              },
+            ),
+            retry: { writes, operationId },
+          };
+    } catch (error) {
+      console.warn('den: Netflix import could not confirm its save', error);
+      session.state = {
+        step: 'failed',
+        message:
+          'Den couldn’t confirm the import. Some changes may already have been saved; trying again is safe.',
+        retry: { writes, operationId },
+      };
+    }
   }
 
   const plural = (n: number, one: string, many = `${one}s`) =>
@@ -119,7 +156,7 @@
       >. Each film and episode is marked seen on the day you last watched it, and reaches Simkl
       through your Apple TV.
     </p>
-    {#if state.step === 'idle' || state.step === 'failed' || state.step === 'done'}
+    {#if session.state.step === 'idle' || session.state.step === 'failed' || session.state.step === 'done'}
       <div class="form">
         <label class="quiet file">
           Choose file…
@@ -136,25 +173,27 @@
         </label>
       </div>
     {/if}
-    {#if state.step === 'matching'}
+    {#if session.state.step === 'matching'}
       <p class="status" role="status">
-        Finding your titles{state.total ? ` — ${state.done} of ${state.total}` : '…'}
+        Finding your titles{session.state.total
+          ? ` — ${session.state.done} of ${session.state.total}`
+          : '…'}
       </p>
-    {:else if state.step === 'preview'}
-      {@const all = previewLines(state.plan.marks)}
-      {@const chosen = state.writes.filter((w) => !excluded.has(w.key))}
+    {:else if session.state.step === 'preview'}
+      {@const all = previewLines(session.state.plan.marks)}
+      {@const chosen = session.state.writes.filter((w) => !session.excluded.has(w.key))}
       {@const series = all.filter((l) => l.episodes > 0)}
       <p class="summary">
         Found {plural(all.length - series.length, 'film')} and {plural(
           series.reduce((n, l) => n + l.episodes, 0),
           'episode',
         )} from {plural(series.length, 'series', 'series')}.
-        {#if state.plan.known}
-          {plural(state.plan.known, 'line')} of what you’ve already marked seen were skipped.
+        {#if session.state.plan.known}
+          {plural(session.state.plan.known, 'line')} of what you’ve already marked seen were skipped.
         {/if}
-        {#if state.plan.covered}
-          {plural(state.plan.covered, 'line')} named an episode of a season the rest of the file already
-          covers in full.
+        {#if session.state.plan.covered}
+          {plural(session.state.plan.covered, 'line')} named an episode of a season the rest of the file
+          already covers in full.
         {/if}
       </p>
       <details class="foot">
@@ -165,10 +204,10 @@
               <label>
                 <input
                   type="checkbox"
-                  checked={!excluded.has(line.key)}
+                  checked={!session.excluded.has(line.key)}
                   onchange={(event) => {
-                    if (event.currentTarget.checked) excluded.delete(line.key);
-                    else excluded.add(line.key);
+                    if (event.currentTarget.checked) session.excluded.delete(line.key);
+                    else session.excluded.add(line.key);
                   }}
                 />
                 <span>
@@ -181,13 +220,16 @@
           {/each}
         </ul>
       </details>
-      {#if state.plan.unmatched.length || state.plan.undated}
+      {#if session.state.plan.unmatched.length || session.state.plan.undated}
         <details class="foot">
           <summary>
-            {plural(state.plan.unmatched.length + state.plan.undated, 'line')} couldn’t be matched
+            {plural(
+              session.state.plan.unmatched.length + session.state.plan.undated,
+              'line',
+            )} couldn’t be matched
           </summary>
           <ul class="unmatched">
-            {#each state.plan.unmatched as title (title)}<li>{title}</li>{/each}
+            {#each session.state.plan.unmatched as title (title)}<li>{title}</li>{/each}
           </ul>
         </details>
       {/if}
@@ -200,20 +242,31 @@
           disabled={!chosen.length}
           onclick={() => void write(chosen)}
         />
-        <Button variant="secondary" label="Cancel" onclick={() => (state = { step: 'idle' })} />
+        <Button
+          variant="secondary"
+          label="Cancel"
+          onclick={() => (session.state = { step: 'idle' })}
+        />
       </div>
-    {:else if state.step === 'writing'}
+    {:else if session.state.step === 'writing'}
       <p class="status" role="status">Saving…</p>
-    {:else if state.step === 'done'}
+    {:else if session.state.step === 'done'}
       <p class="status" role="status">
-        Saved {plural(state.written, 'change')}. Your Apple TV sends them to Simkl next time Den is
-        open on it.
+        Saved {plural(session.state.written, 'change')}. Your Apple TV sends them to Simkl next time
+        Den is open on it.
       </p>
-    {:else if state.step === 'failed'}
-      <p class="status bad" role="alert">{i18n.phrase(state.message)}</p>
+    {:else if session.state.step === 'failed'}
+      <p class="status bad" role="alert">{i18n.phrase(session.state.message)}</p>
+      {#if session.state.retry}
+        <Button
+          variant="secondary"
+          label="Try again"
+          onclick={() => void write(session.state.retry!.writes, session.state.retry!.operationId)}
+        />
+      {/if}
     {/if}
   </SettingRow>
-  <PrimeImportRow {ready} {content} {watched} {importHistory} />
+  <PrimeImportRow {ready} {scope} {content} {watched} {importHistory} />
   <HistoryExportRow {ready} {content} load={exportHistory} />
 </SettingsSection>
 
