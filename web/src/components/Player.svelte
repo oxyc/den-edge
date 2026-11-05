@@ -228,12 +228,11 @@
       : undefined,
   );
 
-  function advanceLink(event: MouseEvent, stopCountdown = false) {
+  function advanceLink(event: MouseEvent) {
     if (!onnext) return;
-    activateLinkInPlace(event, () => {
-      if (stopCountdown) stay();
-      onnext();
-    });
+    // Every explicit Next surface can coexist with the countdown. Retire it before changing episodes so a tick at
+    // the same boundary cannot invoke `onnext` a second time.
+    activateLinkInPlace(event, () => (stay(), onnext()));
   }
 
   type Episode = { season?: number; episode?: number };
@@ -2937,6 +2936,9 @@
   }
 
   function playing() {
+    // Playing after `ended` is a deliberate replay, so the old episode's pending advance no longer owns the viewer.
+    // This also covers the cast page: its first unpaused progress after a receiver resumes calls this same handler.
+    stay();
     // Autoplay is only the initial-start request. Some TV engines reconsider a persistent autoplay flag after a
     // later readiness/buffering transition and can undo a deliberate pause. Once playback has begun, every future
     // start is either a viewer action or an explicitly state-preserving source replacement.
@@ -2971,6 +2973,12 @@
   /** The end: count down to the next episode, when there is one. */
   function finished() {
     if (tv) setTvPlaybackActive(false);
+    if (customTransport) {
+      tvPaused = true;
+      // Desktop controls may have hidden while the episode played. The countdown and its Stay action must be
+      // reachable without first guessing that moving over the finished picture reveals them.
+      revealWebControls(false);
+    }
     progress.complete(video?.currentTime ?? remoteTime);
     // For den-edge's own outcome report (`finish()`): this visit reached a natural end, whether or not there is
     // a next episode to count down to.
@@ -4723,6 +4731,7 @@
           }}
           onplay={playing}
           onpause={paused}
+          onseeking={stay}
           ontimeupdate={tick}
           onended={finished}
           onerror={() => {
@@ -5180,18 +5189,17 @@
         {#if !customTransport && active}
           <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
-        {#if !customTransport && onnext && next}
+        {#if onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
             <Button
               variant="primary"
               aria-label="Next: {next}"
               href={nextHref}
-              onclick={(event) => advanceLink(event, true)}
-              >Next: {next} <span aria-hidden="true">({upNext})</span></Button
+              onclick={advanceLink}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
             >
             <Button label="Stay" onclick={stay} />
-          {:else}
+          {:else if !customTransport}
             <Button
               label={i18n.format('player.next', 'Next: {title}', { title: next })}
               href={nextHref}

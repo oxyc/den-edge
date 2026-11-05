@@ -332,6 +332,9 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
   addEventListener('den:tv-back', onBack);
   document.addEventListener('play', onPlay, { capture: true });
   document.addEventListener('pause', onPause, { capture: true });
+  // Samsung's AVPlay facade has already stopped when it emits `ended`, so there is no separate pause event. Keep
+  // the next-episode countdown and Stay action reachable on every TV engine after natural completion.
+  document.addEventListener('ended', onPause, true);
   document.addEventListener('pointerdown', onPointer, { capture: true });
   document.addEventListener('pointermove', onPointer, { capture: true });
   document.addEventListener('close', onMenuClose, { capture: true });
@@ -343,6 +346,7 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
     removeEventListener('den:tv-back', onBack);
     document.removeEventListener('play', onPlay, { capture: true });
     document.removeEventListener('pause', onPause, { capture: true });
+    document.removeEventListener('ended', onPause, true);
     document.removeEventListener('pointerdown', onPointer, { capture: true });
     document.removeEventListener('pointermove', onPointer, { capture: true });
     document.removeEventListener('close', onMenuClose, { capture: true });
