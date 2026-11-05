@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import profileFixture from '../vendor/den-core/profiles-v1.json';
+import { LibraryModel } from './libraryModel.svelte';
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type { LibraryServiceClientPort } from './libraryServiceSupervisor';
 import { LibraryServiceSupervisor } from './libraryServiceSupervisor';
@@ -872,6 +873,41 @@ it('isolates a lazy subscription failure without weakening required root readine
     failure: { message: 'root projection failed' },
   });
   required.close();
+});
+
+it('rebinds only a failed lazy selection while the ready service and roots stay open', async () => {
+  const client = new FakeClient();
+  client.subscriptionFailure = {
+    kind: 'connections',
+    failure: { code: 'unavailable', message: 'connections projection failed', retryable: true },
+  };
+  const createClient = vi.fn(() => client);
+  const supervisor = new LibraryServiceSupervisor(createClient, { maxAutomaticRestarts: 0 });
+  const model = new LibraryModel(supervisor, openOptions);
+  await model.ready;
+  const rootsBefore = client.events.filter((event) => event.startsWith('subscribe:'));
+  const connections = model.connections();
+  await vi.waitFor(() => expect(connections.snapshot.connection).toBe('failed'));
+  expect(model.connection).toBe('ready');
+
+  client.subscriptionFailure = undefined;
+  expect(connections.rebind()).toBe(true);
+  expect(connections.rebind()).toBe(false);
+  await vi.waitFor(() =>
+    expect(connections.snapshot).toMatchObject({
+      connection: 'ready',
+      value: { kind: 'connections', parentalPinConfigured: false },
+    }),
+  );
+
+  expect(createClient).toHaveBeenCalledOnce();
+  expect(client.events.filter((event) => event === 'open')).toHaveLength(1);
+  expect(client.events.filter((event) => event === 'subscribe:connections')).toHaveLength(2);
+  expect(client.events.filter((event) => event.startsWith('subscribe:')).slice(0, 5)).toEqual(
+    rootsBefore,
+  );
+  connections.release();
+  model.close();
 });
 
 it('stops after the bounded replacement attempt and retains the failed stale view', async () => {

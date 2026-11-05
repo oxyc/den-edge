@@ -245,6 +245,103 @@ test('missing active mode requires the configured Owner PIN and persists success
     .toBe(JSON.stringify({ mode: 'owner' }));
 });
 
+test('a failed lazy parental-controls selection stays closed and a fresh subscription restores the PIN flow', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234&connections=fail');
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText('Owner couldn’t be opened. Try again.');
+  await expect(page.getByText('Checking parental controls…')).toHaveCount(0);
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await expect(page.getByLabel('Owner PIN')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(2);
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await page.getByLabel('Owner PIN').fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+});
+
+test('a failed selection never trusts its retained no-PIN value and retry restores the continue flow', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=none&connections=stale&orphan');
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByText('Continue to the Owner profile.')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Use Owner' })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().parentalControls))
+    .toMatchObject({
+      kind: 'failed',
+      error: { message: 'fixture Connections selection failed' },
+    });
+
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByText('Continue to the Owner profile.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Use Owner' })).toBeFocused();
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem('den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity'),
+      ),
+    )
+    .toBeNull();
+});
+
+test('repeated failures remain retryable by touch, keyboard and TV activation without subscription storms', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234&connections=repeat&connectionFailures=2');
+  let retry = page.getByRole('button', { name: 'Try again' });
+
+  await retry.dispatchEvent('pointerdown', { pointerType: 'touch' });
+  await retry.dispatchEvent('click');
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(2);
+  retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeFocused();
+
+  await retry.press('Enter');
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(3);
+  retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeFocused();
+
+  await page.evaluate(async () => {
+    const { installTVNavigation } = await import('/src/tv/navigation.ts');
+    installTVNavigation();
+  });
+  await page.keyboard.press('Enter');
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(4);
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await page.waitForTimeout(100);
+  expect(
+    await page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+  ).toBe(4);
+});
+
 test('a corrupt active marker cannot expose Owner without its PIN', async ({ page }) => {
   const orphan = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   await page.addInitScript((visit) => {
