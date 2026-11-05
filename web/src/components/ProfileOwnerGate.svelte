@@ -11,9 +11,7 @@
   let establishing = $state(false);
   let gate = $state<HTMLElement>();
   let controls = $derived(profiles.parentalControls);
-  let pinReady = $derived(
-    controls.kind === 'ready' && (!controls.configured || /^\d{4}$/.test(pin)),
-  );
+  let pinReady = $derived(controls === false || (controls === true && /^\d{4}$/.test(pin)));
   let retryRequested = false;
 
   function focusGateAction() {
@@ -28,8 +26,8 @@
   }
 
   $effect(() => {
-    const state = controls.kind;
-    if (!retryRequested || state === 'loading') return;
+    const currentControls = controls;
+    if (!retryRequested || currentControls === undefined) return;
     retryRequested = false;
     void tick().then(focusGateAction);
   });
@@ -56,45 +54,46 @@
 </script>
 
 <section bind:this={gate} class="owner-gate" aria-labelledby="owner-gate-title">
-  {#if controls.kind === 'loading'}
+  {#if controls === undefined}
     <h1 id="owner-gate-title">Opening profiles…</h1>
     <p role="status">Checking parental controls…</p>
-  {:else if controls.kind === 'failed'}
-    <h1 id="owner-gate-title">Owner access</h1>
-    <p role="alert">Owner couldn’t be opened. Try again.</p>
-    <Button variant="primary" label="Try again" onclick={retryParentalControls} />
   {:else}
     <h1 id="owner-gate-title">Owner access</h1>
-    <p>
-      {controls.configured ? 'Enter the Owner PIN to continue.' : 'Continue to the Owner profile.'}
-    </p>
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        if (pinReady) void establishOwner();
-      }}
-    >
-      {#if controls.configured}
-        <PinInput
-          id="owner-gate-pin"
-          label="Owner PIN"
-          bind:value={pin}
-          focusOnMount
-          invalid={denied}
-          onvalue={() => (denied = false)}
-          oncomplete={() => void establishOwner()}
+    {#if controls === null}
+      <p role="alert">Owner couldn’t be opened. Try again.</p>
+      <Button variant="primary" label="Try again" onclick={retryParentalControls} />
+    {:else}
+      <p>
+        {controls ? 'Enter the Owner PIN to continue.' : 'Continue to the Owner profile.'}
+      </p>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          if (pinReady) void establishOwner();
+        }}
+      >
+        {#if controls}
+          <PinInput
+            id="owner-gate-pin"
+            label="Owner PIN"
+            bind:value={pin}
+            focusOnMount
+            invalid={denied}
+            onvalue={() => (denied = false)}
+            oncomplete={() => void establishOwner()}
+          />
+        {/if}
+        {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
+        {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
+        <Button
+          type="submit"
+          variant="primary"
+          label={establishing ? 'Opening…' : 'Use Owner'}
+          disabled={establishing || !pinReady}
+          busy={establishing}
         />
-      {/if}
-      {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
-      {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
-      <Button
-        type="submit"
-        variant="primary"
-        label={establishing ? 'Opening…' : 'Use Owner'}
-        disabled={establishing || !pinReady}
-        busy={establishing}
-      />
-    </form>
+      </form>
+    {/if}
   {/if}
 </section>
 

@@ -1,10 +1,5 @@
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
-import type {
-  ConnectionsView,
-  LibraryServiceFailure,
-  ProfileDirectoryView,
-  TitleRef,
-} from './libraryServiceProtocol';
+import type { ConnectionsView, ProfileDirectoryView, TitleRef } from './libraryServiceProtocol';
 import {
   legacyProfileIdentity,
   persistentProfileIdentity,
@@ -39,10 +34,6 @@ const UNBORN_KID = {
 };
 export type ActiveProfileMode = 'owner' | 'kid' | 'visitor';
 
-export type ParentalControlsState =
-  | { readonly kind: 'loading' }
-  | { readonly kind: 'ready'; readonly configured: boolean }
-  | { readonly kind: 'failed'; readonly error: Readonly<LibraryServiceFailure> | undefined };
 export type ProfileTransitionResult =
   | { readonly outcome: 'success' }
   | { readonly outcome: 'denied' }
@@ -378,26 +369,23 @@ export class ProfileModeCoordinator {
   }
 
   /** A security decision is current only while its exact Connections selection is authoritative. */
-  get parentalControls(): ParentalControlsState {
-    if (this.#preview) return { kind: 'ready', configured: true };
+  get parentalControls(): boolean | null | undefined {
+    if (this.#preview) return true;
     const snapshot = this.#connections.snapshot;
     if (snapshot.connection === 'ready' && snapshot.value)
-      return { kind: 'ready', configured: snapshot.value.parentalPinConfigured };
-    if (snapshot.connection === 'failed' || snapshot.connection === 'closed')
-      return { kind: 'failed', error: snapshot.error };
-    return { kind: 'loading' };
+      return snapshot.value.parentalPinConfigured;
+    return snapshot.connection === 'failed' || snapshot.connection === 'closed' ? null : undefined;
   }
 
   /** Undefined while parental-control authority is opening or failed; callers therefore remain fail-closed. */
   get parentalPinConfigured(): boolean | undefined {
-    const state = this.parentalControls;
-    return state.kind === 'ready' ? state.configured : undefined;
+    return this.parentalControls ?? undefined;
   }
 
   /** Reacquire only the failed household security selection; the ready service and its other views stay intact. */
   retryParentalControls(): boolean {
     this.#assertOpen();
-    if (this.parentalControls.kind !== 'failed') return false;
+    if (this.parentalControls !== null) return false;
     return this.#connections.rebind();
   }
 
