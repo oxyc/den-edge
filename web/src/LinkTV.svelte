@@ -61,6 +61,7 @@
   let receiveFailure = $state<string | null>(null);
   let receiving = $state(false);
   let receiveController = new AbortController();
+  let linkController: AbortController | null = null;
   const receiveAddress = $derived(
     receiveCode ? tvLink(__DEN_TV_WEB_ORIGIN__ || location.origin, receiveCode) : null,
   );
@@ -81,10 +82,15 @@
   /** The twelve characters the TV shows. */
   const whole = $derived(parseCode(code) !== null);
 
-  async function keep(result: Extract<JoinResult, { handover: unknown }>): Promise<boolean> {
+  async function keep(
+    result: Extract<JoinResult, { handover: unknown }>,
+    current: () => boolean = () => true,
+  ): Promise<boolean> {
+    if (!current()) return false;
     const ticket = result.handover.grantTicket;
     if (ticket) {
       const redeemed = await guestGrants.redeemTicket(ticket);
+      if (!current()) return false;
       if ('failure' in redeemed) {
         receiveFailure =
           redeemed.failure === 'full'
@@ -95,6 +101,7 @@
         return false;
       }
     }
+    if (!current()) return false;
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
     const { host, hostDeviceId, libraryKey, linkKey } = result.handover;
     links.add(result.inboxKey, {
@@ -108,48 +115,65 @@
 
   async function showTVLink() {
     receiveController.abort();
-    receiveController = new AbortController();
+    const controller = new AbortController();
+    receiveController = controller;
+    const current = () => receiveController === controller && !controller.signal.aborted;
     receiveCode = null;
     receiveFailure = null;
     receiving = true;
     const result = await receive({
       label: thisDevice.name,
       deviceId,
-      signal: receiveController.signal,
-      onCode: (next) => (receiveCode = next),
+      signal: controller.signal,
+      onCode: (next) => {
+        if (current()) receiveCode = next;
+      },
     });
+    if (!current()) return;
     receiving = false;
     if ('error' in result) {
-      if (!receiveController.signal.aborted)
-        receiveFailure =
-          result.error === 'insecure'
-            ? 'Linking needs a secure HTTPS connection.'
-            : result.error === 'throttled'
-              ? 'Too many links were started. Wait a minute and try again.'
-              : 'That link didn’t finish. Show a new QR and try again.';
+      receiveFailure =
+        result.error === 'insecure'
+          ? 'Linking needs a secure HTTPS connection.'
+          : result.error === 'throttled'
+            ? 'Too many links were started. Wait a minute and try again.'
+            : 'That link didn’t finish. Show a new QR and try again.';
       return;
     }
-    await keep(result);
+    await keep(result, current);
   }
 
   onMount(() => {
     if (__DEN_TV__) void showTVLink();
-    return () => receiveController.abort();
+    return () => {
+      receiveController.abort();
+      linkController?.abort();
+    };
   });
 
   async function link() {
+    linkController?.abort();
+    const controller = new AbortController();
+    linkController = controller;
+    const current = () => linkController === controller && !controller.signal.aborted;
     busy = true;
     failure = null;
-    const result = await join(code, { label: thisDevice.name, deviceId });
+    const result = await join(code, {
+      label: thisDevice.name,
+      deviceId,
+      signal: controller.signal,
+    });
+    if (!current()) return;
     busy = false;
     if ('error' in result) {
       failure = result.error;
       return;
     }
-    await keep(result);
+    await keep(result, current);
   }
 
   function browse() {
+    linkController?.abort();
     links.browse();
     // The TV QR makes onboarding taller than one screen. A click scrolls its button into view; reset that scroll
     // before remote navigation starts, or the spatial navigator cannot see the app's top navigation.
