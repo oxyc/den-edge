@@ -5,18 +5,19 @@
 
   /** The remembered profile, drawn in the switcher's place until the coordinator can open the real switcher. */
   let { choice }: { choice: ProfileChoice } = $props();
+  const switchLabel = $derived(
+    i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+      value: choice.name,
+    }),
+  );
 </script>
 
 <button
   class="profile-trigger mobile-hidden"
   type="button"
   disabled
-  aria-label={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
-    value: choice.name,
-  })}
-  title={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
-    value: choice.name,
-  })}
+  aria-label={switchLabel}
+  title={switchLabel}
 >
   <ProfileAvatar {choice} compact neutral />
 </button>

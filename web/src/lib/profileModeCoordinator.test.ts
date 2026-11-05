@@ -1967,15 +1967,12 @@ describe('household parental-control selection authority', () => {
       return true;
     });
 
-    expect(first.coordinator.parentalControls).toMatchObject({
-      kind: 'failed',
-      error: { message: 'control selection failed' },
-    });
+    expect(first.coordinator.parentalControls).toBeNull();
     expect(first.coordinator.parentalPinConfigured).toBeUndefined();
     expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
     expect(first.coordinator.retryParentalControls()).toBe(true);
     expect(first.rebind).toHaveBeenCalledOnce();
-    expect(first.coordinator.parentalControls).toEqual({ kind: 'loading' });
+    expect(first.coordinator.parentalControls).toBeUndefined();
     expect(first.coordinator.retryParentalControls()).toBe(false);
 
     lease.snapshot = {
@@ -1986,7 +1983,7 @@ describe('household parental-control selection authority', () => {
         parentalPinDelivery: 'synced',
       } as ConnectionsView,
     };
-    expect(first.coordinator.parentalControls).toEqual({ kind: 'ready', configured: true });
+    expect(first.coordinator.parentalControls).toBe(true);
     expect(first.coordinator.parentalPinConfigured).toBe(true);
     expect(first.coordinator.establishUnprotectedOwner()).toBe(false);
     first.coordinator.dispose();

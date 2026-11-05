@@ -191,7 +191,20 @@
           : false,
         householdExposesModel: profiles?.session ? 'model' in profiles.session.household : false,
         servicesExposeModel: profiles?.session ? 'model' in profiles.session.services : false,
-        parentalControls: profiles?.parentalControls,
+        parentalControls: profiles
+          ? {
+              kind:
+                profiles.parentalControls === null
+                  ? 'failed'
+                  : profiles.parentalControls === undefined
+                    ? 'loading'
+                    : 'ready',
+              ...(typeof profiles.parentalControls === 'boolean'
+                ? { configured: profiles.parentalControls }
+                : {}),
+              ...(profiles.parentalControls === null ? { error: connectionsSnapshot.error } : {}),
+            }
+          : null,
         connectionSubscriptions,
         connectionRetries,
         connectionReleases,

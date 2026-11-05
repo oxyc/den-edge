@@ -260,28 +260,24 @@ describe('new episodes', () => {
     let now = 0;
     const news = new NewEpisodes(() => now);
     const episode = { series: DEXTER, season: 2, episode: 1 };
-    expect(news.due(episode)).toBe(true);
     const empty = news.claim(episode)!;
     expect(news.claim(episode)).toBeNull();
-    expect(news.complete(episode, empty, 0)).toBe(true);
+    expect(news.settle(empty, 0)).toBe(true);
     expect(news.has(episode)).toBe(false);
     now = RECHECK_MS - 1;
-    expect(news.due(episode)).toBe(false);
+    expect(news.claim(episode)).toBeNull();
     now = RECHECK_MS;
-    expect(news.due(episode)).toBe(true);
-
     const failed = news.claim(episode)!;
-    expect(news.release(episode, failed)).toBe(true);
-    expect(news.due(episode)).toBe(true);
+    expect(news.settle(failed)).toBe(true);
     const abandoned = news.claim(episode)!;
-    news.releaseAll();
-    expect(news.complete(episode, abandoned, 3)).toBe(false);
+    news.retain();
+    expect(news.settle(abandoned, 3)).toBe(false);
     expect(news.has(episode)).toBe(false);
 
     const found = news.claim(episode)!;
-    expect(news.complete(episode, found, 3)).toBe(true);
+    expect(news.settle(found, 3)).toBe(true);
     expect(news.has(episode)).toBe(true);
-    expect(news.due(episode)).toBe(false);
+    expect(news.claim(episode)).toBeNull();
     news.clear(episode);
     expect(news.has(episode)).toBe(false);
   });
@@ -295,8 +291,8 @@ describe('new episodes', () => {
 
     news.retain([kept]);
 
-    expect(news.owns(kept, keptClaim)).toBe(true);
-    expect(news.owns(gone, goneClaim)).toBe(false);
+    expect(news.owns(keptClaim)).toBe(true);
+    expect(news.owns(goneClaim)).toBe(false);
     expect(news.claim(gone)).not.toBeNull();
   });
 

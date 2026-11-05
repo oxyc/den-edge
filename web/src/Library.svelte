@@ -2,7 +2,7 @@
   import { i18n } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Billboard from './components/Billboard.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
@@ -793,6 +793,7 @@
   });
   /** Which released episodes have sources. Searched for afresh, never more than every half hour each. */
   const newEpisodes = new NewEpisodes();
+  onDestroy(() => newEpisodes.retain());
   /**
    * For each released episode a viewer is caught up to, the episode that plays: their Continue Watching entry, which
    * is the released one itself week to week and where they are in a season that came out at once (S2E1, never the
@@ -828,75 +829,67 @@
   );
   let newEpisodesVersion = $state(0);
   const SEARCH_SETTLE_MS = 2_000;
-  // A retained Home owns source discovery only while it is visible. Leaving it, switching profiles or destroying its
-  // route releases every provisional claim; a late request can then return, but cannot publish into the new owner.
-  $effect(() => {
-    const ownsSearches = active && route.page === 'library';
-    if (!ownsSearches) newEpisodes.releaseAll();
-    return () => newEpisodes.releaseAll();
-  });
   $effect(() => {
     void airingTick;
     const candidates = unstartedEpisodes;
     newEpisodes.retain(candidates);
     const library = downloadsModel;
-    if (!active || route.page !== 'library' || !library || !candidates.length) return;
-    const claimed = candidates.flatMap(
-      (episode): Array<{ episode: NewEpisode; claim: NewEpisodeClaim }> => {
-        const claim = newEpisodes.claim(episode);
-        return claim ? [{ episode, claim }] : [];
-      },
-    );
+    if (!active || route.page !== 'library') {
+      newEpisodes.retain();
+      return;
+    }
+    if (!library || !candidates.length) return;
+    const claimed: Array<[NewEpisode, NewEpisodeClaim]> = [];
+    for (const episode of candidates) {
+      const claim = newEpisodes.claim(episode);
+      if (claim) claimed.push([episode, claim]);
+    }
     if (!claimed.length) return;
     void (async () => {
       // Continue Watching is published a moment after the layout that lets it name a resume point: let it land, then
       // search only what is still unstarted. Nothing waits on this search.
       await new Promise((resolve) => setTimeout(resolve, SEARCH_SETTLE_MS));
-      for (const { episode: released, claim } of claimed) {
-        if (!newEpisodes.owns(released, claim)) continue;
-        const key = NewEpisodes.key(released);
-        if (!untrack(() => unstartedEpisodes).some((one) => NewEpisodes.key(one) === key)) {
-          newEpisodes.release(released, claim);
-          continue;
-        }
-        const imdb = await session.content
-          .query({ kind: 'title.external-id', title: { type: 'tv', id: released.series } })
-          .then((answer) => (answer.imdbId.state === 'ready' ? answer.imdbId.value : null))
-          .catch(() => null);
-        if (!newEpisodes.owns(released, claim)) continue;
-        if (!imdb) {
-          newEpisodes.release(released, claim);
-          continue;
-        }
-        // A followed series need not be on any shelf, so it may not be named yet; its slide and card need the name.
+      const check = async (released: NewEpisode, claim: NewEpisodeClaim) => {
+        if (
+          !newEpisodes.owns(claim) ||
+          !untrack(() => unstartedEpisodes).some(
+            (one) => NewEpisodes.key(one) === NewEpisodes.key(released),
+          )
+        )
+          return null;
+        const imdb = (
+          await session.content.query({
+            kind: 'title.external-id',
+            title: { type: 'tv', id: released.series },
+          })
+        ).imdbId;
+        if (!newEpisodes.owns(claim) || imdb.state !== 'ready') return null;
+        // A followed series need not be on any shelf, so its slide and card may still need a name.
         if (!session.displayTitle({ type: 'tv', id: released.series }))
-          await nameLibraryTitles(session, [{ type: 'tv', id: released.series }]).catch(() => {});
-        if (!newEpisodes.owns(released, claim)) continue;
+          await nameLibraryTitles(session, [{ type: 'tv', id: released.series }]);
+        if (!newEpisodes.owns(claim)) return null;
         const title = session.displayTitle({ type: 'tv', id: released.series });
-        if (!title) {
-          newEpisodes.release(released, claim);
-          continue;
-        }
+        if (!title) return null;
         const date = airingEpisode(
           airings.get(released.series),
           released.season,
           released.episode,
         )?.date;
-        const checked = await recheckEpisode(
+        return recheckEpisode(
           library,
-          imdb,
+          imdb.value,
           released.season,
           { number: released.episode, name: '', ...(date ? { airDate: date } : {}) },
           title,
-        ).catch(() => null);
-        // A failed, unknown or limited rebuild is no verdict about this just-released episode. Release its claim so
-        // the next real Home trigger can retry; do not turn failure into a self-sustaining retry loop here.
-        if (typeof checked !== 'number') {
-          newEpisodes.release(released, claim);
+        );
+      };
+      for (const [released, claim] of claimed) {
+        const checked = await check(released, claim).catch(() => null);
+        // Only an authoritative source count consumes the throttle. A stale owner cannot publish it.
+        if (typeof checked !== 'number' || !newEpisodes.settle(claim, checked)) {
+          newEpisodes.settle(claim);
           continue;
         }
-        if (!newEpisodes.complete(released, claim, checked)) continue;
-        // Found with sources: the verdict its series' poster then asks about (`availability.follow`).
         if (checked) availability.confirm({ type: 'tv', id: released.series }, released, true);
         newEpisodesVersion++;
       }

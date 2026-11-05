@@ -26,6 +26,15 @@
   let returnFocus = $state<HTMLElement>();
 
   const active = $derived(profiles.activeChoice);
+  const pinConfigured = $derived(profiles.parentalPinConfigured);
+  const switchLabel = $derived(
+    i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
+      value: active?.name ?? i18n.phrase('profile'),
+    }),
+  );
+  const pendingLabel = $derived(
+    pending ? i18n.format('actions.use', 'Use {value}', { value: pending.name }) : '',
+  );
 
   function focusPinAfterPaint() {
     requestAnimationFrame(() =>
@@ -48,6 +57,13 @@
 
   function open(event: MouseEvent) {
     show(event.currentTarget as HTMLElement, event.detail === 0);
+  }
+
+  function backToProfiles() {
+    pending = null;
+    settingPin = false;
+    firstPin = null;
+    pin = '';
   }
 
   onMount(() =>
@@ -165,12 +181,8 @@
   class:mobile-hidden={hideOnMobile}
   type="button"
   aria-haspopup="dialog"
-  aria-label={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
-    value: active?.name ?? i18n.phrase('profile'),
-  })}
-  title={i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
-    value: active?.name ?? i18n.phrase('profile'),
-  })}
+  aria-label={switchLabel}
+  title={switchLabel}
   onclick={open}
 >
   <ProfileAvatar choice={active} compact neutral />
@@ -218,64 +230,40 @@
     {#if failed}<p class="denied" role="alert">
         The profile switch couldn’t be completed. Try again.
       </p>{/if}
-    {#if pending && settingPin}
-      <button
-        class="back"
-        type="button"
-        disabled={switching}
-        onclick={() => ((pending = null), (settingPin = false), (firstPin = null), (pin = ''))}
+    {#if pending}
+      <button class="back" type="button" disabled={switching} onclick={backToProfiles}
         >← Profiles</button
       >
       <div class="pending-profile">
         <ProfileAvatar choice={pending} />
-        <div>
-          <strong>{firstPin === null ? 'Set an Owner PIN' : 'Enter the PIN again'}</strong>
-          <span>Needed to switch from {pending.name} back to the Owner</span>
-        </div>
+        {#if settingPin}
+          <div>
+            <strong>{firstPin === null ? 'Set an Owner PIN' : 'Enter the PIN again'}</strong>
+            <span>Needed to switch from {pending.name} back to the Owner</span>
+          </div>
+        {:else}
+          <div><strong>{pending.name}</strong><span>Owner approval required</span></div>
+        {/if}
       </div>
-      {#key firstPin === null}
-        <PinInput
-          id="owner-pin"
-          label={firstPin === null ? 'New Owner PIN' : 'Confirm Owner PIN'}
-          bind:value={pin}
-          autocomplete="new-password"
-          invalid={mismatch}
-          engaged={!switching}
-          onvalue={() => (mismatch = false)}
-          oncomplete={(value) => void setPin(value)}
-        />
-      {/key}
-      {#if mismatch}<p class="denied" role="alert">
-          Those PINs didn’t match. Choose one again.
-        </p>{/if}
-      <div class="actions">
-        <button
-          class="primary"
-          type="button"
-          disabled={switching || !/^\d{4}$/.test(pin)}
-          onclick={() => void setPin(pin)}
-          >{switching
-            ? 'Saving…'
-            : firstPin === null
-              ? 'Continue'
-              : i18n.format('actions.use', 'Use {value}', { value: pending.name })}</button
-        >
-        <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
-      </div>
-    {:else if pending}
-      <button
-        class="back"
-        type="button"
-        disabled={switching}
-        onclick={() => ((pending = null), (pin = ''))}>← Profiles</button
-      >
-      <div class="pending-profile">
-        <ProfileAvatar choice={pending} />
-        <div><strong>{pending.name}</strong><span>Owner approval required</span></div>
-      </div>
-      {#if profiles.parentalPinConfigured === undefined}
+      {#if settingPin}
+        {#key firstPin === null}
+          <PinInput
+            id="owner-pin"
+            label={firstPin === null ? 'New Owner PIN' : 'Confirm Owner PIN'}
+            bind:value={pin}
+            autocomplete="new-password"
+            invalid={mismatch}
+            engaged={!switching}
+            onvalue={() => (mismatch = false)}
+            oncomplete={(value) => void setPin(value)}
+          />
+        {/key}
+        {#if mismatch}<p class="denied" role="alert">
+            Those PINs didn’t match. Choose one again.
+          </p>{/if}
+      {:else if pinConfigured === undefined}
         <p role="status">Checking parental controls…</p>
-      {:else if profiles.parentalPinConfigured}
+      {:else if pinConfigured}
         <PinInput
           id="owner-pin"
           label="Owner PIN"
@@ -288,17 +276,25 @@
         {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
       {/if}
       <div class="actions">
-        <button
-          class="primary"
-          type="button"
-          disabled={profiles.parentalPinConfigured === undefined ||
-            switching ||
-            (profiles.parentalPinConfigured === true && !/^\d{4}$/.test(pin))}
-          onclick={() => void switchTo(pending!)}
-          >{switching
-            ? 'Switching…'
-            : i18n.format('actions.use', 'Use {value}', { value: pending.name })}</button
-        >
+        {#if settingPin}
+          <button
+            class="primary"
+            type="button"
+            disabled={switching || !/^\d{4}$/.test(pin)}
+            onclick={() => void setPin(pin)}
+            >{switching ? 'Saving…' : firstPin === null ? 'Continue' : pendingLabel}</button
+          >
+        {:else}
+          <button
+            class="primary"
+            type="button"
+            disabled={pinConfigured === undefined ||
+              switching ||
+              (pinConfigured === true && !/^\d{4}$/.test(pin))}
+            onclick={() => void switchTo(pending!)}
+            >{switching ? 'Switching…' : pendingLabel}</button
+          >
+        {/if}
         <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
       </div>
     {:else}
