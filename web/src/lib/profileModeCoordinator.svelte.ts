@@ -42,23 +42,7 @@ export type ActiveProfileMode = 'owner' | 'kid' | 'visitor';
 export type ParentalControlsState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly configured: boolean }
-  | { readonly kind: 'failed'; readonly error: Readonly<LibraryServiceFailure> };
-
-const PARENTAL_CONTROLS_LOADING: ParentalControlsState = Object.freeze({ kind: 'loading' });
-const PARENTAL_CONTROLS_WITH_PIN: ParentalControlsState = Object.freeze({
-  kind: 'ready',
-  configured: true,
-});
-const PARENTAL_CONTROLS_WITHOUT_PIN: ParentalControlsState = Object.freeze({
-  kind: 'ready',
-  configured: false,
-});
-const PARENTAL_CONTROLS_UNAVAILABLE: Readonly<LibraryServiceFailure> = Object.freeze({
-  code: 'unavailable',
-  message: 'parental controls are unavailable',
-  retryable: true,
-});
-
+  | { readonly kind: 'failed'; readonly error: Readonly<LibraryServiceFailure> | undefined };
 export type ProfileTransitionResult =
   | { readonly outcome: 'success' }
   | { readonly outcome: 'denied' }
@@ -395,18 +379,13 @@ export class ProfileModeCoordinator {
 
   /** A security decision is current only while its exact Connections selection is authoritative. */
   get parentalControls(): ParentalControlsState {
-    if (this.#preview) return PARENTAL_CONTROLS_WITH_PIN;
+    if (this.#preview) return { kind: 'ready', configured: true };
     const snapshot = this.#connections.snapshot;
     if (snapshot.connection === 'ready' && snapshot.value)
-      return snapshot.value.parentalPinConfigured
-        ? PARENTAL_CONTROLS_WITH_PIN
-        : PARENTAL_CONTROLS_WITHOUT_PIN;
+      return { kind: 'ready', configured: snapshot.value.parentalPinConfigured };
     if (snapshot.connection === 'failed' || snapshot.connection === 'closed')
-      return {
-        kind: 'failed',
-        error: snapshot.error ?? PARENTAL_CONTROLS_UNAVAILABLE,
-      };
-    return PARENTAL_CONTROLS_LOADING;
+      return { kind: 'failed', error: snapshot.error };
+    return { kind: 'loading' };
   }
 
   /** Undefined while parental-control authority is opening or failed; callers therefore remain fail-closed. */

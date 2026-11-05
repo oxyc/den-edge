@@ -60,11 +60,9 @@
     <h1 id="owner-gate-title">Opening profiles…</h1>
     <p role="status">Checking parental controls…</p>
   {:else if controls.kind === 'failed'}
-    <h1 id="owner-gate-title">Parental controls couldn’t be checked</h1>
-    <p role="alert">The Owner profile remains hidden. Check your connection and try again.</p>
-    <div class="actions">
-      <Button variant="primary" label="Try again" onclick={retryParentalControls} />
-    </div>
+    <h1 id="owner-gate-title">Owner access</h1>
+    <p role="alert">Owner couldn’t be opened. Try again.</p>
+    <Button variant="primary" label="Try again" onclick={retryParentalControls} />
   {:else}
     <h1 id="owner-gate-title">Owner access</h1>
     <p>
@@ -89,15 +87,13 @@
       {/if}
       {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
       {#if failed}<p class="denied" role="alert">Owner couldn’t be opened. Try again.</p>{/if}
-      <div class="actions">
-        <Button
-          type="submit"
-          variant="primary"
-          label={establishing ? 'Opening…' : 'Use Owner'}
-          disabled={establishing || !pinReady}
-          busy={establishing}
-        />
-      </div>
+      <Button
+        type="submit"
+        variant="primary"
+        label={establishing ? 'Opening…' : 'Use Owner'}
+        disabled={establishing || !pinReady}
+        busy={establishing}
+      />
     </form>
   {/if}
 </section>
@@ -131,10 +127,6 @@
   form {
     display: grid;
     gap: 10px;
-  }
-
-  .actions {
-    justify-self: end;
   }
 
   .denied {

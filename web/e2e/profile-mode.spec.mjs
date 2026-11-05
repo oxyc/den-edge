@@ -250,12 +250,8 @@ test('a failed lazy parental-controls selection stays closed and a fresh subscri
 }) => {
   await open(page, true, '?pin=1234&connections=fail');
 
-  await expect(
-    page.getByRole('heading', { name: 'Parental controls couldn’t be checked' }),
-  ).toBeVisible();
-  await expect(page.getByRole('alert')).toHaveText(
-    'The Owner profile remains hidden. Check your connection and try again.',
-  );
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText('Owner couldn’t be opened. Try again.');
   await expect(page.getByText('Checking parental controls…')).toHaveCount(0);
   await expect(page.locator('[data-mode]')).toHaveCount(0);
   await expect(page.getByLabel('Owner PIN')).toHaveCount(0);
@@ -280,9 +276,7 @@ test('a failed selection never trusts its retained no-PIN value and retry restor
 }) => {
   await open(page, true, '?pin=none&connections=stale&orphan');
 
-  await expect(
-    page.getByRole('heading', { name: 'Parental controls couldn’t be checked' }),
-  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
   await expect(page.getByText('Continue to the Owner profile.')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Use Owner' })).toHaveCount(0);
   await expect
