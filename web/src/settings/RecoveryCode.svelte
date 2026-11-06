@@ -61,8 +61,8 @@
   let phase = $state(0);
   let prepared = $state<PreparedCode | null>(null);
   let typed = $state('');
-  // The first character carries the status tone; the rest is the localized phrase key.
   let message = $state('');
+  let messageBad = $state(false);
   let copyResult = $state('');
   let codeEl = $state<HTMLElement>();
   let pendingCleanup = $state<string | null>(null);
@@ -75,6 +75,11 @@
     failed: 'Couldn’t save the code. Check that this device is on your network.',
     waits: 'Available after the library update.',
   };
+
+  function showMessage(text: string, bad = true) {
+    message = text;
+    messageBad = bad;
+  }
 
   async function make() {
     const current = ++attempt;
@@ -110,7 +115,7 @@
       }
       if (outcome !== 'begun') {
         phase = 0;
-        message = `0${failures[outcome as keyof typeof failures] ?? failures.failed}`;
+        showMessage(failures[outcome as keyof typeof failures] ?? failures.failed);
         return;
       }
       prepared = {
@@ -122,7 +127,7 @@
       if (current !== attempt) return;
       console.warn('den: a recovery code could not be made', error);
       phase = 0;
-      message = `0${error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed}`;
+      showMessage(error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed);
     }
   }
 
@@ -130,7 +135,7 @@
     const made = prepared;
     if (!made) return;
     if (typed.replace(/[\s-]/g, '').toUpperCase() !== made.code.slice(-4)) {
-      message = '0That isn’t the last group of your code. Check what you wrote down.';
+      showMessage('That isn’t the last group of your code. Check what you wrote down.');
       return;
     }
     phase = 3;
@@ -156,15 +161,16 @@
     active = null;
     if (outcome === 'confirmed') {
       end();
-      message = '1Your recovery code is on.';
+      showMessage('Your recovery code is on.', false);
     } else if (outcome === 'lost') {
       end();
       phase = 5;
-      message = '0That pending recovery code was replaced. Make a new one.';
+      showMessage('That pending recovery code was replaced. Make a new one.');
     } else {
       phase = 0;
-      message =
-        '0Couldn’t save that. Check that this device is on your network, then confirm again.';
+      showMessage(
+        'Couldn’t save that. Check that this device is on your network, then confirm again.',
+      );
     }
   }
 
@@ -192,19 +198,20 @@
     active = null;
     if (outcome === 'failed') {
       phase = 0;
-      message = '0Couldn’t cancel that recovery code setup. Check your connection and try again.';
+      showMessage('Couldn’t cancel that recovery code setup. Check your connection and try again.');
       return;
     }
     pendingCleanup = null;
     phase = outcome === 'lost' ? 5 : 0;
-    if (outcome === 'confirmed') message = '1Your recovery code was already saved and remains on.';
+    if (outcome === 'confirmed')
+      showMessage('Your recovery code was already saved and remains on.', false);
     else if (outcome === 'lost')
-      message = '0That pending recovery code was replaced. Make a new one.';
+      showMessage('That pending recovery code was replaced. Make a new one.');
   }
 
   async function off() {
     message = '';
-    if (!(await run(() => owned.disableRecovery()))) message = `0${failures.failed}`;
+    if (!(await run(() => owned.disableRecovery()))) showMessage(failures.failed);
   }
 
   /**
@@ -370,8 +377,8 @@
     </p>
   {/if}
 {/if}
-{#if message}<p class="status" class:bad={message[0] === '0'} role="status">
-    {i18n.phrase(message.slice(1))}
+{#if message}<p class="status" class:bad={messageBad} role="status">
+    {i18n.phrase(message)}
   </p>{/if}
 <p class="foot">
   A recovery code opens your library on a new device when none of yours is at hand. It’s made and
