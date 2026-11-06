@@ -1273,8 +1273,6 @@ function historyItem(value: unknown): value is HistoryItem {
   );
 }
 
-const HISTORY_PAGE_KEYS = ['revision', 'filter', 'total', 'facets', 'items', 'nextCursor'] as const;
-
 function historyFilter(value: unknown): value is HistoryFilter {
   return (
     record(value) &&

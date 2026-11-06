@@ -340,11 +340,10 @@ export class LibraryAdminAuthority {
 
   #serializeRecovery<T>(locator: string, work: () => Promise<T>): Promise<T> {
     const result = (this.#recoveryTails.get(locator) ?? Promise.resolve()).then(work);
-    let tail: Promise<void>;
     const clear = () => {
       if (this.#recoveryTails.get(locator) === tail) this.#recoveryTails.delete(locator);
     };
-    tail = result.then(clear, clear);
+    const tail = result.then(clear, clear);
     this.#recoveryTails.set(locator, tail);
     return result;
   }

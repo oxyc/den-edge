@@ -1,6 +1,7 @@
 <script lang="ts">
   import RecoveryCode from '../src/settings/RecoveryCode.svelte';
   import type { LibraryModel } from '../src/lib/libraryModel.svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import '../src/app.css';
 
   type Confirmation = 'committed' | 'pending' | 'lost';
@@ -11,7 +12,7 @@
   // Fixture coordination is read explicitly through `recoveryFixture`, not rendered reactively.
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const held = new Map<string, (outcome: Confirmation) => void>();
-  const pending = new Set<string>();
+  const pending = new SvelteSet<string>();
   const events: Array<{ kind: 'confirm' | 'abandon'; locator: string }> = [];
 
   const controls = {
