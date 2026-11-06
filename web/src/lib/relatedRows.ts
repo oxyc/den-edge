@@ -35,11 +35,12 @@ async function drawRefs(
   refs: Ref[],
   cards: Title[],
   content: ContentServiceClientPort,
+  signal?: AbortSignal,
 ): Promise<Title[]> {
   const byKey = new Map(cards.map((t) => [keyOf(t), t]));
   const missing = refs.filter((ref) => !byKey.get(keyOf(ref))?.posterPath);
   const normalized = missing.length
-    ? (await content.query({ kind: 'titles', titles: missing })).titles
+    ? (await content.query({ kind: 'titles', titles: missing }, signal)).titles
     : [];
   const drawn = new Map(normalized.map((title) => [keyOf(title), title]));
   return refs.flatMap((ref) => drawn.get(keyOf(ref)) ?? byKey.get(keyOf(ref)) ?? []);
@@ -114,42 +115,50 @@ export function moreLikeThisRow(
    * The titles an atlas list names: its `ids`, of the seed's type, or — for a mixed row, where the answer has one —
    * its `mixed` list, each with its own type.
    */
-  async function idsFrom(source: 'similar' | 'neighbours'): Promise<Ref[]> {
+  async function idsFrom(source: 'similar' | 'neighbours', signal?: AbortSignal): Promise<Ref[]> {
     try {
-      const result = await content.query({
-        kind: 'atlas.related',
-        query: {
-          operation: 'list',
-          source,
-          title: { type: self.type, id: self.id },
-          mixed,
-          limit: source === 'neighbours' ? NEIGHBOURS : similarLimit,
+      const result = await content.query(
+        {
+          kind: 'atlas.related',
+          query: {
+            operation: 'list',
+            source,
+            title: { type: self.type, id: self.id },
+            mixed,
+            limit: source === 'neighbours' ? NEIGHBOURS : similarLimit,
+          },
         },
-      });
+        signal,
+      );
       return result.answer.state === 'ready' && result.answer.value.operation === 'refs'
         ? result.answer.value.refs
         : [];
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return [];
     }
   }
 
   /** The one requested seed's row, or null when this Atlas does not implement the affinity contract. */
-  async function suggested(): Promise<Ref[] | null> {
+  async function suggested(signal?: AbortSignal): Promise<Ref[] | null> {
     try {
-      const result = await content.query({
-        kind: 'atlas.related',
-        query: {
-          operation: 'suggest',
-          title: { type: self.type, id: self.id },
-          mixed,
-          limit: similarLimit,
+      const result = await content.query(
+        {
+          kind: 'atlas.related',
+          query: {
+            operation: 'suggest',
+            title: { type: self.type, id: self.id },
+            mixed,
+            limit: similarLimit,
+          },
         },
-      });
+        signal,
+      );
       return result.answer.state === 'ready' && result.answer.value.operation === 'refs'
         ? result.answer.value.refs
         : null;
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return null;
     }
   }
@@ -158,45 +167,52 @@ export function moreLikeThisRow(
    * The next page of atlas's mixed affinity row as cards, drawn (`drawRefs`). `null` when this atlas has no such
    * route (the POST's ids are read instead), `undefined` once the row has nothing left.
    */
-  async function drawCards(): Promise<Title[] | null | undefined> {
+  async function drawCards(signal?: AbortSignal): Promise<Title[] | null | undefined> {
     try {
-      const result = await content.query({
-        kind: 'atlas.related',
-        query: {
-          operation: 'cards',
-          title: { type: self.type, id: self.id },
-          skip: cardsSkip,
-          limit: CHUNK,
+      const result = await content.query(
+        {
+          kind: 'atlas.related',
+          query: {
+            operation: 'cards',
+            title: { type: self.type, id: self.id },
+            skip: cardsSkip,
+            limit: CHUNK,
+          },
         },
-      });
+        signal,
+      );
       if (result.answer.state !== 'ready' || result.answer.value.operation !== 'cards')
         return cardsSkip === 0 ? null : undefined;
       const { refs, titles } = result.answer.value;
       if (refs.length === 0) return undefined;
       cardsSkip += refs.length;
       const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
-      return drawRefs(wanted, titles, content);
-    } catch {
+      return drawRefs(wanted, titles, content, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return cardsSkip === 0 ? null : undefined;
     }
   }
 
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
-  async function drawQueued(source: 'similar' | 'neighbours'): Promise<Title[] | undefined> {
-    queue ??= await idsFrom(source);
+  async function drawQueued(
+    source: 'similar' | 'neighbours',
+    signal?: AbortSignal,
+  ): Promise<Title[] | undefined> {
+    queue ??= await idsFrom(source, signal);
     const wanted = queue.filter((ref) => !seen.has(keyOf(ref))).slice(0, CHUNK);
     const last = wanted[wanted.length - 1];
     queue = last ? queue.slice(queue.indexOf(last) + 1) : [];
     if (wanted.length === 0) return undefined;
-    return (await content.query({ kind: 'titles', titles: wanted })).titles;
+    return (await content.query({ kind: 'titles', titles: wanted }, signal)).titles;
   }
 
   /** Where the row goes once atlas's own answer for it has run out: the wider sources, or nowhere. */
   const after: Source = fallback ? 'neighbours' : 'done';
 
-  async function step(): Promise<Title[]> {
+  async function step(signal?: AbortSignal): Promise<Title[]> {
     if (source === 'unknown' && affinity && mixed) {
-      const found = await drawCards();
+      const found = await drawCards(signal);
       if (found !== null) {
         if (found) {
           source = 'cards';
@@ -206,25 +222,25 @@ export function moreLikeThisRow(
       }
     }
     if (source === 'cards') {
-      const found = await drawCards();
+      const found = await drawCards(signal);
       if (found) return found;
       source = after;
     }
     if (source === 'unknown') {
       queue = affinity
-        ? ((await suggested()) ?? (fallback ? await idsFrom('similar') : []))
-        : await idsFrom('similar');
+        ? ((await suggested(signal)) ?? (fallback ? await idsFrom('similar', signal) : []))
+        : await idsFrom('similar', signal);
       source = queue.length > 0 ? 'similar' : fallback ? 'recommended' : 'done';
       if (source !== 'similar') queue = undefined; // atlas has nothing for this title: TMDB alone
     }
     if (source === 'similar') {
-      const found = await drawQueued('similar');
+      const found = await drawQueued('similar', signal);
       if (found) return found;
       source = after;
       queue = undefined;
     }
     if (source === 'neighbours') {
-      const found = await drawQueued('neighbours');
+      const found = await drawQueued('neighbours', signal);
       if (found) return found;
       source = 'recommended'; // atlas is exhausted: TMDB pads the end
     }
@@ -235,14 +251,18 @@ export function moreLikeThisRow(
       }
       try {
         const page = (
-          await content.query({
-            kind: 'catalog.page',
-            catalog: { kind: 'recommendations', title: { type: self.type, id: self.id } },
-            page: recommendedPage++,
-          })
+          await content.query(
+            {
+              kind: 'catalog.page',
+              catalog: { kind: 'recommendations', title: { type: self.type, id: self.id } },
+              page: recommendedPage++,
+            },
+            signal,
+          )
         ).titles;
         if (page.length > 0) return page;
-      } catch {
+      } catch (error) {
+        if (signal?.aborted) throw error;
         // TMDB has nothing deeper, or isn't answering: the row is as long as it gets.
       }
       source = 'done';
@@ -258,9 +278,9 @@ export function moreLikeThisRow(
     aside: affinity
       ? { label: 'Explore', href: searchHref('', { chips: [fansId(self)] }) }
       : { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) },
-    load: async () => {
+    load: async (_page, signal) => {
       while (source !== 'done') {
-        const fresh = (await step()).filter((t) => {
+        const fresh = (await step(signal)).filter((t) => {
           if (seen.has(keyOf(t))) return false;
           seen.add(keyOf(t));
           return true;
