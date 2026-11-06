@@ -377,6 +377,77 @@ test('Samsung start failure is handled without an unhandled playback promise or 
   expect(JSON.stringify([...routed.reports, ...warnings])).not.toContain('play-secret');
 });
 
+test('Samsung AVPlay replays a completed last episode in the same mount', async ({ page }) => {
+  await installAvplayInitScript(page);
+  const routed = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+  await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(0);
+
+  await page.evaluate(() => window.__avplayFixture.end());
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.state())).toBe('IDLE');
+  expect(await remoteKey(page, 'Unidentified', 415)).toBe(true);
+  await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(2);
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(2);
+  await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(0);
+  await expect(video).not.toHaveJSProperty('ended', true);
+
+  await page.evaluate(() => window.__avplayFixture.end());
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.state())).toBe('IDLE');
+  await page.getByRole('button', { name: 'Play from beginning' }).click();
+  await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(3);
+  await expect.poll(async () => (await callsNamed(page, 'seekTo')).at(-1)?.[1]).toBe(0);
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(3);
+  await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(0);
+
+  // The fixture has no successor. Replay stays in this session, cancels completion ownership, and can repeat.
+  expect(routed.sessionRequests).toHaveLength(1);
+  await expect(page.getByTestId('player-close-count')).toHaveText('0');
+});
+
+test('Samsung AVPlay reports a completed-player replay preparation failure', async ({ page }) => {
+  await installAvplayInitScript(page);
+  const routed = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+  await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(0);
+  await page.evaluate(() => window.__avplayFixture.end());
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.state())).toBe('IDLE');
+  await video.evaluate((element) => {
+    element.addEventListener(
+      'error',
+      () => {
+        window.__replayFailureSnapshot = {
+          ended: element.ended,
+          paused: element.paused,
+          currentTime: element.currentTime,
+        };
+      },
+      { once: true },
+    );
+  });
+  await page.evaluate(() => window.__avplayFixture.failNextPrepare());
+  await page.getByRole('button', { name: 'Play from beginning' }).click();
+  await expect(
+    page.getByText('The connection was gone too long for this to carry on.'),
+  ).toBeVisible();
+  expect(await page.evaluate(() => window.__replayFailureSnapshot)).toMatchObject({
+    ended: true,
+    paused: true,
+    currentTime: 0,
+  });
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+
+  // Recovery owns a fresh AVPlay mount. A completed progress value does not seek the replacement back to its end.
+  await page.getByRole('button', { name: /Resume from/ }).click();
+  await expect.poll(() => routed.sessionRequests).toHaveLength(2);
+  await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(3);
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(2);
+  await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(0);
+});
+
 test('Samsung AVPlay forwards completion and distinguishes connection failures from format refusal', async ({
   page,
 }) => {
