@@ -673,23 +673,23 @@ export async function abandonPending(
   locator: string,
 ): Promise<PendingAbandonOutcome> {
   if (!(await ctx.log.readToHead())) return 'failed';
-  const outcome: { value: Exclude<PendingAbandonOutcome, 'failed'> } = { value: 'lost' };
+  let outcome: Exclude<PendingAbandonOutcome, 'failed'> = 'lost';
   const settled = await update(ctx, (entries) => {
     const entry = entries.get(locator);
     if (!entry) {
-      outcome.value = 'lost';
+      outcome = 'lost';
       return null;
     }
     if (entry.state === 'live') {
-      outcome.value = 'confirmed';
+      outcome = 'confirmed';
       return null;
     }
-    outcome.value = 'abandoned';
+    outcome = 'abandoned';
     return { [locator]: null };
   });
   if (!settled) return 'failed';
-  if (outcome.value === 'abandoned' || outcome.value === 'lost') await remove(ctx, locator);
-  return outcome.value;
+  if ((outcome as PendingAbandonOutcome) !== 'confirmed') await remove(ctx, locator);
+  return outcome as PendingAbandonOutcome;
 }
 
 /** §6 *Turning off*: the live entry nulled, then deleted at den-edge. */

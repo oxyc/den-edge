@@ -249,21 +249,20 @@ export function moreLikeThisRow(
         recommendedPage = 2;
         return detail.more;
       }
-      const pageNumber = recommendedPage;
       const page = (
         await content.query(
           {
             kind: 'catalog.page',
             catalog: { kind: 'recommendations', title: { type: self.type, id: self.id } },
-            page: pageNumber,
+            page: recommendedPage,
           },
           signal,
         )
       ).titles;
       // A provider may ignore cancellation. The disposed Pager owns this ask, so do not advance this row's cursor or
       // admit its cards after that ownership has ended.
-      if (signal?.aborted) throw new Error('related recommendations were cancelled');
-      recommendedPage = pageNumber + 1;
+      if (signal?.aborted) throw signal;
+      recommendedPage++;
       if (page.length > 0) return page;
       source = 'done';
     }

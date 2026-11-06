@@ -147,8 +147,22 @@ describe('library service client protocol', () => {
       update([{ id: 'living-room', name: 'Living Room', kind: 'tv', memberToken: 'secret' }]),
     ).toMatchObject({ ok: false });
     expect(
+      update([{ id: 'living-room', name: 'Living Room', kind: 'tv', 'id,name': true }]),
+    ).toMatchObject({ ok: false });
+    expect(
       update(Array.from({ length: 513 }, (_, id) => ({ id: String(id), name: 'TV', kind: 'tv' }))),
     ).toMatchObject({ ok: false });
+
+    for (const extra of ['kin', 'ind'])
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'subscribe',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: extra,
+          subscriptionId: extra,
+          selection: { kind: 'devices', [extra]: true },
+        }),
+      ).toMatchObject({ ok: false });
   });
 
   it('accepts a handshake and semantic, idempotent commands', () => {
