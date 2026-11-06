@@ -42,6 +42,7 @@ export const PARAMETER_FALLBACKS = {
   'player.stream': 'Stream: {stream}',
   'player.audioTrack': 'Audio track: {track}',
   'player.subtitles': 'Subtitles: {subtitles}',
+  'player.subtitleLoadFailed': 'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
   'player.adjustSubtitleTiming': 'Adjust subtitle timing ({offset}s)',
   'player.resetSubtitleTiming': 'Reset subtitle timing ({offset}s)',
   'player.next': 'Next: {title}',

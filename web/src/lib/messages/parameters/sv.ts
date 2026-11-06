@@ -43,6 +43,8 @@ export const parameters = {
   'player.stream': 'Ström: {stream}',
   'player.audioTrack': 'Ljudspår: {track}',
   'player.subtitles': 'Undertexter: {subtitles}',
+  'player.subtitleLoadFailed':
+    'Det gick inte att läsa in undertexterna {subtitle}. Dina nuvarande undertexter är oförändrade.',
   'player.adjustSubtitleTiming': 'Justera undertextsynkronisering ({offset}s)',
   'player.resetSubtitleTiming': 'Återställ undertextsynkronisering ({offset}s)',
   'player.next': 'Nästa: {title}',

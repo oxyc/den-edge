@@ -1347,6 +1347,8 @@
     // `Date.now()` throughout (`startupAskedAt`'s own clock), never mixed with `performance.now()`'s epoch.
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
+    subtitleSelectionGeneration += 1;
+    subtitleLoadFailure = null;
     session = result;
     directWithoutDenSubtitles = result.external === true && !compatibleSubtitles;
     if (!compatibleSubtitles) pendingDirectSubtitleRestore = undefined;
@@ -1445,21 +1447,39 @@
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
     // named was never loaded.
     if (session && subtitleChoice) {
-      const loaded = await loadExternalSubtitle(session, subtitleChoice);
-      const fallback = selectedSubtitle(session)?.fallbackTorboxTrack;
-      if (!loaded && fallback !== undefined) {
-        console.warn(
-          `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(session), torboxRequested: fallback })}`,
-        );
-        const preparing = showTransition('Subtitles failed—trying built-in…');
-        const moved = await begin(
-          { filename: session.release.filename, subtitleTrack: fallback },
-          extra,
-          session,
-          'direct',
-        );
-        if (moved !== true) clearTransition(preparing);
-        return moved;
+      const loadingSession = session;
+      const loadingValue = subtitleChoice;
+      const loadingTrack = selectedSubtitle(loadingSession, loadingValue);
+      if (
+        loadingTrack?.source === 'opensubtitles' &&
+        loadingSession.loadExternalSubtitle &&
+        !loadingSession.externalSubtitles?.some((track) => track.value === loadingValue)
+      ) {
+        const selectionGeneration = ++subtitleSelectionGeneration;
+        const ownsLoad = () =>
+          session === loadingSession &&
+          subtitleChoice === loadingValue &&
+          selectionGeneration === subtitleSelectionGeneration;
+        const loaded = await loadExternalSubtitle(loadingSession, loadingValue, ownsLoad);
+        const fallback = loadingTrack.fallbackTorboxTrack;
+        if (!loaded && ownsLoad() && fallback !== undefined) {
+          const preparing = showTransition('Subtitles failed—trying built-in…');
+          const moved = await begin(
+            { filename: loadingSession.release.filename, subtitleTrack: fallback },
+            extra,
+            loadingSession,
+            'direct',
+          );
+          if (moved !== true) clearTransition(preparing);
+          return moved;
+        }
+        if (!loaded && ownsLoad()) {
+          subtitleChoice = null;
+          subtitleLoadFailedFlag = true;
+          subtitleLoadFailure = loadingTrack;
+          applySubtitles();
+          sendSubtitleChoice();
+        }
       }
     }
     castSubtitlePreparing = false;
@@ -3018,6 +3038,7 @@
   let subtitleResyncNotice = $state<string | null>(null);
   let subtitleResyncRequest: AbortController | undefined;
   let subtitleSelectionGeneration = 0;
+  let subtitleLoadFailure = $state.raw<NonNullable<Session['subtitles']>[number] | null>(null);
   const alignedUrls = new SvelteSet<string>();
   fades(
     () => subtitleResyncNotice,
@@ -3205,12 +3226,6 @@
     const language = selectedSubtitleLanguage();
     const sidecars = session?.externalSubtitles ?? [];
     const sidecar = sidecars.some((track) => track.value === choice);
-    const before = Array.from(video?.textTracks ?? []).map((track) => ({
-      kind: track.kind,
-      language: track.language,
-      label: track.label,
-      mode: track.mode,
-    }));
     if (hls) {
       const languageMatch =
         language === null
@@ -3253,44 +3268,6 @@
           ? 'showing'
           : 'disabled';
     }
-    const picked = selectedSubtitle();
-    console.info(
-      `[Den subtitles] ${JSON.stringify({
-        event: 'applied',
-        choice:
-          choice === null
-            ? 'off'
-            : (picked?.source ??
-              (picked?.torboxTrack === undefined ? 'opensubtitles' : 'built-in')),
-        language,
-        torboxRequested: picked?.torboxTrack ?? null,
-        torboxSelected: session?.torboxSubtitle ?? null,
-        offered:
-          session?.subtitles?.map((track) => ({
-            source:
-              track.source ?? (track.torboxTrack === undefined ? 'opensubtitles' : 'built-in'),
-            language: track.language,
-            name: track.name,
-            torboxTrack: track.torboxTrack ?? null,
-            delivery: track.delivery ?? (track.torboxTrack === undefined ? 'sidecar' : 'torbox'),
-            selected: subtitleValue(track) === choice,
-          })) ?? [],
-        hlsSelected: hls?.subtitleTrack ?? null,
-        hlsTracks:
-          hls?.subtitleTracks.map((track, index) => ({
-            index,
-            language: track.lang,
-            name: track.name,
-          })) ?? [],
-        textTracksBefore: before,
-        textTracksAfter: textTracks.map((track) => ({
-          kind: track.kind,
-          language: track.language,
-          label: track.label,
-          mode: track.mode,
-        })),
-      })}`,
-    );
   }
 
   function adjustSubtitleOffset(change: number) {
@@ -3344,9 +3321,13 @@
     return !castMode && nativeHls(document.createElement('video'));
   }
 
-  async function loadExternalSubtitle(current: Session, value: string): Promise<boolean> {
+  async function loadExternalSubtitle(
+    current: Session,
+    value: string,
+    ownsResult: () => boolean,
+  ): Promise<boolean> {
     const track = await current.loadExternalSubtitle?.(value);
-    if (!track || session !== current) return false;
+    if (!track || !ownsResult()) return false;
     // The loader owns and deduplicates blobs; this array is render state for the `<track>` children.
     current.externalSubtitles = [
       ...(current.externalSubtitles ?? []).filter((one) => one.value !== track.value),
@@ -3435,9 +3416,10 @@
   }
 
   async function chooseSubtitle(next: string | null): Promise<void> {
+    const selectionGeneration = ++subtitleSelectionGeneration;
+    subtitleLoadFailure = null;
+    subtitleResyncRequest?.abort();
     if (next !== subtitleChoice) {
-      subtitleSelectionGeneration += 1;
-      subtitleResyncRequest?.abort();
       subtitleResyncNotice = null;
       subtitleResyncOffset =
         session?.externalSubtitles?.find((track) => track.value === next)?.alignedOffset ?? 0;
@@ -3467,34 +3449,13 @@
     const current = session;
     const previous = subtitleChoice;
     const requested = selectedSubtitle(current, next);
-    console.info(
-      `[Den subtitles] ${JSON.stringify({
-        event: 'choice',
-        from:
-          previous === null
-            ? 'off'
-            : (selectedSubtitle(current, previous)?.source ??
-              (selectedSubtitle(current, previous)?.torboxTrack === undefined
-                ? 'opensubtitles'
-                : 'built-in')),
-        to:
-          next === null
-            ? 'off'
-            : (requested?.source ??
-              (requested?.torboxTrack === undefined ? 'opensubtitles' : 'built-in')),
-        language: requested?.language ?? null,
-        torboxRequested: requested?.torboxTrack ?? null,
-        torboxSelected: current?.torboxSubtitle ?? null,
-        replacesStream:
-          current?.external === true &&
-          (current.torboxSubtitle ?? undefined) !== requested?.torboxTrack,
-      })}`,
-    );
-    subtitleChoice = next;
+    const ownsLoad = () =>
+      session === current && selectionGeneration === subtitleSelectionGeneration;
     if (current?.external) {
-      const nextTrack = selectedSubtitle(current);
+      const nextTrack = selectedSubtitle(current, next);
       const nextTorBox = nextTrack?.torboxTrack;
       if ((current.torboxSubtitle ?? undefined) !== nextTorBox) {
+        subtitleChoice = next;
         const pending = showTransition('Switching subtitles…');
         restart(
           {
@@ -3508,22 +3469,28 @@
         return;
       }
     }
-    if (next && current) {
+    if (
+      next &&
+      current &&
+      requested?.source === 'opensubtitles' &&
+      current.loadExternalSubtitle &&
+      !current.externalSubtitles?.some((track) => track.value === next)
+    ) {
       const pending =
-        requested && requested.torboxTrack === undefined && current.loadExternalSubtitle
-          ? showTransition('Loading subtitles…')
-          : undefined;
+        requested.torboxTrack === undefined ? showTransition('Loading subtitles…') : undefined;
       let loaded = false;
       try {
-        loaded = await loadExternalSubtitle(current, next);
-      } catch (error) {
-        console.warn('A subtitle track could not be loaded.', error);
+        loaded = await loadExternalSubtitle(current, next, ownsLoad);
+      } catch {
+        /* The retry notice below owns this failure. */
       }
-      const fallback = selectedSubtitle(current)?.fallbackTorboxTrack;
+      if (!ownsLoad()) {
+        clearTransition(pending);
+        return;
+      }
+      const fallback = requested?.fallbackTorboxTrack;
       if (!loaded && fallback !== undefined) {
-        console.warn(
-          `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(current), torboxRequested: fallback })}`,
-        );
+        subtitleChoice = next;
         restart(
           { filename: current.release.filename, subtitleTrack: fallback },
           () => (subtitleChoice = previous),
@@ -3533,7 +3500,13 @@
         return;
       }
       clearTransition(pending);
+      if (!loaded) {
+        subtitleLoadFailedFlag = true;
+        subtitleLoadFailure = requested;
+        return;
+      }
     }
+    subtitleChoice = next;
     applySubtitles();
     sendSubtitleChoice();
   }
@@ -3985,6 +3958,8 @@
   function letGo() {
     const current = session;
     if (!current) return;
+    subtitleSelectionGeneration += 1;
+    subtitleLoadFailure = null;
     carryPosition();
     watcher?.stop();
     watcher = undefined;
@@ -4012,6 +3987,8 @@
   function finish() {
     if (ended) return;
     subtitleResyncRequest?.abort();
+    subtitleSelectionGeneration += 1;
+    subtitleLoadFailure = null;
     ended = true;
     if (tv) setTvPlaybackActive(false);
     clearInterval(timer);
@@ -4539,6 +4516,21 @@
     {/if}
     {#if subtitleResyncNotice}
       {@render banner(subtitleResyncNotice, { quiet: true })}
+    {/if}
+    {#if subtitleLoadFailure}
+      {@render banner(
+        i18n.format(
+          'player.subtitleLoadFailed',
+          'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
+          { subtitle: subtitleLabel(subtitleLoadFailure) },
+        ),
+        {
+          action: {
+            label: i18n.phrase('Try again'),
+            run: () => void chooseSubtitle(subtitleValue(subtitleLoadFailure!)),
+          },
+        },
+      )}
     {/if}
     {#if session}
       {#if swapped}
