@@ -3,34 +3,23 @@
      only, from the moment it is made until this screen closes; leaving before confirming ends it. -->
 <script lang="ts">
   import Button from '../components/Button.svelte';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import Confirm from './Confirm.svelte';
   import Loading from '../components/Loading.svelte';
   import { copyText } from '../lib/clipboard';
   import { derive, DeriveFailed, deviceCouldNot, newCode } from '../lib/recovery';
-  import type { RecoveryView } from '../lib/libraryServiceProtocol';
-  import type { Immutable } from '../lib/libraryModel.svelte';
+  import type {
+    LibraryQueryResult,
+    LibraryTaskResult,
+    RecoveryView,
+  } from '../lib/libraryServiceProtocol';
+  import type { Immutable, LibraryModel } from '../lib/libraryModel.svelte';
   import { i18n } from '../lib/i18n.svelte';
-  import type { RecoveryAbandonOutcome, RecoveryConfirmationOutcome } from './recoveryConfirmation';
 
   interface PreparedCode {
     code: string;
     locator: string;
-    createdAt: number;
-    lastGroup: string;
   }
-
-  interface NewCodeMaterial {
-    code: string;
-    locator: string;
-    wrapKey: Uint8Array<ArrayBuffer>;
-  }
-
-  const makeCodeMaterial = async (): Promise<NewCodeMaterial> => {
-    const made = await newCode();
-    const derived = await derive(made.data, { op: 'make' });
-    return { code: made.code, locator: derived.locator, wrapKey: derived.wrapKey };
-  };
 
   const toBase64url = (bytes: Uint8Array) =>
     btoa(String.fromCharCode(...bytes))
@@ -41,44 +30,44 @@
   let {
     view,
     ready,
-    seal,
-    begin,
-    confirm,
-    abandon,
-    disable,
-    makeCode = makeCodeMaterial,
+    authority,
+    run,
   }: {
     view?: Immutable<RecoveryView>;
     ready: boolean;
-    seal: (locator: string, wrapKey: string, createdAt: number) => Promise<string>;
-    begin: (locator: string, sealed: string, createdAt: number) => Promise<string>;
-    confirm: (locator: string, operationId: string) => Promise<RecoveryConfirmationOutcome>;
-    abandon: (locator: string, operationId: string) => Promise<RecoveryAbandonOutcome>;
-    disable: () => Promise<boolean>;
-    /** Controlled material source for the real component's browser race fixture. */
-    makeCode?: () => Promise<NewCodeMaterial>;
+    authority: LibraryModel;
+    run: (action: () => Promise<unknown>) => Promise<boolean>;
   } = $props();
+
+  // Settings keys this component by model identity. Every operation and late teardown cleanup stays on the authority
+  // that created this instance, even while the parent replaces its reactive prop.
+  const owned = untrack(() => authority);
+
+  async function abandon(locator: string) {
+    try {
+      const result = (await owned.abandonRecovery(locator)).result as Extract<
+        LibraryTaskResult,
+        { kind: 'recovery.abandon' }
+      >;
+      return result.outcome;
+    } catch {
+      return 'failed' as const;
+    }
+  }
 
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 
-  let phase = $state<'idle' | 'making' | 'show' | 'confirming' | 'cleanup' | 'lost'>('idle');
+  let phase = $state(0);
   let prepared = $state<PreparedCode | null>(null);
   let typed = $state('');
-  let message = $state<{ text: string; bad: boolean } | null>(null);
-  let copied = $state(false);
-  let manual = $state(false);
+  // The first character carries the status tone; the rest is the localized phrase key.
+  let message = $state('');
+  let copyResult = $state('');
   let codeEl = $state<HTMLElement>();
-  let attempt = 0;
-  let presentation = 0;
-  let confirming: { presentation: number; locator: string; operationId: string } | null = null;
-  let abandoning = $state.raw<{ presentation: number; locator: string } | null>(null);
   let pendingCleanup = $state<string | null>(null);
-
-  const operationId = () =>
-    [...crypto.getRandomValues(new Uint8Array(16))]
-      .map((value) => value.toString(16).padStart(2, '0'))
-      .join('');
+  let attempt = 0;
+  let active: string | null = null;
 
   const failures = {
     full: 'Den holds too many codes for this library just now. Try again in a minute.',
@@ -89,99 +78,91 @@
 
   async function make() {
     const current = ++attempt;
-    phase = 'making';
-    message = null;
-    copied = false;
-    manual = false;
+    phase = 1;
+    message = '';
+    copyResult = '';
     try {
-      const made = await makeCode();
+      const made = await newCode();
+      const derived = await derive(made.data, { op: 'make' });
       if (current !== attempt) {
-        made.wrapKey.fill(0);
+        derived.wrapKey.fill(0);
         return;
       }
       const createdAt = Date.now();
       let sealed: string;
       try {
-        sealed = await seal(made.locator, toBase64url(made.wrapKey), createdAt);
+        sealed = (
+          (await owned.sealRecovery(derived.locator, toBase64url(derived.wrapKey), createdAt))
+            .result as Extract<LibraryQueryResult, { kind: 'recovery.seal' }>
+        ).sealed;
       } finally {
-        made.wrapKey.fill(0);
+        derived.wrapKey.fill(0);
       }
-      const outcome = await begin(made.locator, sealed, createdAt);
+      const outcome = (
+        (await owned.beginRecovery(derived.locator, sealed, createdAt)).result as Extract<
+          LibraryTaskResult,
+          { kind: 'recovery.begin' }
+        >
+      ).outcome;
       if (current !== attempt) {
-        if (outcome === 'begun') await abandon(made.locator, operationId());
+        if (outcome === 'begun') await abandon(derived.locator);
         return;
       }
       if (outcome !== 'begun') {
-        phase = 'idle';
-        message = {
-          text: failures[outcome as keyof typeof failures] ?? failures.failed,
-          bad: true,
-        };
+        phase = 0;
+        message = `0${failures[outcome as keyof typeof failures] ?? failures.failed}`;
         return;
       }
       prepared = {
         code: made.code,
-        locator: made.locator,
-        createdAt,
-        lastGroup: made.code.slice(-4),
+        locator: derived.locator,
       };
       typed = '';
-      phase = 'show';
     } catch (error) {
       if (current !== attempt) return;
       console.warn('den: a recovery code could not be made', error);
-      phase = 'idle';
-      message = {
-        text: error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed,
-        bad: true,
-      };
+      phase = 0;
+      message = `0${error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed}`;
     }
   }
 
   async function save() {
     const made = prepared;
     if (!made) return;
-    if (typed.replace(/[\s-]/g, '').toUpperCase() !== made.lastGroup) {
-      message = {
-        text: 'That isn’t the last group of your code. Check what you wrote down.',
-        bad: true,
-      };
+    if (typed.replace(/[\s-]/g, '').toUpperCase() !== made.code.slice(-4)) {
+      message = '0That isn’t the last group of your code. Check what you wrote down.';
       return;
     }
-    phase = 'confirming';
-    message = null;
-    const owner = {
-      presentation: ++presentation,
-      locator: made.locator,
-      operationId: operationId(),
-    };
-    confirming = owner;
-    const outcome = await confirm(made.locator, owner.operationId).catch(
-      (): RecoveryConfirmationOutcome => ({ state: 'pending' }),
-    );
-    if (confirming !== owner || presentation !== owner.presentation) {
+    phase = 3;
+    message = '';
+    active = made.locator;
+    let outcome: 'confirmed' | 'lost' | 'failed' = 'failed';
+    try {
+      outcome = (
+        (await owned.confirmRecovery(made.locator)).result as Extract<
+          LibraryTaskResult,
+          { kind: 'recovery.confirm' }
+        >
+      ).outcome;
+    } catch {}
+    if (active !== made.locator) {
       // Teardown forgot the secret while this request owned the locator. A pending/unknown answer still needs the
       // exact authority's serialized, pending-only cleanup; a committed or lost answer is already final.
-      if (outcome.state === 'pending' || outcome.state === 'authority-replaced')
-        void abandon(owner.locator, operationId());
+      if (outcome === 'failed') void abandon(made.locator);
       return;
     }
-    confirming = null;
-    if (outcome.state === 'committed') {
+    active = null;
+    if (outcome === 'confirmed') {
       end();
-      message = { text: 'Your recovery code is on.', bad: false };
-    } else if (outcome.state === 'lost') {
+      message = '1Your recovery code is on.';
+    } else if (outcome === 'lost') {
       end();
-      phase = 'lost';
-      message = { text: 'That pending recovery code was replaced. Make a new one.', bad: true };
-    } else if (outcome.state === 'pending') {
-      phase = 'show';
-      message = {
-        text: 'Couldn’t save that. Check that this device is on your network, then confirm again.',
-        bad: true,
-      };
+      phase = 5;
+      message = '0That pending recovery code was replaced. Make a new one.';
     } else {
-      end();
+      phase = 0;
+      message =
+        '0Couldn’t save that. Check that this device is on your network, then confirm again.';
     }
   }
 
@@ -189,46 +170,39 @@
   function end() {
     prepared = null;
     typed = '';
-    phase = 'idle';
+    phase = 0;
   }
 
   async function cancel() {
     attempt++;
-    presentation++;
     const made = prepared;
     end();
     if (made) await cancelPending(made.locator);
   }
 
   async function cancelPending(locator: string) {
-    const owner = { presentation: ++presentation, locator };
-    abandoning = owner;
+    active = locator;
     pendingCleanup = locator;
-    phase = 'cleanup';
-    message = null;
-    const outcome = await abandon(locator, operationId()).catch((): RecoveryAbandonOutcome => ({
-      state: 'pending',
-    }));
-    if (abandoning !== owner || presentation !== owner.presentation) return;
-    abandoning = null;
-    if (outcome.state === 'pending') {
-      message = {
-        text: 'Couldn’t cancel that recovery code setup. Check your connection and try again.',
-        bad: true,
-      };
+    phase = 4;
+    message = '';
+    const outcome = await abandon(locator);
+    if (active !== locator || pendingCleanup !== locator) return;
+    active = null;
+    if (outcome === 'failed') {
+      phase = 0;
+      message = '0Couldn’t cancel that recovery code setup. Check your connection and try again.';
       return;
     }
     pendingCleanup = null;
-    phase = outcome.state === 'lost' ? 'lost' : 'idle';
-    if (outcome.state === 'committed')
-      message = { text: 'Your recovery code was already saved and remains on.', bad: false };
-    else if (outcome.state === 'lost')
-      message = { text: 'That pending recovery code was replaced. Make a new one.', bad: true };
+    phase = outcome === 'lost' ? 5 : 0;
+    if (outcome === 'confirmed') message = '1Your recovery code was already saved and remains on.';
+    else if (outcome === 'lost')
+      message = '0That pending recovery code was replaced. Make a new one.';
   }
 
   async function off() {
-    message = null;
-    if (!(await disable())) message = { text: failures.failed, bad: true };
+    message = '';
+    if (!(await run(() => owned.disableRecovery()))) message = `0${failures.failed}`;
   }
 
   /**
@@ -238,24 +212,22 @@
    */
   async function copy(code: string) {
     const result = await copyText(code, () => getSelection()?.selectAllChildren(codeEl!));
-    copied = result === 'copied';
-    manual = result === 'manual';
+    copyResult = result;
   }
 
   // Leaving with a code shown and not confirmed ends it; a closed tab leaves that to the next reconcile.
   onMount(() => () => {
     attempt++;
-    presentation++;
     const made = prepared;
     const cleanup = pendingCleanup;
-    const confirmationOwns = !!confirming && confirming.locator === made?.locator;
-    const abandonmentOwns = !!abandoning && abandoning.locator === (made?.locator ?? cleanup);
-    confirming = null;
-    abandoning = null;
+    const operationOwns =
+      (phase === 3 && active === made?.locator) ||
+      (phase === 4 && active === (made?.locator ?? cleanup));
+    active = null;
     end();
     pendingCleanup = null;
-    if (!confirmationOwns && !abandonmentOwns && (made || cleanup))
-      void abandon((made ?? { locator: cleanup! }).locator, operationId());
+    const locator = made?.locator ?? cleanup;
+    if (!operationOwns && locator) void abandon(locator);
   });
 
   const live = $derived(view?.live ?? null);
@@ -266,7 +238,7 @@
     {i18n.phrase(notice)}
   </p>{/each}
 
-{#if phase === 'show' || phase === 'confirming'}
+{#if prepared}
   {@const made = prepared!}
   <div class="code-screen">
     <p>
@@ -277,15 +249,15 @@
     <span class="actions">
       <Button
         variant="secondary"
-        label={copied ? 'Copied' : 'Copy'}
+        label={copyResult === 'copied' ? 'Copied' : 'Copy'}
         onclick={() => void copy(made.code)}
       />
     </span>
-    {#if manual}<p class="status" role="status">Select and copy the code.</p>{/if}
+    {#if copyResult === 'manual'}<p class="status" role="status">Select and copy the code.</p>{/if}
     <p class="small" role="status">
-      {copied ? 'Copied to your clipboard. ' : ''}Clipboard history and your system’s clipboard sync
-      can carry a copied code to other devices. Once the code is saved, copy something else to clear
-      it.
+      {copyResult === 'copied' ? 'Copied to your clipboard. ' : ''}Clipboard history and your
+      system’s clipboard sync can carry a copied code to other devices. Once the code is saved, copy
+      something else to clear it.
     </p>
     <form
       class="form"
@@ -307,35 +279,35 @@
       <Button
         type="submit"
         variant="primary"
-        label={phase === 'confirming' ? 'Saving…' : 'I’ve saved it'}
-        disabled={phase === 'confirming' || typed.trim().length < 4}
+        label={phase === 3 ? 'Saving…' : 'I’ve saved it'}
+        disabled={phase === 3 || typed.trim().length < 4}
       />
       <Button
         variant="secondary"
         label="Cancel"
-        disabled={phase === 'confirming'}
+        disabled={phase === 3}
         onclick={() => void cancel()}
       />
     </form>
   </div>
-{:else if phase === 'cleanup'}
-  <span class="actions">
-    <Button
-      variant="secondary"
-      label="Try again"
-      disabled={abandoning !== null}
-      onclick={() => pendingCleanup && void cancelPending(pendingCleanup)}
-    />
-  </span>
-{:else if phase === 'lost'}
+{:else if phase === 5}
   <span class="actions">
     <Button
       variant="secondary"
       label="Close"
       onclick={() => {
-        phase = 'idle';
-        message = null;
+        phase = 0;
+        message = '';
       }}
+    />
+  </span>
+{:else if pendingCleanup}
+  <span class="actions">
+    <Button
+      variant="secondary"
+      label="Try again"
+      disabled={phase === 4}
+      onclick={() => pendingCleanup && void cancelPending(pendingCleanup)}
     />
   </span>
 {:else if !ready}
@@ -361,7 +333,7 @@
     <p class="status">Off.</p>
   {/if}
   <div class="form">
-    {#if phase === 'making'}
+    {#if phase === 1}
       <!-- Argon2id can take seconds on a slow phone (§3): say it is working, up to its timeout. -->
       <Loading label="Working…" inline />
     {:else if live}
@@ -396,8 +368,8 @@
     </p>
   {/if}
 {/if}
-{#if message}<p class="status" class:bad={message.bad} role="status">
-    {i18n.phrase(message.text)}
+{#if message}<p class="status" class:bad={message[0] === '0'} role="status">
+    {i18n.phrase(message.slice(1))}
   </p>{/if}
 <p class="foot">
   A recovery code opens your library on a new device when none of yours is at hand. It’s made and

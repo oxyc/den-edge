@@ -2,42 +2,46 @@ import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork } from './network.mjs';
 
-const locator = (character) => character.repeat(32);
-
-async function make(page, lastGroup) {
+async function make(page) {
   await page.getByRole('button', { name: 'Make a recovery code' }).click();
-  await expect(page.locator('.code')).toBeVisible();
-  await page.getByRole('textbox', { name: 'The code’s last four characters' }).fill(lastGroup);
+  const code = page.locator('.code');
+  await expect(code).toBeVisible({ timeout: 30_000 });
+  const shown = (await code.textContent()).trim();
+  await page
+    .getByRole('textbox', { name: 'The code’s last four characters' })
+    .fill(shown.slice(-4));
+  return shown;
 }
 
 test('confirmation owns teardown and cannot publish into a newer ceremony', async ({ page }) => {
   await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);
-  await make(page, '1111');
+  await make(page);
   await page.getByRole('button', { name: 'I’ve saved it' }).click();
   await expect(page.getByRole('button', { name: 'Saving…' })).toBeDisabled();
 
+  const oldLocator = await page.evaluate(() => globalThis.recoveryFixture.held()[0]);
   await page.evaluate(() => {
     globalThis.recoveryFixture.unmount();
     globalThis.recoveryFixture.remount();
-    globalThis.recoveryFixture.confirmations([{ state: 'committed' }]);
+    globalThis.recoveryFixture.confirmations(['committed']);
   });
-  await make(page, '2222');
-  await page.evaluate(
-    ({ locator }) => globalThis.recoveryFixture.release(locator, { state: 'committed' }),
-    { locator: locator('a') },
-  );
-  await expect(page.locator('.code')).toHaveText('BBBB-BBBB-BBBB-BBBB-BBBB-2222');
+  const currentCode = await make(page);
+  await page.evaluate(({ locator }) => globalThis.recoveryFixture.release(locator, 'committed'), {
+    locator: oldLocator,
+  });
+  await expect(page.locator('.code')).toHaveText(currentCode);
   await expect(page.getByText('Your recovery code is on.')).toHaveCount(0);
   expect(await page.evaluate(() => globalThis.recoveryFixture.events())).toEqual([
-    { kind: 'confirm', locator: locator('a') },
+    { kind: 'confirm', locator: oldLocator },
   ]);
 
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByRole('button', { name: 'Make a recovery code' })).toBeVisible();
-  expect(await page.evaluate(() => globalThis.recoveryFixture.events())).toEqual([
-    { kind: 'confirm', locator: locator('a') },
-    { kind: 'abandon', locator: locator('b') },
-  ]);
+  const events = await page.evaluate(() => globalThis.recoveryFixture.events());
+  expect(events).toHaveLength(2);
+  expect(events[0]).toEqual({ kind: 'confirm', locator: oldLocator });
+  expect(events[1].kind).toBe('abandon');
+  expect(events[1].locator).not.toBe(oldLocator);
   expect(await page.evaluate(() => globalThis.recoveryFixture.held())).toEqual([]);
 });
 
@@ -45,33 +49,57 @@ test('a confirmation that remains pending after teardown gets authoritative clea
   page,
 }) => {
   await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);
-  await make(page, '1111');
+  await make(page);
   await page.getByRole('button', { name: 'I’ve saved it' }).click();
   await expect(page.getByRole('button', { name: 'Saving…' })).toBeDisabled();
 
-  await page.evaluate(() => {
-    globalThis.recoveryFixture.unmount();
-    globalThis.recoveryFixture.release('a'.repeat(32), { state: 'pending' });
-  });
+  const oldLocator = await page.evaluate(() => globalThis.recoveryFixture.held()[0]);
+  await page.evaluate(
+    ({ locator }) => {
+      globalThis.recoveryFixture.unmount();
+      globalThis.recoveryFixture.release(locator, 'pending');
+    },
+    { locator: oldLocator },
+  );
   await expect
     .poll(() => page.evaluate(() => globalThis.recoveryFixture.events()))
     .toEqual([
-      { kind: 'confirm', locator: locator('a') },
-      { kind: 'abandon', locator: locator('a') },
+      { kind: 'confirm', locator: oldLocator },
+      { kind: 'abandon', locator: oldLocator },
     ]);
   expect(await page.evaluate(() => globalThis.recoveryFixture.held())).toEqual([]);
+});
+
+test('failed cancellation stays visible and retries the same durable cleanup', async ({ page }) => {
+  await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);
+  await page.evaluate(() => globalThis.recoveryFixture.abandonments(['failed', 'abandoned']));
+  await make(page);
+  await page.getByRole('button', { name: 'Cancel' }).click();
+
+  await expect(
+    page.getByText(
+      'Couldn’t cancel that recovery code setup. Check your connection and try again.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+  const locator = await page.evaluate(() => globalThis.recoveryFixture.events()[0].locator);
+  expect(await page.evaluate(() => globalThis.recoveryFixture.pending())).toEqual([locator]);
+
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('button', { name: 'Make a recovery code' })).toBeVisible();
+  expect(await page.evaluate(() => globalThis.recoveryFixture.events())).toEqual([
+    { kind: 'abandon', locator },
+    { kind: 'abandon', locator },
+  ]);
+  expect(await page.evaluate(() => globalThis.recoveryFixture.pending())).toEqual([]);
 });
 
 test('failed and lost confirmation retain explicit recovery actions', async ({ page }) => {
   await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);
   await page.evaluate(() =>
-    globalThis.recoveryFixture.confirmations([
-      { state: 'pending' },
-      { state: 'committed' },
-      { state: 'lost' },
-    ]),
+    globalThis.recoveryFixture.confirmations(['pending', 'committed', 'lost']),
   );
-  await make(page, '1111');
+  await make(page);
   await page.getByRole('button', { name: 'I’ve saved it' }).click();
   await expect(
     page.getByText(
@@ -81,7 +109,7 @@ test('failed and lost confirmation retain explicit recovery actions', async ({ p
   await page.getByRole('button', { name: 'I’ve saved it' }).click();
   await expect(page.getByText('Your recovery code is on.')).toBeVisible();
 
-  await make(page, '2222');
+  await make(page);
   await page.getByRole('button', { name: 'I’ve saved it' }).click();
   await expect(
     page.getByText('That pending recovery code was replaced. Make a new one.'),

@@ -8,7 +8,7 @@
   import ContentSection from './settings/ContentSection.svelte';
   import ImportSection from './settings/ImportSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
-  import RecoveryCodeAuthority from './settings/RecoveryCodeAuthority.svelte';
+  import RecoveryCode from './settings/RecoveryCode.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
@@ -81,13 +81,11 @@
   // A retained Settings page can receive a replacement authority. Recovery is authority-scoped: release the old
   // view and read the replacement instead of carrying one library's status into another library's ceremony.
   $effect(() => {
-    const authority = model;
     if (__DEN_TV_LEGACY_JS_CORE__) return;
-    const lease = authority.recovery();
-    recoveryLease = lease;
+    const lease = (recoveryLease = model.recovery());
     return () => {
       lease.release();
-      if (recoveryLease === lease) recoveryLease = undefined;
+      recoveryLease = undefined;
     };
   });
   onDestroy(() => {
@@ -423,7 +421,7 @@
       />
       {#snippet recovery()}
         {#key model}
-          <RecoveryCodeAuthority authority={model} view={recoveryView} {ready} {run} />
+          <RecoveryCode authority={model} view={recoveryView} {ready} {run} />
         {/key}
       {/snippet}
       {#if !__DEN_TV_LEGACY_JS_CORE__}
