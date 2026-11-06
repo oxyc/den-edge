@@ -341,6 +341,79 @@ for (const width of [320, 390, 820, 1280]) {
   });
 }
 
+test('retained Settings replaces every household view and sends its next mutation to that authority', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { images: {}, results: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?authority-replacement`);
+
+  const openDevices = async () => {
+    const button = page.getByRole('button', { name: /Linked devices/ });
+    await expect(button).toBeVisible();
+    if ((await button.getAttribute('aria-expanded')) !== 'true') await button.click();
+    return page.getByRole('region', { name: 'Linked devices' });
+  };
+
+  let devices = await openDevices();
+  await expect(devices).toContainText('Living Room TV');
+  await expect(page.getByRole('button', { name: /SIMKL Not connected/ })).toBeVisible();
+
+  // Retry replaces the failed selector in place: there is still only one live connections subscription.
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.failConnections());
+  await expect(page.getByText('Couldn’t load your settings.')).toBeVisible();
+  await page.getByRole('button', { name: 'Try again' }).click();
+  devices = await openDevices();
+  await expect(devices).toContainText('Living Room TV');
+  let subscriptions = await page.evaluate(() =>
+    globalThis.fixtureSettingsAuthority.subscriptions(),
+  );
+  expect(subscriptions.primary.connections).toBe(1);
+  expect(subscriptions.primary.simkl).toBe(1);
+  expect(subscriptions.primary.recovery).toBe(1);
+
+  // Capture real old-authority publications before replacement, then deliver them after its leases are released.
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.holdOldSelections());
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.replace());
+  devices = await openDevices();
+  await expect(devices).toContainText('Kitchen TV');
+  await expect(devices).not.toContainText('Living Room TV');
+  await expect(page.getByRole('button', { name: /SIMKL Connected/ })).toBeVisible();
+
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.releaseOldSelections());
+  await expect(devices).toContainText('Kitchen TV');
+  await expect(page.getByRole('button', { name: /SIMKL Connected/ })).toBeVisible();
+  subscriptions = await page.evaluate(() => globalThis.fixtureSettingsAuthority.subscriptions());
+  expect(subscriptions.primary.connections ?? 0).toBe(0);
+  expect(subscriptions.primary.simkl ?? 0).toBe(0);
+  expect(subscriptions.primary.recovery ?? 0).toBe(0);
+  expect(subscriptions.replacement.connections).toBe(1);
+  expect(subscriptions.replacement.simkl).toBe(1);
+  expect(subscriptions.replacement.recovery).toBe(1);
+
+  await devices.getByRole('button', { name: 'Remove Kitchen TV' }).click();
+  await expect(
+    devices.getByRole('group', { name: 'Remove Kitchen TV from this list?' }),
+  ).toBeVisible();
+  await devices.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(devices).not.toContainText('Kitchen TV');
+  expect(await page.evaluate(() => globalThis.fixtureSettingsAuthority.commands())).toEqual({
+    primary: [],
+    replacement: ['device.remove'],
+  });
+
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.unmount());
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+  subscriptions = await page.evaluate(() => globalThis.fixtureSettingsAuthority.subscriptions());
+  expect(subscriptions.replacement.connections ?? 0).toBe(0);
+  expect(subscriptions.replacement.simkl ?? 0).toBe(0);
+  expect(subscriptions.replacement.recovery ?? 0).toBe(0);
+});
+
 test('saving a provider key validates it in the content Worker before storing it', async ({
   page,
 }) => {
