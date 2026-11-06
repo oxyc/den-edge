@@ -136,7 +136,7 @@
     phase = 3;
     message = '';
     active = made.locator;
-    let outcome: 'confirmed' | 'lost' | 'failed' = 'failed';
+    let outcome: 'confirmed' | 'lost' | 'failed';
     try {
       outcome = (
         (await owned.confirmRecovery(made.locator)).result as Extract<
@@ -144,7 +144,9 @@
           { kind: 'recovery.confirm' }
         >
       ).outcome;
-    } catch {}
+    } catch {
+      outcome = 'failed';
+    }
     if (active !== made.locator) {
       // Teardown forgot the secret while this request owned the locator. A pending/unknown answer still needs the
       // exact authority's serialized, pending-only cleanup; a committed or lost answer is already final.
