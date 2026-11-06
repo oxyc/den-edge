@@ -26,6 +26,8 @@
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const fixtureQuery = new URLSearchParams(location.search);
+  const replacesAuthority =
+    fixtureQuery.has('authority-replacement') || fixtureQuery.has('recovery-authority-replacement');
   let releaseRecoveryWrite = () => {};
   const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
     ? new Promise<void>((resolve) => (releaseRecoveryWrite = resolve))
@@ -194,7 +196,7 @@
     library.historyImports;
   const primaryModel = library.model;
   const { session } = library;
-  const replacementLibrary = fixtureQuery.has('recovery-authority-replacement')
+  const replacementLibrary = replacesAuthority
     ? fixtureLibraryService({
         log,
         device: fixtureClock.device,
@@ -202,6 +204,7 @@
       })
     : undefined;
   let model = $state.raw<LibraryModel>(primaryModel);
+  let settingsMounted = $state(true);
   const recoveryAuthorityControls = {
     replace() {
       if (replacementLibrary) model = replacementLibrary.model;
@@ -227,6 +230,71 @@
       fixtureRecoveryAuthority?: typeof recoveryAuthorityControls;
     }
   ).fixtureRecoveryAuthority = recoveryAuthorityControls;
+  let heldConnections: ReturnType<typeof library.holdNextSelection> | undefined;
+  let heldSimkl: ReturnType<typeof library.holdNextSelection> | undefined;
+  let heldAuthorityPublication: Promise<void> | undefined;
+  const authorityReplacementControls = {
+    failConnections() {
+      library.failSelection('connections');
+    },
+    async holdOldSelections() {
+      heldConnections = library.holdNextSelection('connections');
+      heldSimkl = library.holdNextSelection('simkl');
+      heldAuthorityPublication = library.publish([{ kind: 'connections' }, { kind: 'simkl' }]);
+      await Promise.all([heldConnections.started, heldSimkl.started]);
+    },
+    replace() {
+      if (!replacementLibrary) return;
+      put(
+        row('keys', {
+          tmdb: { string: 'K1' },
+          parentalPIN: { string: '5678' },
+          simkl: { string: 'replacement-simkl-token' },
+        }),
+      );
+      put(
+        row('plugins', {
+          'https://replacement.example/manifest.json': { bool: true },
+        }),
+      );
+      put(
+        row('devices', {
+          [`${fixtureClock.device}.name`]: { string: 'Test Browser' },
+          [`${fixtureClock.device}.kind`]: { string: 'browser' },
+          [`${fixtureClock.device}.seen`]: { int: 20000 },
+          'cccc000000000003.name': { string: 'Kitchen TV' },
+          'cccc000000000003.kind': { string: 'tv' },
+          'cccc000000000003.seen': { int: 15000 },
+        }),
+      );
+      model = replacementLibrary.model;
+    },
+    async releaseOldSelections() {
+      heldConnections?.release();
+      heldSimkl?.release();
+      await heldAuthorityPublication;
+    },
+    subscriptions() {
+      return {
+        primary: library.activeSelections(),
+        replacement: replacementLibrary?.activeSelections() ?? {},
+      };
+    },
+    commands() {
+      return {
+        primary: [...library.commandKinds],
+        replacement: [...(replacementLibrary?.commandKinds ?? [])],
+      };
+    },
+    unmount() {
+      settingsMounted = false;
+    },
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureSettingsAuthority?: typeof authorityReplacementControls;
+    }
+  ).fixtureSettingsAuthority = authorityReplacementControls;
   // A second activity identity over the same fixture authority is enough to exercise Settings' live prop handoff:
   // it has its own retained import scope while the old model's in-flight semantic reply remains real.
   const replacementActivityModel = {
@@ -280,7 +348,7 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  {#if contentReady}<Settings
+  {#if contentReady && settingsMounted}<Settings
       {link}
       {model}
       {activityModel}

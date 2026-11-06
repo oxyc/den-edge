@@ -53,8 +53,13 @@ class FixtureService {
     operationIds: [] as string[],
   };
   readonly recoveryTasks: LibraryTask['kind'][] = [];
+  readonly commandKinds: LibraryCommand['kind'][] = [];
   readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
+  readonly #heldSelections = new Map<
+    LibrarySelection['kind'],
+    { started: () => void; gate: Promise<void> }
+  >();
   #nextSubscription = 0;
   #revision = 0;
   #ready = false;
@@ -107,6 +112,7 @@ class FixtureService {
     command: LibraryCommand,
     operationId: string = crypto.randomUUID(),
   ): Promise<LibraryServiceCommandResult> {
+    this.commandKinds.push(command.kind);
     const result = await this.authority.command(command, operationId);
     if (result.outcome === 'applied') {
       this.#revision++;
@@ -224,9 +230,29 @@ class FixtureService {
     );
   }
 
+  holdNextSelection(kind: LibrarySelection['kind']) {
+    let noteStarted = () => {};
+    const started = new Promise<void>((resolve) => (noteStarted = resolve));
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.#heldSelections.set(kind, { started: noteStarted, gate });
+    return { started, release };
+  }
+
+  activeSelections() {
+    const counts: Partial<Record<LibrarySelection['kind'], number>> = {};
+    for (const { selection } of this.#subscriptions.values())
+      counts[selection.kind] = (counts[selection.kind] ?? 0) + 1;
+    return counts;
+  }
+
   failDownloadsSelection() {
+    this.failSelection('downloads');
+  }
+
+  failSelection(kind: LibrarySelection['kind']) {
     for (const subscription of this.#subscriptions.values()) {
-      if (subscription.selection.kind !== 'downloads') continue;
+      if (subscription.selection.kind !== kind) continue;
       subscription.failed = true;
       this.#emitSelectionFailure(subscription);
     }
@@ -252,6 +278,12 @@ class FixtureService {
     if (selection.kind === 'downloads') await this.downloadsSelectionGate;
     if (subscription.failed) return this.#emitSelectionFailure(subscription);
     const value = await this.authority.select(selection);
+    const held = this.#heldSelections.get(selection.kind);
+    if (held) {
+      this.#heldSelections.delete(selection.kind);
+      held.started();
+      await held.gate;
+    }
     subscription.retained = value;
     listener({
       selection,
@@ -269,7 +301,7 @@ class FixtureService {
       version: this.version,
       error: {
         code: 'unavailable',
-        message: 'fixture Downloads selection failed',
+        message: `fixture ${subscription.selection.kind} selection failed`,
         retryable: true,
       },
     });
@@ -438,7 +470,11 @@ export function fixtureLibraryService({
     downloadsSelection: fixtureService.downloadsSelection,
     historyImports: fixtureService.historyImports,
     recoveryTasks: fixtureService.recoveryTasks,
+    commandKinds: fixtureService.commandKinds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
+    holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
+    activeSelections: () => fixtureService.activeSelections(),
+    failSelection: (kind: LibrarySelection['kind']) => fixtureService.failSelection(kind),
     failDownloadsSelection: () => fixtureService.failDownloadsSelection(),
   };
 }

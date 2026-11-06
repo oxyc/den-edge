@@ -75,35 +75,51 @@
     oninterfacelanguage?: (language: InterfaceLanguage) => void;
   } = $props();
 
-  let connectionsLease = $state.raw(untrack(() => model.connections()));
-  const simklLease = untrack(() => model.simkl());
-  let recoveryLease = $state.raw<ReturnType<LibraryModel['recovery']>>();
-  // A retained Settings page can receive a replacement authority. Recovery is authority-scoped: release the old
-  // view and read the replacement instead of carrying one library's status into another library's ceremony.
+  type SettingsAuthority = {
+    model: LibraryModel;
+    connections: ReturnType<LibraryModel['connections']>;
+    simkl?: ReturnType<LibraryModel['simkl']>;
+    recovery?: ReturnType<LibraryModel['recovery']>;
+  };
+  const acquireAuthority = (authority: LibraryModel): SettingsAuthority => ({
+    model: authority,
+    connections: authority.connections(),
+    ...(!__DEN_TV_LEGACY_JS_CORE__
+      ? { simkl: authority.simkl(), recovery: authority.recovery() }
+      : {}),
+  });
+  const releaseAuthority = (authority: SettingsAuthority) =>
+    [authority.connections, authority.simkl, authority.recovery].forEach((lease) =>
+      lease?.release(),
+    );
+  let authority = $state.raw(untrack(() => acquireAuthority(model)));
+  // A retained Settings page can receive a replacement household authority. Keep every lazy view and every command
+  // on one exact model identity: publish the complete replacement bundle, then retire all of the old subscriptions.
   $effect(() => {
-    if (__DEN_TV_LEGACY_JS_CORE__) return;
-    const lease = (recoveryLease = model.recovery());
-    return () => {
-      lease.release();
-      recoveryLease = undefined;
-    };
+    const replacement = model;
+    if (authority.model === replacement) return;
+    const previous = authority;
+    authority = untrack(() => acquireAuthority(replacement));
+    releaseAuthority(previous);
   });
-  onDestroy(() => {
-    connectionsLease?.release();
-    simklLease?.release();
+  onDestroy(() => releaseAuthority(authority));
+  const settings = $derived(authority.model.settings.value);
+  const connections = $derived(authority.connections.snapshot.value);
+  const simkl = $derived(authority.simkl?.snapshot.value);
+  const recoveryView = $derived.by(() => {
+    const view = authority.recovery?.snapshot.value;
+    return view ? structuredClone(view) : undefined;
   });
-  const settings = $derived(model.settings.value);
-  const connections = $derived(connectionsLease?.snapshot.value);
-  const simkl = $derived(simklLease?.snapshot.value);
-  const recoveryView = $derived(
-    recoveryLease?.snapshot.value ? structuredClone(recoveryLease.snapshot.value) : undefined,
-  );
   const effectivePreferences = $derived(preferences ? preferences.value : settings?.preferences);
   let localInterfaceLanguage = $state(
     untrack(() => (local ? readLocalInterfaceLanguage() : undefined)),
   );
-  const ready = $derived(!!settings && !!effectivePreferences && !!connections);
-  const loadError = $derived(model.settings.error ?? connectionsLease.snapshot.error);
+  const loadError = $derived(
+    authority.model.settings.error ?? authority.connections.snapshot.error,
+  );
+  // A failed selector may retain its previous value for diagnosis, but that stale authority must not keep Settings
+  // actionable or hide the retry control while a fresh binding is required.
+  const ready = $derived(!!settings && !!effectivePreferences && !!connections && !loadError);
   let retrying = $state(false);
   let failure = $state<string | null>(null);
   let saving = $state(false);
@@ -197,7 +213,7 @@
   async function patchPreferences(changes: PreferenceChanges): Promise<void> {
     if (!preferences) {
       const language = changes.interfaceLanguage;
-      await model.patchPreferences(changes);
+      await authority.model.patchPreferences(changes);
       if (language) {
         rememberFreshPresentationLanguage(language);
         if (local) {
@@ -212,7 +228,7 @@
     // guard would drop one sent to the control log. Only the maturity ceiling is not a profile preference (a
     // profile's policy lives in the directory) and stays on the control log.
     const { maturityCeiling, ...personal } = changes;
-    if ('maturityCeiling' in changes) await model.patchPreferences({ maturityCeiling });
+    if ('maturityCeiling' in changes) await authority.model.patchPreferences({ maturityCeiling });
     if (Object.keys(personal).length) await preferences.patch(personal);
     if (changes.interfaceLanguage) {
       rememberFreshPresentationLanguage(changes.interfaceLanguage);
@@ -220,7 +236,7 @@
     }
   }
   const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));
-  const removeLibraryDevice = (id: string) => run(() => model.removeDevice(id));
+  const removeLibraryDevice = (id: string) => run(() => authority.model.removeDevice(id));
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
   // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
@@ -255,11 +271,9 @@
     if (retrying) return;
     retrying = true;
     try {
-      if (model.connection === 'failed') await model.retry();
-      else if (connectionsLease.snapshot.error) {
-        connectionsLease.release();
-        connectionsLease = model.connections();
-      }
+      const current = authority;
+      if (current.model.connection === 'failed') await current.model.retry();
+      else if (current.connections.snapshot.error) current.connections.rebind();
     } catch {
       // The model snapshots keep the exact retryable failure and this surface stays available for another try.
     } finally {
@@ -268,7 +282,9 @@
   }
 
   async function saveSimkl(token: string | null): Promise<boolean> {
-    return run(() => (token ? model.connectSimkl(token) : model.disconnectSimkl()));
+    return run(() =>
+      token ? authority.model.connectSimkl(token) : authority.model.disconnectSimkl(),
+    );
   }
 
   const heldRemovals = $derived(simkl?.heldRemovals ?? []);
@@ -303,20 +319,24 @@
    */
   async function approveRemovals(): Promise<boolean> {
     const approvalId = simkl?.approvalId;
-    return !!approvalId && run(() => model.approveSimklRemovals(approvalId));
+    return !!approvalId && run(() => authority.model.approveSimklRemovals(approvalId));
   }
 
   // den-edge's assistant connections are asked about as `model`'s member. On a household split into profiles that is
   // the household, whose connections they are (profiles-v1 §6.1), while the page's own credential may be Owner's.
-  const assistantConnectionFetch = __DEN_TV_LEGACY_JS_CORE__
-    ? Promise.resolve(undefined)
-    : untrack(() => model.ready.then(() => model.relayMembership())).then(
+  const assistantConnectionFetch = $derived.by(() => {
+    if (__DEN_TV_LEGACY_JS_CORE__) return Promise.resolve(undefined);
+    const current = authority.model;
+    return current.ready
+      .then(() => current.relayMembership())
+      .then(
         (membership) => (membership ? householdAssistantFetch(membership) : undefined),
         (error: unknown) => {
           console.error('den: the library’s assistant membership could not be read', error);
           return undefined;
         },
       );
+  });
 
   const hasRecoveryCode = $derived(!!recoveryView?.live);
   const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
@@ -327,7 +347,12 @@
     linkKey: string,
     grantTicket?: string,
   ) {
-    const { result } = await model.sealPairingHandover(handoverKey, host, linkKey, grantTicket);
+    const { result } = await authority.model.sealPairingHandover(
+      handoverKey,
+      host,
+      linkKey,
+      grantTicket,
+    );
     if (result.kind !== 'pairing.handover') throw new Error('wrong pairing response');
     return result;
   }
@@ -383,8 +408,8 @@
           pinConfigured={connections?.parentalPinConfigured ?? false}
           {disabled}
           save={savePrefs}
-          savePin={(pin) => run(() => model.setParentalPin(pin))}
-          verifyPin={(pin) => model.verifyParentalPin(pin)}
+          savePin={(pin) => run(() => authority.model.setParentalPin(pin))}
+          verifyPin={(pin) => authority.model.verifyParentalPin(pin)}
           pinRemovable={!profileTopology}
         />
       {/if}
@@ -410,35 +435,39 @@
         devices={structuredClone(connections!.devices)}
         {selfId}
         {disabled}
-        setApiKey={(service, value) => run(() => model.setApiKey(service, value))}
-        installPlugin={(url) => run(() => model.installPlugin(url))}
-        removePlugin={(url) => run(() => model.removePlugin(url))}
-        setPluginTrust={(url, key) => run(() => model.setPluginTrust(url, key))}
-        removeServer={(server) => run(() => model.patchServer(server, null))}
+        setApiKey={(service, value) => run(() => authority.model.setApiKey(service, value))}
+        installPlugin={(url) => run(() => authority.model.installPlugin(url))}
+        removePlugin={(url) => run(() => authority.model.removePlugin(url))}
+        setPluginTrust={(url, key) => run(() => authority.model.setPluginTrust(url, key))}
+        removeServer={(server) => run(() => authority.model.patchServer(server, null))}
         {sealHandover}
         removeDevice={removeLibraryDevice}
         viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
       {#snippet recovery()}
-        {#key model}
-          <RecoveryCode authority={model} view={recoveryView} {ready} {run} />
+        {#key authority.model}
+          <RecoveryCode authority={authority.model} view={recoveryView} {ready} {run} />
         {/key}
       {/snippet}
       {#if !__DEN_TV_LEGACY_JS_CORE__}
         <SharingSection
           {link}
-          {model}
+          model={authority.model}
           plugins={pluginUrls}
           {routes}
           ready={ready && routesLoaded}
           {sealHandover}
           {selfId}
         />
-        <AssistantsSection
-          connectionFetch={assistantConnectionFetch}
-          revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
-          listGrants={link && !local ? () => model.assistantGrants() : undefined}
-        />
+        {#key authority.model}
+          <AssistantsSection
+            connectionFetch={assistantConnectionFetch}
+            revokeGrant={link && !local
+              ? (grant) => authority.model.revokeAssistant(grant)
+              : undefined}
+            listGrants={link && !local ? () => authority.model.assistantGrants() : undefined}
+          />
+        {/key}
         <ImportSection
           {ready}
           scope={activityModel}
@@ -460,7 +489,7 @@
         pendingActions={connections?.diagnostics.pendingChanges ?? 0}
         {edgeVersion}
         {libraryFormat}
-        setRemoteAccess={(credentials) => run(() => model.setRemoteAccess(credentials))}
+        setRemoteAccess={(credentials) => run(() => authority.model.setRemoteAccess(credentials))}
         viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
     {/if}
