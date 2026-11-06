@@ -133,8 +133,7 @@
       console.warn('den: Prime Video import could not confirm its save', error);
       owned.state = {
         step: 'failed',
-        message:
-          'Couldn’t confirm the import. Changes may already be saved; trying again is safe.',
+        message: 'Couldn’t confirm the import. Changes may already be saved; trying again is safe.',
         retry: { writes, operationId },
       };
     }

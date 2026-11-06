@@ -88,9 +88,7 @@ test('provider imports recover a lost semantic reply with the same durable opera
       { name: 'Viewing History.csv', mimeType: 'text/csv', buffer: Buffer.from(viewingHistory) },
     ]);
     await retryPrime.getByRole('button', { name: 'Import viewing history' }).click();
-    await expect(retryPrime.getByRole('alert')).toContainText(
-      'Changes may already be saved',
-    );
+    await expect(retryPrime.getByRole('alert')).toContainText('Changes may already be saved');
     await expect(retryPrime.getByText('Choose both files…')).toBeVisible();
     await expect(retryPrime.getByRole('button', { name: 'Try again' })).toBeVisible();
     expect(await page.evaluate(() => globalThis.fixtureHistoryImports)).toEqual({
@@ -116,9 +114,7 @@ test('provider imports recover a lost semantic reply with the same durable opera
       buffer: Buffer.from('Title,Date\nGoodrich,6/14/26\n'),
     });
     await netflix.getByRole('button', { name: 'Mark 1 film or series as seen' }).click();
-    await expect(netflix.getByRole('alert')).toContainText(
-      'Changes may already be saved',
-    );
+    await expect(netflix.getByRole('alert')).toContainText('Changes may already be saved');
     await expect(netflix.getByText('Choose file…')).toBeVisible();
     await netflix.getByRole('button', { name: 'Try again' }).click();
     await expect(netflix.getByRole('status')).toContainText('Saved 1 change');
