@@ -308,6 +308,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Den stops syncing your watch history with it, on every device.':
     'Den deja de sincronizar su historial de reproducciones con él, en todos los dispositivos.',
   'Den Subtitles': 'Den Subtitles',
+  'Couldn’t confirm the import. Changes may already be saved; trying again is safe.':
+    'No se pudo confirmar la importación. Es posible que los cambios ya se hayan guardado; es seguro intentarlo de nuevo.',
   'Den uses your own TMDB key (free at themoviedb.org) for search, and every title’s poster and details.':
     'Den usa su propia clave TMDB (gratuita en themoviedb.org) para realizar búsquedas y el póster y los detalles de cada título.',
   'Den will accept its index without checking a signature, as before.':

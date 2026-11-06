@@ -45,6 +45,7 @@
   let {
     link,
     model,
+    activityModel = model,
     content,
     local = false,
     onjoin,
@@ -56,6 +57,8 @@
   }: {
     link: Link | null;
     model: LibraryModel;
+    /** The active Owner activity library; household administration remains on `model`. */
+    activityModel?: LibraryModel;
     /**
      * The active profile's own preferences. Once the household has split, `model` is the household's control log, which
      * holds no preferences; all of them (region and services included) are in the profile's library, so they are read
@@ -333,14 +336,17 @@
     return 'outcome' in result ? result.outcome : 'failed';
   }
 
-  async function importHistory(items: Parameters<LibraryModel['importHistory']>[0]) {
-    const { result } = await model.importHistory(items);
+  async function importHistory(
+    items: Parameters<LibraryModel['importHistory']>[0],
+    operationId: string,
+  ) {
+    const { result } = await activityModel.importHistory(items, operationId);
     if (result.kind !== 'history.import') throw new Error('wrong history import response');
     return result;
   }
 
   async function exportHistory() {
-    const { result } = await model.exportHistory();
+    const { result } = await activityModel.exportHistory();
     if (result.kind !== 'history.export') throw new Error('wrong history export response');
     return result;
   }
@@ -448,8 +454,9 @@
         />
         <ImportSection
           {ready}
+          scope={activityModel}
           {content}
-          watched={model.overview.value?.watched ?? []}
+          watched={activityModel.overview.value?.watched ?? []}
           {importHistory}
           {exportHistory}
         />

@@ -46,6 +46,13 @@ class FixtureService {
   };
   readonly #subscriptions = new Map<number, FixtureSubscription>();
   readonly downloadsSelection = { attempts: 0 };
+  readonly historyImports = {
+    attempts: 0,
+    applications: 0,
+    replies: 0,
+    operationIds: [] as string[],
+  };
+  readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   #nextSubscription = 0;
   #revision = 0;
@@ -62,6 +69,8 @@ class FixtureService {
     private readonly settingsGate?: Promise<void>,
     private downloadsSelectionFailures = 0,
     private readonly downloadsSelectionGate?: Promise<void>,
+    private loseHistoryImportReplyOnce = false,
+    private readonly historyImportReplyGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -142,9 +151,25 @@ class FixtureService {
   }
 
   async task(task: LibraryTask, operationId: string = crypto.randomUUID()) {
-    const completed = await this.authority.task(task, operationId);
-    this.#revision++;
-    await this.publish(completed.affected);
+    const historyImport = task.kind === 'history.import';
+    if (historyImport) {
+      this.historyImports.attempts++;
+      this.historyImports.operationIds.push(operationId);
+    }
+    let completed = this.#completedTasks.get(operationId);
+    if (!completed) {
+      completed = await this.authority.task(task, operationId);
+      this.#completedTasks.set(operationId, completed);
+      if (historyImport) this.historyImports.applications++;
+      this.#revision++;
+      await this.publish(completed.affected);
+    }
+    if (historyImport && this.loseHistoryImportReplyOnce) {
+      this.loseHistoryImportReplyOnce = false;
+      throw new Error('fixture lost the committed import reply');
+    }
+    if (historyImport) await this.historyImportReplyGate;
+    if (historyImport) this.historyImports.replies++;
     return { result: completed.result, version: this.version };
   }
 
@@ -281,6 +306,10 @@ export interface FixtureLibraryServiceOptions {
   downloadsSelectionFailures?: number;
   /** Downloads page fixture only: hold its real lazy selection at the service protocol boundary. */
   downloadsSelectionGate?: Promise<void>;
+  /** Settings fixture only: commit one history import, then reject before its semantic reply reaches the page. */
+  loseHistoryImportReplyOnce?: boolean;
+  /** Settings fixture only: hold a committed history import's semantic reply. */
+  historyImportReplyGate?: Promise<void>;
 }
 
 /**
@@ -302,6 +331,8 @@ export function fixtureLibraryService({
   settingsGate,
   downloadsSelectionFailures,
   downloadsSelectionGate,
+  loseHistoryImportReplyOnce,
+  historyImportReplyGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -371,6 +402,8 @@ export function fixtureLibraryService({
     settingsGate,
     downloadsSelectionFailures,
     downloadsSelectionGate,
+    loseHistoryImportReplyOnce,
+    historyImportReplyGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
@@ -391,6 +424,7 @@ export function fixtureLibraryService({
     coordinator,
     historyDetails: fixtureService.historyDetails,
     downloadsSelection: fixtureService.downloadsSelection,
+    historyImports: fixtureService.historyImports,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
     failDownloadsSelection: () => fixtureService.failDownloadsSelection(),
   };
