@@ -249,22 +249,22 @@ export function moreLikeThisRow(
         recommendedPage = 2;
         return detail.more;
       }
-      try {
-        const page = (
-          await content.query(
-            {
-              kind: 'catalog.page',
-              catalog: { kind: 'recommendations', title: { type: self.type, id: self.id } },
-              page: recommendedPage++,
-            },
-            signal,
-          )
-        ).titles;
-        if (page.length > 0) return page;
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        // TMDB has nothing deeper, or isn't answering: the row is as long as it gets.
-      }
+      const pageNumber = recommendedPage;
+      const page = (
+        await content.query(
+          {
+            kind: 'catalog.page',
+            catalog: { kind: 'recommendations', title: { type: self.type, id: self.id } },
+            page: pageNumber,
+          },
+          signal,
+        )
+      ).titles;
+      // A provider may ignore cancellation. The disposed Pager owns this ask, so do not advance this row's cursor or
+      // admit its cards after that ownership has ended.
+      if (signal?.aborted) throw new Error('related recommendations were cancelled');
+      recommendedPage = pageNumber + 1;
+      if (page.length > 0) return page;
       source = 'done';
     }
     return [];
