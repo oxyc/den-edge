@@ -40,6 +40,10 @@
     type InterfaceLanguage,
   } from './lib/interfaceLanguage';
   import { rememberFreshPresentationLanguage } from './lib/translationCache';
+  import type {
+    RecoveryAbandonOutcome,
+    RecoveryConfirmationOutcome,
+  } from './settings/recoveryConfirmation';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -336,6 +340,44 @@
     return 'outcome' in result ? result.outcome : 'failed';
   }
 
+  async function confirmRecovery(
+    authority: LibraryModel,
+    locator: string,
+    operationId: string,
+  ): Promise<RecoveryConfirmationOutcome> {
+    try {
+      const { result } = await authority.confirmRecovery(locator, operationId);
+      if (authority !== model) return { state: 'authority-replaced' };
+      if (result.kind !== 'recovery.confirm') return { state: 'pending' };
+      return result.outcome === 'confirmed'
+        ? { state: 'committed' }
+        : result.outcome === 'lost'
+          ? { state: 'lost' }
+          : { state: 'pending' };
+    } catch {
+      return authority === model ? { state: 'pending' } : { state: 'authority-replaced' };
+    }
+  }
+
+  async function abandonRecovery(
+    authority: LibraryModel,
+    locator: string,
+    operationId: string,
+  ): Promise<RecoveryAbandonOutcome> {
+    try {
+      const { result } = await authority.abandonRecovery(locator, operationId);
+      if (authority !== model) return { state: 'authority-replaced' };
+      if (result.kind !== 'recovery.abandon') return { state: 'pending' };
+      return result.outcome === 'confirmed'
+        ? { state: 'committed' }
+        : result.outcome === 'failed'
+          ? { state: 'pending' }
+          : { state: result.outcome };
+    } catch {
+      return authority === model ? { state: 'pending' } : { state: 'authority-replaced' };
+    }
+  }
+
   async function importHistory(
     items: Parameters<LibraryModel['importHistory']>[0],
     operationId: string,
@@ -424,16 +466,17 @@
         viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
       {#snippet recovery()}
+        {@const recoveryAuthority = model}
         <RecoveryCode
           view={recoveryView}
           {ready}
           seal={sealRecovery}
           begin={(locator, sealed, createdAt) =>
             recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
-          confirm={(locator) => recoveryOutcome(() => model.confirmRecovery(locator))}
-          abandon={async (locator) => {
-            await model.abandonRecovery(locator);
-          }}
+          confirm={(locator, operationId) =>
+            confirmRecovery(recoveryAuthority, locator, operationId)}
+          abandon={(locator, operationId) =>
+            abandonRecovery(recoveryAuthority, locator, operationId)}
           disable={async () => run(() => model.disableRecovery())}
         />
       {/snippet}

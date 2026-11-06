@@ -2383,7 +2383,13 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         (value.outcome === 'confirmed' || value.outcome === 'lost' || value.outcome === 'failed')
       );
     case 'recovery.abandon':
-      return exact(value, ['kind', 'outcome']) && value.outcome === 'abandoned';
+      return (
+        exact(value, ['kind', 'outcome']) &&
+        (value.outcome === 'abandoned' ||
+          value.outcome === 'confirmed' ||
+          value.outcome === 'lost' ||
+          value.outcome === 'failed')
+      );
     case 'recovery.disable':
       return exact(value, ['kind', 'outcome']) && value.outcome === 'disabled';
     case 'history.import':

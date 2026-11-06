@@ -10,6 +10,8 @@
   import { derive, DeriveFailed, deviceCouldNot, newCode } from '../lib/recovery';
   import type { RecoveryView } from '../lib/libraryServiceProtocol';
   import type { Immutable } from '../lib/libraryModel.svelte';
+  import { i18n } from '../lib/i18n.svelte';
+  import type { RecoveryAbandonOutcome, RecoveryConfirmationOutcome } from './recoveryConfirmation';
 
   interface PreparedCode {
     code: string;
@@ -17,6 +19,18 @@
     createdAt: number;
     lastGroup: string;
   }
+
+  interface NewCodeMaterial {
+    code: string;
+    locator: string;
+    wrapKey: Uint8Array<ArrayBuffer>;
+  }
+
+  const makeCodeMaterial = async (): Promise<NewCodeMaterial> => {
+    const made = await newCode();
+    const derived = await derive(made.data, { op: 'make' });
+    return { code: made.code, locator: derived.locator, wrapKey: derived.wrapKey };
+  };
 
   const toBase64url = (bytes: Uint8Array) =>
     btoa(String.fromCharCode(...bytes))
@@ -32,20 +46,23 @@
     confirm,
     abandon,
     disable,
+    makeCode = makeCodeMaterial,
   }: {
     view?: Immutable<RecoveryView>;
     ready: boolean;
     seal: (locator: string, wrapKey: string, createdAt: number) => Promise<string>;
     begin: (locator: string, sealed: string, createdAt: number) => Promise<string>;
-    confirm: (locator: string) => Promise<string>;
-    abandon: (locator: string) => Promise<void>;
+    confirm: (locator: string, operationId: string) => Promise<RecoveryConfirmationOutcome>;
+    abandon: (locator: string, operationId: string) => Promise<RecoveryAbandonOutcome>;
     disable: () => Promise<boolean>;
+    /** Controlled material source for the real component's browser race fixture. */
+    makeCode?: () => Promise<NewCodeMaterial>;
   } = $props();
 
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 
-  let phase = $state<'idle' | 'making' | 'show' | 'confirming' | 'lost'>('idle');
+  let phase = $state<'idle' | 'making' | 'show' | 'confirming' | 'cleanup' | 'lost'>('idle');
   let prepared = $state<PreparedCode | null>(null);
   let typed = $state('');
   let message = $state<{ text: string; bad: boolean } | null>(null);
@@ -53,6 +70,15 @@
   let manual = $state(false);
   let codeEl = $state<HTMLElement>();
   let attempt = 0;
+  let presentation = 0;
+  let confirming: { presentation: number; locator: string; operationId: string } | null = null;
+  let abandoning = $state.raw<{ presentation: number; locator: string } | null>(null);
+  let pendingCleanup = $state<string | null>(null);
+
+  const operationId = () =>
+    [...crypto.getRandomValues(new Uint8Array(16))]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
 
   const failures = {
     full: 'Den holds too many codes for this library just now. Try again in a minute.',
@@ -68,22 +94,21 @@
     copied = false;
     manual = false;
     try {
-      const made = await newCode();
-      const derived = await derive(made.data, { op: 'make' });
+      const made = await makeCode();
       if (current !== attempt) {
-        derived.wrapKey.fill(0);
+        made.wrapKey.fill(0);
         return;
       }
       const createdAt = Date.now();
       let sealed: string;
       try {
-        sealed = await seal(derived.locator, toBase64url(derived.wrapKey), createdAt);
+        sealed = await seal(made.locator, toBase64url(made.wrapKey), createdAt);
       } finally {
-        derived.wrapKey.fill(0);
+        made.wrapKey.fill(0);
       }
-      const outcome = await begin(derived.locator, sealed, createdAt);
+      const outcome = await begin(made.locator, sealed, createdAt);
       if (current !== attempt) {
-        if (outcome === 'begun') await abandon(derived.locator);
+        if (outcome === 'begun') await abandon(made.locator, operationId());
         return;
       }
       if (outcome !== 'begun') {
@@ -96,7 +121,7 @@
       }
       prepared = {
         code: made.code,
-        locator: derived.locator,
+        locator: made.locator,
         createdAt,
         lastGroup: made.code.slice(-4),
       };
@@ -125,20 +150,37 @@
     }
     phase = 'confirming';
     message = null;
-    const outcome = await confirm(made.locator);
-    if (outcome === 'confirmed') {
+    const owner = {
+      presentation: ++presentation,
+      locator: made.locator,
+      operationId: operationId(),
+    };
+    confirming = owner;
+    const outcome = await confirm(made.locator, owner.operationId).catch(
+      (): RecoveryConfirmationOutcome => ({ state: 'pending' }),
+    );
+    if (confirming !== owner || presentation !== owner.presentation) {
+      // Teardown forgot the secret while this request owned the locator. A pending/unknown answer still needs the
+      // exact authority's serialized, pending-only cleanup; a committed or lost answer is already final.
+      if (outcome.state === 'pending') void abandon(owner.locator, operationId());
+      return;
+    }
+    confirming = null;
+    if (outcome.state === 'committed') {
       end();
       message = { text: 'Your recovery code is on.', bad: false };
-    } else if (outcome === 'lost') {
+    } else if (outcome.state === 'lost') {
       end();
       phase = 'lost';
       message = { text: 'That pending recovery code was replaced. Make a new one.', bad: true };
-    } else {
+    } else if (outcome.state === 'pending') {
       phase = 'show';
       message = {
         text: 'Couldn’t save that. Check that this device is on your network, then confirm again.',
         bad: true,
       };
+    } else {
+      end();
     }
   }
 
@@ -151,9 +193,36 @@
 
   async function cancel() {
     attempt++;
+    presentation++;
     const made = prepared;
     end();
-    if (made) await abandon(made.locator);
+    if (made) await cancelPending(made.locator);
+  }
+
+  async function cancelPending(locator: string) {
+    const owner = { presentation: ++presentation, locator };
+    abandoning = owner;
+    pendingCleanup = locator;
+    phase = 'cleanup';
+    message = null;
+    const outcome = await abandon(locator, operationId()).catch((): RecoveryAbandonOutcome => ({
+      state: 'pending',
+    }));
+    if (abandoning !== owner || presentation !== owner.presentation) return;
+    abandoning = null;
+    if (outcome.state === 'pending') {
+      message = {
+        text: 'Couldn’t cancel that recovery code setup. Check your connection and try again.',
+        bad: true,
+      };
+      return;
+    }
+    pendingCleanup = null;
+    phase = outcome.state === 'lost' ? 'lost' : 'idle';
+    if (outcome.state === 'committed')
+      message = { text: 'Your recovery code was already saved and remains on.', bad: false };
+    else if (outcome.state === 'lost')
+      message = { text: 'That pending recovery code was replaced. Make a new one.', bad: true };
   }
 
   async function off() {
@@ -175,14 +244,26 @@
   // Leaving with a code shown and not confirmed ends it; a closed tab leaves that to the next reconcile.
   onMount(() => () => {
     attempt++;
-    if (prepared) void abandon(prepared.locator);
+    presentation++;
+    const made = prepared;
+    const cleanup = pendingCleanup;
+    const confirmationOwns = !!confirming && confirming.locator === made?.locator;
+    const abandonmentOwns = !!abandoning && abandoning.locator === (made?.locator ?? cleanup);
+    confirming = null;
+    abandoning = null;
+    end();
+    pendingCleanup = null;
+    if (!confirmationOwns && !abandonmentOwns && (made || cleanup))
+      void abandon((made ?? { locator: cleanup! }).locator, operationId());
   });
 
   const live = $derived(view?.live ?? null);
 </script>
 
 <h3>Recovery code</h3>
-{#each view?.notices ?? [] as notice (notice)}<p class="status" role="status">{notice}</p>{/each}
+{#each view?.notices ?? [] as notice (notice)}<p class="status" role="status">
+    {i18n.phrase(notice)}
+  </p>{/each}
 
 {#if phase === 'show' || phase === 'confirming'}
   {@const made = prepared!}
@@ -228,9 +309,23 @@
         label={phase === 'confirming' ? 'Saving…' : 'I’ve saved it'}
         disabled={phase === 'confirming' || typed.trim().length < 4}
       />
-      <Button variant="secondary" label="Cancel" onclick={() => void cancel()} />
+      <Button
+        variant="secondary"
+        label="Cancel"
+        disabled={phase === 'confirming'}
+        onclick={() => void cancel()}
+      />
     </form>
   </div>
+{:else if phase === 'cleanup'}
+  <span class="actions">
+    <Button
+      variant="secondary"
+      label="Try again"
+      disabled={abandoning !== null}
+      onclick={() => pendingCleanup && void cancelPending(pendingCleanup)}
+    />
+  </span>
 {:else if phase === 'lost'}
   <span class="actions">
     <Button
@@ -300,7 +395,9 @@
     </p>
   {/if}
 {/if}
-{#if message}<p class="status" class:bad={message.bad} role="status">{message.text}</p>{/if}
+{#if message}<p class="status" class:bad={message.bad} role="status">
+    {i18n.phrase(message.text)}
+  </p>{/if}
 <p class="foot">
   A recovery code opens your library on a new device when none of yours is at hand. It’s made and
   checked on this device; Den keeps only a sealed copy of your library key that the code opens.

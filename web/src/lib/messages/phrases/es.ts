@@ -232,6 +232,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudieron cargar los episodios. No se marcó ninguno como visto.',
   'Couldn’t remove that download. Try again.':
     'No se pudo quitar esa descarga. Inténtalo de nuevo.',
+  'Couldn’t cancel that recovery code setup. Check your connection and try again.':
+    'No se pudo cancelar la configuración del código de recuperación. Comprueba la conexión e inténtalo de nuevo.',
+  'Couldn’t save the code. Check that this device is on your network.':
+    'No se pudo guardar el código. Comprueba que este dispositivo esté conectado a tu red.',
+  'Couldn’t save that. Check that this device is on your network, then confirm again.':
+    'No se pudo guardar. Comprueba que este dispositivo esté conectado a tu red y vuelve a confirmar.',
   'Couldn’t save that. Check your connection and try again.':
     'No se pudo guardar. Comprueba la conexión e inténtalo de nuevo.',
   'Couldn’t start that download. Try again.':
@@ -540,6 +546,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Make a new code': 'Hacer un nuevo código',
   'Make a new recovery code?': '¿Crear un nuevo código de recuperación?',
   'Make a recovery code': 'Hacer un código de recuperación',
+  'Den holds too many codes for this library just now. Try again in a minute.':
+    'Den guarda demasiados códigos para esta biblioteca en este momento. Inténtalo de nuevo en un minuto.',
   'Make one, or open a library with one': 'Crea uno o abre una biblioteca con uno',
   'Making a secure link…': 'Creando un enlace seguro…',
   Malayalam: 'malayalam',
@@ -949,6 +957,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Terms of Use': 'Términos de uso',
   Thai: 'tailandés',
   'That file has no viewing history in it.': 'Ese archivo no tiene historial de visualización.',
+  'That code collided with another. Make a new one.':
+    'Ese código coincidió con otro. Crea uno nuevo.',
+  'That isn’t the last group of your code. Check what you wrote down.':
+    'Ese no es el último grupo de tu código. Comprueba lo que anotaste.',
+  'That pending recovery code was replaced. Make a new one.':
+    'Ese código de recuperación pendiente fue reemplazado. Crea uno nuevo.',
   'That isn’t a valid key. Paste the ed25519:… public key the plugin publishes.':
     'Esa no es una clave válida. Pegue la clave pública ed25519:… que publica el complemento.',
   'That isn’t one of the homelab’s browser keys.':
@@ -1161,6 +1175,11 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Your plugins': 'Tus complementos',
   'Your recovery code no longer works: make a new one.':
     'Tu código de recuperación ya no funciona: crea uno nuevo.',
+  'Your recovery code is on.': 'Tu código de recuperación está activado.',
+  'Your recovery code was already saved and remains on.':
+    'Tu código de recuperación ya se había guardado y sigue activado.',
+  'Your recovery code setup didn’t finish. The code you saw doesn’t work; make a new one.':
+    'La configuración del código de recuperación no terminó. El código que viste no funciona; crea uno nuevo.',
   'Your recovery code still works. If anyone else may have seen it, make a new one in Settings › Linked devices.':
     'Tu código de recuperación aún funciona. Si alguien más lo ha visto, cree uno nuevo en Configuración>Dispositivos vinculados.',
   'Your region': 'Tu región',
