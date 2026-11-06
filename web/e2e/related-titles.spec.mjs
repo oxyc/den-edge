@@ -29,6 +29,54 @@ test('a title’s rows below the fold load only as they near the screen', async 
   await page.close();
 });
 
+test('a failed recommendation continuation stays visible and retries the same page', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  const asked = [];
+  let pageTwoAttempts = 0;
+  const result = (id) => ({
+    id,
+    title: `Remote film ${id}`,
+    release_date: '2020-01-01',
+    poster_path: `/remote-${id}.jpg`,
+  });
+  await routeTmdb(page, (route) => {
+    const url = new URL(route.request().url());
+    if (!url.pathname.endsWith('/movie/1/recommendations'))
+      return route.fulfill({ status: 404, json: {} });
+    const requested = Number(url.searchParams.get('page'));
+    asked.push(requested);
+    if (requested === 2 && pageTwoAttempts++ === 0)
+      return route.fulfill({ status: 503, json: { error: 'temporarily unavailable' } });
+    const ids =
+      requested === 1
+        ? Array.from({ length: 20 }, (_, index) => 100 + index)
+        : [119, ...Array.from({ length: 20 }, (_, index) => 120 + index)];
+    return route.fulfill({ json: { page: requested, total_pages: 2, results: ids.map(result) } });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?remote-recommendations`);
+  const row = page.getByRole('region', { name: 'More like this' });
+  await row.scrollIntoViewIfNeeded();
+  await expect(row.getByRole('link', { name: /^Remote film 100 / })).toBeVisible();
+
+  await row.locator('.track').evaluate((track) => (track.scrollLeft = track.scrollWidth));
+  const retry = row.getByRole('button', { name: 'Couldn’t load these. Try again' });
+  await expect(retry).toBeVisible();
+  await expect(row.locator('.slot')).toHaveCount(20);
+
+  await retry.click();
+  await expect(row.locator('.slot')).toHaveCount(40);
+  expect(asked).toEqual([1, 2, 2]);
+  const keys = await row
+    .locator('.slot')
+    .evaluateAll((slots) => slots.map((slot) => slot.getAttribute('data-route-focus-key')));
+  expect(new Set(keys).size).toBe(40);
+  await page.close();
+});
+
 test('an atlas-late rebuild does not load untouched related rows', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
