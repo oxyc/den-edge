@@ -1,8 +1,8 @@
 <script lang="ts" module>
-  import { SvelteSet } from 'svelte/reactivity';
   import type { PrimeImportSource } from '../lib/primeImport';
   import type { PrimeImportPlan } from '../lib/primeImportPlan';
   import type { PlannedHistoryImport } from './historyImport';
+  import { scopedImportSessions } from './importSession.svelte';
 
   type State =
     | { step: 'idle' }
@@ -20,21 +20,7 @@
         message: string;
         retry?: { writes: PlannedHistoryImport[]; operationId: string };
       };
-
-  class ImportSession {
-    state = $state.raw<State>({ step: 'idle' });
-    excluded = new SvelteSet<string>();
-  }
-
-  const sessions = new WeakMap<object, ImportSession>();
-  const sessionFor = (scope: object) => {
-    let session = sessions.get(scope);
-    if (!session) {
-      session = new ImportSession();
-      sessions.set(scope, session);
-    }
-    return session;
-  };
+  const sessionFor = scopedImportSessions<State>({ step: 'idle' });
 </script>
 
 <script lang="ts">
@@ -47,6 +33,7 @@
   import { viewingPreviewLines } from '../lib/viewingImport';
   import SettingRow from './SettingRow.svelte';
   import { historyImportItems } from './historyImport';
+  import { saveHistoryImport } from './importSession.svelte';
   import type { HistoryImportItem, TitleRef } from '../lib/libraryServiceProtocol';
 
   let {
@@ -110,33 +97,13 @@
   async function write(writes: PlannedHistoryImport[], operationId: string = crypto.randomUUID()) {
     const owned = session;
     owned.state = { step: 'writing' };
-    try {
-      const result = await importHistory(
-        writes.map((entry) => entry.item),
-        operationId,
-      );
-      owned.state = result.complete
-        ? { step: 'done', written: result.written }
-        : {
-            step: 'failed',
-            message: i18n.format(
-              'import.savedPrime',
-              'Saved {written} of {total}. Importing both files again picks up where this stopped.',
-              {
-                written: result.written.toLocaleString(),
-                total: result.total.toLocaleString(),
-              },
-            ),
-            retry: { writes, operationId },
-          };
-    } catch (error) {
-      console.warn('den: Prime Video import could not confirm its save', error);
-      owned.state = {
-        step: 'failed',
-        message: 'Couldn’t confirm the import. Changes may already be saved; trying again is safe.',
-        retry: { writes, operationId },
-      };
-    }
+    owned.state = await saveHistoryImport(importHistory, writes, operationId, (written, total) =>
+      i18n.format(
+        'import.savedPrime',
+        'Saved {written} of {total}. Importing both files again picks up where this stopped.',
+        { written: written.toLocaleString(), total: total.toLocaleString() },
+      ),
+    );
   }
 
   const plural = (count: number, one: string, many = `${one}s`) =>

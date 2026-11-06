@@ -1,8 +1,8 @@
 <!-- Settings › Import & export: provider files are matched here and submitted as semantic history items. -->
 <script lang="ts" module>
-  import { SvelteSet } from 'svelte/reactivity';
   import type { Plan } from '../lib/netflixImport';
   import type { PlannedHistoryImport } from './historyImport';
+  import { scopedImportSessions } from './importSession.svelte';
 
   type State =
     | { step: 'idle' }
@@ -15,22 +15,7 @@
         message: string;
         retry?: { writes: PlannedHistoryImport[]; operationId: string };
       };
-  class ImportSession {
-    /** Matching a long history goes on while the viewer is elsewhere, but never follows another activity library. */
-    state = $state.raw<State>({ step: 'idle' });
-    /** The films and series (`importKey`) the viewer unticked in the preview. */
-    excluded = new SvelteSet<string>();
-  }
-
-  const sessions = new WeakMap<object, ImportSession>();
-  const sessionFor = (scope: object) => {
-    let session = sessions.get(scope);
-    if (!session) {
-      session = new ImportSession();
-      sessions.set(scope, session);
-    }
-    return session;
-  };
+  const sessionFor = scopedImportSessions<State>({ step: 'idle' });
 </script>
 
 <script lang="ts">
@@ -44,6 +29,7 @@
   import { contentImportLookups } from '../lib/contentImportLookups';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import { historyImportItems } from './historyImport';
+  import { saveHistoryImport } from './importSession.svelte';
   import type {
     HistoryImportItem,
     LibraryQueryResult,
@@ -111,33 +97,13 @@
   async function write(writes: PlannedHistoryImport[], operationId: string = crypto.randomUUID()) {
     const owned = session;
     owned.state = { step: 'writing' };
-    try {
-      const result = await importHistory(
-        writes.map((entry) => entry.item),
-        operationId,
-      );
-      owned.state = result.complete
-        ? { step: 'done', written: result.written }
-        : {
-            step: 'failed',
-            message: i18n.format(
-              'import.saved',
-              'Saved {written} of {total}. The rest couldn’t be saved; importing the file again picks up where this stopped.',
-              {
-                written: result.written.toLocaleString(),
-                total: result.total.toLocaleString(),
-              },
-            ),
-            retry: { writes, operationId },
-          };
-    } catch (error) {
-      console.warn('den: Netflix import could not confirm its save', error);
-      owned.state = {
-        step: 'failed',
-        message: 'Couldn’t confirm the import. Changes may already be saved; trying again is safe.',
-        retry: { writes, operationId },
-      };
-    }
+    owned.state = await saveHistoryImport(importHistory, writes, operationId, (written, total) =>
+      i18n.format(
+        'import.saved',
+        'Saved {written} of {total}. The rest couldn’t be saved; importing the file again picks up where this stopped.',
+        { written: written.toLocaleString(), total: total.toLocaleString() },
+      ),
+    );
   }
 
   const plural = (n: number, one: string, many = `${one}s`) =>

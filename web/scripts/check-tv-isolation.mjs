@@ -162,5 +162,9 @@ if (process.argv.includes('--capture')) {
   // Kid Settings PIN service-failure, busy and retry states plus stale-attempt/profile fencing add 409 gzip bytes
   // to the complete graph and 88 bytes to startup versus v0.271.195. They add no polling or background request,
   // and busy state suppresses duplicate submissions. Allow half a KiB; the independent initial ceiling remains.
-  if (coreTotalDelta > 70656) throw new Error('Browser total JS/CSS budget exceeded');
+  // Superseded Explore cancellation and activity-owned, idempotent import recovery add 414 gzip bytes together
+  // versus v0.271.196, only 10 bytes of it at startup. Cancellation stops obsolete provider/network work; import
+  // recovery stays in lazy Settings and adds no polling. Their independently fitting graphs overlap 142 bytes past
+  // the prior ceiling, so allow a quarter KiB for the reviewed combination without changing the startup limit.
+  if (coreTotalDelta > 70912) throw new Error('Browser total JS/CSS budget exceeded');
 }
