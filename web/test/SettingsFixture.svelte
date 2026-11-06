@@ -26,6 +26,11 @@
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const fixtureQuery = new URLSearchParams(location.search);
+  let releaseRecoveryWrite = () => {};
+  const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
+    ? new Promise<void>((resolve) => (releaseRecoveryWrite = resolve))
+    : undefined;
+  let recoveryWriteHeld = false;
   const row = (name: string, values: Record<string, ConfigValue>): SettingsRow => ({
     kind: 'set',
     schema: 2,
@@ -119,6 +124,21 @@
       return next;
     },
     writeAt: async (next: SettingsRow) => {
+      if (
+        recoveryWriteGate &&
+        next.name === 'recovery' &&
+        Object.values(next.values).some(({ value }) => {
+          if (!value || !('string' in value)) return false;
+          try {
+            return (JSON.parse(value.string) as { state?: unknown }).state === 'live';
+          } catch {
+            return false;
+          }
+        })
+      ) {
+        recoveryWriteHeld = true;
+        await recoveryWriteGate;
+      }
       put(next);
       return true;
     },
@@ -168,20 +188,55 @@
     libraryKey: fixtureLibraryKey,
     loseHistoryImportReplyOnce: fixtureQuery.has('lose-import-reply'),
     historyImportReplyGate,
+    loseRecoveryConfirmReplyOnce: fixtureQuery.has('recovery-authority-replacement'),
   });
   (globalThis as { fixtureHistoryImports?: typeof library.historyImports }).fixtureHistoryImports =
     library.historyImports;
-  const { model, session } = library;
+  const primaryModel = library.model;
+  const { session } = library;
+  const replacementLibrary = fixtureQuery.has('recovery-authority-replacement')
+    ? fixtureLibraryService({
+        log,
+        device: fixtureClock.device,
+        libraryKey: fixtureLibraryKey,
+      })
+    : undefined;
+  let model = $state.raw<LibraryModel>(primaryModel);
+  const recoveryAuthorityControls = {
+    replace() {
+      if (replacementLibrary) model = replacementLibrary.model;
+    },
+    release() {
+      releaseRecoveryWrite();
+    },
+    held() {
+      return recoveryWriteHeld;
+    },
+    tasks() {
+      return {
+        primary: [...library.recoveryTasks],
+        replacement: [...(replacementLibrary?.recoveryTasks ?? [])],
+      };
+    },
+    async reread() {
+      await replacementLibrary?.publish([{ kind: 'recovery' }]);
+    },
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureRecoveryAuthority?: typeof recoveryAuthorityControls;
+    }
+  ).fixtureRecoveryAuthority = recoveryAuthorityControls;
   // A second activity identity over the same fixture authority is enough to exercise Settings' live prop handoff:
   // it has its own retained import scope while the old model's in-flight semantic reply remains real.
   const replacementActivityModel = {
     get overview() {
-      return model.overview;
+      return primaryModel.overview;
     },
-    importHistory: model.importHistory.bind(model),
-    exportHistory: model.exportHistory.bind(model),
+    importHistory: primaryModel.importHistory.bind(primaryModel),
+    exportHistory: primaryModel.exportHistory.bind(primaryModel),
   } as unknown as LibraryModel;
-  let activityModel = $state.raw<LibraryModel>(model);
+  let activityModel = $state.raw<LibraryModel>(primaryModel);
   (
     globalThis as {
       fixtureImportScope?: {
@@ -192,7 +247,7 @@
     }
   ).fixtureImportScope = {
     replace: () => (activityModel = replacementActivityModel),
-    restore: () => (activityModel = model),
+    restore: () => (activityModel = primaryModel),
     release: () => releaseImportReply(),
   };
   const contentServices = createWorkerServiceSession();

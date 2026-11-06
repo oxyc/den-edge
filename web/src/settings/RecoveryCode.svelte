@@ -162,7 +162,8 @@
     if (confirming !== owner || presentation !== owner.presentation) {
       // Teardown forgot the secret while this request owned the locator. A pending/unknown answer still needs the
       // exact authority's serialized, pending-only cleanup; a committed or lost answer is already final.
-      if (outcome.state === 'pending') void abandon(owner.locator, operationId());
+      if (outcome.state === 'pending' || outcome.state === 'authority-replaced')
+        void abandon(owner.locator, operationId());
       return;
     }
     confirming = null;

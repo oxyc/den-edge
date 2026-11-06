@@ -8,7 +8,7 @@
   import ContentSection from './settings/ContentSection.svelte';
   import ImportSection from './settings/ImportSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
-  import RecoveryCode from './settings/RecoveryCode.svelte';
+  import RecoveryCodeAuthority from './settings/RecoveryCodeAuthority.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
@@ -40,10 +40,6 @@
     type InterfaceLanguage,
   } from './lib/interfaceLanguage';
   import { rememberFreshPresentationLanguage } from './lib/translationCache';
-  import type {
-    RecoveryAbandonOutcome,
-    RecoveryConfirmationOutcome,
-  } from './settings/recoveryConfirmation';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -81,11 +77,22 @@
 
   let connectionsLease = $state.raw(untrack(() => model.connections()));
   const simklLease = untrack(() => model.simkl());
-  const recoveryLease = untrack(() => (__DEN_TV_LEGACY_JS_CORE__ ? undefined : model.recovery()));
+  let recoveryLease = $state.raw<ReturnType<LibraryModel['recovery']>>();
+  // A retained Settings page can receive a replacement authority. Recovery is authority-scoped: release the old
+  // view and read the replacement instead of carrying one library's status into another library's ceremony.
+  $effect(() => {
+    const authority = model;
+    if (__DEN_TV_LEGACY_JS_CORE__) return;
+    const lease = authority.recovery();
+    recoveryLease = lease;
+    return () => {
+      lease.release();
+      if (recoveryLease === lease) recoveryLease = undefined;
+    };
+  });
   onDestroy(() => {
     connectionsLease?.release();
     simklLease?.release();
-    recoveryLease?.release();
   });
   const settings = $derived(model.settings.value);
   const connections = $derived(connectionsLease?.snapshot.value);
@@ -327,57 +334,6 @@
     return result;
   }
 
-  async function sealRecovery(locator: string, wrapKey: string, createdAt: number) {
-    const { result } = await model.sealRecovery(locator, wrapKey, createdAt);
-    if (result.kind !== 'recovery.seal') throw new Error('wrong recovery response');
-    return result.sealed;
-  }
-
-  async function recoveryOutcome(
-    action: () => ReturnType<LibraryModel['beginRecovery']>,
-  ): Promise<string> {
-    const { result } = await action();
-    return 'outcome' in result ? result.outcome : 'failed';
-  }
-
-  async function confirmRecovery(
-    authority: LibraryModel,
-    locator: string,
-    operationId: string,
-  ): Promise<RecoveryConfirmationOutcome> {
-    try {
-      const { result } = await authority.confirmRecovery(locator, operationId);
-      if (authority !== model) return { state: 'authority-replaced' };
-      if (result.kind !== 'recovery.confirm') return { state: 'pending' };
-      return result.outcome === 'confirmed'
-        ? { state: 'committed' }
-        : result.outcome === 'lost'
-          ? { state: 'lost' }
-          : { state: 'pending' };
-    } catch {
-      return authority === model ? { state: 'pending' } : { state: 'authority-replaced' };
-    }
-  }
-
-  async function abandonRecovery(
-    authority: LibraryModel,
-    locator: string,
-    operationId: string,
-  ): Promise<RecoveryAbandonOutcome> {
-    try {
-      const { result } = await authority.abandonRecovery(locator, operationId);
-      if (authority !== model) return { state: 'authority-replaced' };
-      if (result.kind !== 'recovery.abandon') return { state: 'pending' };
-      return result.outcome === 'confirmed'
-        ? { state: 'committed' }
-        : result.outcome === 'failed'
-          ? { state: 'pending' }
-          : { state: result.outcome };
-    } catch {
-      return authority === model ? { state: 'pending' } : { state: 'authority-replaced' };
-    }
-  }
-
   async function importHistory(
     items: Parameters<LibraryModel['importHistory']>[0],
     operationId: string,
@@ -466,19 +422,9 @@
         viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
       />
       {#snippet recovery()}
-        {@const recoveryAuthority = model}
-        <RecoveryCode
-          view={recoveryView}
-          {ready}
-          seal={sealRecovery}
-          begin={(locator, sealed, createdAt) =>
-            recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
-          confirm={(locator, operationId) =>
-            confirmRecovery(recoveryAuthority, locator, operationId)}
-          abandon={(locator, operationId) =>
-            abandonRecovery(recoveryAuthority, locator, operationId)}
-          disable={async () => run(() => model.disableRecovery())}
-        />
+        {#key model}
+          <RecoveryCodeAuthority authority={model} view={recoveryView} {ready} {run} />
+        {/key}
       {/snippet}
       {#if !__DEN_TV_LEGACY_JS_CORE__}
         <SharingSection
