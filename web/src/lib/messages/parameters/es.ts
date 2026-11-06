@@ -44,6 +44,8 @@ export const parameters = {
   'player.stream': 'Emisión: {stream}',
   'player.audioTrack': 'Pista de audio: {track}',
   'player.subtitles': 'Subtítulos: {subtitles}',
+  'player.subtitleLoadFailed':
+    'No se pudieron cargar los subtítulos {subtitle}. Tus subtítulos actuales no han cambiado.',
   'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset}s)',
   'player.resetSubtitleTiming': 'Restablecer sincronización de subtítulos ({offset}s)',
   'player.next': 'Siguiente: {title}',
