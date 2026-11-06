@@ -25,6 +25,7 @@
   const fixtureClock = browserClock();
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
+  const fixtureQuery = new URLSearchParams(location.search);
   const row = (name: string, values: Record<string, ConfigValue>): SettingsRow => ({
     kind: 'set',
     schema: 2,
@@ -157,16 +158,43 @@
   }
 
   const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
-  const fixtureQuery = new URLSearchParams(location.search);
+  let releaseImportReply = () => {};
+  const historyImportReplyGate = fixtureQuery.has('hold-import-reply')
+    ? new Promise<void>((resolve) => (releaseImportReply = resolve))
+    : undefined;
   const library = fixtureLibraryService({
     log,
     device: fixtureClock.device,
     libraryKey: fixtureLibraryKey,
     loseHistoryImportReplyOnce: fixtureQuery.has('lose-import-reply'),
+    historyImportReplyGate,
   });
   (globalThis as { fixtureHistoryImports?: typeof library.historyImports }).fixtureHistoryImports =
     library.historyImports;
   const { model, session } = library;
+  // A second activity identity over the same fixture authority is enough to exercise Settings' live prop handoff:
+  // it has its own retained import scope while the old model's in-flight semantic reply remains real.
+  const replacementActivityModel = {
+    get overview() {
+      return model.overview;
+    },
+    importHistory: model.importHistory.bind(model),
+    exportHistory: model.exportHistory.bind(model),
+  } as unknown as LibraryModel;
+  let activityModel = $state.raw<LibraryModel>(model);
+  (
+    globalThis as {
+      fixtureImportScope?: {
+        replace(): void;
+        restore(): void;
+        release(): void;
+      };
+    }
+  ).fixtureImportScope = {
+    replace: () => (activityModel = replacementActivityModel),
+    restore: () => (activityModel = model),
+    release: () => releaseImportReply(),
+  };
   const contentServices = createWorkerServiceSession();
   const contentModel = new LibraryModel(contentServices.library, {
     libraryKey: fixtureLibraryKey,
@@ -197,5 +225,11 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  {#if contentReady}<Settings {link} {model} {content} onresetkey={async () => null} />{/if}
+  {#if contentReady}<Settings
+      {link}
+      {model}
+      {activityModel}
+      {content}
+      onresetkey={async () => null}
+    />{/if}
 </main>

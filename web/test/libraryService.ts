@@ -46,11 +46,13 @@ class FixtureService {
   };
   readonly #subscriptions = new Map<number, FixtureSubscription>();
   readonly downloadsSelection = { attempts: 0 };
-  readonly historyImports = { attempts: 0, applications: 0, operationIds: [] as string[] };
-  readonly #completedTasks = new Map<
-    string,
-    Awaited<ReturnType<LibraryLogAuthority['task']>>
-  >();
+  readonly historyImports = {
+    attempts: 0,
+    applications: 0,
+    replies: 0,
+    operationIds: [] as string[],
+  };
+  readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   #nextSubscription = 0;
   #revision = 0;
@@ -68,6 +70,7 @@ class FixtureService {
     private downloadsSelectionFailures = 0,
     private readonly downloadsSelectionGate?: Promise<void>,
     private loseHistoryImportReplyOnce = false,
+    private readonly historyImportReplyGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -165,6 +168,8 @@ class FixtureService {
       this.loseHistoryImportReplyOnce = false;
       throw new Error('fixture lost the committed import reply');
     }
+    if (historyImport) await this.historyImportReplyGate;
+    if (historyImport) this.historyImports.replies++;
     return { result: completed.result, version: this.version };
   }
 
@@ -303,6 +308,8 @@ export interface FixtureLibraryServiceOptions {
   downloadsSelectionGate?: Promise<void>;
   /** Settings fixture only: commit one history import, then reject before its semantic reply reaches the page. */
   loseHistoryImportReplyOnce?: boolean;
+  /** Settings fixture only: hold a committed history import's semantic reply. */
+  historyImportReplyGate?: Promise<void>;
 }
 
 /**
@@ -325,6 +332,7 @@ export function fixtureLibraryService({
   downloadsSelectionFailures,
   downloadsSelectionGate,
   loseHistoryImportReplyOnce,
+  historyImportReplyGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -395,6 +403,7 @@ export function fixtureLibraryService({
     downloadsSelectionFailures,
     downloadsSelectionGate,
     loseHistoryImportReplyOnce,
+    historyImportReplyGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {

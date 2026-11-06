@@ -72,18 +72,19 @@
     exportHistory: () => Promise<HistoryExport>;
   } = $props();
 
-  const session = sessionFor(scope);
+  const session = $derived(sessionFor(scope));
 
   async function read(file: File) {
     if (!ready) return;
+    const owned = session;
     try {
       const viewings = parseCsv(await file.text());
       if (!viewings.length) {
-        session.state = { step: 'failed', message: 'That file has no viewing history in it.' };
+        owned.state = { step: 'failed', message: 'That file has no viewing history in it.' };
         return;
       }
-      session.state = { step: 'matching', done: 0, total: 0 };
-      session.excluded.clear();
+      owned.state = { step: 'matching', done: 0, total: 0 };
+      owned.excluded.clear();
       // What the library already has as seen is found, and left: its episodes aren't looked up at all.
       const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
@@ -92,30 +93,30 @@
         viewings,
         lookups,
         (done, total) => {
-          if (session.state.step === 'matching')
-            session.state = { ...session.state, done, total };
+          if (owned.state.step === 'matching') owned.state = { ...owned.state, done, total };
         },
         seen,
       );
-      session.state = {
+      owned.state = {
         step: 'preview',
         plan: result,
         writes: historyImportItems(result.marks, result.shows),
       };
     } catch (error) {
       console.warn('den: Netflix import failed', error);
-      session.state = { step: 'failed', message: 'Couldn’t read that history. Please try again.' };
+      owned.state = { step: 'failed', message: 'Couldn’t read that history. Please try again.' };
     }
   }
 
-  async function write(writes: PlannedHistoryImport[], operationId = crypto.randomUUID()) {
-    session.state = { step: 'writing' };
+  async function write(writes: PlannedHistoryImport[], operationId: string = crypto.randomUUID()) {
+    const owned = session;
+    owned.state = { step: 'writing' };
     try {
       const result = await importHistory(
         writes.map((entry) => entry.item),
         operationId,
       );
-      session.state = result.complete
+      owned.state = result.complete
         ? { step: 'done', written: result.written }
         : {
             step: 'failed',
@@ -131,10 +132,10 @@
           };
     } catch (error) {
       console.warn('den: Netflix import could not confirm its save', error);
-      session.state = {
+      owned.state = {
         step: 'failed',
         message:
-          'Den couldn’t confirm the import. Some changes may already have been saved; trying again is safe.',
+          'Couldn’t confirm the import. Changes may already be saved; trying again is safe.',
         retry: { writes, operationId },
       };
     }
@@ -223,10 +224,8 @@
       {#if session.state.plan.unmatched.length || session.state.plan.undated}
         <details class="foot">
           <summary>
-            {plural(
-              session.state.plan.unmatched.length + session.state.plan.undated,
-              'line',
-            )} couldn’t be matched
+            {plural(session.state.plan.unmatched.length + session.state.plan.undated, 'line')} couldn’t
+            be matched
           </summary>
           <ul class="unmatched">
             {#each session.state.plan.unmatched as title (title)}<li>{title}</li>{/each}
@@ -257,11 +256,12 @@
       </p>
     {:else if session.state.step === 'failed'}
       <p class="status bad" role="alert">{i18n.phrase(session.state.message)}</p>
-      {#if session.state.retry}
+      {@const retry = session.state.retry}
+      {#if retry}
         <Button
           variant="secondary"
           label="Try again"
-          onclick={() => void write(session.state.retry!.writes, session.state.retry!.operationId)}
+          onclick={() => void write(retry.writes, retry.operationId)}
         />
       {/if}
     {/if}

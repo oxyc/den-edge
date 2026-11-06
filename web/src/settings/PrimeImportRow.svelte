@@ -67,18 +67,19 @@
     ) => Promise<{ written: number; total: number; complete: boolean }>;
   } = $props();
 
-  const session = sessionFor(scope);
+  const session = $derived(sessionFor(scope));
 
   async function read(files: readonly File[]) {
     if (!ready) return;
-    session.excluded.clear();
+    const owned = session;
+    owned.excluded.clear();
     try {
       const source = parsePrimeFiles(
         await Promise.all(
           [...files].map(async (file) => ({ name: file.name, text: await file.text() })),
         ),
       );
-      session.state = { step: 'matching', done: 0, total: source.viewings.length };
+      owned.state = { step: 'matching', done: 0, total: source.viewings.length };
       const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
       const lookups = contentImportLookups(content);
@@ -86,12 +87,11 @@
         source.viewings,
         lookups,
         (done, total) => {
-          if (session.state.step === 'matching')
-            session.state = { ...session.state, done, total };
+          if (owned.state.step === 'matching') owned.state = { ...owned.state, done, total };
         },
         seen,
       );
-      session.state = {
+      owned.state = {
         step: 'preview',
         source,
         plan,
@@ -99,7 +99,7 @@
       };
     } catch (error) {
       console.warn('den: Prime Video import failed', error);
-      session.state = {
+      owned.state = {
         step: 'failed',
         message:
           error instanceof Error ? error.message : 'Couldn’t read that history. Please try again.',
@@ -107,14 +107,15 @@
     }
   }
 
-  async function write(writes: PlannedHistoryImport[], operationId = crypto.randomUUID()) {
-    session.state = { step: 'writing' };
+  async function write(writes: PlannedHistoryImport[], operationId: string = crypto.randomUUID()) {
+    const owned = session;
+    owned.state = { step: 'writing' };
     try {
       const result = await importHistory(
         writes.map((entry) => entry.item),
         operationId,
       );
-      session.state = result.complete
+      owned.state = result.complete
         ? { step: 'done', written: result.written }
         : {
             step: 'failed',
@@ -130,10 +131,10 @@
           };
     } catch (error) {
       console.warn('den: Prime Video import could not confirm its save', error);
-      session.state = {
+      owned.state = {
         step: 'failed',
         message:
-          'Den couldn’t confirm the import. Some changes may already have been saved; trying again is safe.',
+          'Couldn’t confirm the import. Changes may already be saved; trying again is safe.',
         retry: { writes, operationId },
       };
     }
@@ -183,8 +184,7 @@
     {@const sourceMisses =
       session.state.source.diagnostics.unmatched.length +
       session.state.source.diagnostics.ambiguous.length}
-    {@const matchMisses =
-      session.state.plan.unmatched.length + session.state.plan.ambiguous.length}
+    {@const matchMisses = session.state.plan.unmatched.length + session.state.plan.ambiguous.length}
     <p class="summary">
       Found {plural(all.length - series.length, 'film')} and {plural(
         series.reduce((count, line) => count + line.episodes, 0),
@@ -248,11 +248,12 @@
     </p>
   {:else if session.state.step === 'failed'}
     <p class="status bad" role="alert">{i18n.phrase(session.state.message)}</p>
-    {#if session.state.retry}
+    {@const retry = session.state.retry}
+    {#if retry}
       <Button
         variant="secondary"
         label="Try again"
-        onclick={() => void write(session.state.retry!.writes, session.state.retry!.operationId)}
+        onclick={() => void write(retry.writes, retry.operationId)}
       />
     {/if}
   {/if}
