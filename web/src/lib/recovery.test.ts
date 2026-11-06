@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  abandon,
+  abandonPending,
   begin,
   confirm,
   DeriveFailed,
@@ -402,10 +402,27 @@ describe('making a code (§6)', () => {
       const prepared = await prepare(web, LIBRARY_KEY);
       const begun = await begin(web, prepared);
       if (!begun.ok) throw new Error('begin failed');
-      await abandon(web, prepared.locator);
+      expect(await abandonPending(web, prepared.locator)).toBe('abandoned');
       begun.done();
       expect(readRecovery(edge.row).size).toBe(0);
       expect(edge.entries.size).toBe(0);
+    },
+    SLOW,
+  );
+
+  it(
+    'pending-only cleanup preserves a confirmation committed before its response was observed',
+    async () => {
+      const edge = server();
+      const web = await device(edge, WEB, 'Mac · Safari');
+      const prepared = await prepare(web, LIBRARY_KEY);
+      const begun = await begin(web, prepared);
+      if (!begun.ok) throw new Error('begin failed');
+      expect(await confirm(web, prepared, begun.baseLive)).toEqual({ ok: true });
+      expect(await abandonPending(web, prepared.locator)).toBe('confirmed');
+      expect(readRecovery(edge.row).get(prepared.locator)?.state).toBe('live');
+      expect(edge.entries.has(prepared.locator)).toBe(true);
+      begun.done();
     },
     SLOW,
   );

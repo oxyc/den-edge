@@ -228,6 +228,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'Avsnitten kunde inte läsas in. Inget markerades som sett.',
   'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',
+  'Couldn’t cancel that recovery code setup. Check your connection and try again.':
+    'Det gick inte att avbryta inställningen av återställningskoden. Kontrollera anslutningen och försök igen.',
+  'Couldn’t save the code. Check that this device is on your network.':
+    'Det gick inte att spara koden. Kontrollera att den här enheten är ansluten till ditt nätverk.',
+  'Couldn’t save that. Check that this device is on your network, then confirm again.':
+    'Det gick inte att spara. Kontrollera att den här enheten är ansluten till ditt nätverk och bekräfta igen.',
   'Couldn’t save that. Check your connection and try again.':
     'Det gick inte att spara. Kontrollera anslutningen och försök igen.',
   'Couldn’t start that download. Try again.': 'Hämtningen kunde inte startas. Försök igen.',
@@ -529,6 +535,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Make a new code': 'Gör en ny kod',
   'Make a new recovery code?': 'Skapa en ny återställningskod?',
   'Make a recovery code': 'Skapa en återställningskod',
+  'Den holds too many codes for this library just now. Try again in a minute.':
+    'Den lagrar för många koder för det här biblioteket just nu. Försök igen om en minut.',
   'Make one, or open a library with one': 'Gör en eller öppna ett bibliotek med en',
   'Making a secure link…': 'Gör en säker länk...',
   Malayalam: 'Malayalam',
@@ -937,6 +945,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Terms of Use': 'Användarvillkor',
   Thai: 'Thai',
   'That file has no viewing history in it.': 'Den filen har ingen visningshistorik.',
+  'That code collided with another. Make a new one.':
+    'Den koden kolliderade med en annan. Skapa en ny.',
+  'That isn’t the last group of your code. Check what you wrote down.':
+    'Det är inte den sista gruppen i din kod. Kontrollera vad du skrev ner.',
+  'That pending recovery code was replaced. Make a new one.':
+    'Den väntande återställningskoden ersattes. Skapa en ny.',
   'That isn’t a valid key. Paste the ed25519:… public key the plugin publishes.':
     'Det är inte en giltig nyckel. Klistra in den offentliga nyckeln ed25519:... som plugin publicerar.',
   'That isn’t one of the homelab’s browser keys.': 'Det är inte en av homelab:s webbläsarnycklar.',
@@ -1148,6 +1162,11 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Your plugins': 'Dina plugins',
   'Your recovery code no longer works: make a new one.':
     'Din återställningskod fungerar inte längre: skapa en ny.',
+  'Your recovery code is on.': 'Din återställningskod är aktiverad.',
+  'Your recovery code was already saved and remains on.':
+    'Din återställningskod hade redan sparats och är fortfarande aktiverad.',
+  'Your recovery code setup didn’t finish. The code you saw doesn’t work; make a new one.':
+    'Inställningen av återställningskoden slutfördes inte. Koden du såg fungerar inte; skapa en ny.',
   'Your recovery code still works. If anyone else may have seen it, make a new one in Settings › Linked devices.':
     'Din återställningskod fungerar fortfarande. Om någon annan kanske har sett den, skapa en ny i Inställningar › Länkade enheter.',
   'Your region': 'Din region',

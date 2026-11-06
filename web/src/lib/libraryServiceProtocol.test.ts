@@ -93,6 +93,17 @@ describe('library service client protocol', () => {
         value: { kind: 'watchlist', titles: [{ type: 'movie', id: 7 }] },
       }),
     ).toMatchObject({ ok: true });
+    for (const outcome of ['abandoned', 'confirmed', 'lost', 'failed'])
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'task-result',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'request-task',
+          operationId: 'operation-task',
+          result: { kind: 'recovery.abandon', outcome },
+          version,
+        }),
+      ).toMatchObject({ ok: true });
     expect(
       decodeLibraryServiceServerMessage({
         type: 'update',

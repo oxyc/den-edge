@@ -845,7 +845,11 @@ export type KeyResetOutcome =
 export type LibraryTaskResult =
   | { kind: 'recovery.begin'; outcome: 'begun' | 'full' | 'taken' | 'waits' | 'failed' }
   | { kind: 'recovery.confirm'; outcome: 'confirmed' | 'lost' | 'failed' }
-  | { kind: 'recovery.abandon'; outcome: 'abandoned' }
+  | {
+      kind: 'recovery.abandon';
+      /** `failed` leaves the ceremony pending; `confirmed` must never be deleted as pending cleanup. */
+      outcome: 'abandoned' | 'confirmed' | 'lost' | 'failed';
+    }
   | { kind: 'recovery.disable'; outcome: 'disabled' }
   | { kind: 'history.import'; written: number; total: number; complete: boolean }
   | {

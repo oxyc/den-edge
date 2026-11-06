@@ -20,6 +20,7 @@ import { completeDurableTaskOperation } from './libraryOperationAuthority';
 import { startupMark } from './startupTiming';
 import {
   abandon,
+  abandonPending,
   begin,
   confirm,
   makingWaits,
@@ -75,6 +76,7 @@ export interface LibraryAdminAuthorityOptions {
  * locators remain here; callers exchange only bounded semantic tasks and presentation-safe results.
  */
 export class LibraryAdminAuthority {
+  readonly #recoveryTails = new Map<string, Promise<void>>();
   readonly #recoveryMakes = new Map<
     string,
     {
@@ -94,7 +96,8 @@ export class LibraryAdminAuthority {
     private readonly options: LibraryAdminAuthorityOptions,
   ) {}
 
-  close(): void {
+  async close(): Promise<void> {
+    await Promise.allSettled([...this.#recoveryTails.values()]);
     for (const make of this.#recoveryMakes.values()) make.done();
     this.#recoveryMakes.clear();
   }
@@ -211,9 +214,11 @@ export class LibraryAdminAuthority {
       case 'recovery.begin':
         return this.#beginRecovery(task, operationId);
       case 'recovery.confirm':
-        return this.#confirmRecovery(task.locator, operationId);
+        return this.#serializeRecovery(task.locator, () =>
+          this.#confirmRecovery(task.locator, operationId),
+        );
       case 'recovery.abandon':
-        return this.#abandonRecovery(task.locator);
+        return this.#serializeRecovery(task.locator, () => this.#abandonRecovery(task.locator));
       case 'recovery.disable':
         return this.#disableRecovery();
       case 'history.import':
@@ -332,14 +337,45 @@ export class LibraryAdminAuthority {
 
   async #abandonRecovery(locator: string): Promise<LibraryAuthorityTaskResult> {
     const making = await this.#recoveryMake(locator);
-    making?.done();
-    this.#recoveryMakes.delete(locator);
-    await this.#keepRecoveryMakes();
-    await abandon(this.#recoveryContext(), locator);
+    const outcome =
+      making?.outcome === 'confirmed' || making?.outcome === 'lost'
+        ? making.outcome
+        : await abandonPending(this.#recoveryContext(), locator);
+    if (outcome === 'confirmed') {
+      if (making) {
+        making.done();
+        making.done = () => {};
+        making.outcome = 'confirmed';
+        await this.#keepRecoveryMakes();
+      }
+    } else if (outcome !== 'failed') {
+      making?.done();
+      this.#recoveryMakes.delete(locator);
+      await this.#keepRecoveryMakes();
+    } else if (making) {
+      // A disposed presentation cannot retry confirmation and must not retain its heartbeat/timer. The durable
+      // pending preparation remains for a later authoritative cleanup pass or explicit Retry while still mounted.
+      making.done();
+      making.done = () => {};
+    }
     return {
-      result: { kind: 'recovery.abandon', outcome: 'abandoned' },
+      result: { kind: 'recovery.abandon', outcome },
       affected: [{ kind: 'recovery' }],
     };
+  }
+
+  #serializeRecovery<T>(locator: string, work: () => Promise<T>): Promise<T> {
+    const before = this.#recoveryTails.get(locator) ?? Promise.resolve();
+    const result = before.then(work);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#recoveryTails.set(locator, tail);
+    void tail.then(() => {
+      if (this.#recoveryTails.get(locator) === tail) this.#recoveryTails.delete(locator);
+    });
+    return result;
   }
 
   async #recoveryMake(locator: string) {

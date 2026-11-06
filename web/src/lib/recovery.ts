@@ -661,6 +661,37 @@ export async function abandon(
   if (!deleteFirst) await remove(ctx, locator);
 }
 
+export type PendingAbandonOutcome = 'abandoned' | 'confirmed' | 'lost' | 'failed';
+
+/**
+ * Cleanup of a presentation-owned make. Read through the current head before deciding: after a lost confirmation
+ * response, a cached pending row is not evidence that the ceremony did not commit. The library row is authoritative;
+ * den-edge is deleted only after that row demonstrably ended pending or no longer names the locator.
+ */
+export async function abandonPending(
+  ctx: RecoveryContext,
+  locator: string,
+): Promise<PendingAbandonOutcome> {
+  if (!(await ctx.log.readToHead())) return 'failed';
+  const outcome: { value: Exclude<PendingAbandonOutcome, 'failed'> } = { value: 'lost' };
+  const settled = await update(ctx, (entries) => {
+    const entry = entries.get(locator);
+    if (!entry) {
+      outcome.value = 'lost';
+      return null;
+    }
+    if (entry.state === 'live') {
+      outcome.value = 'confirmed';
+      return null;
+    }
+    outcome.value = 'abandoned';
+    return { [locator]: null };
+  });
+  if (!settled) return 'failed';
+  if (outcome.value === 'abandoned' || outcome.value === 'lost') await remove(ctx, locator);
+  return outcome.value;
+}
+
 /** §6 *Turning off*: the live entry nulled, then deleted at den-edge. */
 export async function turnOff(ctx: RecoveryContext): Promise<boolean> {
   let ended: string[] = [];

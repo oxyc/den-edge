@@ -556,7 +556,7 @@ export class LibraryLogAuthority {
     this.#projectionTimer = undefined;
     this.#listeners.clear();
     this.#log.onDeferred = null;
-    this.#admin?.close();
+    await this.#admin?.close();
     await this.#viewWriter?.close();
     this.#log.close();
   }
