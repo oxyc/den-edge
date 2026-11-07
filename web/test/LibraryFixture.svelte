@@ -61,6 +61,10 @@
     ).denTestReleaseLibrarySettings = releaseSettings;
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
+  let releaseProgressReply = () => {};
+  const progressReplyGate = params.has('hold-final-progress-reply')
+    ? new Promise<void>((resolve) => (releaseProgressReply = resolve))
+    : undefined;
   /** Actions wait until `denTestReleaseWrites()`: a write that takes as long as a slow library takes. */
   let releaseWrites = () => {};
   const writeGate = params.has('hold-writes')
@@ -398,7 +402,15 @@
     openGate,
     settingsGate,
     failHistoryDetails: params.has('fail-history-details'),
+    rejectProgressCommands: params.has('reject-final-progress') ? 1 : 0,
+    progressReplyGate,
   });
+  if (progressReplyGate)
+    (window as unknown as { denTestReleaseProgressReply: () => void }).denTestReleaseProgressReply =
+      releaseProgressReply;
+  (
+    window as unknown as { denTestProgressOperationIds: () => string[] }
+  ).denTestProgressOperationIds = () => [...library.progressOperationIds];
   (
     window as unknown as { denTestHistoryDetails: typeof library.historyDetails }
   ).denTestHistoryDetails = library.historyDetails;
@@ -502,6 +514,8 @@
     return () => {
       delete (window as { denTestLivePosition?: unknown }).denTestLivePosition;
       delete (window as { denTestRows?: unknown }).denTestRows;
+      delete (window as { denTestReleaseProgressReply?: unknown }).denTestReleaseProgressReply;
+      delete (window as { denTestProgressOperationIds?: unknown }).denTestProgressOperationIds;
     };
   });
 </script>

@@ -1068,6 +1068,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Trending This Week': 'Tendencias de esta semana',
   'True black background (OLED)': 'Fondo negro verdadero (OLED)',
   'Try again': 'Inténtalo de nuevo',
+  'Couldn’t save where you stopped': 'No se pudo guardar dónde te quedaste',
+  'Leave unsaved': 'Dejar sin guardar',
   'Try another': 'prueba con otro',
   'Try another release': 'Prueba con otra versión',
   'Try Den Remux': 'Pruebe Den Remux',

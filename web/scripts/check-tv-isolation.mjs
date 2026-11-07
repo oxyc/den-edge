@@ -173,5 +173,11 @@ if (process.argv.includes('--capture')) {
   // Preserving Scout's early-answer `late` count through the library authority and rendering its accessible Detail
   // notice adds 224 gzip bytes to the complete app graph versus main and two bytes to the initial graph.
   // Keep that bounded wire/UI contract inside a quarter KiB; it adds no request, retry, polling or startup work.
-  if (coreTotalDelta > 71552) throw new Error('Browser total JS/CSS budget exceeded');
+  // Retaining rejected final playback progress for an exact, idempotent retry adds 678 gzip bytes to the complete
+  // graph (71,406 -> 72,084) and 603 bytes at startup (1,097 -> 1,700) on matched current-main/head builds. Decoder
+  // and session teardown still happen immediately, with no polling or background retry. Preserve main's existing
+  // 146-byte total margin around that reviewed contract; the independent startup ceiling remains unchanged. Receipt
+  // ownership and the durable command must remain in the always-loaded Library; splitting only the tiny failure
+  // dialog would delay its sole recovery path and add chunk-loader overhead while leaving that authority at startup.
+  if (coreTotalDelta > 72230) throw new Error('Browser total JS/CSS budget exceeded');
 }

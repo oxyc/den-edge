@@ -2,7 +2,7 @@
   import { i18n } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Billboard from './components/Billboard.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
@@ -305,6 +305,27 @@
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  type FinalProgressReceipt = {
+    readonly operationId: string;
+    readonly target: Target;
+    readonly fraction: number;
+    readonly seconds: number;
+    readonly observedAt: number;
+    /** null while the first unobtrusive save runs; false after rejection; true during an explicit retry. */
+    saving: boolean | null;
+  };
+  let finalProgressReceipts = $state<FinalProgressReceipt[]>([]);
+  const finalProgressRecovery = $derived(
+    finalProgressReceipts.find(({ saving }) => saving !== null),
+  );
+  let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
+  let finalProgressAlive = true;
+  onDestroy(() => (finalProgressAlive = false));
+  $effect(() => {
+    const receipt = finalProgressRecovery;
+    if (!receipt || receipt.saving) return;
+    void tick().then(() => finalProgressRetryButton?.focus());
+  });
   /**
    * Where the library's services answer, found once for the session and shared by every page. The parent keys this
    * whole tree by the session object, so the session is fixed for its life.
@@ -1643,32 +1664,103 @@
   }
 
   /** Where playback got to, written as the TV's player writes it. */
-  async function progressed(target: Target, fraction: number, seconds: number, playing: boolean) {
+  function writeProgress(
+    target: Target,
+    fraction: number,
+    seconds: number,
+    playing: boolean,
+    observedAt: number,
+    operationId?: string,
+  ) {
     if (!model && !profileActivity) return;
     const { title, season, episode } = target;
-    return runCommand(
-      profileActivity
-        ? () =>
-            profileActivity.recordProgress(
-              title,
-              fraction,
-              seconds,
-              season !== undefined && episode !== undefined ? { season, episode } : undefined,
-              playing,
-            )
-        : () =>
-            model!.recordProgress({
-              title,
-              ...(season !== undefined && episode !== undefined
-                ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
-                : {}),
-              fraction,
-              seconds,
-              playing,
-              observedAt: Date.now(),
-            }),
-      title,
+    remember(title);
+    return profileActivity
+      ? profileActivity.recordProgress(
+          title,
+          fraction,
+          seconds,
+          season !== undefined && episode !== undefined ? { season, episode } : undefined,
+          playing,
+        )
+      : model!.recordProgress(
+          {
+            title,
+            ...(season !== undefined && episode !== undefined
+              ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
+              : {}),
+            fraction,
+            seconds,
+            playing,
+            observedAt,
+          },
+          operationId,
+        );
+  }
+
+  async function progressed(target: Target, fraction: number, seconds: number, playing: boolean) {
+    if (!model && !profileActivity) return;
+    return runCommand(() => writeProgress(target, fraction, seconds, playing, Date.now())!);
+  }
+
+  function removeFinalProgress(operationId: string) {
+    const index = finalProgressReceipts.findIndex((receipt) => receipt.operationId === operationId);
+    if (index >= 0) finalProgressReceipts.splice(index, 1);
+  }
+
+  async function saveFinalProgress(receipt: FinalProgressReceipt) {
+    const current = finalProgressReceipts.find(
+      (candidate) => candidate.operationId === receipt.operationId,
     );
+    if (!current || current.saving === true || !finalProgressAlive) return;
+    receipt = current;
+    if (receipt.saving !== null) receipt.saving = true;
+    try {
+      await writeProgress(
+        receipt.target,
+        receipt.fraction,
+        receipt.seconds,
+        false,
+        receipt.observedAt,
+        receipt.operationId,
+      );
+      // The awaited command result is the library service's durable receipt/readback boundary. A late answer from
+      // an older playback can remove only that exact receipt, never a replacement player's recovery.
+      if (finalProgressAlive) removeFinalProgress(receipt.operationId);
+    } catch (error) {
+      console.error('final playback progress failed', error);
+      if (!finalProgressAlive) return;
+      const current = finalProgressReceipts.find(
+        (candidate) => candidate.operationId === receipt.operationId,
+      );
+      if (current) current.saving = false;
+    }
+  }
+
+  function finalProgressed(target: Target, fraction: number, seconds: number) {
+    if (!model && !profileActivity) return;
+    const targetIdentity = `${titleKey(target.title)}:${target.season ?? ''}:${target.episode ?? ''}`;
+    const existing = finalProgressReceipts.find(
+      (receipt) =>
+        `${titleKey(receipt.target.title)}:${receipt.target.season ?? ''}:${receipt.target.episode ?? ''}` ===
+          targetIdentity &&
+        receipt.fraction === fraction &&
+        receipt.seconds === seconds,
+    );
+    if (existing) return;
+    const receipt: FinalProgressReceipt = {
+      operationId: crypto.randomUUID(),
+      target: { ...target, title: { ...target.title } },
+      fraction,
+      seconds,
+      observedAt: Date.now(),
+      saving: null,
+    };
+    // The recovery surface is modal, so another interactive playback cannot start until these are resolved. Keep a
+    // small hard ceiling as a defense against synthetic lifecycle storms; the player itself also emits once/visit.
+    finalProgressReceipts.push(receipt);
+    if (finalProgressReceipts.length > 8) finalProgressReceipts.shift();
+    void saveFinalProgress(receipt);
   }
 
   /**
@@ -3152,11 +3244,40 @@
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
       onprogress={(fraction, seconds, at, playing) =>
         void progressed({ title: target.title, ...at }, fraction, seconds, playing)}
+      onfinalprogress={(fraction, seconds, at) =>
+        finalProgressed({ title: target.title, ...at }, fraction, seconds)}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}
     />
   {/key}
+{/if}
+
+{#if finalProgressRecovery}
+  {@const receipt = finalProgressRecovery}
+  <div
+    class="player-screen final-progress-recovery"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="final-progress-title"
+  >
+    <h2 id="final-progress-title">
+      {receipt.saving ? i18n.phrase('Saving…') : i18n.phrase('Couldn’t save where you stopped')}
+    </h2>
+    {#if !receipt.saving}
+      <button
+        bind:this={finalProgressRetryButton}
+        type="button"
+        class="retry"
+        onclick={() => void saveFinalProgress(receipt)}
+      >
+        {i18n.phrase('Try again')}
+      </button>
+      <button type="button" class="close" onclick={() => removeFinalProgress(receipt.operationId)}>
+        {i18n.phrase('Leave unsaved')}
+      </button>
+    {/if}
+  </div>
 {/if}
 
 <style>
@@ -3226,5 +3347,13 @@
     background: none;
     color: inherit;
     cursor: pointer;
+  }
+
+  .final-progress-recovery {
+    z-index: 70;
+  }
+
+  .final-progress-recovery h2 {
+    max-width: 520px;
   }
 </style>

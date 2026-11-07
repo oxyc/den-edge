@@ -104,6 +104,10 @@
       progress = { fraction, seconds, playing };
       progressWrites += 1;
     }}
+    onfinalprogress={(fraction, seconds, _at, playing) => {
+      progress = { fraction, seconds, playing };
+      progressWrites += 1;
+    }}
     onclose={() => {
       closeCount += 1;
       open = false;
