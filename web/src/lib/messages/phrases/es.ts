@@ -667,6 +667,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Only Owner can change this profile’s age limit and unrated-title policy.':
     'Solo el Propietario puede cambiar el límite de edad de este perfil y la política de títulos no clasificados.',
   'Open Den': 'Abrir Den',
+  'Open a recovery code in Den on a phone or computer, then link this TV with the QR or code above.':
+    'Abre un código de recuperación en Den desde un teléfono u ordenador y, a continuación, vincula este televisor con el código QR o el código de arriba.',
   'Open on this browser': 'Abrir en este navegador',
   'Open the link on your phone, or scan the code with it: your library comes over, and so do the addons you were lent, if there is a device free for them. The link works once, for ten minutes, and asks you here before the phone gets anything.':
     'Abre el enlace en tu teléfono o escanea el código con él: tu biblioteca aparece, y también los complementos que te prestaron, si hay un dispositivo libre para ellos. El enlace funciona una vez, durante diez minutos, y le pregunta aquí antes de que el teléfono reciba algo.',
