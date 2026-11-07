@@ -16,6 +16,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -439,6 +440,14 @@ const MEDIA_LIFETIME: Duration =
 pub struct Lease {
     until: u64,
     slot: Option<Arc<Slot>>,
+    /// The verified credential that opened a member lease. A digest keeps the proof itself out of process
+    /// metadata; guest leases have no identity and continue to be shared by address.
+    member: Option<MemberLease>,
+}
+
+struct MemberLease {
+    library: Box<str>,
+    claim: [u8; 32],
 }
 
 /// A guest's slot, shared by its lease and every body the lease admitted.
@@ -465,6 +474,18 @@ impl Drop for Lease {
             crate::lock(&slot.permit).take();
         }
     }
+}
+
+fn claim_digest(claim: &str) -> [u8; 32] {
+    Sha256::digest(claim.as_bytes()).into()
+}
+
+/// A changed member proof or a retired library must not leave the credential's fast media path alive. Bodies
+/// already in flight keep their bounded response permits, but the next request proves the new authority.
+pub(crate) fn invalidate_member_media_leases(state: &AppState, library: &str) {
+    let mut leases = crate::lock(&state.media_leases);
+    state.media_member_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    leases.retain(|_, lease| lease.member.as_ref().is_none_or(|member| member.library.as_ref() != library));
 }
 
 /// What admission decided.
@@ -529,37 +550,88 @@ fn media_video(path: &str) -> Option<&str> {
 /// billboard is one viewer however many trailers it opens.
 ///
 /// Members and guests are held apart, so a visitor on the household's own network cannot ride the
-/// lease a member opened. Which one to look for is read from whether a claim is present at all; what
-/// is stored is decided by whether that claim proved out, so a forged one lands on the guest lease
-/// and spends a guest slot.
+/// lease a member opened. A member lease remembers a digest of the exact verified claim; only that claim can
+/// take its fast path. A changed or forged claim is proved before it can select member admission, and on
+/// failure joins the address's guest lease and spends its guest budget.
 async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted {
     let now = (state.clock)();
     let side = |member: bool| format!("{bucket}|{}", if member { "member" } else { "guest" });
+    let asked = claim.map(claim_digest);
     {
         let mut leases = crate::lock(&state.media_leases);
         leases.retain(|_, lease| !lease.over(now));
-        if let Some(lease) = leases.get_mut(&side(claim.is_some())) {
+        let lease = if claim.is_none() {
+            leases.get_mut(&side(false))
+        } else {
+            leases.get_mut(&side(true)).filter(|lease| {
+                lease
+                    .member
+                    .as_ref()
+                    .zip(asked.as_ref())
+                    .is_some_and(|(member, asked)| crate::handler::constant_time_eq(&member.claim, asked))
+            })
+        };
+        if let Some(lease) = lease {
             lease.until = now + LEASE_IDLE_MS;
             return Admitted::Yes { slot: lease.slot.clone() };
         }
     }
-    // Nothing open for this address: this is a session starting, and the only place membership is
-    // asked. Once per session, never per segment — the lease remembers the answer.
-    let member = crate::library::is_household_member(state, claim).await;
-    let slot = if member {
-        None
-    } else {
-        if !media_allowance_left(state) {
-            return Admitted::Spent;
+    // Nothing open for this address: this is a session starting, and the only place membership is normally
+    // asked. If authority changes while the asynchronous check is running, ask again before publishing a
+    // reusable lease. The invalidator and this insertion use the same mutex, so neither can slip past the
+    // other.
+    loop {
+        let generation = state.media_member_generation.load(std::sync::atomic::Ordering::Relaxed);
+        let member = crate::library::is_household_member(state, claim).await;
+        if !member {
+            break;
         }
-        match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
-            Ok(permit) => Some(Arc::new(Slot { permit: Mutex::new(Some(permit)), sent: 0.into() })),
-            Err(_) => return Admitted::Busy,
+        let now = (state.clock)();
+        let mut leases = crate::lock(&state.media_leases);
+        if generation != state.media_member_generation.load(std::sync::atomic::Ordering::Relaxed) {
+            drop(leases);
+            continue;
         }
+        let claim = claim.expect("a proved member has a claim");
+        let library = claim.split_once(':').expect("a proved member claim names its library").0.into();
+        leases.insert(
+            side(true),
+            Lease {
+                until: now + LEASE_IDLE_MS,
+                slot: None,
+                member: Some(MemberLease {
+                    library,
+                    claim: asked.expect("a proved member claim has a digest"),
+                }),
+            },
+        );
+        return Admitted::Yes { slot: None };
+    }
+
+    // A nonempty claim could not select the guest lease until it had failed authentication. Once it has,
+    // preserve the address-sharing behavior of an ordinary guest instead of taking a second slot or refusing
+    // its segments.
+    let now = (state.clock)();
+    {
+        let mut leases = crate::lock(&state.media_leases);
+        leases.retain(|_, lease| !lease.over(now));
+        if let Some(lease) = leases.get_mut(&side(false)) {
+            lease.until = now + LEASE_IDLE_MS;
+            return Admitted::Yes { slot: lease.slot.clone() };
+        }
+    }
+    if !media_allowance_left(state) {
+        return Admitted::Spent;
+    }
+    let slot = match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
+        Ok(permit) => Arc::new(Slot { permit: Mutex::new(Some(permit)), sent: 0.into() }),
+        Err(_) => return Admitted::Busy,
     };
-    crate::lock(&state.media_leases)
-        .insert(side(member), Lease { until: now + LEASE_IDLE_MS, slot: slot.clone() });
-    Admitted::Yes { slot }
+    crate::lock(&state.media_leases).insert(
+        side(false),
+        Lease { until: now + LEASE_IDLE_MS, slot: Some(Arc::clone(&slot)), member: None },
+    );
+    Admitted::Yes { slot: Some(slot) }
 }
 
 /// Is there anything left of today's guest allowance (env `MEDIA_DAILY_MAX_BYTES`)?
@@ -5331,6 +5403,209 @@ mod tests {
         let mut h = Harness::new();
         Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays("/reel=http://127.0.0.1:9");
         h
+    }
+
+    /// A real local Reel endpoint. Every admitted request is reported before its response; a path containing
+    /// `hold` never answers, so a caller can cancel after admission without an `admit`-only test.
+    async fn local_reel() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (asked, requests) = tokio::sync::mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let asked = asked.clone();
+            async move {
+                let path = req.uri().path().to_owned();
+                let hold = path.contains("hold");
+                let _ = asked.send(path);
+                if hold {
+                    return std::future::pending::<StatusCode>().await;
+                }
+                StatusCode::NO_CONTENT
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), requests)
+    }
+
+    fn reel_at(origin: &str, dir: Option<std::path::PathBuf>) -> Harness {
+        let mut h = dir.map_or_else(Harness::new, Harness::in_dir);
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/reel={origin}"));
+        state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.guest_media_slots = Arc::new(tokio::sync::Semaphore::new(0));
+        h
+    }
+
+    async fn saw_upstream(requests: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(2), requests.recv())
+            .await
+            .expect("the admitted request never reached Reel")
+            .expect("the Reel request recorder closed")
+    }
+
+    fn saw_no_upstream(requests: &mut tokio::sync::mpsc::UnboundedReceiver<String>) {
+        assert!(
+            matches!(requests.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "a refused request reached Reel"
+        );
+    }
+
+    /// TEST-SHARED06: the real media handler, proof store, admission cache and upstream fetch must agree on
+    /// the identity that owns a warm member lease. A nonempty header is not itself member authority.
+    #[tokio::test]
+    async fn a_warm_member_media_lease_is_bound_to_its_verified_claim() {
+        let (origin, mut requests) = local_reel().await;
+        let h = reel_at(&origin, None);
+        let member = registered_library(&h).await;
+
+        for path in ["/reel/hls/aaaaaaaaaaa.m3u8", "/reel/hls/bbbbbbbbbbb.m3u8"] {
+            let admitted = h.send("GET", path, None, &[("x-den-library-member", &member)]).await;
+            assert_eq!(admitted.status(), StatusCode::NO_CONTENT, "the verified claim keeps its lease");
+            drop(admitted);
+            saw_upstream(&mut requests).await;
+        }
+
+        for claim in [Some(format!("{LIB}:wrong-proof")), Some("arbitrary-nonempty-claim".into()), None] {
+            let headers =
+                claim.as_deref().map_or_else(Vec::new, |claim| vec![("x-den-library-member", claim)]);
+            let refused = h.send("GET", "/reel/hls/ccccccccccc.m3u8", None, &headers).await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(refused.headers().contains_key("retry-after"));
+            saw_no_upstream(&mut requests);
+        }
+
+        let public = h
+            .send(
+                "GET",
+                "/reel/hls/ddddddddddd.m3u8",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(public.status(), StatusCode::NOT_FOUND, "the public face still refuses relayed media");
+        saw_no_upstream(&mut requests);
+
+        let other_address = h
+            .send(
+                "GET",
+                "/reel/hls/eeeeeeeeeee.m3u8",
+                None,
+                &[("x-forwarded-for", "203.0.113.8"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(other_address.status(), StatusCode::NO_CONTENT);
+        drop(other_address);
+        saw_upstream(&mut requests).await;
+
+        h.advance(super::LEASE_IDLE_MS + 1);
+        let after_expiry =
+            h.send("GET", "/reel/hls/fffffffffff.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(
+            after_expiry.status(),
+            StatusCode::NO_CONTENT,
+            "the valid proof starts again after expiry"
+        );
+        drop(after_expiry);
+        saw_upstream(&mut requests).await;
+    }
+
+    /// The legacy proof is authority until registration replaces it, and retirement revokes the registered
+    /// proof. Neither transition may leave its old warm member classification behind.
+    #[tokio::test]
+    async fn member_media_leases_follow_proof_rotation_and_retirement() {
+        let (origin, mut requests) = local_reel().await;
+        let h = reel_at(&origin, None);
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK);
+        let legacy = format!("{LIB}:{TOKEN}");
+        let warmed =
+            h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[("x-den-library-member", &legacy)]).await;
+        assert_eq!(warmed.status(), StatusCode::NO_CONTENT);
+        drop(warmed);
+        saw_upstream(&mut requests).await;
+
+        let member = format!("{LIB}:{MEMBER}");
+        let registered = h
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/member"),
+                None,
+                &[("x-den-library-token", TOKEN), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(registered.status(), StatusCode::OK);
+
+        let old =
+            h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[("x-den-library-member", &legacy)]).await;
+        assert_eq!(old.status(), StatusCode::SERVICE_UNAVAILABLE, "registration revokes the legacy lease");
+        assert!(old.headers().contains_key("retry-after"));
+        saw_no_upstream(&mut requests);
+
+        let rotated =
+            h.send("GET", "/reel/hls/ccccccccccc.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(rotated.status(), StatusCode::NO_CONTENT, "the registered proof can retry immediately");
+        drop(rotated);
+        saw_upstream(&mut requests).await;
+
+        let retired = h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(retired.status(), StatusCode::OK);
+        let revoked =
+            h.send("GET", "/reel/hls/ddddddddddd.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(revoked.status(), StatusCode::SERVICE_UNAVAILABLE, "retirement revokes the warm lease");
+        assert!(revoked.headers().contains_key("retry-after"));
+        saw_no_upstream(&mut requests);
+    }
+
+    /// Cancelling after real upstream admission leaves the lease bound to the same proof. A restart keeps the
+    /// durable proof but no in-memory classification, so both paths still refuse a forged claim before Reel.
+    #[tokio::test]
+    async fn cancelled_and_restarted_member_media_requests_keep_the_claim_boundary() {
+        let (origin, mut requests) = local_reel().await;
+        let h = Arc::new(reel_at(&origin, None));
+        let member = registered_library(&h).await;
+        let held = tokio::spawn({
+            let h = Arc::clone(&h);
+            let member = member.clone();
+            async move {
+                h.send("GET", "/reel/hls/hold0000000.m3u8", None, &[("x-den-library-member", &member)])
+                    .await
+                    .status()
+            }
+        });
+        saw_upstream(&mut requests).await;
+        held.abort();
+        let _ = held.await;
+
+        let forged = format!("{LIB}:not-the-member-proof");
+        let refused =
+            h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[("x-den-library-member", &forged)]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        saw_no_upstream(&mut requests);
+        let retried =
+            h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+        drop(retried);
+        saw_upstream(&mut requests).await;
+
+        let restarted = reel_at(&origin, Some(h.dir.clone()));
+        let refused = restarted
+            .send("GET", "/reel/hls/ccccccccccc.m3u8", None, &[("x-den-library-member", &forged)])
+            .await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        saw_no_upstream(&mut requests);
+        let admitted = restarted
+            .send("GET", "/reel/hls/ddddddddddd.m3u8", None, &[("x-den-library-member", &member)])
+            .await;
+        assert_eq!(
+            admitted.status(),
+            StatusCode::NO_CONTENT,
+            "the durable registered proof survives restart"
+        );
+        drop(admitted);
+        saw_upstream(&mut requests).await;
     }
 
     /// The cap is on viewers at once, because that is what spends the household's upload — not on

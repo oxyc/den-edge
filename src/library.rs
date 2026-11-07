@@ -666,7 +666,7 @@ async fn library_store_locked(
     }
 }
 
-pub async fn handle(state: &AppState, req: Request) -> Response {
+pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
     let Some(rest) = path.strip_prefix("/lib/") else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
@@ -1210,7 +1210,7 @@ async fn rewrite_abort(
 
 /// Replace the temporary legacy membership proof with the key derived specifically for relay membership.
 async fn register_member(
-    state: &AppState,
+    state: &Arc<AppState>,
     id: &str,
     token_hash: [u8; 32],
     authority: &RequestAuthority,
@@ -1258,7 +1258,22 @@ async fn register_member(
         }
         return *response;
     }
-    match tokio::task::spawn_blocking(move || store.register_member(member_hash)).await {
+    // Close the old fast path before changing authority. A request that had already selected it may finish, while
+    // a later one proves the credential against the store. The blocking mutation keeps running if the client
+    // cancels its request, so give that task ownership of the final invalidation too: anything that re-proved the
+    // legacy credential while the task was waiting to run is removed after a successful replacement.
+    crate::relay::invalidate_member_media_leases(state, id);
+    let invalidation_state = Arc::clone(state);
+    let invalidation_id = id.to_owned();
+    let registered = tokio::task::spawn_blocking(move || {
+        let registered = store.register_member(member_hash);
+        if registered.is_ok() {
+            crate::relay::invalidate_member_media_leases(&invalidation_state, &invalidation_id);
+        }
+        registered
+    })
+    .await;
+    match registered {
         Ok(Ok(_)) => {}
         Ok(Err(v3::StoreError::Invalid(message))) if message == "member_already_registered" => {
             return json_reply(StatusCode::CONFLICT, &error("member_already_registered"));
@@ -1416,6 +1431,7 @@ async fn retire_owned_marked(
     // The marker is written: the library is retired, and the answer is 200 from here on. A client told anything else
     // would take its move as failed and delete the only copy left; cleanup that fails is logged and left behind.
     slot.authority.store(AUTHORITY_MOVED, Ordering::Release);
+    crate::relay::invalidate_member_media_leases(state, id);
     // Retired: a member check now fails, so recovery may go on while the database is removed.
     drop(recovery);
     // A held reader is told now that the library moved, rather than at the end of its wait.
