@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork } from './network.mjs';
+import { trackRecoveryWorkers } from './recovery-workers.mjs';
 
 async function make(page) {
   await page.getByRole('button', { name: 'Make a recovery code' }).click();
@@ -12,6 +13,73 @@ async function make(page) {
     .fill(shown.slice(-4));
   return shown;
 }
+
+test('leaving and retrying does not overlap or retain recovery derivation Workers', async ({
+  page,
+}, testInfo) => {
+  await trackRecoveryWorkers(page);
+  await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);
+
+  await page.getByRole('button', { name: 'Make a recovery code' }).click();
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(1);
+  await page.evaluate(() => globalThis.recoveryFixture.unmount());
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(0);
+
+  await page.evaluate(() => globalThis.recoveryFixture.remount());
+  const retryStarted = await page.evaluate(() => performance.now());
+  await page.getByRole('button', { name: 'Make a recovery code' }).click();
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(1);
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.maximum)).toBe(1);
+  const retryAllocatedInMs = await page.evaluate(
+    (started) => globalThis.recoveryWorkers.createdAt.at(-1) - started,
+    retryStarted,
+  );
+  await expect(page.locator('.code')).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(0);
+  expect(await page.evaluate(() => globalThis.recoveryWorkers)).toMatchObject({
+    active: 0,
+    created: 2,
+    maximum: 1,
+    terminated: 2,
+  });
+  await testInfo.attach('recovery-worker-metrics', {
+    body: JSON.stringify({ retryAllocatedInMs }),
+    contentType: 'application/json',
+  });
+});
+
+test('leaving and retrying redemption cancels its Worker before any stale network work', async ({
+  page,
+}) => {
+  await trackRecoveryWorkers(page);
+  let opens = 0;
+  await page.route('**/recovery/timing', (route) => route.fulfill({ status: 204 }));
+  await page.route('**/recovery/open', (route) => {
+    opens++;
+    return route.fulfill({ status: 404, json: { error: 'unknown_code' } });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/recovery-redeem.html`);
+  const code = 'GEB2-LP9U-C63W-Q95U-NSLT-XMFL';
+  await page.getByRole('textbox', { name: 'Recovery code' }).fill(code);
+  await page.getByRole('button', { name: 'Open with code' }).click();
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(1);
+  await page.evaluate(() => globalThis.recoveryRedeemFixture.unmount());
+  await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(0);
+  expect(opens).toBe(0);
+
+  await page.evaluate(() => globalThis.recoveryRedeemFixture.remount());
+  await page.getByRole('textbox', { name: 'Recovery code' }).fill(code);
+  await page.getByRole('button', { name: 'Open with code' }).click();
+  await expect(page.getByText(/This code doesn’t open a library/)).toBeVisible({ timeout: 30_000 });
+  expect(opens).toBe(1);
+  expect(await page.evaluate(() => globalThis.recoveryRedeemFixture.opened())).toEqual([]);
+  expect(await page.evaluate(() => globalThis.recoveryWorkers)).toMatchObject({
+    active: 0,
+    created: 2,
+    maximum: 1,
+    terminated: 2,
+  });
+});
 
 test('confirmation owns teardown and cannot publish into a newer ceremony', async ({ page }) => {
   await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);

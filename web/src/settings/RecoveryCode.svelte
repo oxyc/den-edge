@@ -67,6 +67,7 @@
   let codeEl = $state<HTMLElement>();
   let pendingCleanup = $state<string | null>(null);
   let attempt = 0;
+  let derivation: AbortController | null = null;
   let active: string | null = null;
 
   const failures = {
@@ -82,13 +83,17 @@
   }
 
   async function make() {
+    derivation?.abort();
+    const controller = new AbortController();
+    derivation = controller;
     const current = ++attempt;
     phase = 1;
     message = '';
     copyResult = '';
     try {
       const made = await newCode();
-      const derived = await derive(made.data, { op: 'make' });
+      const derived = await derive(made.data, { op: 'make', signal: controller.signal });
+      if (derivation === controller) derivation = null;
       if (current !== attempt) {
         derived.wrapKey.fill(0);
         return;
@@ -128,6 +133,8 @@
       console.warn('den: a recovery code could not be made', error);
       phase = 0;
       showMessage(error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed);
+    } finally {
+      if (derivation === controller) derivation = null;
     }
   }
 
@@ -182,6 +189,8 @@
   }
 
   async function cancel() {
+    derivation?.abort();
+    derivation = null;
     attempt++;
     const made = prepared;
     end();
@@ -226,6 +235,8 @@
 
   // Leaving with a code shown and not confirmed ends it; a closed tab leaves that to the next reconcile.
   onMount(() => () => {
+    derivation?.abort();
+    derivation = null;
     attempt++;
     const made = prepared;
     const cleanup = pendingCleanup;

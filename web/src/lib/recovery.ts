@@ -145,6 +145,13 @@ export class DeriveFailed extends Error {
   }
 }
 
+/** The presentation that owned a derivation went away. This is not a device failure or a timing sample. */
+export class DeriveCancelled extends Error {
+  constructor() {
+    super('recovery_derive: cancelled');
+  }
+}
+
 /** What a person is told when this device can't derive (§3): another device can. */
 export const deviceCouldNot = {
   make: 'This device couldn’t make the code — try Den Web on a computer.',
@@ -196,6 +203,8 @@ export interface DeriveOptions {
   op: Timing['op'];
   /** Where the derivation runs: a module Worker, as Den Web runs it. Tests stand one in. */
   worker?: () => Pick<Worker, 'postMessage' | 'terminate' | 'onmessage' | 'onerror'>;
+  /** The presentation owner. Aborting it terminates the Worker before a replacement may start. */
+  signal?: AbortSignal;
   timeoutMs?: number;
   report?: (timing: Timing) => void;
 }
@@ -226,40 +235,67 @@ export function derive(data: string, options: DeriveOptions = { op: 'redeem' }):
       : () => new Worker(new URL('./recoveryWorker.ts', import.meta.url), { type: 'module' }));
   if (!makeWorker) {
     return ensureRecoveryPolicy()
-      .then(() =>
-        answer(
-          recoveryPolicy<{ locator: string; wrapKey: string }>({ op: 'recovery_derive', data }),
-        ),
-      )
+      .then(() => {
+        if (options.signal?.aborted) throw new DeriveCancelled();
+        const out = recoveryPolicy<{ locator: string; wrapKey: string }>({
+          op: 'recovery_derive',
+          data,
+        });
+        if (options.signal?.aborted) throw new DeriveCancelled();
+        return answer(out);
+      })
       .catch((error: unknown) => {
-        throw error instanceof DeriveFailed ? error : new DeriveFailed('error');
+        throw error instanceof DeriveFailed || error instanceof DeriveCancelled
+          ? error
+          : new DeriveFailed('error');
       });
   }
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new DeriveCancelled());
+      return;
+    }
     const worker = makeWorker();
-    const timer = setTimeout(() => {
+    let finished = false;
+    const finish = (done: () => void) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', cancel);
+      worker.onmessage = null;
+      worker.onerror = null;
       worker.terminate();
-      settle('timeout');
-      reject(new DeriveFailed('timeout'));
-    }, options.timeoutMs ?? DERIVE_TIMEOUT_MS);
+      done();
+    };
+    const cancel = () => finish(() => reject(new DeriveCancelled()));
+    const timer = setTimeout(
+      () =>
+        finish(() => {
+          settle('timeout');
+          reject(new DeriveFailed('timeout'));
+        }),
+      options.timeoutMs ?? DERIVE_TIMEOUT_MS,
+    );
     worker.onmessage = (
       event: MessageEvent<{ locator?: string; wrapKey?: string; error?: string }>,
     ) => {
-      clearTimeout(timer);
-      worker.terminate();
-      try {
-        resolve(answer(event.data));
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
+      finish(() => {
+        try {
+          resolve(answer(event.data));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
     };
     worker.onerror = () => {
-      clearTimeout(timer);
-      worker.terminate();
-      settle('error');
-      reject(new DeriveFailed('error'));
+      finish(() => {
+        settle('error');
+        reject(new DeriveFailed('error'));
+      });
     };
-    worker.postMessage(data);
+    options.signal?.addEventListener('abort', cancel, { once: true });
+    if (options.signal?.aborted) cancel();
+    else worker.postMessage(data);
   });
 }
 
@@ -851,20 +887,24 @@ export type RedeemError =
 export async function redeem(
   text: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<{ libraryKey: string } | { error: RedeemError; retryAfter?: number }> {
   const read = await readCode(text);
   if ('error' in read) return read;
   let derived: Derived;
   try {
-    derived = await derive(read.data, { op: 'redeem' });
-  } catch {
+    derived = await derive(read.data, { op: 'redeem', signal });
+  } catch (error) {
+    if (error instanceof DeriveCancelled) throw error;
     return { error: 'device' };
   }
   try {
+    if (signal?.aborted) throw new DeriveCancelled();
     const res = await fetchImpl('/recovery/open', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ locator: derived.locator }),
+      signal,
     });
     if (res.status === 404) return { error: 'unknown_code' };
     if (res.status === 429)
@@ -873,15 +913,20 @@ export async function redeem(
     const key = await unseal(derived, ((await res.json()) as { sealed: string }).sealed);
     derived.wrapKey.fill(0);
     if (!key) return { error: 'unreadable' };
+    if (signal?.aborted) throw new DeriveCancelled();
     const keys = await deriveKeys(key);
     const library = await fetchImpl(`/lib/${keys.id}/changes?since=0&limit=1`, {
       headers: { 'x-den-library-token': keys.token },
+      signal,
     });
     if (library.status === 410) return { error: 'library_moved' };
     if (!library.ok) return { error: library.status === 404 ? 'library_missing' : 'unreachable' };
     return { libraryKey: btoa(String.fromCharCode(...key)) };
-  } catch {
+  } catch (error) {
+    if (error instanceof DeriveCancelled || signal?.aborted) throw new DeriveCancelled();
     return { error: 'unreachable' };
+  } finally {
+    derived.wrapKey.fill(0);
   }
 }
 
