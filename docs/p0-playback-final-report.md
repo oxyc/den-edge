@@ -1,6 +1,7 @@
 # P0 playback final qualification
 
 Base: `73d4166d8d1b3aa426793ee65ae849673ed65a3c`.
+Joined-contract follow-up base: `d75e209815621f4f634ec7ca72df56736ec67e40`.
 
 ## Corrected contracts
 
@@ -20,6 +21,12 @@ Base: `73d4166d8d1b3aa426793ee65ae849673ed65a3c`.
 
 - Full Vitest: 231 files passed, 3 skipped; 3,056 tests passed, 16 skipped.
 - Edge receipt callback suite: 8 passed (748 unrelated tests filtered).
+- Joined receipt production contract: the real Library Service created a drop-box without assistant consent; actual
+  Edge callbacks queued one movie and one episode receipt; the service's real assistant authority applied both; and
+  both progress records read back after reopening the durable library.
+- Focused follow-up Vitest: 3 files and 83 tests passed across `LibraryLogAuthority`, the embedded assistant
+  authority, and `LibraryServiceCore`. The Edge receipt module passed all 8 ordinary tests; its ignored bridge is
+  invoked and required by the joined Vitest contract.
 - Playwright: all 13 Cast-offer scenarios (the original 11 plus receipt-intent ordering and visible handshake
   timeout/retry), including deterministic reload/stale-message coverage, plus the real Svelte A→B→A authority test
   passed. One pre-existing slow-config
@@ -44,18 +51,21 @@ Wasm SHA-256 is identical in both builds:
 - recovery: `9ce86ca99a1853e391e9e1f271c69c9e09b54a83d43f3658d02043d7c78198dd`
 - startup: `ae086beee41d6474f2a60abeb8677974df72af3075f5fbbfd195a58a28184a9e`
 
-The binary patch from the named base, excluding this self-referential report file, has SHA-256
-`7ef5fa79a4655c699ce1efa62f15daf776a2e63b74f8a0404cdb1536b7cdc2ed`.
+The joined-contract binary patch from `d75e209815621f4f634ec7ca72df56736ec67e40`, excluding this self-referential
+report file, has SHA-256 `b78c20dee6767cf54adb3fe7cb688d46004cf4b9a5167a64f478b6ce4d3567dc`. The
+cumulative binary patch from the original named base, with the same exclusion, has SHA-256
+`8695b9090ad728ec16683809775dc97a658d16cf346b9a39e8394523ef2b8a76`.
 
 ## Platform disposition and remaining work
 
 - Browser: changed and source/unit/browser verified.
 - LG/webOS and supported Samsung/Tizen: shared production paths changed; source/static/unit verified, no device run.
 - Chromecast: sender and Cast document changed; Chromium contract verified, no receiver hardware run.
-- iOS/iPadOS/tvOS: receipt parity remains unverified/incomplete. Den #717 is diagnostics, not receipt ownership.
+- iOS/iPadOS/tvOS: receipt parity remains unverified/incomplete and is tracked by
+  [oxyc/den#719](https://github.com/oxyc/den/issues/719). Den #717 is diagnostics, not receipt ownership.
 - Tizen 3: grant/relay changes apply, but receipt crypto is explicitly unsupported. Ordinary in-page progress remains;
-  post-page managed completion has no specific recovery/handoff UI. The focused issue draft is retained in
-  `edge-1052-1054-audit.md` because this supervised run forbade GitHub posting.
+  post-page managed completion has no specific recovery/handoff UI. Unsupported/recovery parity is tracked by
+  [oxyc/den-edge#1059](https://github.com/oxyc/den-edge/issues/1059).
 - Android TV: native launcher/player receipt parity was not found in this repository path and remains unverified.
 
 No new measured performance regression was found. The native/Tizen 3 receipt and recovery gap is the remaining

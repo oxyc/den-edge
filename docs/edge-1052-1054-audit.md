@@ -34,10 +34,10 @@
 - Key publication, connection lending, and apply are fenced after every await to the current foreground profile.
   Failure leaves the queue unacknowledged and a later pass retries it. Tests cross the client codec, Worker host,
   `LibraryServiceCore`, real assistant authority malformed handling, queue transport, cancellation, and retry paths.
-- Den #717 is diagnostics work; it does not own native receipt parity. The read-only issue search found no focused
-  native receipt issue. iOS/iPadOS/tvOS do not implement this encrypted completion-receipt transport in the code
-  reviewed here, so native parity remains unverified and incomplete; the issue draft below must be filed by an owner
-  allowed to post to GitHub.
+- A joined production-contract test starts with the real Library Service in a no-consent household, creates its
+  drop-box, passes movie and episode ciphertext through the actual Edge callback and drain, applies both through the
+  service's real assistant authority, and reopens the durable library for readback. Native Apple receipt parity is
+  tracked by [oxyc/den#719](https://github.com/oxyc/den/issues/719); Den #717 remains diagnostics only.
 
 ## Platform and performance disposition
 
@@ -45,7 +45,9 @@
   Chromecast is browser-only. Tizen 3 uses the shared grant/relay fixes, but its explicit
   `assistantCore-tizen3` adapter cannot create or open receipt crypto. It can still save ordinary in-page progress;
   managed playback completion after the page is gone is unsupported, and the current UI has no specific handoff or
-  recovery notice for that limitation. That is an open parity/recovery gap, not a successful queued-receipt path.
+  recovery notice for that limitation. That open parity/recovery gap is tracked by
+  [oxyc/den-edge#1059](https://github.com/oxyc/den-edge/issues/1059), not represented as a successful queued-receipt
+  path.
 - The authority refresh adds one already-required held-grant refresh before first discovery and removes doomed
   release/session work. The empty receipt lane performs one bounded drain request but no assistant policy import.
 - Matched clean-archive and worktree production builds transformed the same 564 client modules. The complete build
@@ -70,20 +72,3 @@
 - No deployment, homelab/device access, active stream probe, TV packaging, or public posting was performed.
 - Source and browser fixtures use synthetic ids and ciphertext only; no production route token or private evidence is
   present in the patch.
-
-## Follow-up issue draft (not posted from this supervised run)
-
-**Title:** Add native Apple playback receipts and explicit Tizen 3 completion recovery
-
-**Expected:** iOS/iPadOS/tvOS establish the household receipt drop-box before managed playback and durably apply
-movie/episode completion receipts with the same authority, cancellation, retry and privacy contract as Web. Tizen 3
-must either implement that contract within its documented crypto limits or visibly hand off/recover completion work
-without claiming success.
-
-**Actual/source evidence:** the native clients are outside this repository and no reviewed native receipt consumer
-was found; Den #717 covers diagnostics only. In this repository `assistantCore-tizen3` explicitly refuses assistant
-crypto, while managed playback can continue after receipt preparation fails, leaving only ordinary in-page progress.
-
-**Acceptance:** production-path movie and episode tests cover first playback in a no-consent household, callback,
-queue, real authority apply, durable readback, replacement/abort before ack, offline retry, and an explicit Tizen 3
-unsupported/recovery presentation. Record iOS/iPadOS/tvOS/Tizen 3 performance and launch-cost results.
