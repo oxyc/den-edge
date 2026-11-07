@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import {
+  drainPlaybackReceiptsForCurrentAuthority,
   drainPlaybackReceiptsOnce,
   drainWhileOpen,
   type ApplyOutcome,
@@ -189,5 +190,94 @@ test('playback receipts share the queue transport but use their own one-shot rou
   expect(calls).toEqual([
     { path: '/playback/receipts/drain', body: undefined },
     { path: '/playback/receipts/ack', body: { upTo: 7 } },
+  ]);
+});
+
+test('an empty playback receipt lane does not enter the crypto/apply path', async () => {
+  const ensure = vi.fn(async () => DROPBOX);
+  const fetchImpl = vi.fn(async () => Response.json({ messages: [] })) as unknown as typeof fetch;
+  await drainPlaybackReceiptsForCurrentAuthority(
+    {
+      libraryId: 'lib',
+      ensure,
+      lend: async () => null,
+      apply: async () => ({ ack: null }),
+      current: () => true,
+      fetchImpl,
+    },
+    new AbortController().signal,
+  );
+  expect(ensure).not.toHaveBeenCalled();
+  expect(fetchImpl).toHaveBeenCalledOnce();
+});
+
+test('receipt work is fenced after key and profile awaits when authority is replaced', async () => {
+  for (const boundary of ['ensure', 'lend'] as const) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let current = true;
+    const apply = vi.fn(async () => ({ ack: 7 }));
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith('/drain')
+        ? Response.json({ messages: [{ seq: 7, sealed: 'receipt' }] })
+        : Response.json({ removed: 1 }),
+    );
+    const fetchImpl = fetchSpy as unknown as typeof fetch;
+    const running = drainPlaybackReceiptsForCurrentAuthority(
+      {
+        libraryId: `lib-${boundary}`,
+        ensure: async () => {
+          if (boundary === 'ensure') await held;
+          return DROPBOX;
+        },
+        lend: async () => {
+          if (boundary === 'lend') await held;
+          return { profile: 'old' };
+        },
+        apply,
+        current: () => current,
+        fetchImpl,
+      },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    current = false;
+    release();
+    await running;
+    expect(apply, boundary).not.toHaveBeenCalled();
+    expect(fetchSpy.mock.calls.some(([path]) => String(path).endsWith('/ack'))).toBe(false);
+  }
+});
+
+test('a failed receipt key publication can be retried without acknowledging the queue', async () => {
+  let attempt = 0;
+  const calls: string[] = [];
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    calls.push(path);
+    return path.endsWith('/drain')
+      ? Response.json({ messages: [{ seq: 7, sealed: 'receipt' }] })
+      : Response.json({ removed: 1 });
+  }) as unknown as typeof fetch;
+  const options = {
+    libraryId: 'lib-retry',
+    ensure: async () => {
+      if (attempt++ === 0) throw new Error('key publication failed');
+      return DROPBOX;
+    },
+    lend: async () => null,
+    apply: async () => ({ ack: 7 }),
+    current: () => true,
+    fetchImpl,
+  };
+  await expect(
+    drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal),
+  ).rejects.toThrow('key publication failed');
+  expect(calls).toEqual(['/playback/receipts/drain']);
+  await drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal);
+  expect(calls).toEqual([
+    '/playback/receipts/drain',
+    '/playback/receipts/drain',
+    '/playback/receipts/ack',
   ]);
 });

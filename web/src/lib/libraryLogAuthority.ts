@@ -1351,7 +1351,7 @@ export class LibraryLogAuthority {
         return {
           result: {
             kind: 'assistant.receipts.ensure',
-            dropbox: await this.#assistant.ensureDropbox(false),
+            dropbox: await this.#assistant.ensureDropbox(),
           },
           affected: [],
         };

@@ -127,7 +127,7 @@ export class RelaySession {
       try {
         const install = (JSON.parse(init.body) as { scout?: unknown }).scout;
         const named = typeof install === 'string' ? GRANT_INSTALL.exec(install)?.[1] : undefined;
-        if (named && this.#grants.has(named)) gid = named;
+        if (named) gid = named;
       } catch {
         // The body names no usable shared install.
       }
@@ -407,7 +407,7 @@ function grantOf(url: URL, init: RequestInit | undefined): string | null {
     try {
       const install = (JSON.parse(init.body) as { scout?: unknown }).scout;
       const gid = typeof install === 'string' ? GRANT_INSTALL.exec(install)?.[1] : undefined;
-      if (gid && grantSecrets.has(gid)) return gid;
+      if (gid) return gid;
     } catch {
       // Not JSON: nothing names a grant.
     }

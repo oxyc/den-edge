@@ -5,6 +5,7 @@ import { availability } from './availability.svelte';
 import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
+import { sharedInstallOf } from './grants';
 import type { Immutable, LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
 import { ahead } from './privateAddresses';
@@ -18,6 +19,19 @@ type Runtime = Immutable<RuntimeDiscoveryView>;
 
 const inputs = (library: boolean, plugins: readonly string[], remux: string | null) =>
   JSON.stringify([library, plugins, remux]);
+
+/** A retained playback install is usable only while the current authority still lists its manifest. */
+function retainsScout(install: string, plugins: readonly string[]): boolean {
+  const shared = sharedInstallOf(install);
+  if (shared) return plugins.some((plugin) => sharedInstallOf(plugin)?.install === shared.install);
+  const manifest = `${install.replace(/\/+$/, '')}/manifest.json`;
+  try {
+    const expected = new URL(manifest, globalThis.location?.href).href;
+    return plugins.some((plugin) => new URL(plugin, globalThis.location?.href).href === expected);
+  } catch {
+    return false;
+  }
+}
 
 export class SessionServices {
   plugins = $state.raw<string[]>([]);
@@ -35,7 +49,10 @@ export class SessionServices {
   #for?: string;
   #stop?: () => void;
   #keep?: ReturnType<typeof setTimeout>;
-  #grants = false;
+  #grantsReady = false;
+  #grantsRefreshing = false;
+  #pendingConfigure?: [library: boolean, plugins: readonly string[], remux: string | null];
+  #stopped = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
   readonly #model: LibraryModel | null;
@@ -78,20 +95,39 @@ export class SessionServices {
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
   configure(runtime: Runtime | undefined): void {
-    this.#configure(
+    if (this.#stopped) return;
+    const wanted: [boolean, readonly string[], string | null] = [
       this.#model !== null,
       runtime?.pluginManifestUrls ?? [],
       runtime?.privateRemuxUrl ?? null,
+    ];
+    this.#pendingConfigure = wanted;
+    if (this.#grantsReady) return this.#configure(...wanted);
+    if (this.#grantsRefreshing) return;
+    this.#grantsRefreshing = true;
+    void guestGrants.refresh().then(
+      () => {
+        this.#grantsRefreshing = false;
+        this.#grantsReady = true;
+        if (!this.#stopped && this.#pendingConfigure) this.#configure(...this.#pendingConfigure);
+      },
+      () => {
+        this.#grantsRefreshing = false;
+        // A cached grant is not current authority after a failed refresh. Continue with member plugins only; a later
+        // configure retries the refresh and can visibly recover without ever publishing the unverified guest Scout.
+        if (!this.#stopped && this.#pendingConfigure)
+          this.#configure(...this.#pendingConfigure, []);
+      },
     );
   }
 
-  #configure(library: boolean, libraryPlugins: readonly string[], remux: string | null): void {
+  #configure(
+    library: boolean,
+    libraryPlugins: readonly string[],
+    remux: string | null,
+    shared: readonly string[] = guestGrants.pluginUrls(),
+  ): void {
     if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
-    if (!this.#grants) {
-      this.#grants = true;
-      void guestGrants.refresh();
-    }
-    const shared = guestGrants.pluginUrls();
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
     );
@@ -103,6 +139,11 @@ export class SessionServices {
     this.#keep = undefined;
     this.#stop?.();
     if (JSON.stringify(this.plugins) !== JSON.stringify(plugins)) this.plugins = plugins;
+    if (this.scout && !retainsScout(this.scout.install, plugins)) {
+      this.scout = null;
+      this.debrid = null;
+      if (this.#foregroundReady) availability.connect(null, this.content);
+    }
     let current = true;
     // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish.
     this.#atlasGeneration++;
@@ -130,9 +171,10 @@ export class SessionServices {
             ]),
           );
           // A playback route is a live runtime capability, never a durable retained hint.
-          this.scout = saved.scout
-            ? { install: saved.scout.install, base: saved.scout.base }
-            : null;
+          this.scout =
+            saved.scout && retainsScout(saved.scout.install, plugins)
+              ? { install: saved.scout.install, base: saved.scout.base }
+              : null;
           this.reel = saved.reel;
           this.remux = saved.remux;
           if (this.#foregroundReady) availability.connect(this.scout, this.content);
@@ -153,15 +195,17 @@ export class SessionServices {
         ...(library || shared.length > 0
           ? {
               scout: (found: Addon | null) => {
+                if (!current) return;
                 this.scout = found;
                 if (this.#foregroundReady) availability.connect(found, this.content);
                 if (found)
                   void readDebridState(found).then((state) => {
-                    if (current) this.debrid = state;
+                    if (current && this.scout === found) this.debrid = state;
                   });
                 this.#settled();
               },
               remux: (found: string | null) => {
+                if (!current) return;
                 this.remux = found;
                 this.remuxAway = found === null;
                 this.remuxBlocked = false;
@@ -178,11 +222,13 @@ export class SessionServices {
             }
           : {}),
         atlas: (found) => {
+          if (!current) return;
           if (found === undefined) return;
           liveAtlas = true;
           this.#configureAtlas(found?.base ?? null, () => current);
         },
         reel: (found) => {
+          if (!current) return;
           this.reel = found?.base ?? null;
           this.#settled();
         },
@@ -203,6 +249,7 @@ export class SessionServices {
   }
 
   stop(): void {
+    this.#stopped = true;
     this.#stop?.();
     this.#atlasGeneration++;
     clearTimeout(this.#keep);

@@ -9,6 +9,15 @@ let discoveries = 0;
 let reaches: string | undefined;
 /** atlas could not be reached at all (`discoverServices` publishes undefined). */
 let atlasUnreachable = false;
+let guestPluginUrls: string[] = [];
+let refreshGrants: () => Promise<void> = async () => undefined;
+let autoDiscover = true;
+const discoveryPublishes: Array<{
+  scout?: (value: { base: string; install: string; playback?: string } | null) => void;
+  atlas: (value: { base: string } | null) => void;
+  reel: (value: { base: string } | null) => void;
+  remux?: (value: string | null) => void;
+}> = [];
 vi.mock('./discoverServices', () => ({
   discoverServices: (
     _installed: string[],
@@ -21,21 +30,24 @@ vi.mock('./discoverServices', () => ({
     },
   ) => {
     const run = ++discoveries;
-    queueMicrotask(() =>
-      publish.scout?.({
-        base: `/scout-${run}`,
-        install: '/scout',
-        playback: `/scout-${run}/playback`,
-      }),
-    );
-    queueMicrotask(() => publish.atlas(atlasUnreachable ? undefined : { base: `/atlas-${run}` }));
-    queueMicrotask(() => publish.reel({ base: `/reel-${run}` }));
-    if (reaches) queueMicrotask(() => publish.remux?.(reaches!));
+    discoveryPublishes.push(publish);
+    if (autoDiscover) {
+      queueMicrotask(() =>
+        publish.scout?.({
+          base: `/scout-${run}`,
+          install: '/scout',
+          playback: `/scout-${run}/playback`,
+        }),
+      );
+      queueMicrotask(() => publish.atlas(atlasUnreachable ? undefined : { base: `/atlas-${run}` }));
+      queueMicrotask(() => publish.reel({ base: `/reel-${run}` }));
+      if (reaches) queueMicrotask(() => publish.remux?.(reaches!));
+    }
     return () => undefined;
   },
 }));
 vi.mock('./grants.svelte', () => ({
-  guestGrants: { refresh: async () => undefined, pluginUrls: () => [] },
+  guestGrants: { refresh: () => refreshGrants(), pluginUrls: () => guestPluginUrls },
 }));
 
 const runtime = (pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
@@ -62,6 +74,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   reaches = undefined;
   atlasUnreachable = false;
+  guestPluginUrls = [];
+  refreshGrants = async () => undefined;
+  autoDiscover = true;
+  discoveryPublishes.length = 0;
 });
 
 describe('SessionServices', () => {
@@ -100,7 +116,178 @@ describe('SessionServices', () => {
     services.stop();
   });
 
+  it('does not publish a retained guest playback install from a grant no longer held', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
+    let release!: (routes: Record<string, Array<{ url: string }>>) => void;
+    const routes = new Promise<Record<string, Array<{ url: string }>>>(
+      (resolve) => (release = resolve),
+    );
+    const services = new SessionServices(
+      fakeModel({
+        retainedServices: vi.fn().mockResolvedValue({
+          routes: {},
+          scout: {
+            base: '/den/~aaaaaaaa',
+            install: 'https://den.example/den/~aaaaaaaa',
+          },
+          atlas: null,
+          reel: null,
+          remux: null,
+        }),
+      }),
+      content,
+      () => routes,
+    );
+
+    services.configure(runtime());
+    await vi.waitFor(() => expect(services.atlasReady).toBe(true));
+    expect(services.scout).toBeNull();
+    release({});
+    services.stop();
+  });
+
+  it('waits for grant refresh before retained paint and uses the refreshed authority', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    autoDiscover = false;
+    let refreshed!: () => void;
+    refreshGrants = () => new Promise<void>((resolve) => (refreshed = resolve));
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    const retainedServices = vi.fn().mockResolvedValue({
+      routes: {},
+      scout: {
+        base: '/den/~aaaaaaaa',
+        install: 'https://den.example/den/~aaaaaaaa',
+      },
+      atlas: null,
+      reel: null,
+      remux: null,
+    });
+    const services = new SessionServices(
+      fakeModel({ retainedServices }),
+      content,
+      async () => ({}),
+    );
+    services.configure(runtime());
+    await Promise.resolve();
+    expect(retainedServices).not.toHaveBeenCalled();
+    expect(services.scout).toBeNull();
+
+    guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
+    refreshed();
+    await vi.waitFor(() => expect(retainedServices).toHaveBeenCalledOnce());
+    expect(services.scout).toBeNull();
+    services.stop();
+  });
+
+  it('fails closed on grant refresh failure and recovers on the next configuration', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    autoDiscover = false;
+    discoveries = 0;
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    refreshGrants = async () => {
+      throw new Error('offline');
+    };
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    services.configure(runtime());
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
+    expect(services.plugins).toEqual([]);
+    expect(services.scout).toBeNull();
+
+    refreshGrants = async () => undefined;
+    guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
+    services.configure(runtime(['https://member.example/scout/manifest.json']));
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
+    expect(services.plugins).toEqual([
+      'https://member.example/scout/manifest.json',
+      'https://den.example/den/~bbbbbbbb/manifest.json',
+    ]);
+    services.stop();
+  });
+
+  it('does not start discovery after a stopped profile refresh completes', async () => {
+    let refreshed!: () => void;
+    refreshGrants = () => new Promise<void>((resolve) => (refreshed = resolve));
+    const retainedServices = vi.fn().mockResolvedValue(null);
+    const services = new SessionServices(
+      fakeModel({ retainedServices }),
+      content,
+      async () => ({}),
+    );
+    services.configure(runtime());
+    services.stop();
+    refreshed();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(retainedServices).not.toHaveBeenCalled();
+  });
+
+  it('withdraws A immediately on A→B→A authority replacement and fences stale discovery', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    autoDiscover = false;
+    discoveries = 0;
+    const connect = vi.spyOn(availability, 'connect');
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    services.foregroundReady();
+
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    services.configure(runtime());
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
+    const a = { base: '/den/~aaaaaaaa', install: 'https://den.example/den/~aaaaaaaa' };
+    discoveryPublishes[0]!.scout?.(a);
+    expect(services.scout).toEqual(a);
+
+    guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
+    services.configure(runtime());
+    expect(services.scout).toBeNull();
+    expect(connect).toHaveBeenLastCalledWith(null, content);
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
+    discoveryPublishes[0]!.scout?.(a);
+    expect(services.scout).toBeNull();
+    const b = { base: '/den/~bbbbbbbb', install: 'https://den.example/den/~bbbbbbbb' };
+    discoveryPublishes[1]!.scout?.(b);
+    expect(services.scout).toEqual(b);
+
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    services.configure(runtime());
+    expect(services.scout).toBeNull();
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(3));
+    discoveryPublishes[1]!.scout?.(b);
+    expect(services.scout).toBeNull();
+    discoveryPublishes[2]!.scout?.(a);
+    expect(services.scout).toEqual(a);
+    services.stop();
+  });
+
+  it('keeps an incompatible Scout withdrawn when replacement route discovery fails', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    autoDiscover = false;
+    discoveries = 0;
+    let fail = false;
+    const services = new SessionServices(fakeModel(), content, async () => {
+      if (fail) throw new Error('route discovery failed');
+      return {};
+    });
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    services.configure(runtime());
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
+    discoveryPublishes[0]!.scout?.({
+      base: '/den/~aaaaaaaa',
+      install: 'https://den.example/den/~aaaaaaaa',
+    });
+    expect(services.scout).not.toBeNull();
+
+    fail = true;
+    guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
+    services.configure(runtime());
+    expect(services.scout).toBeNull();
+    await Promise.resolve();
+    expect(services.scout).toBeNull();
+    services.stop();
+  });
+
   it('paints retained discovery while live probes are pending', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
     let release!: (routes: Record<string, Array<{ url: string }>>) => void;
     const routes = new Promise<Record<string, Array<{ url: string }>>>(
       (resolve) => (release = resolve),
@@ -120,7 +307,7 @@ describe('SessionServices', () => {
       }),
     });
     const services = new SessionServices(model, content, () => routes);
-    services.configure(runtime());
+    services.configure(runtime(['/scout/manifest.json']));
     await vi.waitFor(() => expect(services.atlas).toBe('/retained-atlas'));
     expect(services.scout).toEqual({ base: '/retained-scout', install: '/scout' });
     release({ live: [{ url: '/live' }] });

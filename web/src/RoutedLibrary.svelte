@@ -1528,27 +1528,29 @@
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
   $effect(() => {
     const current = session;
-    return whileNeeded(session.foregrounded, ({ drainPlaybackReceiptsOnce }, work, signal) => {
-      void (async () => {
-        try {
-          const dropbox = await (work.household ?? work.model).ensurePlaybackReceipts();
-          if (!dropbox) return;
-        } catch (error) {
-          console.warn('den: playback receipt key could not be published', error);
-          return;
-        }
-        if (signal.aborted || current !== session) return;
-        await drainPlaybackReceiptsOnce(
-          {
-            libraryId: work.libraryId,
-            apply: async (messages) =>
-              work.model.applyPlaybackReceipts(messages, await work.lend()),
-            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
-          },
-          signal,
-        );
-      })();
-    });
+    return whileNeeded(
+      session.foregrounded,
+      ({ drainPlaybackReceiptsForCurrentAuthority }, work, signal) => {
+        void (async () => {
+          try {
+            await drainPlaybackReceiptsForCurrentAuthority(
+              {
+                libraryId: work.libraryId,
+                ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
+                lend: work.lend,
+                apply: (messages, connection) =>
+                  work.model.applyPlaybackReceipts(messages, connection),
+                current: () => current === session,
+                ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+              },
+              signal,
+            );
+          } catch (error) {
+            console.warn('den: playback receipts could not be applied', error);
+          }
+        })();
+      },
+    );
   });
 
   // An LG or Samsung TV also drains its own lane of the assistant's TV queue (den-spec assistant-v1 §16), so an

@@ -213,6 +213,59 @@ test('a session naming a shared install goes to the relay under the grant, not t
   }
 });
 
+test('a remux body naming an unheld grant never falls back to another held grant', async () => {
+  const spy = stub();
+  rememberGrant(GID, 'sekrit');
+  const body = JSON.stringify({ scout: 'https://den.example/den/~ffffffff' });
+  for (const path of ['/remux/releases', '/remux/session'])
+    await expect(relayFetch(path, { method: 'POST', body })).rejects.toThrow(
+      'no secret held for grant ffffffff',
+    );
+  expect(spy).not.toHaveBeenCalled();
+});
+
+test('keeps remux header and body gids equal for releases, session, and its 428 retry', async () => {
+  const other = 'bbbbbbbb';
+  rememberGrant(GID, 'first');
+  rememberGrant(other, 'second');
+  const calls: Array<{ header: string | null; body: { scout: string; ipv4Hint?: string } }> = [];
+  let sessions = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        header: new Headers(init?.headers).get(GRANT),
+        body: JSON.parse(String(init?.body)),
+      });
+      const session = new URL(String(input), HERE).pathname === '/remux/session';
+      const wantsHint = session && sessions++ === 0;
+      return new Response(
+        JSON.stringify(wantsHint ? { error: 'ipv4_hint_wanted' } : { releases: [] }),
+        { status: wantsHint ? 428 : 200 },
+      );
+    }),
+  );
+  const base = { scout: `https://den.example/den/~${other}`, imdb: 'tt42' };
+  await relayFetch('/remux/releases', { method: 'POST', body: JSON.stringify(base) });
+  await relayFetch('/remux/releases', {
+    method: 'POST',
+    body: JSON.stringify({ ...base, season: 2, episode: 3 }),
+  });
+  await relayFetch('/remux/session', { method: 'POST', body: JSON.stringify(base) });
+  await relayFetch('/remux/session', {
+    method: 'POST',
+    body: JSON.stringify({ ...base, ipv4Hint: '198.51.100.7' }),
+  });
+  expect(calls).toHaveLength(4);
+  for (const call of calls) {
+    const bodyGid = /~([0-9a-f]{8})$/.exec(call.body.scout)?.[1];
+    expect(call.header?.split(':')[0]).toBe(bodyGid);
+    expect(call.header).toBe(`${other}:second`);
+  }
+  expect(calls[3]!.body.ipv4Hint).toBe('198.51.100.7');
+  forgetGrant(other);
+});
+
 test('a member who is also a guest plays their own library as a member', async () => {
   const spy = stub();
   useLibraryCredential(KEYS);
@@ -305,4 +358,16 @@ test('RelaySession honors the scout named in remux bodies and verifies grant exp
   });
   expect(sent(spy)[GRANT]).toBe(`${other}:named`);
   expect(ended).toHaveBeenCalledWith(other);
+});
+
+test('RelaySession refuses an explicitly named unheld grant instead of signing as another', async () => {
+  const session = new RelaySession();
+  session.configureGrants([{ gid: GID, secret: 'first' }]);
+  const spy = stub();
+  const body = JSON.stringify({ scout: 'https://den.example/scout/~ffffffff' });
+  for (const path of ['/remux/releases', '/remux/session'])
+    await expect(session.fetch(path, { method: 'POST', body })).rejects.toThrow(
+      'no secret held for grant ffffffff',
+    );
+  expect(spy).not.toHaveBeenCalled();
 });

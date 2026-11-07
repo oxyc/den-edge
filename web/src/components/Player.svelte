@@ -451,6 +451,18 @@
   let heldFrame = $state<string>();
   /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
   const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin ?? heldFrame);
+  /** The exact iframe document generation that announced readiness; origin alone cannot distinguish a reload. */
+  let castFrameGeneration = $state(0);
+  let castFrameReady = $state<{ origin: string; generation: number }>();
+  let castReadyBeforeLoad: { origin: string; generation: number } | undefined;
+  let castReadyTurn: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    void frameOrigin;
+    castFrameGeneration = untrack(() => castFrameGeneration + 1);
+    castFrameReady = undefined;
+    castReadyBeforeLoad = undefined;
+    clearTimeout(castReadyTurn);
+  });
   let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -2325,10 +2337,43 @@
     return () => clearInterval(tick);
   });
 
+  function readyCastFrame(origin: string): Window | null {
+    const frame = castFrame?.contentWindow;
+    return frame &&
+      castFrameReady?.origin === origin &&
+      castFrameReady.generation === castFrameGeneration
+      ? frame
+      : null;
+  }
+
+  function castDocumentReady(origin: string): void {
+    const ready = { origin, generation: castFrameGeneration };
+    castFrameReady = ready;
+    // An inline den-ready can reach the parent before this navigation's load event. Let that one load carry the
+    // readiness into its new generation, but never let an old document authorize a later same-origin reload.
+    castReadyBeforeLoad = ready;
+    clearTimeout(castReadyTurn);
+    castReadyTurn = setTimeout(() => {
+      if (castReadyBeforeLoad === ready) castReadyBeforeLoad = undefined;
+    });
+  }
+
+  function castFrameLoaded(): void {
+    const before = castReadyBeforeLoad;
+    castFrameGeneration += 1;
+    castFrameReady =
+      before && before.origin === frameOrigin
+        ? { origin: before.origin, generation: castFrameGeneration }
+        : undefined;
+    castReadyBeforeLoad = undefined;
+    clearTimeout(castReadyTurn);
+  }
+
   function sendToCastFrame(): void {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return;
+    if (!current?.castOrigin) return;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return;
     playedEngine = 'cast_page';
     // Played here only because this page could not reach the home network: the cast page, in the same browser,
     // can't either, so it is not sent there to fail. A receiver is on that network, so a cast still offers it.
@@ -2385,7 +2430,14 @@
   // Send each replacement explicitly; the frame's den-ready message remains the retry for its initial page load.
   $effect(() => {
     const [current, frame, preparing] = [session, castFrame, castSubtitlePreparing];
-    if (!current?.castOrigin || !frame || preparing) return;
+    if (
+      !current?.castOrigin ||
+      !frame ||
+      preparing ||
+      castFrameReady?.origin !== current.castOrigin ||
+      castFrameReady.generation !== castFrameGeneration
+    )
+      return;
     untrack(sendToCastFrame);
   });
 
@@ -2393,9 +2445,10 @@
     const looking = castFrame?.contentWindow;
     if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
       const message = event.data as { type?: string; available?: unknown; profile?: unknown };
-      if (message.type === 'den-ready')
+      if (message.type === 'den-ready') {
+        castDocumentReady(event.origin);
         looking.postMessage({ type: 'den-discover', interfaceLanguage }, lookOrigin);
-      else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
+      } else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
         look({ kind: 'availability', available: message.available });
       else if (message.type === 'den-cast-session' && castOffer === 'choose') {
         // The receiver model the viewer keeps in the cast page's menu, else its default.
@@ -2422,7 +2475,7 @@
       available?: boolean;
     };
     if (message.type === 'den-ready') {
-      sendToCastFrame();
+      castDocumentReady(event.origin);
       return;
     }
     if (message.id !== current.playlist) return;
@@ -2462,7 +2515,10 @@
         if (restartAfterMeasure(current, publicMaxBitrate)) {
           restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
         } else
-          frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
+          readyCastFrame(current.castOrigin)?.postMessage(
+            { type: 'den-continue', id: current.playlist },
+            current.castOrigin,
+          );
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -2654,7 +2710,7 @@
     const next = castLook(castOffer, event);
     castOffer = next.offer;
     if (next.offer === 'choose' && discoveredOrigin)
-      castFrame?.contentWindow?.postMessage(
+      readyCastFrame(discoveredOrigin)?.postMessage(
         { type: 'den-choose', interfaceLanguage },
         discoveredOrigin,
       );
@@ -3387,8 +3443,9 @@
 
   function sendSubtitleChoice() {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return;
+    if (!current?.castOrigin) return;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return;
     frame.postMessage(
       {
         type: 'den-subtitle',
@@ -3786,8 +3843,9 @@
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
   function seekCastFrame(time: number): boolean {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return false;
+    if (!current?.castOrigin) return false;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return false;
     frame.postMessage({ type: 'den-seek', id: current.playlist, time }, current.castOrigin);
     return true;
   }
@@ -4991,7 +5049,7 @@
         src={frameOrigin}
         allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
         sandbox="allow-scripts allow-same-origin allow-presentation"
-        onload={sendToCastFrame}
+        onload={castFrameLoaded}
       ></iframe>
     {/if}
   </div>

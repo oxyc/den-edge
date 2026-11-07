@@ -194,6 +194,35 @@ export function drainPlaybackReceiptsOnce(
   });
 }
 
+/** Drain one receipt batch only while the same foreground library/profile authority still owns every await. */
+export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
+  loop: {
+    libraryId: string;
+    ensure: () => Promise<DropboxKey | null>;
+    lend: () => Promise<Connection>;
+    apply: (messages: QueuedRequest[], connection: Connection) => Promise<{ ack: number | null }>;
+    current: () => boolean;
+    fetchImpl?: typeof fetch;
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  await drainPlaybackReceiptsOnce(
+    {
+      libraryId: loop.libraryId,
+      apply: async (messages) => {
+        if (signal.aborted || !loop.current()) return { ack: null };
+        const dropbox = await loop.ensure();
+        if (!dropbox || signal.aborted || !loop.current()) return { ack: null };
+        const connection = await loop.lend();
+        if (signal.aborted || !loop.current()) return { ack: null };
+        return loop.apply(messages, connection);
+      },
+      ...(loop.fetchImpl ? { fetchImpl: loop.fetchImpl } : {}),
+    },
+    signal,
+  );
+}
+
 /** How often the publisher asks the library service whether a projection is due (§15: it debounces and heartbeats). */
 const PUBLISH_TICK_MS = 30_000;
 
