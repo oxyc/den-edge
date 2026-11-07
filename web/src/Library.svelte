@@ -278,9 +278,16 @@
   });
   let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
   let tmdbLimited = $state(false);
+  /**
+   * That answers this browser kept stand in for live ones (`keptAnswers`). The content Worker sends the copy, so a
+   * healthy start carries none of it; it takes the TMDB limit's place, since with den-edge unreachable the saved copy
+   * is what is worth saying.
+   */
+  let keptNotice = $state<string | null>(null);
   $effect(() => {
     let clear: ReturnType<typeof setTimeout> | undefined;
     const stop = session.content.onStatus((status) => {
+      if (status.kind === 'kept') keptNotice = status.notice;
       if (status.kind !== 'throttled' || status.provider !== 'tmdb') return;
       tmdbLimited = true;
       if (clear) clearTimeout(clear);
@@ -2872,9 +2879,11 @@
   }}
 />
 
-{#if tmdbLimited}
+{#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.
+    {keptNotice
+      ? i18n.phrase(keptNotice)
+      : 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'}
   </p>
 {/if}
 

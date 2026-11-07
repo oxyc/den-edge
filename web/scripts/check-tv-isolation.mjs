@@ -198,5 +198,11 @@ if (process.argv.includes('--capture')) {
   // matched current-main/head builds. Its 2.29 KiB queue/transport chunk is fetched only after the first reportable
   // failure; the healthy path creates no queue, retry timer or online listener. Allow 3.25 KiB including gzip variance
   // while retaining the independent startup, translation, TV-isolation, body, rate and deduplication ceilings.
-  if (coreTotalDelta > 80806) throw new Error('Browser total JS/CSS budget exceeded');
+  // Browsing while the home server is unreachable (den#724) adds 729 gzip bytes to the complete graph (80,250 ->
+  // 80,979) and 101 bytes to startup (4,706 -> 4,807) on matched main/head builds. Almost all of it is in the shared
+  // library Worker: the first page of atlas's browse answers kept in IndexedDB and handed out only when atlas cannot
+  // be reached, and the saved-copy notice, whose copy the Worker sends so the page carries none of it. It adds no
+  // request or background work while the server answers. It was 173 bytes past the prior ceiling, which rises by
+  // 194; the startup ceiling is unchanged and this build sits 57 bytes under it.
+  if (coreTotalDelta > 81000) throw new Error('Browser total JS/CSS budget exceeded');
 }

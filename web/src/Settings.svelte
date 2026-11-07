@@ -253,7 +253,7 @@
     const installed = pluginUrls;
     const table = routes;
     let gone = false;
-    const creditsOf = async (addon: Addon | null): Promise<Credit[] | null> => {
+    const creditsOf = async (addon?: Addon | null): Promise<Credit[] | null> => {
       if (!addon) return null;
       try {
         const res = await relayFetch(`${addon.base}/manifest.json`);

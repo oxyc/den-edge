@@ -113,11 +113,16 @@ export class SessionServices {
     };
 
     let live = false;
+    // A live atlas answer, as opposed to none: atlas unreachable says nothing about whether it is there, so the
+    // retained address stands until atlas itself answers, and what this browser kept of it is shown (`atlasKept`).
+    let liveAtlas = false;
     if (first && this.#model)
       void this.#model
         .retainedServices()
         .then((saved) => {
-          if (!current || live || !saved) return;
+          if (!current || !saved) return;
+          if (!liveAtlas) this.#configureAtlas(saved.atlas, () => current);
+          if (live) return;
           this.routes = Object.fromEntries(
             Object.entries(saved.routes).map(([name, entries]) => [
               name,
@@ -128,7 +133,6 @@ export class SessionServices {
           this.scout = saved.scout
             ? { install: saved.scout.install, base: saved.scout.base }
             : null;
-          this.#configureAtlas(saved.atlas, () => current);
           this.reel = saved.reel;
           this.remux = saved.remux;
           if (this.#foregroundReady) availability.connect(this.scout, this.content);
@@ -174,6 +178,8 @@ export class SessionServices {
             }
           : {}),
         atlas: (found) => {
+          if (found === undefined) return;
+          liveAtlas = true;
           this.#configureAtlas(found?.base ?? null, () => current);
         },
         reel: (found) => {

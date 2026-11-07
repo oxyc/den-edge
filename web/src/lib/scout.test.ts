@@ -236,6 +236,16 @@ describe('findAtlas', () => {
       'nothing under /atlas here',
     ).toBeNull();
   });
+
+  /** An origin that cannot answer (Cloudflare's 52x, a dropped connection) says nothing about whether atlas is there. */
+  it('is undefined, not none, when this origin could not be reached', async () => {
+    const down = async () => new Response('<html>522</html>', { status: 522 });
+    expect(await findAtlas([], ROUTES, down)).toBeUndefined();
+    const offline = async () => Promise.reject(new TypeError('Failed to fetch'));
+    expect(
+      await findAtlas(['https://d-atlas.oxy.fi/manifest.json'], ROUTES, offline),
+    ).toBeUndefined();
+  });
 });
 
 describe('findReel', () => {

@@ -12,7 +12,8 @@ export function discoverServices(
      * discovered at all. Stronger than relying on an empty plugin list — `findRemux` reads the routes
      * table and never consults plugins. */
     scout?: (value: Addon | null) => void;
-    atlas: (value: Addon | null) => void;
+    /** Undefined when atlas could not be reached at all, which says nothing about whether there is one. */
+    atlas: (value: Addon | null | undefined) => void;
     reel: (value: Addon | null) => void;
     remux?: (value: string | null) => void;
   },

@@ -1267,7 +1267,8 @@ pub fn json_reply(status: StatusCode, body: &Value) -> Response {
 /// How long Cloudflare keeps `/config` and `/routes`, and hands out its copy past that. They are built partly from
 /// this process's environment (`ROUTES`, `SIMKL_CLIENT_ID`, the cast and MCP origins), which a restart changes with
 /// no image deployed and so with no purge. A copy kept until a purge someone forgot would strand a TV away from home
-/// on a moved address; a minute keeps it prompt with no purge at all.
+/// on a moved address; a minute keeps it prompt with no purge at all. The copy Cloudflare hands out while this origin
+/// is down (`STALE_IF_ERROR`) is the last kill-switch and table it gave: nothing newer exists until it answers again.
 const ENV_EDGE: (u64, u64) = (60, 600);
 
 /// `/config`, `/routes` and `/version`: asked again every time, and a 304 while unchanged. A client reads them on
@@ -2249,11 +2250,12 @@ pub mod tests {
     async fn config_routes_and_version_are_revalidated_every_time() {
         let mut h = split_harness();
         prepare_public_json(&mut h);
-        // What only a deploy changes is kept until it purges; what a restart's environment changes, a minute.
+        // What only a deploy changes is kept until it purges; what a restart's environment changes, a minute. Either
+        // is handed out for a week more while this origin cannot answer, so a client away from home still starts.
         for (path, edge) in [
-            ("/config", "max-age=60, stale-while-revalidate=600"),
-            ("/routes", "max-age=60, stale-while-revalidate=600"),
-            ("/version", "max-age=2592000, stale-while-revalidate=86400"),
+            ("/config", "max-age=60, stale-while-revalidate=600, stale-if-error=604800"),
+            ("/routes", "max-age=60, stale-while-revalidate=600, stale-if-error=604800"),
+            ("/version", "max-age=2592000, stale-while-revalidate=86400, stale-if-error=604800"),
         ] {
             let first = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
             assert_eq!(first.status(), StatusCode::OK, "{path}");
