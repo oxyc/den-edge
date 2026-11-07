@@ -75,6 +75,7 @@
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
   import { scheduleAfterStartupMilestone } from './lib/startupScheduling';
+  import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
   import type { AtlasCatalog } from './lib/services';
   import type { Service } from './settings/services';
@@ -321,6 +322,12 @@
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
+  // RoutedLibrary keys this whole tree by the session object. One lifetime therefore fences Owner/Kid changes and
+  // reopening the same profile alike: work admitted by the old mount cannot route, notify or write into the new one.
+  const playLifetime = new AbortController();
+  const playSignal = playLifetime.signal;
+  onDestroy(() => playLifetime.abort());
+  const playStopped = (signal?: AbortSignal) => playSignal.aborted || signal?.aborted === true;
   $effect(() => {
     const receipt = finalProgressRecovery;
     if (!receipt || receipt.saving) return;
@@ -1293,7 +1300,9 @@
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
             restricted: session.restricted,
+            signal: playSignal,
           });
+          if (playStopped()) return;
           if (blocked) {
             busy = false;
             failure = blocked;
@@ -1301,6 +1310,7 @@
             return;
           }
           const queue = await householdQueue(tv.play);
+          if (playStopped()) return;
           const sealed = await sendToTV(queue, {
             type: 'play',
             tmdbId: title.id,
@@ -1309,6 +1319,7 @@
             season,
             episode,
           });
+          if (playStopped()) return;
           busy = false;
           if (sealed)
             playOnTv.start(queue, sealed, tv.name, {
@@ -1374,7 +1385,9 @@
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
             restricted: session.restricted,
+            signal: playSignal,
           });
+          if (playStopped()) return false;
           if (blocked) {
             failure = blocked;
             session.notify(blocked);
@@ -1395,18 +1408,22 @@
    * Start a play sent from another device as this TV's own Play would, through `playHere` and its parental guard.
    * Nobody at the TV asked, so a refusal is not offered a PIN: the guard's message says why.
    */
-  async function startPushed(push: PlayRequest) {
+  async function startPushed(push: PlayRequest, signal?: AbortSignal) {
     // A TV opened to take this play may still be finding its sources: give that a moment, well inside the play's two
     // minutes, before saying there is none.
-    for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500)
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500) {
+      await abortableDelay(500, playSignal, signal);
+      if (playStopped(signal)) return;
+    }
     const start = untrack(() => playHere);
+    if (playStopped(signal)) return;
     if (!start) {
       session.notify(`No playable source for “${push.title}”`);
       return;
     }
     const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
     if (!(await start(title, push.season, push.episode))) return;
+    if (playStopped(signal)) return;
     session.notify(push.title ? `Starting “${push.title}”…` : 'Starting…');
     void householdModel
       ?.markPlayed()
@@ -1428,11 +1445,11 @@
           navigate(
             titleHref({ type: play.mediaType, id: play.tmdbId, title: play.title, trailer: true }),
           );
-        else await startPushed(play);
+        else await startPushed(play, stop.signal);
       });
       return receiveTv(
         {
-          play: startPushed,
+          play: (play) => startPushed(play, stop.signal),
           stale: (push) => session.notify(`Ignored an old “Play on TV” for “${push.title}”`),
           transport: (command) => {
             const target = untrack(() => playing);
@@ -1634,7 +1651,9 @@
       region: detailPrefs.region,
       ceiling: detailPrefs.ceiling,
       restricted: session.restricted,
+      signal: playSignal,
     });
+    if (playStopped()) return;
     if (blocked) {
       playing = null;
       session.notify(blocked);
