@@ -51,4 +51,9 @@ export const messages = {
   'common.play': 'Spela',
   'common.resume': 'Fortsätt',
   'common.close': 'Stäng',
+  'retirement.title': 'Biblioteksrensningen måste försökas igen',
+  'retirement.detail':
+    'Du är utloggad. Den måste fortfarande ta bort krypterade biblioteksdata som sparats på den här enheten. Du kan lämna säkert; ett nytt försök görs nästa gång.',
+  'retirement.waiting': 'En annan Den-flik avslutar fortfarande arbete för det biblioteket.',
+  'retirement.retry': 'Försök rensa igen',
 } as const satisfies MessageCatalog;

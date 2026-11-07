@@ -116,7 +116,11 @@ if (process.argv.includes('--capture')) {
   // page the one-date overlay, the new-episode search and its billboard slide, the Continue Watching badge and the
   // two Home rows. Measured 4.1 KiB over main's complete graph (3.2 KiB of it in the initial graph, which stays
   // 2.7 KiB below baseline). Allow five KiB including gzip variance; the initial and catalog ceilings are unchanged.
-  if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
+  // Durable linked-library retirement adds 2,154 gzip bytes to startup and 3,976 bytes to the non-translation graph
+  // on matched main/head builds. Receipt reconciliation and the exclusive pre-Worker fence must run before a reload
+  // can relink; only the 0.35 KiB recovery notice/CSS is lazy, and it adds no request unless cleanup needs attention.
+  // Allow 2.25 KiB at startup and four KiB total for that privacy boundary, including gzip variance.
+  if (initialDelta > Math.min(4864, Math.floor(baseline.initialGzip * 0.025)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -190,5 +194,5 @@ if (process.argv.includes('--capture')) {
   // Splitting the small reconciliation helper again would add a request to the sole recovery action, while the join's
   // durable authority must remain with always-loaded RoutedLibrary. Allow 768 bytes including gzip variance, leaving
   // 317 bytes of total margin and 554 bytes at the independently enforced startup ceiling on this build.
-  if (coreTotalDelta > 73382) throw new Error('Browser total JS/CSS budget exceeded');
+  if (coreTotalDelta > 77478) throw new Error('Browser total JS/CSS budget exceeded');
 }

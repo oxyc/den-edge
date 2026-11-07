@@ -1187,7 +1187,7 @@
         destination.close();
         return 'unknown';
       }
-      links.rekey(pending.from, pending.to);
+      await links.rekey(pending.from, pending.to);
       pendingReset = null;
       libraryIdentity = pending.to;
       session = destination;
@@ -1198,7 +1198,7 @@
       return outcome;
     }
     publishReset(null);
-    if (outcome === 'foreign' && link) links.forgetMoved(link);
+    if (outcome === 'foreign' && link) await links.forgetMoved(link);
     return outcome;
   }
 
@@ -1263,9 +1263,9 @@
       return { session: destination, close: () => destination.close() };
     },
     link: () => links.list.find((l) => l.libraryKey === pendingReset?.to) ?? null,
-    install: (from, to) => links.rekey(from, to, true),
-    release: (from) => {
-      links.releaseRekeyed(from);
+    install: (from, to) => void links.rekey(from, to, true),
+    release: async (from) => {
+      await links.releaseRekeyed(from);
       pendingReset = null;
     },
     adopt: (destination, to) => {
@@ -1631,7 +1631,7 @@
   });
   $effect(() => {
     const status = session.model?.status;
-    if (status?.kind === 'moved' && link) links.forgetMoved(link);
+    if (status?.kind === 'moved' && link) void links.forgetMoved(link);
   });
   $effect(() => {
     if (session.updateRequired) requestReleaseCheck();

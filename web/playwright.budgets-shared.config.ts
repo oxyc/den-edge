@@ -9,7 +9,7 @@ import { bridgeUpstreams } from './e2e/shared-worker-bridge.mjs';
 // `npm run test:e2e:budgets:shared`.
 export default defineConfig({
   ...budgets,
-  testMatch: ['big-library-shared-worker.spec.mjs'],
+  testMatch: ['big-library-shared-worker.spec.mjs', 'library-retirement.spec.mjs'],
   webServer: {
     command: `npm run build && npx vite preview --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
     url: `${E2E_ORIGIN}/test/seed-library.html`,

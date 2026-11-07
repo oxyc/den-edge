@@ -60,8 +60,8 @@
     presentation: Parameters<typeof adoptRecoveredLibrary>[1],
   ) => adoptRecoveredLibrary(libraryKey, presentation, onjoin);
 
-  function unlink(target: Link) {
-    links.remove(target.inboxKey);
+  async function unlink(target: Link) {
+    await links.remove(target.inboxKey);
     // The library this page was reading is gone; the app goes back to linking.
     if (target.inboxKey === link?.inboxKey) navigate('/');
   }
@@ -216,7 +216,7 @@
                 question="Sign out of your library on this browser?"
                 detail="Your other devices keep it, and you can join it again with a code."
                 confirmLabel="Sign out"
-                onconfirm={() => unlink(linked)}
+                onconfirm={() => void unlink(linked)}
               />
             {:else}
               <Confirm
@@ -224,7 +224,7 @@
                 ariaLabel="Remove the library joined through {linked.name ?? 'another device'}"
                 question="Remove this library from this browser?"
                 detail="Your other devices keep it."
-                onconfirm={() => unlink(linked)}
+                onconfirm={() => void unlink(linked)}
               />
             {/if}
           </li>

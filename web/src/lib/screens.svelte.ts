@@ -52,6 +52,10 @@ export const WatchlistScreen = lazy(() => import('../components/WatchlistPage.sv
 export const InviteDialogScreen = lazy(() => import('../components/InviteDialog.svelte'));
 export const PhoneDialogScreen = lazy(() => import('../components/PhoneDialog.svelte'));
 export const ConnectDialogScreen = lazy(() => import('../components/ConnectDialog.svelte'));
+/** Loaded only when durable library retirement needs visible recovery. The receipt/fence stays eager. */
+export const LibraryRetirementNoticeScreen = lazy(
+  () => import('../components/LibraryRetirementNotice.svelte'),
+);
 
 /** Home's bounded speculative tail. Everything absent here is loaded only by route or pointer intent. */
 export const HOME_SCREEN_PRELOADS = [[DetailScreen, SearchScreen], [PersonScreen]] as const;
