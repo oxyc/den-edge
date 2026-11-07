@@ -313,6 +313,9 @@ pub struct AppState {
     /// Deterministic test boundary after a media request's initial lease miss.
     #[cfg(test)]
     pub media_admission_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Deterministic test boundary after a grant revoke's initial member check.
+    #[cfg(test)]
+    pub grant_authority_gate: Mutex<Option<Arc<grants::AuthorityGate>>>,
     /// Guest grants' in-memory state (`grants.rs`): last use, media source addresses, sessions already ended.
     pub grants: grants::Grants,
     /// Held across every read-modify-write of recovery entries (`recovery.rs`).
@@ -469,6 +472,8 @@ impl AppState {
             media_member_generation: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             media_admission_gate: Mutex::new(None),
+            #[cfg(test)]
+            grant_authority_gate: Mutex::new(None),
             grants: grants::Grants::default(),
             recovery_lock: tokio::sync::Mutex::new(()),
             member_hints: Mutex::new(HashMap::new()),
