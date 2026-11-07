@@ -14,11 +14,17 @@ import { fetchRoutes, type Routes } from './routes';
 import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import type { GrantRefreshOutcome } from './grants.svelte';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
+type Grants = {
+  pluginUrls(): string[];
+  refresh(): Promise<GrantRefreshOutcome>;
+};
 
 const inputs = (library: boolean, plugins: readonly string[], remux: string | null) =>
   JSON.stringify([library, plugins, remux]);
+const GRANT_RETRY_MS = 5_000;
 
 /** A retained playback install is usable only while the current authority still lists its manifest. */
 function retainsScout(install: string, plugins: readonly string[]): boolean {
@@ -49,9 +55,10 @@ export class SessionServices {
   #for?: string;
   #stop?: () => void;
   #keep?: ReturnType<typeof setTimeout>;
-  #grantsReady = false;
   #grantsRefreshing = false;
-  #pendingConfigure?: [library: boolean, plugins: readonly string[], remux: string | null];
+  #verifiedGrantsFor?: string;
+  #pendingConfigure?: [library: boolean, plugins: readonly string[], remux: string | null, string];
+  #grantRetry?: ReturnType<typeof setTimeout>;
   #stopped = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
@@ -61,6 +68,7 @@ export class SessionServices {
     model: LibraryModel | null,
     private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
+    private readonly grants: Grants = guestGrants,
   ) {
     this.#model = model;
   }
@@ -96,27 +104,64 @@ export class SessionServices {
   /** Reconfigure from the authority's deliberately narrow discovery view. */
   configure(runtime: Runtime | undefined): void {
     if (this.#stopped) return;
-    const wanted: [boolean, readonly string[], string | null] = [
+    // This read must stay synchronous: it is the Svelte dependency that re-runs the caller's real `$effect` when a
+    // redeem, expiry, replacement, or A→B→A grant transition changes authority. Async refresh and discovery below
+    // are fenced separately.
+    const shared = this.grants.pluginUrls();
+    const grantsFor = JSON.stringify(shared);
+    const wanted: [boolean, readonly string[], string | null, string] = [
       this.#model !== null,
       runtime?.pluginManifestUrls ?? [],
       runtime?.privateRemuxUrl ?? null,
+      grantsFor,
     ];
     this.#pendingConfigure = wanted;
-    if (this.#grantsReady) return this.#configure(...wanted);
+    const visiblePlugins = [...wanted[1], ...shared];
+    if (this.scout && !retainsScout(this.scout.install, visiblePlugins)) {
+      this.scout = null;
+      this.debrid = null;
+      if (this.#foregroundReady) availability.connect(null, this.content);
+    }
+    if (this.#verifiedGrantsFor === grantsFor)
+      return this.#configure(wanted[0], wanted[1], wanted[2], shared);
     if (this.#grantsRefreshing) return;
+    this.#refreshGrants();
+  }
+
+  #refreshGrants(): void {
+    if (this.#stopped || this.#grantsRefreshing || !this.#pendingConfigure) return;
     this.#grantsRefreshing = true;
-    void guestGrants.refresh().then(
-      () => {
+    void this.grants.refresh().then(
+      (outcome) => {
         this.#grantsRefreshing = false;
-        this.#grantsReady = true;
-        if (!this.#stopped && this.#pendingConfigure) this.#configure(...this.#pendingConfigure);
+        if (this.#stopped || !this.#pendingConfigure) return;
+        const [library, plugins, remux] = this.#pendingConfigure;
+        if (outcome === 'verified') {
+          clearTimeout(this.#grantRetry);
+          this.#grantRetry = undefined;
+          const refreshed = this.grants.pluginUrls();
+          this.#verifiedGrantsFor = JSON.stringify(refreshed);
+          this.#configure(library, plugins, remux, refreshed);
+          return;
+        }
+        // Cached grants remain useful storage, but are not current authority until one refresh verifies them.
+        this.#configure(library, plugins, remux, []);
+        clearTimeout(this.#grantRetry);
+        this.#grantRetry = setTimeout(() => {
+          this.#grantRetry = undefined;
+          this.#refreshGrants();
+        }, GRANT_RETRY_MS);
       },
       () => {
         this.#grantsRefreshing = false;
-        // A cached grant is not current authority after a failed refresh. Continue with member plugins only; a later
-        // configure retries the refresh and can visibly recover without ever publishing the unverified guest Scout.
-        if (!this.#stopped && this.#pendingConfigure)
-          this.#configure(...this.#pendingConfigure, []);
+        if (this.#stopped || !this.#pendingConfigure) return;
+        const [library, plugins, remux] = this.#pendingConfigure;
+        this.#configure(library, plugins, remux, []);
+        clearTimeout(this.#grantRetry);
+        this.#grantRetry = setTimeout(() => {
+          this.#grantRetry = undefined;
+          this.#refreshGrants();
+        }, GRANT_RETRY_MS);
       },
     );
   }
@@ -125,7 +170,7 @@ export class SessionServices {
     library: boolean,
     libraryPlugins: readonly string[],
     remux: string | null,
-    shared: readonly string[] = guestGrants.pluginUrls(),
+    shared: readonly string[] = this.grants.pluginUrls(),
   ): void {
     if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
     const plugins = [...libraryPlugins, ...shared].filter(
@@ -253,6 +298,7 @@ export class SessionServices {
     this.#stop?.();
     this.#atlasGeneration++;
     clearTimeout(this.#keep);
+    clearTimeout(this.#grantRetry);
   }
 
   #settled(): void {

@@ -883,6 +883,25 @@ window.__onGCastApiAvailable = (available) => {
   });
 };
 
+// Readiness is a challenge for one loaded iframe document, not an origin-level announcement. The parent creates a
+// new generation only from that iframe's `load` event; echoing it makes a delayed or queued message from an older
+// same-origin document harmless without guessing event-loop order.
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  const message = event.data as { type?: string; generation?: unknown };
+  if (
+    message.type !== 'den-handshake' ||
+    typeof message.generation !== 'string' ||
+    message.generation.length < 1 ||
+    message.generation.length > 96
+  )
+    return;
+  event.source.postMessage(
+    { type: 'den-ready', generation: message.generation },
+    { targetOrigin: event.origin },
+  );
+});
+
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
   const message = event.data as Partial<LoadMessage>;
@@ -1046,5 +1065,3 @@ video.addEventListener('ended', () => {
 video.addEventListener('error', () =>
   fail(video.error?.message || 'Playback failed', video.error?.code ?? 0),
 );
-
-window.parent.postMessage({ type: 'den-ready' }, '*');

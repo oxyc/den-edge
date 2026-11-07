@@ -249,6 +249,40 @@ test('receipt work is fenced after key and profile awaits when authority is repl
   }
 });
 
+test('replacement or abort while receipt apply is pending cannot acknowledge through a new authority', async () => {
+  for (const boundary of ['replacement', 'abort'] as const) {
+    let finish!: (value: { ack: number | null }) => void;
+    const applying = new Promise<{ ack: number | null }>((resolve) => (finish = resolve));
+    let current = true;
+    const stop = new AbortController();
+    const claims: string[] = [];
+    const originatingFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      claims.push(`old:${path}`);
+      return path.endsWith('/drain')
+        ? Response.json({ messages: [{ seq: 8, sealed: 'receipt' }] })
+        : Response.json({ removed: 1 });
+    }) as unknown as typeof fetch;
+    const running = drainPlaybackReceiptsForCurrentAuthority(
+      {
+        libraryId: `lib-${boundary}`,
+        ensure: async () => DROPBOX,
+        lend: async () => ({ profile: 'old' }),
+        apply: async () => applying,
+        current: () => current,
+        fetchImpl: originatingFetch,
+      },
+      stop.signal,
+    );
+    await vi.waitFor(() => expect(claims).toEqual(['old:/playback/receipts/drain']));
+    if (boundary === 'replacement') current = false;
+    else stop.abort();
+    finish({ ack: 8 });
+    await running;
+    expect(claims, boundary).toEqual(['old:/playback/receipts/drain']);
+  }
+});
+
 test('a failed receipt key publication can be retried without acknowledging the queue', async () => {
   let attempt = 0;
   const calls: string[] = [];

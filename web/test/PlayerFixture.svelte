@@ -34,6 +34,7 @@
   const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
+  const receiptBoundary = query.has('receiptBoundary');
   const resumeSeconds = Number(query.get('resume')) || undefined;
   const hasNext = query.has('next');
   const reel = query.has('reel');
@@ -100,6 +101,12 @@
     next={hasNext ? 'S1 · E2' : undefined}
     {castDiscoveryMs}
     {castPlayMs}
+    onmanagedplayback={receiptBoundary
+      ? async () => {
+          const response = await fetch('/test/receipt-ready', { method: 'POST' });
+          if (!response.ok) throw new Error('receipt authority failed');
+        }
+      : undefined}
     onprogress={(fraction, seconds, _at, playing) => {
       progress = { fraction, seconds, playing };
       progressWrites += 1;

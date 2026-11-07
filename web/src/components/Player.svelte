@@ -177,6 +177,7 @@
     castPlayMs = CAST_PLAY_MS,
     onprogress,
     onfinalprogress,
+    onmanagedplayback,
     onnext,
     onclose,
     oncontrols,
@@ -220,6 +221,8 @@
     onprogress: (fraction: number, seconds: number, at: Episode, playing: boolean) => void;
     /** The visit's terminal position, retained by the library until its exact command is durable. */
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
+    /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
+    onmanagedplayback?: () => Promise<unknown>;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -452,17 +455,9 @@
   /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
   const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin ?? heldFrame);
   /** The exact iframe document generation that announced readiness; origin alone cannot distinguish a reload. */
-  let castFrameGeneration = $state(0);
-  let castFrameReady = $state<{ origin: string; generation: number }>();
-  let castReadyBeforeLoad: { origin: string; generation: number } | undefined;
-  let castReadyTurn: ReturnType<typeof setTimeout> | undefined;
-  $effect(() => {
-    void frameOrigin;
-    castFrameGeneration = untrack(() => castFrameGeneration + 1);
-    castFrameReady = undefined;
-    castReadyBeforeLoad = undefined;
-    clearTimeout(castReadyTurn);
-  });
+  let castFrameGeneration = 0;
+  let castFrameChallenge = '';
+  let castFrameReady = $state<{ origin: string; challenge: string }>();
   let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -1162,6 +1157,14 @@
     // longer rules it out: Scout asks TorBox to create that exact track's stream.
     const torboxTried =
       !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
+    if (playback && onmanagedplayback) {
+      try {
+        await onmanagedplayback();
+      } catch (error) {
+        console.warn('den: managed playback receipt authority could not be prepared', error);
+      }
+      if (attempt.signal.aborted) return false;
+    }
     let result = playback
       ? await startPlayback(playback, asked, undefined, attempt.signal)
       : await startSession(request, undefined, on, undefined, attempt.signal);
@@ -2341,32 +2344,25 @@
     const frame = castFrame?.contentWindow;
     return frame &&
       castFrameReady?.origin === origin &&
-      castFrameReady.generation === castFrameGeneration
+      castFrameReady.challenge === castFrameChallenge
       ? frame
       : null;
   }
 
-  function castDocumentReady(origin: string): void {
-    const ready = { origin, generation: castFrameGeneration };
-    castFrameReady = ready;
-    // An inline den-ready can reach the parent before this navigation's load event. Let that one load carry the
-    // readiness into its new generation, but never let an old document authorize a later same-origin reload.
-    castReadyBeforeLoad = ready;
-    clearTimeout(castReadyTurn);
-    castReadyTurn = setTimeout(() => {
-      if (castReadyBeforeLoad === ready) castReadyBeforeLoad = undefined;
-    });
+  function castDocumentReady(origin: string, generation: unknown): boolean {
+    if (generation !== castFrameChallenge) return false;
+    castFrameReady = { origin, challenge: castFrameChallenge };
+    return true;
   }
 
   function castFrameLoaded(): void {
-    const before = castReadyBeforeLoad;
     castFrameGeneration += 1;
-    castFrameReady =
-      before && before.origin === frameOrigin
-        ? { origin: before.origin, generation: castFrameGeneration }
-        : undefined;
-    castReadyBeforeLoad = undefined;
-    clearTimeout(castReadyTurn);
+    castFrameChallenge = `${castFrameGeneration}:${crypto.randomUUID?.() ?? performance.now()}`;
+    castFrameReady = undefined;
+    const origin = frameOrigin;
+    const frame = castFrame?.contentWindow;
+    if (origin && frame)
+      frame.postMessage({ type: 'den-handshake', generation: castFrameChallenge }, origin);
   }
 
   function sendToCastFrame(): void {
@@ -2435,7 +2431,7 @@
       !frame ||
       preparing ||
       castFrameReady?.origin !== current.castOrigin ||
-      castFrameReady.generation !== castFrameGeneration
+      castFrameReady.challenge !== castFrameChallenge
     )
       return;
     untrack(sendToCastFrame);
@@ -2444,9 +2440,13 @@
   function castMessage(event: MessageEvent<unknown>): void {
     const looking = castFrame?.contentWindow;
     if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
-      const message = event.data as { type?: string; available?: unknown; profile?: unknown };
-      if (message.type === 'den-ready') {
-        castDocumentReady(event.origin);
+      const message = event.data as {
+        type?: string;
+        generation?: unknown;
+        available?: unknown;
+        profile?: unknown;
+      };
+      if (message.type === 'den-ready' && castDocumentReady(event.origin, message.generation)) {
         looking.postMessage({ type: 'den-discover', interfaceLanguage }, lookOrigin);
       } else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
         look({ kind: 'availability', available: message.available });
@@ -2473,9 +2473,10 @@
       profile?: string;
       maxBitrate?: number;
       available?: boolean;
+      generation?: unknown;
     };
     if (message.type === 'den-ready') {
-      castDocumentReady(event.origin);
+      castDocumentReady(event.origin, message.generation);
       return;
     }
     if (message.id !== current.playlist) return;

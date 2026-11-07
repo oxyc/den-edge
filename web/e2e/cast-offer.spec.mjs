@@ -28,8 +28,14 @@ const TEST_CAST_PLAY_MS = 1_000;
 const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html><script>
   window.loads = [];
   window.messages = [];
+  window.handshakes = [];
   addEventListener('message', (event) => {
     const message = event.data || {};
+    if (message.type === 'den-handshake') {
+      window.handshakes.push(message.generation);
+      if (${ready}) parent.postMessage({ type: 'den-ready', generation: message.generation }, event.origin);
+      return;
+    }
     window.messages.push(message.type);
     if (message.type === 'den-discover')
       setTimeout(() => parent.postMessage({ type: 'den-cast-availability', available: ${mode !== 'none'} }, event.origin), ${discoveryDelay});
@@ -48,7 +54,7 @@ const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html><sc
     else if (${mode === 'playing'})
       parent.postMessage({ type: 'den-cast', id: message.id, state: 'playing' }, event.origin);
   });
-  if (${ready}) parent.postMessage({ type: 'den-ready' }, '*');
+  if (${ready}) parent.postMessage({ type: 'den-ready', generation: -1 }, '*');
 </script>`;
 
 /** Read the receiver stub without turning its normal replacement into a test failure. */
@@ -111,6 +117,7 @@ async function open(
     castDiscoveryDelay = 0,
     castReady = true,
     directCastOrigin = false,
+    receiptBoundary = false,
     configDelay = 0,
     discoveryMs = mode === 'none' ? TEST_CAST_DISCOVERY_MS : undefined,
   } = {},
@@ -125,9 +132,14 @@ async function open(
   });
   const page = await context.newPage();
   await guardNetwork(page);
-  const asked = { direct: [], managed: [], relay: [], ended: [] };
+  const asked = { direct: [], managed: [], relay: [], ended: [], order: [] };
+  await page.route(`${ORIGIN}/test/receipt-ready`, (r) => {
+    asked.order.push('receipt');
+    return r.fulfill({ status: 204 });
+  });
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
+  await page.route(/\/playback\/(?:outcome|cast)$/, (r) => r.fulfill({ status: 204 }));
   await page.route(`${ORIGIN}/config`, async (r) => {
     if (configDelay) await new Promise((resolve) => setTimeout(resolve, configDelay));
     return r.fulfill({ json: { castOrigin: CAST } });
@@ -144,6 +156,7 @@ async function open(
   });
   await page.route(`${ORIGIN}/direct/releases`, (r) => r.fulfill({ json: { releases } }));
   await page.route(`${ORIGIN}/den/config/playback`, (r) => {
+    asked.order.push('playback');
     const request = r.request().postDataJSON();
     asked.managed.push(request);
     if (request.directFailed === true)
@@ -247,9 +260,23 @@ async function open(
     query.set('remux', '/remux');
   }
   if (subtitleLanguage) query.set('subtitleLanguage', subtitleLanguage);
+  if (receiptBoundary) query.set('receiptBoundary', '1');
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };
 }
+
+test('the first managed playback intent establishes receipt authority before reaching Hearth', async () => {
+  const { browser, page, asked } = await open('playing', {
+    managed: true,
+    receiptBoundary: true,
+  });
+  try {
+    await playingPast(page, 1);
+    expect(asked.order.slice(0, 2)).toEqual(['receipt', 'playback']);
+  } finally {
+    await browser.close();
+  }
+});
 
 test('managed direct HLS refreshes TorBox once on Cast failure without switching sources', async () => {
   const { browser, page, asked } = await open('direct-fail', { managed: true });
@@ -493,7 +520,7 @@ test('a slow /config read does not spend the discovery window', async () => {
 });
 
 test('a Cast media document waits for its own ready message across initial load and reload', async () => {
-  const { browser, page } = await open('none', { castReady: false, directCastOrigin: true });
+  const { browser, page } = await open('playing', { castReady: false, directCastOrigin: true });
   try {
     await expect(page.locator('.player iframe[title="Den Cast player"]')).toHaveCount(1);
     await expect.poll(() => page.frames().some((frame) => frame.url().startsWith(CAST))).toBe(true);
@@ -503,7 +530,11 @@ test('a Cast media document waits for its own ready message across initial load 
     await expect.poll(() => castMessages(page)).toEqual([]);
     let cast = page.frames().find((frame) => frame.url().startsWith(CAST));
     expect(cast).toBeTruthy();
-    await cast.evaluate(() => parent.postMessage({ type: 'den-ready' }, '*'));
+    const firstGeneration = await cast.evaluate(() => window.handshakes.at(-1));
+    expect(typeof firstGeneration).toBe('string');
+    await cast.evaluate(() =>
+      parent.postMessage({ type: 'den-ready', generation: window.handshakes.at(-1) }, '*'),
+    );
     await expect.poll(async () => (await castLoads(page)).length).toBe(1);
 
     await cast.evaluate(() => location.reload());
@@ -512,8 +543,30 @@ test('a Cast media document waits for its own ready message across initial load 
     await expect.poll(() => castMessages(page)).toEqual([]);
     cast = page.frames().find((frame) => frame.url().startsWith(CAST));
     expect(cast).toBeTruthy();
-    await cast.evaluate(() => parent.postMessage({ type: 'den-ready' }, '*'));
+    await cast.evaluate(
+      (generation) => parent.postMessage({ type: 'den-ready', generation }, '*'),
+      firstGeneration,
+    );
+    await expect.poll(() => castMessages(page)).toEqual([]);
+    await cast.evaluate(() =>
+      parent.postMessage({ type: 'den-ready', generation: window.handshakes.at(-1) }, '*'),
+    );
     await expect.poll(async () => (await castLoads(page)).length).toBe(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a Cast document that never completes its handshake times out visibly and can be retried', async () => {
+  const { browser, page, asked } = await open('silent', {
+    castReady: false,
+    directCastOrigin: true,
+  });
+  try {
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Try another release' })).toBeVisible();
+    await page.getByRole('button', { name: 'Try another release' }).click();
+    await expect.poll(() => asked.direct.length).toBeGreaterThanOrEqual(2);
   } finally {
     await browser.close();
   }

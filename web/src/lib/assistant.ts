@@ -149,6 +149,7 @@ export function drainPlaybackReceiptsOnce(
   loop: {
     libraryId: string;
     apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null }>;
+    canAck?: () => boolean;
     fetchImpl?: typeof fetch;
   },
   signal: AbortSignal,
@@ -181,6 +182,7 @@ export function drainPlaybackReceiptsOnce(
         });
       return;
     }
+    if (signal.aborted || (loop.canAck && !loop.canAck())) return;
     if (result.ack !== null) {
       const acknowledged = await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
       if (!acknowledged && !signal.aborted)
@@ -217,6 +219,7 @@ export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
         if (signal.aborted || !loop.current()) return { ack: null };
         return loop.apply(messages, connection);
       },
+      canAck: () => !signal.aborted && loop.current(),
       ...(loop.fetchImpl ? { fetchImpl: loop.fetchImpl } : {}),
     },
     signal,

@@ -9,8 +9,8 @@ let discoveries = 0;
 let reaches: string | undefined;
 /** atlas could not be reached at all (`discoverServices` publishes undefined). */
 let atlasUnreachable = false;
-let guestPluginUrls: string[] = [];
-let refreshGrants: () => Promise<void> = async () => undefined;
+let guestPluginUrls = $state.raw<string[]>([]);
+let refreshGrants: () => Promise<'verified' | 'retained-unverified'> = async () => 'verified';
 let autoDiscover = true;
 const discoveryPublishes: Array<{
   scout?: (value: { base: string; install: string; playback?: string } | null) => void;
@@ -75,7 +75,7 @@ afterEach(() => {
   reaches = undefined;
   atlasUnreachable = false;
   guestPluginUrls = [];
-  refreshGrants = async () => undefined;
+  refreshGrants = async () => 'verified';
   autoDiscover = true;
   discoveryPublishes.length = 0;
 });
@@ -151,7 +151,8 @@ describe('SessionServices', () => {
     vi.stubGlobal('location', { href: 'https://den.example/' });
     autoDiscover = false;
     let refreshed!: () => void;
-    refreshGrants = () => new Promise<void>((resolve) => (refreshed = resolve));
+    refreshGrants = () =>
+      new Promise<'verified'>((resolve) => (refreshed = () => resolve('verified')));
     guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
     const retainedServices = vi.fn().mockResolvedValue({
       routes: {},
@@ -194,7 +195,7 @@ describe('SessionServices', () => {
     expect(services.plugins).toEqual([]);
     expect(services.scout).toBeNull();
 
-    refreshGrants = async () => undefined;
+    refreshGrants = async () => 'verified';
     guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
     services.configure(runtime(['https://member.example/scout/manifest.json']));
     await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
@@ -207,7 +208,8 @@ describe('SessionServices', () => {
 
   it('does not start discovery after a stopped profile refresh completes', async () => {
     let refreshed!: () => void;
-    refreshGrants = () => new Promise<void>((resolve) => (refreshed = resolve));
+    refreshGrants = () =>
+      new Promise<'verified'>((resolve) => (refreshed = () => resolve('verified')));
     const retainedServices = vi.fn().mockResolvedValue(null);
     const services = new SessionServices(
       fakeModel({ retainedServices }),
@@ -256,6 +258,24 @@ describe('SessionServices', () => {
     expect(services.scout).toBeNull();
     discoveryPublishes[2]!.scout?.(a);
     expect(services.scout).toEqual(a);
+    services.stop();
+  });
+
+  it('retries an unchanged retained grant after production-style resolved fetch failure', async () => {
+    vi.useFakeTimers();
+    autoDiscover = false;
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    let attempts = 0;
+    refreshGrants = async () => (++attempts === 1 ? 'retained-unverified' : 'verified');
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    services.configure(runtime());
+    await vi.runAllTicks();
+    expect(services.plugins).toEqual([]);
+    expect(attempts).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(attempts).toBe(2);
+    expect(services.plugins).toEqual(guestPluginUrls);
     services.stop();
   });
 
