@@ -327,6 +327,112 @@ test('Samsung defers pause, track changes and teardown until an asynchronous see
   await expect.poll(() => callsNamed(page, 'close')).toHaveLength(closeCalls + 1);
 });
 
+test('Samsung gives a replacement mount ownership only after outgoing asynchronous teardown', async ({
+  page,
+}) => {
+  await installAvplayInitScript(page);
+  const routed = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+
+  await page.evaluate(() => window.__avplayFixture.delaySeeks());
+  await video.evaluate((element) => {
+    element.currentTime += 10;
+  });
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+
+  await page.getByRole('button', { name: /^Audio track:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Spanish/ }).click();
+  await expect.poll(() => routed.sessionRequests).toHaveLength(2);
+  // The replacement exists, but the singleton still belongs to the outgoing mount until its seek and deferred
+  // stop/close have completed. In particular, it must not issue the illegal open that reproduced #928.
+  await expect.poll(() => callsNamed(page, 'open')).toHaveLength(1);
+  expect(await callsNamed(page, 'close')).toHaveLength(0);
+
+  await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => callsNamed(page, 'close')).toHaveLength(1);
+  await expect.poll(() => callsNamed(page, 'open')).toHaveLength(2);
+  // A sufficiently advanced outgoing clock carries a resume position into the replacement. The fixture keeps seek
+  // delay enabled, so release that optional seek; a replacement that started near zero can already be playing.
+  await expect
+    .poll(async () => {
+      const pending = await page.evaluate(() => window.__avplayFixture.pendingSeekCount());
+      return pending > 0 || (await callsNamed(page, 'play')).length === 2;
+    })
+    .toBe(true);
+  if ((await page.evaluate(() => window.__avplayFixture.pendingSeekCount())) > 0)
+    await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(2);
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.state())).toBe('PLAYING');
+
+  // Firmware can retain old listener objects after close. Their late callbacks remain fenced by mount identity and
+  // cannot close or report an error against the owner that replaced them.
+  await page.evaluate(() => {
+    window.__avplayFixture.staleError(0);
+    window.__avplayFixture.staleEnd(0);
+  });
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.state())).toBe('PLAYING');
+  await expect(page.getByText('This browser couldn’t play this release.')).toHaveCount(0);
+  await expect.poll(() => callsNamed(page, 'close')).toHaveLength(1);
+});
+
+test('Samsung cancels a replacement waiting for outgoing AVPlay ownership', async ({ page }) => {
+  await installAvplayInitScript(page);
+  const routed = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+
+  await page.evaluate(() => window.__avplayFixture.delaySeeks());
+  await video.evaluate((element) => {
+    element.currentTime += 10;
+  });
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+  await page.getByRole('button', { name: /^Audio track:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Spanish/ }).click();
+  await expect.poll(() => routed.sessionRequests).toHaveLength(2);
+  await expect.poll(() => callsNamed(page, 'open')).toHaveLength(1);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(video).toHaveCount(0);
+  await page.evaluate(() => window.__avplayFixture.releaseSeek());
+  await expect.poll(() => callsNamed(page, 'close')).toHaveLength(1);
+  // The cancelled waiter never touches the singleton after the outgoing owner releases it.
+  await expect.poll(() => callsNamed(page, 'open')).toHaveLength(1);
+});
+
+test('Samsung bounds replacement startup when an outgoing native callback never arrives', async ({
+  page,
+}) => {
+  await installAvplayInitScript(page);
+  const routed = await routePlayback(page);
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+
+  await page.evaluate(() => window.__avplayFixture.delaySeeks());
+  await video.evaluate((element) => {
+    element.currentTime += 10;
+  });
+  await expect.poll(() => page.evaluate(() => window.__avplayFixture.pendingSeekCount())).toBe(1);
+  await page.getByRole('button', { name: /^Audio track:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Spanish/ }).click();
+  await expect.poll(() => routed.sessionRequests).toHaveLength(2);
+
+  // Do not release the native seek. The replacement fails through the ordinary bounded recovery path instead of
+  // waiting forever or opening over a singleton that is still busy. Back must remain usable from that state.
+  await expect(
+    page.getByText('This release stopped responding. Try it again, or pick another one.'),
+  ).toBeVisible({ timeout: 12_000 });
+  await expect.poll(() => callsNamed(page, 'open')).toHaveLength(1);
+  expect(await remoteKey(page, 'Unidentified', 461)).toBe(true);
+  await expect(video).toHaveCount(0);
+});
+
 test('Samsung error reports retain the error enum without signed media details', async ({
   page,
 }) => {
