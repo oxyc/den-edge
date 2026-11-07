@@ -1,7 +1,15 @@
 // The full application startup. `main.ts` admits this after a retained parser-time hero has reached one paint.
 import { mount } from 'svelte';
 import App from './App.svelte';
-import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosticsReport';
+import {
+  chunkOf,
+  clientFailureErrorClass,
+  moduleOf,
+  pageError,
+  loadRelease,
+  reportClientFailure,
+  sendPageError,
+} from './lib/diagnosticsReport';
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
@@ -62,17 +70,30 @@ if (!__DEN_TV__) {
 // den-edge's own request log sees nothing past the page load that reached it: an uncaught error or an unhandled
 // rejection anywhere in the app today just sits in the browser console, for nobody to read (den-edge#262).
 window.addEventListener('error', (event) => {
-  sendPageError(pageError('uncaught', moduleOf(event.error?.stack), event.error));
+  reportClientFailure({
+    operation: 'uncaught',
+    kind: 'uncaught',
+    outcome: 'terminal',
+    route: 'page',
+    module: moduleOf(event.error?.stack),
+    frame: chunkOf(event.error?.stack),
+    errorClass: clientFailureErrorClass(event.error),
+    uncaught: true,
+  });
 });
 window.addEventListener('unhandledrejection', (event) => {
   const reason: unknown = event.reason;
-  sendPageError(
-    pageError(
-      'unhandled_rejection',
-      moduleOf(reason instanceof Error ? reason.stack : undefined),
-      reason,
-    ),
-  );
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  reportClientFailure({
+    operation: 'uncaught',
+    kind: 'uncaught',
+    outcome: 'terminal',
+    route: 'page',
+    module: moduleOf(stack),
+    frame: chunkOf(stack),
+    errorClass: clientFailureErrorClass(reason),
+    uncaught: true,
+  });
 });
 
 // A page whose first route never rendered — the billboard stall this is written for found nothing in any log,

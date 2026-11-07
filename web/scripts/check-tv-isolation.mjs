@@ -194,5 +194,9 @@ if (process.argv.includes('--capture')) {
   // Splitting the small reconciliation helper again would add a request to the sole recovery action, while the join's
   // durable authority must remain with always-loaded RoutedLibrary. Allow 768 bytes including gzip variance, leaving
   // 317 bytes of total margin and 554 bytes at the independently enforced startup ceiling on this build.
-  if (coreTotalDelta > 77478) throw new Error('Browser total JS/CSS budget exceeded');
+  // Privacy-minimized failure reporting adds 3,032 gzip bytes to the complete graph and 417 bytes to startup on
+  // matched current-main/head builds. Its 2.29 KiB queue/transport chunk is fetched only after the first reportable
+  // failure; the healthy path creates no queue, retry timer or online listener. Allow 3.25 KiB including gzip variance
+  // while retaining the independent startup, translation, TV-isolation, body, rate and deduplication ceilings.
+  if (coreTotalDelta > 80806) throw new Error('Browser total JS/CSS budget exceeded');
 }

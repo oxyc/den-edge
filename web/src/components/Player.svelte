@@ -132,7 +132,9 @@
   import {
     hlsFatalFromMessage,
     identityOf,
+    reportClientFailure,
     reportableLanguage,
+    replaceClientFailureGeneration,
     sendCastReport,
     sendPlaybackOutcome,
     sendPlaybackRoute,
@@ -495,6 +497,7 @@
   let retry: ReturnType<typeof setTimeout> | undefined;
   /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
   let startingSession: AbortController | undefined;
+  let clientFailureGeneration = 0;
   let ended = false;
   /** The episode playing, which the props name ahead of it once an advance asks for the next (`playEpisode`). */
   let playingEpisode: Episode = untrack(() => ({ season, episode }));
@@ -1101,6 +1104,8 @@
     startingSession?.abort(new DOMException('superseded session start', 'AbortError'));
     const attempt = new AbortController();
     startingSession = attempt;
+    const diagnosticGeneration = ++clientFailureGeneration;
+    replaceClientFailureGeneration('session', diagnosticGeneration);
     const {
       scout: _scout,
       subtitles: _subtitles,
@@ -1197,6 +1202,34 @@
     if ('failure' in result) {
       // Only `startPlayback` adds this field, after its closed allow-list parser. Legacy Remux refusals do not.
       const cause = 'cause' in result ? (result.cause as PlaybackCause | undefined) : undefined;
+      const retries =
+        result.failure === 'busy' ||
+        result.failure === 'starting' ||
+        result.failure === 'transcode' ||
+        result.failure === 'timedOut' ||
+        result.failure === 'temporarilyUnavailable' ||
+        cause === 'torbox_rate_limited';
+      if (!retries) {
+        const status = 'httpStatus' in result ? result.httpStatus : undefined;
+        reportClientFailure({
+          operation: 'session',
+          kind:
+            typeof status === 'number'
+              ? 'http'
+              : result.failure === 'timedOut'
+                ? 'timeout'
+                : result.failure === 'unreachable'
+                  ? 'transport'
+                  : result.failure === 'protocol' || result.failure === 'request'
+                    ? 'protocol'
+                    : 'other',
+          outcome: replacing ? 'recovered' : 'terminal',
+          route: playback ? 'content_service' : 'remux_session',
+          status,
+          generation: diagnosticGeneration,
+          attempt: 1,
+        });
+      }
       playbackRouteLog({
         event: 'failed',
         requestedSource,
@@ -2480,6 +2513,14 @@
       endCastSession();
       castFailed = true;
       castFailReason = castFailReasonOf(message.message ?? '');
+      reportClientFailure({
+        operation: 'cast',
+        kind: 'protocol',
+        outcome: returnsFromCast(castOffered, castMode) ? 'recovered' : 'terminal',
+        route: 'cast_receiver',
+        generation: clientFailureGeneration,
+        errorClass: 'media_error',
+      });
       // The cast page refused the load this page handed it before fetching anything: a fault in that hand-off, not
       // in the release, so no release is left out for it and no other is tried.
       if (message.message === 'Invalid media URL') {
@@ -2718,6 +2759,14 @@
       // Handed to a receiver, it is the receiver that fetches the media, not this browser or its frame: a receiver
       // that never starts is a Cast session's failure, not a sign the home network was out of reach.
       castFailReason = castMode ? 'session_error' : castFailReasonOf(why);
+      reportClientFailure({
+        operation: 'cast',
+        kind: 'timeout',
+        outcome: returnsFromCast(castOffered, castMode) ? 'recovered' : 'terminal',
+        route: 'cast_receiver',
+        generation: clientFailureGeneration,
+        errorClass: 'media_error',
+      });
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
