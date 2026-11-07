@@ -453,7 +453,7 @@ test('rejected final progress retains its exact durable retry without holding pl
     await expect(recovery.getByRole('button', { name: 'Leave unsaved' })).toBeVisible();
 
     await recovery.getByRole('button', { name: 'Try again' }).click();
-    await expect(recovery).toContainText('Saving where you stopped');
+    await expect(recovery).toContainText('Saving…');
     await expect
       .poll(() => progressOf(page, 1))
       .toMatchObject({ value: expect.any(Number), viewing: 0 });

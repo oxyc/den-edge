@@ -306,20 +306,23 @@
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
   type FinalProgressReceipt = {
-    readonly receiptId: string;
     readonly operationId: string;
     readonly target: Target;
     readonly fraction: number;
     readonly seconds: number;
     readonly observedAt: number;
-    saving: boolean;
+    /** null while the first unobtrusive save runs; false after rejection; true during an explicit retry. */
+    saving: boolean | null;
   };
-  let finalProgressReceipts = $state.raw<FinalProgressReceipt[]>([]);
+  let finalProgressReceipts = $state<FinalProgressReceipt[]>([]);
+  const finalProgressRecovery = $derived(
+    finalProgressReceipts.find(({ saving }) => saving !== null),
+  );
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
   $effect(() => {
-    const receipt = finalProgressReceipts[0];
+    const receipt = finalProgressRecovery;
     if (!receipt || receipt.saving) return;
     void tick().then(() => finalProgressRetryButton?.focus());
   });
@@ -1700,21 +1703,18 @@
     return runCommand(() => writeProgress(target, fraction, seconds, playing, Date.now())!);
   }
 
-  function removeFinalProgress(receiptId: string) {
-    finalProgressReceipts = finalProgressReceipts.filter(
-      (receipt) => receipt.receiptId !== receiptId,
-    );
+  function removeFinalProgress(operationId: string) {
+    const index = finalProgressReceipts.findIndex((receipt) => receipt.operationId === operationId);
+    if (index >= 0) finalProgressReceipts.splice(index, 1);
   }
 
   async function saveFinalProgress(receipt: FinalProgressReceipt) {
     const current = finalProgressReceipts.find(
-      (candidate) => candidate.receiptId === receipt.receiptId,
+      (candidate) => candidate.operationId === receipt.operationId,
     );
-    if (!current || current.saving || !finalProgressAlive) return;
+    if (!current || current.saving === true || !finalProgressAlive) return;
     receipt = current;
-    finalProgressReceipts = finalProgressReceipts.map((candidate) =>
-      candidate.receiptId === receipt.receiptId ? { ...candidate, saving: true } : candidate,
-    );
+    if (receipt.saving !== null) receipt.saving = true;
     try {
       await writeProgress(
         receipt.target,
@@ -1726,13 +1726,14 @@
       );
       // The awaited command result is the library service's durable receipt/readback boundary. A late answer from
       // an older playback can remove only that exact receipt, never a replacement player's recovery.
-      if (finalProgressAlive) removeFinalProgress(receipt.receiptId);
+      if (finalProgressAlive) removeFinalProgress(receipt.operationId);
     } catch (error) {
       console.error('final playback progress failed', error);
       if (!finalProgressAlive) return;
-      finalProgressReceipts = finalProgressReceipts.map((candidate) =>
-        candidate.receiptId === receipt.receiptId ? { ...candidate, saving: false } : candidate,
+      const current = finalProgressReceipts.find(
+        (candidate) => candidate.operationId === receipt.operationId,
       );
+      if (current) current.saving = false;
     }
   }
 
@@ -1748,17 +1749,17 @@
     );
     if (existing) return;
     const receipt: FinalProgressReceipt = {
-      receiptId: crypto.randomUUID(),
       operationId: crypto.randomUUID(),
       target: { ...target, title: { ...target.title } },
       fraction,
       seconds,
       observedAt: Date.now(),
-      saving: false,
+      saving: null,
     };
     // The recovery surface is modal, so another interactive playback cannot start until these are resolved. Keep a
     // small hard ceiling as a defense against synthetic lifecycle storms; the player itself also emits once/visit.
-    finalProgressReceipts = [...finalProgressReceipts.slice(-7), receipt];
+    finalProgressReceipts.push(receipt);
+    if (finalProgressReceipts.length > 8) finalProgressReceipts.shift();
     void saveFinalProgress(receipt);
   }
 
@@ -3252,43 +3253,29 @@
   {/key}
 {/if}
 
-{#if finalProgressReceipts[0]}
-  {@const receipt = finalProgressReceipts[0]}
+{#if finalProgressRecovery}
+  {@const receipt = finalProgressRecovery}
   <div
-    class="final-progress-recovery"
+    class="player-screen final-progress-recovery"
     role="alertdialog"
     aria-modal="true"
     aria-labelledby="final-progress-title"
-    aria-describedby="final-progress-detail"
   >
     <h2 id="final-progress-title">
-      {receipt.saving
-        ? i18n.phrase('Saving where you stopped…')
-        : i18n.phrase('Couldn’t save where you stopped')}
+      {receipt.saving ? i18n.phrase('Saving…') : i18n.phrase('Couldn’t save where you stopped')}
     </h2>
-    <p id="final-progress-detail">
-      {receipt.saving
-        ? i18n.phrase('The player can close while Den finishes saving this position.')
-        : i18n.phrase('Try again, or leave this position unsaved.')}
-    </p>
     {#if !receipt.saving}
-      <div class="final-progress-actions">
-        <button
-          bind:this={finalProgressRetryButton}
-          type="button"
-          class="retry"
-          onclick={() => void saveFinalProgress(receipt)}
-        >
-          {i18n.phrase('Try again')}
-        </button>
-        <button
-          type="button"
-          class="leave-unsaved"
-          onclick={() => removeFinalProgress(receipt.receiptId)}
-        >
-          {i18n.phrase('Leave unsaved')}
-        </button>
-      </div>
+      <button
+        bind:this={finalProgressRetryButton}
+        type="button"
+        class="retry"
+        onclick={() => void saveFinalProgress(receipt)}
+      >
+        {i18n.phrase('Try again')}
+      </button>
+      <button type="button" class="close" onclick={() => removeFinalProgress(receipt.operationId)}>
+        {i18n.phrase('Leave unsaved')}
+      </button>
     {/if}
   </div>
 {/if}
@@ -3363,40 +3350,10 @@
   }
 
   .final-progress-recovery {
-    position: fixed;
-    inset: 0;
     z-index: 70;
-    display: grid;
-    place-content: center;
-    justify-items: center;
-    padding: 32px var(--gutter);
-    background: rgb(0 0 0 / 0.94);
-    color: #fff;
-    text-align: center;
   }
 
-  .final-progress-recovery h2,
-  .final-progress-recovery p {
+  .final-progress-recovery h2 {
     max-width: 520px;
-  }
-
-  .final-progress-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 12px;
-  }
-
-  .leave-unsaved {
-    min-height: 44px;
-    margin-top: 8px;
-    padding: 8px 18px;
-    border: 1px solid rgb(255 255 255 / 0.5);
-    border-radius: 999px;
-    background: none;
-    color: inherit;
-    font: inherit;
-    font-weight: 700;
-    cursor: pointer;
   }
 </style>
