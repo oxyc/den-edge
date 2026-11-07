@@ -155,9 +155,47 @@ export function drainPlaybackReceiptsOnce(
   return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
     const fetchImpl = loop.fetchImpl ?? relayFetch;
     const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
-    if (signal.aborted || messages === null || !messages.length) return;
-    const result = await loop.apply(messages);
-    if (result.ack !== null) await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
+    if (signal.aborted) return;
+    if (messages === null) {
+      void import('./failureReport').then(({ reportClientFailure }) =>
+        reportClientFailure({
+          operation: 'receipt',
+          kind: 'transport',
+          outcome: 'terminal',
+          route: 'receipt_drain',
+        }),
+      );
+      return;
+    }
+    if (!messages.length) return;
+    let result: { ack: number | null };
+    try {
+      result = await loop.apply(messages);
+    } catch (error) {
+      if (!signal.aborted)
+        void import('./failureReport').then(({ failureErrorClass, reportClientFailure }) =>
+          reportClientFailure({
+            operation: 'receipt',
+            kind: 'other',
+            outcome: 'terminal',
+            route: 'receipt_apply',
+            errorClass: failureErrorClass(error),
+          }),
+        );
+      return;
+    }
+    if (result.ack !== null) {
+      const acknowledged = await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
+      if (!acknowledged && !signal.aborted)
+        void import('./failureReport').then(({ reportClientFailure }) =>
+          reportClientFailure({
+            operation: 'receipt',
+            kind: 'http',
+            outcome: 'terminal',
+            route: 'receipt_ack',
+          }),
+        );
+    }
   });
 }
 

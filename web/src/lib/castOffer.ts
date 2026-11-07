@@ -83,6 +83,15 @@ export async function fetchCastOrigin(fetchImpl: typeof fetch = fetch): Promise<
     return url.protocol === 'https:' && url.origin === origin ? origin : null;
   } catch (error) {
     console.warn('Cast: the cast page could not be found', error);
+    void import('./failureReport').then(({ failureErrorClass, reportClientFailure }) =>
+      reportClientFailure({
+        operation: 'cast',
+        kind: 'transport',
+        outcome: 'terminal',
+        route: 'cast_config',
+        errorClass: failureErrorClass(error),
+      }),
+    );
     return null;
   }
 }

@@ -6,8 +6,8 @@
 //! rather than by scrubbing.
 
 use crate::handler::{
-    client_ip, error, json_reply, read_json, retry_after, CastTag, LoadTag, PageErrorTag, PerformanceTag,
-    PlaybackOutcomeTag, PlaybackRouteTag, ReportField,
+    client_ip, error, json_reply, read_json, retry_after, CastTag, FailureTag, LoadTag,
+    PageErrorTag, PerformanceTag, PlaybackOutcomeTag, PlaybackRouteTag, ReportField,
 };
 use crate::AppState;
 use axum::body::Body;
@@ -16,6 +16,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// A handful of enums and short strings: a few hundred bytes, generously, for any report in this file.
@@ -433,6 +434,297 @@ pub async fn handle_page_error(state: &Arc<AppState>, req: Request) -> Response 
     };
     accepted(report.tag(), |resp, tag| {
         resp.extensions_mut().insert(PageErrorTag(tag));
+    })
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Privacy-minimized client failures (`POST /diagnostics/failure`): the common Web/TV/native schema. This is the
+// existing diagnostics transport and request log, not a second collector. All text is either a closed enum or a
+// bounded, shape-checked build/correlation/frame value; unknown fields fail the whole report.
+
+const FAILURE_BUCKET: &str = "failure";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureOperation {
+    Playback,
+    Session,
+    Receipt,
+    Authority,
+    Persistence,
+    Recovery,
+    Uncaught,
+    Navigation,
+    Cast,
+}
+
+impl FailureOperation {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Playback => "playback",
+            Self::Session => "session",
+            Self::Receipt => "receipt",
+            Self::Authority => "authority",
+            Self::Persistence => "persistence",
+            Self::Recovery => "recovery",
+            Self::Uncaught => "uncaught",
+            Self::Navigation => "navigation",
+            Self::Cast => "cast",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureKind {
+    Transport,
+    Http,
+    Timeout,
+    Protocol,
+    Storage,
+    Authority,
+    Cancelled,
+    Uncaught,
+    Other,
+}
+
+impl FailureKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Http => "http",
+            Self::Timeout => "timeout",
+            Self::Protocol => "protocol",
+            Self::Storage => "storage",
+            Self::Authority => "authority",
+            Self::Cancelled => "cancelled",
+            Self::Uncaught => "uncaught",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureOutcome {
+    Terminal,
+    Recovered,
+    RetryExhausted,
+}
+
+impl FailureOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Recovered => "recovered",
+            Self::RetryExhausted => "retry_exhausted",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureRoute {
+    Page,
+    RemuxSession,
+    RemuxGrant,
+    CastConfig,
+    CastReceiver,
+    ReceiptDrain,
+    ReceiptApply,
+    ReceiptAck,
+    ContentService,
+}
+
+impl FailureRoute {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::RemuxSession => "remux_session",
+            Self::RemuxGrant => "remux_grant",
+            Self::CastConfig => "cast_config",
+            Self::CastReceiver => "cast_receiver",
+            Self::ReceiptDrain => "receipt_drain",
+            Self::ReceiptApply => "receipt_apply",
+            Self::ReceiptAck => "receipt_ack",
+            Self::ContentService => "content_service",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureErrorClass {
+    TypeError,
+    ReferenceError,
+    RangeError,
+    SyntaxError,
+    DomException,
+    NetworkError,
+    AbortError,
+    MediaError,
+    DecodeError,
+    QuotaError,
+    Unknown,
+}
+
+impl FailureErrorClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::TypeError => "type_error",
+            Self::ReferenceError => "reference_error",
+            Self::RangeError => "range_error",
+            Self::SyntaxError => "syntax_error",
+            Self::DomException => "dom_exception",
+            Self::NetworkError => "network_error",
+            Self::AbortError => "abort_error",
+            Self::MediaError => "media_error",
+            Self::DecodeError => "decode_error",
+            Self::QuotaError => "quota_error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+struct Correlation(String);
+
+impl TryFrom<String> for Correlation {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let hex = (16..=64).contains(&value.len())
+            && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let uuid = value.len() == 36
+            && value.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+            });
+        (hex || uuid).then_some(Self(value)).ok_or("invalid_correlation")
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(try_from = "u16")]
+struct HttpStatus(u16);
+
+impl TryFrom<u16> for HttpStatus {
+    type Error = &'static str;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        (100..=599).contains(&value).then_some(Self(value)).ok_or("invalid_status")
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(try_from = "bool")]
+struct TrueOnly;
+
+impl TryFrom<bool> for TrueOnly {
+    type Error = &'static str;
+
+    fn try_from(value: bool) -> Result<Self, Self::Error> {
+        value.then_some(Self).ok_or("must_be_true")
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FailureReport {
+    platform: ClientPlatform,
+    operation: FailureOperation,
+    kind: FailureKind,
+    outcome: FailureOutcome,
+    correlation: Correlation,
+    release: Option<Release>,
+    route: Option<FailureRoute>,
+    status: Option<HttpStatus>,
+    generation: Option<u32>,
+    attempt: Option<u8>,
+    error_class: Option<FailureErrorClass>,
+    module: Option<Module>,
+    frame: Option<Chunk>,
+    uncaught: Option<TrueOnly>,
+}
+
+impl FailureReport {
+    fn parts(&self, correlation: bool, attempt: bool) -> Vec<String> {
+        let mut parts = vec![
+            format!("platform:{}", self.platform.as_str()),
+            format!("operation:{}", self.operation.as_str()),
+            format!("kind:{}", self.kind.as_str()),
+            format!("outcome:{}", self.outcome.as_str()),
+        ];
+        if correlation {
+            parts.push(format!("correlation:{}", self.correlation.0));
+        }
+        if let Some(release) = &self.release {
+            parts.push(format!("release:{}", release.0));
+        }
+        if let Some(route) = &self.route {
+            parts.push(format!("route:{}", route.as_str()));
+        }
+        if let Some(status) = &self.status {
+            parts.push(format!("status:{}", status.0));
+        }
+        if let Some(generation) = self.generation {
+            parts.push(format!("generation:{generation}"));
+        }
+        if attempt {
+            if let Some(attempt) = self.attempt {
+                parts.push(format!("attempt:{attempt}"));
+            }
+        }
+        if let Some(class) = &self.error_class {
+            parts.push(format!("errorClass:{}", class.as_str()));
+        }
+        if let Some(module) = &self.module {
+            parts.push(format!("module:{}", module.as_str()));
+        }
+        if let Some(frame) = &self.frame {
+            parts.push(format!("frame:{}", frame.0));
+        }
+        if self.uncaught.is_some() {
+            parts.push("uncaught:1".to_owned());
+        }
+        parts
+    }
+
+    fn tag(&self) -> String {
+        self.parts(true, true).join(",")
+    }
+
+    /// A logical failure fingerprint: retry delivery metadata is deliberately absent, so another correlation or
+    /// attempt for the same release/lifecycle/error cannot evade the server's duplicate suppression.
+    fn fingerprint(&self) -> String {
+        self.parts(false, false).join(",")
+    }
+}
+
+pub async fn handle_failure(state: &Arc<AppState>, req: Request) -> Response {
+    let ip = client_ip(state, &req);
+    let report: FailureReport = match intake(state, req, FAILURE_BUCKET).await {
+        Ok(report) => report,
+        Err(resp) => return *resp,
+    };
+    let fingerprint = report.fingerprint();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    fingerprint.hash(&mut hash);
+    // One identical report per address and minute reaches the tagged journal. Duplicates still get a successful,
+    // non-retryable answer, while the independent aggregate intake limit bounds novel fingerprints.
+    if crate::link::throttled_per_minute(
+        state,
+        &format!("failure-dedupe:{ip}:{:016x}", hash.finish()),
+        1,
+    )
+    .is_some()
+    {
+        return accepted(String::new(), |_, _| {});
+    }
+    let tag = report.tag();
+    accepted(tag, |resp, tag| {
+        resp.extensions_mut().insert(FailureTag(tag));
     })
 }
 
@@ -2026,6 +2318,116 @@ mod tests {
             "platform": "web", "journey": "navigation", "stage": "stalls", "route": "home",
             "stalls": [1, 80, 80], "memory": { "warnings": 0 }
         })
+    }
+
+    fn failure(correlation: &str) -> serde_json::Value {
+        serde_json::json!({
+            "platform": "web",
+            "operation": "session",
+            "kind": "http",
+            "outcome": "terminal",
+            "correlation": correlation,
+            "route": "remux_session",
+            "status": 400,
+            "generation": 7,
+            "attempt": 2,
+            "errorClass": "network_error",
+            "module": "player",
+            "frame": "Player",
+        })
+    }
+
+    #[tokio::test]
+    async fn a_failure_reaches_the_durable_request_log_with_only_allowlisted_correlation_fields() {
+        let h = Harness::new();
+        let response = h
+            .send("POST", "/diagnostics/failure", Some(failure("0123456789abcdef").to_string()), &[])
+            .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.extensions().get::<FailureTag>().unwrap().0,
+            "platform:web,operation:session,kind:http,outcome:terminal,correlation:0123456789abcdef,route:remux_session,status:400,generation:7,attempt:2,errorClass:network_error,module:player,frame:Player"
+        );
+    }
+
+    #[test]
+    fn a_maximal_failure_tag_has_a_fixed_retention_cost() {
+        let report: FailureReport = serde_json::from_value(serde_json::json!({
+            "platform": "android_tv",
+            "operation": "persistence",
+            "kind": "cancelled",
+            "outcome": "retry_exhausted",
+            "correlation": "f".repeat(64),
+            "release": "a".repeat(64),
+            "route": "content_service",
+            "status": 599,
+            "generation": u32::MAX,
+            "attempt": u8::MAX,
+            "errorClass": "reference_error",
+            "module": "billboard",
+            "frame": format!("A{}", "a".repeat(31)),
+            "uncaught": true,
+        }))
+        .unwrap();
+        assert_eq!(report.tag().len(), 391);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_privacy_unsafe_failure_fields_are_never_logged() {
+        let h = Harness::new();
+        let changed = |field: &str, value: serde_json::Value| {
+            let mut report = failure("0123456789abcdef");
+            report.as_object_mut().unwrap().insert(field.to_owned(), value);
+            report
+        };
+        for report in [
+            changed("authorization", serde_json::json!("Bearer secret")),
+            changed("correlation", serde_json::json!("profile/id?secret=1")),
+            changed("frame", serde_json::json!("/Users/me/private.ts")),
+            changed("status", serde_json::json!(999)),
+            changed("operation", serde_json::json!("some_new_free_text")),
+            changed("uncaught", serde_json::json!(false)),
+        ] {
+            let response = h.send("POST", "/diagnostics/failure", Some(report.to_string()), &[]).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{report}");
+            assert!(response.extensions().get::<FailureTag>().is_none());
+        }
+        let oversized = h
+            .send(
+                "POST",
+                "/diagnostics/failure",
+                Some("x".repeat(MAX_BODY_BYTES + 1)),
+                &[],
+            )
+            .await;
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(oversized.extensions().get::<FailureTag>().is_none());
+    }
+
+    #[tokio::test]
+    async fn identical_failures_are_deduplicated_but_novel_reports_hit_the_address_rate_limit() {
+        let h = Harness::new();
+        let first = h
+            .send("POST", "/diagnostics/failure", Some(failure("0000000000000000").to_string()), &[])
+            .await;
+        assert!(first.extensions().get::<FailureTag>().is_some());
+        let mut retried = failure("1111111111111111");
+        retried["attempt"] = serde_json::json!(9);
+        let duplicate = h.send("POST", "/diagnostics/failure", Some(retried.to_string()), &[]).await;
+        assert_eq!(duplicate.status(), StatusCode::NO_CONTENT);
+        assert!(duplicate.extensions().get::<FailureTag>().is_none());
+
+        for index in 1..(PER_MINUTE - 1) {
+            let correlation = format!("{index:016x}");
+            assert_eq!(
+                h.call("POST", "/diagnostics/failure", Some(failure(&correlation))).await.0,
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert_eq!(
+            h.call("POST", "/diagnostics/failure", Some(failure("ffffffffffffffff"))).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     #[tokio::test]

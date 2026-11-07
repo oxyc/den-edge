@@ -7,6 +7,7 @@
 import { parseRoute, type Route } from './route';
 import { apiUrl } from './runtimeUrl';
 import { currentClientPlatform } from './clientPlatform';
+import type { ClientFailure, FailureOperation } from './failureReport';
 
 // ---- The release this page is running (den-edge's `x-den-release` on the shell, `web.rs`'s `release()`) ----
 
@@ -217,6 +218,51 @@ export function pageError(kind: PageErrorKind, module: Module, error?: unknown):
     release: currentRelease(),
     route: currentRouteKind(),
   };
+}
+
+let failureReporting: Promise<typeof import('./failureReport')> | undefined;
+
+/** Load the bounded queue only after the first report-worthy failure. Ordinary app startup keeps no extra task,
+ * online listener or retry timer alive. */
+export function reportClientFailure(report: ClientFailure): void {
+  failureReporting ??= import('./failureReport');
+  void failureReporting.then(({ reportClientFailure }) =>
+    reportClientFailure({ ...report, release: report.release ?? currentRelease() }),
+  );
+}
+
+/** Fence an older lifecycle only when reporting has already been activated; never load it on a healthy path. */
+export function replaceClientFailureGeneration(
+  operation: FailureOperation,
+  generation: number,
+): void {
+  if (failureReporting)
+    void failureReporting.then(({ replaceFailureGeneration }) =>
+      replaceFailureGeneration(operation, generation),
+    );
+}
+
+export function clientFailureErrorClass(
+  error: unknown,
+): import('./failureReport').FailureErrorClass {
+  switch (errorKindOf(error)) {
+    case 'TypeError':
+      return 'type_error';
+    case 'ReferenceError':
+      return 'reference_error';
+    case 'RangeError':
+      return 'range_error';
+    case 'SyntaxError':
+      return 'syntax_error';
+    case 'DOMException':
+      return error instanceof DOMException && error.name === 'AbortError'
+        ? 'abort_error'
+        : 'dom_exception';
+    case 'NetworkError':
+      return 'network_error';
+    default:
+      return 'unknown';
+  }
 }
 
 // ---- Identity: what was played (`LOG_IDENTITY`, den-edge's own switch — never asked here) ----
