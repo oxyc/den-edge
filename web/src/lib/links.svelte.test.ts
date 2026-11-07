@@ -65,6 +65,35 @@ it('keeps a TV paired in another tab when this tab changes its links', () => {
   expect(readLinks().map((link) => link.name)).toEqual(['Bedroom', 'Living room']);
 });
 
+it('reconciles committed credentials without selecting them or overwriting a replacement', () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Current' }, 1);
+  const committed = tab.reconcileCommitted(
+    { inboxKey: 'b'.repeat(16), name: 'Committed', linkKey: 'committed' },
+    'joined',
+  );
+  expect(committed).toMatchObject({ libraryKey: 'joined', name: 'Committed' });
+  expect(tab.current?.name).toBe('Current');
+
+  const replacement = new Links();
+  replacement.add(
+    'c'.repeat(16),
+    { libraryKey: 'replacement', linkKey: 'new', name: 'Replacement' },
+    2,
+  );
+  expect(
+    tab.reconcileCommitted(
+      { inboxKey: 'c'.repeat(16), name: 'Old', linkKey: 'old' },
+      'old-library',
+    ),
+  ).toBeNull();
+  expect(readLinks().find((link) => link.inboxKey === 'c'.repeat(16))).toMatchObject({
+    libraryKey: 'replacement',
+    linkKey: 'new',
+    name: 'Replacement',
+  });
+});
+
 it('takes up a change another tab made, and keeps its own records the same objects', () => {
   const tab = new Links();
   const first = tab.share('Phone', 'bGli', undefined, 1);

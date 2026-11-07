@@ -5,15 +5,24 @@
   import { onDestroy } from 'svelte';
   import { redeem, redeemMessages } from '../lib/recovery';
   import Button from './Button.svelte';
+  import {
+    LibraryJoinPresentationOwner,
+    type LibraryJoinPresentationLease,
+  } from '../lib/libraryJoinPresentation';
 
   let {
     question,
     onopen,
+    presentationOwner = new LibraryJoinPresentationOwner(),
   }: {
     /** Said before a library already open here is left for the recovered one; none asks nothing. */
     question?: string;
     /** Opens the recovered library (base64 key). False when it couldn't. */
-    onopen: (libraryKey: string) => Promise<boolean> | boolean;
+    onopen: (
+      libraryKey: string,
+      presentation: LibraryJoinPresentationLease,
+    ) => Promise<boolean> | boolean;
+    presentationOwner?: LibraryJoinPresentationOwner;
   } = $props();
 
   let code = $state('');
@@ -24,14 +33,16 @@
   let derivation: AbortController | null = null;
 
   async function open() {
+    const presentation = presentationOwner.begin();
     derivation?.abort();
     const controller = new AbortController();
     derivation = controller;
+    presentation.signal.addEventListener('abort', () => controller.abort(), { once: true });
     busy = true;
     problem = null;
     try {
       const result = await redeem(code, fetch, controller.signal);
-      if (derivation !== controller) return;
+      if (derivation !== controller || !presentation.isCurrent()) return;
       if ('error' in result) {
         problem =
           result.error === 'rate_limited' && result.retryAfter
@@ -42,7 +53,7 @@
       code = '';
       opened = result.libraryKey;
     } catch {
-      if (derivation === controller && !controller.signal.aborted)
+      if (derivation === controller && presentation.isCurrent() && !controller.signal.aborted)
         problem = redeemMessages.unreachable;
     } finally {
       if (derivation === controller) {
@@ -53,14 +64,17 @@
   }
 
   onDestroy(() => {
+    presentationOwner.invalidate();
     derivation?.abort();
     derivation = null;
   });
 
   async function go() {
     if (!opened) return;
+    const presentation = presentationOwner.begin();
     busy = true;
-    const done = await onopen(opened);
+    const done = await onopen(opened, presentation);
+    if (!presentation.isCurrent()) return;
     busy = false;
     if (done) opened = null;
     else problem = 'Couldn’t open that library here. Check that this device is on your network.';

@@ -1,15 +1,19 @@
 import { beforeAll, expect, it, vi } from 'vitest';
 import {
   commitHousehold,
+  householdJoinPlan,
   householdPlan,
+  keepHouseholdJoin,
   keptHousehold,
   observeKeptActions,
   planHousehold,
   recheckHousehold,
   settledHousehold,
+  settleHouseholdJoin,
   startHouseholdPlan,
   verifyHouseholdPlan,
 } from './browserHousehold';
+import type { HouseholdJoinPlan } from './browserHousehold';
 import { householdScoped, profileScoped } from './householdScope';
 import { ensureSyncPolicy } from './syncLoader';
 import type { Row, SettingsRow, Stamp } from './wire';
@@ -34,6 +38,30 @@ function memoryStorage(): Storage {
 
 const LOCAL = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 const at: Stamp = [1000, 0, '0123456789abcdef'];
+
+const key = (byte: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(byte)));
+
+it('settles only the exact household join plan that committed', () => {
+  const storage = memoryStorage();
+  const old: HouseholdJoinPlan = {
+    version: 1,
+    source: key(1),
+    destination: key(2),
+    link: { inboxKey: 'a'.repeat(16), name: 'Old TV', linkKey: 'old' },
+  };
+  const replacement: HouseholdJoinPlan = {
+    version: 1,
+    source: key(1),
+    destination: key(3),
+    link: { inboxKey: 'b'.repeat(16), name: 'New TV', linkKey: 'new' },
+  };
+  expect(keepHouseholdJoin(old, storage)).toBe(true);
+  expect(keepHouseholdJoin(replacement, storage)).toBe(true);
+  settleHouseholdJoin(old, true, storage);
+  expect(householdJoinPlan(storage)).toEqual(replacement);
+  settleHouseholdJoin(replacement, true, storage);
+  expect(householdJoinPlan(storage)).toBeNull();
+});
 
 it('plans every id and key of the household before anything is asked of den-edge', () => {
   const storage = memoryStorage();
