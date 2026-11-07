@@ -105,14 +105,23 @@ function configOf(install: string, mount: string): string | null {
   return path === '' || /^\/[\w.~%-]+$/.test(path) ? path : null;
 }
 
-/** Read a live manifest only when it identifies the expected addon. */
+/**
+ * Read a live manifest only when it identifies the expected addon: null when it does not, undefined when it could not
+ * be reached at all (a network failure, a timeout or a 5xx), which says nothing about whether the addon is there.
+ */
 async function readManifest(
   manifest: string,
   id: string | readonly string[],
   fetchImpl: typeof fetch,
-): Promise<Record<string, unknown> | null> {
+): Promise<Record<string, unknown> | null | undefined> {
+  let res: Response;
   try {
-    const res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
+    res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
+  } catch {
+    return undefined;
+  }
+  if (res.status >= 500) return undefined;
+  try {
     if (!res.ok) return null;
     const body = (await res.json()) as Record<string, unknown> | null;
     const ids = typeof id === 'string' ? [id] : id;
@@ -136,18 +145,33 @@ async function hasPlayback(base: string, fetchImpl: typeof fetch): Promise<boole
   }
 }
 
-/** The first of the library's plugins that is the service `want` names, confirmed by its manifest. */
+/**
+ * The first of the library's plugins that is the service `want` names, confirmed by its manifest. `unreachable` hears
+ * each manifest that could not be reached at all.
+ */
 export async function findAddon(
   plugins: string[],
   routes: Routes,
   want: { name: string; id: string | readonly string[]; path: string },
   fetchImpl: typeof fetch = relayFetch,
+  unreachable?: () => void,
 ): Promise<Addon | null> {
   for (const url of plugins) {
     const addon = place(url, routes, want);
-    if (addon && (await readManifest(`${addon.base}${MANIFEST}`, want.id, fetchImpl))) return addon;
+    if (!addon) continue;
+    const manifest = await readManifest(`${addon.base}${MANIFEST}`, want.id, fetchImpl);
+    if (manifest) return addon;
+    if (manifest === undefined) unreachable?.();
   }
   return null;
+}
+
+/** No candidate for a service answered at all: nobody can say whether it is there (den-edge or the box down). */
+export class AddonUnreachable extends Error {
+  constructor(service: string) {
+    super(`${service} could not be reached`);
+    this.name = 'AddonUnreachable';
+  }
 }
 
 /**
@@ -174,16 +198,22 @@ export async function findScout(
   return null;
 }
 
-/** atlas: a plugin, or — where this origin serves one — the box's own, which the library need not list. */
+/**
+ * atlas: a plugin, or — where this origin serves one — the box's own, which the library need not list. Rejects with
+ * `AddonUnreachable` when none was found and a candidate could not be reached, rather than saying there is none.
+ */
 export async function findAtlas(
   plugins: string[],
   routes: Routes,
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<Addon | null> {
-  const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl);
+  let unreachable = false;
+  const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl, () => (unreachable = true));
   if (plugin) return plugin;
   const here = await readManifest(`${ATLAS.path}${MANIFEST}`, ATLAS.id, fetchImpl);
-  return here ? { install: ATLAS.path, base: ATLAS.path } : null;
+  if (here) return { install: ATLAS.path, base: ATLAS.path };
+  if (here === undefined || unreachable) throw new AddonUnreachable('atlas');
+  return null;
 }
 
 /**

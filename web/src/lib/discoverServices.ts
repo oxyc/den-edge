@@ -1,4 +1,4 @@
-import { findAtlas, findReel, findScout, type Addon } from './scout';
+import { AddonUnreachable, findAtlas, findReel, findScout, type Addon } from './scout';
 import { findRemux } from './remuxRoute';
 import type { Routes } from './routes';
 
@@ -12,7 +12,8 @@ export function discoverServices(
      * discovered at all. Stronger than relying on an empty plugin list — `findRemux` reads the routes
      * table and never consults plugins. */
     scout?: (value: Addon | null) => void;
-    atlas: (value: Addon | null) => void;
+    /** Undefined when atlas could not be reached at all, which says nothing about whether there is one. */
+    atlas: (value: Addon | null | undefined) => void;
     reel: (value: Addon | null) => void;
     remux?: (value: string | null) => void;
   },
@@ -29,7 +30,14 @@ export function discoverServices(
     );
   };
   if (publish.scout) accept(findScout(installed, routes), publish.scout);
-  accept(findAtlas(installed, routes), publish.atlas);
+  void findAtlas(installed, routes).then(
+    (value) => {
+      if (current) publish.atlas(value);
+    },
+    (error: unknown) => {
+      if (current) publish.atlas(error instanceof AddonUnreachable ? undefined : null);
+    },
+  );
   accept(findReel(installed, routes), publish.reel);
   if (publish.remux) accept(findRemux(routes.remux ?? []), publish.remux);
   return () => {

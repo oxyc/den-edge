@@ -38,6 +38,8 @@ export class SessionServices {
   #grants = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
+  /** The last atlas address the content Worker took: kept through a discovery that could not reach atlas. */
+  #lastAtlas: string | null = null;
   readonly #model: LibraryModel | null;
 
   constructor(
@@ -67,6 +69,7 @@ export class SessionServices {
         // acknowledged, nor a ready flag paired with a stale address.
         this.atlas = base;
         this.atlasReady = true;
+        if (base) this.#lastAtlas = base;
         this.#settled();
       },
       (error: unknown) => {
@@ -113,9 +116,12 @@ export class SessionServices {
     };
 
     let live = false;
+    const retained =
+      first && this.#model
+        ? this.#model.retainedServices().catch(() => null)
+        : Promise.resolve(null);
     if (first && this.#model)
-      void this.#model
-        .retainedServices()
+      void retained
         .then((saved) => {
           if (!current || live || !saved) return;
           this.routes = Object.fromEntries(
@@ -142,9 +148,14 @@ export class SessionServices {
       if (!current) return;
       await yieldTask();
       if (!current) return;
-      live = true;
-      this.routes = foundRoutes;
-      const forDiscovery = { ...foundRoutes, remux: ahead(remux ?? undefined, foundRoutes.remux) };
+      // An empty table is den-edge not saying (`fetchRoutes`): one this browser retained stays until a live one
+      // replaces it, and discovery goes on from it.
+      if (Object.keys(foundRoutes).length) {
+        live = true;
+        this.routes = foundRoutes;
+      }
+      const table = live ? foundRoutes : this.routes;
+      const forDiscovery = { ...table, remux: ahead(remux ?? undefined, table.remux) };
       const stop = discoverServices(plugins, forDiscovery, {
         ...(library || shared.length > 0
           ? {
@@ -174,7 +185,17 @@ export class SessionServices {
             }
           : {}),
         atlas: (found) => {
-          this.#configureAtlas(found?.base ?? null, () => current);
+          if (found !== undefined) {
+            live = true;
+            this.#configureAtlas(found?.base ?? null, () => current);
+            return;
+          }
+          // atlas could not be reached, which says nothing about whether it is there: keep the address this page or
+          // the last visit found, so what this browser kept of atlas's answers is shown (`atlasKept`).
+          void retained.then((saved) => {
+            const base = this.#lastAtlas ?? saved?.atlas ?? null;
+            if (current && base && !this.atlasReady) this.#configureAtlas(base, () => current);
+          });
         },
         reel: (found) => {
           this.reel = found?.base ?? null;

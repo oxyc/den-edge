@@ -693,7 +693,9 @@ fn respond(
     } else {
         headers.insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=86400, stale-while-revalidate=604800"),
+            HeaderValue::from_static(
+                "public, max-age=86400, stale-while-revalidate=604800, stale-if-error=604800",
+            ),
         );
     }
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -1189,16 +1191,17 @@ mod tests {
         let og = h.send("GET", "/og.png", None, &[]).await;
         assert_eq!(
             og.headers()[header::CACHE_CONTROL],
-            "public, max-age=86400, stale-while-revalidate=604800"
+            "public, max-age=86400, stale-while-revalidate=604800, stale-if-error=604800"
         );
         assert!(!og.headers().contains_key("cdn-cache-control"));
-        // Every shell, and the service worker, are kept as long as atlas's answers, until a deploy purges.
+        // Every shell, and the service worker, are kept as long as atlas's answers, until a deploy purges, and handed
+        // out for a week more while this origin is down.
         for path in ["/", "/index.html", "/movies", "/series", "/sw.js", "/movies/603"] {
             let resp = h.send("GET", path, None, &[]).await;
             assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
             assert_eq!(
                 resp.headers()["cdn-cache-control"],
-                "max-age=2592000, stale-while-revalidate=86400",
+                "max-age=2592000, stale-while-revalidate=86400, stale-if-error=604800",
                 "{path}"
             );
             assert_eq!(resp.headers()["cache-tag"], "den-edge", "{path}");

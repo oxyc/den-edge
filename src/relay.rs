@@ -2015,6 +2015,9 @@ fn answer_response(
         // What the answer is built from, so the deploy that changes it can purge Cloudflare's copy by name
         // (atlas's `atlas`). Cloudflare strips it before a browser sees the answer.
         header::HeaderName::from_static("cache-tag"),
+        // How long Cloudflare alone may keep it, and hand it out while the addon cannot answer (atlas's dataset
+        // answers). Dropped below wherever the answer may not be kept by a shared cache at all.
+        crate::cache::CDN_CACHE_CONTROL,
     ] {
         if playback && matches!(name, header::ETAG | header::LAST_MODIFIED | header::VARY) {
             continue;
@@ -2027,6 +2030,11 @@ fn answer_response(
     // no cache in front of this origin keeps one.
     if no_store {
         resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    }
+    // Cloudflare reads this header in place of `Cache-Control`, so an answer made private or `no-store` here must not
+    // keep the addon's.
+    if no_store || private_only {
+        resp.headers_mut().remove(crate::cache::CDN_CACHE_CONTROL);
     }
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
     // is answered at all, so a shared cache in front of it — Cloudflare's — must not keep one to hand a stranger.
@@ -5324,6 +5332,7 @@ mod tests {
         Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/atlas={addon}"));
         let tuned = h.send("GET", TUNED, None, &[]).await;
         assert_eq!(tuned.headers()["cache-control"], "no-store");
+        assert!(!tuned.headers().contains_key("cdn-cache-control"), "nor Cloudflare, which reads this first");
         let browsing = h.send("GET", "/atlas/recommend", None, &[]).await;
         assert_eq!(browsing.headers()["cache-control"], "public, max-age=300, stale-while-revalidate=60");
     }
@@ -6303,6 +6312,9 @@ mod tests {
         drop(body);
     }
 
+    /// The `CDN-Cache-Control` `public_addon` sends: atlas's for a dataset answer.
+    const EDGE_POLICY: &str = "max-age=2592000, stale-while-revalidate=86400, stale-if-error=604800";
+
     /// An addon that says its answer may be kept by anyone, and echoes the validator it was sent.
     async fn public_addon() -> String {
         use axum::http::{header, HeaderValue};
@@ -6320,6 +6332,7 @@ mod tests {
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=300, stale-while-revalidate=60"),
             );
+            resp.headers_mut().insert("cdn-cache-control", HeaderValue::from_static(EDGE_POLICY));
             resp.headers_mut().insert("cache-tag", HeaderValue::from_static("atlas"));
             resp
         });
@@ -6457,6 +6470,8 @@ mod tests {
                 &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
             )
             .await;
+        // Cloudflare reads `CDN-Cache-Control` in place of `Cache-Control`: a private answer keeps neither.
+        assert!(!web.headers().contains_key("cdn-cache-control"), "a member's answer has no shared lifetime");
         assert_eq!(policy(web), "private, max-age=300, stale-while-revalidate=60");
         let lan = h.send("GET", "/scout/cfg/manifest.json", None, &[]).await;
         assert_eq!(
@@ -6465,8 +6480,10 @@ mod tests {
             "anyone may ask on the LAN"
         );
         let atlas = h.send("GET", "/atlas/recommend", None, &[("host", "d.oxy.fi")]).await;
-        // Its tag too, which is what purges Cloudflare's copy when atlas or its dataset changes.
+        // Its tag too, which is what purges Cloudflare's copy when atlas or its dataset changes, and how long
+        // Cloudflare keeps it and hands it out while atlas cannot answer.
         assert_eq!(atlas.headers()["cache-tag"], "atlas");
+        assert_eq!(atlas.headers()["cdn-cache-control"], EDGE_POLICY);
         assert_eq!(policy(atlas), "public, max-age=300, stale-while-revalidate=60", "atlas answers everyone");
 
         assert_eq!(super::private(&"no-store".parse().unwrap()), "no-store");

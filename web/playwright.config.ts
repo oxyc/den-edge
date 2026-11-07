@@ -42,6 +42,7 @@ export const PRODUCTION_BUILD_SPECS = [
   'guest-library.spec.mjs',
   'hidden-start.spec.mjs',
   'household-downloads.spec.mjs',
+  'origin-outage.spec.mjs',
   'profile-transition-failures.spec.mjs',
   'startup-fetches.spec.mjs',
 ];

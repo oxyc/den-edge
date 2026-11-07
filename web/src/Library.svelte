@@ -278,9 +278,15 @@
   });
   let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
   let tmdbLimited = $state(false);
+  /** Answers this browser kept are on screen because den-edge could not give live ones (`keptAnswers`). */
+  let showingKept = $state(false);
   $effect(() => {
     let clear: ReturnType<typeof setTimeout> | undefined;
     const stop = session.content.onStatus((status) => {
+      if (status.kind === 'kept') {
+        showingKept = status.kept;
+        return;
+      }
       if (status.kind !== 'throttled' || status.provider !== 'tmdb') return;
       tmdbLimited = true;
       if (clear) clearTimeout(clear);
@@ -2875,6 +2881,12 @@
 {#if tmdbLimited}
   <p class="tmdb-limit" role="alert">
     TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.
+  </p>
+{/if}
+{#if showingKept}
+  <p class="tmdb-limit" role="status">
+    Den’s server can’t be reached right now. You’re seeing what this device saved earlier, so some
+    titles may be missing or out of date.
   </p>
 {/if}
 

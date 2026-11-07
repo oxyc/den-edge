@@ -384,11 +384,18 @@ pub(crate) const CACHE_TAG: header::HeaderName = header::HeaderName::from_static
 /// included.
 pub(crate) const RELEASE_EDGE: (u64, u64) = (2_592_000, 86_400);
 
+/// How long past its lifetime Cloudflare may hand out the copy it holds while this origin cannot answer (a 5xx, the
+/// box or its uplink down). Only an answer this origin gave is ever repeated, and while it is down it cannot give a
+/// newer one, so the copy is the newest there is; the alternative is Cloudflare's own error page. A week covers an
+/// outage over a weekend away. A browser ignores the directive.
+pub(crate) const STALE_IF_ERROR: u64 = 604_800;
+
 /// The policy of an answer that names the running release: the web app's shell and service worker, `/config`,
 /// `/routes` and `/version`. The browser asks again on every load (`no-cache`), so a release shows up on the next
 /// one. Cloudflare may answer that asking itself for `max_age` seconds, then hand out its copy for `stale` more while
 /// it fetches the next, and a deploy purges it by `CACHE_TAG`. Anything such an answer is built from that changes
-/// without a deploy needs a purge of its own, or a short `max_age`: see each caller.
+/// without a deploy needs a purge of its own, or a short `max_age`: see each caller. While this origin cannot answer,
+/// Cloudflare goes on handing out its copy for `STALE_IF_ERROR`, so a visitor away from home still gets the app.
 ///
 /// Measured before this, with curl over a warm HTTP/2 connection: `/`, a title page and `/config` with `no-cache`
 /// alone were `cf-cache-status: REVALIDATED` at 85–105 ms, every request crossing to this origin, against 20–40 ms
@@ -401,8 +408,10 @@ pub(crate) fn release_bound(headers: &mut HeaderMap, (max_age, stale): (u64, u64
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     headers.insert(
         CDN_CACHE_CONTROL,
-        HeaderValue::from_str(&format!("max-age={max_age}, stale-while-revalidate={stale}"))
-            .expect("digits and ASCII"),
+        HeaderValue::from_str(&format!(
+            "max-age={max_age}, stale-while-revalidate={stale}, stale-if-error={STALE_IF_ERROR}"
+        ))
+        .expect("digits and ASCII"),
     );
     headers.insert(CACHE_TAG, HeaderValue::from_static("den-edge"));
 }

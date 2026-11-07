@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Routes } from './routes';
 import {
+  AddonUnreachable,
   denAddonOf,
   denConfigureURL,
   DEN,
@@ -235,6 +236,16 @@ describe('findAtlas', () => {
       await findAtlas([], ROUTES, addons({}).fetchImpl),
       'nothing under /atlas here',
     ).toBeNull();
+  });
+
+  /** An origin that cannot answer (Cloudflare's 52x, a dropped connection) says nothing about whether atlas is there. */
+  it('rejects as unreachable, not none, when no candidate answered at all', async () => {
+    const down = async () => new Response('<html>522</html>', { status: 522 });
+    await expect(findAtlas([], ROUTES, down)).rejects.toBeInstanceOf(AddonUnreachable);
+    const offline = async () => Promise.reject(new TypeError('Failed to fetch'));
+    await expect(
+      findAtlas(['https://d-atlas.oxy.fi/manifest.json'], ROUTES, offline),
+    ).rejects.toBeInstanceOf(AddonUnreachable);
   });
 });
 

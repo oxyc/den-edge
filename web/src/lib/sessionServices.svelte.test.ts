@@ -7,13 +7,15 @@ import { SessionServices } from './sessionServices.svelte';
 
 let discoveries = 0;
 let reaches: string | undefined;
+/** atlas could not be reached at all (`discoverServices` publishes undefined). */
+let atlasUnreachable = false;
 vi.mock('./discoverServices', () => ({
   discoverServices: (
     _installed: string[],
     _routes: unknown,
     publish: {
       scout?: (value: { base: string; install: string; playback?: string } | null) => void;
-      atlas: (value: { base: string } | null) => void;
+      atlas: (value: { base: string } | null | undefined) => void;
       reel: (value: { base: string } | null) => void;
       remux?: (value: string | null) => void;
     },
@@ -26,7 +28,7 @@ vi.mock('./discoverServices', () => ({
         playback: `/scout-${run}/playback`,
       }),
     );
-    queueMicrotask(() => publish.atlas({ base: `/atlas-${run}` }));
+    queueMicrotask(() => publish.atlas(atlasUnreachable ? undefined : { base: `/atlas-${run}` }));
     queueMicrotask(() => publish.reel({ base: `/reel-${run}` }));
     if (reaches) queueMicrotask(() => publish.remux?.(reaches!));
     return () => undefined;
@@ -59,6 +61,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   reaches = undefined;
+  atlasUnreachable = false;
 });
 
 describe('SessionServices', () => {
@@ -215,6 +218,36 @@ describe('SessionServices', () => {
       reel: '/reel-2',
     });
     expect(retainServices.mock.calls[0]?.[0].scout).not.toHaveProperty('playback');
+    services.stop();
+  });
+
+  /**
+   * den-edge down: `/routes` says nothing and atlas's manifest cannot be reached. Neither says atlas is gone, so the
+   * address the last visit found stays configured and the content Worker can hand out what it kept of atlas.
+   */
+  it('keeps the retained table and atlas while den-edge and atlas cannot be reached', async () => {
+    atlasUnreachable = true;
+    discoveries = 0;
+    const services = new SessionServices(
+      fakeModel({
+        retainedServices: vi.fn().mockResolvedValue({
+          routes: { atlas: [{ url: '/retained' }] },
+          scout: null,
+          atlas: '/retained-atlas',
+          reel: null,
+          remux: null,
+        }),
+      }),
+      content,
+      async () => ({}),
+    );
+    services.configure(runtime());
+    await vi.waitFor(() => expect(discoveries).toBe(1));
+    // Every hint, probe and acknowledgement is settled by then.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(services.atlas).toBe('/retained-atlas');
+    expect(services.atlasReady).toBe(true);
+    expect(services.routes).toEqual({ atlas: [{ url: '/retained' }] });
     services.stop();
   });
 

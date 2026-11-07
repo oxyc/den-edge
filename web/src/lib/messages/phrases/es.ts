@@ -311,6 +311,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Los complementos no deben facilitar el acceso a contenido para el que no tengas autorización. Eres responsable de que tu uso cumpla la legislación aplicable y los derechos de los propietarios del contenido.',
   'Den Reel': 'Den Reel',
   'Den Scout': 'Den Scout',
+  'Den’s server can’t be reached right now. You’re seeing what this device saved earlier, so some titles may be missing or out of date.':
+    'No se puede conectar con el servidor de Den en este momento. Ves lo que este dispositivo guardó antes, así que pueden faltar títulos o estar desactualizados.',
   'Den stops syncing your watch history with it, on every device.':
     'Den deja de sincronizar su historial de reproducciones con él, en todos los dispositivos.',
   'Den Subtitles': 'Den Subtitles',

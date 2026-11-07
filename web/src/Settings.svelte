@@ -263,7 +263,7 @@
       }
     };
     void Promise.all([
-      findAtlas(installed, table).then(creditsOf),
+      findAtlas(installed, table).then(creditsOf, () => null),
       findAddon(installed, table, REEL).then(creditsOf),
     ]).then(([atlas, reel]) => {
       if (!gone) addonCredits = [atlas?.length ? atlas : [...ATLAS_FALLBACK], reel ?? []];
