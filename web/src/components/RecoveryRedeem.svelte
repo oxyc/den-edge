@@ -2,6 +2,7 @@
      library it opens. The code is held only in this field until it is opened. -->
 <script lang="ts">
   import Loading from './Loading.svelte';
+  import { onDestroy } from 'svelte';
   import { redeem, redeemMessages } from '../lib/recovery';
   import Button from './Button.svelte';
 
@@ -20,22 +21,41 @@
   let problem = $state<string | null>(null);
   /** The key a code opened, waiting for the person to go on. */
   let opened = $state<string | null>(null);
+  let derivation: AbortController | null = null;
 
   async function open() {
+    derivation?.abort();
+    const controller = new AbortController();
+    derivation = controller;
     busy = true;
     problem = null;
-    const result = await redeem(code);
-    busy = false;
-    if ('error' in result) {
-      problem =
-        result.error === 'rate_limited' && result.retryAfter
-          ? `Too many tries. Try again in ${Math.ceil(result.retryAfter / 60)} min.`
-          : redeemMessages[result.error];
-      return;
+    try {
+      const result = await redeem(code, fetch, controller.signal);
+      if (derivation !== controller) return;
+      if ('error' in result) {
+        problem =
+          result.error === 'rate_limited' && result.retryAfter
+            ? `Too many tries. Try again in ${Math.ceil(result.retryAfter / 60)} min.`
+            : redeemMessages[result.error];
+        return;
+      }
+      code = '';
+      opened = result.libraryKey;
+    } catch {
+      if (derivation === controller && !controller.signal.aborted)
+        problem = redeemMessages.unreachable;
+    } finally {
+      if (derivation === controller) {
+        derivation = null;
+        busy = false;
+      }
     }
-    code = '';
-    opened = result.libraryKey;
   }
+
+  onDestroy(() => {
+    derivation?.abort();
+    derivation = null;
+  });
 
   async function go() {
     if (!opened) return;

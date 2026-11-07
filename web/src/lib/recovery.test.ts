@@ -105,6 +105,39 @@ describe('a derivation that can’t finish (§3)', () => {
     expect(timings[0]!.ms).toBeGreaterThanOrEqual(15);
   });
 
+  it('cancels the Worker once and ignores its stale completion without reporting a failure', async () => {
+    const controller = new AbortController();
+    const timings: Timing[] = [];
+    let terminated = 0;
+    const replies: Array<(event: MessageEvent) => void> = [];
+    const failed = derive('GEB2LP9UC63WQ95UNSLTXM', {
+      op: 'redeem',
+      signal: controller.signal,
+      report: (timing) => timings.push(timing),
+      worker: () => {
+        const worker = {
+          onmessage: null as ((event: MessageEvent) => void) | null,
+          onerror: null,
+          postMessage() {
+            if (worker.onmessage) replies.push(worker.onmessage);
+          },
+          terminate() {
+            terminated++;
+          },
+        };
+        return worker as unknown as Worker;
+      },
+    });
+    controller.abort();
+    await expect(failed).rejects.toBe(controller.signal.reason);
+    replies[0]?.({
+      data: { locator: vectors.entries[0]!.locator, wrapKey: vectors.entries[0]!.wrapKey },
+    } as MessageEvent);
+    await Promise.resolve();
+    expect(terminated).toBe(1);
+    expect(timings).toEqual([]);
+  });
+
   it('a Worker that could not grow its memory fails as memory, with the device message', async () => {
     const timings: Timing[] = [];
     const failed = derive('GEB2LP9UC63WQ95UNSLTXM', {
