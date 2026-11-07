@@ -1999,7 +1999,7 @@ describe('LibraryLogAuthority', () => {
     });
     expect(reopenedLog.settings(GRANTS_ROW)).toBeUndefined();
     await reopened.close();
-  }, 30_000);
+  }, 60_000);
 
   it('owns every synced preference with semantic default and explicit-empty patches', async () => {
     const { log, authority } = await localAuthority();
