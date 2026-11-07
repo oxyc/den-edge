@@ -208,14 +208,17 @@ test('More like this for a title atlas does not hold is TMDB’s recommendations
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
 
   const row = page.getByRole('region', { name: 'More like this' });
+  // BrowseRow publishes one light, keyed slot per title before it progressively materializes the expensive card
+  // trees. The slots are the ordered list contract; `a.card` is deliberately only the frame-dependent subset that
+  // has been promoted so far.
   const order = () =>
     row
-      .locator('a.card')
-      .evaluateAll((cards) => cards.map((card) => card.textContent.replace(/\s+/g, ' ').trim()));
+      .locator('.slot')
+      .evaluateAll((slots) => slots.map((slot) => slot.getAttribute('data-route-focus-key')));
   await expect(row.getByRole('link', { name: /^Similar film 1 / })).toBeVisible();
   const first = await order();
-  expect(first.length).toBeGreaterThan(3);
-  expect(first[0]).toMatch(/^Similar film 1\b/);
+  expect(first).toEqual(Array.from({ length: 20 }, (_, index) => `movie:${index + 100}`));
+  expect(new Set(first).size).toBe(first.length);
   await page.waitForTimeout(1200);
   expect(await order()).toEqual(first);
   await page.close();
