@@ -2341,6 +2341,57 @@ pub async fn is_household_member(state: &AppState, member: Option<&str>) -> bool
     }
 }
 
+/// Run a durable household mutation only while `claim` is still the exact member authority for `id`.
+///
+/// Callers may parse an untrusted body before entering here, but publication stays under the library slot. Library
+/// retirement already takes that slot before its grants cascade, so a delayed mutation is ordered wholly before or
+/// after retirement rather than recreating state after the cascade. Member-proof replacement uses the same slot.
+pub(crate) async fn with_current_household_member<F, Fut>(
+    state: &AppState,
+    id: &str,
+    claim: &str,
+    commit: F,
+) -> Response
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    let Some((claimed_id, token)) = claim.split_once(':') else {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    };
+    if claimed_id != id || !valid_hex_id(id) || token.is_empty() || token.len() > 256 {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    let slot = state.libraries.slot(id, state.now());
+    let library = slot.library.lock().await;
+    let current = if let Some(library) = library.as_ref() {
+        constant_time_eq(library.member_hash.as_ref().unwrap_or(&library.token_hash), &hash)
+    } else {
+        match header_of(state, &slot, id).await {
+            Ok(Some((token_hash, member_hash))) => {
+                constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), &hash)
+            }
+            Ok(None) => false,
+            Err(reason) => {
+                eprintln!("library member commit check: {reason}");
+                false
+            }
+        }
+    };
+    if !current {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
+    match library_is_visitor(state, id).await {
+        Ok(false) => commit().await,
+        Ok(true) => json_reply(StatusCode::FORBIDDEN, &error("forbidden")),
+        Err(reason) => {
+            eprintln!("library tier commit check: {reason}");
+            json_reply(StatusCode::FORBIDDEN, &error("forbidden"))
+        }
+    }
+}
+
 /// A successor a key reset's live lock declared, started by a holder of that household: the reset's work.
 async fn is_part_of_a_reset(state: &AppState, id: &str, member: Option<&str>) -> io::Result<bool> {
     let Some((household, _)) = member.and_then(|m| m.split_once(':')) else { return Ok(false) };
