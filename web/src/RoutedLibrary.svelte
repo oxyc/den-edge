@@ -94,7 +94,7 @@
     type HouseholdJoinPlan,
     type HouseholdPlan,
     type JoinAnswer,
-    type JoinLink,
+    type JoinLibrary,
   } from './lib/browserHousehold';
   import { setInterfaceLanguage } from './lib/i18n.svelte';
 
@@ -780,12 +780,12 @@
    * Bring what this browser keeps into the household `key` opens, before the browser switches to it: the library kept
    * only here, or this browser's own household (`joinOwnHousehold`). `link` is the TV paired with, opened from then on.
    */
-  async function joinLibrary(
-    key: string,
-    options: { pin?: string; link?: JoinLink } = {},
-  ): Promise<JoinAnswer> {
+  type JoinOptions = NonNullable<Parameters<JoinLibrary>[1]>;
+
+  async function joinLibrary(key: string, options: JoinOptions = {}): Promise<JoinAnswer> {
+    if (options?.presentation && !options.presentation.isCurrent()) return 'failed';
     if (!session.local && ownHousehold) return joinOwnHousehold(ownHousehold, key, options);
-    return (await joinLocalLibrary(key)) ? 'joined' : 'failed';
+    return (await joinLocalLibrary(key, options)) ? 'joined' : 'failed';
   }
   const joinsAsBoolean = async (key: string) => (await joinLibrary(key)) === 'joined';
 
@@ -797,16 +797,20 @@
   async function joinOwnHousehold(
     source: string,
     destination: string,
-    options: { pin?: string; link?: JoinLink },
+    options: JoinOptions,
   ): Promise<JoinAnswer> {
+    const current = () => !options.presentation || options.presentation.isCurrent();
+    if (!current()) return 'failed';
     if (source === destination) return 'failed';
     const kept = householdJoinPlan();
     const link = options.link ?? (kept?.destination === destination ? kept.link : undefined);
     const plan: HouseholdJoinPlan = { version: 1, source, destination, ...(link ? { link } : {}) };
+    if (!current()) return 'failed';
     if (!keepHouseholdJoin(plan)) return 'failed';
     let opened = open(destination, false);
     try {
       await opened.model!.ready;
+      if (!current()) return 'failed';
       const ask = () => opened.model!.joinHousehold(source, options.pin);
       const answer = await ask().catch(async (error: unknown) => {
         // Opened again from this browser's copy, a profile household is known to need wire 5 before den-edge is
@@ -816,23 +820,21 @@
         opened.close();
         opened = open(destination, false, 5);
         await opened.model!.ready;
+        if (!current()) return { outcome: 'unavailable' } as const;
         return ask();
       });
       // Refused before anything moved: this browser keeps its household.
       if (answer.outcome === 'refused-kids') settleHouseholdJoin(plan, false);
       if (answer.outcome !== 'joined')
         return answer.outcome === 'unavailable' ? 'failed' : answer.outcome;
-      carryActiveProfile(localStorage, answer.owner ?? null, answer.kids ?? {});
-      // The link first: should the page stop here, the next load opens the household joined and settles the plan.
+      if (current()) carryActiveProfile(localStorage, answer.owner ?? null, answer.kids ?? {});
+      // A committed move owns only its captured credentials. Selection and navigation remain with the still-current
+      // presentation; a newer record reusing the inbox key is left untouched.
       if (plan.link) {
-        links.add(plan.link.inboxKey, {
-          name: plan.link.name,
-          libraryKey: destination,
-          linkKey: plan.link.linkKey,
-          ...(plan.link.deviceId ? { deviceId: plan.link.deviceId } : {}),
-        });
-        links.makeCurrent(plan.link.inboxKey);
-      } else links.addRecovered(destination);
+        links.reconcileCommitted(plan.link, destination);
+      } else {
+        links.reconcileCommitted(links.recoveryCandidate(destination), destination);
+      }
       settleHouseholdJoin(plan, true);
       await retireMovedLibrary(source);
       return 'joined';
@@ -873,7 +875,9 @@
   });
 
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
-  async function joinLocalLibrary(key: string): Promise<boolean> {
+  async function joinLocalLibrary(key: string, options: JoinOptions = {}): Promise<boolean> {
+    const current = () => !options.presentation || options.presentation.isCurrent();
+    if (!current()) return false;
     let sourceKey = libraryIdentity;
     const source = session.model;
     if (!session.local || !source || !sourceKey) return false;
@@ -893,7 +897,15 @@
         // optimistically before its local command has finished; forgetting the source on the first pass could
         // otherwise publish an empty linked library while that command was still being kept.
         for (let pass = 0; pass < 3 && !settled; pass++) {
+          if (!current()) {
+            destination.close();
+            return false;
+          }
           await waitForKeptActions();
+          if (!current()) {
+            destination.close();
+            return false;
+          }
           const seen = keptActions;
           const { result } = await destination.model!.mergeLocalLibrary(sourceKey, undefined, {
             keep: true,
@@ -902,7 +914,7 @@
           if (
             result.kind !== 'local-library.merge' ||
             (result.outcome !== 'merged' && result.outcome !== 'absent') ||
-            !alive
+            (!options.presentation && !alive)
           ) {
             destination.close();
             return false;
@@ -915,9 +927,14 @@
         }
         settleLocalLibraryMerge(sourceKey);
         if (await dropLocalLibrary(sourceKey)) {
+          if (options.link) links.reconcileCommitted(options.link, key);
           // Cancel a queued convergence open before publishing the linked destination.
           convergence++;
           clearTimeout(convergenceRetry);
+          if (!current()) {
+            destination.close();
+            return true;
+          }
           // The same viewer goes on in the linked library: not a profile switch, so the page they are on stays open.
           routedProfile = profileSessionKey(destination.identity, destination.policyKey);
           libraryIdentity = key;

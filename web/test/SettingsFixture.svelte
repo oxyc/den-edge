@@ -19,6 +19,8 @@
   import { fixtureLibraryService } from './libraryService';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
+  import { links } from '../src/lib/links.svelte';
+  import type { JoinLibrary } from '../src/lib/browserHousehold';
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
@@ -26,8 +28,11 @@
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const fixtureQuery = new URLSearchParams(location.search);
+  const joinPresentationFixture = fixtureQuery.has('join-presentation');
   const replacesAuthority =
-    fixtureQuery.has('authority-replacement') || fixtureQuery.has('recovery-authority-replacement');
+    fixtureQuery.has('authority-replacement') ||
+    fixtureQuery.has('recovery-authority-replacement') ||
+    joinPresentationFixture;
   let releaseRecoveryWrite = () => {};
   const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
     ? new Promise<void>((resolve) => (releaseRecoveryWrite = resolve))
@@ -295,6 +300,75 @@
       fixtureSettingsAuthority?: typeof authorityReplacementControls;
     }
   ).fixtureSettingsAuthority = authorityReplacementControls;
+
+  type JoinGate = { promise: Promise<void>; release: () => void };
+  const gate = (): JoinGate => {
+    let release = () => {};
+    const promise = new Promise<void>((resolve) => (release = resolve));
+    return { promise, release };
+  };
+  const joinCalls: Array<{
+    key: string;
+    link: NonNullable<NonNullable<Parameters<JoinLibrary>[1]>['link']>;
+    before: JoinGate;
+    after: JoinGate;
+    stage: 'before' | 'after' | 'done' | 'abandoned';
+  }> = [];
+  const heldJoin: JoinLibrary = async (key, options = {}) => {
+    if (!options.link || !options.presentation) return 'failed';
+    const call: (typeof joinCalls)[number] = {
+      key,
+      link: options.link,
+      before: gate(),
+      after: gate(),
+      stage: 'before',
+    };
+    joinCalls.push(call);
+    await call.before.promise;
+    if (!options.presentation.isCurrent()) {
+      call.stage = 'abandoned';
+      return 'failed';
+    }
+    call.stage = 'after';
+    await call.after.promise;
+    // This is RoutedLibrary's post-commit rule: reconcile only the exact captured credentials even if the initiating
+    // presentation has since gone. Connections owns selection, notices and navigation and will fence all of those.
+    links.reconcileCommitted(call.link, key);
+    call.stage = 'done';
+    return 'joined';
+  };
+  const joinPresentationControls = {
+    calls: () =>
+      joinCalls.map(({ key, link, stage }) => ({
+        key,
+        link: structuredClone(link),
+        stage,
+      })),
+    release(index: number, boundary: 'before' | 'after') {
+      joinCalls[index]?.[boundary].release();
+    },
+    replace() {
+      authorityReplacementControls.replace();
+    },
+    unmount() {
+      authorityReplacementControls.unmount();
+    },
+    installReplacement(inboxKey: string) {
+      links.add(inboxKey, {
+        name: 'Replacement',
+        libraryKey: 'replacement-library',
+        linkKey: 'replacement-key',
+      });
+      links.makeCurrent(inboxKey);
+    },
+    links: () => structuredClone(links.list),
+    current: () => links.current?.inboxKey ?? null,
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureJoinPresentation?: typeof joinPresentationControls;
+    }
+  ).fixtureJoinPresentation = joinPresentationControls;
   // A second activity identity over the same fixture authority is enough to exercise Settings' live prop handoff:
   // it has its own retained import scope while the old model's in-flight semantic reply remains real.
   const replacementActivityModel = {
@@ -338,12 +412,13 @@
   );
   // `?switched`: this browser just moved the library to v4, as the real session says after `switchLibraryToV4`.
   if (new URLSearchParams(location.search).has('switched')) session.toast = 'Library updated to v4';
-  const link = {
+  const linked = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
     libraryKey: fixtureLibraryKey,
     linkKey: 'fixture',
   };
+  const link = joinPresentationFixture ? null : linked;
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
@@ -353,6 +428,8 @@
       {model}
       {activityModel}
       {content}
+      local={joinPresentationFixture}
+      onjoin={joinPresentationFixture ? heldJoin : undefined}
       onresetkey={async () => null}
     />{/if}
 </main>

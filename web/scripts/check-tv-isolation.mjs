@@ -184,5 +184,11 @@ if (process.argv.includes('--capture')) {
   // attempt state. The UI stays in the existing lazy Settings/redeem chunks and the lifecycle belongs beside Worker
   // creation, so another split would add a request without removing startup code. Allow 384 bytes including gzip
   // variance; the independently enforced initial ceiling remains unchanged.
-  if (coreTotalDelta > 72614) throw new Error('Browser total JS/CSS budget exceeded');
+  // Settings presentation ownership, exact post-commit link reconciliation and recovery adoption add 691 gzip bytes
+  // to the complete graph and 291 bytes to startup on matched parent/head builds. They add no request, polling or
+  // retained work; the pairing relay request counts are unchanged. Settings and LinkTV already own lazy boundaries.
+  // Splitting the small reconciliation helper again would add a request to the sole recovery action, while the join's
+  // durable authority must remain with always-loaded RoutedLibrary. Allow 768 bytes including gzip variance, leaving
+  // 317 bytes of total margin and 554 bytes at the independently enforced startup ceiling on this build.
+  if (coreTotalDelta > 73382) throw new Error('Browser total JS/CSS budget exceeded');
 }

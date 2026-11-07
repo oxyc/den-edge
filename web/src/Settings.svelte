@@ -40,6 +40,7 @@
     type InterfaceLanguage,
   } from './lib/interfaceLanguage';
   import { rememberFreshPresentationLanguage } from './lib/translationCache';
+  import { LibraryJoinPresentationOwner } from './lib/libraryJoinPresentation';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
@@ -92,17 +93,22 @@
     [authority.connections, authority.simkl, authority.recovery].forEach((lease) =>
       lease?.release(),
     );
+  const joinPresentation = new LibraryJoinPresentationOwner();
   let authority = $state.raw(untrack(() => acquireAuthority(model)));
   // A retained Settings page can receive a replacement household authority. Keep every lazy view and every command
   // on one exact model identity: publish the complete replacement bundle, then retire all of the old subscriptions.
   $effect(() => {
     const replacement = model;
+    joinPresentation.replace(replacement);
     if (authority.model === replacement) return;
     const previous = authority;
     authority = untrack(() => acquireAuthority(replacement));
     releaseAuthority(previous);
   });
-  onDestroy(() => releaseAuthority(authority));
+  onDestroy(() => {
+    joinPresentation.invalidate();
+    releaseAuthority(authority);
+  });
   const settings = $derived(authority.model.settings.value);
   const connections = $derived(authority.connections.snapshot.value);
   const simkl = $derived(authority.simkl?.snapshot.value);
@@ -413,37 +419,38 @@
           pinRemovable={!profileTopology}
         />
       {/if}
-      <ConnectionsSection
-        {link}
-        {content}
-        {onjoin}
-        onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
-          ? onresetkey
-          : undefined}
-        profileResetBlocked={!!link && profileTopology}
-        {hasRecoveryCode}
-        {heldReset}
-        {onadoptheld}
-        apiKeys={connections!.apiKeys}
-        simklConnected={!!simkl?.connected}
-        {saveSimkl}
-        heldRemovals={namedRemovals}
-        {approveRemovals}
-        plugins={plugins!}
-        {routes}
-        servers={structuredClone(connections!.servers)}
-        devices={structuredClone(connections!.devices)}
-        {selfId}
-        {disabled}
-        setApiKey={(service, value) => run(() => authority.model.setApiKey(service, value))}
-        installPlugin={(url) => run(() => authority.model.installPlugin(url))}
-        removePlugin={(url) => run(() => authority.model.removePlugin(url))}
-        setPluginTrust={(url, key) => run(() => authority.model.setPluginTrust(url, key))}
-        removeServer={(server) => run(() => authority.model.patchServer(server, null))}
-        {sealHandover}
-        removeDevice={removeLibraryDevice}
-        viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
-      />
+      {#key authority.model}<ConnectionsSection
+          {link}
+          {content}
+          {onjoin}
+          onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
+            ? onresetkey
+            : undefined}
+          profileResetBlocked={!!link && profileTopology}
+          {hasRecoveryCode}
+          {heldReset}
+          {onadoptheld}
+          apiKeys={connections!.apiKeys}
+          simklConnected={!!simkl?.connected}
+          {saveSimkl}
+          heldRemovals={namedRemovals}
+          {approveRemovals}
+          plugins={plugins!}
+          {routes}
+          servers={structuredClone(connections!.servers)}
+          devices={structuredClone(connections!.devices)}
+          {selfId}
+          {disabled}
+          setApiKey={(service, value) => run(() => authority.model.setApiKey(service, value))}
+          installPlugin={(url) => run(() => authority.model.installPlugin(url))}
+          removePlugin={(url) => run(() => authority.model.removePlugin(url))}
+          setPluginTrust={(url, key) => run(() => authority.model.setPluginTrust(url, key))}
+          removeServer={(server) => run(() => authority.model.patchServer(server, null))}
+          {sealHandover}
+          removeDevice={removeLibraryDevice}
+          viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
+          presentationOwner={joinPresentation}
+        />{/key}
       {#snippet recovery()}
         {#key authority.model}
           <RecoveryCode authority={authority.model} view={recoveryView} {ready} {run} />
@@ -477,21 +484,20 @@
           {exportHistory}
         />
       {/if}
-      <AdvancedSection
-        {link}
-        onjoin={local && onjoin
-          ? async (key: string) => (await onjoin(key)) === 'joined'
-          : undefined}
-        recovery={link && !local ? recovery : undefined}
-        remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
-        {disabled}
-        {selfId}
-        pendingActions={connections?.diagnostics.pendingChanges ?? 0}
-        {edgeVersion}
-        {libraryFormat}
-        setRemoteAccess={(credentials) => run(() => authority.model.setRemoteAccess(credentials))}
-        viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
-      />
+      {#key authority.model}<AdvancedSection
+          {link}
+          onjoin={local && onjoin ? onjoin : undefined}
+          recovery={link && !local ? recovery : undefined}
+          remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
+          {disabled}
+          {selfId}
+          pendingActions={connections?.diagnostics.pendingChanges ?? 0}
+          {edgeVersion}
+          {libraryFormat}
+          setRemoteAccess={(credentials) => run(() => authority.model.setRemoteAccess(credentials))}
+          viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
+          presentationOwner={joinPresentation}
+        />{/key}
     {/if}
     {#if !__DEN_TV_LEGACY_JS_CORE__}<AboutSection
         credits={mergeCredits([...addonCredits, [AIRING_CREDIT]])}

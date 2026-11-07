@@ -373,6 +373,58 @@ export class Links {
   }
 
   /**
+   * Reconcile only the exact credentials captured by a join that durably committed. This deliberately does not make
+   * the link current: a replacement presentation owns selection and navigation. A replacement record reusing the
+   * inbox credential wins and is never overwritten.
+   */
+  reconcileCommitted(
+    expected: Pick<Link, 'inboxKey' | 'name' | 'linkKey' | 'deviceId' | 'recovered' | 'linkedAt'>,
+    libraryKey: string,
+  ): Link | null {
+    this.reread();
+    const held = this.list.find((link) => link.inboxKey === expected.inboxKey);
+    if (held) {
+      return held.libraryKey === libraryKey &&
+        held.linkKey === expected.linkKey &&
+        held.name === expected.name &&
+        held.deviceId === expected.deviceId &&
+        held.recovered === expected.recovered &&
+        (expected.linkedAt === undefined || held.linkedAt === expected.linkedAt)
+        ? held
+        : null;
+    }
+    const committed: Link = {
+      inboxKey: expected.inboxKey,
+      name: expected.name,
+      linkedAt: expected.linkedAt ?? Date.now(),
+      libraryKey,
+      linkKey: expected.linkKey,
+      ...(expected.deviceId ? { deviceId: expected.deviceId } : {}),
+      ...(expected.recovered ? { recovered: true } : {}),
+    };
+    this.list = [...this.list, committed];
+    this.moved = null;
+    this.saveLinks();
+    return committed;
+  }
+
+  /** Capture recovery credentials before its durable join; keeping them happens only after that join commits. */
+  recoveryCandidate(libraryKey: string): Link {
+    this.reread();
+    const held = this.list.find((link) => link.libraryKey === libraryKey);
+    if (held) return held;
+    const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
+    return {
+      inboxKey: Array.from(random(24), (b) => b.toString(16).padStart(2, '0')).join(''),
+      name: 'a recovery code',
+      linkedAt: Date.now(),
+      libraryKey,
+      linkKey: btoa(String.fromCharCode(...random(32))),
+      recovered: true,
+    };
+  }
+
+  /**
    * Keep a library key opened with a recovery code, as a link with no TV behind it, and open it from now on. A library
    * already held is opened, not added twice.
    */
