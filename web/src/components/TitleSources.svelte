@@ -21,6 +21,7 @@
   import { activateLinkInPlace } from '../lib/linkActivation';
   import { i18n } from '../lib/i18n.svelte';
   import { reportClientFailure, replaceClientFailureGeneration } from '../lib/diagnosticsReport';
+  import { sourceWait } from '../lib/sourceDiscoveryPolicy';
   let {
     imdb,
     season,
@@ -175,7 +176,6 @@
     let attempt = 0;
     let recoverable = false;
     let started = 0;
-    const policy = import('../lib/sourceDiscoveryPolicy');
     const current = (request: number) =>
       generation === sourceGeneration && request === requestGeneration;
     const stop = (
@@ -203,19 +203,16 @@
     };
     const recovery = async (facts: { online_restored?: boolean; retry_after_ms?: number }) => {
       if (!recoverable || attempt > 0 || retryTimer) return;
-      let decision: Awaited<
-        ReturnType<(typeof import('../lib/sourceDiscoveryPolicy'))['sourceWait']>
-      >;
+      let decision: Awaited<ReturnType<typeof sourceWait>>;
       try {
-        const { sourceWait } = await policy;
         decision = await sourceWait({
           elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
           attempt,
           ...facts,
         });
       } catch {
-        // A document being replaced can cancel WebKit's module request. The owned lookup teardown handles that
-        // document; a current document keeps its visible manual Retry rather than leaking an unhandled rejection.
+        // A document being replaced can cancel WebKit's deferred Wasm request. The owned lookup teardown handles
+        // that document; a current document keeps its visible manual Retry rather than leaking a rejected promise.
         return;
       }
       if (generation !== sourceGeneration || !recoverable || attempt > 0) return;
@@ -227,11 +224,8 @@
       }, decision.retry_in_ms);
     };
     const advanceWait = async (request: number) => {
-      let decision: Awaited<
-        ReturnType<(typeof import('../lib/sourceDiscoveryPolicy'))['sourceWait']>
-      >;
+      let decision: Awaited<ReturnType<typeof sourceWait>>;
       try {
-        const { sourceWait } = await policy;
         decision = await sourceWait({
           elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
           attempt,
