@@ -640,11 +640,15 @@ async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>, code:
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
     match (req.method().clone(), gid) {
-        (Method::POST, Some(gid)) if code => new_code(state, id, gid, req).await,
+        (Method::POST, Some(gid)) if code => {
+            new_code(state, id, gid, claim.expect("a named host has a claim"), req).await
+        }
         _ if code => method_not_allowed(),
         (Method::POST, None) => create(state, id, claim.expect("a named host has a claim"), req).await,
         (Method::GET | Method::HEAD, None) => list(state, id).await,
-        (Method::PUT, Some(gid)) => update(state, id, gid, req).await,
+        (Method::PUT, Some(gid)) => {
+            update(state, id, gid, claim.expect("a named host has a claim"), req).await
+        }
         (Method::DELETE, Some(gid)) => revoke(state, id, gid).await,
         _ => method_not_allowed(),
     }
@@ -834,29 +838,32 @@ async fn owned(state: &AppState, host: &str, gid: &str) -> Result<Record, Box<Re
     }
 }
 
-async fn update(state: &AppState, host: &str, gid: &str, req: Request) -> Response {
+async fn update(state: &AppState, host: &str, gid: &str, claim: String, req: Request) -> Response {
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
     };
     let now = state.now();
-    let _lock = state.grants.lock.lock().await;
-    let mut record = match owned(state, host, gid).await {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    if body.as_object().and_then(|map| apply(&mut record, map, now, false)).is_none() {
-        return bad_request();
-    }
-    // An extension can bring an expired grant back to life. Its next expiry is a different kill obligation.
-    if is_live(&record, now) {
-        record.remux_kill_for = None;
-        record.remux_kill_acked = false;
-    }
-    if let Err(e) = save(state, &record).await {
-        return internal("grant write", e);
-    }
-    json_reply(StatusCode::OK, &json!({ "grant": grant_json(state, &record, now) }))
+    crate::library::with_current_household_member(state, host, &claim, || async move {
+        let _lock = state.grants.lock.lock().await;
+        let mut record = match owned(state, host, gid).await {
+            Ok(r) => r,
+            Err(resp) => return *resp,
+        };
+        if body.as_object().and_then(|map| apply(&mut record, map, now, false)).is_none() {
+            return bad_request();
+        }
+        // An extension can bring an expired grant back to life. Its next expiry is a different kill obligation.
+        if is_live(&record, now) {
+            record.remux_kill_for = None;
+            record.remux_kill_acked = false;
+        }
+        if let Err(e) = save(state, &record).await {
+            return internal("grant write", e);
+        }
+        json_reply(StatusCode::OK, &json!({ "grant": grant_json(state, &record, now) }))
+    })
+    .await
 }
 
 fn mint_code(gid: &str) -> String {
@@ -869,7 +876,7 @@ fn mint_code(gid: &str) -> String {
 /// same five `apply` allows; at five full slots there is nothing to give the link to, so it is `409 devices_full`.
 /// A grant whose access has ended is `409 access_ended`: no code revives it, and extending it is the host's PUT.
 /// A code that merely lapsed is exactly what this is for, so it is renewed.
-async fn new_code(state: &AppState, host: &str, gid: &str, req: Request) -> Response {
+async fn new_code(state: &AppState, host: &str, gid: &str, claim: String, req: Request) -> Response {
     let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large")),
@@ -891,32 +898,35 @@ async fn new_code(state: &AppState, host: &str, gid: &str, req: Request) -> Resp
             None => return bad_request(),
         },
     };
-    let _lock = state.grants.lock.lock().await;
-    let mut record = match owned(state, host, gid).await {
-        Ok(r) => r,
-        Err(resp) => return *resp,
-    };
-    if end(&record).is_some_and(|at| now >= at) {
-        return json_reply(StatusCode::CONFLICT, &error("access_ended"));
-    }
-    let raised = devices_full(&record);
-    if raised {
-        let Some(limit) = record.max_devices else { unreachable!("an unlimited grant is never full") };
-        if limit >= 5 {
-            return json_reply(StatusCode::CONFLICT, &error("devices_full"));
+    crate::library::with_current_household_member(state, host, &claim, || async move {
+        let _lock = state.grants.lock.lock().await;
+        let mut record = match owned(state, host, gid).await {
+            Ok(r) => r,
+            Err(resp) => return *resp,
+        };
+        if end(&record).is_some_and(|at| now >= at) {
+            return json_reply(StatusCode::CONFLICT, &error("access_ended"));
         }
-        record.max_devices = Some(limit + 1);
-    }
-    let code = mint_code(&record.gid);
-    record.code_hash = sha(code.as_bytes());
-    record.code_expires_at = code_expires_at;
-    if let Err(e) = save(state, &record).await {
-        return internal("grant write", e);
-    }
-    json_reply(
-        StatusCode::OK,
-        &json!({ "code": code, "devicesRaised": raised, "grant": grant_json(state, &record, now) }),
-    )
+        let raised = devices_full(&record);
+        if raised {
+            let Some(limit) = record.max_devices else { unreachable!("an unlimited grant is never full") };
+            if limit >= 5 {
+                return json_reply(StatusCode::CONFLICT, &error("devices_full"));
+            }
+            record.max_devices = Some(limit + 1);
+        }
+        let code = mint_code(&record.gid);
+        record.code_hash = sha(code.as_bytes());
+        record.code_expires_at = code_expires_at;
+        if let Err(e) = save(state, &record).await {
+            return internal("grant write", e);
+        }
+        json_reply(
+            StatusCode::OK,
+            &json!({ "code": code, "devicesRaised": raised, "grant": grant_json(state, &record, now) }),
+        )
+    })
+    .await
 }
 
 /// End a grant: it stops answering, its escrow and device secrets are dropped, and its remux sessions are killed.
@@ -1953,16 +1963,38 @@ mod tests {
     fn delayed_create(
         claim: &str,
     ) -> (Request, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<Bytes>) {
+        delayed_host_mutation("POST", "", claim)
+    }
+
+    fn delayed_host_mutation(
+        method: &str,
+        suffix: &str,
+        claim: &str,
+    ) -> (Request, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<Bytes>) {
         let (started, observed) = tokio::sync::oneshot::channel();
         let (release, waiting) = tokio::sync::oneshot::channel();
         let request = Request::builder()
-            .method("POST")
-            .uri(format!("/lib/{LIB}/grants"))
+            .method(method)
+            .uri(format!("/lib/{LIB}/grants{suffix}"))
             .header(crate::library::MEMBER_HEADER, claim)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::new(DelayedGrantBody { started: Some(started), release: Some(waiting) }))
             .unwrap();
         (request, observed, release)
+    }
+
+    async fn replace_member(h: &Harness) -> String {
+        let current = format!("{LIB}:the-new-member-proof");
+        let registered = h
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/member"),
+                None,
+                &[("x-den-library-token", TOKEN), (crate::library::MEMBER_HEADER, &current)],
+            )
+            .await;
+        assert_eq!(registered.status(), StatusCode::OK);
+        current
     }
 
     async fn no_grants_survive(h: &Harness) {
@@ -2020,16 +2052,7 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(2), started).await.unwrap().unwrap();
 
-        let current = format!("{LIB}:the-new-member-proof");
-        let registered = h
-            .send(
-                "PUT",
-                &format!("/lib/{LIB}/member"),
-                None,
-                &[("x-den-library-token", TOKEN), (crate::library::MEMBER_HEADER, &current)],
-            )
-            .await;
-        assert_eq!(registered.status(), StatusCode::OK);
+        let current = replace_member(&h).await;
         release.send(invite(json!({})).to_string().into()).unwrap();
         assert_eq!(creating.await.unwrap().status(), StatusCode::FORBIDDEN);
         no_grants_survive(&h).await;
@@ -2043,6 +2066,118 @@ mod tests {
             )
             .await;
         assert_eq!(retry.status(), StatusCode::CREATED);
+    }
+
+    /// A grant update admitted by the old member proof cannot publish after that authority is replaced. The
+    /// unchanged durable record survives restart, while the current host can perform the same update.
+    #[tokio::test]
+    async fn delayed_grant_update_rechecks_member_replacement_and_preserves_the_record() {
+        let h = Arc::new(harness().await);
+        let (gid, _) = invited(&h, json!({})).await;
+        let record_key = key(&gid);
+        let before = h.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        let (request, started, release) = delayed_host_mutation("PUT", &format!("/{gid}"), &member());
+        let updating = tokio::spawn({
+            let h = Arc::clone(&h);
+            async move { h.send_request(request).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), started).await.unwrap().unwrap();
+
+        let current = replace_member(&h).await;
+        release.send(json!({ "name": "Alex" }).to_string().into()).unwrap();
+        assert_eq!(updating.await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(h.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+        assert_eq!(
+            host_call(&h, "PUT", &format!("/{gid}"), Some(json!({ "name": "Alex" }))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+
+        let retry = restarted
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/grants/{gid}"),
+                Some(json!({ "name": "Alex" }).to_string()),
+                &[(crate::library::MEMBER_HEADER, &current), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(load(&restarted.state, &gid).await.unwrap().unwrap().name, "Alex");
+        let after_retry = restarted.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        let restarted_again = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted_again.state.store.get(NS, &record_key).await.unwrap().unwrap(), after_retry);
+    }
+
+    /// A delayed new-code request cannot replace the invite after its member proof is superseded. The old code
+    /// remains durable, and only the current host can mint and persist its replacement.
+    #[tokio::test]
+    async fn delayed_new_code_rechecks_member_replacement_and_preserves_the_code() {
+        let h = Arc::new(harness().await);
+        let (gid, old_code) = invited(&h, json!({})).await;
+        let record_key = key(&gid);
+        let before = h.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        assert_eq!(load(&h.state, &gid).await.unwrap().unwrap().code_hash, sha(old_code.as_bytes()));
+        let (request, started, release) = delayed_host_mutation("POST", &format!("/{gid}/code"), &member());
+        let replacing = tokio::spawn({
+            let h = Arc::clone(&h);
+            async move { h.send_request(request).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), started).await.unwrap().unwrap();
+
+        let current = replace_member(&h).await;
+        release.send(json!({}).to_string().into()).unwrap();
+        assert_eq!(replacing.await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(h.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+        assert_eq!(
+            host_call(&h, "POST", &format!("/{gid}/code"), Some(json!({}))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+        assert_eq!(redeem_with(&restarted, &old_code, SECRET).await.0, StatusCode::OK);
+
+        let retry = restarted
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/grants/{gid}/code"),
+                Some(json!({}).to_string()),
+                &[(crate::library::MEMBER_HEADER, &current), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retried = body_json(retry).await;
+        let new_code = retried["code"].as_str().unwrap();
+        assert_ne!(new_code, old_code);
+        let after_retry = restarted.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        assert_eq!(load(&restarted.state, &gid).await.unwrap().unwrap().code_hash, sha(new_code.as_bytes()));
+        let restarted_again = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted_again.state.store.get(NS, &record_key).await.unwrap().unwrap(), after_retry);
+    }
+
+    /// Cancelling either delayed management body leaves the existing durable grant byte-for-byte unchanged.
+    #[tokio::test]
+    async fn cancelled_delayed_grant_mutations_preserve_the_record() {
+        let h = Arc::new(harness().await);
+        let (gid, _) = invited(&h, json!({})).await;
+        let record_key = key(&gid);
+        let before = h.state.store.get(NS, &record_key).await.unwrap().unwrap();
+
+        for (method, suffix) in [("PUT", format!("/{gid}")), ("POST", format!("/{gid}/code"))] {
+            let (request, started, release) = delayed_host_mutation(method, &suffix, &member());
+            let mutating = tokio::spawn({
+                let h = Arc::clone(&h);
+                async move { h.send_request(request).await }
+            });
+            tokio::time::timeout(Duration::from_secs(2), started).await.unwrap().unwrap();
+            mutating.abort();
+            assert!(mutating.await.unwrap_err().is_cancelled());
+            drop(release);
+            assert_eq!(h.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+        }
+
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
     }
 
     /// Cancellation while the body is pending never reaches the serialized commit or leaves durable fragments.
