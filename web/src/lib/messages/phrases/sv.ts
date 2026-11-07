@@ -1056,6 +1056,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Trending This Week': 'Populärt den här veckan',
   'True black background (OLED)': 'Äkta svart bakgrund (OLED)',
   'Try again': 'Försök igen',
+  'Saving where you stopped…': 'Sparar var du slutade…',
+  'Couldn’t save where you stopped': 'Det gick inte att spara var du slutade',
+  'The player can close while Den finishes saving this position.':
+    'Spelaren kan stängas medan Den slutför sparandet av positionen.',
+  'Try again, or leave this position unsaved.': 'Försök igen eller lämna positionen osparad.',
+  'Leave unsaved': 'Lämna osparad',
   'Try another': 'Prova en annan',
   'Try another release': 'Prova en annan version',
   'Try Den Remux': 'Prova Den Remux',

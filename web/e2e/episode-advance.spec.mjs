@@ -160,7 +160,7 @@ async function serveHls(route) {
  * desktop Chrome's, on a direct den-remux route, with Google's sender stubbed. `asked.playback` is every playback
  * request's body; `asked.media` every media path fetched.
  */
-async function open(browserType, { cast, answer = torboxAnswer } = {}) {
+async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [] } = {}) {
   const browser = await browserType.launch(
     browserType === chromium
       ? {
@@ -241,6 +241,7 @@ async function open(browserType, { cast, answer = torboxAnswer } = {}) {
   query.set('local', '');
   query.set('services', '');
   query.set('address', '');
+  for (const name of libraryQuery) query.set(name, '');
   await page.goto(`${ORIGIN}/test/library.html?${query}`);
   return { browser, page, asked };
 }
@@ -429,6 +430,63 @@ test('closing the player and playing another title opens a fresh player', async 
     expect(
       await page.evaluate(() => document.querySelector('.player video') === window.__seriesVideo),
     ).toBe(false);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('rejected final progress retains its exact durable retry without holding player resources', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['reject-final-progress', 'hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 9);
+    await revealPlayerControls(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+
+    // Closing never awaits storage: the video/decoder is gone while the rejected receipt becomes actionable.
+    await expect(player(page)).toHaveCount(0);
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+    await expect(recovery.getByRole('button', { name: 'Try again' })).toBeVisible();
+    await expect(recovery.getByRole('button', { name: 'Leave unsaved' })).toBeVisible();
+
+    await recovery.getByRole('button', { name: 'Try again' }).click();
+    await expect(recovery).toContainText('Saving where you stopped');
+    await expect
+      .poll(() => progressOf(page, 1))
+      .toMatchObject({ value: expect.any(Number), viewing: 0 });
+
+    const finalOperationIds = await page.evaluate(() => window.denTestProgressOperationIds());
+    expect(finalOperationIds.slice(-2)).toEqual([
+      finalOperationIds.at(-1),
+      finalOperationIds.at(-1),
+    ]);
+    // The authority has published the row, but the modal remains until the exact semantic reply/readback arrives.
+    await expect(recovery).toBeVisible();
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect(recovery).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('rejected final progress can be explicitly left unsaved', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['reject-final-progress'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 9);
+    await revealPlayerControls(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+    await recovery.getByRole('button', { name: 'Leave unsaved' }).click();
+    await expect(recovery).toHaveCount(0);
+    await expect(player(page)).toHaveCount(0);
   } finally {
     await browser.close();
   }

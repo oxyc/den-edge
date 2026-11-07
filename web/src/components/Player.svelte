@@ -174,6 +174,7 @@
     castDiscoveryMs = CAST_DISCOVERY_MS,
     castPlayMs = CAST_PLAY_MS,
     onprogress,
+    onfinalprogress,
     onnext,
     onclose,
     oncontrols,
@@ -215,6 +216,8 @@
     castPlayMs?: number;
     /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
     onprogress: (fraction: number, seconds: number, at: Episode, playing: boolean) => void;
+    /** The visit's terminal position, retained by the library until its exact command is durable. */
+    onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -265,11 +268,6 @@
   const RECONNECT_AHEAD_SECS = 0.5;
   /** Seconds the next episode waits once this one has ended. */
   const UP_NEXT_SECS = 10;
-  /**
-   * How close to the last report a hidden page's close may be and write nothing: hiding the page already wrote it, and
-   * closing a tab hides it just before `pagehide`.
-   */
-  const HIDDEN_SLACK_SECS = 5;
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
   const tv = __DEN_TV__;
@@ -505,6 +503,7 @@
     new PlaybackProgressReporter(
       (fraction, seconds, playing) => onprogress(fraction, seconds, at, playing),
       at.season !== undefined && at.episode !== undefined ? 'episode' : 'movie',
+      (fraction, seconds) => onfinalprogress(fraction, seconds, at, false),
     );
   let progress = reporterFor(playingEpisode);
   /** Where the next session starts: a language switch picks up where the last one was. */
@@ -3998,7 +3997,16 @@
     clearTimeout(retry);
     startingSession?.abort(new DOMException('player closed', 'AbortError'));
     startingSession = undefined;
-    report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
+    // The durable retry receipt is handed off without awaiting it. Decoder and playback-session retirement below
+    // stay on the close path even when the library service is offline or a write is deliberately held.
+    if (session) {
+      const at = video?.currentTime ?? remoteTime;
+      if (at > 0)
+        progress.final(at, length(), {
+          creditsReached: reachedCredits(at),
+          naturallyFinished: reachedNaturalEnd,
+        });
+    }
     const stats = watcher?.stats();
     watcher?.stop();
     watcher = undefined;

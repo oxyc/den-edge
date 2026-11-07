@@ -54,6 +54,7 @@ class FixtureService {
   };
   readonly recoveryTasks: LibraryTask['kind'][] = [];
   readonly commandKinds: LibraryCommand['kind'][] = [];
+  readonly progressOperationIds: string[] = [];
   readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   readonly #heldSelections = new Map<
@@ -78,6 +79,8 @@ class FixtureService {
     private loseHistoryImportReplyOnce = false,
     private readonly historyImportReplyGate?: Promise<void>,
     private loseRecoveryConfirmReplyOnce = false,
+    private rejectProgressCommands = 0,
+    private readonly progressReplyGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -113,11 +116,20 @@ class FixtureService {
     operationId: string = crypto.randomUUID(),
   ): Promise<LibraryServiceCommandResult> {
     this.commandKinds.push(command.kind);
+    if (command.kind === 'progress.record') {
+      this.progressOperationIds.push(operationId);
+      if (command.playing === false && this.rejectProgressCommands > 0) {
+        this.rejectProgressCommands--;
+        throw new Error('fixture rejected progress command');
+      }
+    }
     const result = await this.authority.command(command, operationId);
     if (result.outcome === 'applied') {
       this.#revision++;
       await this.publish(result.affected);
     }
+    if (command.kind === 'progress.record' && command.playing === false)
+      await this.progressReplyGate;
     return {
       type: 'command-result',
       protocol: 1,
@@ -352,6 +364,10 @@ export interface FixtureLibraryServiceOptions {
   historyImportReplyGate?: Promise<void>;
   /** Settings fixture only: commit one recovery confirmation, then lose its semantic reply. */
   loseRecoveryConfirmReplyOnce?: boolean;
+  /** Playback fixture only: reject this many progress commands before they reach durable authority. */
+  rejectProgressCommands?: number;
+  /** Playback fixture only: hold the semantic reply after progress is durably applied and published. */
+  progressReplyGate?: Promise<void>;
 }
 
 /**
@@ -376,6 +392,8 @@ export function fixtureLibraryService({
   loseHistoryImportReplyOnce,
   historyImportReplyGate,
   loseRecoveryConfirmReplyOnce,
+  rejectProgressCommands,
+  progressReplyGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -448,6 +466,8 @@ export function fixtureLibraryService({
     loseHistoryImportReplyOnce,
     historyImportReplyGate,
     loseRecoveryConfirmReplyOnce,
+    rejectProgressCommands,
+    progressReplyGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
@@ -471,6 +491,7 @@ export function fixtureLibraryService({
     historyImports: fixtureService.historyImports,
     recoveryTasks: fixtureService.recoveryTasks,
     commandKinds: fixtureService.commandKinds,
+    progressOperationIds: fixtureService.progressOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
     holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
     activeSelections: () => fixtureService.activeSelections(),
