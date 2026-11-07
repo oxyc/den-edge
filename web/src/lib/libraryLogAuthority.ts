@@ -823,6 +823,7 @@ export class LibraryLogAuthority {
               })
           : null;
         const missing = providerInteger(snapshot.answer?.missing);
+        const late = providerInteger(snapshot.answer?.late);
         const outageBuiltAt = providerInteger(snapshot.answer?.outage?.builtAt);
         return {
           kind: 'download.sources',
@@ -833,6 +834,7 @@ export class LibraryLogAuthority {
                 answer: {
                   kind: snapshot.answer.kind,
                   missing,
+                  ...(late !== undefined ? { late } : {}),
                   ...(outageBuiltAt !== undefined ? { outageBuiltAt } : {}),
                 },
               }

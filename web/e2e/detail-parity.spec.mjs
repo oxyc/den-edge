@@ -662,6 +662,10 @@ test('retained Detail drops a source answer that completes while another identit
               attributes: { cached: true, resolution: '1080p' },
             },
           ],
+          den:
+            call === 0
+              ? { answerKind: 'partial', coverage: { sources: [{ outcome: 'late' }] } }
+              : { answerKind: 'live', coverage: { sources: [] } },
         },
       });
       if (call === 0) firstFinished();
@@ -684,10 +688,50 @@ test('retained Detail drops a source answer that completes while another identit
     await expect(sources).toHaveAttribute('aria-expanded', 'true');
     await expect.poll(() => calls).toBe(2);
     await expect(active().getByText('Stale.mkv', { exact: true })).toHaveCount(0);
+    await expect(
+      active().getByRole('status').filter({ hasText: 'Sources still answering' }),
+    ).toHaveCount(0);
     await expect(active().getByText('Loading sources', { exact: true })).toBeVisible();
     releaseSecond();
     await expect(active().getByText('Fresh.mkv', { exact: true })).toBeVisible();
     await expect(active().getByText('Stale.mkv', { exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an empty early title list discloses late work without claiming authoritative absence', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    let requests = 0;
+    await page.route('**/scout/config/stream/movie/**', (route) => {
+      requests++;
+      return route.fulfill({
+        json: {
+          streams: [],
+          den: { answerKind: 'partial', coverage: { sources: [{ outcome: 'late' }] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = page.locator('[data-active="true"]');
+    await active
+      .locator('header.hero')
+      .getByRole('button', { name: 'Sources', exact: true })
+      .click();
+    const panel = active.locator('.source-panel');
+    await expect(
+      panel.getByRole('status').filter({
+        hasText: 'Sources still answering when this early list arrived: 1. It may be short.',
+      }),
+    ).toBeVisible();
+    await expect(panel.getByText('No sources found for this movie.')).toHaveCount(0);
+    expect(requests).toBe(1);
   } finally {
     await browser.close();
   }
@@ -841,7 +885,14 @@ test('a title refresh keeps its prior list when limited, exposes Retry, then adm
         headers: fresh ? { 'x-den-fresh': 'rebuilt' } : {},
         json: {
           streams: listed(admitted ? 'New.Movie.1080p.mkv' : 'Prior.Movie.1080p.mkv'),
-          den: { answerKind: 'live', coverage: { sources: [] } },
+          den: {
+            answerKind: admitted ? 'live' : 'partial',
+            coverage: {
+              sources: admitted
+                ? []
+                : [{ outcome: 'late' }, { outcome: 'late' }, { outcome: 'timeout' }],
+            },
+          },
         },
       });
     });
@@ -854,12 +905,24 @@ test('a title refresh keeps its prior list when limited, exposes Retry, then adm
       .click();
     const panel = active.locator('.source-panel');
     await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+    const late = panel.getByRole('status').filter({
+      hasText: 'Sources still answering when this early list arrived: 2. It may be short.',
+    });
+    await expect(late).toBeVisible();
+    await expect(
+      panel.getByText('One source didn’t answer, so this list may be short.'),
+    ).toBeVisible();
     const plainBefore = plainRequests;
+    expect(plainRequests).toBe(plainBefore);
     await panel.getByRole('button', { name: 'Check for sources again', exact: true }).click();
     await expect(
       panel.getByRole('status').filter({ hasText: 'Sources were checked recently' }),
     ).toBeVisible();
     await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+    await expect(late).toBeVisible();
+    await expect(
+      panel.getByText('One source didn’t answer, so this list may be short.'),
+    ).toBeVisible();
     await expect(panel.getByText('New.Movie.1080p.mkv')).toHaveCount(0);
     expect({ freshRequests, plainRequests }).toEqual({
       freshRequests: 1,
@@ -870,6 +933,10 @@ test('a title refresh keeps its prior list when limited, exposes Retry, then adm
     await retry.focus();
     await retry.press('Enter');
     await expect(panel.getByText('New.Movie.1080p.mkv')).toBeVisible();
+    await expect(late).toHaveCount(0);
+    await expect(
+      panel.getByText('One source didn’t answer, so this list may be short.'),
+    ).toHaveCount(0);
     await expect.poll(() => plainRequests).toBe(plainBefore + 1);
     expect(freshRequests).toBe(2);
   } finally {

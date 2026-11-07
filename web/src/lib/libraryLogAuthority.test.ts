@@ -2376,17 +2376,25 @@ describe('LibraryLogAuthority', () => {
         source(`release-${index}.mkv`),
       ),
     ];
+    let malformedAnswer = false;
     const downloads = new DownloadCoordinator(log, clock, {
       prepare: async () => ({ state: 'preparing', progress: 0 }),
       cancel: async () => true,
-      resolve: async () => ({
-        sources: providerSources,
-        answer: {
-          kind: 'partial',
-          missing: Number.POSITIVE_INFINITY,
-          outage: { builtAt: Number.NaN },
-        },
-      }),
+      resolve: async () =>
+        malformedAnswer
+          ? {
+              sources: providerSources,
+              answer: {
+                kind: 'partial' as const,
+                missing: Number.POSITIVE_INFINITY,
+                late: Number.POSITIVE_INFINITY,
+                outage: { builtAt: Number.NaN },
+              },
+            }
+          : {
+              sources: providerSources,
+              answer: { kind: 'partial' as const, missing: 2, late: 3 },
+            },
       ticket: (url) => (url.startsWith('/scout/') ? url : null),
     });
     const service = new LibraryLogAuthority(log, clock, {
@@ -2415,7 +2423,7 @@ describe('LibraryLogAuthority', () => {
     expect(alternatives.sources?.[0]?.languages.every((language) => language.length === 64)).toBe(
       true,
     );
-    expect(alternatives.answer).toBeUndefined();
+    expect(alternatives.answer).toEqual({ kind: 'partial', missing: 2, late: 3 });
     expect(
       decodeLibraryServiceServerMessage({
         type: 'query-result',
@@ -2425,6 +2433,16 @@ describe('LibraryLogAuthority', () => {
         result: alternatives,
       }),
     ).toMatchObject({ ok: true });
+
+    malformedAnswer = true;
+    const malformedAlternatives = await service.query({
+      kind: 'download.sources',
+      title,
+      refresh: true,
+    });
+    expect(malformedAlternatives.kind).toBe('download.sources');
+    if (malformedAlternatives.kind !== 'download.sources') throw new Error('wrong query result');
+    expect(malformedAlternatives.answer).toBeUndefined();
 
     const internalTitle = { mediaType: 'movie' as const, mediaId: 7, title: 'Seven' };
     await downloads.enqueue(internalTitle, providerSources[1]!, providerSources.length);

@@ -70,7 +70,10 @@ export async function sourceRefreshFixture(page, { bundled = false, packaged = f
       headers: fresh ? { 'x-den-fresh': 'rebuilt' } : {},
       json: {
         streams: [source(requests.admitted ? 'Rebuilt.Movie.1080p.mkv' : 'Prior.Movie.1080p.mkv')],
-        den: { answerKind: 'live', coverage: { sources: [] } },
+        den: {
+          answerKind: requests.admitted ? 'live' : 'partial',
+          coverage: { sources: requests.admitted ? [] : [{ outcome: 'late' }] },
+        },
       },
     });
   });

@@ -170,5 +170,8 @@ if (process.argv.includes('--capture')) {
   // adds 273 gzip bytes to the complete graph and 114 bytes at startup versus main. It adds no request, storage or
   // background work: one header lookup and bounded string comparison per changes page. Allow 384 bytes; the
   // independent startup ceiling remains unchanged.
-  if (coreTotalDelta > 71296) throw new Error('Browser total JS/CSS budget exceeded');
+  // Preserving Scout's early-answer `late` count through the library authority and rendering its accessible Detail
+  // notice adds 224 gzip bytes to the complete app graph versus main and two bytes to the initial graph.
+  // Keep that bounded wire/UI contract inside a quarter KiB; it adds no request, retry, polling or startup work.
+  if (coreTotalDelta > 71552) throw new Error('Browser total JS/CSS budget exceeded');
 }
