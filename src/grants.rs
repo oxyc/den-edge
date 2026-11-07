@@ -61,6 +61,20 @@ use std::time::Duration;
 
 /// The guest's credential, `<gid>:<secret>`. Same origin only, never in a URL.
 pub const HEADER: &str = "x-den-grant";
+
+#[cfg(test)]
+pub struct AuthorityGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl AuthorityGate {
+    fn new() -> Self {
+        Self { entered: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() }
+    }
+}
+
 const CONFIGURE_COOKIE: &str = "den_guest_configure";
 const MEMBER_CONFIGURE_COOKIE: &str = "den_member_configure";
 const CONFIGURE_COOKIE_MAX_AGE: u64 = 15 * 60;
@@ -639,6 +653,14 @@ async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>, code:
     if !names_it || !crate::library::is_household_member(state, claim.as_deref()).await {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
+    #[cfg(test)]
+    if req.method() == Method::DELETE {
+        let gate = { crate::lock(&state.grant_authority_gate).clone() };
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
     match (req.method().clone(), gid) {
         (Method::POST, Some(gid)) if code => {
             new_code(state, id, gid, claim.expect("a named host has a claim"), req).await
@@ -649,7 +671,7 @@ async fn host(state: &AppState, req: Request, id: &str, gid: Option<&str>, code:
         (Method::PUT, Some(gid)) => {
             update(state, id, gid, claim.expect("a named host has a claim"), req).await
         }
-        (Method::DELETE, Some(gid)) => revoke(state, id, gid).await,
+        (Method::DELETE, Some(gid)) => revoke(state, id, gid, claim.expect("a named host has a claim")).await,
         _ => method_not_allowed(),
     }
 }
@@ -942,9 +964,9 @@ async fn end_grant(state: &AppState, record: &mut Record, now: u64) -> io::Resul
     save(state, record).await
 }
 
-async fn revoke(state: &AppState, host: &str, gid: &str) -> Response {
+async fn revoke(state: &AppState, host: &str, gid: &str, claim: String) -> Response {
     let now = state.now();
-    {
+    let response = crate::library::with_current_household_member(state, host, &claim, || async move {
         let _lock = state.grants.lock.lock().await;
         let mut record = match load(state, gid).await {
             Ok(Some(r)) if r.host == host => r,
@@ -954,9 +976,14 @@ async fn revoke(state: &AppState, host: &str, gid: &str) -> Response {
         if let Err(e) = end_grant(state, &mut record, now).await {
             return internal("grant write", e);
         }
+        no_content()
+    })
+    .await;
+    if response.status() != StatusCode::NO_CONTENT {
+        return response;
     }
     end_sessions(state, gid).await;
-    no_content()
+    response
 }
 
 // ---- the guest's side
@@ -2176,6 +2203,102 @@ mod tests {
             assert_eq!(h.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
         }
 
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+    }
+
+    /// A DELETE that passed the first member check cannot revoke after that exact authority is replaced. The
+    /// stale request is refused before the queued grants lock, while the current host can retry durably.
+    #[tokio::test]
+    async fn queued_grant_revoke_rechecks_member_replacement_before_commit() {
+        let (h, seen) = relaying(remux_reply, Some("edge-secret")).await;
+        let h = Arc::new(h);
+        let (gid, _) = invited(&h, json!({})).await;
+        let record_key = key(&gid);
+        let before = h.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        let grants_lock = h.state.grants.lock.lock().await;
+        let gate = Arc::new(AuthorityGate::new());
+        *crate::lock(&h.state.grant_authority_gate) = Some(Arc::clone(&gate));
+        let deleting = tokio::spawn({
+            let h = Arc::clone(&h);
+            let gid = gid.clone();
+            async move {
+                h.send(
+                    "DELETE",
+                    &format!("/lib/{LIB}/grants/{gid}"),
+                    None,
+                    &[(crate::library::MEMBER_HEADER, &member())],
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified()).await.unwrap();
+
+        let current = replace_member(&h).await;
+        crate::lock(&h.state.grant_authority_gate).take();
+        gate.release.notify_one();
+        let refused = tokio::time::timeout(Duration::from_secs(2), deleting).await.unwrap().unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "stale authority never waits for the grants lock"
+        );
+        assert_eq!(h.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+        drop(grants_lock);
+        assert_eq!(
+            host_call(&h, "DELETE", &format!("/{gid}"), None).await.0,
+            StatusCode::FORBIDDEN,
+            "the old proof remains refused"
+        );
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
+        assert!(seen.lock().unwrap().is_empty(), "the stale revoke did not ask remux to end sessions");
+
+        let retried = h
+            .send(
+                "DELETE",
+                &format!("/lib/{LIB}/grants/{gid}"),
+                None,
+                &[(crate::library::MEMBER_HEADER, &current)],
+            )
+            .await;
+        assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+        assert_eq!(seen.lock().unwrap().as_slice()[0].0, "/remux/admin/kill");
+        let revoked = load(&h.state, &gid).await.unwrap().unwrap();
+        assert!(revoked.revoked_at.is_some());
+        assert!(revoked.remux_kill_for.is_some());
+        let after_retry = h.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        let restarted_again = Harness::in_dir(h.dir.clone());
+        assert_eq!(restarted_again.state.store.get(NS, &record_key).await.unwrap().unwrap(), after_retry);
+    }
+
+    /// Cancellation at the post-authentication boundary never reaches the serialized revoke or its session end.
+    #[tokio::test]
+    async fn cancelled_queued_grant_revoke_preserves_the_record() {
+        let h = Arc::new(harness().await);
+        let (gid, _) = invited(&h, json!({})).await;
+        let record_key = key(&gid);
+        let before = h.state.store.get(NS, &record_key).await.unwrap().unwrap();
+        let gate = Arc::new(AuthorityGate::new());
+        *crate::lock(&h.state.grant_authority_gate) = Some(Arc::clone(&gate));
+        let deleting = tokio::spawn({
+            let h = Arc::clone(&h);
+            async move {
+                h.send(
+                    "DELETE",
+                    &format!("/lib/{LIB}/grants/{gid}"),
+                    None,
+                    &[(crate::library::MEMBER_HEADER, &member())],
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified()).await.unwrap();
+        crate::lock(&h.state.grant_authority_gate).take();
+        deleting.abort();
+        assert!(deleting.await.unwrap_err().is_cancelled());
+        gate.release.notify_one();
+        assert_eq!(h.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
         let restarted = Harness::in_dir(h.dir.clone());
         assert_eq!(restarted.state.store.get(NS, &record_key).await.unwrap().unwrap(), before);
     }
