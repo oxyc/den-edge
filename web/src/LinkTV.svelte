@@ -273,11 +273,20 @@
     <p class="error" role="alert">{messages[failure]}</p>
   {/if}
   {#if !embedded}
-    <!-- No TV at hand, or a new Apple ID: the code opens the library from den-edge alone (recovery-code §8). -->
-    <details class="recovery">
-      <summary>Open with a recovery code</summary>
-      <RecoveryRedeem onopen={(key) => (links.addRecovered(key), true)} />
-    </details>
+    {#if __DEN_TV_LEGACY_JS_CORE__}
+      <!-- Tizen 3 deliberately has no recovery-code core. Keep pairing usable and say where recovery lives
+           instead of mounting a control whose substituted implementation can only reject it. -->
+      <p class="recovery-handoff">
+        Open a recovery code in Den on a phone or computer, then link this TV with the QR or code
+        above.
+      </p>
+    {:else}
+      <!-- No TV at hand, or a new Apple ID: the code opens the library from den-edge alone (recovery-code §8). -->
+      <details class="recovery">
+        <summary>Open with a recovery code</summary>
+        <RecoveryRedeem onopen={(key) => (links.addRecovered(key), true)} />
+      </details>
+    {/if}
   {/if}
   <!-- Someone who only wants to look around should not be stopped by a pairing step. Dismissing is
        remembered, so the invitation belongs to a first visit; pairing stays under Settings afterwards. -->
@@ -427,6 +436,11 @@
   .recovery {
     margin-top: 24px;
     text-align: left;
+  }
+
+  .recovery-handoff {
+    margin: 24px 0 0;
+    color: var(--muted);
   }
 
   .recovery summary {
