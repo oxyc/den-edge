@@ -17,6 +17,11 @@
   Member→guest, guest→member, guest→guest and member→member replacements preserve the exact request body plus
   originating member claim or guest secret; no replacement identity can sign the old body. SharedWorker
   `RelaySession` has no hello barrier and already selects body and credential synchronously per port.
+- The final implicit-gid audit covers both `/remux/health` and `/oauth/request/:id/approve`: an already-held guest
+  proof is selected with its secret before the hello wait, while a request created with no member or guest authority
+  remains unresolved and takes the first authority installed by the hello. OAuth approval keeps its exact body with
+  that proof. Split-household member approval uses its captured household fetch capability; its guest fallback and
+  legacy topology share the corrected page relay.
 - Tests cover delayed and failed grant refresh, stopped-profile refresh completion, retained A against B, A→B→A,
   stopped discovery callbacks, movie and episode release bodies, releases/session gid equality, and the 428 retry.
 
@@ -82,11 +87,15 @@
 ## Validation boundaries
 
 - Follow-up focused Vitest: 2 files and 44 tests passed across session authority and actual relay transport. Full
-  Vitest passed 3,066 tests with 16 skipped, including the joined production receipt contract; earlier
+  Vitest passed 3,080 tests with 16 skipped, including the joined production receipt contract; earlier
   codec, `LibraryServiceCore`, Worker-host, assistant-authority and Edge callback suites remain in that bundle.
+- Round-5 focused production-module Vitest passed 49 tests across relay and OAuth. The added matrix covers both
+  implicit routes, all four guest/member replacement directions, authority-less bootstrap to either proof, and the
+  split-household fixed-membership approval path.
 - Follow-up Playwright: 11 managed-playback, release-picker/remux and real Svelte authority cases passed serially,
-  including the automatic remux-persistence/player-identity case. These are Chromium fixtures, not device
-  qualification; previously recorded Cast cases were not rerun in this follow-up.
+  including both real split-household assistant cases and the automatic remux-persistence/player-identity case.
+  These are Chromium fixtures, not device qualification; previously recorded Cast cases were not rerun in this
+  follow-up.
 - `npm run lint` passed Prettier, ESLint, Stylelint, Svelte diagnostics (0 errors and 0 warnings), and strict Cast
   TypeScript. `npm run build` passed the client/Worker verification, SSR shell build, and round-trip precompression;
   the reviewed client build transformed 564 modules. LG/webOS, current Tizen and explicit Tizen 3 builds passed their
@@ -95,8 +104,12 @@
 - No deployment, homelab/device access, active stream probe, TV packaging, or public posting was performed.
 - Source and browser fixtures use synthetic ids and ciphertext only; no production route token or private evidence is
   present in the patch.
+- Browser, webOS, current Tizen and explicit Tizen 3 builds passed; the Tizen 3 packaged-mode CSS audit found zero
+  unsupported `:is` rules. The separate TV-isolation budget check also fails on an archive of the exact round-5 base
+  against its older `c7e20146` baseline (+2,792 initial gzip bytes; +2,798 after this patch), so the unrelated baseline
+  was not changed and this check is not reported as passing.
 - Privacy improves: an old request can no longer expose its body under a replacement member or guest identity. The
   captured guest secret lives only for that already-started request's hello wait and still leaves only in the existing
-  same-origin header. Production output is 4,531,731/1,650,332/1,366,627 raw/gzip/brotli bytes, +247/+94/+15 against
-  the recorded `4a71f195` build. This static-size delta and removal of avoidable Player teardown are source/build
-  evidence, not a measured runtime or device gain; no credible new hot-path regression was found.
+  same-origin header. Round-5 production output is 4,531,716/1,650,399/1,366,470 raw/gzip/brotli bytes,
+  -15/+67/-157 against round 4. The only added hot-path work is the grant lookup the non-waiting path already made;
+  there is no extra network, timer, retry or render work, and no runtime or device performance gain is claimed.

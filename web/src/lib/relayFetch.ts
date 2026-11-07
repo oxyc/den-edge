@@ -482,8 +482,10 @@ export const relayFetch: typeof fetch = async (input, init) => {
   const originatingCredential = credential;
   const originatingLibraryId = libraryId;
   const opening = url && membershipSensitive(url) ? membershipOpening?.ready : undefined;
-  const originatingGid =
-    url && (!opening || originatingCredential ? grantOf(url, init) : boundGrantOf(url, init));
+  // `grantOf` returns null while a genuine bootstrap has no authority, so that request can still take the first
+  // membership or grant installed by the hello. If a guest proof already exists, however, select it now just as we
+  // select an existing member claim: neither its identity nor its secret may be borrowed from the replacement.
+  const originatingGid = url && grantOf(url, init);
   const originatingGrant = originatingGid
     ? { secret: grantSecrets.get(originatingGid) }
     : undefined;

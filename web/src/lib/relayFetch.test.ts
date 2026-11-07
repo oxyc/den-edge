@@ -3,6 +3,7 @@ import {
   forgetGrant,
   forgetLibraryCredential,
   holdLibraryRelayMembership,
+  householdAssistantFetch,
   onGrantEnded,
   relayFetch,
   rememberGrant,
@@ -68,9 +69,8 @@ test('takes the bounded membership capability returned by LibraryService', async
   expect(sent(spy)[HEADER]).toBeUndefined();
 });
 
-test('holds page-owned relay traffic for a guest until their opening library installs membership', async () => {
+test('holds authority-less page relay traffic until its opening library installs membership', async () => {
   const spy = stub();
-  rememberGrant(GID, 'sekrit');
   let opened!: () => void;
   const opening = new Promise<void>((resolve) => (opened = resolve));
   const release = holdLibraryRelayMembership(opening);
@@ -140,6 +140,101 @@ test.each([
     expect(sent(spy)[GRANT]).toBe(grant);
     release();
     forgetGrant(other);
+  },
+);
+
+const implicitAuthorityRoutes = [
+  { route: 'remux health', path: '/remux/health', init: undefined },
+  {
+    route: 'OAuth approval',
+    path: `/oauth/request/${'a'.repeat(32)}/approve`,
+    init: {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ write: { grant: 'connection', key: 'seed' } }),
+    },
+  },
+] as const;
+
+const authorityReplacements = [
+  { from: 'guest', to: 'guest', header: undefined, grant: `${GID}:secret-a` },
+  { from: 'guest', to: 'member', header: undefined, grant: `${GID}:secret-a` },
+  { from: 'member', to: 'guest', header: 'member-a:token-a', grant: undefined },
+  { from: 'member', to: 'member', header: 'member-a:token-a', grant: undefined },
+] as const;
+
+test.each(
+  implicitAuthorityRoutes.flatMap((request) =>
+    authorityReplacements.map((replacement) => ({ ...request, ...replacement })),
+  ),
+)(
+  'keeps a blocked implicit-gid $route paired with its $from proof across $from→$to replacement',
+  async ({ path, init, from, to, header, grant }) => {
+    const spy = stub();
+    if (from === 'member') useLibraryCredential({ id: 'member-a', member: 'token-a' });
+    else rememberGrant(GID, 'secret-a');
+    let opened!: () => void;
+    const release = holdLibraryRelayMembership(new Promise<void>((resolve) => (opened = resolve)));
+    const pending = relayFetch(path, init);
+    await Promise.resolve();
+    expect(spy).not.toHaveBeenCalled();
+
+    forgetLibraryCredential();
+    forgetGrant(GID);
+    if (to === 'member') useLibraryCredential({ id: 'member-b', member: 'token-b' });
+    else rememberGrant(GID, 'secret-b');
+    opened();
+    await pending;
+
+    expect(spy.mock.calls.at(-1)?.[1]?.body).toBe(init?.body);
+    expect(sent(spy)[HEADER]).toBe(header);
+    expect(sent(spy)[GRANT]).toBe(grant);
+    release();
+  },
+);
+
+test.each(
+  implicitAuthorityRoutes.flatMap((request) =>
+    (['guest', 'member'] as const).map((to) => ({ ...request, to })),
+  ),
+)(
+  'lets a genuinely authority-less blocked $route take the first $to proof',
+  async ({ path, init, to }) => {
+    const spy = stub();
+    let opened!: () => void;
+    const release = holdLibraryRelayMembership(new Promise<void>((resolve) => (opened = resolve)));
+    const pending = relayFetch(path, init);
+    await Promise.resolve();
+    expect(spy).not.toHaveBeenCalled();
+
+    if (to === 'member') useLibraryCredential({ id: 'member-b', member: 'token-b' });
+    else rememberGrant(GID, 'secret-b');
+    opened();
+    await pending;
+
+    expect(spy.mock.calls.at(-1)?.[1]?.body).toBe(init?.body);
+    expect(sent(spy)[HEADER]).toBe(to === 'member' ? 'member-b:token-b' : undefined);
+    expect(sent(spy)[GRANT]).toBe(to === 'guest' ? `${GID}:secret-b` : undefined);
+    release();
+  },
+);
+
+test.each(['guest', 'member'] as const)(
+  'keeps split-household OAuth approval on its captured membership while page authority becomes $to',
+  async (to) => {
+    const spy = stub();
+    const householdFetch = householdAssistantFetch({
+      libraryId: 'household-a',
+      memberToken: 'token-a',
+    });
+    if (to === 'member') useLibraryCredential({ id: 'profile-b', member: 'token-b' });
+    else rememberGrant(GID, 'secret-b');
+    await householdFetch(`/oauth/request/${'a'.repeat(32)}/approve`, {
+      method: 'POST',
+      headers: { [GRANT]: 'smuggled' },
+    });
+    expect(sent(spy)[HEADER]).toBe('household-a:token-a');
+    expect(sent(spy)[GRANT]).toBeUndefined();
   },
 );
 
