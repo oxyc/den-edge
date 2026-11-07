@@ -3,7 +3,7 @@
 <script lang="ts">
   import Loading from './Loading.svelte';
   import { onDestroy } from 'svelte';
-  import { DeriveCancelled, redeem, redeemMessages } from '../lib/recovery';
+  import { redeem, redeemMessages } from '../lib/recovery';
   import Button from './Button.svelte';
 
   let {
@@ -21,19 +21,17 @@
   let problem = $state<string | null>(null);
   /** The key a code opened, waiting for the person to go on. */
   let opened = $state<string | null>(null);
-  let attempt = 0;
   let derivation: AbortController | null = null;
 
   async function open() {
     derivation?.abort();
     const controller = new AbortController();
     derivation = controller;
-    const current = ++attempt;
     busy = true;
     problem = null;
     try {
       const result = await redeem(code, fetch, controller.signal);
-      if (current !== attempt) return;
+      if (derivation !== controller) return;
       if ('error' in result) {
         problem =
           result.error === 'rate_limited' && result.retryAfter
@@ -43,17 +41,18 @@
       }
       code = '';
       opened = result.libraryKey;
-    } catch (error) {
-      if (current === attempt && !(error instanceof DeriveCancelled))
+    } catch {
+      if (derivation === controller && !controller.signal.aborted)
         problem = redeemMessages.unreachable;
     } finally {
-      if (derivation === controller) derivation = null;
-      if (current === attempt) busy = false;
+      if (derivation === controller) {
+        derivation = null;
+        busy = false;
+      }
     }
   }
 
   onDestroy(() => {
-    attempt++;
     derivation?.abort();
     derivation = null;
   });

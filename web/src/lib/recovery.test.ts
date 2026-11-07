@@ -4,7 +4,6 @@ import {
   abandonPending,
   begin,
   confirm,
-  DeriveCancelled,
   DeriveFailed,
   derive,
   deviceCouldNot,
@@ -130,7 +129,7 @@ describe('a derivation that can’t finish (§3)', () => {
       },
     });
     controller.abort();
-    await expect(failed).rejects.toEqual(new DeriveCancelled());
+    await expect(failed).rejects.toBe(controller.signal.reason);
     replies[0]?.({
       data: { locator: vectors.entries[0]!.locator, wrapKey: vectors.entries[0]!.wrapKey },
     } as MessageEvent);

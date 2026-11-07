@@ -93,7 +93,6 @@
     try {
       const made = await newCode();
       const derived = await derive(made.data, { op: 'make', signal: controller.signal });
-      if (derivation === controller) derivation = null;
       if (current !== attempt) {
         derived.wrapKey.fill(0);
         return;

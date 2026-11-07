@@ -179,5 +179,10 @@ if (process.argv.includes('--capture')) {
   // 146-byte total margin around that reviewed contract; the independent startup ceiling remains unchanged. Receipt
   // ownership and the durable command must remain in the always-loaded Library; splitting only the tiny failure
   // dialog would delay its sole recovery path and add chunk-loader overhead while leaving that authority at startup.
-  if (coreTotalDelta > 72230) throw new Error('Browser total JS/CSS budget exceeded');
+  // Recovery derivation cancellation and stale-attempt fencing add 261 gzip bytes to the complete graph and six
+  // bytes at startup on matched current-main/head builds, after removing a dedicated cancellation error and redundant
+  // attempt state. The UI stays in the existing lazy Settings/redeem chunks and the lifecycle belongs beside Worker
+  // creation, so another split would add a request without removing startup code. Allow 384 bytes including gzip
+  // variance; the independently enforced initial ceiling remains unchanged.
+  if (coreTotalDelta > 72614) throw new Error('Browser total JS/CSS budget exceeded');
 }

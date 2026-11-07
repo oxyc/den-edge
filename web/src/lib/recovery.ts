@@ -146,12 +146,6 @@ export class DeriveFailed extends Error {
 }
 
 /** The presentation that owned a derivation went away. This is not a device failure or a timing sample. */
-export class DeriveCancelled extends Error {
-  constructor() {
-    super('recovery_derive: cancelled');
-  }
-}
-
 /** What a person is told when this device can't derive (§3): another device can. */
 export const deviceCouldNot = {
   make: 'This device couldn’t make the code — try Den Web on a computer.',
@@ -236,25 +230,21 @@ export function derive(data: string, options: DeriveOptions = { op: 'redeem' }):
   if (!makeWorker) {
     return ensureRecoveryPolicy()
       .then(() => {
-        if (options.signal?.aborted) throw new DeriveCancelled();
+        options.signal?.throwIfAborted();
         const out = recoveryPolicy<{ locator: string; wrapKey: string }>({
           op: 'recovery_derive',
           data,
         });
-        if (options.signal?.aborted) throw new DeriveCancelled();
+        options.signal?.throwIfAborted();
         return answer(out);
       })
       .catch((error: unknown) => {
-        throw error instanceof DeriveFailed || error instanceof DeriveCancelled
-          ? error
-          : new DeriveFailed('error');
+        if (options.signal?.aborted || error instanceof DeriveFailed) throw error;
+        throw new DeriveFailed('error');
       });
   }
   return new Promise((resolve, reject) => {
-    if (options.signal?.aborted) {
-      reject(new DeriveCancelled());
-      return;
-    }
+    options.signal?.throwIfAborted();
     const worker = makeWorker();
     let finished = false;
     const finish = (done: () => void) => {
@@ -262,12 +252,10 @@ export function derive(data: string, options: DeriveOptions = { op: 'redeem' }):
       finished = true;
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', cancel);
-      worker.onmessage = null;
-      worker.onerror = null;
       worker.terminate();
       done();
     };
-    const cancel = () => finish(() => reject(new DeriveCancelled()));
+    const cancel = () => finish(() => reject(options.signal?.reason));
     const timer = setTimeout(
       () =>
         finish(() => {
@@ -294,8 +282,7 @@ export function derive(data: string, options: DeriveOptions = { op: 'redeem' }):
       });
     };
     options.signal?.addEventListener('abort', cancel, { once: true });
-    if (options.signal?.aborted) cancel();
-    else worker.postMessage(data);
+    worker.postMessage(data);
   });
 }
 
@@ -895,11 +882,11 @@ export async function redeem(
   try {
     derived = await derive(read.data, { op: 'redeem', signal });
   } catch (error) {
-    if (error instanceof DeriveCancelled) throw error;
+    if (signal?.aborted) throw error;
     return { error: 'device' };
   }
   try {
-    if (signal?.aborted) throw new DeriveCancelled();
+    signal?.throwIfAborted();
     const res = await fetchImpl('/recovery/open', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -911,9 +898,8 @@ export async function redeem(
       return { error: 'rate_limited', retryAfter: Number(res.headers.get('retry-after')) || 60 };
     if (!res.ok) return { error: 'unreachable' };
     const key = await unseal(derived, ((await res.json()) as { sealed: string }).sealed);
-    derived.wrapKey.fill(0);
     if (!key) return { error: 'unreadable' };
-    if (signal?.aborted) throw new DeriveCancelled();
+    signal?.throwIfAborted();
     const keys = await deriveKeys(key);
     const library = await fetchImpl(`/lib/${keys.id}/changes?since=0&limit=1`, {
       headers: { 'x-den-library-token': keys.token },
@@ -923,7 +909,7 @@ export async function redeem(
     if (!library.ok) return { error: library.status === 404 ? 'library_missing' : 'unreachable' };
     return { libraryKey: btoa(String.fromCharCode(...key)) };
   } catch (error) {
-    if (error instanceof DeriveCancelled || signal?.aborted) throw new DeriveCancelled();
+    if (signal?.aborted) throw error;
     return { error: 'unreachable' };
   } finally {
     derived.wrapKey.fill(0);
