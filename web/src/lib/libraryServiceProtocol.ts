@@ -8,9 +8,10 @@
 /**
  * Version 10 makes History a revision-bound, materialized keyset page instead of one whole-library reply. Version 11
  * adds the `airing` observation and Continue Watching's `upcoming` day. Version 12 carries fresh-source admission
- * separately from the source list's coverage.
+ * separately from the source list's coverage. Version 13 preserves the count of sources still answering when an
+ * early source list was returned.
  */
-export const LIBRARY_SERVICE_PROTOCOL = 12 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 13 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -203,6 +204,8 @@ export interface DownloadSourceOption extends DownloadReleaseDescriptor {
 export interface DownloadSourceAnswer {
   kind: 'live' | 'partial' | 'empty' | 'unknown' | 'stale';
   missing: number;
+  /** Sources still answering when Scout returned this early list; separate from failed/missing sources. */
+  late?: number;
   outageBuiltAt?: number;
 }
 

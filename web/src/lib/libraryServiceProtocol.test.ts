@@ -1383,11 +1383,26 @@ describe('library service server protocol', () => {
               ...source,
             },
           ],
-          answer: { kind: 'partial', missing: 1 },
+          answer: { kind: 'partial', missing: 1, late: 2 },
           fresh: 'limited',
         },
       });
     expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    for (const late of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2']) {
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'query-result',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'download-sources-late-boundary',
+          version,
+          result: {
+            kind: 'download.sources',
+            sources: [],
+            answer: { kind: 'partial', missing: 0, late },
+          },
+        }),
+      ).toMatchObject({ ok: false });
+    }
     expect(
       decodeLibraryServiceServerMessage({
         type: 'query-result',

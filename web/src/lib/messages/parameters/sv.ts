@@ -37,6 +37,10 @@ export const parameters = {
   'settings.collapseAllIn': 'Fäll ihop alla i {value}',
   'profile.allowedCount.one': '{count} tillåten',
   'profile.allowedCount.other': '{count} tillåtna',
+  'sources.late.one':
+    '{count} källa svarade fortfarande när den här tidiga listan kom, så den kan vara ofullständig.',
+  'sources.late.other':
+    '{count} källor svarade fortfarande när den här tidiga listan kom, så den kan vara ofullständig.',
   'error.couldntReachDevice': 'Det gick inte att nå {device}. Kontrollera att enheten är ansluten.',
   'player.switchTo': 'Byt till {source}',
   'player.resumeFrom': 'Fortsätt från {time}',

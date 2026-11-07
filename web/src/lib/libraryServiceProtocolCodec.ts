@@ -2022,7 +2022,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       bool(candidate.probed);
     const answer = (candidate: unknown): candidate is Record<string, unknown> =>
       record(candidate) &&
-      exact(candidate, ',kind,missing,outageBuiltAt,') &&
+      exact(candidate, ',kind,missing,late,outageBuiltAt,') &&
       (candidate.kind === 'live' ||
         candidate.kind === 'partial' ||
         candidate.kind === 'empty' ||
@@ -2030,6 +2030,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         candidate.kind === 'stale') &&
       integer(candidate.missing) &&
       candidate.missing >= 0 &&
+      optional(candidate.late, integer) &&
       optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
     return (
       exact(value, ',kind,sources,answer,fresh,failure,') &&

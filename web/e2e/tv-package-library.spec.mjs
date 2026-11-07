@@ -161,6 +161,10 @@ test('packaged title refresh keeps the prior list when limited and warms only af
   await page.keyboard.press('Enter');
   const panel = active.locator('.source-panel');
   await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+  const late = panel.getByRole('status').filter({
+    hasText: 'Sources still answering when this early list arrived: 1. It may be short.',
+  });
+  await expect(late).toBeVisible();
   await expect(active.getByRole('button', { name: 'Sources, 1 available' })).toBeFocused();
   const plainBefore = requests.plain;
   const refresh = panel.getByRole('button', { name: 'Check for sources again', exact: true });
@@ -170,11 +174,13 @@ test('packaged title refresh keeps the prior list when limited and warms only af
     panel.getByRole('status').filter({ hasText: 'Sources were checked recently' }),
   ).toBeVisible();
   await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+  await expect(late).toBeVisible();
   expect(requests).toMatchObject({ fresh: 1, plain: plainBefore });
   const retry = panel.getByRole('button', { name: 'Try again', exact: true });
   await retry.focus();
   await page.keyboard.press('Enter');
   await expect(panel.getByText('Rebuilt.Movie.1080p.mkv')).toBeVisible();
+  await expect(late).toHaveCount(0);
   await expect.poll(() => requests.plain).toBe(plainBefore + 1);
   expect(requests.fresh).toBe(2);
 });

@@ -248,6 +248,17 @@
         onclick={retrySources}
       />
     {/if}
+    {#if !answer?.outageBuiltAt && answer?.late}<p class="note" role="status">
+        {i18n.format(
+          answer.late === 1 ? 'sources.late.one' : 'sources.late.other',
+          'Sources still answering when this early list arrived: {count}. It may be short.',
+          { count: answer.late },
+        )}
+      </p>{/if}
+    {#if !answer?.outageBuiltAt && answer?.kind === 'partial' && answer.missing > 0}<p class="note">
+        {answer.missing === 1 ? 'One source' : `${answer.missing} sources`} didn’t answer, so this list
+        may be short.
+      </p>{/if}
     {#if failure === 'not-configured'}<p class="note">
         Add Den Scout in <a href="/settings">Settings</a> to browse sources.
       </p>
@@ -269,16 +280,13 @@
           disabled={refreshing}
           onclick={retrySources}
         />{/if}
-    {:else if sources.length === 0}<p class="note">
-        No sources found for this {season === undefined ? 'movie' : 'episode'}.
-      </p>
+    {:else if sources.length === 0}
+      {#if answer?.kind !== 'partial'}<p class="note">
+          No sources found for this {season === undefined ? 'movie' : 'episode'}.
+        </p>{/if}
     {:else}
       {#if answer?.outageBuiltAt}<p class="note">
           Your sources didn’t answer, so this is the list from {ageOf(answer.outageBuiltAt)} ago.
-        </p>
-      {:else if answer?.kind === 'partial' && answer.missing > 0}<p class="note">
-          {answer.missing === 1 ? 'One source' : `${answer.missing} sources`} didn’t answer, so this list
-          may be short.
         </p>{/if}
       <ul>
         {#each sources as source (source.identity)}
