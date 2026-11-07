@@ -160,6 +160,10 @@ pub(super) struct Conflict {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct BatchResult {
+    /// The protocol metadata committed by this same write transaction. Callers must use this outcome instead of
+    /// reopening the database after the per-library slot is released: a subsequent writer may already have moved
+    /// the library to a newer generation.
+    pub protocol: Protocol,
     pub head: u64,
     pub applied: Vec<(String, u64)>,
     pub conflicts: Vec<Conflict>,
@@ -855,41 +859,42 @@ impl LibraryStore for RedbLibrary {
         let mut prepared = self.prepared.lock().unwrap();
         let database = self.database();
         let transaction = database.begin_write().map_err(StoreError::redb)?;
-        if transaction
-            .open_table(META_BYTES)
-            .map_err(StoreError::redb)?
-            .get(EXCLUSIVE_OPERATION_LOCK)
-            .map_err(StoreError::redb)?
-            .is_some()
-        {
-            return Err(StoreError::Locked);
-        }
-        let mut head = {
+        let generation = {
+            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            if metadata.get(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?.is_some() {
+                return Err(StoreError::Locked);
+            }
+            let current = metadata
+                .get("generation")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 generation is missing".into()))?;
+            std::str::from_utf8(current.value())
+                .map_err(|_| StoreError::Invalid("v3 generation is not UTF-8".into()))?
+                .to_owned()
+        };
+        let (mut head, current_min, mut migration_generation) = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata
+            let head = metadata
                 .get("head")
                 .map_err(StoreError::redb)?
                 .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
-            value.value()
+            let current_min =
+                metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+            let migration_generation = metadata
+                .get("migration-generation")
+                .map_err(StoreError::redb)?
+                .map_or(0, |value| value.value());
+            (head.value(), current_min, migration_generation)
         };
         let started_empty = head == 0;
-        let current_min = {
-            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
-            value
-        };
         // The minimum this batch leaves: a first batch sets it, as below. Read inside the transaction, so a rewrite
         // committed between the handler's read and this write is the minimum applied.
         let effective_min = if started_empty { current_min.max(wire_min) } else { current_min };
         if effective_min >= 3 && authority.wire.unwrap_or(0) < effective_min {
             return Err(StoreError::UpgradeRequired(effective_min));
         }
-        if let Some(expected) = &authority.generation {
-            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
-            let current = metadata.get("generation").map_err(StoreError::redb)?;
-            if current.as_ref().map(|value| value.value()) != Some(expected.as_bytes()) {
-                return Err(StoreError::GenerationChanged);
-            }
+        if authority.generation.as_ref().is_some_and(|expected| generation != expected.as_str()) {
+            return Err(StoreError::GenerationChanged);
         }
         if writes.iter().any(|write| !value_fits(&write.value, effective_min)) {
             return Err(StoreError::TooLarge);
@@ -978,19 +983,24 @@ impl LibraryStore for RedbLibrary {
                 }
             }
             if !accepted.is_empty() {
-                let generation = metadata
-                    .get("migration-generation")
-                    .map_err(StoreError::redb)?
-                    .map_or(0, |value| value.value())
+                migration_generation = migration_generation
                     .checked_add(1)
                     .filter(|value| *value <= MAX_SAFE_INTEGER)
                     .ok_or_else(|| StoreError::Invalid("profile migration generation exhausted".into()))?;
-                metadata.insert("migration-generation", generation).map_err(StoreError::redb)?;
+                metadata.insert("migration-generation", migration_generation).map_err(StoreError::redb)?;
             }
         }
+        let protocol = Protocol {
+            head,
+            // An all-conflict first batch does not publish its requested minimum.
+            wire_min: if started_empty && accepted.is_empty() { current_min } else { effective_min },
+            generation,
+            migration_generation,
+        };
         transaction.commit().map_err(StoreError::redb)?;
         *prepared = None;
         Ok(BatchResult {
+            protocol,
             head,
             applied: accepted.into_iter().map(|(write, _, seq, _, _)| (write.key.clone(), seq)).collect(),
             conflicts,
@@ -1666,7 +1676,7 @@ impl LibraryStore for StoreLease {
         authority: &WriteAuthority,
     ) -> Result<BatchResult, StoreError> {
         let result = self.store.apply_tiered(writes, live_cap, wire_min, tier, authority)?;
-        self.index.record(&self.id, &self.store.protocol()?)?;
+        self.index.record(&self.id, &result.protocol)?;
         Ok(result)
     }
 
@@ -2291,7 +2301,8 @@ mod tests {
         let id = "1111111111111111";
         let first = manager(&dir, 4, 32 << 20, 8 << 20);
         let store = first.library(id, TOKEN).unwrap();
-        store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        let committed = store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        assert_eq!(committed.protocol, store.protocol().unwrap());
         drop(store);
         drop(first);
         let index = dir.join("library-v3-index.redb");
@@ -2303,9 +2314,29 @@ mod tests {
         assert!(unchanged(), "a cold open rewrote its current entry");
         let conflict = store.apply(&[Write { key: K1.into(), base: 0, value: "lost".into() }]).unwrap();
         assert!(conflict.applied.is_empty());
+        assert_eq!(conflict.protocol, store.protocol().unwrap());
         assert!(unchanged(), "a batch of conflicts rewrote the index");
-        store.apply(&[Write { key: K1.into(), base: 1, value: "two".into() }]).unwrap();
+        let next = store.apply(&[Write { key: K1.into(), base: 1, value: "two".into() }]).unwrap();
+        assert_eq!(next.protocol, store.protocol().unwrap());
+        assert_ne!(committed.protocol.migration_generation, next.protocol.migration_generation);
         assert!(!unchanged(), "a new head is recorded");
+    }
+
+    #[test]
+    fn an_all_conflict_first_batch_reports_the_protocol_it_actually_committed() {
+        let dir = temp_dir();
+        let store = manager(&dir, 4, 32 << 20, 8 << 20).library("1111111111111111", TOKEN).unwrap();
+        let result =
+            store.apply_bounded(&[Write { key: K1.into(), base: 9, value: "lost".into() }], 1 << 20, 4);
+        let result = result.unwrap();
+
+        assert!(result.applied.is_empty());
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.protocol, store.protocol().unwrap());
+        assert_eq!(
+            result.protocol.wire_min, 2,
+            "a refused first write does not publish its requested minimum"
+        );
     }
 
     #[test]
