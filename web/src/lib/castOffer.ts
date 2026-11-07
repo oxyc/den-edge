@@ -1,5 +1,7 @@
 // Offering Cast from the plain in-page player.
 
+import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
+
 /**
  * Whether this browser could cast at all. Google's Cast web SDK exists only in desktop and Android Chromium; every
  * iOS browser is WebKit underneath (which has AirPlay instead), and Firefox and Safari have no Cast sender. A browser
@@ -83,15 +85,13 @@ export async function fetchCastOrigin(fetchImpl: typeof fetch = fetch): Promise<
     return url.protocol === 'https:' && url.origin === origin ? origin : null;
   } catch (error) {
     console.warn('Cast: the cast page could not be found', error);
-    void import('./failureReport').then(({ failureErrorClass, reportClientFailure }) =>
-      reportClientFailure({
-        operation: 'cast',
-        kind: 'transport',
-        outcome: 'terminal',
-        route: 'cast_config',
-        errorClass: failureErrorClass(error),
-      }),
-    );
+    reportClientFailure({
+      operation: 'cast',
+      kind: 'transport',
+      outcome: 'terminal',
+      route: 'cast_config',
+      errorClass: clientFailureErrorClass(error),
+    });
     return null;
   }
 }

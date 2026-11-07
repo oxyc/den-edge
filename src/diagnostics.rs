@@ -6,8 +6,8 @@
 //! rather than by scrubbing.
 
 use crate::handler::{
-    client_ip, error, json_reply, read_json, retry_after, CastTag, FailureTag, LoadTag,
-    PageErrorTag, PerformanceTag, PlaybackOutcomeTag, PlaybackRouteTag, ReportField,
+    client_ip, error, json_reply, read_json, retry_after, CastTag, FailureTag, LoadTag, PageErrorTag,
+    PerformanceTag, PlaybackOutcomeTag, PlaybackRouteTag, ReportField,
 };
 use crate::AppState;
 use axum::body::Body;
@@ -713,12 +713,8 @@ pub async fn handle_failure(state: &Arc<AppState>, req: Request) -> Response {
     fingerprint.hash(&mut hash);
     // One identical report per address and minute reaches the tagged journal. Duplicates still get a successful,
     // non-retryable answer, while the independent aggregate intake limit bounds novel fingerprints.
-    if crate::link::throttled_per_minute(
-        state,
-        &format!("failure-dedupe:{ip}:{:016x}", hash.finish()),
-        1,
-    )
-    .is_some()
+    if crate::link::throttled_per_minute(state, &format!("failure-dedupe:{ip}:{:016x}", hash.finish()), 1)
+        .is_some()
     {
         return accepted(String::new(), |_, _| {});
     }
@@ -2340,9 +2336,8 @@ mod tests {
     #[tokio::test]
     async fn a_failure_reaches_the_durable_request_log_with_only_allowlisted_correlation_fields() {
         let h = Harness::new();
-        let response = h
-            .send("POST", "/diagnostics/failure", Some(failure("0123456789abcdef").to_string()), &[])
-            .await;
+        let response =
+            h.send("POST", "/diagnostics/failure", Some(failure("0123456789abcdef").to_string()), &[]).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             response.extensions().get::<FailureTag>().unwrap().0,
@@ -2392,14 +2387,8 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{report}");
             assert!(response.extensions().get::<FailureTag>().is_none());
         }
-        let oversized = h
-            .send(
-                "POST",
-                "/diagnostics/failure",
-                Some("x".repeat(MAX_BODY_BYTES + 1)),
-                &[],
-            )
-            .await;
+        let oversized =
+            h.send("POST", "/diagnostics/failure", Some("x".repeat(MAX_BODY_BYTES + 1)), &[]).await;
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(oversized.extensions().get::<FailureTag>().is_none());
     }
@@ -2407,9 +2396,8 @@ mod tests {
     #[tokio::test]
     async fn identical_failures_are_deduplicated_but_novel_reports_hit_the_address_rate_limit() {
         let h = Harness::new();
-        let first = h
-            .send("POST", "/diagnostics/failure", Some(failure("0000000000000000").to_string()), &[])
-            .await;
+        let first =
+            h.send("POST", "/diagnostics/failure", Some(failure("0000000000000000").to_string()), &[]).await;
         assert!(first.extensions().get::<FailureTag>().is_some());
         let mut retried = failure("1111111111111111");
         retried["attempt"] = serde_json::json!(9);

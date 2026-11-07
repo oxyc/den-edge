@@ -5,6 +5,7 @@
 // also drains its own lane of the TV queue (§16), whose plays it starts rather than applies.
 
 import { exclusive } from './exclusive';
+import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
 
@@ -157,14 +158,12 @@ export function drainPlaybackReceiptsOnce(
     const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
     if (signal.aborted) return;
     if (messages === null) {
-      void import('./failureReport').then(({ reportClientFailure }) =>
-        reportClientFailure({
-          operation: 'receipt',
-          kind: 'transport',
-          outcome: 'terminal',
-          route: 'receipt_drain',
-        }),
-      );
+      reportClientFailure({
+        operation: 'receipt',
+        kind: 'transport',
+        outcome: 'terminal',
+        route: 'receipt_drain',
+      });
       return;
     }
     if (!messages.length) return;
@@ -173,28 +172,24 @@ export function drainPlaybackReceiptsOnce(
       result = await loop.apply(messages);
     } catch (error) {
       if (!signal.aborted)
-        void import('./failureReport').then(({ failureErrorClass, reportClientFailure }) =>
-          reportClientFailure({
-            operation: 'receipt',
-            kind: 'other',
-            outcome: 'terminal',
-            route: 'receipt_apply',
-            errorClass: failureErrorClass(error),
-          }),
-        );
+        reportClientFailure({
+          operation: 'receipt',
+          kind: 'other',
+          outcome: 'terminal',
+          route: 'receipt_apply',
+          errorClass: clientFailureErrorClass(error),
+        });
       return;
     }
     if (result.ack !== null) {
       const acknowledged = await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
       if (!acknowledged && !signal.aborted)
-        void import('./failureReport').then(({ reportClientFailure }) =>
-          reportClientFailure({
-            operation: 'receipt',
-            kind: 'http',
-            outcome: 'terminal',
-            route: 'receipt_ack',
-          }),
-        );
+        reportClientFailure({
+          operation: 'receipt',
+          kind: 'http',
+          outcome: 'terminal',
+          route: 'receipt_ack',
+        });
     }
   });
 }
