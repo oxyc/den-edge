@@ -11,6 +11,7 @@
   import { consentRequestId } from './lib/oauth';
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
+  import { libraryRetirements } from './lib/libraryRetirement.svelte';
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
@@ -19,6 +20,7 @@
   import {
     ConnectDialogScreen,
     InviteDialogScreen,
+    LibraryRetirementNoticeScreen,
     LinkScreen,
     PhoneDialogScreen,
   } from './lib/screens.svelte';
@@ -35,6 +37,10 @@
     if (invited) void InviteDialogScreen.load();
   });
   if (consenting) void ConnectDialogScreen.load();
+  $effect(() => {
+    if (libraryRetirements.pending.some((receipt) => receipt.failure))
+      void LibraryRetirementNoticeScreen.load();
+  });
   $effect(() => {
     if (phoneLanding.request) void PhoneDialogScreen.load();
   });
@@ -182,6 +188,7 @@
   {#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
   {#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
 {/if}
+{#if LibraryRetirementNoticeScreen.current}<LibraryRetirementNoticeScreen.current />{/if}
 
 <main>
   {#if links.current}

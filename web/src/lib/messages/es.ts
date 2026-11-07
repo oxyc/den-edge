@@ -52,4 +52,9 @@ export const messages = {
   'common.play': 'Reproducir',
   'common.resume': 'Reanudar',
   'common.close': 'Cerrar',
+  'retirement.title': 'Hay que volver a intentar limpiar la biblioteca',
+  'retirement.detail':
+    'Has cerrado sesión. Den todavía debe eliminar los datos cifrados de la biblioteca guardados en este dispositivo. Puedes salir con seguridad; se volverá a intentar la próxima vez.',
+  'retirement.waiting': 'Otra pestaña de Den todavía está terminando el trabajo de esa biblioteca.',
+  'retirement.retry': 'Volver a intentar la limpieza',
 } as const satisfies MessageCatalog;

@@ -10,6 +10,7 @@ import { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
+import { libraryGenerationVault } from './libraryRetirementLease';
 import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
 import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
 import { retryAfterMs } from './retryAfter';
@@ -2385,17 +2386,20 @@ export class LibraryLog {
   ): Promise<LibraryLog | null> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
+    const generationVault = vault ? await libraryGenerationVault(vault, keys.id) : null;
     const log = new LibraryLog(
       keys,
       fetchImpl,
       storage,
-      vault && { vault, key: await libraryLocalKey(raw) },
+      generationVault && { vault: generationVault, key: await libraryLocalKey(raw) },
       false,
-      vault,
+      generationVault,
       wire,
     );
     await log.initializeRuntime();
-    log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
+    log.factStore = generationVault
+      ? await LibraryFactStore.open(libraryKey, generationVault)
+      : null;
     // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
     // never skip valid rows.
     const policy = ensureSyncPolicy();
@@ -3229,18 +3233,19 @@ export class LibraryLog {
     if (!vault) return null;
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
+    const generationVault = await libraryGenerationVault(vault, keys.id);
     const log = new LibraryLog(
       keys,
       fetchImpl,
       typeof localStorage === 'undefined' ? undefined : localStorage,
-      { vault, key: await libraryLocalKey(raw) },
+      { vault: generationVault, key: await libraryLocalKey(raw) },
       false,
-      vault,
+      generationVault,
       wire,
     );
     await log.initializeRuntime();
     if (log.wireMin < WIRE || log.pending.size || log.readOnly) return null;
-    const store = await LibraryFactStore.open(libraryKey, vault);
+    const store = await LibraryFactStore.open(libraryKey, generationVault);
     const manifest = await store?.manifest();
     if (!store || !manifest?.complete || manifest.profileTopology || !manifest.newest) return null;
     const { stamp, reconsiderAt } = manifest.newest;

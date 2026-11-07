@@ -47,6 +47,11 @@ export const ENGLISH_MESSAGES = {
   'common.play': 'Play',
   'common.resume': 'Resume',
   'common.close': 'Close',
+  'retirement.title': 'Library cleanup needs another try',
+  'retirement.detail':
+    'You’re signed out. Den still needs to remove encrypted library data kept on this device. You can leave safely; it will try again next time.',
+  'retirement.waiting': 'Another Den tab is still finishing work for that library.',
+  'retirement.retry': 'Try cleanup again',
 } as const;
 
 export type MessageId = keyof typeof ENGLISH_MESSAGES;
