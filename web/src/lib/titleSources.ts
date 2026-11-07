@@ -152,6 +152,28 @@ export interface SourceListResult {
   retryAfterMs?: number;
 }
 
+/** den-core `source_outcome`; Edge carries this verdict without reinterpreting its rules. */
+export interface SourceOutcome {
+  result:
+    | 'live'
+    | 'partial'
+    | 'stale_held'
+    | 'degraded'
+    | 'confirmed_empty'
+    | 'failed_retryable'
+    | 'no_imdb';
+  category: 'debrid' | 'source_discovery' | null;
+  list: 'new' | 'retained' | 'none';
+  caveat: {
+    stale_since: number | null;
+    missing: number;
+    late: number;
+    failed_addons: number;
+  } | null;
+  may_mark_unavailable: boolean;
+  retryable: boolean;
+}
+
 /**
  * Scout's list for a title and what it says about it; `sources` is null when scout could not be reached.
  *

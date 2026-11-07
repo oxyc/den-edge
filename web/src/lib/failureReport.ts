@@ -276,8 +276,16 @@ export class FailureReporter {
     this.#online = options.online ?? (() => globalThis.navigator?.onLine !== false);
     this.#target = options.target ?? (typeof window === 'undefined' ? undefined : window);
     this.#correlation = options.correlation ?? randomCorrelation;
-    this.#setTimer = options.setTimer ?? setTimeout;
-    this.#clearTimer = options.clearTimer ?? clearTimeout;
+    // Older WebKit and Chromium require timer functions to be called with their Window receiver. Store wrappers,
+    // not the detached native methods, because this lazy reporter first exercises them on a real failure.
+    this.#setTimer =
+      options.setTimer ??
+      (((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+        globalThis.setTimeout(handler, timeout, ...args)) as typeof setTimeout);
+    this.#clearTimer =
+      options.clearTimer ??
+      (((timer?: ReturnType<typeof setTimeout>) =>
+        globalThis.clearTimeout(timer)) as typeof clearTimeout);
   }
 
   report(input: ClientFailure): void {

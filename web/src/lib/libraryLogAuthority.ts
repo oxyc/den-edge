@@ -840,6 +840,26 @@ export class LibraryLogAuthority {
                 },
               }
             : {}),
+          ...(snapshot.outcome
+            ? {
+                outcome: {
+                  result: snapshot.outcome.result,
+                  category: snapshot.outcome.category,
+                  list: snapshot.outcome.list,
+                  caveat: snapshot.outcome.caveat
+                    ? {
+                        staleSince: snapshot.outcome.caveat.stale_since,
+                        missing: snapshot.outcome.caveat.missing,
+                        late: snapshot.outcome.caveat.late,
+                        failedAddons: snapshot.outcome.caveat.failed_addons,
+                      }
+                    : null,
+                  mayMarkUnavailable: snapshot.outcome.may_mark_unavailable,
+                  retryable: snapshot.outcome.retryable,
+                },
+              }
+            : {}),
+          ...(snapshot.retryAfterMs !== undefined ? { retryAfterMs: snapshot.retryAfterMs } : {}),
           ...(snapshot.failure ? { failure: snapshot.failure } : {}),
         };
       }

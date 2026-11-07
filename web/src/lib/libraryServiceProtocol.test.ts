@@ -1388,6 +1388,43 @@ describe('library service server protocol', () => {
         },
       });
     expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    const outcome = {
+      result: 'failed_retryable',
+      category: 'source_discovery',
+      list: 'retained',
+      caveat: { staleSince: null, missing: 1, late: 0, failedAddons: 1 },
+      mayMarkUnavailable: false,
+      retryable: true,
+    };
+    const recovered = decodeLibraryServiceServerMessage({
+      type: 'query-result',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'download-sources-outcome',
+      version,
+      result: {
+        kind: 'download.sources',
+        sources: [],
+        outcome,
+        retryAfterMs: 30_000,
+        failure: 'unreachable',
+      },
+    });
+    expect(recovered).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-sources-outcome',
+        version,
+        result: {
+          kind: 'download.sources',
+          sources: [],
+          outcome: { ...outcome, mayMarkUnavailable: true },
+          retryAfterMs: 60_001,
+          failure: 'unreachable',
+        },
+      }),
+    ).toMatchObject({ ok: false });
     for (const late of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2']) {
       expect(
         decodeLibraryServiceServerMessage({

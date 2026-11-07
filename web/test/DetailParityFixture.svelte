@@ -29,19 +29,23 @@
     // The parity spec changes Scout's answer between opening Sources and using the episode's direct Download action.
     refreshDownloadSources: true,
     effects: {
-      resolve: async (title, fresh) =>
+      resolve: async (title, fresh, early, signal) =>
         title.imdbId
-          ? fetchSourceList(
-              scout,
-              title.imdbId,
-              routes,
-              title.season,
-              title.episode,
-              undefined,
-              fetch,
-              fresh,
-            )
-          : { sources: null },
+          ? {
+              ...(await fetchSourceList(
+                scout,
+                title.imdbId,
+                routes,
+                title.season,
+                title.episode,
+                signal,
+                fetch,
+                fresh,
+                early,
+              )),
+              imdb: 'resolved' as const,
+            }
+          : { sources: null, imdb: 'missing' as const },
     },
   });
   // What `Library.svelte` does with a toast: shows it. Detail's episode actions report through it.

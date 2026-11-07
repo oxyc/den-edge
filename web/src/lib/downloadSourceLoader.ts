@@ -2,6 +2,7 @@ import type { LibraryModel } from './libraryModel.svelte';
 import type {
   DownloadSourceAnswer,
   DownloadSourceFreshAnswer,
+  DownloadSourceOutcome,
   DownloadSourceOption,
   DownloadTitleDescriptor,
 } from './libraryServiceProtocol';
@@ -10,6 +11,8 @@ export type DownloadSourceLoad = {
   sources: DownloadSourceOption[] | null;
   answer?: DownloadSourceAnswer;
   fresh?: DownloadSourceFreshAnswer;
+  outcome?: DownloadSourceOutcome;
+  retryAfterMs?: number;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 };
 

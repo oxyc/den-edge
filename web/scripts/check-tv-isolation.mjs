@@ -204,5 +204,11 @@ if (process.argv.includes('--capture')) {
   // be reached, and the saved-copy notice, whose copy the Worker sends so the page carries none of it. It adds no
   // request or background work while the server answers. It was 173 bytes past the prior ceiling, which rises by
   // 194; the startup ceiling is unchanged and this build sits 57 bytes under it.
-  if (coreTotalDelta > 81000) throw new Error('Browser total JS/CSS budget exceeded');
+  // Owned source lookup deadlines, cancellation, retained-list recovery and canonical den-core outcome selection add
+  // 3,312 gzip bytes to the non-translation graph on matched parent/head builds, only 92 bytes of it at startup. The
+  // 222-byte canonical policy adapter is independently lazy beside den-core's already-deferred policy Wasm; reporting
+  // stays in the existing lazy failure chunk. Splitting Detail's visible recovery state again would add a request to
+  // its sole consumer, while Worker cancellation must remain with the always-loaded request authority. Spend the old
+  // 556-byte margin and allow 3 KiB more, retaining 316 bytes of total margin and the unchanged startup/catalog limits.
+  if (coreTotalDelta > 84072) throw new Error('Browser total JS/CSS budget exceeded');
 }

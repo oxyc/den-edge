@@ -212,6 +212,28 @@ export interface DownloadSourceAnswer {
 /** Admission of the explicit source-list rebuild, separate from the returned list's coverage. */
 export type DownloadSourceFreshAnswer = 'rebuilt' | 'limited';
 
+/** Canonical den-core source verdict, with transport names normalized to this protocol's camelCase. */
+export interface DownloadSourceOutcome {
+  result:
+    | 'live'
+    | 'partial'
+    | 'stale_held'
+    | 'degraded'
+    | 'confirmed_empty'
+    | 'failed_retryable'
+    | 'no_imdb';
+  category: 'debrid' | 'source_discovery' | null;
+  list: 'new' | 'retained' | 'none';
+  caveat: {
+    staleSince: number | null;
+    missing: number;
+    late: number;
+    failedAddons: number;
+  } | null;
+  mayMarkUnavailable: boolean;
+  retryable: boolean;
+}
+
 export type LibraryCommand =
   | { kind: 'watchlist.add'; title: TitleRef }
   | { kind: 'library.remove'; title: TitleRef }
@@ -1071,6 +1093,8 @@ export type LibraryQueryResult =
       sources: DownloadSourceOption[] | null;
       answer?: DownloadSourceAnswer;
       fresh?: DownloadSourceFreshAnswer;
+      outcome?: DownloadSourceOutcome;
+      retryAfterMs?: number;
       failure?: 'not-configured' | 'unmatched' | 'unreachable';
     }
   | { kind: 'download.artwork'; stillPath: string | null }

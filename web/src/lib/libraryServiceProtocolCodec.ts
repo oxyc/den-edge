@@ -2032,18 +2032,55 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       candidate.missing >= 0 &&
       optional(candidate.late, integer) &&
       optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
+    const outcome = (candidate: unknown): candidate is Record<string, unknown> => {
+      if (!record(candidate)) return false;
+      const caveat = (item: unknown): item is Record<string, unknown> =>
+        record(item) &&
+        exact(item, ',staleSince,missing,late,failedAddons,') &&
+        (item.staleSince === null || (integer(item.staleSince) && item.staleSince >= 0)) &&
+        integer(item.missing) &&
+        item.missing >= 0 &&
+        integer(item.late) &&
+        item.late >= 0 &&
+        integer(item.failedAddons) &&
+        item.failedAddons >= 0;
+      return (
+        exact(candidate, ',result,category,list,caveat,mayMarkUnavailable,retryable,') &&
+        [
+          'live',
+          'partial',
+          'stale_held',
+          'degraded',
+          'confirmed_empty',
+          'failed_retryable',
+          'no_imdb',
+        ].includes(candidate.result as string) &&
+        (candidate.category === null ||
+          candidate.category === 'debrid' ||
+          candidate.category === 'source_discovery') &&
+        (candidate.list === 'new' || candidate.list === 'retained' || candidate.list === 'none') &&
+        (candidate.caveat === null || caveat(candidate.caveat)) &&
+        bool(candidate.mayMarkUnavailable) &&
+        bool(candidate.retryable)
+      );
+    };
     return (
-      exact(value, ',kind,sources,answer,fresh,failure,') &&
+      exact(value, ',kind,sources,answer,fresh,outcome,retryAfterMs,failure,') &&
       (value.sources === null ||
         list(value.sources, source, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)) &&
       optional(value.answer, answer) &&
       optional(value.fresh, (item): item is string => item === 'rebuilt' || item === 'limited') &&
+      optional(value.outcome, outcome) &&
+      optional(
+        value.retryAfterMs,
+        (item): item is number => integer(item) && item >= 0 && item <= 60_000,
+      ) &&
       optional(
         value.failure,
         (item): item is string =>
           item === 'not-configured' || item === 'unmatched' || item === 'unreachable',
       ) &&
-      (value.failure === undefined || value.sources === null)
+      (value.failure === undefined || value.sources === null || value.outcome?.list === 'retained')
     );
   }
   if (value.kind === 'download.artwork')
