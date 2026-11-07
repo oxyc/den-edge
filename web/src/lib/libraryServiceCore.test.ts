@@ -207,6 +207,64 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('aborts detached source discovery without holding the command actor lane', async () => {
+    const aborted = vi.fn();
+    const held = {
+      ...authority(),
+      async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind !== 'download.sources') throw new Error('unsupported query');
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener(
+            'abort',
+            () => {
+              aborted();
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        return { kind: 'download.sources' as const, sources: null };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    const requestId = 'sources-1';
+    const sources = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      query: {
+        kind: 'download.sources',
+        title: { target: title, name: 'Title' },
+        early: true,
+      },
+    });
+    await Promise.resolve();
+    await expect(
+      core.dispatch({ type: 'cancel', protocol: LIBRARY_SERVICE_PROTOCOL, requestId }),
+    ).resolves.toEqual([]);
+    expect(aborted).toHaveBeenCalledOnce();
+
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-after-source-cancel',
+        operationId: 'operation-after-source-cancel',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+    await expect(sources).resolves.toEqual([
+      expect.objectContaining({
+        type: 'query-result',
+        requestId,
+        result: { kind: 'download.sources', sources: null },
+      }),
+    ]);
+  });
+
   it('does not hold the command actor lane while an assistant projection is built and sent', async () => {
     let release!: () => void;
     const building = new Promise<void>((resolve) => (release = resolve));

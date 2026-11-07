@@ -456,6 +456,7 @@ enum FailureOperation {
     Uncaught,
     Navigation,
     Cast,
+    SourceLookup,
 }
 
 impl FailureOperation {
@@ -470,6 +471,7 @@ impl FailureOperation {
             Self::Uncaught => "uncaught",
             Self::Navigation => "navigation",
             Self::Cast => "cast",
+            Self::SourceLookup => "source_lookup",
         }
     }
 }
@@ -510,6 +512,24 @@ enum FailureOutcome {
     Terminal,
     Recovered,
     RetryExhausted,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureDurationBucket {
+    Fast,
+    Slow,
+    Deadline,
+}
+
+impl FailureDurationBucket {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Slow => "slow",
+            Self::Deadline => "deadline",
+        }
+    }
 }
 
 impl FailureOutcome {
@@ -646,6 +666,8 @@ struct FailureReport {
     module: Option<Module>,
     frame: Option<Chunk>,
     uncaught: Option<TrueOnly>,
+    duration_bucket: Option<FailureDurationBucket>,
+    prior_list: Option<bool>,
 }
 
 impl FailureReport {
@@ -687,6 +709,12 @@ impl FailureReport {
         }
         if self.uncaught.is_some() {
             parts.push("uncaught:1".to_owned());
+        }
+        if let Some(bucket) = &self.duration_bucket {
+            parts.push(format!("durationBucket:{}", bucket.as_str()));
+        }
+        if let Some(prior) = self.prior_list {
+            parts.push(format!("priorList:{}", u8::from(prior)));
         }
         parts
     }
@@ -2345,6 +2373,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_source_lookup_report_keeps_only_bounded_recovery_facts() {
+        let h = Harness::new();
+        let response = h
+            .send(
+                "POST",
+                "/diagnostics/failure",
+                Some(
+                    serde_json::json!({
+                        "platform": "tizen",
+                        "operation": "source_lookup",
+                        "kind": "timeout",
+                        "outcome": "terminal",
+                        "correlation": "0123456789abcdef",
+                        "route": "content_service",
+                        "durationBucket": "deadline",
+                        "priorList": true
+                    })
+                    .to_string(),
+                ),
+                &[],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.extensions().get::<FailureTag>().unwrap().0,
+            "platform:tizen,operation:source_lookup,kind:timeout,outcome:terminal,correlation:0123456789abcdef,route:content_service,durationBucket:deadline,priorList:1"
+        );
+    }
+
     #[test]
     fn a_maximal_failure_tag_has_a_fixed_retention_cost() {
         let report: FailureReport = serde_json::from_value(serde_json::json!({
@@ -2381,6 +2439,8 @@ mod tests {
             changed("frame", serde_json::json!("/Users/me/private.ts")),
             changed("status", serde_json::json!(999)),
             changed("operation", serde_json::json!("some_new_free_text")),
+            changed("durationBucket", serde_json::json!("20 seconds for tt123")),
+            changed("priorList", serde_json::json!("release-name")),
             changed("uncaught", serde_json::json!(false)),
         ] {
             let response = h.send("POST", "/diagnostics/failure", Some(report.to_string()), &[]).await;

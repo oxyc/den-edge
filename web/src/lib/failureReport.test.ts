@@ -58,6 +58,35 @@ describe('FailureReporter production transport', () => {
     expect(JSON.stringify(body)).not.toMatch(/secret|private|media\.example|authorization/i);
   });
 
+  it('keeps only bounded source recovery facts', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const reporter = new FailureReporter({ fetchImpl, correlation });
+    reporter.report({
+      operation: 'source_lookup',
+      kind: 'timeout',
+      outcome: 'terminal',
+      route: 'content_service',
+      durationBucket: 'deadline',
+      priorList: true,
+      title: 'Private title',
+      imdbId: 'tt-secret',
+      sourceUrl: 'https://media.example/private.m3u8?token=x',
+    } as never);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string);
+    expect(body).toEqual({
+      platform: 'web',
+      operation: 'source_lookup',
+      kind: 'timeout',
+      outcome: 'terminal',
+      correlation: '0123456789abcdef',
+      route: 'content_service',
+      durationBucket: 'deadline',
+      priorList: true,
+    });
+    expect(JSON.stringify(body)).not.toMatch(/Private title|tt-secret|media\.example|token/i);
+  });
+
   it('queues while offline, drains on reconnect, then removes its only online listener', async () => {
     let online = false;
     const events = target();

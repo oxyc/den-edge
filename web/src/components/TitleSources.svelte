@@ -161,8 +161,9 @@
     refreshing = rechecking;
     message = '';
     if (!service || !requested) return;
+    const controller = new AbortController();
     const generation = ++sourceGeneration;
-    void loadDownloadSources(service, requested, rechecking).then((loaded) => {
+    void loadDownloadSources(service, requested, rechecking, controller.signal).then((loaded) => {
       if (generation !== sourceGeneration) return;
       refreshing = false;
       fresh = loaded?.fresh;
@@ -182,6 +183,7 @@
         );
     });
     return () => {
+      controller.abort();
       sourceGeneration++;
       refreshing = false;
     };

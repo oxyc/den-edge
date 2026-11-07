@@ -850,15 +850,24 @@ export class LibraryModel {
     };
   }
 
-  downloadSources(title: DownloadTitleDescriptor, refresh = false, fresh = false, early = false) {
+  downloadSources(
+    title: DownloadTitleDescriptor,
+    refresh = false,
+    fresh = false,
+    early = false,
+    signal?: AbortSignal,
+  ) {
     this.#assertOpen();
-    return this.service.query({
-      kind: 'download.sources',
-      title: wireDownloadTitle(title),
-      ...(refresh ? { refresh } : {}),
-      ...(fresh ? { fresh } : {}),
-      ...(early ? { early } : {}),
-    });
+    return this.service.query(
+      {
+        kind: 'download.sources',
+        title: wireDownloadTitle(title),
+        ...(refresh ? { refresh } : {}),
+        ...(fresh ? { fresh } : {}),
+        ...(early ? { early } : {}),
+      },
+      signal,
+    );
   }
 
   downloadArtwork(target: DownloadTarget) {

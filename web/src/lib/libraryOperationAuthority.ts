@@ -172,7 +172,7 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
   }
 
   select: LibraryServiceAuthority['select'] = (selection) => this.authority.select(selection);
-  query: LibraryServiceAuthority['query'] = (query) => this.authority.query(query);
+  query: LibraryServiceAuthority['query'] = (query, signal) => this.authority.query(query, signal);
   observe: LibraryServiceAuthority['observe'] = (observation) =>
     this.authority.observe(observation);
   listen: NonNullable<LibraryServiceAuthority['listen']> = (listener) =>

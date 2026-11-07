@@ -60,7 +60,7 @@ export interface LibraryServiceAuthority {
   readonly generation: string | null;
   select(selection: LibrarySelection): Promise<LibrarySelectionValue>;
   command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult>;
-  query(query: LibraryQuery): Promise<LibraryQueryResult>;
+  query(query: LibraryQuery, signal?: AbortSignal): Promise<LibraryQueryResult>;
   task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult>;
   observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult>;
   listen?(listener: (event: LibraryAuthorityEvent) => void): () => void;
@@ -163,6 +163,7 @@ export class LibraryServiceCore {
   #closed = false;
   #requests: Promise<void> = Promise.resolve();
   readonly #providerWork = new Set<Promise<LibraryServiceServerMessage[]>>();
+  readonly #queryControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly openAuthority: LibraryAuthorityOpener,
@@ -177,9 +178,29 @@ export class LibraryServiceCore {
     // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
     // An assistant projection's publish is the same: it reads the library once, then waits on its own Worker's build
     // and on den-edge, and changes nothing the lane orders.
-    if (isLibraryMetadataRequest(input) || isAssistantPublish(input)) {
+    if (
+      isLibraryMetadataRequest(input) ||
+      isAssistantPublish(input) ||
+      isDownloadSourcesRequest(input)
+    ) {
       const admitted = this.#requests;
-      const work = admitted.then(() => this.#dispatch(input));
+      let controller: AbortController | undefined;
+      let ownedRequestId: string | undefined;
+      if (isDownloadSourcesRequest(input)) {
+        controller = new AbortController();
+        ownedRequestId = input.requestId;
+        this.#queryControllers.set(ownedRequestId, controller);
+      }
+      const work = admitted
+        .then(() => this.#dispatch(input, controller?.signal))
+        .finally(() => {
+          if (
+            controller &&
+            ownedRequestId &&
+            this.#queryControllers.get(ownedRequestId) === controller
+          )
+            this.#queryControllers.delete(ownedRequestId);
+        });
       this.#providerWork.add(work);
       void work.finally(() => this.#providerWork.delete(work));
       return work;
@@ -214,6 +235,8 @@ export class LibraryServiceCore {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    for (const controller of this.#queryControllers.values()) controller.abort();
+    this.#queryControllers.clear();
     await this.#requests;
     await Promise.allSettled([...this.#providerWork]);
     // A completed metadata query may have queued its shape replacement just before it observed `#closed`.
@@ -228,7 +251,7 @@ export class LibraryServiceCore {
     await authority?.close?.();
   }
 
-  async #dispatch(input: unknown): Promise<LibraryServiceServerMessage[]> {
+  async #dispatch(input: unknown, signal?: AbortSignal): Promise<LibraryServiceServerMessage[]> {
     const decoded = decodeLibraryServiceClientMessage(input);
     if (!decoded.ok) return [errorReply(decoded.error, requestIdOf(input))];
     const request = decoded.value;
@@ -242,6 +265,9 @@ export class LibraryServiceCore {
 
     try {
       switch (request.type) {
+        case 'cancel':
+          this.#queryControllers.get(request.requestId)?.abort();
+          return [];
         case 'subscribe':
           return await this.#subscribe(request);
         case 'unsubscribe':
@@ -262,7 +288,7 @@ export class LibraryServiceCore {
               type: 'query-result',
               protocol: LIBRARY_SERVICE_PROTOCOL,
               requestId: request.requestId,
-              result: await this.#authority.query(request.query),
+              result: await this.#authority.query(request.query, signal),
               version: this.#version(),
             },
           ];
@@ -440,6 +466,11 @@ export class LibraryServiceCore {
       request.command,
       request.operationId,
     );
+    if (
+      outcome === 'applied' &&
+      affected.some((scope) => scope.kind === 'connections' || scope.kind === 'runtime')
+    )
+      for (const controller of this.#queryControllers.values()) controller.abort();
     if (outcome === 'applied') this.#revision++;
     const version = this.#version();
     this.#rememberOperation(request.operationId, {
@@ -595,6 +626,18 @@ function isLibraryMetadataRequest(
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
   const request = input as { type?: unknown; query?: { kind?: unknown } };
   return request.type === 'query' && request.query?.kind === 'library.metadata';
+}
+
+function isDownloadSourcesRequest(
+  input: unknown,
+): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
+  const request = input as { type?: unknown; requestId?: unknown; query?: { kind?: unknown } };
+  return (
+    request.type === 'query' &&
+    typeof request.requestId === 'string' &&
+    request.query?.kind === 'download.sources'
+  );
 }
 
 function isAssistantPublish(input: unknown): boolean {

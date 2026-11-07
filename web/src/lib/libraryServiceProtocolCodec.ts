@@ -2387,6 +2387,9 @@ export function decodeLibraryServiceClientMessage(
   if (!text(input.type) || !text(input.requestId))
     return invalid('request type and requestId are required');
   switch (input.type) {
+    case 'cancel':
+      if (!exact(input, ',type,protocol,requestId,')) return invalid('cancel is invalid');
+      break;
     case 'hello':
       if (
         !exact(input, ',type,protocol,requestId,clientId,libraryKey,wire,mode,legacyClock,') ||

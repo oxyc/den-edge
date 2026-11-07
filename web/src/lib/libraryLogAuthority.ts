@@ -715,7 +715,7 @@ export class LibraryLogAuthority {
     }
   }
 
-  async query(query: LibraryQuery): Promise<LibraryQueryResult> {
+  async query(query: LibraryQuery, signal?: AbortSignal): Promise<LibraryQueryResult> {
     if (
       query.kind === 'profile-create.status' ||
       query.kind === 'key-reset.prepare' ||
@@ -813,6 +813,7 @@ export class LibraryLogAuthority {
           query.refresh,
           query.fresh,
           query.early,
+          signal,
         );
         const sources = Array.isArray(snapshot.sources)
           ? snapshot.sources

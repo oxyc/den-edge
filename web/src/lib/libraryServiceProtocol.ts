@@ -1154,6 +1154,12 @@ export interface LibraryServiceQueryRequest extends ClientMessage {
   query: LibraryQuery;
 }
 
+/** Ends one request whose caller no longer owns its result. It intentionally has no reply of its own. */
+export interface LibraryServiceCancelRequest extends ClientMessage {
+  type: 'cancel';
+  requestId: string;
+}
+
 export interface LibraryServiceTaskRequest extends ClientMessage {
   type: 'task';
   requestId: string;
@@ -1182,6 +1188,7 @@ export interface LibraryServiceObserveRequest extends ClientMessage {
 
 export type LibraryServiceClientMessage =
   | LibraryServiceHello
+  | LibraryServiceCancelRequest
   | LibraryServiceCommandRequest
   | LibraryServiceQueryRequest
   | LibraryServiceTaskRequest

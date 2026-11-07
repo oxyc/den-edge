@@ -13,7 +13,8 @@ export type FailureOperation =
   | 'recovery'
   | 'uncaught'
   | 'navigation'
-  | 'cast';
+  | 'cast'
+  | 'source_lookup';
 export type FailureKind =
   | 'transport'
   | 'http'
@@ -25,6 +26,7 @@ export type FailureKind =
   | 'uncaught'
   | 'other';
 export type FailureOutcome = 'terminal' | 'recovered' | 'retry_exhausted';
+export type FailureDurationBucket = 'fast' | 'slow' | 'deadline';
 export type FailureRoute =
   | 'page'
   | 'remux_session'
@@ -62,6 +64,8 @@ export interface ClientFailure {
   module?: FailureModule;
   frame?: string;
   uncaught?: boolean;
+  durationBucket?: FailureDurationBucket;
+  priorList?: boolean;
   release?: string;
   correlation?: string;
 }
@@ -124,6 +128,7 @@ const OPERATIONS: readonly FailureOperation[] = [
   'uncaught',
   'navigation',
   'cast',
+  'source_lookup',
 ];
 const KINDS: readonly FailureKind[] = [
   'transport',
@@ -137,6 +142,7 @@ const KINDS: readonly FailureKind[] = [
   'other',
 ];
 const OUTCOMES: readonly FailureOutcome[] = ['terminal', 'recovered', 'retry_exhausted'];
+const DURATION_BUCKETS: readonly FailureDurationBucket[] = ['fast', 'slow', 'deadline'];
 const ROUTES: readonly FailureRoute[] = [
   'page',
   'remux_session',
@@ -226,6 +232,9 @@ function wireFailure(input: ClientFailure, makeCorrelation: () => string): WireF
   if (input.frame !== undefined && /^[A-Z][A-Za-z0-9]{0,31}$/.test(input.frame))
     report.frame = input.frame;
   if (input.uncaught === true) report.uncaught = true;
+  if (input.durationBucket !== undefined && DURATION_BUCKETS.includes(input.durationBucket))
+    report.durationBucket = input.durationBucket;
+  if (typeof input.priorList === 'boolean') report.priorList = input.priorList;
   return report;
 }
 

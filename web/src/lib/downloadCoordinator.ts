@@ -69,6 +69,7 @@ export type DownloadResolve = (
   title: DownloadTitle,
   fresh?: boolean,
   early?: boolean,
+  signal?: AbortSignal,
 ) => Promise<{
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
@@ -405,6 +406,7 @@ export class DownloadCoordinator {
     refresh = false,
     fresh = false,
     early = false,
+    signal?: AbortSignal,
   ): Promise<DownloadSourceSnapshot> {
     const key = sourceKey(contentKeyOf(title), early);
     const now = this.now();
@@ -414,7 +416,7 @@ export class DownloadCoordinator {
     // A fresh ask never joins a plain one already running: that one may be answered from the caches it skips.
     // Plain viewers join one another, but not a fresh action: a limited marker belongs only to that action, and
     // handing it to an uninitialized Sources panel would leave the panel with no concrete list to draw.
-    if (!fresh && pending?.plain) return pending.plain;
+    if (!fresh && pending?.plain && !signal) return pending.plain;
     if (!pending) {
       pending = { active: 0, publishedFreshGeneration: 0 };
       this.#sourcePending.set(key, pending);
@@ -422,7 +424,7 @@ export class DownloadCoordinator {
     const freshGeneration = fresh ? ++this.#sourceGeneration : 0;
     pending.active++;
     const run: Promise<DownloadSourceSnapshot> = this.effects
-      .resolve(title, fresh, early)
+      .resolve(title, fresh, early, signal)
       .then(({ sources, answer, fresh: admission, failure }) => {
         const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
         const ordered = preferred
@@ -462,7 +464,7 @@ export class DownloadCoordinator {
           this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
         return snapshot;
       });
-    if (!fresh) pending.plain = run;
+    if (!fresh && !signal) pending.plain = run;
     try {
       return await run;
     } finally {
