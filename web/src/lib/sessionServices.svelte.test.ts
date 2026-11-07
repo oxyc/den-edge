@@ -12,6 +12,7 @@ let atlasUnreachable = false;
 let guestPluginUrls = $state.raw<string[]>([]);
 let refreshGrants: () => Promise<'verified' | 'retained-unverified'> = async () => 'verified';
 let autoDiscover = true;
+const debridReads: Array<(value: { configured: boolean; reachable: boolean } | null) => void> = [];
 const discoveryPublishes: Array<{
   scout?: (value: { base: string; install: string; playback?: string } | null) => void;
   atlas: (value: { base: string } | null) => void;
@@ -49,6 +50,12 @@ vi.mock('./discoverServices', () => ({
 vi.mock('./grants.svelte', () => ({
   guestGrants: { refresh: () => refreshGrants(), pluginUrls: () => guestPluginUrls },
 }));
+vi.mock('./debridStatus', () => ({
+  readDebridState: () =>
+    new Promise<{ configured: boolean; reachable: boolean } | null>((resolve) =>
+      debridReads.push(resolve),
+    ),
+}));
 
 const runtime = (pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
   kind: 'runtime',
@@ -78,6 +85,7 @@ afterEach(() => {
   refreshGrants = async () => 'verified';
   autoDiscover = true;
   discoveryPublishes.length = 0;
+  debridReads.length = 0;
 });
 
 describe('SessionServices', () => {
@@ -105,7 +113,8 @@ describe('SessionServices', () => {
   it('holds availability until the foreground signal', async () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    const model = fakeModel();
+    const services = new SessionServices(model, content, async () => ({}));
     services.configure(runtime());
     await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
     expect(connect).not.toHaveBeenCalledWith(services.scout, content);
@@ -259,6 +268,103 @@ describe('SessionServices', () => {
     discoveryPublishes[2]!.scout?.(a);
     expect(services.scout).toEqual(a);
     services.stop();
+  });
+
+  it('stops A before a held B refresh and requires a new refresh after A→B→A', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    autoDiscover = false;
+    discoveries = 0;
+    let refreshes = 0;
+    const held: Array<(outcome: 'verified') => void> = [];
+    refreshGrants = () => {
+      refreshes++;
+      if (refreshes === 1) return Promise.resolve('verified');
+      return new Promise<'verified'>((resolve) => held.push(resolve));
+    };
+    const model = fakeModel();
+    const services = new SessionServices(model, content, async () => ({}));
+
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    services.configure(runtime());
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
+    const first = discoveryPublishes[0]!;
+    first.scout?.({
+      base: '/den/~aaaaaaaa',
+      install: 'https://den.example/den/~aaaaaaaa',
+    });
+    first.atlas({ base: '/atlas-a' });
+    first.reel({ base: '/reel-a' });
+    first.remux?.('/remux-a');
+    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-a'));
+    expect(debridReads).toHaveLength(1);
+
+    guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
+    services.configure(runtime());
+    expect(services.scout).toBeNull();
+    expect(services.atlas).toBeNull();
+    expect(services.reel).toBeNull();
+    expect(services.remux).toBeNull();
+    expect(refreshes).toBe(2);
+
+    first.scout?.({
+      base: '/late-scout-a',
+      install: 'https://den.example/den/~aaaaaaaa',
+    });
+    first.atlas({ base: '/late-atlas-a' });
+    first.reel({ base: '/late-reel-a' });
+    first.remux?.('/late-remux-a');
+    debridReads[0]!({ configured: true, reachable: true });
+    await Promise.resolve();
+    expect(services.scout).toBeNull();
+    expect(services.atlas).toBeNull();
+    expect(services.reel).toBeNull();
+    expect(services.remux).toBeNull();
+    expect(services.debrid).toBeNull();
+
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    services.configure(runtime());
+    held[0]!('verified');
+    await vi.waitFor(() => expect(refreshes).toBe(3));
+    expect(discoveryPublishes).toHaveLength(1);
+    held[1]!('verified');
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
+    expect(model.retainedServices).toHaveBeenCalledOnce();
+    discoveryPublishes[1]!.reel({ base: '/reel-a-again' });
+    expect(services.reel).toBe('/reel-a-again');
+    services.stop();
+  });
+
+  it('retries unchanged route discovery with a bounded cancelable schedule', async () => {
+    vi.useFakeTimers();
+    autoDiscover = false;
+    let attempts = 0;
+    const services = new SessionServices(fakeModel(), content, async () => {
+      attempts++;
+      if (attempts < 3) throw new Error('route discovery failed');
+      return { atlas: [{ url: '/atlas' }] };
+    });
+    services.configure(runtime());
+    await vi.runAllTicks();
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(attempts).toBe(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(attempts).toBe(3);
+    await vi.runAllTimersAsync();
+    expect(services.routes).toEqual({ atlas: [{ url: '/atlas' }] });
+    services.stop();
+
+    attempts = 0;
+    const stopped = new SessionServices(fakeModel(), content, async () => {
+      attempts++;
+      throw new Error('route discovery failed');
+    });
+    stopped.configure(runtime(['different']));
+    await vi.runAllTicks();
+    expect(attempts).toBe(1);
+    stopped.stop();
+    await vi.runAllTimersAsync();
+    expect(attempts).toBe(1);
   });
 
   it('retries an unchanged retained grant after production-style resolved fetch failure', async () => {

@@ -84,6 +84,26 @@ test('holds page-owned relay traffic for a guest until their opening library ins
   release();
 });
 
+test('a request held behind replacement opening keeps its originating membership', async () => {
+  const spy = stub();
+  useLibraryCredential({ id: 'old', member: 'member-a' });
+  let opened!: () => void;
+  const opening = new Promise<void>((resolve) => (opened = resolve));
+  const release = holdLibraryRelayMembership(opening);
+  const pending = relayFetch('/playback/receipts/ack', {
+    method: 'POST',
+    body: JSON.stringify({ upTo: 8 }),
+  });
+  await Promise.resolve();
+  expect(spy).not.toHaveBeenCalled();
+
+  useLibraryCredential({ id: 'new', member: 'member-b' });
+  opened();
+  await pending;
+  expect(sent(spy)[HEADER]).toBe('old:member-a');
+  release();
+});
+
 test('an old model cannot clear the membership installed by its replacement', async () => {
   const spy = stub();
   const disposeOld = useLibraryRelayMembership({ libraryId: 'old', memberToken: 'member' });

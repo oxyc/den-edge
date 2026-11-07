@@ -7,6 +7,11 @@ import {
   type OtherQueue,
   type QueuedRequest,
 } from './assistant';
+import {
+  forgetLibraryCredential,
+  holdLibraryRelayMembership,
+  useLibraryCredential,
+} from './relayFetch';
 
 const DROPBOX = { kid: '0123456789abcdef0123456789abcdef', public: 'pk-one' };
 
@@ -281,6 +286,49 @@ test('replacement or abort while receipt apply is pending cannot acknowledge thr
     await running;
     expect(claims, boundary).toEqual(['old:/playback/receipts/drain']);
   }
+});
+
+test('an aborted receipt drain held by relay opening cannot inherit replacement membership', async () => {
+  vi.stubGlobal('location', { href: 'https://den.example/library' });
+  const claims: Array<string | null> = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      claims.push(new Headers(init?.headers).get('x-den-library-member'));
+      return Response.json({ messages: [{ seq: 9, sealed: 'receipt' }] });
+    }),
+  );
+  useLibraryCredential({ id: 'old', member: 'member-a' });
+  let opened!: () => void;
+  const releaseOpening = holdLibraryRelayMembership(
+    new Promise<void>((resolve) => (opened = resolve)),
+  );
+  let current = true;
+  const stop = new AbortController();
+  const apply = vi.fn(async () => ({ ack: 9 }));
+  const running = drainPlaybackReceiptsForCurrentAuthority(
+    {
+      libraryId: 'old',
+      ensure: async () => DROPBOX,
+      lend: async () => ({ profile: 'old' }),
+      apply,
+      current: () => current,
+    },
+    stop.signal,
+  );
+  await Promise.resolve();
+  expect(claims).toEqual([]);
+
+  useLibraryCredential({ id: 'new', member: 'member-b' });
+  current = false;
+  stop.abort();
+  opened();
+  await running;
+  expect(claims).toEqual(['old:member-a']);
+  expect(apply).not.toHaveBeenCalled();
+  releaseOpening();
+  forgetLibraryCredential();
+  vi.unstubAllGlobals();
 });
 
 test('a failed receipt key publication can be retried without acknowledging the queue', async () => {

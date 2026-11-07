@@ -468,13 +468,28 @@ export const relayFetch: typeof fetch = async (input, init) => {
   const href =
     typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
   const url = ours(href);
+  // Bind a request to the authority that originated it. A replacement library may finish opening while this call is
+  // behind the shared hello barrier; that must never make an old drain or control request inherit its membership.
+  const originatingCredential = credential;
+  const originatingLibraryId = libraryId;
   const opening = url && membershipSensitive(url) ? membershipOpening?.ready : undefined;
+  const originatingGid = !opening || originatingCredential ? url && grantOf(url, init) : null;
   if (opening) await opening;
-  const gid = url && grantOf(url, init);
+  const memberCredential = originatingCredential ?? credential;
+  const memberLibraryId = originatingCredential ? originatingLibraryId : libraryId;
+  const gid = originatingGid ?? (url && grantOf(url, init));
   if (gid) return guestFetch(gid, input, init);
-  if (!credential || !relayed(href)) return fetch(input, init);
+  const sensitive =
+    !!url &&
+    (RELAYED.some((path) => url.pathname.startsWith(path)) ||
+      remuxControl(url.pathname) ||
+      OAUTH.test(url.pathname) ||
+      ASSISTANT.test(url.pathname) ||
+      url.pathname === DEN_CONFIGURE_SESSION ||
+      (memberLibraryId !== null && HOST_GRANTS.exec(url.pathname)?.[1] === memberLibraryId));
+  if (!memberCredential || !sensitive) return fetch(input, init);
   const inherited = init?.headers ?? (input instanceof Request ? input.headers : undefined);
   const headers = new Headers(inherited);
-  headers.set(MEMBER_HEADER, credential);
+  headers.set(MEMBER_HEADER, memberCredential);
   return fetch(input, { ...init, headers });
 };

@@ -25,6 +25,7 @@ type Grants = {
 const inputs = (library: boolean, plugins: readonly string[], remux: string | null) =>
   JSON.stringify([library, plugins, remux]);
 const GRANT_RETRY_MS = 5_000;
+const ROUTE_RETRY_MS = [1_000, 5_000] as const;
 
 /** A retained playback install is usable only while the current authority still lists its manifest. */
 function retainsScout(install: string, plugins: readonly string[]): boolean {
@@ -59,6 +60,8 @@ export class SessionServices {
   #verifiedGrantsFor?: string;
   #pendingConfigure?: [library: boolean, plugins: readonly string[], remux: string | null, string];
   #grantRetry?: ReturnType<typeof setTimeout>;
+  #requestedFor?: string;
+  #configureGeneration = 0;
   #stopped = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
@@ -115,6 +118,12 @@ export class SessionServices {
       runtime?.privateRemuxUrl ?? null,
       grantsFor,
     ];
+    const requestedFor = JSON.stringify(wanted);
+    if (this.#requestedFor !== undefined && requestedFor !== this.#requestedFor) {
+      this.#configureGeneration++;
+      this.#invalidateDiscovery();
+    }
+    this.#requestedFor = requestedFor;
     this.#pendingConfigure = wanted;
     const visiblePlugins = [...wanted[1], ...shared];
     if (this.scout && !retainsScout(this.scout.install, visiblePlugins)) {
@@ -122,19 +131,24 @@ export class SessionServices {
       this.debrid = null;
       if (this.#foregroundReady) availability.connect(null, this.content);
     }
+    if (this.#grantsRefreshing) return;
     if (this.#verifiedGrantsFor === grantsFor)
       return this.#configure(wanted[0], wanted[1], wanted[2], shared);
-    if (this.#grantsRefreshing) return;
     this.#refreshGrants();
   }
 
   #refreshGrants(): void {
     if (this.#stopped || this.#grantsRefreshing || !this.#pendingConfigure) return;
     this.#grantsRefreshing = true;
+    const generation = this.#configureGeneration;
     void this.grants.refresh().then(
       (outcome) => {
         this.#grantsRefreshing = false;
         if (this.#stopped || !this.#pendingConfigure) return;
+        if (generation !== this.#configureGeneration) {
+          this.#refreshGrants();
+          return;
+        }
         const [library, plugins, remux] = this.#pendingConfigure;
         if (outcome === 'verified') {
           clearTimeout(this.#grantRetry);
@@ -155,6 +169,10 @@ export class SessionServices {
       () => {
         this.#grantsRefreshing = false;
         if (this.#stopped || !this.#pendingConfigure) return;
+        if (generation !== this.#configureGeneration) {
+          this.#refreshGrants();
+          return;
+        }
         const [library, plugins, remux] = this.#pendingConfigure;
         this.#configure(library, plugins, remux, []);
         clearTimeout(this.#grantRetry);
@@ -164,6 +182,27 @@ export class SessionServices {
         }, GRANT_RETRY_MS);
       },
     );
+  }
+
+  /** Stop and withdraw everything a previous authority's live discovery could publish. */
+  #invalidateDiscovery(): void {
+    this.#stop?.();
+    this.#stop = undefined;
+    // Force the replacement run without making it another "first" run: retained Atlas/Reel/Remux belong to the
+    // authority just withdrawn and must not repaint while the replacement's live route table is pending.
+    this.#for = 'invalidated';
+    this.#atlasGeneration++;
+    clearTimeout(this.#keep);
+    this.#keep = undefined;
+    this.scout = null;
+    this.debrid = null;
+    this.atlas = null;
+    this.atlasReady = false;
+    this.reel = null;
+    this.remux = null;
+    this.remuxAway = false;
+    this.remuxBlocked = false;
+    if (this.#foregroundReady) availability.connect(null, this.content);
   }
 
   #configure(
@@ -190,13 +229,19 @@ export class SessionServices {
       if (this.#foregroundReady) availability.connect(null, this.content);
     }
     let current = true;
+    let routeRetry: ReturnType<typeof setTimeout> | undefined;
+    let releaseRouteRetry: (() => void) | undefined;
     // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish.
     this.#atlasGeneration++;
     this.atlas = null;
     this.atlasReady = false;
-    this.#stop = () => {
+    const stopRun = () => {
       current = false;
+      clearTimeout(routeRetry);
+      releaseRouteRetry?.();
+      releaseRouteRetry = undefined;
     };
+    this.#stop = stopRun;
 
     let live = false;
     // A live atlas answer, as opposed to none: atlas unreachable says nothing about whether it is there, so the
@@ -229,7 +274,23 @@ export class SessionServices {
         });
 
     void (async () => {
-      const foundRoutes = await this.fetchRouteTable();
+      let foundRoutes: Routes | undefined;
+      for (let attempt = 0; attempt <= ROUTE_RETRY_MS.length; attempt++) {
+        try {
+          foundRoutes = await this.fetchRouteTable();
+          break;
+        } catch (error) {
+          if (!current || attempt === ROUTE_RETRY_MS.length) throw error;
+          await new Promise<void>((resolve) => {
+            releaseRouteRetry = resolve;
+            routeRetry = setTimeout(resolve, ROUTE_RETRY_MS[attempt]);
+          });
+          routeRetry = undefined;
+          releaseRouteRetry = undefined;
+          if (!current) return;
+        }
+      }
+      if (!foundRoutes) return;
       if (!current) return;
       await yieldTask();
       if (!current) return;
@@ -279,7 +340,7 @@ export class SessionServices {
         },
       });
       this.#stop = () => {
-        current = false;
+        stopRun();
         stop();
       };
     })().catch(() => {

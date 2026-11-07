@@ -883,6 +883,12 @@ window.__onGCastApiAvailable = (available) => {
   });
 };
 
+let parentDocumentOrigin: string | undefined;
+const authorizedParent = (event: MessageEvent<unknown>): boolean =>
+  parentDocumentOrigin === event.origin &&
+  parents.has(event.origin) &&
+  event.source === window.parent;
+
 // Readiness is a challenge for one loaded iframe document, not an origin-level announcement. The parent creates a
 // new generation only from that iframe's `load` event; echoing it makes a delayed or queued message from an older
 // same-origin document harmless without guessing event-loop order.
@@ -896,6 +902,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     message.generation.length > 96
   )
     return;
+  parentDocumentOrigin = event.origin;
   event.source.postMessage(
     { type: 'den-ready', generation: message.generation },
     { targetOrigin: event.origin },
@@ -903,7 +910,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 });
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  if (!authorizedParent(event)) return;
   const message = event.data as Partial<LoadMessage>;
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
   applyInterfaceLanguage(message.media.interfaceLanguage);
@@ -960,7 +967,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 });
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (!parents.has(event.origin) || event.source !== window.parent || !current) return;
+  if (!authorizedParent(event) || !current) return;
   const message = event.data as {
     type?: string;
     id?: string;
@@ -988,7 +995,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 
 /** The player asks whether a receiver is on the network, with nothing to load yet. */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  if (!authorizedParent(event)) return;
   const message = event.data as { type?: string; interfaceLanguage?: unknown };
   if (message.type !== 'den-discover') return;
   applyInterfaceLanguage(message.interfaceLanguage);
@@ -998,7 +1005,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 
 /** The player offers casting: this page shows the one button that can open Chrome's device list. */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  if (!authorizedParent(event)) return;
   const message = event.data as { type?: string; interfaceLanguage?: unknown };
   if (message.type !== 'den-choose' || !castContext) return;
   applyInterfaceLanguage(message.interfaceLanguage);
@@ -1017,7 +1024,7 @@ choose.addEventListener('click', () => {
 
 /** The player kept the measured session: play it. */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  if (!authorizedParent(event)) return;
   const message = event.data as { type?: string; id?: string };
   const held = waiting;
   if (message.type !== 'den-continue' || !held || message.id !== held.id) return;
@@ -1036,7 +1043,7 @@ window.addEventListener('pagehide', () => {
 
 /** The outside player's Skip button: move this page's video, or the receiver it is casting to, to `time`. */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (!parents.has(event.origin) || event.source !== window.parent || !current) return;
+  if (!authorizedParent(event) || !current) return;
   const message = event.data as { type?: string; id?: string; time?: unknown };
   if (message.type !== 'den-seek' || message.id !== current.id) return;
   if (typeof message.time !== 'number' || !Number.isFinite(message.time) || message.time < 0)

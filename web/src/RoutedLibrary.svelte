@@ -46,7 +46,7 @@
   import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
-  import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
+  import { householdAssistantFetch } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { thisDevice } from './lib/device.svelte';
@@ -1465,11 +1465,12 @@
     const household = assistantHousehold;
     if (!needed || !model) return;
     const stop = new AbortController();
-    void Promise.all([import('./lib/assistant'), household?.relayMembership() ?? null]).then(
+    const authority = household ?? model;
+    void Promise.all([import('./lib/assistant'), authority.relayMembership()]).then(
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
-        if (household && !membership) {
-          console.warn('den: the household is not a member on den-edge yet; its assistants wait');
+        if (!membership) {
+          console.warn('den: the library is not a member on den-edge yet; its assistants wait');
           return;
         }
         run(
@@ -1477,8 +1478,8 @@
           {
             model,
             household,
-            libraryId: membership?.libraryId ?? libraryCredentialId() ?? 'library',
-            ...(membership ? { fetchImpl: householdAssistantFetch(membership) } : {}),
+            libraryId: membership.libraryId,
+            fetchImpl: householdAssistantFetch(membership),
             lend: async () => {
               if (!household) return undefined;
               const connection = await household.assistantConnection();

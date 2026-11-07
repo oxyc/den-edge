@@ -3,9 +3,10 @@
 ## Authority and remux (#1052)
 
 - `SessionServices` waits for the held-grant refresh before reading or publishing retained discovery. A failed refresh
-  is fail-closed for guest plugins and a later configuration retries it.
+  is fail-closed for guest plugins and bounded cancelable retry handles unchanged grant and route inputs.
 - An A→B authority change synchronously disconnects an incompatible published Scout and clears its debrid result.
-  Every discovery callback and delayed debrid answer is fenced to its originating run, including A→B→A.
+  It also stops and withdraws Atlas, Reel and Remux before replacement refresh; every route/discovery callback and
+  delayed debrid answer is fenced to its originating run, including A→B→A while the replaced refresh is held.
 - Both page and SharedWorker relay fetchers treat a gid explicitly named by a remux body as authoritative. If that gid
   is not held, the request is refused locally; it is never signed with another held grant.
 - Tests cover delayed and failed grant refresh, stopped-profile refresh completion, retained A against B, A→B→A,
@@ -32,17 +33,23 @@
   not create an assistant grant. The foreground path drains the opaque lane first, so an empty lane never initializes
   assistant crypto/Wasm.
 - Key publication, connection lending, and apply are fenced after every await to the current foreground profile.
+  Drain/apply/ack also retain one originating membership capability in split, non-split, SharedWorker and legacy
+  topologies; a replacement library completing the relay-opening barrier cannot lend its claim to an old request.
   Failure leaves the queue unacknowledged and a later pass retries it. Tests cross the client codec, Worker host,
-  `LibraryServiceCore`, real assistant authority malformed handling, queue transport, cancellation, and retry paths.
+  `LibraryServiceCore`, real assistant authority malformed handling, actual `assistant.ts` plus `relayFetch`,
+  cancellation, and retry paths.
 - A joined production-contract test starts with the real Library Service in a no-consent household, creates its
   drop-box, passes movie and episode ciphertext through the actual Edge callback and drain, applies both through the
-  service's real assistant authority, and reopens the durable library for readback. Native Apple receipt parity is
-  tracked by [oxyc/den#719](https://github.com/oxyc/den/issues/719); Den #717 remains diagnostics only.
+  service's real assistant authority, and reopens the durable library for readback. Apple platforms already have
+  `PlaybackReceiptDrainer`, `AssistantClient` receipt transport, `PairedLibrarySession` polling, split-household row
+  binding and durable replay rows; [oxyc/den#719](https://github.com/oxyc/den/issues/719) tracks remaining native
+  qualification rather than implementation of an absent consumer. Den #717 remains diagnostics only.
 
 ## Platform and performance disposition
 
 - Browser, LG/webOS, and supported Samsung/Tizen builds use the shared authority, relay, and receipt paths.
-  Chromecast is browser-only. Tizen 3 uses the shared grant/relay fixes, but its explicit
+  Chromecast uses the shared sender plus its fenced Cast document. Apple native consumers already exist but were not
+  changed or device-qualified by this Edge round. Tizen 3 uses the shared grant/relay fixes, but its explicit
   `assistantCore-tizen3` adapter cannot create or open receipt crypto. It can still save ordinary in-page progress;
   managed playback completion after the page is gone is unsupported, and the current UI has no specific handoff or
   recovery notice for that limitation. That open parity/recovery gap is tracked by
@@ -61,11 +68,11 @@
 
 ## Validation boundaries
 
-- Focused Vitest: 8 files, 164 tests passed across session authority, relay, client receipt draining, codec,
-  `LibraryServiceCore`, Worker-host rejection, and real assistant authority. The focused Edge callback/drain/ack test
-  also passed (1 test; 755 filtered out).
-- Playwright: all 11 `cast-offer` cases passed serially, including the deterministic document-generation regression;
-  the managed sidecar expiry/replan case also passed. These are Chromium fixtures, not Cast hardware qualification.
+- Round-3 focused Vitest: 3 files and 50 tests passed across session authority, actual relay transport and receipt
+  draining. Full Vitest passed 3,061 tests with 16 skipped, including the joined production receipt contract; earlier
+  codec, `LibraryServiceCore`, Worker-host, assistant-authority and Edge callback suites remain in that bundle.
+- Playwright: all 13 `cast-offer` cases, two real built-Cast-page cases and the real Svelte authority case passed
+  serially. These are Chromium fixtures, not Cast hardware qualification.
 - `npm run lint` passed Prettier, ESLint, Stylelint, Svelte diagnostics (0 errors and 0 warnings), and strict Cast
   TypeScript. `npm run build` passed the client/Worker verification, SSR shell build, and round-trip precompression;
   the reviewed client build transformed 564 modules. `git diff --check` is part of snapshot finalization.
