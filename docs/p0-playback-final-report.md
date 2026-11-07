@@ -3,6 +3,7 @@
 Base: `73d4166d8d1b3aa426793ee65ae849673ed65a3c`.
 Joined-contract follow-up base: `d75e209815621f4f634ec7ca72df56736ec67e40`.
 Round-3 blocker base: `2312314d19aaa7682795b7d894dcaffa46f4f244`.
+Round-4 Astra blocker base: `4a71f19511af2d982a976f526047794700d4977f`.
 
 ## Corrected contracts
 
@@ -11,6 +12,10 @@ Round-3 blocker base: `2312314d19aaa7682795b7d894dcaffa46f4f244`.
   refresh; refresh and every Scout/Atlas/Reel/Remux/debrid completion remain independently fenced. Transport/5xx
   refresh results are explicit `retained-unverified` outcomes, cached guest services fail closed, and unchanged
   grant and route-discovery inputs retry on bounded cancelable schedules.
+- Reconfiguration no longer implies revocation: automatic private-remux persistence and additive plugin changes stop
+  and fence stale probes while keeping still-authorized services published, so Library does not unmount an active
+  Player. Plugin contraction/replacement still withdraws synchronously, including A→B→A, and stale callbacks and
+  Atlas acknowledgements remain fenced.
 - Managed playback awaits household receipt-key establishment at the Player intent boundary. Browsing and an empty
   receipt lane still do not enter assistant crypto. Receipt acknowledgement rechecks abort/session authority after
   apply, while drain/apply/ack use the same household-scoped membership capability captured by that originating run
@@ -20,11 +25,18 @@ Round-3 blocker base: `2312314d19aaa7682795b7d894dcaffa46f4f244`.
   receives the latest session/subtitle/control state afterward. No CSP allowance was widened.
 - `startSession` production 428 behavior retains the exact membership claim and body identity, adding only the
   requested IPv4 hint. Exact unheld-gid refusal and the 100-message/2,539-character receipt bounds remain unchanged.
+- A page request blocked by the shared hello barrier now records whether grant selection was actually evaluated.
+  Member→guest, guest→member, guest→guest and member→member replacements preserve the originating body/credential
+  pair, including the guest secret for the already-started request; evaluated member/null can no longer fall through
+  to a replacement guest. `RelaySession` remains synchronously isolated per SharedWorker port and has no such wait.
 
 ## Qualification
 
-- Full Vitest: 231 files passed, 3 skipped; 3,061 tests passed, 16 skipped. This includes the joined real
+- Full Vitest: 231 files passed, 3 skipped; 3,066 tests passed, 16 skipped. This includes the joined real
   movie/episode receipt contract.
+- Focused Astra follow-up: 2 Vitest files and 44 tests passed. Eleven Chromium cases passed across managed playback,
+  release-picker/remux switching and the production-shaped Svelte service-authority fixture; its marked active-player
+  DOM node survives automatic remux persistence and an unrelated plugin addition.
 - Edge receipt callback suite: 8 passed (748 unrelated tests filtered).
 - Joined receipt production contract: the real Library Service created a drop-box without assistant consent; actual
   Edge callbacks queued one movie and one episode receipt; the service's real assistant authority applied both; and
@@ -38,6 +50,9 @@ Round-3 blocker base: `2312314d19aaa7682795b7d894dcaffa46f4f244`.
   Chromium fixture coverage, not Cast hardware qualification.
 - `npm run lint` passed Prettier, ESLint, Stylelint, Svelte diagnostics, and strict Cast TypeScript.
 - `npm run build` passed client/Worker verification, SSR shell, and precompression round-trip checks.
+- LG/webOS, current Samsung/Tizen and explicit Tizen 3 builds passed Worker, compatibility and fixture-isolation
+  verification. Tizen 3's JavaScript policy matched Wasm for 166 viewer fixtures and refused 12 intentionally absent
+  admin/delivery fixtures; its CSS audit reported no unpaired unsupported `:is`. No TV/device execution occurred.
 - No deployment, live homelab, stream probe, device run, TV packaging, or GitHub mutation was performed.
 
 ## Matched build evidence
@@ -47,6 +62,12 @@ precompression round trips, and produced 4,531,484/1,650,238/1,366,612 raw/gzip/
 recorded clean original-base build that is +1,918/+527/+437 bytes; against the round-2 snapshot it is
 +818/+260/+152 bytes. The current client and SSR samples took 1.91 s and 0.189 s respectively; these single local
 samples establish no performance gain or regression.
+
+The round-4 production build transformed the same 564 client modules and emitted
+4,531,731/1,650,332/1,366,627 raw/gzip/brotli bytes, +247/+94/+15 bytes from the recorded round-3 build. Preventing a
+doomed Player teardown/recreation is a concrete mechanism-level improvement, but no runtime/device measurement was
+taken, so no latency, frame, memory or energy saving is claimed. Capturing one grant secret for only the lifetime of
+an already-started hello-blocked request is bounded and adds no network work.
 
 Wasm SHA-256 is identical in both builds:
 
@@ -71,8 +92,14 @@ cumulative binary patch from the original named base, with the same exclusion, h
   [oxyc/den#719](https://github.com/oxyc/den/issues/719). Den #717 is diagnostics, not receipt ownership.
 - Tizen 3: grant/relay changes apply, but receipt crypto is explicitly unsupported. Ordinary in-page progress remains;
   post-page managed completion has no specific recovery/handoff UI. Unsupported/recovery parity is tracked by
-  [oxyc/den-edge#1059](https://github.com/oxyc/den-edge/issues/1059).
+  [oxyc/den-edge#1059](https://github.com/oxyc/den-edge/issues/1059). The round-4 service-lifecycle and remux pairing
+  fixes are in its shared legacy build; its additional explicit HLS exclusion selects progressive media instead.
 - Android TV: not represented by this Edge web-runtime change; no Android receipt consumer was qualified here.
 
 No new measured performance regression was found. Tizen 3's explicit crypto/recovery exclusion remains a
 cross-platform gap; existing Apple native consumers are not misreported as absent.
+
+The round-4 changes are web-host lifecycle/transport fixes. iOS/iPadOS/tvOS have no `SessionServices` or page
+`relayFetch` counterpart to change; their previously recorded receipt consumers were not rerun. Android TV remains
+outside this Edge web runtime. No new defect, parity gap or follow-up issue was discovered beyond #1059 and the
+already recorded Apple qualification work.

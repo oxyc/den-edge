@@ -13,6 +13,8 @@ import {
 
 const KEYS = { id: 'abc123', member: 'def456' };
 const HEADER = 'x-den-library-member';
+const GRANT = 'x-den-grant';
+const GID = 'a1b2c3d4';
 const HERE = 'https://den.example/movie/157336';
 
 type FetchSpy = ReturnType<typeof stub>;
@@ -104,6 +106,43 @@ test('a request held behind replacement opening keeps its originating membership
   release();
 });
 
+test.each([
+  { from: 'member', to: 'guest', header: 'member-a:token-a', grant: undefined },
+  { from: 'guest', to: 'member', header: undefined, grant: `${GID}:secret-a` },
+  { from: 'guest', to: 'guest', header: undefined, grant: `${GID}:secret-a` },
+  { from: 'member', to: 'member', header: 'member-a:token-a', grant: undefined },
+] as const)(
+  'keeps a blocked remux body paired with its $from authority across $from→$to replacement',
+  async ({ from, to, header, grant }) => {
+    const spy = stub();
+    const other = 'bbbbbbbb';
+    if (from === 'member') useLibraryCredential({ id: 'member-a', member: 'token-a' });
+    else rememberGrant(GID, 'secret-a');
+    const scout =
+      from === 'member' ? 'https://den.example/scout/sealed' : `https://den.example/scout/~${GID}`;
+    const body = JSON.stringify({ imdb: 'tt42', scout });
+    let opened!: () => void;
+    const release = holdLibraryRelayMembership(new Promise<void>((resolve) => (opened = resolve)));
+    const pending = relayFetch('/remux/session', { method: 'POST', body });
+    await Promise.resolve();
+    expect(spy).not.toHaveBeenCalled();
+
+    forgetLibraryCredential();
+    forgetGrant(GID);
+    if (to === 'member') useLibraryCredential({ id: 'member-b', member: 'token-b' });
+    else rememberGrant(other, 'secret-b');
+    opened();
+    await pending;
+
+    const call = spy.mock.calls.at(-1)!;
+    expect(call[1]?.body).toBe(body);
+    expect(sent(spy)[HEADER]).toBe(header);
+    expect(sent(spy)[GRANT]).toBe(grant);
+    release();
+    forgetGrant(other);
+  },
+);
+
 test('an old model cannot clear the membership installed by its replacement', async () => {
   const spy = stub();
   const disposeOld = useLibraryRelayMembership({ libraryId: 'old', memberToken: 'member' });
@@ -162,9 +201,6 @@ test('keeps the caller’s own headers and init', async () => {
   expect(sent(spy)[HEADER]).toBe('abc123:def456');
   expect(spy.mock.calls.at(-1)?.[1]?.method).toBe('POST');
 });
-
-const GRANT = 'x-den-grant';
-const GID = 'a1b2c3d4';
 
 afterEach(() => {
   forgetGrant(GID);

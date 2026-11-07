@@ -399,9 +399,17 @@ function membershipSensitive(url: URL): boolean {
  * relay's health probe has nothing else to claim, so it takes a held grant.
  */
 function grantOf(url: URL, init: RequestInit | undefined): string | null {
+  const bound = boundGrantOf(url, init);
+  if (bound) return bound;
+  if (OAUTH.test(url.pathname)) return credential ? null : (heldGrant() ?? null);
+  if (!remuxControl(url.pathname)) return null;
+  return credential ? null : (heldGrant() ?? null);
+}
+
+/** A grant explicitly named by the request path or body, independent of whichever authority is currently open. */
+function boundGrantOf(url: URL, init: RequestInit | undefined): string | null {
   const shared = GRANT_BASE.exec(url.pathname)?.[1];
   if (shared) return shared;
-  if (OAUTH.test(url.pathname)) return credential ? null : (heldGrant() ?? null);
   if (!remuxControl(url.pathname)) return null;
   if (typeof init?.body === 'string') {
     try {
@@ -412,7 +420,7 @@ function grantOf(url: URL, init: RequestInit | undefined): string | null {
       // Not JSON: nothing names a grant.
     }
   }
-  return credential ? null : (heldGrant() ?? null);
+  return null;
 }
 
 /** A grant this browser holds, for a call that needs some proof and has no member's to give. */
@@ -430,12 +438,13 @@ async function guestFetch(
   gid: string,
   input: Parameters<typeof fetch>[0],
   init: RequestInit | undefined,
+  captured?: { secret: string | undefined },
 ): Promise<Response> {
   const headers = new Headers(
     init?.headers ?? (input instanceof Request ? input.headers : undefined),
   );
   headers.delete(MEMBER_HEADER);
-  const secret = grantSecrets.get(gid);
+  const secret = captured ? captured.secret : grantSecrets.get(gid);
   // Sent bare, den-edge answers the same 404 as for a missing path, which read as "nothing here" and quietly put
   // TMDB in Atlas's place: a call this browser cannot prove is refused here, out loud.
   if (!secret) {
@@ -473,12 +482,26 @@ export const relayFetch: typeof fetch = async (input, init) => {
   const originatingCredential = credential;
   const originatingLibraryId = libraryId;
   const opening = url && membershipSensitive(url) ? membershipOpening?.ready : undefined;
-  const originatingGid = !opening || originatingCredential ? url && grantOf(url, init) : null;
+  const originatingGid =
+    url && (!opening || originatingCredential ? grantOf(url, init) : boundGrantOf(url, init));
+  const originatingGrant = originatingGid
+    ? { secret: grantSecrets.get(originatingGid) }
+    : undefined;
+  // null has two meanings unless it is paired with this bit: a member request was evaluated and belongs to no
+  // grant, while a proof-less request behind the first hello has not resolved its authority yet. Never let `??`
+  // turn the former into a replacement guest's signature after the wait.
+  const originatingAuthorityResolved = originatingCredential !== null || originatingGid !== null;
   if (opening) await opening;
-  const memberCredential = originatingCredential ?? credential;
-  const memberLibraryId = originatingCredential ? originatingLibraryId : libraryId;
-  const gid = originatingGid ?? (url && grantOf(url, init));
-  if (gid) return guestFetch(gid, input, init);
+  const memberCredential = originatingAuthorityResolved ? originatingCredential : credential;
+  const memberLibraryId = originatingAuthorityResolved ? originatingLibraryId : libraryId;
+  const gid = originatingAuthorityResolved ? originatingGid : url && grantOf(url, init);
+  if (gid)
+    return guestFetch(
+      gid,
+      input,
+      init,
+      originatingAuthorityResolved ? originatingGrant : undefined,
+    );
   const sensitive =
     !!url &&
     (RELAYED.some((path) => url.pathname.startsWith(path)) ||

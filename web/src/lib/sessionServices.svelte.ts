@@ -86,8 +86,6 @@ export class SessionServices {
       return;
     }
     const generation = ++this.#atlasGeneration;
-    this.atlas = null;
-    this.atlasReady = false;
     void this.content.query({ kind: 'sources.configure', atlas: base }).then(
       () => {
         if (!current() || generation !== this.#atlasGeneration) return;
@@ -119,13 +117,18 @@ export class SessionServices {
       grantsFor,
     ];
     const requestedFor = JSON.stringify(wanted);
+    const visiblePlugins = [...wanted[1], ...shared];
     if (this.#requestedFor !== undefined && requestedFor !== this.#requestedFor) {
       this.#configureGeneration++;
-      this.#invalidateDiscovery();
+      // A changed hint or an additional install must fence the old probes, but it does not revoke a service the
+      // current authority still names. In particular, remembering the remux address discovered by this very run
+      // feeds it back through RuntimeDiscoveryView; withdrawing Scout here unmounts an active Player. A contraction
+      // is different: any published service could have come from the removed install, so withdraw it synchronously.
+      const contractsAuthority = this.plugins.some((plugin) => !visiblePlugins.includes(plugin));
+      this.#cancelDiscovery(contractsAuthority);
     }
     this.#requestedFor = requestedFor;
     this.#pendingConfigure = wanted;
-    const visiblePlugins = [...wanted[1], ...shared];
     if (this.scout && !retainsScout(this.scout.install, visiblePlugins)) {
       this.scout = null;
       this.debrid = null;
@@ -184,16 +187,17 @@ export class SessionServices {
     );
   }
 
-  /** Stop and withdraw everything a previous authority's live discovery could publish. */
-  #invalidateDiscovery(): void {
+  /** Stop stale work; withdraw publications only when their authority was actually contracted. */
+  #cancelDiscovery(withdraw: boolean): void {
     this.#stop?.();
     this.#stop = undefined;
-    // Force the replacement run without making it another "first" run: retained Atlas/Reel/Remux belong to the
-    // authority just withdrawn and must not repaint while the replacement's live route table is pending.
+    // Force the replacement run without making it another "first" run. This also handles A→B→A: although the
+    // final inputs equal the first run, that run was stopped and may never be reused.
     this.#for = 'invalidated';
     this.#atlasGeneration++;
     clearTimeout(this.#keep);
     this.#keep = undefined;
+    if (!withdraw) return;
     this.scout = null;
     this.debrid = null;
     this.atlas = null;
@@ -215,6 +219,9 @@ export class SessionServices {
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
     );
+    // A failed grant verification can contract authority even when configure() initially saw the same retained
+    // plugin list. Fail closed before starting the replacement run.
+    if (this.plugins.some((plugin) => !plugins.includes(plugin))) this.#cancelDiscovery(true);
     const wanted = inputs(library, plugins, remux);
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
@@ -231,10 +238,10 @@ export class SessionServices {
     let current = true;
     let routeRetry: ReturnType<typeof setTimeout> | undefined;
     let releaseRouteRetry: (() => void) | undefined;
-    // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish.
+    // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish. Keep the
+    // acknowledged Atlas publication in place until this run has a replacement; additions and hint changes are not
+    // authority withdrawal and consumers can continue using the old configuration while probes run.
     this.#atlasGeneration++;
-    this.atlas = null;
-    this.atlasReady = false;
     const stopRun = () => {
       current = false;
       clearTimeout(routeRetry);

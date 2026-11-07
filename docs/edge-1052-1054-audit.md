@@ -7,8 +7,16 @@
 - An A→B authority change synchronously disconnects an incompatible published Scout and clears its debrid result.
   It also stops and withdraws Atlas, Reel and Remux before replacement refresh; every route/discovery callback and
   delayed debrid answer is fenced to its originating run, including A→B→A while the replaced refresh is held.
+- Discovery-input changes that do not contract authority are now separate from replacement. Persisting a private
+  remux hint or adding an unrelated plugin cancels and fences prior probes while keeping its still-authorized
+  Scout/Atlas/Reel/Remux publications until replacements answer. A production-shaped Svelte fixture proves the
+  active Player DOM node survives both transitions; contraction still withdraws synchronously.
 - Both page and SharedWorker relay fetchers treat a gid explicitly named by a remux body as authoritative. If that gid
   is not held, the request is refused locally; it is never signed with another held grant.
+- Page relay requests held behind a library hello distinguish evaluated no-grant from unresolved initial authority.
+  Member→guest, guest→member, guest→guest and member→member replacements preserve the exact request body plus
+  originating member claim or guest secret; no replacement identity can sign the old body. SharedWorker
+  `RelaySession` has no hello barrier and already selects body and credential synchronously per port.
 - Tests cover delayed and failed grant refresh, stopped-profile refresh completion, retained A against B, A→B→A,
   stopped discovery callbacks, movie and episode release bodies, releases/session gid equality, and the 428 retry.
 
@@ -55,6 +63,11 @@
   recovery notice for that limitation. That open parity/recovery gap is tracked by
   [oxyc/den-edge#1059](https://github.com/oxyc/den-edge/issues/1059), not represented as a successful queued-receipt
   path.
+- This follow-up built browser, LG/webOS, current Samsung/Tizen and the explicit Tizen 3 legacy target. The two new
+  fixes are in shared page/session modules on all four web targets. Tizen 3's existing exclusions remain assistant
+  and recovery crypto plus HLS (progressive playback is selected); they do not exclude service authority or remux
+  pairing. Its JavaScript policy matched Wasm for 166 viewer fixtures and refused 12 deliberately absent
+  admin/delivery fixtures. No TV hardware was run.
 - The authority refresh adds one already-required held-grant refresh before first discovery and removes doomed
   release/session work. The empty receipt lane performs one bounded drain request but no assistant policy import.
 - Matched clean-archive and worktree production builds transformed the same 564 client modules. The complete build
@@ -68,14 +81,22 @@
 
 ## Validation boundaries
 
-- Round-3 focused Vitest: 3 files and 50 tests passed across session authority, actual relay transport and receipt
-  draining. Full Vitest passed 3,061 tests with 16 skipped, including the joined production receipt contract; earlier
+- Follow-up focused Vitest: 2 files and 44 tests passed across session authority and actual relay transport. Full
+  Vitest passed 3,066 tests with 16 skipped, including the joined production receipt contract; earlier
   codec, `LibraryServiceCore`, Worker-host, assistant-authority and Edge callback suites remain in that bundle.
-- Playwright: all 13 `cast-offer` cases, two real built-Cast-page cases and the real Svelte authority case passed
-  serially. These are Chromium fixtures, not Cast hardware qualification.
+- Follow-up Playwright: 11 managed-playback, release-picker/remux and real Svelte authority cases passed serially,
+  including the automatic remux-persistence/player-identity case. These are Chromium fixtures, not device
+  qualification; previously recorded Cast cases were not rerun in this follow-up.
 - `npm run lint` passed Prettier, ESLint, Stylelint, Svelte diagnostics (0 errors and 0 warnings), and strict Cast
   TypeScript. `npm run build` passed the client/Worker verification, SSR shell build, and round-trip precompression;
-  the reviewed client build transformed 564 modules. `git diff --check` is part of snapshot finalization.
+  the reviewed client build transformed 564 modules. LG/webOS, current Tizen and explicit Tizen 3 builds passed their
+  Worker/compatibility/isolation verifiers; the Tizen 3 emitted-CSS report found no unpaired unsupported `:is` rule.
+  `git diff --check` is part of snapshot finalization.
 - No deployment, homelab/device access, active stream probe, TV packaging, or public posting was performed.
 - Source and browser fixtures use synthetic ids and ciphertext only; no production route token or private evidence is
   present in the patch.
+- Privacy improves: an old request can no longer expose its body under a replacement member or guest identity. The
+  captured guest secret lives only for that already-started request's hello wait and still leaves only in the existing
+  same-origin header. Production output is 4,531,731/1,650,332/1,366,627 raw/gzip/brotli bytes, +247/+94/+15 against
+  the recorded `4a71f195` build. This static-size delta and removal of avoidable Player teardown are source/build
+  evidence, not a measured runtime or device gain; no credible new hot-path regression was found.

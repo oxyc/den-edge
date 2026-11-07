@@ -57,10 +57,13 @@ vi.mock('./debridStatus', () => ({
     ),
 }));
 
-const runtime = (pluginManifestUrls: string[] = []): RuntimeDiscoveryView => ({
+const runtime = (
+  pluginManifestUrls: string[] = [],
+  privateRemuxUrl: string | null = null,
+): RuntimeDiscoveryView => ({
   kind: 'runtime',
   pluginManifestUrls,
-  privateRemuxUrl: null,
+  privateRemuxUrl,
 });
 const content = {
   query: vi.fn(async () => ({ kind: 'sources.configure' })),
@@ -267,6 +270,60 @@ describe('SessionServices', () => {
     expect(services.scout).toBeNull();
     discoveryPublishes[2]!.scout?.(a);
     expect(services.scout).toEqual(a);
+    services.stop();
+  });
+
+  it('keeps published services through remux persistence and unrelated plugin additions', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/' });
+    autoDiscover = false;
+    discoveries = 0;
+    const connect = vi.spyOn(availability, 'connect');
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    services.foregroundReady();
+
+    const scout = { base: '/scout-a', install: 'https://plugins.example/a' };
+    services.configure(runtime(['https://plugins.example/a/manifest.json']));
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
+    discoveryPublishes[0]!.scout?.(scout);
+    discoveryPublishes[0]!.atlas({ base: '/atlas-a' });
+    discoveryPublishes[0]!.reel({ base: '/reel-a' });
+    discoveryPublishes[0]!.remux?.('/remux');
+    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-a'));
+    connect.mockClear();
+
+    // This is the production feedback loop from rememberPrivateRemux: the same authority now carries the hint it
+    // discovered. The old run is stale, but every publication remains usable until its replacement answers.
+    services.configure(
+      runtime(['https://plugins.example/a/manifest.json'], 'https://private.example/remux'),
+    );
+    expect(services.scout).toEqual(scout);
+    expect(services.atlas).toBe('/atlas-a');
+    expect(services.reel).toBe('/reel-a');
+    expect(services.remux).toBe('/remux');
+    expect(connect).not.toHaveBeenCalledWith(null, content);
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
+
+    services.configure(
+      runtime(
+        [
+          'https://plugins.example/a/manifest.json',
+          'https://plugins.example/unrelated/manifest.json',
+        ],
+        'https://private.example/remux',
+      ),
+    );
+    expect(services.scout).toEqual(scout);
+    expect(services.atlas).toBe('/atlas-a');
+    expect(services.reel).toBe('/reel-a');
+    expect(services.remux).toBe('/remux');
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(3));
+
+    // Neither cancelled run can publish after the reconfiguration.
+    discoveryPublishes[0]!.scout?.(null);
+    discoveryPublishes[1]!.scout?.(null);
+    discoveryPublishes[1]!.atlas({ base: '/stale-atlas' });
+    expect(services.scout).toEqual(scout);
+    expect(services.atlas).toBe('/atlas-a');
     services.stop();
   });
 
