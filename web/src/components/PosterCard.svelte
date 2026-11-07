@@ -120,6 +120,13 @@
    * a card later given TMDB's own path still tries it.
    */
   let failed = $state('');
+  let destroyed = false;
+  function imageFailed(event: Event) {
+    // Image errors can already be queued when a card leaves a row. Svelte keeps the element listener, but the
+    // card's derived values no longer have a live owner, so a late callback must neither read them nor write state.
+    if (destroyed) return;
+    failed = (event.currentTarget as HTMLImageElement).src;
+  }
   const art = $derived(
     still && still !== failed ? still : poster && poster !== failed ? poster : undefined,
   );
@@ -261,6 +268,7 @@
     actionMenu?.openAt(event.clientX, event.clientY);
   }
   onDestroy(() => {
+    destroyed = true;
     clearTimeout(warming);
     clearTimeout(longPressTimer);
   });
@@ -284,7 +292,7 @@
           loading="lazy"
           decoding="async"
           onload={() => startupMarkOnce('first poster')}
-          onerror={() => (failed = art ?? '')}
+          onerror={imageFailed}
         />
       {/if}
     {:else}
