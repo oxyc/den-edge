@@ -45,7 +45,7 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
   browser,
   page: host,
 }) => {
-  const edge = newEdge();
+  const edge = newEdge({ profiles: true });
   await routeGuestEdge(host, edge);
   await host.goto(E2E_ORIGIN);
   await host.getByRole('button', { name: 'Look around instead' }).click();
@@ -68,7 +68,23 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
       { timeout: 30_000 },
     )
     .toBe(true);
-  expect(edge.libraries.size).toBe(1);
+  // Profile provisioning may start its split libraries concurrently; the migrated grant library itself must exist.
+  expect(edge.grant.reserved).not.toBeNull();
+  expect(edge.libraries.has(edge.grant.reserved.id)).toBe(true);
+  // Split the household before linking the TV, so the same mounted production host can exercise an inbound play
+  // across a real Kid -> Owner ProfileSession replacement below.
+  const ownerProfile = host.getByRole('button', { name: 'Switch profile, current Owner' });
+  await expect(ownerProfile).toBeVisible({ timeout: 30_000 });
+  await ownerProfile.click();
+  await host.getByRole('button', { name: 'Use Kids' }).click();
+  await host.getByLabel('New Owner PIN').fill('1234');
+  await host.getByLabel('Confirm Owner PIN').fill('1234');
+  const kidProfile = host.getByRole('button', { name: 'Switch profile, current Kids' });
+  await expect(kidProfile).toBeVisible({ timeout: 30_000 });
+  await kidProfile.click();
+  await host.getByRole('button', { name: 'Use Owner' }).click();
+  await host.getByLabel('Owner PIN').fill('1234');
+  await expect(ownerProfile).toBeVisible({ timeout: 30_000 });
   await host.goto(`${E2E_ORIGIN}/settings`);
   await host.getByRole('button', { name: /Linked devices/ }).click();
   const devices = host.getByRole('region', { name: 'Linked devices' });
@@ -77,17 +93,47 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
 
   const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   try {
-    const tv = await context.newPage();
     const queues = new Map();
     const drains = [];
-    await routeGuestEdge(tv, edge);
-    await routeInbox(tv, queues, drains);
+    // The linked profile opens production Workers. Own their requests at the context boundary as well as the page,
+    // so a Worker created during profile handover cannot slip past the fixture's household and provider authorities.
+    await routeGuestEdge(context, edge);
+    await routeInbox(context, queues, drains);
+    let holdEligibility = false;
+    let eligibilityStarted = () => {};
+    let eligibilitySeen;
+    let releaseEligibility = () => {};
+    let eligibilityGate;
+    await context.route('**/atlas/**', async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/manifest.json'))
+        return route.fulfill({ json: { id: 'com.den.atlas', catalogs: [] } });
+      if (/\/index\/title\/movie\/1002\.json$/.test(path)) {
+        if (holdEligibility) {
+          eligibilityStarted();
+          await eligibilityGate;
+        }
+        return route
+          .fulfill({
+            json: {
+              type: 'movie',
+              id: 1002,
+              title: 'Movie 1002',
+              indexed: true,
+              eligible: true,
+              minimumAge: 7,
+            },
+          })
+          .catch(() => undefined);
+      }
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    });
     // A playback service, so a play can start once the TV has a source plugin.
-    await tv.route('**/routes', (route) =>
+    await context.route('**/routes', (route) =>
       route.fulfill({ json: { remux: [{ url: `${E2E_ORIGIN}/remux` }] } }),
     );
-    await tv.route('**/remux/health', (route) => route.fulfill({ json: { status: 'ok' } }));
-    await tv.route('**/scout/fixture-install/manifest.json', (route) =>
+    await context.route('**/remux/health', (route) => route.fulfill({ json: { status: 'ok' } }));
+    await context.route('**/scout/fixture-install/manifest.json', (route) =>
       route.fulfill({
         json: {
           id: 'com.den.scout',
@@ -97,12 +143,16 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
         },
       }),
     );
+    const tv = await context.newPage();
     await tv.goto(E2E_ORIGIN);
     await tv.getByLabel('Link code, twelve characters').fill(code);
     await tv.getByLabel('This device’s name').fill('Living room LG');
     await tv.getByRole('button', { name: 'Link', exact: true }).click();
     await devices.getByRole('button', { name: 'Allow', exact: true }).click();
     await expect(tv.getByRole('heading', { name: 'Open your Den library' })).toBeHidden();
+    await expect(tv.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+    await tv.getByLabel('Owner PIN').fill('1234');
+    await expect(tv.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible();
 
     // The TV makes its play key when it checks in with the library.
     const storedKey = () =>
@@ -154,6 +204,36 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     ).toBeVisible({ timeout: 30_000 });
     await tv.goto(E2E_ORIGIN);
 
+    queues.set(fresh.inbox, [{ sealed: play(1002).sealed }]);
+    await expect(tv).toHaveURL(/\/movie\/1002[^?]*\?play=1/, { timeout: 30_000 });
+
+    // A Kid's real policy check can outlive the press that admitted it. Hold that provider answer, replace the
+    // mounted ProfileSession, then release the old answer: it must neither route nor notify in the Owner tree.
+    await tv.goto(E2E_ORIGIN);
+    const tvOwner = tv.getByRole('button', { name: 'Switch profile, current Owner' });
+    await expect(tvOwner).toBeVisible({ timeout: 30_000 });
+    await tvOwner.click();
+    await tv.getByRole('button', { name: 'Use Kids' }).click();
+    const tvKid = tv.getByRole('button', { name: 'Switch profile, current Kids' });
+    await expect(tvKid).toBeVisible({ timeout: 30_000 });
+    holdEligibility = true;
+    eligibilitySeen = new Promise((resolve) => (eligibilityStarted = resolve));
+    eligibilityGate = new Promise((resolve) => (releaseEligibility = resolve));
+    queues.set(fresh.inbox, [{ sealed: play(1002).sealed }]);
+    await eligibilitySeen;
+
+    await tvKid.click();
+    await tv.getByRole('button', { name: 'Use Owner' }).click();
+    await tv.getByLabel('Owner PIN').fill('1234');
+    await expect(tvOwner).toBeVisible({ timeout: 30_000 });
+    const ownerAddress = tv.url();
+    releaseEligibility();
+    await expect(tv).toHaveURL(ownerAddress);
+    await expect(tv.getByText('Starting “Movie 1002”…')).toHaveCount(0);
+    await expect(tv.getByText('Blocked by parental controls')).toHaveCount(0);
+
+    // The current Owner boundary remains usable after cancellation and takes the next valid queue item.
+    holdEligibility = false;
     queues.set(fresh.inbox, [{ sealed: play(1002).sealed }]);
     await expect(tv).toHaveURL(/\/movie\/1002[^?]*\?play=1/, { timeout: 30_000 });
   } finally {

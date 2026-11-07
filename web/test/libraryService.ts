@@ -1,5 +1,6 @@
 import type { ClockStore } from '../src/lib/clockStore';
 import { ContentAuthority } from '../src/lib/contentAuthority';
+import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
 import {
   DownloadCoordinator,
   type DownloadCoordinatorEffects,
@@ -337,6 +338,8 @@ function matches(scope: LibrarySelectionScope, selection: LibrarySelection) {
 
 export interface FixtureLibraryServiceOptions {
   log: LibraryLog;
+  /** A focused fixture's production-shaped content port; ordinary fixtures keep the in-page authority below. */
+  content?: ContentServiceClientPort;
   device?: string;
   /** Enables the administrative queries Settings owns without exposing a production session/log escape hatch. */
   libraryKey?: string;
@@ -376,6 +379,7 @@ export interface FixtureLibraryServiceOptions {
  */
 export function fixtureLibraryService({
   log,
+  content = fixtureContentService(),
   device = 'aaaaaaaaaaaaaaaa',
   libraryKey,
   effects = {},
@@ -476,12 +480,7 @@ export function fixtureLibraryService({
   });
   // RoutedLibrary owns this observation in production; fixtures render the model directly.
   void model.ready.catch(() => {});
-  const session = legacyProfileSession(
-    libraryKey ?? 'fixture',
-    false,
-    model,
-    fixtureContentService(),
-  );
+  const session = legacyProfileSession(libraryKey ?? 'fixture', false, model, content);
   return {
     model,
     session,
