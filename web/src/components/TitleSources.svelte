@@ -178,37 +178,12 @@
     const policy = import('../lib/sourceDiscoveryPolicy');
     const current = (request: number) =>
       generation === sourceGeneration && request === requestGeneration;
-    const recovery = async (facts: { online_restored?: boolean; retry_after_ms?: number }) => {
-      if (!recoverable || attempt > 0 || retryTimer) return;
-      const { sourceWait } = await policy;
-      if (generation !== sourceGeneration || !recoverable || attempt > 0) return;
-      const decision = await sourceWait({
-        elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
-        attempt,
-        ...facts,
-      });
-      if (decision.retry_in_ms === null) return;
-      retryTimer = setTimeout(() => {
-        retryTimer = undefined;
-        attempt = 1;
-        void run(true);
-      }, decision.retry_in_ms);
-    };
-    const advanceWait = async (request: number) => {
-      const { sourceWait } = await policy;
+    const stop = (
+      request: number,
+      kind: 'timeout' | 'other',
+      durationBucket: 'fast' | 'deadline',
+    ) => {
       if (!current(request)) return;
-      const decision = await sourceWait({
-        elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
-        attempt,
-      });
-      if (!current(request)) return;
-      waitPhase = decision.phase;
-      if (decision.next_ms !== null) {
-        waitTimer = setTimeout(() => void advanceWait(request), decision.next_ms);
-        return;
-      }
-      // The page owns the terminal deadline. Cancelling the query sends an exact request-id cancel to the library
-      // Worker, which in turn aborts the provider fetch. Keep any admitted rows while the viewer decides to Retry.
       requestGeneration++;
       controller?.abort();
       controller = undefined;
@@ -217,14 +192,63 @@
       recoverable = true;
       reportClientFailure({
         operation: 'source_lookup',
-        kind: 'timeout',
+        kind,
         outcome: 'terminal',
         route: 'content_service',
-        durationBucket: 'deadline',
+        durationBucket,
         priorList: Boolean(sources?.length),
         generation,
         attempt,
       });
+    };
+    const recovery = async (facts: { online_restored?: boolean; retry_after_ms?: number }) => {
+      if (!recoverable || attempt > 0 || retryTimer) return;
+      let decision: Awaited<
+        ReturnType<(typeof import('../lib/sourceDiscoveryPolicy'))['sourceWait']>
+      >;
+      try {
+        const { sourceWait } = await policy;
+        decision = await sourceWait({
+          elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+          attempt,
+          ...facts,
+        });
+      } catch {
+        // A document being replaced can cancel WebKit's module request. The owned lookup teardown handles that
+        // document; a current document keeps its visible manual Retry rather than leaking an unhandled rejection.
+        return;
+      }
+      if (generation !== sourceGeneration || !recoverable || attempt > 0) return;
+      if (decision.retry_in_ms === null) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        attempt = 1;
+        void run(true);
+      }, decision.retry_in_ms);
+    };
+    const advanceWait = async (request: number) => {
+      let decision: Awaited<
+        ReturnType<(typeof import('../lib/sourceDiscoveryPolicy'))['sourceWait']>
+      >;
+      try {
+        const { sourceWait } = await policy;
+        decision = await sourceWait({
+          elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+          attempt,
+        });
+      } catch {
+        stop(request, 'other', 'fast');
+        return;
+      }
+      if (!current(request)) return;
+      waitPhase = decision.phase;
+      if (decision.next_ms !== null) {
+        waitTimer = setTimeout(() => void advanceWait(request), decision.next_ms);
+        return;
+      }
+      // The page owns the terminal deadline. Cancelling the query sends an exact request-id cancel to the library
+      // Worker, which in turn aborts the provider fetch. Keep any admitted rows while the viewer decides to Retry.
+      stop(request, 'timeout', 'deadline');
     };
     const run = async (automatic = false) => {
       if (generation !== sourceGeneration) return;
