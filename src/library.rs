@@ -1967,12 +1967,7 @@ async fn batch(
         Ok(Err(error)) => return internal("library write", v3_io(error)),
         Err(error) => return internal("library write task", io::Error::other(error)),
     };
-    let protocol_store = Arc::clone(&store);
-    let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
-        Ok(Ok(protocol)) => protocol,
-        Ok(Err(error)) => return internal("library protocol", v3_io(error)),
-        Err(error) => return internal("library protocol task", io::Error::other(error)),
-    };
+    let protocol = &result.protocol;
     if !result.applied.is_empty() {
         state.library_holds.wake(id);
         maintain_v3(state, id, store).await;
@@ -1999,11 +1994,12 @@ async fn batch(
         })
         .collect();
     state.metrics.record_library_writes(applied.len(), conflicts.len());
-    json_reply(
+    let response = json_reply(
         StatusCode::OK,
         &json!({ "head": result.head, "applied": applied, "conflicts": conflicts,
             "generation": full_generation(state, &protocol.generation) }),
-    )
+    );
+    with_wire_headers(state, response, Some(protocol))
 }
 
 #[derive(Serialize)]
@@ -3039,6 +3035,68 @@ mod tests {
         eprintln!("BENCH {} B batch parse {:?}", body.len(), started.elapsed() / 50);
     }
 
+    /// Manual matched release probe for #945. Kept ignored: every sample includes the real durable library and
+    /// protocol-index commits, and is therefore intentionally unsuitable for CI timing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn protocol_outcome_batch_benchmark() {
+        async fn update(h: &Harness, keys: &[String], bases: &[u64], bytes: usize) -> Vec<u64> {
+            let writes: Vec<_> = keys
+                .iter()
+                .zip(bases)
+                .enumerate()
+                .map(|(n, (key, base))| {
+                    json!({"k": key, "base": base, "v": format!("{n:08x}").repeat(bytes.div_ceil(8))})
+                })
+                .collect();
+            let (status, body) = batch(h, TOKEN, json!(writes)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["applied"].as_array().unwrap().iter().map(|row| row["seq"].as_u64().unwrap()).collect()
+        }
+
+        let small = Harness::new();
+        let one = vec![K1.to_owned()];
+        let first_started = std::time::Instant::now();
+        let mut one_base = update(&small, &one, &[0], 32).await;
+        let first = first_started.elapsed();
+        let started = std::time::Instant::now();
+        for _ in 0..30 {
+            one_base = update(&small, &one, &one_base, 32).await;
+        }
+        let warm_small = started.elapsed() / 30;
+        assert_eq!(one_base.len(), 1);
+
+        let large = Harness::new();
+        let keys: Vec<_> = (0..8).map(|n| format!("{n:016x}")).collect();
+        let mut bases = vec![0; keys.len()];
+        bases = update(&large, &keys, &bases, 16 << 10).await;
+        let started = std::time::Instant::now();
+        for _ in 0..12 {
+            bases = update(&large, &keys, &bases, 16 << 10).await;
+        }
+        let warm_large = started.elapsed() / 12;
+        assert_eq!(bases.len(), 8);
+
+        let contended = Harness::new();
+        let keys: Vec<_> = (10..14).map(|n| format!("{n:016x}")).collect();
+        let mut bases = update(&contended, &keys, &[0; 4], 256).await;
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            let (a, b, c, d) = tokio::join!(
+                update(&contended, &keys[0..1], &bases[0..1], 256),
+                update(&contended, &keys[1..2], &bases[1..2], 256),
+                update(&contended, &keys[2..3], &bases[2..3], 256),
+                update(&contended, &keys[3..4], &bases[3..4], 256),
+            );
+            bases = vec![a[0], b[0], c[0], d[0]];
+        }
+        let contended_each = started.elapsed() / 40;
+        assert_eq!(bases.len(), 4);
+        eprintln!(
+            "ISSUE945 first={first:?} warm_small={warm_small:?} warm_large={warm_large:?} contended_each={contended_each:?}"
+        );
+    }
+
     /// The length a value is checked at is the length `serde_json` writes it at, for every byte that escapes.
     #[test]
     fn a_value_is_measured_as_it_is_stored() {
@@ -3353,6 +3411,7 @@ mod tests {
         assert_eq!(first.status(), StatusCode::OK);
         let generation = first.headers()[super::GENERATION_HEADER].to_str().unwrap().to_owned();
         assert_ne!(generation, "0");
+        assert_eq!(body_json(first).await["generation"], generation);
 
         let stale = h
             .send(
