@@ -15,14 +15,12 @@ const DAY = 86_400_000;
 export const RETENTION = 30 * DAY;
 /** The most answers kept: a row or chart page is some kilobytes, so the store stays at a few megabytes. */
 export const MOST_KEPT = 300;
-const PRUNE_BATCH = 50;
-/** A tab kept open prunes again after this many answers kept, not only once per Worker. */
-const PRUNE_EVERY = 100;
+/** One prune per Worker drops at most this many: a session keeps only first pages, so it cannot outgrow it far. */
+const PRUNE_BATCH = 100;
 
+/** Only an unrestricted profile's answers are kept, and those carry no `X-Den-Policy` to check. */
 export interface KeptAtlasAnswer {
   body: string;
-  /** Atlas's `X-Den-Policy`, which the reader checks against the policy it asked under. */
-  policy: string | null;
   fetchedAt: number;
 }
 
@@ -57,11 +55,7 @@ export function keepingAtlasFetch(
   now: () => number = Date.now,
 ): typeof fetch {
   if (!store) return network;
-  let keptSince: number | undefined;
-  const prune = () => {
-    keptSince = 0;
-    void store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH).catch(() => undefined);
-  };
+  let pruned = false;
   return async (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const method = (
@@ -69,17 +63,17 @@ export function keepingAtlasFetch(
     ).toUpperCase();
     if (method !== 'GET' || !KEPT_ROUTE.test(href.split(/[?#]/)[0]!) || LATER_PAGE.test(href))
       return network(input, init);
-    if (keptSince === undefined) prune();
+    if (!pruned) {
+      pruned = true;
+      void store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH).catch(() => undefined);
+    }
     const kept = async (failed: () => Response | Promise<Response>): Promise<Response> => {
       const answer = await store.get(href).catch(() => undefined);
       if (!answer || now() - answer.fetchedAt >= RETENTION) return failed();
       keptAnswerServed('atlas');
-      const headers = new Headers({
-        'content-type': 'application/json',
-        'x-den-kept': String(answer.fetchedAt),
+      return new Response(answer.body, {
+        headers: { 'content-type': 'application/json', 'x-den-kept': String(answer.fetchedAt) },
       });
-      if (answer.policy) headers.set('x-den-policy', answer.policy);
-      return new Response(answer.body, { status: 200, headers });
     };
     let response: Response;
     try {
@@ -91,14 +85,10 @@ export function keepingAtlasFetch(
     if (response.status >= 500) return kept(() => response);
     if (response.ok && response.headers.get('content-type')?.includes('json')) {
       providerAnswered('atlas');
-      const policy = response.headers.get('x-den-policy');
       void response
         .clone()
         .text()
-        .then((body) => store.put(href, { body, policy, fetchedAt: now() }))
-        .then(() => {
-          if (keptSince !== undefined && ++keptSince >= PRUNE_EVERY) prune();
-        })
+        .then((body) => store.put(href, { body, fetchedAt: now() }))
         .catch(() => undefined);
     }
     return response;

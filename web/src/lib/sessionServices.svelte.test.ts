@@ -222,10 +222,11 @@ describe('SessionServices', () => {
   });
 
   /**
-   * den-edge down: `/routes` says nothing and atlas's manifest cannot be reached. Neither says atlas is gone, so the
-   * address the last visit found stays configured and the content Worker can hand out what it kept of atlas.
+   * den-edge down: `/routes` comes from Cloudflare's copy (so the live table wins over the retained hint) and atlas's
+   * manifest cannot be reached. That does not say atlas is gone, so the address the last visit found is configured and
+   * the content Worker can hand out what it kept of atlas.
    */
-  it('keeps the retained table and atlas while den-edge and atlas cannot be reached', async () => {
+  it('keeps the retained atlas while atlas cannot be reached', async () => {
     atlasUnreachable = true;
     discoveries = 0;
     const services = new SessionServices(
@@ -239,7 +240,7 @@ describe('SessionServices', () => {
         }),
       }),
       content,
-      async () => ({}),
+      async () => ({ atlas: [{ url: '/live' }] }),
     );
     services.configure(runtime());
     await vi.waitFor(() => expect(discoveries).toBe(1));
@@ -247,7 +248,6 @@ describe('SessionServices', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(services.atlas).toBe('/retained-atlas');
     expect(services.atlasReady).toBe(true);
-    expect(services.routes).toEqual({ atlas: [{ url: '/retained' }] });
     services.stop();
   });
 

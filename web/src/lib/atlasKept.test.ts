@@ -25,8 +25,7 @@ describe('keepingAtlasFetch', () => {
   it('hands out the last answer while atlas cannot be reached, and says so', async () => {
     const store = memoryStore();
     let now = 1_000;
-    let answer: () => Promise<Response> = async () =>
-      json({ titles: [{ id: 1 }] }, { 'x-den-policy': 'p1' });
+    let answer: () => Promise<Response> = async () => json({ titles: [{ id: 1 }] });
     const fetchImpl = keepingAtlasFetch(
       () => answer(),
       store,
@@ -37,7 +36,7 @@ describe('keepingAtlasFetch', () => {
 
     expect(await (await fetchImpl(ROW)).json()).toEqual({ titles: [{ id: 1 }] });
     await settle();
-    expect(store.entries.get(ROW)).toMatchObject({ policy: 'p1', fetchedAt: 1_000 });
+    expect(store.entries.get(ROW)).toMatchObject({ fetchedAt: 1_000 });
 
     // Cloudflare with no copy of its own, the origin down.
     now = 5_000;
@@ -45,7 +44,6 @@ describe('keepingAtlasFetch', () => {
     const kept = await fetchImpl(ROW);
     expect(kept.status).toBe(200);
     expect(kept.headers.get('x-den-kept')).toBe('1000');
-    expect(kept.headers.get('x-den-policy')).toBe('p1');
     expect(await kept.json()).toEqual({ titles: [{ id: 1 }] });
 
     // No connection at all.

@@ -101,6 +101,12 @@ const TMDB = 'https://api.themoviedb.org/3';
 const MAX_ATLAS_TITLE_CURSORS = 64;
 /** The TV's repeat-search cache size (`SearchResultsCache`). */
 const SEARCH_CACHE_LIMIT = 40;
+/**
+ * What the page says while answers kept here stand in (`keptAnswers`): sent with the `kept` status and translated by
+ * the page from its phrase catalogs, so its startup graph carries none of it.
+ */
+const KEPT_NOTICE =
+  'Den’s server can’t be reached. You’re seeing what this device saved, so some titles may be missing or out of date.';
 
 /**
  * Row and chart answers whose poster fill den-edge did not answer (a `429` or a failure). They are handed to whoever
@@ -373,7 +379,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     });
     this.#stopKept = onKeptAnswers((provider, kept) => {
       this.#kept = kept ? provider : null;
-      for (const listener of this.#statusListeners) listener({ kind: 'kept', provider, kept });
+      for (const listener of this.#statusListeners)
+        listener({ kind: 'kept', provider, notice: kept ? KEPT_NOTICE : null });
     });
     // The page holds the guest's grants and says when one ends; a `grant_expired` met here is told back to it.
     (options.onGrantEnded ?? onGrantEnded)((gid) => {
@@ -384,7 +391,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   listen(listener: (status: ContentServiceStatusValue) => void): () => void {
     this.#statusListeners.add(listener);
     // A page that connects while kept answers stand in (another tab on a shared Worker met the failure) is told too.
-    if (this.#kept) listener({ kind: 'kept', provider: this.#kept, kept: true });
+    if (this.#kept) listener({ kind: 'kept', provider: this.#kept, notice: KEPT_NOTICE });
     return () => this.#statusListeners.delete(listener);
   }
 

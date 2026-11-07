@@ -71,7 +71,7 @@ async function scrollToAtlasRow(page) {
   await atlasRow(page).scrollIntoViewIfNeeded();
 }
 const keptNotice = (page) =>
-  page.getByRole('status').filter({ hasText: 'Den’s server can’t be reached right now' });
+  page.getByRole('alert').filter({ hasText: 'Den’s server can’t be reached' });
 
 test('a returning household opens Home from what it kept while the origin is down, and says so', async () => {
   const browser = await chromium.launch({

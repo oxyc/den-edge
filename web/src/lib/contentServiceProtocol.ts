@@ -397,10 +397,11 @@ export type ContentServiceStatusValue =
   /** den-edge answered one of the Worker's calls for this grant with `grant_expired`. */
   | { kind: 'grant-ended'; gid: string }
   /**
-   * `kept`: answers this browser kept are standing in for `provider`, which den-edge could not reach (`keptAnswers`);
-   * false once it answers again.
+   * Answers this browser kept are standing in for `provider`, which den-edge could not reach (`keptAnswers`): `notice`
+   * is the English copy that says so, which the page translates; null once a provider answers again. The copy lives in
+   * the Worker so the page's startup graph carries none of it.
    */
-  | { kind: 'kept'; provider: ContentProvider; kept: boolean };
+  | { kind: 'kept'; provider: ContentProvider; notice: string | null };
 
 interface ContentClientMessage {
   protocol: ContentServiceProtocol;

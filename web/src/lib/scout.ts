@@ -145,33 +145,18 @@ async function hasPlayback(base: string, fetchImpl: typeof fetch): Promise<boole
   }
 }
 
-/**
- * The first of the library's plugins that is the service `want` names, confirmed by its manifest. `unreachable` hears
- * each manifest that could not be reached at all.
- */
+/** The first of the library's plugins that is the service `want` names, confirmed by its manifest. */
 export async function findAddon(
   plugins: string[],
   routes: Routes,
   want: { name: string; id: string | readonly string[]; path: string },
   fetchImpl: typeof fetch = relayFetch,
-  unreachable?: () => void,
 ): Promise<Addon | null> {
   for (const url of plugins) {
     const addon = place(url, routes, want);
-    if (!addon) continue;
-    const manifest = await readManifest(`${addon.base}${MANIFEST}`, want.id, fetchImpl);
-    if (manifest) return addon;
-    if (manifest === undefined) unreachable?.();
+    if (addon && (await readManifest(`${addon.base}${MANIFEST}`, want.id, fetchImpl))) return addon;
   }
   return null;
-}
-
-/** No candidate for a service answered at all: nobody can say whether it is there (den-edge or the box down). */
-export class AddonUnreachable extends Error {
-  constructor(service: string) {
-    super(`${service} could not be reached`);
-    this.name = 'AddonUnreachable';
-  }
 }
 
 /**
@@ -199,21 +184,18 @@ export async function findScout(
 }
 
 /**
- * atlas: a plugin, or — where this origin serves one — the box's own, which the library need not list. Rejects with
- * `AddonUnreachable` when none was found and a candidate could not be reached, rather than saying there is none.
+ * atlas: a plugin, or — where this origin serves one — the box's own, which the library need not list. Undefined, not
+ * none, when this origin could not be reached at all: that says nothing about whether atlas is there.
  */
 export async function findAtlas(
   plugins: string[],
   routes: Routes,
   fetchImpl: typeof fetch = relayFetch,
-): Promise<Addon | null> {
-  let unreachable = false;
-  const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl, () => (unreachable = true));
+): Promise<Addon | null | undefined> {
+  const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl);
   if (plugin) return plugin;
   const here = await readManifest(`${ATLAS.path}${MANIFEST}`, ATLAS.id, fetchImpl);
-  if (here) return { install: ATLAS.path, base: ATLAS.path };
-  if (here === undefined || unreachable) throw new AddonUnreachable('atlas');
-  return null;
+  return here ? { install: ATLAS.path, base: ATLAS.path } : here;
 }
 
 /**

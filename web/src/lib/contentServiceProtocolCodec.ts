@@ -691,9 +691,9 @@ function status(value: unknown): value is ContentServiceStatusValue {
   if (value.kind === 'grant-ended') return exact(value, ['kind', 'gid']) && grantId(value.gid);
   if (value.kind === 'kept')
     return (
-      exact(value, ['kind', 'provider', 'kept']) &&
+      exact(value, ['kind', 'provider', 'notice']) &&
       provider(value.provider) &&
-      typeof value.kept === 'boolean'
+      (value.notice === null || text(value.notice, 512))
     );
   return (
     value.kind === 'unavailable' &&

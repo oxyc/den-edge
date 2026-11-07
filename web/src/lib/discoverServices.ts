@@ -1,4 +1,4 @@
-import { AddonUnreachable, findAtlas, findReel, findScout, type Addon } from './scout';
+import { findAtlas, findReel, findScout, type Addon } from './scout';
 import { findRemux } from './remuxRoute';
 import type { Routes } from './routes';
 
@@ -30,14 +30,7 @@ export function discoverServices(
     );
   };
   if (publish.scout) accept(findScout(installed, routes), publish.scout);
-  void findAtlas(installed, routes).then(
-    (value) => {
-      if (current) publish.atlas(value);
-    },
-    (error: unknown) => {
-      if (current) publish.atlas(error instanceof AddonUnreachable ? undefined : null);
-    },
-  );
+  accept(findAtlas(installed, routes), publish.atlas);
   accept(findReel(installed, routes), publish.reel);
   if (publish.remux) accept(findRemux(routes.remux ?? []), publish.remux);
   return () => {
