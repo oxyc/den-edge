@@ -1450,7 +1450,7 @@
       const loadingValue = subtitleChoice;
       const loadingTrack = selectedSubtitle(loadingSession, loadingValue);
       if (
-        loadingTrack?.source === 'opensubtitles' &&
+        (loadingTrack?.delivery === 'sidecar' || loadingTrack?.source === 'opensubtitles') &&
         loadingSession.loadExternalSubtitle &&
         !loadingSession.externalSubtitles?.some((track) => track.value === loadingValue)
       ) {
@@ -3471,7 +3471,7 @@
     if (
       next &&
       current &&
-      requested?.source === 'opensubtitles' &&
+      (requested?.delivery === 'sidecar' || requested?.source === 'opensubtitles') &&
       current.loadExternalSubtitle &&
       !current.externalSubtitles?.some((track) => track.value === next)
     ) {
