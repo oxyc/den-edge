@@ -42,6 +42,7 @@ const COMPACT_MIN_FREE: u64 = 2 << 20;
 const COMPACTION_BYTES: usize = 1536 * 1024;
 pub(super) const DATABASE_CACHE_BYTES: usize = 64 * 1024;
 const DATABASE_HANDLE_BYTES: usize = 112 * 1024;
+pub(super) const RESPONSE_CHUNK_BYTES: usize = 64 * 1024;
 const PREPARED_PAGE_BYTES: usize = PAGE_BYTES + 64 * 1024;
 /// Redb's measured handle/cache/mapping residency plus one worst-case exact prepared identity page.
 pub(crate) const OPEN_DATABASE_BYTES: usize = DATABASE_HANDLE_BYTES + PREPARED_PAGE_BYTES;
@@ -249,6 +250,31 @@ pub(super) struct LibrarySnapshot {
 pub(super) struct ChunkPage {
     pub chunks: Vec<Bytes>,
     pub len: usize,
+    /// Payload allocations retained by `chunks`, including the last chunk's unused capacity and their handles.
+    /// Response admission is charged against this rather than only the logical HTTP length.
+    pub retained: usize,
+}
+
+impl ChunkPage {
+    fn new(chunks: Vec<Vec<u8>>) -> Self {
+        let len = chunks.iter().map(Vec::len).sum();
+        let retained_payload = chunks.iter().map(Vec::capacity).sum::<usize>();
+        let chunks: Vec<Bytes> = chunks.into_iter().map(Bytes::from).collect();
+        let retained = retained_payload + chunks.capacity() * std::mem::size_of::<Bytes>();
+        Self { chunks, len, retained }
+    }
+}
+
+fn append_chunked(chunks: &mut Vec<Vec<u8>>, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        if chunks.last().is_none_or(|chunk| chunk.len() == RESPONSE_CHUNK_BYTES) {
+            chunks.push(Vec::with_capacity(RESPONSE_CHUNK_BYTES));
+        }
+        let chunk = chunks.last_mut().unwrap();
+        let taking = bytes.len().min(RESPONSE_CHUNK_BYTES - chunk.len());
+        chunk.extend_from_slice(&bytes[..taking]);
+        bytes = &bytes[taking..];
+    }
 }
 
 struct PreparedPage {
@@ -317,8 +343,8 @@ pub(super) trait LibraryStore: Send + Sync {
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError>;
     /// The rows below `before`, newest first: a first read that wants a library's recent rows before its oldest.
     fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError>;
-    /// The current rows of `keys` that exist, in sequence order, with the head they were read at.
-    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError>;
+    /// The selected-row HTTP representation, built directly in bounded chunks from one read transaction.
+    fn selected_chunks(&self, keys: &[String], generation: &str) -> Result<ChunkPage, StoreError>;
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage>;
     fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError>;
     #[cfg(test)]
@@ -1031,7 +1057,7 @@ impl LibraryStore for RedbLibrary {
         Ok(RangePage { entries, head, more, rows: Some(live_rows) })
     }
 
-    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
+    fn selected_chunks(&self, keys: &[String], generation: &str) -> Result<ChunkPage, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
         let head = {
@@ -1043,22 +1069,37 @@ impl LibraryStore for RedbLibrary {
             value.value()
         };
         let index = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
-        let mut entries = Vec::new();
+        let mut selected = Vec::with_capacity(keys.len());
         for key in keys {
             let Some((sequence_number, _)) =
                 index.get(key.as_str()).map_err(StoreError::redb)?.map(|value| unpacked(value.value()))
             else {
                 continue;
             };
+            // The HTTP parser already deduplicates keys. Keep this store boundary defensive so another caller
+            // cannot turn one fragment into repeated response allocations.
+            if !selected.contains(&sequence_number) {
+                selected.push(sequence_number);
+            }
+        }
+        selected.sort_unstable();
+
+        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+        let mut chunks = vec![Vec::with_capacity(RESPONSE_CHUNK_BYTES)];
+        append_chunked(&mut chunks, br#"{"entries":["#);
+        for (at, sequence_number) in selected.into_iter().enumerate() {
             let fragment = sequence
                 .get(sequence_number)
                 .map_err(StoreError::redb)?
                 .ok_or_else(|| StoreError::Invalid("v3 key points to no fragment".into()))?;
-            entries.push(self.row(sequence_number, fragment.value()));
+            if at > 0 {
+                append_chunked(&mut chunks, b",");
+            }
+            append_chunked(&mut chunks, fragment.value());
         }
-        entries.sort_by_key(|row| row.sequence);
-        Ok(RangePage { entries, head, more: false, rows: None })
+        let suffix = format!(r#"],"head":{head},"more":false,"generation":"{generation}","selected":true}}"#);
+        append_chunked(&mut chunks, suffix.as_bytes());
+        Ok(ChunkPage::new(chunks))
     }
 
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
@@ -1069,20 +1110,6 @@ impl LibraryStore for RedbLibrary {
     }
 
     fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError> {
-        const CHUNK_BYTES: usize = 64 * 1024;
-
-        fn append(chunks: &mut Vec<Vec<u8>>, mut bytes: &[u8]) {
-            while !bytes.is_empty() {
-                if chunks.last().is_none_or(|chunk| chunk.len() == CHUNK_BYTES) {
-                    chunks.push(Vec::with_capacity(CHUNK_BYTES));
-                }
-                let chunk = chunks.last_mut().unwrap();
-                let taking = bytes.len().min(CHUNK_BYTES - chunk.len());
-                chunk.extend_from_slice(&bytes[..taking]);
-                bytes = &bytes[taking..];
-            }
-        }
-
         let limit = limit.min(MAX_LIMIT);
         let mut prepared = self.prepared.lock().unwrap();
         if let Some(cached) = prepared.as_ref() {
@@ -1102,8 +1129,8 @@ impl LibraryStore for RedbLibrary {
         };
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
         let mut rows = sequence.range((Excluded(since), Unbounded)).map_err(StoreError::redb)?;
-        let mut chunks = vec![Vec::with_capacity(CHUNK_BYTES)];
-        append(&mut chunks, br#"{"entries":["#);
+        let mut chunks = vec![Vec::with_capacity(RESPONSE_CHUNK_BYTES)];
+        append_chunked(&mut chunks, br#"{"entries":["#);
         let mut entries = 0usize;
         let mut page_bytes = 128usize;
         let mut more = false;
@@ -1116,9 +1143,9 @@ impl LibraryStore for RedbLibrary {
                 break;
             }
             if entries != 0 {
-                append(&mut chunks, b",");
+                append_chunked(&mut chunks, b",");
             }
-            append(&mut chunks, fragment.value());
+            append_chunked(&mut chunks, fragment.value());
             page_bytes += cost;
             entries += 1;
         }
@@ -1126,9 +1153,8 @@ impl LibraryStore for RedbLibrary {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
         let suffix = format!(r#"],"head":{head},"more":{more},"generation":"{generation}"}}"#);
-        append(&mut chunks, suffix.as_bytes());
-        let len = chunks.iter().map(Vec::len).sum();
-        let page = ChunkPage { chunks: chunks.into_iter().map(Bytes::from).collect(), len };
+        append_chunked(&mut chunks, suffix.as_bytes());
+        let page = ChunkPage::new(chunks);
         *prepared =
             Some(PreparedPage { since, limit, generation: generation.to_owned(), page: page.clone() });
         Ok(page)
@@ -1676,8 +1702,8 @@ impl LibraryStore for StoreLease {
         self.store.range_before(before, limit)
     }
 
-    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
-        self.store.rows(keys)
+    fn selected_chunks(&self, keys: &[String], generation: &str) -> Result<ChunkPage, StoreError> {
+        self.store.selected_chunks(keys, generation)
     }
 
     fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
@@ -2589,8 +2615,24 @@ mod tests {
         assert_eq!(forwards, [2, 3, 4]);
         let back = store.range_before(4, 1).unwrap();
         assert_eq!((back.entries[0].sequence, back.more, back.rows), (3, true, Some(3)));
-        let named = store.rows(&[K3.to_owned(), K1.to_owned()]).unwrap();
-        assert_eq!(named.entries.iter().map(|row| row.sequence).collect::<Vec<_>>(), [3, 4]);
+        let named = store.selected_chunks(&[K3.to_owned(), K1.to_owned()], "generation").unwrap();
+        let named: serde_json::Value = serde_json::from_slice(
+            &named.chunks.iter().flat_map(|chunk| chunk.iter().copied()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            named["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [3, 4]
+        );
+        assert_eq!(
+            (named["generation"].as_str(), named["selected"].as_bool()),
+            (Some("generation"), Some(true))
+        );
 
         let conflict = store.apply(&[Write { key: K2.into(), base: 0, value: "lost".into() }]).unwrap();
         assert_eq!(conflict.conflicts[0].current.as_ref().unwrap().sequence, 2);

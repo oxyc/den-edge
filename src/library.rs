@@ -141,6 +141,14 @@ const ROW_OVERHEAD: usize = 192;
 const MAX_LOG_LINE: usize = 6 * (MAX_VALUE + 128) + 128;
 const MAX_CACHED_LIBRARIES: usize = 128;
 const PAGE_BYTES: usize = 512 * 1024;
+/// Before a selected read touches row payloads, reserve enough for every requested row at the wire-4 cap, the
+/// largest valid key and JSON envelope, bounded chunks, and one streaming-gzip output frame. The charge is reduced
+/// to the chunks actually retained once they are built.
+const SELECTED_ROW_RESERVATION_BYTES: usize = MAX_VALUE_V4 + 128 + 64;
+const SELECTED_RESPONSE_OVERHEAD_BYTES: usize = 4 * v3::RESPONSE_CHUNK_BYTES;
+// A fast-gzip frame can be a little larger than its incompressible input. `Vec` then rounds its backing allocation
+// up, so retain twice the input chunk while that one backpressured output frame is live.
+const GZIP_RESPONSE_FRAME_BYTES: usize = 2 * v3::RESPONSE_CHUNK_BYTES;
 /// Held `/changes?wait=` requests per library (`hold.rs`); past it a request is answered at once. A household holds
 /// one per TV and per open browser.
 pub const MAX_HELD_PER_LIBRARY: usize = 4;
@@ -894,9 +902,15 @@ pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
                 .clamp(1, MAX_LIMIT);
             let (_, gzip, identity) = crate::web::encodings(req.headers());
             let read = if let Some(keys) = query_param(&req, "keys") {
-                let keys: Vec<String> = keys.split(',').map(str::to_owned).collect();
-                if keys.len() > MAX_SELECTED_KEYS || keys.iter().any(|key| !valid_hex_id(key)) {
+                let requested: Vec<&str> = keys.split(',').collect();
+                if requested.len() > MAX_SELECTED_KEYS || requested.iter().any(|key| !valid_hex_id(key)) {
                     return json_reply(StatusCode::BAD_REQUEST, &error("invalid_keys"));
+                }
+                let mut keys: Vec<String> = Vec::with_capacity(requested.len());
+                for key in requested {
+                    if !keys.iter().any(|selected| selected.as_str() == key) {
+                        keys.push(key.to_owned());
+                    }
                 }
                 Read::Keys(keys)
             } else if let Some(before) = query_param(&req, "before").and_then(|s| s.parse().ok()) {
@@ -2017,6 +2031,34 @@ fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str, 
     body
 }
 
+fn selected_response_reservation(keys: usize) -> usize {
+    keys.checked_mul(SELECTED_ROW_RESERVATION_BYTES)
+        .and_then(|bytes| bytes.checked_add(SELECTED_RESPONSE_OVERHEAD_BYTES))
+        .expect("the selected-key limit has a bounded response reservation")
+}
+
+async fn response_permit(state: &AppState, bytes: usize) -> (tokio::sync::OwnedSemaphorePermit, bool) {
+    let bytes = u32::try_from(bytes).expect("a library response reservation fits the semaphore API");
+    let semaphore = Arc::clone(&state.library_response_bytes);
+    match Arc::clone(&semaphore).try_acquire_many_owned(bytes) {
+        Ok(permit) => (permit, false),
+        Err(tokio::sync::TryAcquireError::NoPermits) => (
+            semaphore.acquire_many_owned(bytes).await.expect("the library response budget is never closed"),
+            true,
+        ),
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            unreachable!("the library response budget is never closed")
+        }
+    }
+}
+
+fn retain_response_permits(permit: &mut tokio::sync::OwnedSemaphorePermit, bytes: usize) {
+    let excess = permit.num_permits().checked_sub(bytes).expect("the selected response fits its reservation");
+    if excess > 0 {
+        drop(permit.split(excess).expect("the selected response reservation contains its excess"));
+    }
+}
+
 struct ChunkBody {
     chunks: std::vec::IntoIter<axum::body::Bytes>,
     left: usize,
@@ -2025,6 +2067,19 @@ struct ChunkBody {
 struct HeldLibraryBody {
     body: Body,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    _accounting: crate::metrics::ByteAdmission,
+}
+
+struct GzippedLibraryBody {
+    inner: ChunkBody,
+    encoder: Option<flate2::write::GzEncoder<Vec<u8>>>,
+    slots: Arc<tokio::sync::Semaphore>,
+    waiting: Option<Pin<Box<dyn std::future::Future<Output = tokio::sync::OwnedSemaphorePermit> + Send>>>,
+    pending: Option<axum::body::Bytes>,
+    finished_inner: bool,
+    job: Option<crate::metrics::CompressionJob>,
+    input: usize,
+    output: usize,
 }
 
 impl http_body::Body for HeldLibraryBody {
@@ -2047,10 +2102,119 @@ impl http_body::Body for HeldLibraryBody {
     }
 }
 
+impl Drop for GzippedLibraryBody {
+    fn drop(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.finished(self.input, None);
+        }
+    }
+}
+
+impl http_body::Body for GzippedLibraryBody {
+    type Data = axum::body::Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::io::Write as _;
+
+        loop {
+            if self.encoder.is_none() {
+                return Poll::Ready(None);
+            }
+            if self.pending.is_none() && !self.finished_inner {
+                match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {
+                    Some(Ok(frame)) => {
+                        self.pending =
+                            Some(frame.into_data().expect("a library chunk body has only data frames"));
+                    }
+                    Some(Err(never)) => match never {},
+                    None => self.finished_inner = true,
+                }
+            }
+            let compression_permit = if let Some(waiting) = self.waiting.as_mut() {
+                let permit = std::task::ready!(waiting.as_mut().poll(cx));
+                self.waiting = None;
+                permit
+            } else {
+                match Arc::clone(&self.slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        let slots = Arc::clone(&self.slots);
+                        self.waiting = Some(Box::pin(async move {
+                            slots.acquire_owned().await.expect("the library compression pool is never closed")
+                        }));
+                        continue;
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        unreachable!("the library compression pool is never closed")
+                    }
+                }
+            };
+            if let Some(data) = self.pending.take() {
+                self.input += data.len();
+                let encoder = self.encoder.as_mut().expect("checked above");
+                if let Err(error) = encoder.write_all(&data) {
+                    self.encoder = None;
+                    let input = self.input;
+                    if let Some(job) = self.job.take() {
+                        job.finished(input, None);
+                    }
+                    return Poll::Ready(Some(Err(error)));
+                }
+                let out = std::mem::take(encoder.get_mut());
+                drop(compression_permit);
+                if !out.is_empty() {
+                    self.output += out.len();
+                    return Poll::Ready(Some(Ok(http_body::Frame::data(axum::body::Bytes::from(out)))));
+                }
+            } else {
+                debug_assert!(self.finished_inner);
+                let finished = self.encoder.take().expect("checked above").finish();
+                drop(compression_permit);
+                match finished {
+                    Ok(out) => {
+                        self.output += out.len();
+                        let (input, output) = (self.input, self.output);
+                        if let Some(job) = self.job.take() {
+                            job.finished(input, Some(output));
+                        }
+                        return Poll::Ready(Some(Ok(http_body::Frame::data(axum::body::Bytes::from(out)))));
+                    }
+                    Err(error) => {
+                        let input = self.input;
+                        if let Some(job) = self.job.take() {
+                            job.finished(input, None);
+                        }
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.encoder.is_none()
+    }
+}
+
 impl ChunkBody {
     fn new(page: v3::ChunkPage) -> Self {
         Self { chunks: page.chunks.into_iter(), left: page.len }
     }
+}
+
+fn held_library_body(
+    state: &AppState,
+    body: Body,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    waited: bool,
+) -> Body {
+    let bytes = permit.num_permits();
+    let accounting = state.metrics.byte_admitted(crate::metrics::BytePool::LibraryResponse, bytes, waited);
+    Body::new(HeldLibraryBody { body, _permit: permit, _accounting: accounting })
 }
 
 impl http_body::Body for ChunkBody {
@@ -2148,10 +2312,75 @@ async fn changes(
         }
         break (store, generation);
     };
-    let response_permit = Arc::clone(&state.library_response_bytes)
-        .acquire_many_owned(PAGE_BYTES as u32)
-        .await
-        .expect("the library response budget is never closed");
+    let reservation = match &read {
+        Read::Keys(keys) => selected_response_reservation(keys.len()),
+        _ => PAGE_BYTES,
+    };
+    // Selected rows are not touched until their worst-case retained representation has capacity. Cancellation while
+    // waiting therefore allocates no oversized response. Once built, only the chunk allocations that remain live
+    // stay charged.
+    let (mut response_permit, response_waited) = response_permit(state, reservation).await;
+    let (selected_keys, read) = match read {
+        Read::Keys(keys) => (Some(keys), None),
+        read => (None, Some(read)),
+    };
+    if let Some(keys) = selected_keys {
+        let selected_generation = generation.clone();
+        let page =
+            match tokio::task::spawn_blocking(move || store.selected_chunks(&keys, &selected_generation))
+                .await
+            {
+                Ok(Ok(page)) => page,
+                Ok(Err(reason)) => return internal("library read", v3_io(reason)),
+                Err(reason) => return internal("library read task", io::Error::other(reason)),
+            };
+        let length = page.len;
+        let compression = if gzip && length >= 1024 {
+            match Arc::clone(&state.library_compression_slots).try_acquire_owned() {
+                Ok(permit) => {
+                    drop(permit);
+                    true
+                }
+                Err(_) => {
+                    state.metrics.compression_busy();
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let retained = page.retained + usize::from(compression) * GZIP_RESPONSE_FRAME_BYTES;
+        retain_response_permits(&mut response_permit, retained);
+        let chunks = ChunkBody::new(page);
+        let body = if compression {
+            Body::new(GzippedLibraryBody {
+                inner: chunks,
+                encoder: Some(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast())),
+                slots: Arc::clone(&state.library_compression_slots),
+                waiting: None,
+                pending: None,
+                finished_inner: false,
+                job: Some(state.metrics.compression_started()),
+                input: 0,
+                output: 0,
+            })
+        } else {
+            Body::new(chunks)
+        };
+        let body = held_library_body(state, body, response_permit, response_waited);
+        let mut response = raw_json(StatusCode::OK, body, true);
+        if compression {
+            response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+        } else {
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
+            );
+        }
+        return response;
+    }
+    let Some(read) = read else { unreachable!("a selected read returned above") };
     if !gzip && matches!(read, Read::Since(_)) {
         let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
             page
@@ -2164,8 +2393,8 @@ async fn changes(
         };
         let length = page.len;
         let body = Body::new(ChunkBody::new(page));
-        let mut response =
-            raw_json(StatusCode::OK, Body::new(HeldLibraryBody { body, _permit: response_permit }), true);
+        let body = held_library_body(state, body, response_permit, response_waited);
+        let mut response = raw_json(StatusCode::OK, body, true);
         response.headers_mut().insert(
             header::CONTENT_LENGTH,
             HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
@@ -2176,12 +2405,12 @@ async fn changes(
     let marker = match read {
         Read::Since(_) => "",
         Read::Before(_) => r#","order":"desc""#,
-        Read::Keys(_) => r#","selected":true"#,
+        Read::Keys(_) => unreachable!("selected reads return through the chunked path"),
     };
     let page = match tokio::task::spawn_blocking(move || match read {
         Read::Since(since) => store.range(since, limit),
         Read::Before(before) => store.range_before(before, limit),
-        Read::Keys(keys) => store.rows(&keys),
+        Read::Keys(_) => unreachable!("selected reads return through the chunked path"),
     })
     .await
     {
@@ -2211,11 +2440,8 @@ async fn changes(
             match compressed {
                 Ok((_, Some(compressed))) => {
                     let body = Body::from(compressed);
-                    let mut resp = raw_json(
-                        StatusCode::OK,
-                        Body::new(HeldLibraryBody { body, _permit: response_permit }),
-                        true,
-                    );
+                    let body = held_library_body(state, body, response_permit, response_waited);
+                    let mut resp = raw_json(StatusCode::OK, body, true);
                     resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                     resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
                     return resp;
@@ -2231,7 +2457,8 @@ async fn changes(
         }
     }
     let body = Body::from(body);
-    raw_json(StatusCode::OK, Body::new(HeldLibraryBody { body, _permit: response_permit }), true)
+    let body = held_library_body(state, body, response_permit, response_waited);
+    raw_json(StatusCode::OK, body, true)
 }
 
 /// A sync page gzipped, when that is worth the bytes. The rows are ciphertext under random nonces and nothing of the
@@ -3771,6 +3998,10 @@ mod tests {
             "the current value"
         );
         assert_eq!((page["selected"].clone(), page["more"].clone()), (json!(true), json!(false)));
+        let (_, repeated) = changes(&h, TOKEN, &format!("?keys={K1},{K1},{K2}")).await;
+        let repeated = repeated["entries"].as_array().unwrap();
+        assert_eq!(repeated.len(), 2, "a repeated key is returned once");
+        assert_eq!((repeated[0]["k"].clone(), repeated[1]["k"].clone()), (json!(K2), json!(K1)));
         assert_eq!(changes(&h, TOKEN, "?keys=not-hex").await.0, StatusCode::BAD_REQUEST);
         let many = vec!["a".repeat(64); super::MAX_SELECTED_KEYS + 1].join(",");
         assert_eq!(changes(&h, TOKEN, &format!("?keys={many}")).await.0, StatusCode::BAD_REQUEST);
@@ -4434,7 +4665,110 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(h.state.library_response_bytes.available_permits(), before - super::PAGE_BYTES);
+        assert!(h.state.metrics.render().contains(&format!(
+            r#"den_edge_byte_admission_used_bytes{{pool="library_response"}} {}"#,
+            super::PAGE_BYTES
+        )));
         drop(response);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="library_response"} 0"#));
+    }
+
+    #[tokio::test]
+    async fn selected_reads_are_deduplicated_chunked_and_charged_while_their_bodies_live() {
+        let h = Harness::new();
+        let keys: Vec<String> = (0..super::MAX_ROWS).map(|i| format!("{i:016x}")).collect();
+        let mut generation = "0".to_owned();
+        for chunk in keys.chunks(4) {
+            let writes: Vec<_> = chunk
+                .iter()
+                .map(|key| json!({ "k": key, "base": 0, "v": "a".repeat(super::MAX_VALUE_V4) }))
+                .collect();
+            let response =
+                wired(&h, &format!("{LIB}/batch"), "4", &generation, json!({ "writes": writes })).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            generation = generation_of(&response);
+        }
+        let selected = format!("/lib/{LIB}/changes?keys={}", keys.join(","));
+        let headers = [
+            ("x-den-library-token", TOKEN),
+            (super::WIRE_HEADER, "4"),
+            (super::GENERATION_HEADER, generation.as_str()),
+            ("accept-encoding", "identity"),
+        ];
+        let before = h.state.library_response_bytes.available_permits();
+        let response = h.send("GET", &selected, None, &headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let length: usize =
+            response.headers()[axum::http::header::CONTENT_LENGTH].to_str().unwrap().parse().unwrap();
+        let selected_charge = before - h.state.library_response_bytes.available_permits();
+        assert!(selected_charge >= length, "{selected_charge} charged for {length} response bytes");
+        assert!(selected_charge > super::PAGE_BYTES, "maximum selected rows are not a range page");
+
+        let range = h.send("GET", &format!("/lib/{LIB}/changes?since=0&limit=1"), None, &headers).await;
+        assert_eq!(
+            h.state.library_response_bytes.available_permits(),
+            before - selected_charge - super::PAGE_BYTES,
+            "selected and range bodies share the byte pool"
+        );
+        drop(range);
+        drop(response);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+
+        let repeated_keys =
+            std::iter::repeat_n(keys[0].as_str(), super::MAX_SELECTED_KEYS).collect::<Vec<_>>().join(",");
+        let repeated =
+            h.send("GET", &format!("/lib/{LIB}/changes?keys={repeated_keys}"), None, &headers).await;
+        let repeated_charge = before - h.state.library_response_bytes.available_permits();
+        assert!(repeated_charge < super::PAGE_BYTES, "one repeated row retained {repeated_charge} bytes");
+        let repeated = body_json(repeated).await;
+        assert_eq!(repeated["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+
+        let mut gzip_headers = headers;
+        gzip_headers[3] = ("accept-encoding", "gzip");
+        let zipped = h.send("GET", &selected, None, &gzip_headers).await;
+        assert_eq!(zipped.headers()[axum::http::header::CONTENT_ENCODING], "gzip");
+        let gzip_charge = before - h.state.library_response_bytes.available_permits();
+        assert!(gzip_charge >= selected_charge, "streaming gzip keeps a bounded output-frame allowance");
+        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut text).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["entries"].as_array().unwrap().len(),
+            keys.len()
+        );
+
+        let dropped = h.send("GET", &selected, None, &gzip_headers).await;
+        assert!(h.state.library_response_bytes.available_permits() < before);
+        assert_eq!(
+            h.state.library_compression_slots.available_permits(),
+            super::COMPRESSION_JOBS,
+            "a slow selected response does not monopolize a compression worker"
+        );
+        drop(dropped);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+        assert_eq!(h.state.library_compression_slots.available_permits(), super::COMPRESSION_JOBS);
+
+        let held =
+            Arc::clone(&h.state.library_response_bytes).acquire_many_owned(before as u32).await.unwrap();
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            h.send("GET", &selected, None, &headers),
+        )
+        .await;
+        assert!(blocked.is_err(), "selected materialization waits for its worst-case response capacity");
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="library_response"} 0"#));
+        drop(held);
         assert_eq!(h.state.library_response_bytes.available_permits(), before);
     }
 

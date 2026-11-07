@@ -87,10 +87,10 @@ struct MediaAdmissionState {
 
 #[derive(Default)]
 struct ByteAdmissionState {
-    active: [usize; 3],
-    high_water: [usize; 3],
-    waited: [u64; 3],
-    refused: [u64; 3],
+    active: [usize; 4],
+    high_water: [usize; 4],
+    waited: [u64; 4],
+    refused: [u64; 4],
 }
 
 #[derive(Default)]
@@ -116,10 +116,12 @@ pub enum BytePool {
     RelayCollect = 0,
     TmdbDerived = 1,
     TitleObservation = 2,
+    LibraryResponse = 3,
 }
 
 impl BytePool {
-    const LABELS: [&'static str; 3] = ["relay_collect", "tmdb_derived", "title_observation"];
+    const LABELS: [&'static str; 4] =
+        ["relay_collect", "tmdb_derived", "title_observation", "library_response"];
 }
 
 pub struct ByteAdmission {
@@ -988,6 +990,7 @@ mod tests {
         let rendered = Metrics::default().render();
         for row in [
             r#"den_edge_byte_admission_used_bytes{pool="relay_collect"} 0"#,
+            r#"den_edge_byte_admission_used_bytes{pool="library_response"} 0"#,
             r#"den_edge_byte_admission_refused_total{pool="tmdb_derived"} 0"#,
             r#"den_edge_stream_retained_bytes{class="addon"} 0"#,
             r#"den_edge_stream_terminated_total{class="media",reason="receiver_idle"} 0"#,
