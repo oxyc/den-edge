@@ -47,6 +47,7 @@ import {
   noteNarrowEdit,
 } from './libraryStartupMetrics';
 import type { DeferredDelivery } from './log';
+import { coherentLibraryGeneration } from './libraryPage';
 import { isRetainedServices } from './libraryServiceProtocolCodec';
 import { ensureSyncPolicy } from './syncLoader';
 import {
@@ -943,12 +944,19 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           await this.#promote(`reconcile:${response.status}`);
           return;
         }
-        const page = (await response.json()) as {
+        const raw = (await response.json()) as {
           generation?: unknown;
           head?: unknown;
           entries?: unknown;
           more?: unknown;
         };
+        const generation = coherentLibraryGeneration(response, raw.generation);
+        if (!generation) {
+          await this.#promote('reconcile:generation');
+          return;
+        }
+        raw.generation = generation;
+        const page = raw;
         const unchanged =
           page.generation === identity.generation &&
           page.head === identity.head &&
@@ -1046,7 +1054,11 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         },
       );
       if (!response.ok) return false;
-      page = (await response.json()) as typeof page;
+      const next = (await response.json()) as typeof page;
+      const generation = coherentLibraryGeneration(response, next.generation);
+      if (!generation) return false;
+      next.generation = generation;
+      page = next;
     }
 
     const manifest = await this.factStore.manifest();
@@ -1480,6 +1492,7 @@ class FactImport {
   /** A changes page whose every entry `accept`s its sequence, or null for any answer that is not one. */
   async page(query: string, generation: string | undefined, accept: (seq: number) => boolean) {
     let body: Partial<Record<keyof ChangesPage, unknown>> | null;
+    let pageGeneration: string | null;
     try {
       const response = await this.fetchImpl(`/lib/${this.keys.id}/changes?${query}`, {
         signal: this.#abort.signal,
@@ -1491,13 +1504,13 @@ class FactImport {
       });
       if (!response.ok) return null;
       body = await response.json().catch(() => null);
+      pageGeneration = coherentLibraryGeneration(response, body?.generation) ?? null;
     } catch {
       return null;
     }
     if (
       !body ||
-      typeof body.generation !== 'string' ||
-      !body.generation.length ||
+      !pageGeneration ||
       !Number.isSafeInteger(body.head) ||
       typeof body.more !== 'boolean' ||
       !Array.isArray(body.entries)
@@ -1517,7 +1530,7 @@ class FactImport {
         return null;
       entries.push({ k, seq: seq as number, v });
     }
-    return { ...(body as ChangesPage), entries };
+    return { ...(body as ChangesPage), generation: pageGeneration, entries };
   }
 
   /** Registered once a page names the generation: before it, den-edge refuses it for any library that exists. */

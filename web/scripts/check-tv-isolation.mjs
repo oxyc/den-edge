@@ -166,5 +166,9 @@ if (process.argv.includes('--capture')) {
   // versus v0.271.196, only 10 bytes of it at startup. Cancellation stops obsolete provider/network work; import
   // recovery stays in lazy Settings and adds no polling. Their independently fitting graphs overlap 142 bytes past
   // the prior ceiling, so allow a quarter KiB for the reviewed combination without changing the startup limit.
-  if (coreTotalDelta > 70912) throw new Error('Browser total JS/CSS budget exceeded');
+  // Rejecting contradictory library-generation evidence before any consumer commits rows, heads or delete authority
+  // adds 273 gzip bytes to the complete graph and 114 bytes at startup versus main. It adds no request, storage or
+  // background work: one header lookup and bounded string comparison per changes page. Allow 384 bytes; the
+  // independent startup ceiling remains unchanged.
+  if (coreTotalDelta > 71296) throw new Error('Browser total JS/CSS budget exceeded');
 }

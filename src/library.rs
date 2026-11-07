@@ -949,8 +949,12 @@ pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
         ("batch" | "changes" | "member" | "" | "rewrite", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     };
-    let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
-    with_wire_headers(state, response, latest.as_ref())
+    if response.headers().contains_key(GENERATION_HEADER) {
+        response
+    } else {
+        let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
+        with_wire_headers(state, response, latest.as_ref())
+    }
 }
 
 async fn rewrite_open(
@@ -2262,7 +2266,7 @@ async fn changes(
     };
     // Registered before the head is read: a write that lands after the read must still wake the wait.
     let mut hold = hold.and_then(|hold| Some((state.library_holds.hold(id, &[id])?, hold)));
-    let (store, generation) = loop {
+    let store = loop {
         let slot = state.libraries.slot(id, state.now());
         let mut library = slot.library.lock().await;
         match authority(state, &slot, id).await {
@@ -2310,7 +2314,7 @@ async fn changes(
                 continue;
             }
         }
-        break (store, generation);
+        break store;
     };
     let reservation = match &read {
         Read::Keys(keys) => selected_response_reservation(keys.len()),
@@ -2320,20 +2324,20 @@ async fn changes(
     // waiting therefore allocates no oversized response. Once built, only the chunk allocations that remain live
     // stay charged.
     let (mut response_permit, response_waited) = response_permit(state, reservation).await;
+    let generation_prefix = state.store.generation().to_owned();
     let (selected_keys, read) = match read {
         Read::Keys(keys) => (Some(keys), None),
         read => (None, Some(read)),
     };
     if let Some(keys) = selected_keys {
-        let selected_generation = generation.clone();
-        let page =
-            match tokio::task::spawn_blocking(move || store.selected_chunks(&keys, &selected_generation))
-                .await
-            {
-                Ok(Ok(page)) => page,
-                Ok(Err(reason)) => return internal("library read", v3_io(reason)),
-                Err(reason) => return internal("library read task", io::Error::other(reason)),
-            };
+        let page = match tokio::task::spawn_blocking(move || store.selected_chunks(&keys, &generation_prefix))
+            .await
+        {
+            Ok(Ok(page)) => page,
+            Ok(Err(reason)) => return internal("library read", v3_io(reason)),
+            Err(reason) => return internal("library read task", io::Error::other(reason)),
+        };
+        let protocol = page.protocol.clone();
         let length = page.len;
         let compression = if gzip && length >= 1024 {
             match Arc::clone(&state.library_compression_slots).try_acquire_owned() {
@@ -2378,19 +2382,22 @@ async fn changes(
                 HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
             );
         }
-        return response;
+        return with_wire_headers(state, response, Some(&protocol));
     }
     let Some(read) = read else { unreachable!("a selected read returned above") };
     if !gzip && matches!(read, Read::Since(_)) {
-        let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
+        let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation_prefix) {
             page
         } else {
-            match tokio::task::spawn_blocking(move || store.range_chunks(since, limit, &generation)).await {
+            match tokio::task::spawn_blocking(move || store.range_chunks(since, limit, &generation_prefix))
+                .await
+            {
                 Ok(Ok(page)) => page,
                 Ok(Err(reason)) => return internal("library read", v3_io(reason)),
                 Err(reason) => return internal("library read task", io::Error::other(reason)),
             }
         };
+        let protocol = page.protocol.clone();
         let length = page.len;
         let body = Body::new(ChunkBody::new(page));
         let body = held_library_body(state, body, response_permit, response_waited);
@@ -2399,7 +2406,7 @@ async fn changes(
             header::CONTENT_LENGTH,
             HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
         );
-        return response;
+        return with_wire_headers(state, response, Some(&protocol));
     }
     // Named in the answer, so a client can tell the read it asked for from an older den-edge's ignoring it.
     let marker = match read {
@@ -2418,6 +2425,7 @@ async fn changes(
         Ok(Err(reason)) => return internal("library read", v3_io(reason)),
         Err(reason) => return internal("library read task", io::Error::other(reason)),
     };
+    let generation = full_generation(state, &page.protocol.generation);
     let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
     // A newest-first read also says how many rows the library holds, so a client counts its progress in rows.
     let extra = match page.rows {
@@ -2444,7 +2452,7 @@ async fn changes(
                     let mut resp = raw_json(StatusCode::OK, body, true);
                     resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                     resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-                    return resp;
+                    return with_wire_headers(state, resp, Some(&page.protocol));
                 }
                 Ok((identity, None)) => body = identity,
                 Err(error) => {
@@ -2458,7 +2466,7 @@ async fn changes(
     }
     let body = Body::from(body);
     let body = held_library_body(state, body, response_permit, response_waited);
-    raw_json(StatusCode::OK, body, true)
+    with_wire_headers(state, raw_json(StatusCode::OK, body, true), Some(&page.protocol))
 }
 
 /// A sync page gzipped, when that is worth the bytes. The rows are ciphertext under random nonces and nothing of the
@@ -4972,6 +4980,100 @@ mod tests {
         let answer = tokio::time::timeout(PROMPT, held).await.expect("the commit wakes it");
         assert_eq!(answer.status(), StatusCode::OK);
         assert_ne!(answer.headers()[super::GENERATION_HEADER].to_str().unwrap(), generation);
+    }
+
+    /// Response admission is global and asynchronous. A rewrite that commits while any read shape waits for byte
+    /// capacity must not let new rows leave under the protocol snapshot captured before that wait.
+    #[tokio::test]
+    async fn reads_delayed_by_response_capacity_return_one_rewrite_snapshot() {
+        async fn run(path: String, encoding: &'static str) {
+            let h = Harness::new();
+            let first = wired(
+                &h,
+                &format!("{LIB}/batch"),
+                "3",
+                "0",
+                json!({ "writes": [{ "k": K1, "base": 0, "v": "old" }] }),
+            )
+            .await;
+            assert_eq!(first.status(), StatusCode::OK);
+            let generation = generation_of(&first);
+            drop(first);
+
+            let available = h.state.library_response_bytes.available_permits();
+            let held = Arc::clone(&h.state.library_response_bytes)
+                .acquire_many_owned(available as u32)
+                .await
+                .unwrap();
+            let headers = [
+                ("x-den-library-token", TOKEN),
+                (super::WIRE_HEADER, "3"),
+                (super::GENERATION_HEADER, generation.as_str()),
+                ("accept-encoding", encoding),
+            ];
+            let mut waiting = Box::pin(h.send("GET", &path, None, &headers));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting).await.is_err(),
+                "the read reached response admission before the rewrite"
+            );
+
+            let opened = wired(&h, &format!("{LIB}/rewrite"), "4", &generation, json!({})).await;
+            assert_eq!(opened.status(), StatusCode::OK);
+            let opened = body_json(opened).await;
+            let rewrite = opened["rewrite"].as_str().unwrap();
+            let staged = wired(
+                &h,
+                &format!("{LIB}/rewrite/{rewrite}/rows"),
+                "4",
+                &generation,
+                json!({ "writes": [{ "k": K2, "v": "n".repeat(2048) }] }),
+            )
+            .await;
+            assert_eq!(staged.status(), StatusCode::OK);
+            let committed = wired(
+                &h,
+                &format!("{LIB}/rewrite/{rewrite}/commit"),
+                "4",
+                &generation,
+                json!({ "base": opened["base"], "wireMin": 4 }),
+            )
+            .await;
+            assert_eq!(committed.status(), StatusCode::OK);
+            let latest_generation = generation_of(&committed);
+            drop(committed);
+            drop(held);
+
+            let response =
+                tokio::time::timeout(PROMPT, waiting).await.expect("capacity release answers the read");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(generation_of(&response), latest_generation, "headers name the row snapshot");
+            assert_eq!(response.headers()[super::WIRE_MIN_HEADER], "4", "wire minimum is from that snapshot");
+            let compressed = response.headers().get(axum::http::header::CONTENT_ENCODING).is_some();
+            assert_eq!(compressed, encoding == "gzip", "the requested representation was exercised");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = if compressed {
+                let mut decoded = String::new();
+                std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut decoded)
+                    .unwrap();
+                serde_json::from_str::<Value>(&decoded).unwrap()
+            } else {
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            };
+            assert_eq!(body["generation"], latest_generation, "body and headers share authority");
+            assert_eq!(body["entries"][0]["k"], K2);
+            assert_eq!(body["entries"][0]["v"].as_str().map(str::len), Some(2048));
+        }
+
+        for (query, encoding) in [
+            ("since=0".to_owned(), "identity"),
+            ("since=0".to_owned(), "gzip"),
+            ("before=100".to_owned(), "identity"),
+            ("before=100".to_owned(), "gzip"),
+            (format!("keys={K2}"), "identity"),
+            (format!("keys={K2}"), "gzip"),
+        ] {
+            run(format!("/lib/{LIB}/changes?{query}"), encoding).await;
+        }
     }
 
     #[tokio::test]
