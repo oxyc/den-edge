@@ -95,9 +95,9 @@ Wasm SHA-256 is identical in both builds:
 - startup: `ae086beee41d6474f2a60abeb8677974df72af3075f5fbbfd195a58a28184a9e`
 
 The whole-change binary patch from `d75e209815621f4f634ec7ca72df56736ec67e40`, excluding this self-referential
-report file, has SHA-256 `5478ac9d95c2c661a603f083dd10dcad93c06b961ed750b04adc8ee7ee647ec0`. The
+report file, has SHA-256 `a55103dbb39acaf4f814e742a537525df8e80e16dc38058ef4ec7b69354bf75c`. The
 cumulative binary patch from the original named base, with the same exclusion, has SHA-256
-`1d70f04d0a3c7df781f986632cec7e809ad1b7ab0275a7020fd4931009aefacf`.
+`cae5b7364677d2b6df7ff25b1ef116a991d80ac12a06da121aa96623a3f12c4f`.
 
 ## Platform disposition and remaining work
 
