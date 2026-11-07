@@ -576,6 +576,12 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted 
             return Admitted::Yes { slot: lease.slot.clone() };
         }
     }
+    #[cfg(test)]
+    let gate = { crate::lock(&state.media_admission_gate).clone() };
+    #[cfg(test)]
+    if let Some(gate) = gate {
+        gate.wait().await;
+    }
     // Nothing open for this address: this is a session starting, and the only place membership is normally
     // asked. If authority changes while the asynchronous check is running, ask again before publishing a
     // reusable lease. The invalidator and this insertion use the same mutex, so neither can slip past the
@@ -627,7 +633,17 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted 
         Ok(permit) => Arc::new(Slot { permit: Mutex::new(Some(permit)), sent: 0.into() }),
         Err(_) => return Admitted::Busy,
     };
-    crate::lock(&state.media_leases).insert(
+    // Authentication and permit acquisition are asynchronous, so another request for this address can publish
+    // while they run. Join that winner instead of replacing it: every response must update the slot the live lease
+    // owns, and the unused contender permit returns when `slot` is dropped here.
+    let now = (state.clock)();
+    let mut leases = crate::lock(&state.media_leases);
+    leases.retain(|_, lease| !lease.over(now));
+    if let Some(lease) = leases.get_mut(&side(false)) {
+        lease.until = now + LEASE_IDLE_MS;
+        return Admitted::Yes { slot: lease.slot.clone() };
+    }
+    leases.insert(
         side(false),
         Lease { until: now + LEASE_IDLE_MS, slot: Some(Arc::clone(&slot)), member: None },
     );
@@ -5743,6 +5759,77 @@ mod tests {
         state.relays = crate::parse_relays(&format!("/reel=http://{addr}"));
         state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
         h
+    }
+
+    /// Two first requests from one address can both miss the lease while membership is checked. They must converge
+    /// on the one published viewer slot: otherwise one body updates a detached slot and can keep streaming after the
+    /// live lease's unrelated activity expires.
+    #[tokio::test]
+    async fn concurrent_first_guest_media_requests_share_the_published_viewer_slot() {
+        use http_body_util::BodyExt;
+
+        let mut h = reel_mid_stream(10).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.media_slots = Arc::new(tokio::sync::Semaphore::new(8));
+        state.guest_media_slots = Arc::new(tokio::sync::Semaphore::new(3));
+        let gate = Arc::new(tokio::sync::Barrier::new(3));
+        *crate::lock(&state.media_admission_gate) = Some(Arc::clone(&gate));
+        let h = Arc::new(h);
+        let ask = |path: &'static str| {
+            let h = Arc::clone(&h);
+            tokio::spawn(
+                async move { h.send("GET", path, None, &[("x-forwarded-for", "203.0.113.1")]).await },
+            )
+        };
+        let first = ask("/reel/hls/aaaaaaaaaaa.m3u8");
+        let second = ask("/reel/hls/bbbbbbbbbbb.m3u8");
+        tokio::time::timeout(std::time::Duration::from_secs(2), gate.wait()).await.unwrap();
+        crate::lock(&h.state.media_admission_gate).take();
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert_eq!((first.status(), second.status()), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(h.state.guest_media_slots.available_permits(), 2, "one address is one viewer");
+
+        let published = crate::lock(&h.state.media_leases)
+            .values()
+            .find_map(|lease| lease.slot.clone())
+            .expect("published guest lease");
+        let mut first = first.into_body();
+        let mut second = second.into_body();
+        h.advance(1);
+        assert!(first.frame().await.unwrap().unwrap().is_data());
+        assert_eq!(published.sent.load(std::sync::atomic::Ordering::Relaxed), h.state.now());
+        h.advance(1);
+        assert!(second.frame().await.unwrap().unwrap().is_data());
+        assert_eq!(
+            published.sent.load(std::sync::atomic::Ordering::Relaxed),
+            h.state.now(),
+            "both racing bodies update the slot retained by the winning lease"
+        );
+
+        let third = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        let fourth = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.3")]).await;
+        assert_eq!((third.status(), fourth.status()), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(h.state.guest_media_slots.available_permits(), 0);
+        let refused = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.4")]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE, "a fourth viewer cannot enter");
+
+        drop(first);
+        assert_eq!(
+            h.state.guest_media_slots.available_permits(),
+            0,
+            "cancelling either racing response cannot release their published viewer slot"
+        );
+        drop(second);
+        assert_eq!(
+            h.state.guest_media_slots.available_permits(),
+            0,
+            "the shared lease remains charged until its documented idle expiry"
+        );
+        drop((third, fourth));
+        h.advance(super::LEASE_IDLE_MS + 1);
+        let retried = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.4")]).await;
+        assert_eq!(retried.status(), StatusCode::OK, "idle completed bodies return viewer capacity");
     }
 
     /// An addon that sends its head and part of its body, then goes silent, is given up on at the deadline rather than
