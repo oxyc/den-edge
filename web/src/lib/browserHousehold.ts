@@ -6,6 +6,7 @@
 
 import type { LibraryCommand } from './libraryServiceProtocol';
 import type { LibraryServiceSupervisor } from './libraryServiceSupervisor';
+import { coherentLibraryGeneration } from './libraryPage';
 
 const HOUSEHOLD_KEY = 'den.household';
 const PLAN_KEY = 'den.household.plan';
@@ -195,6 +196,7 @@ export async function recheckHousehold(
     const keys = await deriveKeys(Uint8Array.from(atob(key), (c) => c.charCodeAt(0)));
     let live = 0;
     let since = 0;
+    let generation: string | null = null;
     for (;;) {
       const response = await fetchImpl(`/lib/${keys.id}/changes?since=${since}&limit=1000`, {
         cache: 'no-store',
@@ -202,9 +204,17 @@ export async function recheckHousehold(
       }).catch(() => null);
       if (!response?.ok) return `den-edge answered ${response?.status ?? 'nothing'}`;
       const page = (await response.json()) as {
+        generation?: unknown;
         entries: { seq: number; v: string | null }[];
         more: boolean;
       };
+      const pageGeneration = coherentLibraryGeneration(response, page.generation);
+      if (
+        pageGeneration === undefined ||
+        (generation && pageGeneration && generation !== pageGeneration)
+      )
+        return 'den-edge answered inconsistent generation evidence';
+      if (pageGeneration) generation ??= pageGeneration;
       for (const entry of page.entries) if (entry.v) live++;
       if (!page.more || !page.entries.length) return live;
       since = page.entries.at(-1)!.seq;
