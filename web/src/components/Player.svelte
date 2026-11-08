@@ -2893,9 +2893,8 @@
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
     const pending = showTransition('Starting Chromecast…');
-    // A TorBox stream playing here is asked for again as an ordinary managed start, not TorBox-or-nothing: Hearth
-    // leaves a release the receiver can't take as it is to Remux (`torbox_receiver_unsupported`), and a request that
-    // ruled Remux out was refused instead, so the Chromecast got nothing.
+    // A TorBox stream is cast as TorBox only: Remux is not a usable path to a Chromecast for remote households, so a
+    // receiver Hearth says can't take this release (`torbox_receiver_unsupported`) is refused and named, not remuxed.
     restart(
       { filename: session.release.filename },
       () => {
@@ -2904,7 +2903,7 @@
         route = routeBeforeCast;
         castMode = false;
       },
-      session.external ? 'ordinary' : undefined,
+      undefined,
       pending,
     );
   }

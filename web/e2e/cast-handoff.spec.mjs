@@ -342,10 +342,9 @@ test('casting keeps TorBox playing until a Chromecast is chosen, then hands that
   }
 });
 
-// Measured 2026-11-08: a TorBox stream cast as TorBox-or-nothing (`directOnly`) was refused, since Hearth leaves a
-// release the receiver can't take as it is to Remux, and the TV sat idle on "Default Media Receiver". Hearth answers
-// here as it does: refused for a TorBox-only ask, Remux (degraded, naming why) for an ordinary one.
-test('a TorBox stream the receiver can’t take as it is casts through Remux, not a refused TorBox-only ask', async () => {
+// A TorBox stream is cast as TorBox only: Den Remux is used only when the viewer picks it, since it is not a usable
+// path to a Chromecast for remote households. Hearth's refusal is named, and nothing is remuxed in its place.
+test('a TorBox stream the receiver can’t take is refused and named, never cast through Remux', async () => {
   const { browser, page, asked } = await open({
     castAnswer: (r, request) =>
       request.directOnly
@@ -364,13 +363,12 @@ test('a TorBox stream the receiver can’t take as it is casts through Remux, no
 
     await expect.poll(() => asked.managed.length).toBe(2);
     expect(asked.managed[1]).toMatchObject({ player: 'cast', filename: 'fixture.mkv' });
-    expect(asked.managed[1]).not.toHaveProperty('directOnly');
-    expect(asked.managed[1]).not.toHaveProperty('directFailed');
-    await expect.poll(() => castLoads(page)).toHaveLength(1);
-    const [load] = await castLoads(page);
-    expect(load.url).toContain(PATH);
-    // One ask for the receiver: nothing re-requested once it was answered.
+    expect(asked.managed[1]).toHaveProperty('directOnly');
+    await expect(
+      page.getByText('The Chromecast can’t play this release as TorBox streams it'),
+    ).toBeVisible();
     await page.waitForTimeout(CAST_PLAY_MS * 2);
+    expect(await castLoads(page)).toHaveLength(0);
     expect(asked.managed).toHaveLength(2);
   } finally {
     await browser.close();
