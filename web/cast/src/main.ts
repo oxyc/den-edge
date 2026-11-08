@@ -831,7 +831,11 @@ function initializeCast(): boolean {
     }
     const reason = castContext?.getCurrentSession()?.getMediaSession()?.idleReason;
     const action = castIdleAction(reason, replacingCast);
-    if (action === 'replaced') return;
+    // The receiver's own words, for the console a viewer can share: what it said is what decides the session's end.
+    console.info(
+      `[Den cast] ${JSON.stringify({ event: 'receiver-idle', reason: reason ?? null, action })}`,
+    );
+    if (action === 'replaced' || action === 'pending') return;
     replacingCast = false;
     castStarted = false;
     if (action === 'finished') {
@@ -862,6 +866,7 @@ function initializeCast(): boolean {
     } else if (state === 'SESSION_STARTED') {
       void loadCast();
     } else if (state === 'SESSION_ENDED' && castStarted) {
+      console.info(`[Den cast] ${JSON.stringify({ event: 'receiver-session-ended' })}`);
       castStarted = false;
       replacingCast = false;
       tell('den-cast', { state: 'stopped', reason: 'SESSION_ENDED' });
