@@ -744,9 +744,9 @@ for (const [engine, browserType] of [
     test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
     const { browser, page, asked } = await open(browserType, { userAgent: null });
     try {
-      await expect
-        .poll(() => page.evaluate(() => document.querySelector('.player video')?.currentTime ?? 0))
-        .toBeGreaterThan(1);
+      // As every flow here waits for playback: a freshly launched Firefox or WebKit on a busy runner takes longer than
+      // `expect.poll`'s default five seconds to start, which failed this case with the video playing at 0.6 s.
+      await playingPast(page, 1);
       await reveal(page);
       await expect(page.locator('.cast-slot')).toHaveCount(0);
       await expect(page.locator(`iframe[src^="${CAST}"]`)).toHaveCount(0);
