@@ -4484,6 +4484,9 @@
     subtitleSelectionGeneration += 1;
     subtitleLoadFailure = null;
     carryPosition();
+    // Read while the media is attached: once hls.js or AVPlay lets go, the element's duration is gone, and a direct
+    // stream's session names none (`duration: 0`), so the receipt would end with no evidence.
+    const evidence = terminalEvidence();
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
@@ -4492,7 +4495,7 @@
       avplay?.destroy();
       avplay = undefined;
     }
-    endSession(current, undefined, terminalEvidence());
+    endSession(current, undefined, evidence);
     session = null;
   }
 
@@ -4531,6 +4534,8 @@
           naturallyFinished: reachedNaturalEnd,
         });
     }
+    // Before hls.js lets go of the media (`letGo` says why).
+    const evidence = terminalEvidence();
     const stats = watcher?.stats();
     watcher?.stop();
     watcher = undefined;
@@ -4538,7 +4543,7 @@
     hls?.destroy();
     hls = undefined;
     // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
-    if (session && !casting) endSession(session, undefined, terminalEvidence());
+    if (session && !casting) endSession(session, undefined, evidence);
   }
 
   /**
