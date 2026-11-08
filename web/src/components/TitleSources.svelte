@@ -399,7 +399,9 @@
       </p>{/if}
     {#if waitPhase === 'deadline'}<p class="note" role="status">
         {i18n.phrase(
-          'Source discovery didn’t answer in time. Your previous results are still here.',
+          sources?.length
+            ? 'Source discovery didn’t answer in time. Your previous results are still here.'
+            : 'Source discovery didn’t answer in time. Try again.',
         )}
       </p>
       <Button

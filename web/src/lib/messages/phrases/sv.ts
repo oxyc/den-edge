@@ -1228,6 +1228,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Källorna tar längre tid än vanligt. Du kan fortsätta använda den här sidan.',
   'Source discovery didn’t answer in time. Your previous results are still here.':
     'Källsökningen svarade inte i tid. Dina tidigare resultat finns kvar här.',
+  'Source discovery didn’t answer in time. Try again.':
+    'Källsökningen svarade inte i tid. Försök igen.',
   'The latest check failed, so these are your previous source results.':
     'Den senaste kontrollen misslyckades, så detta är dina tidigare källresultat.',
   'The availability check is degraded, so some source details may be incomplete.':
