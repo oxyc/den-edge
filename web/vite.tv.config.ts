@@ -403,6 +403,9 @@ export default mergeConfig(
       __DEN_TV_PLATFORM__: JSON.stringify(platform),
       __DEN_TV_PACKAGED__: packaged ? 'true' : 'false',
       __DEN_TV_LEGACY_JS_CORE__: tizen3 ? 'true' : 'false',
+      // Tizen 3's JavaScript core deliberately has no assistant receipt crypto. Keep this a build contract rather
+      // than guessing from a user agent: capable WebOS and current-Tizen builds retain the ordinary bounded path.
+      __DEN_MANAGED_PLAYBACK_RECEIPTS__: tizen3 ? 'false' : 'true',
       __DEN_TV_API_ORIGIN__: JSON.stringify(apiOrigin),
       __DEN_TV_SERVICE_ORIGIN__: JSON.stringify(serviceOrigin),
       __DEN_TV_WEB_ORIGIN__: JSON.stringify(webOrigin),

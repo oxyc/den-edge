@@ -88,6 +88,7 @@
   import { Link, wasInterrupted } from '../lib/resumingLoader';
   import { stuckWatch } from '../lib/stuckWatch';
   import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
+  import type { PlaybackReceiptPreparation } from '../lib/playbackReceiptSupport';
   import {
     bufferingWhilePlaying,
     startupNotice,
@@ -176,6 +177,8 @@
     onprogress,
     onfinalprogress,
     onmanagedplayback,
+    playbackReceiptHandoffAsOwner,
+    onplaybackreceipthandoff,
     onnext,
     onclose,
     oncontrols,
@@ -219,7 +222,11 @@
     /** The visit's terminal position, retained by the library until its exact command is durable. */
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
     /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
-    onmanagedplayback?: (signal: AbortSignal) => Promise<boolean>;
+    onmanagedplayback?: (signal: AbortSignal) => Promise<PlaybackReceiptPreparation>;
+    /** Whether the authorized recovery opens Connections directly or first switches to Owner. */
+    playbackReceiptHandoffAsOwner: boolean;
+    /** Leaves playback only after handing terminal progress to the host's durable recovery surface. */
+    onplaybackreceipthandoff: () => void;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -838,6 +845,7 @@
   let startsIn = $state<string | null>(null);
   /** Said when a change asked for mid-film (another track, another release, casting) couldn't be made as a copy. */
   let unchanged = $state<string | null>(null);
+  let receiptUnsupported = $state(false);
   /**
    * The startup notice's own clock (den-edge#234): when the session now starting was asked for (`Date.now()`,
    * reset at the top of every `begin()`), and the running time since, ticked while there is still nothing to
@@ -1060,6 +1068,7 @@
     }
     swapped = null;
     unchanged = null;
+    receiptUnsupported = false;
     // Each wait below may outlast the player: once it is closed, nothing more is asked for, and no session started.
     if (!imdb) {
       const answer = await content
@@ -1214,7 +1223,7 @@
     const torboxTried =
       !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
     if (playback && onmanagedplayback) {
-      let receiptReady = false;
+      let receiptPreparation: PlaybackReceiptPreparation = 'temporarily-unavailable';
       try {
         const receiptSignal = AbortSignal.any([
           attempt.signal,
@@ -1223,13 +1232,14 @@
         // The deadline owns the whole callback, including the first lazy module load and any transport reconnect.
         // Passing it down still cancels work that observes the signal; racing it here prevents an uncooperative
         // boundary from holding playback indefinitely.
-        receiptReady = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
+        receiptPreparation = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
       } catch (error) {
         if (!attempt.signal.aborted)
           console.warn('den: managed playback receipt authority could not be prepared', error);
       }
       if (attempt.signal.aborted) return false;
-      if (!receiptReady)
+      if (receiptPreparation === 'unsupported') receiptUnsupported = true;
+      else if (receiptPreparation !== 'ready')
         unchanged = i18n.phrase(
           'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.',
         );
@@ -4618,6 +4628,13 @@
     onclose();
   }
 
+  function openPlaybackReceiptHandoff() {
+    // Use the player's terminal path first: final progress, decoder/session retirement and an in-flight startup
+    // abort must all happen before the parent leaves for the authorized linking flow.
+    close();
+    onplaybackreceipthandoff();
+  }
+
   /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
   function playerMenuOpen(): boolean {
     return __DEN_TV__
@@ -5009,6 +5026,22 @@
       {#if unchanged}
         {@render banner(unchanged, { dismiss: () => (unchanged = null) })}
       {/if}
+    {/if}
+    {#if receiptUnsupported}
+      {@render banner(
+        i18n.phrase(
+          'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.',
+        ),
+        {
+          dismiss: () => (receiptUnsupported = false),
+          action: {
+            label: playbackReceiptHandoffAsOwner
+              ? i18n.text('settings.section.connections')
+              : i18n.phrase('Switch to Owner'),
+            run: openPlaybackReceiptHandoff,
+          },
+        },
+      )}
     {/if}
   </div>
   <div class="stage" bind:this={stageElement}>
@@ -6124,7 +6157,7 @@
     gap: 4px 12px;
     align-items: center;
     box-sizing: border-box;
-    width: max-content;
+    width: fit-content;
     max-width: min(100%, 36rem);
     margin: 0;
     padding: 8px 8px 8px 14px;

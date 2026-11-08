@@ -1,6 +1,12 @@
+import type { ActiveProfileMode } from './profileModeCoordinator.svelte';
+
 export interface ProfileSwitcherRequest {
   readonly trigger: HTMLElement;
   readonly restoreFocus: boolean;
+  /** Open directly at the named profile's authorization step instead of the general chooser. */
+  readonly target?: ActiveProfileMode;
+  /** Continue here only after that profile transition commits. */
+  readonly successPath?: string;
 }
 
 const EVENT = 'den:open-profile-switcher';

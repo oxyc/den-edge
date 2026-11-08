@@ -3,6 +3,7 @@
   import { flushSync, onMount, tick } from 'svelte';
   import type { ProfileChoice, ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { onProfileSwitcherRequest } from '../lib/profileSwitcherControl';
+  import { navigate } from '../lib/navigation';
   import PinInput from './PinInput.svelte';
   import ProfileAvatar from './ProfileAvatar.svelte';
 
@@ -24,6 +25,11 @@
   let restoreTriggerFocus = false;
   let backdropPress = false;
   let returnFocus = $state<HTMLElement>();
+  let successPath: string | undefined;
+  let successRole: ProfileChoice['role'] | undefined;
+  // Only receipt-incapable artifacts request an authorized Owner continuation. The E2E build keeps that exact path
+  // injectable so the browser suite can cover it without duplicating the much heavier Tizen 3 build transform.
+  const ownerContinuationEnabled = !__DEN_MANAGED_PLAYBACK_RECEIPTS__ || import.meta.env.DEN_E2E;
 
   const active = $derived(profiles.activeChoice);
   const pinConfigured = $derived(profiles.parentalPinConfigured);
@@ -42,7 +48,7 @@
     );
   }
 
-  function show(opener: HTMLElement, restoreFocus: boolean) {
+  function show(opener: HTMLElement, restoreFocus: boolean, target?: ProfileChoice, path?: string) {
     denied = false;
     failed = false;
     pin = '';
@@ -52,7 +58,12 @@
     mismatch = false;
     returnFocus = opener;
     restoreTriggerFocus = restoreFocus;
+    // A continuation belongs to the requested profile, not to the dialog. If the viewer backs out and chooses a
+    // different profile, that successful switch must not inherit the requested Owner's privileged destination.
+    successPath = ownerContinuationEnabled && target ? path : undefined;
+    successRole = ownerContinuationEnabled ? target?.role : undefined;
     dialog?.showModal();
+    if (ownerContinuationEnabled && target) void choose(target);
   }
 
   function open(event: MouseEvent) {
@@ -64,10 +75,21 @@
     settingPin = false;
     firstPin = null;
     pin = '';
+    successPath = undefined;
+    successRole = undefined;
   }
 
   onMount(() =>
-    onProfileSwitcherRequest(({ trigger: opener, restoreFocus }) => show(opener, restoreFocus)),
+    onProfileSwitcherRequest(({ trigger: opener, restoreFocus, target, successPath: path }) =>
+      show(
+        opener,
+        restoreFocus,
+        ownerContinuationEnabled && target
+          ? profiles.choices.find((choice) => choice.role === target)
+          : undefined,
+        path,
+      ),
+    ),
   );
 
   const choiceKey = (choice: ProfileChoice | null) =>
@@ -88,7 +110,12 @@
             ? await profiles.switchToPersistent(choice.id, pin)
             : await profiles.switchToVisitor(pin);
       if (result.outcome === 'success') {
+        const path =
+          ownerContinuationEnabled && choice.role === successRole ? successPath : undefined;
+        successPath = undefined;
+        successRole = undefined;
         dialog?.close();
+        if (path) navigate(path);
         return;
       }
       if (result.outcome === 'denied' && askedPin) denied = true;
@@ -151,7 +178,12 @@
     denied = false;
     failed = false;
     if (choiceKey(choice) === choiceKey(active)) {
+      const path =
+        ownerContinuationEnabled && choice.role === successRole ? successPath : undefined;
+      successPath = undefined;
+      successRole = undefined;
       dialog?.close();
+      if (path) navigate(path);
       return;
     }
     if (profiles.waitsForPin(choice.role)) return;
@@ -210,6 +242,8 @@
     settingPin = false;
     firstPin = null;
     mismatch = false;
+    successPath = undefined;
+    successRole = undefined;
     requestAnimationFrame(() => {
       if (restoreTriggerFocus) returnFocus?.focus({ preventScroll: true });
       else {

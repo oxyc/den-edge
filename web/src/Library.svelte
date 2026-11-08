@@ -63,6 +63,7 @@
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
+  import { openProfileSwitcher } from './lib/profileSwitcherControl';
   import {
     titleHref,
     watchlistHref,
@@ -83,6 +84,7 @@
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
   import { sharedInstallOf } from './lib/grants';
+  import type { PlaybackReceiptPreparation } from './lib/playbackReceiptSupport';
   import { installsOf } from './lib/scout';
   import {
     billboardScope,
@@ -147,6 +149,7 @@
     watchedYear,
     titleSeason,
     profiles = null,
+    managedPlaybackReceiptsSupported = __DEN_MANAGED_PLAYBACK_RECEIPTS__,
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -163,6 +166,8 @@
     /** The season a series page shows, from the address as `watchedYear` is. */
     titleSeason?: TitleSeason;
     profiles?: ProfileModeCoordinator | null;
+    /** Build capability, injectable only by production-path fixtures that exercise the unsupported host. */
+    managedPlaybackReceiptsSupported?: boolean;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -331,6 +336,7 @@
     finalProgressReceipts.find(({ saving }) => saving !== null),
   );
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
+  let playbackReceiptHandoffPending = $state<number | null>(null);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
   // RoutedLibrary keys this whole tree by the session object. One lifetime therefore fences Owner/Kid changes and
@@ -343,6 +349,30 @@
     const receipt = finalProgressRecovery;
     if (!receipt || receipt.saving) return;
     void tick().then(() => finalProgressRetryButton?.focus());
+  });
+  $effect(() => {
+    // Ordinary capable artifacts cannot enter this recovery path. Keep the E2E seam so browser automation can run
+    // the Tizen 3 production path without giving its Chromium 87 build's heavier compatibility transform the lane.
+    if (__DEN_MANAGED_PLAYBACK_RECEIPTS__ && !import.meta.env.DEN_E2E) return;
+    const intent = playbackReceiptHandoffPending;
+    if (intent === null || finalProgressReceipts.length) return;
+    playbackReceiptHandoffPending = null;
+    // A durable reply from the closed player can arrive after the viewer has opened another one. The old handoff
+    // owns neither that replacement player nor its route, even when it happens to play the same title again.
+    if (playing || intent !== playbackIntent) return;
+    if (session.administersHousehold) {
+      navigate('/settings');
+      return;
+    }
+    // Kid and Visitor Settings are intentionally personal. The app-level switcher owns the PIN check, then opens
+    // the Owner's household Settings only after that profile transition has committed.
+    const trigger = document.querySelector<HTMLElement>('.profile-trigger') ?? document.body;
+    openProfileSwitcher({
+      trigger,
+      restoreFocus: false,
+      target: 'owner',
+      successPath: '/settings',
+    });
   });
   /**
    * Where the library's services answer, found once for the session and shared by every page. The parent keys this
@@ -517,12 +547,18 @@
   // The household's device list, which names the TVs a play can go to (`householdTvs`).
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
-  async function preparePlaybackReceipts(signal: AbortSignal): Promise<boolean> {
+  async function preparePlaybackReceipts(signal: AbortSignal): Promise<PlaybackReceiptPreparation> {
+    // This gate must precede both the lazy import and authority work. Tizen 3 keeps the opaque completion queued for
+    // a capable linked device; this page's ordinary progress writes remain independent.
+    if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__ || !managedPlaybackReceiptsSupported)
+      return 'unsupported';
     const authority = householdModel ?? model;
-    if (!authority) return false;
+    if (!authority || signal.aborted) return 'temporarily-unavailable';
     const assistant = await import('./lib/assistant');
-    if (signal.aborted) return false;
-    return assistant.preparePlaybackReceipts(authority, signal);
+    if (signal.aborted) return 'temporarily-unavailable';
+    return (await assistant.preparePlaybackReceipts(authority, signal))
+      ? 'ready'
+      : 'temporarily-unavailable';
   }
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
@@ -537,6 +573,7 @@
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
+  let playbackIntent = $state(0);
   let tvControls = $state<{
     play: () => void;
     pause: () => void;
@@ -570,6 +607,7 @@
         }),
         replace,
       );
+    playbackIntent += 1;
     playing = target;
   }
 
@@ -1510,6 +1548,12 @@
       );
   }
 
+  function requestPlaybackReceiptHandoff() {
+    // Player has already emitted its exact terminal receipt and released playback resources. Keep the viewer on the
+    // title until that receipt is durably acknowledged, or until the visible recovery explicitly leaves it unsaved.
+    playbackReceiptHandoffPending = playbackIntent;
+  }
+
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
   // the page toast, the one `ProfileSession.notify` already shows for other library news.
@@ -1711,10 +1755,13 @@
   ) {
     if (!model && !profileActivity) return;
     const { title, season, episode } = target;
-    remember(title);
+    // `playing` is deep reactive state, so its title is a Svelte proxy. Visitor activity persists JSON-safe title
+    // metadata; cross that same serialization boundary before its structured clone sees the proxy.
+    const progressTitle = profileActivity ? (JSON.parse(JSON.stringify(title)) as Title) : title;
+    remember(progressTitle);
     return profileActivity
       ? profileActivity.recordProgress(
-          title,
+          progressTitle,
           fraction,
           seconds,
           season !== undefined && episode !== undefined ? { season, episode } : undefined,
@@ -3295,6 +3342,8 @@
       onfinalprogress={(fraction, seconds, at) =>
         finalProgressed({ title: target.title, ...at }, fraction, seconds)}
       onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
+      playbackReceiptHandoffAsOwner={session.administersHousehold}
+      onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}

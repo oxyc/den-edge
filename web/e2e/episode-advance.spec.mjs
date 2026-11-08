@@ -207,6 +207,16 @@ async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [
     }
     return r.fulfill({ status: 404, json: { error: 'not_found' } });
   });
+  // Visitor activity has no profile library whose service configuration can replace the fixture's explicit Scout
+  // endpoint. Exercise the same managed playback answer there instead of letting it escape the network guard.
+  await page.route(`${ORIGIN}/den/fixture/playback`, (r) => {
+    const body = r.request().postDataJSON();
+    asked.playback.push(body);
+    return r.fulfill({ json: answer(body) });
+  });
+  await page.route(`${ORIGIN}/den/fixture/subtitles/**`, (r) =>
+    r.fulfill({ json: { subtitles: [] } }),
+  );
   await page.route(`${ORIGIN}/remux/releases`, (r) => r.fulfill({ json: { releases: [] } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/playback/**`, (r) => r.fulfill({ status: 204 }));
@@ -287,10 +297,11 @@ const progressOf = (page, episode) =>
   );
 
 /** Play the series from its page: Season 1's first episode. */
-async function playFirstEpisode(page) {
+async function playFirstEpisode(page, { next = true } = {}) {
   await page.getByRole('link', { name: /^Play/ }).first().click();
   await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
   await expect(page).toHaveURL(`${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=1&play=1`);
+  if (!next) return;
   await expect(player(page).getByRole('link', { name: 'Next: S1 · E2' })).toHaveAttribute(
     'href',
     `/tv/${SERIES}-series-${SERIES}?season=1&episode=2&play=1`,
@@ -493,6 +504,76 @@ test('rejected final progress can be explicitly left unsaved', async () => {
     await browser.close();
   }
 });
+
+test('receipt recovery waits for rejected final progress to become durable before opening Connections', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['receipt-unsupported', 'reject-final-progress', 'hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    const handoff = page.getByRole('button', { name: 'Connections' });
+    await expect(handoff).toBeVisible();
+    await playingPast(page, 9);
+    await handoff.click();
+
+    await expect(player(page)).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/settings$/);
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+
+    await recovery.getByRole('button', { name: 'Try again' }).click();
+    await expect(recovery).toContainText('Saving…');
+    await expect(page).not.toHaveURL(/\/settings$/);
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect(recovery).toHaveCount(0);
+    await expect(page).toHaveURL(/\/settings$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an old receipt ACK cannot hand off or close replacement playback', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['receipt-unsupported', 'hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 9);
+    await page.getByRole('button', { name: 'Connections' }).click();
+
+    await expect(player(page)).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/settings$/);
+    await page.getByRole('link', { name: /^Play/ }).first().click();
+    await expect(player(page)).toHaveAttribute('aria-label', new RegExp(`^Series ${SERIES}`));
+
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect(player(page)).toHaveAttribute('aria-label', new RegExp(`^Series ${SERIES}`));
+    await expect(page).not.toHaveURL(/\/settings$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+for (const role of ['Kid', 'Visitor']) {
+  test(`receipt recovery sends a ${role} through the authorized Owner handoff`, async () => {
+    const { browser, page } = await open(chromium, {
+      libraryQuery: ['receipt-unsupported', role.toLowerCase()],
+    });
+    try {
+      if (role === 'Visitor') await expect(page.locator('[data-visitor-ready]')).toBeAttached();
+      await playFirstEpisode(page, { next: role !== 'Visitor' });
+      const handoff = page.getByRole('button', { name: 'Switch to Owner' });
+      await expect(handoff).toBeVisible();
+      await handoff.click();
+
+      await expect(player(page)).toHaveCount(0);
+      await expect(page).not.toHaveURL(/\/settings$/);
+      await expect(page.getByTestId('profile-handoff')).toHaveText('owner:/settings');
+    } finally {
+      await browser.close();
+    }
+  });
+}
 
 test.describe('Den Cast', () => {
   let built;

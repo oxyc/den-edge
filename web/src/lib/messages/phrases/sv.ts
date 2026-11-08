@@ -970,6 +970,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Svenska: 'Svenska',
   Swedish: 'svenska',
   'Switch profile': 'Byt profil',
+  'Switch to Owner': 'Byt till Ägarprofilen',
   'Switching…': 'Byter...',
   Talk: 'Prata',
   Tamil: 'Tamil',
@@ -1234,6 +1235,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Uppspelningen har ingen aktiv källa. Prova någon av vägarna direkt.',
   'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.':
     'Uppspelningen kan starta, men återställning av förloppet i bakgrunden är inte tillgänglig. Håll sidan öppen för att spara var du slutade.',
+  'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.':
+    'Den här TV:n kan inte återställa förloppet för hanterad uppspelning efter att sidan stängts. Håll Den öppet eller länka en telefon eller dator under Inställningar › Anslutningar.',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'För ljud eller undertexter som webbläsaren inte kan spela, eller en ström som stannar',
   'Turns subtitles off: this player shows only Den Remux’s':

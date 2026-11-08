@@ -199,11 +199,26 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
       const current =
         target instanceof HTMLElement && controls.includes(target) ? target : undefined;
       if (!current) {
-        const fallback = root.querySelector<HTMLElement>(
-          '.tv-transport button, .tv-transport a, header button, footer select, footer button, footer a',
-        );
+        // Actionable notices sit above a held startup stage, where no transport exists yet. Make their primary
+        // action the first directional destination instead of requiring pointer/DOM focus to escape the picture.
+        const fallback =
+          root.querySelector<HTMLElement>('.notice .notice-action') ??
+          root.querySelector<HTMLElement>(
+            '.tv-transport button, .tv-transport a, header button, footer select, footer button, footer a',
+          );
         fallback?.focus({ preventScroll: true });
         return !!fallback;
+      }
+      // A notice's dismiss glyph may own startup focus even though its primary recovery action is beside it, not
+      // geometrically above or below it. A direction key from that dead-end must still reach the useful action.
+      if (current.matches('.notice-dismiss')) {
+        const action = current
+          .closest<HTMLElement>('.notice')
+          ?.querySelector<HTMLElement>('.notice-action');
+        if (action) {
+          action.focus({ preventScroll: true });
+          return true;
+        }
       }
       const from = current.getBoundingClientRect();
       const x = from.left + from.width / 2;

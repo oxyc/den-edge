@@ -54,6 +54,11 @@ async function setupSeries(page, { linked = false, playback = false } = {}) {
     await page.route('**/remux/health', (route) => route.fulfill({ json: { status: 'ok' } }));
   }
   await page.route('**/tmdb/3/tv/9*', (route) => route.fulfill({ json: series }));
+  // Player resolves the identifier through the dedicated production endpoint. Keep this more-specific route
+  // after the detail route because Playwright dispatches the most recently registered matching handler first.
+  await page.route('**/tmdb/3/tv/9/external_ids', (route) =>
+    route.fulfill({ json: { imdb_id: series.external_ids.imdb_id } }),
+  );
   await page.route('**/tmdb/3/tv/9/season/**', (route) => {
     const season = Number(new URL(route.request().url()).pathname.split('/').at(-1));
     return route.fulfill({ json: episodes(season) });
@@ -145,6 +150,45 @@ async function installSourcePlugin(page, sourceRequests = []) {
   await page.goto(`${E2E_ORIGIN}/tv/9`);
   await expect(page.getByRole('heading', { name: 'Remote Series', level: 1 })).toBeVisible();
 }
+
+test('Tizen 3 preserves queued managed-playback receipts for a capable linked device', async ({
+  page,
+}) => {
+  test.skip(
+    process.env.DEN_TIZEN_VERSION !== '3.0',
+    'only the Tizen 3 build permanently excludes receipt crypto',
+  );
+  const receiptRequests = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/playback/receipts/'))
+      receiptRequests.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+
+  await setupSeries(page, { linked: true, playback: true });
+  await expect(
+    page
+      .getByRole('region', { name: 'Watchlist', exact: true })
+      .getByRole('link', { name: /Remote Series/ }),
+  ).toBeVisible();
+  await page.goto(`${E2E_ORIGIN}/tv/9`);
+  await expect(page.getByRole('heading', { name: 'Remote Series', level: 1 })).toBeVisible();
+  const play = page.locator('header.hero').getByRole('link', { name: 'Play', exact: true });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByText(
+      'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const recovery = page.getByRole('button', { name: 'Connections' });
+  await expect(recovery).toBeVisible();
+  await recovery.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings`);
+  await expect(page.getByRole('button', { name: /Linked devices/ })).toBeVisible();
+  expect(receiptRequests).toEqual([]);
+});
 
 test('remote changes seasons from the focused season tab', async ({ page }) => {
   await setupSeries(page);

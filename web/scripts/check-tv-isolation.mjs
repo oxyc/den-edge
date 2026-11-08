@@ -135,7 +135,12 @@ if (process.argv.includes('--capture')) {
   // (202,635 -> 202,878). Its presentation, localized copy and result controller remain in the existing assistant
   // chunk; only the session/foreground/retry fence stays before that import because splitting it would let replacement
   // authority publish stale work. Allow the next 128-byte boundary, retaining 46 bytes on the matched build.
-  if (initialDelta > Math.min(6528, Math.floor(baseline.initialGzip * 0.034)))
+  // Tizen 3 receipt exclusion and recovery add 205 gzip bytes at startup on matched base/head builds. The Player
+  // surface stays in its existing lazy chunk; capable production builds compile out the unsupported Library handoff
+  // and Owner continuation while E2E retains the injectable production path. Unsupported builds must keep the small
+  // durable-ACK owner in Library because Player unmounts before that ACK or PIN transition finishes. Allow the next
+  // 128-byte boundary above the retained delta, preserving 178 bytes of cross-machine gzip margin on this build.
+  if (initialDelta > Math.min(6784, Math.floor(baseline.initialGzip * 0.035)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -257,5 +262,7 @@ if (process.argv.includes('--capture')) {
   // catalogs. The remaining growth is the typed failure/retirement result, cancelable ACK, durable shared/local
   // readbacks and bounded status lifecycle; another lazy split cannot reduce complete-graph bytes. The current-main
   // ceiling already retains 251 bytes on the matched head, so no complete-graph allowance is added here.
-  if (coreTotalDelta > 90240) throw new Error('Browser total JS/CSS budget exceeded');
+  // The same contract adds 374 gzip bytes to the complete non-translation graph after that compile-time split.
+  // Keep it within the next 128-byte boundary with useful variance, retaining 138 bytes against the fixed baseline.
+  if (coreTotalDelta > 90624) throw new Error('Browser total JS/CSS budget exceeded');
 }
