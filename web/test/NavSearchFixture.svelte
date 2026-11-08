@@ -105,7 +105,7 @@
     let releaseOld: (() => void) | undefined;
     const hit = (id: number, title: string): Hit => ({
       kind: 'title',
-      title: { type: 'movie', id, title, year: 2026 },
+      title: { type: 'movie', id, title, year: 2026, posterPath: `/${id}.jpg` },
     });
     content.query = (async (request, signal, policy, onProgress) => {
       if (request.kind !== 'search')
