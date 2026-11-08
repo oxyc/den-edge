@@ -168,6 +168,49 @@ for (const profiles of [false, true]) {
   });
 }
 
+test('a profile Owner’s language chosen while the household is still confirming its profiles is saved', async () => {
+  const edge = newEdge({ profiles: true });
+  await browserOf(edge, async (_browser, open) => {
+    const laptop = await laptopAcceptingAnInvite(open, edge);
+    await expect(laptop.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible(
+      { timeout: 30_000 },
+    );
+    await laptop.reload();
+    await expect(laptop.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible(
+      { timeout: 30_000 },
+    );
+    // The returning Owner is drawn from its own library while the page asks whether this host has profiles. Left
+    // unanswered, the page stays in that state: the household session behind it holds no preferences.
+    let release = () => {};
+    const answered = new Promise((resolve) => (release = resolve));
+    await laptop.route('**/capabilities/profiles', async (route) => {
+      await answered;
+      await route.fallback();
+    });
+    const refused = [];
+    laptop.on('console', (message) => {
+      if (message.text().includes('profile_scoped')) refused.push(message.text());
+    });
+    await laptop.goto(`${E2E_ORIGIN}/settings`);
+    const language = laptop.getByRole('combobox', { name: 'Interface language', exact: true });
+    await expect(language).toBeEnabled({ timeout: 30_000 });
+    await language.selectOption('es');
+    await expect(laptop.locator('html')).toHaveAttribute('lang', 'es');
+    await expect(
+      laptop.getByRole('combobox', { name: 'Idioma de la interfaz', exact: true }),
+    ).toHaveValue('es');
+    expect(refused).toEqual([]);
+
+    release();
+    await laptop.unroute('**/capabilities/profiles');
+    await laptop.reload();
+    await expect(laptop.locator('html')).toHaveAttribute('lang', 'es', { timeout: 30_000 });
+    await expect(
+      laptop.getByRole('combobox', { name: 'Idioma de la interfaz', exact: true }),
+    ).toHaveValue('es', { timeout: 30_000 });
+  });
+});
+
 test('a page opened while the invite moves the library stays open when the move finishes', async () => {
   const edge = newEdge();
   await browserOf(edge, async (_browser, open) => {

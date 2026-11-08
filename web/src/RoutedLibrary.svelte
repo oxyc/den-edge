@@ -1843,11 +1843,13 @@
               </section>
             {:else if (link || session.local || ownHousehold) && householdSettingsModel}
               {#if SettingsScreen.current}
+                <!-- Preferences are the drawn profile's: while a remembered Owner is restored, `session` is the hidden
+                     household bootstrap, which holds none, and a write through it is refused as profile-scoped. -->
                 <SettingsScreen.current
                   {link}
                   model={householdSettingsModel}
                   activityModel={shown.model ?? householdSettingsModel}
-                  preferences={session.preferences}
+                  preferences={shown.preferences}
                   content={session.content}
                   local={session.local}
                   oninterfacelanguage={(language) => {
