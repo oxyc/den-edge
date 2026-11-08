@@ -202,10 +202,9 @@ test('playback receipts share the queue transport but use their own one-shot rou
   }) as unknown as typeof fetch;
   const apply = vi.fn(async () => ({ ack: 7 }));
 
-  await drainPlaybackReceiptsOnce(
-    { libraryId: 'lib', apply, fetchImpl },
-    new AbortController().signal,
-  );
+  await expect(
+    drainPlaybackReceiptsOnce({ libraryId: 'lib', apply, fetchImpl }, new AbortController().signal),
+  ).resolves.toEqual({ outcome: 'completed', applied: 0 });
 
   expect(apply).toHaveBeenCalledWith([{ seq: 7, sealed: 'receipt' }]);
   expect(calls).toEqual([
@@ -217,17 +216,19 @@ test('playback receipts share the queue transport but use their own one-shot rou
 test('an empty playback receipt lane does not enter the crypto/apply path', async () => {
   const ensure = vi.fn(async () => DROPBOX);
   const fetchImpl = vi.fn(async () => Response.json({ messages: [] })) as unknown as typeof fetch;
-  await drainPlaybackReceiptsForCurrentAuthority(
-    {
-      libraryId: 'lib',
-      ensure,
-      lend: async () => null,
-      apply: async () => ({ ack: null }),
-      current: () => true,
-      fetchImpl,
-    },
-    new AbortController().signal,
-  );
+  await expect(
+    drainPlaybackReceiptsForCurrentAuthority(
+      {
+        libraryId: 'lib',
+        ensure,
+        lend: async () => null,
+        apply: async () => ({ ack: null }),
+        current: () => true,
+        fetchImpl,
+      },
+      new AbortController().signal,
+    ),
+  ).resolves.toEqual({ outcome: 'empty' });
   expect(ensure).not.toHaveBeenCalled();
   expect(fetchImpl).toHaveBeenCalledOnce();
 });
@@ -264,7 +265,7 @@ test('receipt work is fenced after key and profile awaits when authority is repl
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
     current = false;
     release();
-    await running;
+    await expect(running).resolves.toEqual({ outcome: 'retired' });
     expect(apply, boundary).not.toHaveBeenCalled();
     expect(fetchSpy.mock.calls.some(([path]) => String(path).endsWith('/ack'))).toBe(false);
   }
@@ -299,7 +300,7 @@ test('replacement or abort while receipt apply is pending cannot acknowledge thr
     if (boundary === 'replacement') current = false;
     else stop.abort();
     finish({ ack: 8 });
-    await running;
+    await expect(running).resolves.toEqual({ outcome: 'retired' });
     expect(claims, boundary).toEqual(['old:/playback/receipts/drain']);
   }
 });
@@ -339,7 +340,7 @@ test('an aborted receipt drain held by relay opening cannot inherit replacement 
   current = false;
   stop.abort();
   opened();
-  await running;
+  await expect(running).resolves.toEqual({ outcome: 'retired' });
   expect(claims).toEqual(['old:member-a']);
   expect(apply).not.toHaveBeenCalled();
   releaseOpening();
@@ -370,12 +371,67 @@ test('a failed receipt key publication can be retried without acknowledging the 
   };
   await expect(
     drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal),
-  ).resolves.toBeUndefined();
+  ).resolves.toEqual({ outcome: 'failed', stage: 'apply' });
   expect(calls).toEqual(['/playback/receipts/drain']);
-  await drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal);
+  await expect(
+    drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal),
+  ).resolves.toEqual({ outcome: 'completed', applied: 0 });
   expect(calls).toEqual([
     '/playback/receipts/drain',
     '/playback/receipts/drain',
     '/playback/receipts/ack',
   ]);
+});
+
+test('receipt transport, partial application, and acknowledgement failures stay visibly retryable', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const transport = vi.fn(
+    async () => new Response(null, { status: 503 }),
+  ) as unknown as typeof fetch;
+  await expect(
+    drainPlaybackReceiptsOnce(
+      { libraryId: 'transport', apply: async () => ({ ack: null }), fetchImpl: transport },
+      new AbortController().signal,
+    ),
+  ).resolves.toEqual({ outcome: 'failed', stage: 'drain' });
+
+  const partialFetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) =>
+    String(input).endsWith('/drain')
+      ? Response.json({
+          messages: [
+            { seq: 1, sealed: 'first' },
+            { seq: 2, sealed: 'held' },
+          ],
+        })
+      : Response.json({ removed: 1 }),
+  );
+  const partialFetch = partialFetchSpy as unknown as typeof fetch;
+  await expect(
+    drainPlaybackReceiptsOnce(
+      {
+        libraryId: 'partial',
+        apply: async () => ({ ack: 1, applied: 1 }),
+        fetchImpl: partialFetch,
+      },
+      new AbortController().signal,
+    ),
+  ).resolves.toEqual({ outcome: 'failed', stage: 'apply' });
+  expect(partialFetchSpy.mock.calls.map(([path]) => String(path))).toEqual([
+    '/playback/receipts/drain',
+    '/playback/receipts/ack',
+  ]);
+  expect(JSON.parse(String(partialFetchSpy.mock.calls[1]?.[1]?.body))).toEqual({ upTo: 1 });
+
+  const ackFetch = vi.fn(async (input: RequestInfo | URL) =>
+    String(input).endsWith('/drain')
+      ? Response.json({ messages: [{ seq: 3, sealed: 'receipt' }] })
+      : new Response(null, { status: 503 }),
+  ) as unknown as typeof fetch;
+  await expect(
+    drainPlaybackReceiptsOnce(
+      { libraryId: 'ack', apply: async () => ({ ack: 3, applied: 1 }), fetchImpl: ackFetch },
+      new AbortController().signal,
+    ),
+  ).resolves.toEqual({ outcome: 'failed', stage: 'ack' });
+  warn.mockRestore();
 });

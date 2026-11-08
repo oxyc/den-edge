@@ -119,6 +119,14 @@ export async function guardNetwork(target, origin = E2E_ORIGIN) {
     // page-level route; every other fixture accepts it like den-edge does so adding observability changes no flow.
     if (url.origin === origin && url.pathname === '/playback/route')
       return route.fulfill({ status: 204 });
+    // A member library checks its managed-playback completion lane once when it becomes active. Specs that exercise
+    // recovery install a page-level route first; every other fixture has no pending completion to apply.
+    if (
+      url.origin === origin &&
+      url.pathname === '/playback/receipts/drain' &&
+      route.request().method() === 'POST'
+    )
+      return route.fulfill({ json: { messages: [] } });
     // So is a screen's stalls report, sent as a screen that stalled is left (`screenPerformance.ts`).
     if (url.origin === origin && url.pathname === '/performance/event')
       return route.fulfill({ status: 204 });

@@ -46,6 +46,7 @@ export const PRODUCTION_BUILD_SPECS = [
   'household-downloads.spec.mjs',
   'library-retirement.spec.mjs',
   'origin-outage.spec.mjs',
+  'playback-receipt-recovery.spec.mjs',
   'profile-transition-failures.spec.mjs',
   'startup-fetches.spec.mjs',
 ];

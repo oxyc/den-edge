@@ -1999,6 +1999,13 @@ describe('LibraryLogAuthority', () => {
         }),
       ]),
     });
+    // The exact shared replay markers and this device's kept records survived close/reopen. An older client still
+    // sees the unchanged ack/applied wire shape, and no progress command is invented on replay.
+    await expect(
+      reopened.task({ kind: 'assistant.receipts.apply', messages }, 'receipt-replay'),
+    ).resolves.toMatchObject({
+      result: { kind: 'assistant.receipts.apply', ack: 2, applied: 0 },
+    });
     expect(reopenedLog.settings(GRANTS_ROW)).toBeUndefined();
     await reopened.close();
   }, 60_000);

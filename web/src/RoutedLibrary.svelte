@@ -3,6 +3,7 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import type PlaybackReceiptStatusComponent from './components/PlaybackReceiptStatus.svelte';
   import type LegacyBackupRecoveryComponent from './components/LegacyBackupRecovery.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
@@ -1461,6 +1462,7 @@
       work: AssistantWork,
       signal: AbortSignal,
     ) => void,
+    unavailable?: (signal: AbortSignal) => void,
   ) {
     const current = session;
     const model = memberModel;
@@ -1468,11 +1470,18 @@
     if (!needed || !model) return;
     const stop = new AbortController();
     const authority = household ?? model;
-    void Promise.all([import('./lib/assistant'), authority.relayMembership()]).then(
+    const assistant =
+      import.meta.env.DEN_E2E &&
+      (globalThis as typeof globalThis & { __denFailAssistantImport?: boolean })
+        .__denFailAssistantImport
+        ? Promise.reject(new TypeError('fixture assistant module is offline'))
+        : import('./lib/assistant');
+    void Promise.all([assistant, authority.relayMembership()]).then(
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
           console.warn('den: the library is not a member on den-edge yet; its assistants wait');
+          unavailable?.(stop.signal);
           return;
         }
         run(
@@ -1492,7 +1501,10 @@
           stop.signal,
         );
       },
-      (error: unknown) => console.warn('den: the assistant connection could not be loaded', error),
+      (error: unknown) => {
+        console.warn('den: the assistant connection could not be loaded', error);
+        if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
+      },
     );
     return () => stop.abort();
   }
@@ -1527,32 +1539,63 @@
     });
   });
 
+  type PlaybackReceiptStatus = {
+    owner: ProfileSession;
+    state: 'pending' | 'failed' | 'recovered';
+  };
+  let playbackReceiptStatus = $state.raw<PlaybackReceiptStatus | null>(null);
+  let PlaybackReceiptStatus = $state.raw<typeof PlaybackReceiptStatusComponent>();
+  let playbackReceiptRetry = $state(0);
+
   // Managed playback can finish after this page is gone. Make its household drop-box available, then keep the
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
   $effect(() => {
+    // Tizen 3's explicit unsupported/handoff product surface remains owned by #1059/#1083. Do not drain its queued
+    // ciphertext or offer the capable-build retry here; a linked capable device may still settle that work.
+    if (__DEN_TV_LEGACY_JS_CORE__) return;
     const current = session;
+    const retry = playbackReceiptRetry;
+    const heldStatus = untrack(() => playbackReceiptStatus);
+    if (heldStatus && heldStatus.owner !== current) playbackReceiptStatus = null;
+    if (!session.foregrounded || !memberModel) {
+      if (heldStatus?.owner === current && heldStatus.state === 'pending')
+        playbackReceiptStatus = null;
+      return;
+    }
+    const recovering = heldStatus?.owner === current && heldStatus.state === 'failed';
+    const publish = (
+      state: PlaybackReceiptStatus['state'] | null,
+      signal: AbortSignal,
+      expected?: PlaybackReceiptStatus,
+    ) => {
+      if (signal.aborted || current !== session || retry !== playbackReceiptRetry) return null;
+      if (!state) {
+        if (!expected || playbackReceiptStatus === expected) playbackReceiptStatus = null;
+        return null;
+      }
+      return (playbackReceiptStatus = { owner: current, state });
+    };
     return whileNeeded(
-      session.foregrounded,
-      ({ drainPlaybackReceiptsForCurrentAuthority }, work, signal) => {
-        void (async () => {
-          try {
-            await drainPlaybackReceiptsForCurrentAuthority(
-              {
-                libraryId: work.libraryId,
-                ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
-                lend: work.lend,
-                apply: (messages, connection) =>
-                  work.model.applyPlaybackReceipts(messages, connection),
-                current: () => current === session,
-                ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
-              },
-              signal,
-            );
-          } catch (error) {
-            console.warn('den: playback receipts could not be applied', error);
-          }
-        })();
+      true,
+      (
+        { recoverPlaybackReceiptsForCurrentAuthority, PlaybackReceiptStatus: Status },
+        work,
+        signal,
+      ) => {
+        PlaybackReceiptStatus = Status;
+        publish('pending', signal);
+        void recoverPlaybackReceiptsForCurrentAuthority<
+          AssistantConnection | undefined,
+          PlaybackReceiptStatus
+        >(
+          work,
+          () => current === session,
+          signal,
+          recovering,
+          (state, expected) => publish(state, signal, expected),
+        );
       },
+      (signal) => publish('failed', signal),
     );
   });
 
@@ -1802,6 +1845,20 @@
           alert={shown.alert}
           undo={shown.undo}
         />
+        {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
+          <PlaybackReceiptStatus
+            state={playbackReceiptStatus.state}
+            retry={() => playbackReceiptRetry++}
+          />
+        {:else if playbackReceiptStatus?.owner === session && playbackReceiptStatus.state === 'failed'}
+          <!-- The assistant chunk itself can be unavailable. Reuse the eager status renderer so this bootstrap
+               failure stays localized and actionable without pulling recovery code across its lazy boundary. -->
+          <LibraryStatus
+            toast={null}
+            alert="Saved playback progress couldn’t be updated. Try again."
+            alertRetry={() => playbackReceiptRetry++}
+          />
+        {/if}
       {/if}
       <Router
         profile={profileSessionKey(shown.identity)}

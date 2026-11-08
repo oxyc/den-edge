@@ -99,6 +99,9 @@ const EMPTY: AssistantRecords = {
   dropped: [],
 };
 
+const sameConfigValue = (left: ConfigValue | null | undefined, right: ConfigValue): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
+
 /** A read record in these states has its projection dropped (§15); `newer` is left to a client that reads it. */
 const DEAD = new Set(['revoked', 'expired', 'malformed']);
 
@@ -356,19 +359,23 @@ export class LibraryAssistantAuthority {
     return { member, rows, revoked: (await this.#load()).revoked };
   }
 
-  async #load(): Promise<AssistantRecords> {
+  async #load(strict = false): Promise<AssistantRecords> {
     try {
       return readRecords(await this.port.loadRecords());
     } catch (error) {
+      if (strict) throw error;
       console.warn('den: this device’s assistant records could not be read', error);
       return { ...EMPTY };
     }
   }
 
   /** Join `update` into the stored records: sets only grow (pruning aside), `renewedAt` only moves on. */
-  #remember(update: Partial<AssistantRecords> & { prune?: string[] }): Promise<AssistantRecords> {
+  #remember(
+    update: Partial<AssistantRecords> & { prune?: string[] },
+    readBack = false,
+  ): Promise<AssistantRecords> {
     const run = this.#records.then(async () => {
-      const held = await this.#load();
+      const held = await this.#load(readBack);
       const revoked = [...new Set([...held.revoked, ...(update.revoked ?? [])])].sort();
       const applied = { ...held.applied, ...(update.applied ?? {}) };
       const receiptApplied = { ...held.receiptApplied, ...(update.receiptApplied ?? {}) };
@@ -384,9 +391,18 @@ export class LibraryAssistantAuthority {
         ...(publication ? { publication } : {}),
       };
       // Losing a record weakens this device against an older row; it is said, never silent.
-      await this.port.saveRecords(next).catch((error: unknown) => {
-        console.error('den: this device’s assistant records could not be saved', error);
-      });
+      if (!readBack)
+        await this.port.saveRecords(next).catch((error: unknown) => {
+          console.error('den: this device’s assistant records could not be saved', error);
+        });
+      else {
+        await this.port.saveRecords(next);
+        const durable = await this.#load(true);
+        for (const [setting, value] of Object.entries(update.receiptApplied ?? {}))
+          if (!sameConfigValue(durable.receiptApplied?.[setting], value))
+            throw new Error('the playback receipt replay record was not read back');
+        return durable;
+      }
       return next;
     });
     this.#records = run.catch(() => undefined);
@@ -952,7 +968,7 @@ export class LibraryAssistantAuthority {
       | { reject: string };
     await ensureAssistantPolicy();
     await this.port.refresh();
-    let records = await this.#load();
+    let records = await this.#load(true);
     let ack: number | null = null;
     let applied = 0;
     for (const message of messages) {
@@ -1001,9 +1017,22 @@ export class LibraryAssistantAuthority {
             );
           },
         );
+        // ACK only after both durable replay layers can be read back. The shared row protects every device; this
+        // device's kept record protects against an older row served after reconnecting.
+        await this.port.refresh();
+        if (
+          !sameConfigValue(
+            this.#row(PLAYBACK_RECEIPTS_APPLIED_ROW)?.values[accept.setting]?.value,
+            accept.value,
+          )
+        )
+          throw new Error('the playback receipt replay row was not read back');
         // The effect and shared replay row landed together. Keep the local replay record afterwards; a crash
         // between them reads the shared row on the next pass, while keeping it first could lose the effect.
-        records = await this.#remember({ receiptApplied: { [accept.setting]: accept.value } });
+        records = await this.#remember(
+          { receiptApplied: { [accept.setting]: accept.value } },
+          true,
+        );
         applied += 1;
         ack = message.seq;
       } catch (error) {

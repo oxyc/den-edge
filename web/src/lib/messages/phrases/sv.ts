@@ -187,6 +187,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Check status': 'Kontrollera status',
   checking: 'kontrollerar',
   'Checking parental controls…': 'Kontrollerar föräldrakontroll...',
+  'Checking saved playback progress…': 'Kontrollerar sparade uppspelningsframsteg…',
   'Checking your recovery code…': 'Kontrollerar din återställningskod...',
   'Checking…': 'Kontrollerar...',
   Children: 'Barn',
@@ -827,6 +828,9 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Save: 'Spara',
   'Save & validate': 'Spara & validera',
   Saved: 'Sparad',
+  'Saved playback progress couldn’t be updated. Try again.':
+    'Sparade uppspelningsframsteg kunde inte uppdateras. Försök igen.',
+  'Saved playback progress is up to date.': 'Sparade uppspelningsframsteg är uppdaterade.',
   'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.':
     'Sparat på den här enheten. Väntar på synkronisering – behåll webbläsarens data tills anslutningen återupprättas.',
   'Saving…': 'Sparar...',
