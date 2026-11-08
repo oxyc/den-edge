@@ -152,6 +152,7 @@
   import ButtonIcon from './ButtonIcon.svelte';
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
+  import { readPlayerAddress, writePlayerAddress, type PlayerAddress } from '../lib/playerAddress';
 
   let {
     title,
@@ -480,6 +481,19 @@
    * Nothing moves playback off it on its own: where it can't keep up, the viewer is told and offered another.
    */
   let chosenRelease: string | undefined = untrack(() => filename) ?? recalled.chosen;
+  /**
+   * What this player's address held when it opened (`playerAddress.ts`): the viewer's delivery, audio, subtitle and
+   * position from before a reload, or from a shared link. The release itself arrives as `filename`. Applied to the
+   * first session only (`restoring`); an advance to the next episode starts clean.
+   */
+  const addressed: PlayerAddress = untrack(() =>
+    readPlayerAddress({ type: title.type, id: title.id, season, episode }),
+  );
+  let restoring = true;
+  /** The viewer's own choices this visit, which the address keeps; an automatic pick is never written. */
+  let viewerAudio = $state(untrack(() => filename !== undefined && addressed.audio !== undefined));
+  let viewerDelivery = $state(addressed.via !== undefined);
+  let viewerSubtitles = $state(addressed.subtitles !== undefined);
   let session = $state<Session | null>(null);
   /** Holds a direct Cast handoff until its selected external subtitle has its receiver URL. */
   let castSubtitlePreparing = $state(false);
@@ -590,7 +604,8 @@
     );
   let progress = reporterFor(playingEpisode);
   /** Where the next session starts: a language switch picks up where the last one was. */
-  let startAt: { fraction: number; seconds?: number } | null = null;
+  let startAt: { fraction: number; seconds?: number } | null =
+    addressed.at !== undefined ? { seconds: addressed.at, fraction: 0 } : null;
   /** The second den-remux was asked to start the playing session at; undefined when it was asked for none. */
   let started: number | undefined;
   /** What this browser decodes, found once: den-remux converts only what won't play here. */
@@ -1041,7 +1056,13 @@
   async function begin(
     pick:
       { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined = chosenRelease
-      ? { filename: chosenRelease }
+      ? {
+          filename: chosenRelease,
+          // An audio index names a track of one release: the address's, only while that is still the one asked for.
+          ...(restoring && viewerAudio && chosenRelease === filename
+            ? { audioTrack: addressed.audio }
+            : {}),
+        }
       : undefined,
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
     replacing?: Session,
@@ -1096,7 +1117,7 @@
     const { audio, subtitleLanguages } = wantedLanguages(
       {
         audio: audioLanguage,
-        subtitle: subtitleLanguage ?? undefined,
+        subtitle: addressedSubtitleLanguage() ?? subtitleLanguage ?? undefined,
         shownSubtitles: shownSubtitleLanguages,
       },
       title.originalLanguage,
@@ -1532,6 +1553,7 @@
       compatibleSubtitles &&
       subtitleLanguage === undefined &&
       subtitleChoice === null &&
+      !(restoring && addressed.subtitles === 'off') &&
       !(result.external && subtitlesNeedPlaylist())
     ) {
       // A TorBox stream names no audio track: what it plays is the release's default, the title's original language
@@ -1546,13 +1568,14 @@
     // full candidate (TorBox embeds precede OpenSubtitles), never a forced-only track merely because it came first,
     // and keep an exact manual identity across same-language alternatives.
     if (subtitleChoice) {
+      // A track the address named that this session doesn't offer is still that language.
+      const sameLanguage = replacingSubtitleLanguage ?? addressedSubtitleLanguage();
       const picked =
         preferredSubtitleTrack(result.subtitles ?? [], subtitleChoice) ??
-        (replacingSubtitleLanguage
-          ? preferredSubtitleTrack(result.subtitles ?? [], replacingSubtitleLanguage)
-          : undefined);
+        (sameLanguage ? preferredSubtitleTrack(result.subtitles ?? [], sameLanguage) : undefined);
       subtitleChoice = picked ? subtitleValue(picked) : null;
     }
+    restoring = false;
     const selectedTorBoxTrack = selectedSubtitle(result)?.torboxTrack;
     if (
       result.external &&
@@ -3339,6 +3362,7 @@
     clearInterval(timer);
     progress.paused();
     report();
+    keepAddress();
     if (session) {
       sendHeartbeat(session);
       clearInterval(heartbeat);
@@ -3383,10 +3407,24 @@
    * Begin with Settings' preference; undefined means Off. den-remux's renditions are non-default so every playback
    * path starts consistently, then this player applies the explicit choice on its local or away-browser path.
    */
-  let subtitleChoice = $state<string | null>(untrack(() => subtitleLanguage ?? null));
+  let subtitleChoice = $state<string | null>(
+    untrack(() =>
+      addressed.subtitles === 'off'
+        ? null
+        : addressed.subtitles
+          ? (addressed.subtitles.track ?? addressed.subtitles.language)
+          : (subtitleLanguage ?? null),
+    ),
+  );
+  /** The address's subtitle language, asked for and matched on the session it restores. */
+  function addressedSubtitleLanguage(): string | undefined {
+    return restoring && addressed.subtitles && addressed.subtitles !== 'off'
+      ? addressed.subtitles.language
+      : undefined;
+  }
   /** The viewer's prior choice while an explicit no-session TorBox attempt, including its retries, omits Den subs. */
   let pendingDirectSubtitleRestore: string | null | undefined;
-  let subtitleOffset = $state(0);
+  let subtitleOffset = $state(addressed.subtitleDelay ?? 0);
   let subtitleResyncOffset = $state(0);
   const subtitleTimingOffset = $derived(subtitleOffset + subtitleResyncOffset);
   let subtitleResyncReady = $state(false);
@@ -3773,6 +3811,7 @@
   }
 
   async function chooseSubtitle(next: string | null): Promise<void> {
+    viewerSubtitles = true;
     const selectionGeneration = ++subtitleSelectionGeneration;
     subtitleLoadFailure = null;
     subtitleResyncRequest?.abort();
@@ -3924,6 +3963,7 @@
     // Where it last was, for `carryPosition`'s fallback once the element is gone. How much actually played is
     // `totalPlayedSecs`, from the element's own `played` ranges — never summed here.
     lastPosition = at;
+    if (Date.now() - addressWrittenAt >= ADDRESS_MS) keepAddress();
     // The first part-way position once playback starts or resumes goes out now, not a minute later.
     if (session && !(video ? video.paused : remotePaused))
       progress.reportStart(at, length(), { creditsReached: reachedCredits(at) });
@@ -4220,6 +4260,7 @@
 
   function switchAudioIndex(n: number) {
     if (!session || n === session.audioTrack) return;
+    viewerAudio = true;
     const pending = showTransition('Switching audio…');
     restart({ audioTrack: n, filename: session.release.filename }, undefined, undefined, pending);
   }
@@ -4244,6 +4285,8 @@
     degraded = false;
     excluded = excluded.filter((one) => one !== filename);
     chosenRelease = filename;
+    // Another release has its own tracks: the one it opens with is its own default, not a choice.
+    viewerAudio = false;
     keepReleases();
     switchCount += 1;
     lastSwitchReason = 'user';
@@ -4343,6 +4386,7 @@
         if (moved === true) {
           switchCount += 1;
           lastSwitchReason = 'user';
+          viewerDelivery = true;
           return;
         }
         clearTransition(pending);
@@ -4389,7 +4433,10 @@
         return false;
       })
       .then((moved) => {
-        if (moved === true) return;
+        if (moved === true) {
+          viewerDelivery = true;
+          return;
+        }
         clearTransition(pending);
         if (!compatibleSubtitles && !session && retry === undefined) {
           subtitleChoice = previousSubtitle;
@@ -4577,6 +4624,9 @@
     const remembered = recallReleases(memoryKey);
     chosenRelease = filename ?? remembered.chosen;
     excluded = remembered.left;
+    // The address held the episode left; this one is picked, and delivered, as any new one is.
+    restoring = false;
+    viewerAudio = viewerDelivery = false;
     releases = [];
     releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
@@ -4633,6 +4683,64 @@
     if (!session && !failure) return;
     holding = false;
     heldFrame = undefined;
+  });
+
+  /**
+   * The first start, as the address left it (`addressed`). A release or path it names that Hearth no longer offers is
+   * an old link, not a failure: noted in the console, and played as an address without it would be.
+   */
+  async function beginAddressed() {
+    const named = filename !== undefined || addressed.via === 'remux';
+    const started = await begin(
+      undefined,
+      {},
+      undefined,
+      addressed.via === 'remux' ? 'fallback' : 'ordinary',
+    );
+    if (started !== false || !named || session || ended || retry !== undefined) return;
+    if (failure !== 'none' && failure !== 'sourceUnavailable' && failure !== 'request') return;
+    console.info(
+      'den: this address named a stream that is no longer offered; playing the usual pick instead.',
+    );
+    if (chosenRelease === filename) chosenRelease = undefined;
+    viewerAudio = viewerDelivery = false;
+    await begin(undefined, {}, undefined, 'ordinary');
+  }
+
+  /** How often a playing position is written to the address, besides each pause and seek. */
+  const ADDRESS_MS = 10_000;
+  let addressWrittenAt = 0;
+  /** The viewer's choices, and where playback is, kept in this player's address (`playerAddress.ts`). */
+  function keepAddress() {
+    const current = session;
+    if (!current || ended) return;
+    addressWrittenAt = Date.now();
+    // Before its first frame a session is still at 0: the second it was asked to start at is where it is.
+    const at = (video?.currentTime ?? remoteTime) || started || 0;
+    const total = length();
+    const track = subtitleChoice === null ? undefined : selectedSubtitle(current);
+    writePlayerAddress(
+      { type: title.type, id: title.id, ...playingEpisode },
+      {
+        source: viewerAudio ? current.release.filename : chosenRelease,
+        ...(viewerDelivery ? { via: current.external ? 'torbox' : 'remux' } : {}),
+        ...(viewerAudio ? { audio: current.audioTrack } : {}),
+        ...(viewerSubtitles && (track || subtitleChoice === null)
+          ? {
+              subtitles: track
+                ? { language: track.language, track: subtitleValue(track) }
+                : ('off' as const),
+            }
+          : {}),
+        subtitleDelay: subtitleOffset,
+        ...(total && at > 5 && at / total < WATCHED ? { at } : {}),
+      },
+    );
+  }
+  $effect(() => {
+    // Each of these is a choice changed: another session (release, track or path), a subtitle, its timing.
+    void [session, subtitleChoice, subtitleOffset, viewerAudio, viewerDelivery, viewerSubtitles];
+    untrack(keepAddress);
   });
 
   function close() {
@@ -4771,7 +4879,7 @@
   });
 
   $effect(() => {
-    untrack(() => void begin());
+    untrack(() => void beginAddressed());
     const focusBeforePlayer = document.activeElement as HTMLElement | null;
     const root = untrack(() => playerRoot);
     let initialFocusFrame: number | undefined;
@@ -5209,6 +5317,7 @@
           onplay={playing}
           onpause={paused}
           onseeking={stay}
+          onseeked={keepAddress}
           ontimeupdate={tick}
           onended={finished}
           onerror={() => {

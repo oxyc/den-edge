@@ -142,16 +142,19 @@
         },
       )
     : [];
+  // `path`: open on that address as the Router would, a player's own state included.
   let route = $state<Route>(
-    params.get('page') === 'watchlist'
-      ? { page: 'watchlist' }
-      : params.get('page') === 'title'
-        ? {
-            page: 'title',
-            type: params.get('type') === 'tv' ? 'tv' : 'movie',
-            id: Number(params.get('id')),
-          }
-        : { page: 'library' },
+    params.get('path')
+      ? parseRoute(params.get('path')!)
+      : params.get('page') === 'watchlist'
+        ? { page: 'watchlist' }
+        : params.get('page') === 'title'
+          ? {
+              page: 'title',
+              type: params.get('type') === 'tv' ? 'tv' : 'movie',
+              id: Number(params.get('id')),
+            }
+          : { page: 'library' },
   );
   // The app's Router answers a page's `navigate`; here the route just follows it, so a pick that lives in the address
   // (Watched's year) is drawn.
@@ -434,7 +437,8 @@
       if (this.holds === 0)
         return Promise.resolve({
           kind: 'title.eligibility',
-          allowed: request.titles,
+          // `blocked`: the Kid's policy refuses every title asked about.
+          allowed: params.has('blocked') ? [] : request.titles,
         } as ContentResultFor<Request>);
       this.holds--;
       return new Promise<ContentResultFor<Request>>((resolve, reject) => {
