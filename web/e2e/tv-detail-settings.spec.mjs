@@ -159,12 +159,29 @@ test('Tizen 3 preserves queued managed-playback receipts for a capable linked de
       receiptRequests.push(`${request.method()} ${new URL(request.url()).pathname}`);
   });
 
-  await setupSeries(page, { linked: true });
+  await setupSeries(page, { linked: true, playback: true });
   await expect(
     page
       .getByRole('region', { name: 'Watchlist', exact: true })
       .getByRole('link', { name: /Remote Series/ }),
   ).toBeVisible();
+  await page.goto(`${E2E_ORIGIN}/tv/9`);
+  await expect(page.getByRole('heading', { name: 'Remote Series', level: 1 })).toBeVisible();
+  const play = page.locator('header.hero').getByRole('link', { name: 'Play', exact: true });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByText(
+      'This TV can save progress while Den stays open, but it cannot recover managed playback after the page closes. Link a phone or computer in Settings › Connections to recover it later.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const recovery = page.getByRole('button', { name: 'Open Connections' });
+  await expect(recovery).toBeVisible();
+  await recovery.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings`);
+  await expect(page.getByRole('button', { name: /Linked devices/ })).toBeVisible();
   expect(receiptRequests).toEqual([]);
 });
 
