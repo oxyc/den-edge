@@ -256,12 +256,24 @@ async function play(page, path = `/movie/${++lastFilm}`, name = 'Play') {
   return path;
 }
 
-/** Close the player as a viewer does: over the picture first, where its chrome has auto-hidden while they watched. */
-async function closePlayer(page) {
+/** Over the picture, as a viewer moves before pressing the player's chrome, which auto-hides while they watch. */
+async function revealControls(page) {
   const box = await page.locator('.player').boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.move(box.x + box.width / 2 + 5, box.y + box.height / 2);
+}
+
+async function closePlayer(page) {
+  await revealControls(page);
   await page.getByRole('button', { name: 'Close' }).click();
+}
+
+/** The cast page's own button in the player's bar, pressed. */
+async function pressCast(page) {
+  const button = castFrame(page).locator('#cast');
+  await expect(button).toBeVisible({ timeout: 30_000 });
+  await revealControls(page);
+  await button.click();
 }
 
 /** Every playback operation the page asked for (`POST /den/<config>/playback`), with its body, from `from` on. */
@@ -272,9 +284,7 @@ const playbacks = (seen, from = 0) =>
 
 /** The cast page's own button, pressed: Chrome's device list, where the stub's one receiver is chosen. */
 async function castToReceiver(page) {
-  const button = castFrame(page).locator('#cast');
-  await expect(button).toBeVisible({ timeout: 30_000 });
-  await button.click();
+  await pressCast(page);
   await expect
     .poll(async () => (await castWindow(page)?.evaluate(() => window.loads.length)) ?? 0, {
       timeout: 60_000,
@@ -554,9 +564,7 @@ test.describe('Cast of a TorBox stream', () => {
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
 
     const from = seen.requests.length;
-    const button = castFrame(page).locator('#cast');
-    await expect(button).toBeVisible({ timeout: 30_000 });
-    await button.click();
+    await pressCast(page);
     await expect(
       page.getByText(
         'The Chromecast couldn’t play this TorBox release, so it’s playing here again.',
