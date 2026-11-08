@@ -264,5 +264,8 @@ if (process.argv.includes('--capture')) {
   // ceiling already retains 251 bytes on the matched head, so no complete-graph allowance is added here.
   // The same contract adds 374 gzip bytes to the complete non-translation graph after that compile-time split.
   // Keep it within the next 128-byte boundary with useful variance, retaining 138 bytes against the fixed baseline.
-  if (coreTotalDelta > 90624) throw new Error('Browser total JS/CSS budget exceeded');
+  // Receipt recovery (#1104) and Tizen receipt recovery (#1083) were each sized against a main without the other and
+  // without the outage gaps; merged together main measures 91,770 on a local production build, over both of their
+  // ceilings. Allow the next 128-byte boundary past the merged measurement, retaining 134.
+  if (coreTotalDelta > 91904) throw new Error('Browser total JS/CSS budget exceeded');
 }
