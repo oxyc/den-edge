@@ -10,7 +10,7 @@ import {
   type Watcher,
 } from '../../src/lib/playbackStats';
 import { lanReachable } from '../../src/lib/localNetwork';
-import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
+import { castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import {
   denLifecycleMedia,
@@ -39,7 +39,6 @@ interface Media {
   subtitleIndex?: number;
   /** A chosen external WebVTT staged on this page's origin for the receiver. */
   subtitleTrack?: { language: string; name: string; url: string };
-  terminal?: boolean;
   /** Externally managed media has no Den lifecycle endpoint; this URL is the only capability handed to Cast. */
   external?: boolean;
   /** Hearth's opaque terminal lifecycle capability. */
@@ -270,6 +269,11 @@ let castStarted = false;
 /** Whether a receiver is on the network, once the SDK has said; undefined before that. */
 let castDevices: boolean | undefined;
 let replacingCast = false;
+/**
+ * A LOAD sent and not yet answered. The media it replaces keeps reporting meanwhile, and one of its progress ticks
+ * must not end `replacingCast` before that media's own INTERRUPTED arrives: read as a stop, it ended the session.
+ */
+let loadInFlight = false;
 let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
 /** What this page's video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
@@ -714,7 +718,12 @@ async function loadCast(): Promise<void> {
     media.subtitleLanguage && validSubtitleTrack(media.subtitleTrack) ? [1] : [];
   try {
     replacingCast = castStarted;
-    await session.loadMedia(request);
+    loadInFlight = true;
+    try {
+      await session.loadMedia(request);
+    } finally {
+      loadInFlight = false;
+    }
     // A LOAD replaces the receiver only once it succeeds. Until then its events and lifecycle still belong to
     // the previous media, even though `current` already describes the requested replacement.
     playing = requested;
@@ -736,8 +745,7 @@ async function loadCast(): Promise<void> {
       return;
     }
     castStarted = false;
-    if (castErrorAction(media.terminal === true) === 'stop-receiver')
-      castContext?.endCurrentSession(true);
+    // The Cast session is kept: the player decides what is tried next, and only Stop casting ends it.
     const message = 'Chromecast could not load this release';
     setStatus(message);
     fail(message, 0, requested);
@@ -820,7 +828,7 @@ function initializeCast(): boolean {
       muted: remotePlayer.isMuted,
     });
     if (remotePlayer.playerState !== 'IDLE') {
-      replacingCast = false;
+      if (!loadInFlight) replacingCast = false;
       if (
         current &&
         castSubtitleAppliedId !== current.id &&
@@ -842,8 +850,6 @@ function initializeCast(): boolean {
       naturallyFinished = true;
       tell('den-ended');
     } else if (action === 'error') {
-      if (castErrorAction(current?.media.terminal === true) === 'stop-receiver')
-        castContext?.endCurrentSession(true);
       fail('Chromecast could not continue playback');
     } else {
       // CANCELLED means the media was stopped; an unrelated sender's LOAD is merely disconnected from.

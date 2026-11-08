@@ -353,8 +353,14 @@ test('managed direct HLS refreshes TorBox once on Cast failure without switching
         ).length;
       })
       .toBe(2);
-    await expect(page.getByRole('alert')).toContainText('stopped responding');
-    expect(asked.managed).toHaveLength(3);
+    // Told as what it is, and playing here again: only Stop casting ends the Cast session.
+    await expect(
+      page.getByText(
+        'The Chromecast couldn’t play this TorBox release, so it’s playing here again.',
+      ),
+    ).toBeVisible();
+    await expect.poll(() => asked.managed.length).toBe(4);
+    expect(asked.managed[3].player).not.toBe('cast');
     expect(asked.managed).not.toContainEqual(expect.objectContaining({ directFailed: true }));
     expect(asked.direct, 'managed playback never posts to the legacy direct facade').toEqual([]);
     expect(asked.relay, 'a TorBox Cast failure does not open a Remux session').toEqual([]);

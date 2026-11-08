@@ -31,9 +31,17 @@ const web = fileURLToPath(new URL('..', import.meta.url));
  * (`window.__devices(bool)` changes it later). `connect`: what choosing one in Chrome's list comes to — `ok` (a session,
  * after `connectMs` of CONNECTING), `fail` (Chrome could not start one) or `gone` (the receiver went away). Every call
  * the cast page makes of the receiver is kept in `window.calls`, every LOAD in `window.loads`; the receiver plays a
- * loaded title on, a quarter second at a time, as the real one reports it.
+ * loaded title on, a quarter second at a time, as the real one reports it. `interrupt`: a LOAD after the first is
+ * answered as a receiver does, after the media it replaces reported once more and then went IDLE `INTERRUPTED`.
+ * `refuse`: the receiver refuses every LOAD.
  */
-const sdk = ({ devices = true, connect = 'ok', connectMs = 300 } = {}) => `
+const sdk = ({
+  devices = true,
+  connect = 'ok',
+  connectMs = 300,
+  interrupt = false,
+  refuse = false,
+} = {}) => `
   window.loads = [];
   window.calls = [];
   window.states = [];
@@ -62,6 +70,7 @@ const sdk = ({ devices = true, connect = 'ok', connectMs = 300 } = {}) => `
   let state = 'NO_DEVICES_AVAILABLE';
   let session = null;
   let loaded = false;
+  let idleReason = null;
   const setState = (next) => {
     state = next;
     window.states.push(next);
@@ -108,13 +117,24 @@ const sdk = ({ devices = true, connect = 'ok', connectMs = 300 } = {}) => `
         session = {
           loadMedia(request) {
             window.loads.push({ url: request.media.contentId, currentTime: request.currentTime });
+            if (${refuse}) return Promise.reject('load_failed');
+            if (${interrupt} && loaded)
+              return new Promise((resolve) => setTimeout(() => {
+                player.playerState = 'PLAYING';
+                changes.forEach((fn) => fn());
+                idleReason = 'INTERRUPTED';
+                player.playerState = 'IDLE';
+                changes.forEach((fn) => fn());
+                idleReason = null;
+                setTimeout(resolve, 100);
+              }, 100));
             loaded = true;
             player.currentTime = request.currentTime || 0;
             player.isPaused = false;
             return Promise.resolve();
           },
           getMediaSession() {
-            return loaded ? { idleReason: null, media: { tracks: [] }, editTracksInfo() {} } : null;
+            return loaded ? { idleReason, media: { tracks: [] }, editTracksInfo() {} } : null;
           },
           getCastDevice() { return { friendlyName: 'Living Room TV' }; },
         };
@@ -175,6 +195,9 @@ async function open(
     userAgent = CHROME_MAC,
     viewport = { width: 1280, height: 800 },
     mobile = false,
+    subtitle = false,
+    // As Hearth does: every ask is a newly created TorBox stream, at its own signed URL.
+    freshUrls = false,
   } = {},
 ) {
   const browser = await browserType.launch(
@@ -198,9 +221,30 @@ async function open(
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
   await page.route(`${ORIGIN}/den/config/playback`, (r) => {
-    asked.managed.push(r.request().postDataJSON());
+    const request = r.request().postDataJSON();
+    asked.managed.push(request);
     return r.fulfill({
-      json: { url: TORBOX, release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 } },
+      json: {
+        url: freshUrls ? `${TORBOX}&stream=${asked.managed.length}` : TORBOX,
+        release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 },
+        // As Hearth answers: TorBox's embedded track, burned into the stream only when it was asked for by index.
+        ...(subtitle
+          ? {
+              subtitleResync: { supported: false, reason: 'managed_delivery' },
+              subtitles: [
+                {
+                  value: 'torbox:0',
+                  language: 'en',
+                  name: 'English',
+                  source: 'built-in',
+                  delivery: 'torbox',
+                  torboxTrack: 0,
+                },
+              ],
+              torboxSubtitle: request.subtitleTrack ?? null,
+            }
+          : {}),
+      },
     });
   });
   await page.route(`${ORIGIN}/den/config/subtitles/**`, (r) =>
@@ -229,7 +273,9 @@ async function open(
     if (path === '/') asked.castFrames += 1;
     return serveFile(r, path === '/' ? 'index.html' : path.slice(1));
   });
-  await page.goto(`${ORIGIN}/test/player.html?playback=/den/config/playback&next`);
+  await page.goto(
+    `${ORIGIN}/test/player.html?playback=/den/config/playback&next${subtitle ? '&subtitleLanguage=en' : ''}`,
+  );
   return { browser, page, asked };
 }
 
@@ -333,6 +379,102 @@ test('one tap opens Chrome’s device list, connects, and the TV plays from wher
     await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
     await expect(page.locator('.player video')).toHaveCount(0);
     expect(asked.castFrames, 'the same cast page throughout').toBe(1);
+    // One hand-off is one ask of Hearth and one LOAD on the receiver, and nothing ends it afterwards (2026-11-08: a
+    // second ask and LOAD seconds later ended the Cast session and the TV went back to its home screen).
+    await page.waitForTimeout(3_000);
+    expect(asked.managed.filter((request) => request.player === 'cast')).toHaveLength(1);
+    expect(await receiver(page, 'loads')).toHaveLength(1);
+    expect(await receiver(page, 'calls')).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+// The TorBox stream playing here carries its built-in subtitle burned in. Cast asked for the release alone, so Hearth
+// handed over a stream without it, the player asked again for the one with it, and the receiver was sent a second
+// LOAD seconds after the first (2026-11-08: the TV then went back to its home screen).
+test('casting a TorBox stream with its built-in subtitle on is one ask and one LOAD, subtitle included', async () => {
+  const { browser, page, asked } = await open(chromium, { subtitle: true });
+  try {
+    await expect.poll(() => asked.managed.length).toBe(2);
+    expect(asked.managed[1]).toMatchObject({ subtitleTrack: 0 });
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+    await page.waitForTimeout(3_000);
+    const cast = asked.managed.filter((request) => request.player === 'cast');
+    expect(cast).toHaveLength(1);
+    expect(cast[0]).toMatchObject({ filename: 'fixture.mkv', subtitleTrack: 0 });
+    expect(await receiver(page, 'loads')).toHaveLength(1);
+    expect(await receiver(page, 'calls')).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+// The media a replacement LOAD interrupts reports once more while that LOAD is answered. That tick ended the cast page's
+// note that a replacement was under way, so the INTERRUPTED after it read as the viewer stopping, and the Cast session
+// was ended.
+test('a replacement LOAD on the receiver never ends the Cast session', async () => {
+  const { browser, page } = await open(chromium, { sdkOptions: { interrupt: true } });
+  try {
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+    await page.waitForTimeout(500);
+    await page.evaluate(
+      ([cast, url]) =>
+        document.querySelector(`iframe[src^="${cast}"]`).contentWindow.postMessage(
+          {
+            type: 'den-load',
+            id: `${url}&replacement`,
+            media: { url: `${url}&replacement`, mode: 'cast', title: 'Fixture', external: true },
+          },
+          cast,
+        ),
+      [CAST, TORBOX],
+    );
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(2);
+    await page.waitForTimeout(1_000);
+    expect(await receiver(page, 'calls')).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
+    );
+    await expect(page.locator('.player video')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+// A TorBox stream stays TorBox: Den Remux only when the viewer picks it. One fresh TorBox stream is tried on the
+// receiver, then the viewer is told and it plays here again, with the Cast session left for Stop casting.
+test('a TorBox stream the receiver won’t load is retried once as TorBox, named, and never remuxed', async () => {
+  const { browser, page, asked } = await open(chromium, {
+    sdkOptions: { refuse: true },
+    freshUrls: true,
+  });
+  try {
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect(
+      page.getByText(
+        'The Chromecast couldn’t play this TorBox release, so it’s playing here again.',
+      ),
+    ).toBeVisible({ timeout: 15_000 });
+    expect(await receiver(page, 'loads')).toHaveLength(2);
+    const cast = asked.managed.filter((request) => request.player === 'cast');
+    expect(cast).toHaveLength(2);
+    expect(asked.managed.some((request) => request.directFailed)).toBe(false);
+    expect(await receiver(page, 'calls')).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
+    );
+    await playingPast(page, 0);
   } finally {
     await browser.close();
   }
