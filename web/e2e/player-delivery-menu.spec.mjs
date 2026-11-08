@@ -154,11 +154,7 @@ for (const [engine, browserType] of [
         await expect(stamp).toHaveAttribute('aria-expanded', 'false');
 
         // A press opens the menu and changes nothing about what plays.
-        if (layout === 'desktop') {
-          const box = await page.locator('.player').boundingBox();
-          if (!box) throw new Error('player has no box');
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        }
+        await showControls(page, layout);
         await stamp.click();
         const menu = page.getByRole('menu', { name: 'Playing from TorBox' });
         await expect(menu).toBeVisible();
@@ -193,11 +189,7 @@ for (const [engine, browserType] of [
           .poll(() => video.evaluate((v) => v.currentTime), { timeout: 30_000 })
           .toBeGreaterThan(7);
         const at = await video.evaluate((v) => v.currentTime);
-        if (layout === 'desktop') {
-          const box = await page.locator('.player').boundingBox();
-          if (!box) throw new Error('player has no box');
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        }
+        await showControls(page, layout);
         await stamp.click();
         await toRemux.click();
         const remuxStamp = page.getByRole('button', { name: 'Playing from Den Remux' });
@@ -206,11 +198,7 @@ for (const [engine, browserType] of [
         expect(playback[1]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
         expect(playback[1].startAt).toBeGreaterThan(at - 1);
 
-        if (layout === 'desktop') {
-          const box = await page.locator('.player').boundingBox();
-          if (!box) throw new Error('player has no box');
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        }
+        await showControls(page, layout);
         await remuxStamp.click();
         const back = page.getByRole('menu', { name: 'Playing from Den Remux' });
         await expect(back).toContainText('Playing through Den Remux');
@@ -222,4 +210,18 @@ for (const [engine, browserType] of [
       }
     });
   }
+}
+
+/**
+ * Bring the auto-hidden controls back as a viewer does: a mouse moves over the picture, a finger taps it (a tap on
+ * controls already showing would hide them).
+ */
+async function showControls(page, layout) {
+  const player = page.locator('.player');
+  const box = await page.locator('.player video').boundingBox();
+  if (!box) throw new Error('player has no video');
+  if (layout === 'desktop') await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  else if (/web-controls-hidden/.test((await player.getAttribute('class')) ?? ''))
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(player).not.toHaveClass(/web-controls-hidden/);
 }
