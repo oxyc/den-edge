@@ -42,6 +42,7 @@ const COMPACT_MIN_FREE: u64 = 2 << 20;
 const COMPACTION_BYTES: usize = 1536 * 1024;
 pub(super) const DATABASE_CACHE_BYTES: usize = 64 * 1024;
 const DATABASE_HANDLE_BYTES: usize = 112 * 1024;
+pub(super) const RESPONSE_CHUNK_BYTES: usize = 64 * 1024;
 const PREPARED_PAGE_BYTES: usize = PAGE_BYTES + 64 * 1024;
 /// Redb's measured handle/cache/mapping residency plus one worst-case exact prepared identity page.
 pub(crate) const OPEN_DATABASE_BYTES: usize = DATABASE_HANDLE_BYTES + PREPARED_PAGE_BYTES;
@@ -159,6 +160,10 @@ pub(super) struct Conflict {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct BatchResult {
+    /// The protocol metadata committed by this same write transaction. Callers must use this outcome instead of
+    /// reopening the database after the per-library slot is released: a subsequent writer may already have moved
+    /// the library to a newer generation.
+    pub protocol: Protocol,
     pub head: u64,
     pub applied: Vec<(String, u64)>,
     pub conflicts: Vec<Conflict>,
@@ -228,6 +233,7 @@ impl ExclusiveEdit {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RangePage {
+    pub protocol: Protocol,
     pub entries: Vec<StoredRow>,
     pub head: u64,
     pub more: bool,
@@ -247,14 +253,40 @@ pub(super) struct LibrarySnapshot {
 
 #[derive(Clone)]
 pub(super) struct ChunkPage {
+    pub protocol: Protocol,
     pub chunks: Vec<Bytes>,
     pub len: usize,
+    /// Payload allocations retained by `chunks`, including the last chunk's unused capacity and their handles.
+    /// Response admission is charged against this rather than only the logical HTTP length.
+    pub retained: usize,
+}
+
+impl ChunkPage {
+    fn new(protocol: Protocol, chunks: Vec<Vec<u8>>) -> Self {
+        let len = chunks.iter().map(Vec::len).sum();
+        let retained_payload = chunks.iter().map(Vec::capacity).sum::<usize>();
+        let chunks: Vec<Bytes> = chunks.into_iter().map(Bytes::from).collect();
+        let retained = retained_payload + chunks.capacity() * std::mem::size_of::<Bytes>();
+        Self { protocol, chunks, len, retained }
+    }
+}
+
+fn append_chunked(chunks: &mut Vec<Vec<u8>>, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        if chunks.last().is_none_or(|chunk| chunk.len() == RESPONSE_CHUNK_BYTES) {
+            chunks.push(Vec::with_capacity(RESPONSE_CHUNK_BYTES));
+        }
+        let chunk = chunks.last_mut().unwrap();
+        let taking = bytes.len().min(RESPONSE_CHUNK_BYTES - chunk.len());
+        chunk.extend_from_slice(&bytes[..taking]);
+        bytes = &bytes[taking..];
+    }
 }
 
 struct PreparedPage {
     since: u64,
     limit: usize,
-    generation: String,
+    generation_prefix: String,
     page: ChunkPage,
 }
 
@@ -317,10 +349,15 @@ pub(super) trait LibraryStore: Send + Sync {
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError>;
     /// The rows below `before`, newest first: a first read that wants a library's recent rows before its oldest.
     fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError>;
-    /// The current rows of `keys` that exist, in sequence order, with the head they were read at.
-    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError>;
-    fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage>;
-    fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError>;
+    /// The selected-row HTTP representation, built directly in bounded chunks from one read transaction.
+    fn selected_chunks(&self, keys: &[String], generation_prefix: &str) -> Result<ChunkPage, StoreError>;
+    fn cached_range_chunks(&self, since: u64, limit: usize, generation_prefix: &str) -> Option<ChunkPage>;
+    fn range_chunks(
+        &self,
+        since: u64,
+        limit: usize,
+        generation_prefix: &str,
+    ) -> Result<ChunkPage, StoreError>;
     #[cfg(test)]
     fn disk_bytes(&self) -> Result<u64, StoreError>;
     #[cfg(test)]
@@ -742,6 +779,28 @@ impl RedbLibrary {
         DatabaseRef(self.database.read().unwrap())
     }
 
+    /// Protocol authority read from the same redb snapshot as a response's rows.
+    fn read_protocol(&self, transaction: &redb::ReadTransaction) -> Result<Protocol, StoreError> {
+        let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+        let head = numbers
+            .get("head")
+            .map_err(StoreError::redb)?
+            .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+            .value();
+        let wire_min = numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+        let migration_generation =
+            numbers.get("migration-generation").map_err(StoreError::redb)?.map_or(0, |value| value.value());
+        let bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+        let generation = bytes
+            .get("generation")
+            .map_err(StoreError::redb)?
+            .ok_or_else(|| StoreError::Invalid("v3 generation is missing".into()))?;
+        let generation = std::str::from_utf8(generation.value())
+            .map_err(|_| StoreError::Invalid("v3 generation is not UTF-8".into()))?
+            .to_owned();
+        Ok(Protocol { head, wire_min, generation, migration_generation })
+    }
+
     /// Claim this handle's hourly measurement and report whether more than half the file, and at least
     /// `COMPACT_MIN_FREE`, is free pages. redb's own page count is exact and cheap (measured 2–18 ms, under 60 KB,
     /// from a 13.7 MB to a 67 MB file); the live-byte charge is not a usable proxy, because a freshly compacted file
@@ -800,41 +859,42 @@ impl LibraryStore for RedbLibrary {
         let mut prepared = self.prepared.lock().unwrap();
         let database = self.database();
         let transaction = database.begin_write().map_err(StoreError::redb)?;
-        if transaction
-            .open_table(META_BYTES)
-            .map_err(StoreError::redb)?
-            .get(EXCLUSIVE_OPERATION_LOCK)
-            .map_err(StoreError::redb)?
-            .is_some()
-        {
-            return Err(StoreError::Locked);
-        }
-        let mut head = {
+        let generation = {
+            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            if metadata.get(EXCLUSIVE_OPERATION_LOCK).map_err(StoreError::redb)?.is_some() {
+                return Err(StoreError::Locked);
+            }
+            let current = metadata
+                .get("generation")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 generation is missing".into()))?;
+            std::str::from_utf8(current.value())
+                .map_err(|_| StoreError::Invalid("v3 generation is not UTF-8".into()))?
+                .to_owned()
+        };
+        let (mut head, current_min, mut migration_generation) = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata
+            let head = metadata
                 .get("head")
                 .map_err(StoreError::redb)?
                 .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
-            value.value()
+            let current_min =
+                metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+            let migration_generation = metadata
+                .get("migration-generation")
+                .map_err(StoreError::redb)?
+                .map_or(0, |value| value.value());
+            (head.value(), current_min, migration_generation)
         };
         let started_empty = head == 0;
-        let current_min = {
-            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
-            value
-        };
         // The minimum this batch leaves: a first batch sets it, as below. Read inside the transaction, so a rewrite
         // committed between the handler's read and this write is the minimum applied.
         let effective_min = if started_empty { current_min.max(wire_min) } else { current_min };
         if effective_min >= 3 && authority.wire.unwrap_or(0) < effective_min {
             return Err(StoreError::UpgradeRequired(effective_min));
         }
-        if let Some(expected) = &authority.generation {
-            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
-            let current = metadata.get("generation").map_err(StoreError::redb)?;
-            if current.as_ref().map(|value| value.value()) != Some(expected.as_bytes()) {
-                return Err(StoreError::GenerationChanged);
-            }
+        if authority.generation.as_ref().is_some_and(|expected| generation != expected.as_str()) {
+            return Err(StoreError::GenerationChanged);
         }
         if writes.iter().any(|write| !value_fits(&write.value, effective_min)) {
             return Err(StoreError::TooLarge);
@@ -923,19 +983,24 @@ impl LibraryStore for RedbLibrary {
                 }
             }
             if !accepted.is_empty() {
-                let generation = metadata
-                    .get("migration-generation")
-                    .map_err(StoreError::redb)?
-                    .map_or(0, |value| value.value())
+                migration_generation = migration_generation
                     .checked_add(1)
                     .filter(|value| *value <= MAX_SAFE_INTEGER)
                     .ok_or_else(|| StoreError::Invalid("profile migration generation exhausted".into()))?;
-                metadata.insert("migration-generation", generation).map_err(StoreError::redb)?;
+                metadata.insert("migration-generation", migration_generation).map_err(StoreError::redb)?;
             }
         }
+        let protocol = Protocol {
+            head,
+            // An all-conflict first batch does not publish its requested minimum.
+            wire_min: if started_empty && accepted.is_empty() { current_min } else { effective_min },
+            generation,
+            migration_generation,
+        };
         transaction.commit().map_err(StoreError::redb)?;
         *prepared = None;
         Ok(BatchResult {
+            protocol,
             head,
             applied: accepted.into_iter().map(|(write, _, seq, _, _)| (write.key.clone(), seq)).collect(),
             conflicts,
@@ -963,14 +1028,7 @@ impl LibraryStore for RedbLibrary {
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let head = {
-            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata
-                .get("head")
-                .map_err(StoreError::redb)?
-                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
-            value.value()
-        };
+        let protocol = self.read_protocol(&transaction)?;
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
         let mut rows = sequence.range((Excluded(since), Unbounded)).map_err(StoreError::redb)?;
         let mut entries = Vec::new();
@@ -990,20 +1048,13 @@ impl LibraryStore for RedbLibrary {
         if !more {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
-        Ok(RangePage { entries, head, more, rows: None })
+        Ok(RangePage { head: protocol.head, protocol, entries, more, rows: None })
     }
 
     fn range_before(&self, before: u64, limit: usize) -> Result<RangePage, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let head = {
-            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata
-                .get("head")
-                .map_err(StoreError::redb)?
-                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
-            value.value()
-        };
+        let protocol = self.read_protocol(&transaction)?;
         // Kept in the table's header, as the write path's live-row count is: no scan.
         let live_rows = {
             let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
@@ -1028,82 +1079,81 @@ impl LibraryStore for RedbLibrary {
         if !more {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
-        Ok(RangePage { entries, head, more, rows: Some(live_rows) })
+        Ok(RangePage { head: protocol.head, protocol, entries, more, rows: Some(live_rows) })
     }
 
-    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
+    fn selected_chunks(&self, keys: &[String], generation_prefix: &str) -> Result<ChunkPage, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let head = {
-            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata
-                .get("head")
-                .map_err(StoreError::redb)?
-                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
-            value.value()
-        };
+        let protocol = self.read_protocol(&transaction)?;
         let index = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
-        let mut entries = Vec::new();
+        let mut selected = Vec::with_capacity(keys.len());
         for key in keys {
             let Some((sequence_number, _)) =
                 index.get(key.as_str()).map_err(StoreError::redb)?.map(|value| unpacked(value.value()))
             else {
                 continue;
             };
+            // The HTTP parser already deduplicates keys. Keep this store boundary defensive so another caller
+            // cannot turn one fragment into repeated response allocations.
+            if !selected.contains(&sequence_number) {
+                selected.push(sequence_number);
+            }
+        }
+        selected.sort_unstable();
+
+        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+        let mut chunks = vec![Vec::with_capacity(RESPONSE_CHUNK_BYTES)];
+        append_chunked(&mut chunks, br#"{"entries":["#);
+        for (at, sequence_number) in selected.into_iter().enumerate() {
             let fragment = sequence
                 .get(sequence_number)
                 .map_err(StoreError::redb)?
                 .ok_or_else(|| StoreError::Invalid("v3 key points to no fragment".into()))?;
-            entries.push(self.row(sequence_number, fragment.value()));
+            if at > 0 {
+                append_chunked(&mut chunks, b",");
+            }
+            append_chunked(&mut chunks, fragment.value());
         }
-        entries.sort_by_key(|row| row.sequence);
-        Ok(RangePage { entries, head, more: false, rows: None })
+        let generation = format!("{generation_prefix}.{}", protocol.generation);
+        let suffix = format!(
+            r#"],"head":{},"more":false,"generation":"{generation}","selected":true}}"#,
+            protocol.head
+        );
+        append_chunked(&mut chunks, suffix.as_bytes());
+        Ok(ChunkPage::new(protocol, chunks))
     }
 
-    fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
+    fn cached_range_chunks(&self, since: u64, limit: usize, generation_prefix: &str) -> Option<ChunkPage> {
         let prepared = self.prepared.try_lock().ok()?;
         let cached = prepared.as_ref()?;
-        (cached.since == since && cached.limit == limit.min(MAX_LIMIT) && cached.generation == generation)
+        (cached.since == since
+            && cached.limit == limit.min(MAX_LIMIT)
+            && cached.generation_prefix == generation_prefix)
             .then(|| cached.page.clone())
     }
 
-    fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError> {
-        const CHUNK_BYTES: usize = 64 * 1024;
-
-        fn append(chunks: &mut Vec<Vec<u8>>, mut bytes: &[u8]) {
-            while !bytes.is_empty() {
-                if chunks.last().is_none_or(|chunk| chunk.len() == CHUNK_BYTES) {
-                    chunks.push(Vec::with_capacity(CHUNK_BYTES));
-                }
-                let chunk = chunks.last_mut().unwrap();
-                let taking = bytes.len().min(CHUNK_BYTES - chunk.len());
-                chunk.extend_from_slice(&bytes[..taking]);
-                bytes = &bytes[taking..];
-            }
-        }
-
+    fn range_chunks(
+        &self,
+        since: u64,
+        limit: usize,
+        generation_prefix: &str,
+    ) -> Result<ChunkPage, StoreError> {
         let limit = limit.min(MAX_LIMIT);
         let mut prepared = self.prepared.lock().unwrap();
         if let Some(cached) = prepared.as_ref() {
-            if cached.since == since && cached.limit == limit && cached.generation == generation {
+            if cached.since == since && cached.limit == limit && cached.generation_prefix == generation_prefix
+            {
                 return Ok(cached.page.clone());
             }
         }
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let head = {
-            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let value = metadata
-                .get("head")
-                .map_err(StoreError::redb)?
-                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
-            value.value()
-        };
+        let protocol = self.read_protocol(&transaction)?;
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
         let mut rows = sequence.range((Excluded(since), Unbounded)).map_err(StoreError::redb)?;
-        let mut chunks = vec![Vec::with_capacity(CHUNK_BYTES)];
-        append(&mut chunks, br#"{"entries":["#);
+        let mut chunks = vec![Vec::with_capacity(RESPONSE_CHUNK_BYTES)];
+        append_chunked(&mut chunks, br#"{"entries":["#);
         let mut entries = 0usize;
         let mut page_bytes = 128usize;
         let mut more = false;
@@ -1116,21 +1166,25 @@ impl LibraryStore for RedbLibrary {
                 break;
             }
             if entries != 0 {
-                append(&mut chunks, b",");
+                append_chunked(&mut chunks, b",");
             }
-            append(&mut chunks, fragment.value());
+            append_chunked(&mut chunks, fragment.value());
             page_bytes += cost;
             entries += 1;
         }
         if !more {
             more = rows.next().transpose().map_err(StoreError::redb)?.is_some();
         }
-        let suffix = format!(r#"],"head":{head},"more":{more},"generation":"{generation}"}}"#);
-        append(&mut chunks, suffix.as_bytes());
-        let len = chunks.iter().map(Vec::len).sum();
-        let page = ChunkPage { chunks: chunks.into_iter().map(Bytes::from).collect(), len };
-        *prepared =
-            Some(PreparedPage { since, limit, generation: generation.to_owned(), page: page.clone() });
+        let generation = format!("{generation_prefix}.{}", protocol.generation);
+        let suffix = format!(r#"],"head":{},"more":{more},"generation":"{generation}"}}"#, protocol.head);
+        append_chunked(&mut chunks, suffix.as_bytes());
+        let page = ChunkPage::new(protocol, chunks);
+        *prepared = Some(PreparedPage {
+            since,
+            limit,
+            generation_prefix: generation_prefix.to_owned(),
+            page: page.clone(),
+        });
         Ok(page)
     }
 
@@ -1189,44 +1243,13 @@ impl LibraryStore for RedbLibrary {
     fn protocol(&self) -> Result<Protocol, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-        let head = numbers
-            .get("head")
-            .map_err(StoreError::redb)?
-            .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
-            .value();
-        let wire_min = numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
-        let bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
-        let generation = bytes
-            .get("generation")
-            .map_err(StoreError::redb)?
-            .ok_or_else(|| StoreError::Invalid("v3 generation is missing".into()))?;
-        let generation = std::str::from_utf8(generation.value())
-            .map_err(|_| StoreError::Invalid("v3 generation is not UTF-8".into()))?
-            .to_owned();
-        let migration_generation =
-            numbers.get("migration-generation").map_err(StoreError::redb)?.map_or(0, |value| value.value());
-        Ok(Protocol { head, wire_min, generation, migration_generation })
+        self.read_protocol(&transaction)
     }
 
     fn snapshot(&self) -> Result<LibrarySnapshot, StoreError> {
         let database = self.database();
         let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-        let head = numbers
-            .get("head")
-            .map_err(StoreError::redb)?
-            .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
-            .value();
-        let wire_min = numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
-        let bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
-        let generation = bytes
-            .get("generation")
-            .map_err(StoreError::redb)?
-            .ok_or_else(|| StoreError::Invalid("v3 generation is missing".into()))?;
-        let generation = std::str::from_utf8(generation.value())
-            .map_err(|_| StoreError::Invalid("v3 generation is not UTF-8".into()))?
-            .to_owned();
+        let protocol = self.read_protocol(&transaction)?;
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
         let rows = sequence
             .iter()
@@ -1236,9 +1259,7 @@ impl LibraryStore for RedbLibrary {
                 Ok(self.row(stored_sequence.value(), fragment.value()))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
-        let migration_generation =
-            numbers.get("migration-generation").map_err(StoreError::redb)?.map_or(0, |value| value.value());
-        Ok(LibrarySnapshot { protocol: Protocol { head, wire_min, generation, migration_generation }, rows })
+        Ok(LibrarySnapshot { protocol, rows })
     }
 
     fn exclusive_operation_lock(&self) -> Result<Option<String>, StoreError> {
@@ -1655,7 +1676,7 @@ impl LibraryStore for StoreLease {
         authority: &WriteAuthority,
     ) -> Result<BatchResult, StoreError> {
         let result = self.store.apply_tiered(writes, live_cap, wire_min, tier, authority)?;
-        self.index.record(&self.id, &self.store.protocol()?)?;
+        self.index.record(&self.id, &result.protocol)?;
         Ok(result)
     }
 
@@ -1676,16 +1697,21 @@ impl LibraryStore for StoreLease {
         self.store.range_before(before, limit)
     }
 
-    fn rows(&self, keys: &[String]) -> Result<RangePage, StoreError> {
-        self.store.rows(keys)
+    fn selected_chunks(&self, keys: &[String], generation_prefix: &str) -> Result<ChunkPage, StoreError> {
+        self.store.selected_chunks(keys, generation_prefix)
     }
 
-    fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
-        self.store.cached_range_chunks(since, limit, generation)
+    fn cached_range_chunks(&self, since: u64, limit: usize, generation_prefix: &str) -> Option<ChunkPage> {
+        self.store.cached_range_chunks(since, limit, generation_prefix)
     }
 
-    fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError> {
-        self.store.range_chunks(since, limit, generation)
+    fn range_chunks(
+        &self,
+        since: u64,
+        limit: usize,
+        generation_prefix: &str,
+    ) -> Result<ChunkPage, StoreError> {
+        self.store.range_chunks(since, limit, generation_prefix)
     }
 
     #[cfg(test)]
@@ -2275,7 +2301,8 @@ mod tests {
         let id = "1111111111111111";
         let first = manager(&dir, 4, 32 << 20, 8 << 20);
         let store = first.library(id, TOKEN).unwrap();
-        store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        let committed = store.apply(&[Write { key: K1.into(), base: 0, value: "one".into() }]).unwrap();
+        assert_eq!(committed.protocol, store.protocol().unwrap());
         drop(store);
         drop(first);
         let index = dir.join("library-v3-index.redb");
@@ -2287,9 +2314,29 @@ mod tests {
         assert!(unchanged(), "a cold open rewrote its current entry");
         let conflict = store.apply(&[Write { key: K1.into(), base: 0, value: "lost".into() }]).unwrap();
         assert!(conflict.applied.is_empty());
+        assert_eq!(conflict.protocol, store.protocol().unwrap());
         assert!(unchanged(), "a batch of conflicts rewrote the index");
-        store.apply(&[Write { key: K1.into(), base: 1, value: "two".into() }]).unwrap();
+        let next = store.apply(&[Write { key: K1.into(), base: 1, value: "two".into() }]).unwrap();
+        assert_eq!(next.protocol, store.protocol().unwrap());
+        assert_ne!(committed.protocol.migration_generation, next.protocol.migration_generation);
         assert!(!unchanged(), "a new head is recorded");
+    }
+
+    #[test]
+    fn an_all_conflict_first_batch_reports_the_protocol_it_actually_committed() {
+        let dir = temp_dir();
+        let store = manager(&dir, 4, 32 << 20, 8 << 20).library("1111111111111111", TOKEN).unwrap();
+        let result =
+            store.apply_bounded(&[Write { key: K1.into(), base: 9, value: "lost".into() }], 1 << 20, 4);
+        let result = result.unwrap();
+
+        assert!(result.applied.is_empty());
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.protocol, store.protocol().unwrap());
+        assert_eq!(
+            result.protocol.wire_min, 2,
+            "a refused first write does not publish its requested minimum"
+        );
     }
 
     #[test]
@@ -2589,8 +2636,25 @@ mod tests {
         assert_eq!(forwards, [2, 3, 4]);
         let back = store.range_before(4, 1).unwrap();
         assert_eq!((back.entries[0].sequence, back.more, back.rows), (3, true, Some(3)));
-        let named = store.rows(&[K3.to_owned(), K1.to_owned()]).unwrap();
-        assert_eq!(named.entries.iter().map(|row| row.sequence).collect::<Vec<_>>(), [3, 4]);
+        let named = store.selected_chunks(&[K3.to_owned(), K1.to_owned()], "generation").unwrap();
+        let named_generation = format!("generation.{}", named.protocol.generation);
+        let named: serde_json::Value = serde_json::from_slice(
+            &named.chunks.iter().flat_map(|chunk| chunk.iter().copied()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            named["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [3, 4]
+        );
+        assert_eq!(
+            (named["generation"].as_str(), named["selected"].as_bool()),
+            (Some(named_generation.as_str()), Some(true))
+        );
 
         let conflict = store.apply(&[Write { key: K2.into(), base: 0, value: "lost".into() }]).unwrap();
         assert_eq!(conflict.conflicts[0].current.as_ref().unwrap().sequence, 2);
@@ -2791,12 +2855,13 @@ mod tests {
         let value = "\\\"".repeat(16 * 1024);
         store.apply(&[Write { key: K1.into(), base: 0, value }]).unwrap();
         let page = store.range_chunks(0, 500, "0123456789abcdef0123456789abcdef").unwrap();
+        let generation = format!("0123456789abcdef0123456789abcdef.{}", page.protocol.generation);
         assert!(page.chunks.iter().all(|chunk| chunk.len() <= 64 * 1024));
         assert_eq!(page.chunks.iter().map(|chunk| chunk.len()).sum::<usize>(), page.len);
         let joined: Vec<u8> = page.chunks.into_iter().flatten().collect();
         let decoded: serde_json::Value = serde_json::from_slice(&joined).unwrap();
         assert_eq!(decoded["entries"][0]["seq"], 1);
-        assert_eq!(decoded["generation"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(decoded["generation"], generation);
     }
 
     #[test]

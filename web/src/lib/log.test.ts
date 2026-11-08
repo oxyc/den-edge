@@ -1715,6 +1715,25 @@ describe('LibraryLog', () => {
     expect(await log.readToHead(), 'the next pass, after the write-back').toBe(true);
   });
 
+  it('rejects contradictory generation evidence before rows or facts are kept, then retries coherently', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1)], [], 'body-generation');
+    const contradictory: typeof fetch = async (input, init) => {
+      const response = await server.fetchImpl(input, init);
+      if (init?.method || !response.ok) return response;
+      return new Response(await response.text(), {
+        status: response.status,
+        headers: { 'content-type': 'application/json', 'x-den-generation': 'header-generation' },
+      });
+    };
+
+    await expect(LibraryLog.open(LIBRARY_KEY, contradictory, undefined, vault)).resolves.toBeNull();
+    expect(keptFacts(data)).toBe(false);
+
+    const coherent = await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault);
+    expect(coherent?.title({ type: 'movie', id: 1 })).toBeDefined();
+  });
+
   /** README: after a restore, a device "writes back what the snapshot lacks" — it rewrote every row it held. */
   it('writes back only what a restored log lacks', async () => {
     let server = await edge([row(1), row(2), row(3), row(4)]);

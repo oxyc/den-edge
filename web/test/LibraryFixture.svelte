@@ -25,6 +25,14 @@
   import type { LibraryLog } from '../src/lib/log';
   import { documentsOf, fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
+  import { fixtureContentService } from './contentService';
+  import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
+  import type {
+    ContentPolicy,
+    ContentRequest,
+    ContentResultFor,
+    ContentServiceStatusValue,
+  } from '../src/lib/contentServiceProtocol';
   import {
     rowName,
     type EpisodeRow,
@@ -34,6 +42,7 @@
   } from '../src/lib/wire';
 
   const params = new URLSearchParams(location.search);
+  const playBoundary = params.has('play-boundary');
   const populated = params.has('populated');
   let releaseContinueHint!: () => void;
   const continueHint = new Promise<void>((resolve) => (releaseContinueHint = resolve));
@@ -61,6 +70,10 @@
     ).denTestReleaseLibrarySettings = releaseSettings;
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
+  let releaseProgressReply = () => {};
+  const progressReplyGate = params.has('hold-final-progress-reply')
+    ? new Promise<void>((resolve) => (releaseProgressReply = resolve))
+    : undefined;
   /** Actions wait until `denTestReleaseWrites()`: a write that takes as long as a slow library takes. */
   let releaseWrites = () => {};
   const writeGate = params.has('hold-writes')
@@ -389,8 +402,74 @@
   } as unknown as LibraryLog;
 
   let publish = () => {};
+  class HeldEligibilityContent implements ContentServiceClientPort {
+    readonly inner = fixtureContentService();
+    readonly waiting = new Set<{
+      finish: () => void;
+      cancel: () => void;
+    }>();
+    holds = 0;
+    asked = 0;
+    cancelled = 0;
+
+    query<Request extends ContentRequest>(
+      request: Request,
+      signal?: AbortSignal,
+      policy?: ContentPolicy,
+      onProgress?: (partial: ContentResultFor<Request>) => void,
+    ): Promise<ContentResultFor<Request>> {
+      if (!playBoundary || request.kind !== 'title.eligibility')
+        return this.inner.query(request, signal, policy, onProgress);
+      this.asked++;
+      if (this.holds === 0)
+        return Promise.resolve({
+          kind: 'title.eligibility',
+          allowed: request.titles,
+        } as ContentResultFor<Request>);
+      this.holds--;
+      return new Promise<ContentResultFor<Request>>((resolve, reject) => {
+        const cleanup = () => signal?.removeEventListener('abort', pending.cancel);
+        const pending = {
+          finish: () => {
+            cleanup();
+            this.waiting.delete(pending);
+            resolve({
+              kind: 'title.eligibility',
+              allowed: request.titles,
+            } as ContentResultFor<Request>);
+          },
+          cancel: () => {
+            cleanup();
+            this.waiting.delete(pending);
+            this.cancelled++;
+            reject(new DOMException('fixture request cancelled', 'AbortError'));
+          },
+        };
+        if (signal?.aborted) return pending.cancel();
+        this.waiting.add(pending);
+        signal?.addEventListener('abort', pending.cancel, { once: true });
+      });
+    }
+
+    onStatus(listener: (status: ContentServiceStatusValue) => void): () => void {
+      return this.inner.onStatus(listener);
+    }
+
+    release(): void {
+      this.holds = 0;
+      for (const pending of [...this.waiting]) pending.finish();
+    }
+
+    hold(): void {
+      this.asked = 0;
+      this.cancelled = 0;
+      this.holds = 1;
+    }
+  }
+  const boundaryContent = playBoundary ? new HeldEligibilityContent() : null;
   const library = fixtureLibraryService({
     log,
+    ...(boundaryContent ? { content: boundaryContent } : {}),
     failOpenOnce: params.has('open-failure'),
     openFailureMessage: params.has('storage-timeout')
       ? 'Library storage timed out while opening IndexedDB'
@@ -398,7 +477,15 @@
     openGate,
     settingsGate,
     failHistoryDetails: params.has('fail-history-details'),
+    rejectProgressCommands: params.has('reject-final-progress') ? 1 : 0,
+    progressReplyGate,
   });
+  if (progressReplyGate)
+    (window as unknown as { denTestReleaseProgressReply: () => void }).denTestReleaseProgressReply =
+      releaseProgressReply;
+  (
+    window as unknown as { denTestProgressOperationIds: () => string[] }
+  ).denTestProgressOperationIds = () => [...library.progressOperationIds];
   (
     window as unknown as { denTestHistoryDetails: typeof library.historyDetails }
   ).denTestHistoryDetails = library.historyDetails;
@@ -433,25 +520,83 @@
   }
   const visitor = params.has('visitor');
   const kid = params.has('kid');
-  const session: ProfileSession = visitor
-    ? visitorProfileSession(
-        library.session.household,
-        localStorage,
-        visitorVisitId('11111111111111111111111111111111'),
-      )
-    : kid
-      ? activeProfileSession(
-          persistentProfileIdentity('22222222222222222222222222222222', 'fixture-kid'),
+  let session = $state<ProfileSession>(
+    visitor
+      ? visitorProfileSession(
+          library.session.household,
+          localStorage,
+          visitorVisitId('11111111111111111111111111111111'),
+        )
+      : kid
+        ? activeProfileSession(
+            persistentProfileIdentity('22222222222222222222222222222222', 'fixture-kid'),
+            library.session.household,
+            library.session.model!,
+            null,
+            { maximumAge: 12, unknownRatings: 'block' },
+            false,
+            true,
+          )
+        : playBoundary
+          ? activeProfileSession(
+              persistentProfileIdentity('22222222222222222222222222222222', 'fixture-kid-a'),
+              library.session.household,
+              library.session.model!,
+              null,
+              { maximumAge: 12, unknownRatings: 'block' },
+              false,
+              true,
+              [{ type: 'movie', id: 1001 }],
+            )
+          : library.session,
+  );
+  if (playBoundary) {
+    session.services.scout = {
+      install: 'https://hearth.test/fixture',
+      base: '/den/fixture',
+      playback: '/den/fixture/playback',
+    };
+    (
+      window as unknown as {
+        denTestPlayBoundary: {
+          replace: (profile: 'same' | 'other' | 'owner') => void;
+          hold: () => void;
+          release: () => void;
+          stats: () => { asked: number; waiting: number; cancelled: number };
+        };
+      }
+    ).denTestPlayBoundary = {
+      replace: (profile) => {
+        const old = session;
+        const owner = profile === 'owner';
+        session = activeProfileSession(
+          persistentProfileIdentity(
+            profile === 'other'
+              ? '33333333333333333333333333333333'
+              : '22222222222222222222222222222222',
+            profile === 'other' ? 'fixture-kid-b' : owner ? 'fixture-owner' : 'fixture-kid-a',
+          ),
           library.session.household,
           library.session.model!,
           null,
-          { maximumAge: 12, unknownRatings: 'block' },
-          false,
-          true,
-        )
-      : library.session;
+          owner ? null : { maximumAge: 12, unknownRatings: 'block' },
+          owner,
+          !owner,
+          owner ? [] : [{ type: 'movie', id: 1001 }],
+        );
+        old.close();
+      },
+      hold: () => boundaryContent!.hold(),
+      release: () => boundaryContent!.release(),
+      stats: () => ({
+        asked: boundaryContent!.asked,
+        waiting: boundaryContent!.waiting.size,
+        cancelled: boundaryContent!.cancelled,
+      }),
+    };
+  }
   // `services`: find atlas and the rest as the app does, so Home draws its service rows.
-  if (kid || params.has('services'))
+  if ((kid || params.has('services')) && !playBoundary)
     void session.model?.ready.then(() => session.configureServices());
   let visitorReady = $state(!visitor);
   if (visitor) {
@@ -502,6 +647,9 @@
     return () => {
       delete (window as { denTestLivePosition?: unknown }).denTestLivePosition;
       delete (window as { denTestRows?: unknown }).denTestRows;
+      delete (window as { denTestReleaseProgressReply?: unknown }).denTestReleaseProgressReply;
+      delete (window as { denTestProgressOperationIds?: unknown }).denTestProgressOperationIds;
+      delete (window as { denTestPlayBoundary?: unknown }).denTestPlayBoundary;
     };
   });
 </script>
@@ -509,11 +657,13 @@
 <main style="padding:var(--bar-space) var(--gutter)">
   {#if visitorReady}<span data-visitor-ready hidden>ready</span>{/if}
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  <Library
-    link={shownLink}
-    {session}
-    {route}
-    active={true}
-    watchedYear={route.page === 'watchlist' ? route.year : undefined}
-  />
+  {#key session}
+    <Library
+      link={shownLink}
+      {session}
+      {route}
+      active={true}
+      watchedYear={route.page === 'watchlist' ? route.year : undefined}
+    />
+  {/key}
 </main>

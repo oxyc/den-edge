@@ -20,6 +20,7 @@ import { completeDurableTaskOperation } from './libraryOperationAuthority';
 import { startupMark } from './startupTiming';
 import {
   abandon,
+  abandonPending,
   begin,
   confirm,
   makingWaits,
@@ -56,6 +57,9 @@ const affectedLibrary = [
   { kind: 'recovery' as const },
   { kind: 'connections' as const },
 ];
+const recoveryResult = (
+  result: Extract<LibraryAuthorityTaskResult['result'], { kind: `recovery.${string}` }>,
+): LibraryAuthorityTaskResult => ({ result, affected: [{ kind: 'recovery' }] });
 
 const standardKey = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 
@@ -75,6 +79,7 @@ export interface LibraryAdminAuthorityOptions {
  * locators remain here; callers exchange only bounded semantic tasks and presentation-safe results.
  */
 export class LibraryAdminAuthority {
+  readonly #recoveryTails = new Map<string, Promise<void>>();
   readonly #recoveryMakes = new Map<
     string,
     {
@@ -94,7 +99,8 @@ export class LibraryAdminAuthority {
     private readonly options: LibraryAdminAuthorityOptions,
   ) {}
 
-  close(): void {
+  async close(): Promise<void> {
+    await Promise.allSettled(this.#recoveryTails.values());
     for (const make of this.#recoveryMakes.values()) make.done();
     this.#recoveryMakes.clear();
   }
@@ -211,9 +217,11 @@ export class LibraryAdminAuthority {
       case 'recovery.begin':
         return this.#beginRecovery(task, operationId);
       case 'recovery.confirm':
-        return this.#confirmRecovery(task.locator, operationId);
+        return this.#serializeRecovery(task.locator, () =>
+          this.#confirmRecovery(task.locator, operationId),
+        );
       case 'recovery.abandon':
-        return this.#abandonRecovery(task.locator);
+        return this.#serializeRecovery(task.locator, () => this.#abandonRecovery(task.locator));
       case 'recovery.disable':
         return this.#disableRecovery();
       case 'history.import':
@@ -254,10 +262,7 @@ export class LibraryAdminAuthority {
   ): Promise<LibraryAuthorityTaskResult> {
     const previous = await this.#recoveryMake(task.locator);
     if (previous && previous.operationId === operationId && !previous.outcome)
-      return {
-        result: { kind: 'recovery.begin', outcome: 'begun' },
-        affected: [{ kind: 'recovery' }],
-      };
+      return recoveryResult({ kind: 'recovery.begin', outcome: 'begun' });
     previous?.done();
     this.#recoveryMakes.delete(task.locator);
     await this.#keepRecoveryMakes();
@@ -269,11 +274,7 @@ export class LibraryAdminAuthority {
       createdAt: task.createdAt,
     };
     const begun = await begin(this.#recoveryContext(), prepared);
-    if (!begun.ok)
-      return {
-        result: { kind: 'recovery.begin', outcome: begun.error },
-        affected: [{ kind: 'recovery' }],
-      };
+    if (!begun.ok) return recoveryResult({ kind: 'recovery.begin', outcome: begun.error });
     this.#recoveryMakes.set(task.locator, {
       prepared,
       baseLive: begun.baseLive,
@@ -286,15 +287,9 @@ export class LibraryAdminAuthority {
       begun.done();
       this.#recoveryMakes.delete(task.locator);
       await abandon(this.#recoveryContext(), task.locator);
-      return {
-        result: { kind: 'recovery.begin', outcome: 'failed' },
-        affected: [{ kind: 'recovery' }],
-      };
+      return recoveryResult({ kind: 'recovery.begin', outcome: 'failed' });
     }
-    return {
-      result: { kind: 'recovery.begin', outcome: 'begun' },
-      affected: [{ kind: 'recovery' }],
-    };
+    return recoveryResult({ kind: 'recovery.begin', outcome: 'begun' });
   }
 
   async #confirmRecovery(
@@ -302,16 +297,9 @@ export class LibraryAdminAuthority {
     operationId?: string,
   ): Promise<LibraryAuthorityTaskResult> {
     const making = await this.#recoveryMake(locator);
-    if (!making)
-      return {
-        result: { kind: 'recovery.confirm', outcome: 'lost' },
-        affected: [{ kind: 'recovery' }],
-      };
+    if (!making) return recoveryResult({ kind: 'recovery.confirm', outcome: 'lost' });
     if (making.operationId === operationId && making.outcome)
-      return {
-        result: { kind: 'recovery.confirm', outcome: making.outcome },
-        affected: [{ kind: 'recovery' }],
-      };
+      return recoveryResult({ kind: 'recovery.confirm', outcome: making.outcome });
     const result = await confirm(this.#recoveryContext(), making.prepared, making.baseLive);
     const outcome = result.ok ? 'confirmed' : 'lost' in result ? 'lost' : 'failed';
     if (result.ok || 'lost' in result) {
@@ -321,25 +309,43 @@ export class LibraryAdminAuthority {
       making.outcome = outcome;
       await this.#keepRecoveryMakes();
     }
-    return {
-      result: {
-        kind: 'recovery.confirm',
-        outcome,
-      },
-      affected: [{ kind: 'recovery' }],
-    };
+    return recoveryResult({ kind: 'recovery.confirm', outcome });
   }
 
   async #abandonRecovery(locator: string): Promise<LibraryAuthorityTaskResult> {
     const making = await this.#recoveryMake(locator);
-    making?.done();
-    this.#recoveryMakes.delete(locator);
-    await this.#keepRecoveryMakes();
-    await abandon(this.#recoveryContext(), locator);
-    return {
-      result: { kind: 'recovery.abandon', outcome: 'abandoned' },
-      affected: [{ kind: 'recovery' }],
+    const outcome =
+      making?.outcome === 'confirmed' || making?.outcome === 'lost'
+        ? making.outcome
+        : await abandonPending(this.#recoveryContext(), locator);
+    if (outcome === 'confirmed') {
+      if (making) {
+        making.done();
+        making.done = () => {};
+        making.outcome = 'confirmed';
+        await this.#keepRecoveryMakes();
+      }
+    } else if (outcome !== 'failed') {
+      making?.done();
+      this.#recoveryMakes.delete(locator);
+      await this.#keepRecoveryMakes();
+    } else if (making) {
+      // A disposed presentation cannot retry confirmation and must not retain its heartbeat/timer. The durable
+      // pending preparation remains for a later authoritative cleanup pass or explicit Retry while still mounted.
+      making.done();
+      making.done = () => {};
+    }
+    return recoveryResult({ kind: 'recovery.abandon', outcome });
+  }
+
+  #serializeRecovery<T>(locator: string, work: () => Promise<T>): Promise<T> {
+    const result = (this.#recoveryTails.get(locator) ?? Promise.resolve()).then(work);
+    const clear = () => {
+      if (this.#recoveryTails.get(locator) === tail) this.#recoveryTails.delete(locator);
     };
+    const tail = result.then(clear, clear);
+    this.#recoveryTails.set(locator, tail);
+    return result;
   }
 
   async #recoveryMake(locator: string) {
@@ -401,10 +407,7 @@ export class LibraryAdminAuthority {
   async #disableRecovery(): Promise<LibraryAuthorityTaskResult> {
     if (!(await turnOff(this.#recoveryContext())))
       throw new Error('recovery code was not disabled');
-    return {
-      result: { kind: 'recovery.disable', outcome: 'disabled' },
-      affected: [{ kind: 'recovery' }],
-    };
+    return recoveryResult({ kind: 'recovery.disable', outcome: 'disabled' });
   }
 
   async #importHistory(

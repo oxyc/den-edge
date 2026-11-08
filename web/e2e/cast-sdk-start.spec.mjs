@@ -100,7 +100,7 @@ test('a Cast SDK whose framework arrives after its availability callback still f
             if (e.data.type === 'den-ready') e.source.postMessage({ type: 'den-discover' }, '${CAST}');
             if (e.data.type === 'den-cast-availability') window.answers.push(e.data.available);
           });
-        </script><iframe src="${CAST}/"></iframe>`,
+        </script><iframe src="${CAST}/" onload="this.contentWindow.postMessage({ type: 'den-handshake', generation: 'sdk-test' }, '${CAST}')"></iframe>`,
       }),
     );
     await page.goto(`${ORIGIN}/cast-parent`);
@@ -111,6 +111,60 @@ test('a Cast SDK whose framework arrives after its availability callback still f
       false,
     );
     expect(errors.filter((e) => e.includes('Cast could not start'))).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the real Cast document ignores media until its own handshake and replays current state after delayed load', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await context.route('https://www.gstatic.com/**', (r) =>
+      r.fulfill({ contentType: 'text/javascript', body: sdk(0) }),
+    );
+    await context.route(`${CAST}/**`, async (r) => {
+      const path = new URL(r.request().url()).pathname;
+      const file = path === '/' ? 'index.html' : path.slice(1);
+      if (file.endsWith('.js')) await new Promise((resolve) => setTimeout(resolve, 250));
+      const type = file.endsWith('.html')
+        ? 'text/html'
+        : file.endsWith('.js')
+          ? 'text/javascript'
+          : 'text/css';
+      return r.fulfill({ contentType: type, body: await readFile(join(built, file)) });
+    });
+    await page.route(`${ORIGIN}/cast-fence-parent`, (r) =>
+      r.fulfill({
+        contentType: 'text/html',
+        body: `<!doctype html><script>
+          const media = (title, time) => ({ type: 'den-load', id: title, media: {
+            url: 'https://media.test/remux/s/${'a'.repeat(22)}/${'b'.repeat(22)}/master.m3u8',
+            mode: 'browser', title, currentTime: time, terminal: false, external: false
+          }});
+          window.current = media('initial', 3);
+          setTimeout(() => window.current = media('current', 19), 50);
+          addEventListener('message', (event) => {
+            if (event.origin !== '${CAST}' || event.data.type !== 'den-ready') return;
+            event.source.postMessage(window.current, '${CAST}');
+          });
+          function loaded(frame) {
+            frame.contentWindow.postMessage(media('before-handshake', 1), '${CAST}');
+            setTimeout(() => frame.contentWindow.postMessage(
+              { type: 'den-handshake', generation: 'replacement-document' }, '${CAST}'
+            ), 100);
+          }
+        </script><iframe src="${CAST}/" onload="loaded(this)"></iframe>`,
+      }),
+    );
+
+    await page.goto(`${ORIGIN}/cast-fence-parent`);
+    const cast = () => page.frames().find((frame) => frame.url().startsWith(CAST));
+    await expect.poll(() => cast()?.title()).toBe('current');
+    expect(await cast().evaluate(() => document.title)).not.toBe('before-handshake');
   } finally {
     await browser.close();
   }

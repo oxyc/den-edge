@@ -6,6 +6,8 @@
 
 import type { LibraryCommand } from './libraryServiceProtocol';
 import type { LibraryServiceSupervisor } from './libraryServiceSupervisor';
+import { coherentLibraryGeneration } from './libraryPage';
+import type { LibraryJoinPresentationLease } from './libraryJoinPresentation';
 
 const HOUSEHOLD_KEY = 'den.household';
 const PLAN_KEY = 'den.household.plan';
@@ -195,6 +197,7 @@ export async function recheckHousehold(
     const keys = await deriveKeys(Uint8Array.from(atob(key), (c) => c.charCodeAt(0)));
     let live = 0;
     let since = 0;
+    let generation: string | null = null;
     for (;;) {
       const response = await fetchImpl(`/lib/${keys.id}/changes?since=${since}&limit=1000`, {
         cache: 'no-store',
@@ -202,9 +205,17 @@ export async function recheckHousehold(
       }).catch(() => null);
       if (!response?.ok) return `den-edge answered ${response?.status ?? 'nothing'}`;
       const page = (await response.json()) as {
+        generation?: unknown;
         entries: { seq: number; v: string | null }[];
         more: boolean;
       };
+      const pageGeneration = coherentLibraryGeneration(response, page.generation);
+      if (
+        pageGeneration === undefined ||
+        (generation && pageGeneration && generation !== pageGeneration)
+      )
+        return 'den-edge answered inconsistent generation evidence';
+      if (pageGeneration) generation ??= pageGeneration;
       for (const entry of page.entries) if (entry.v) live++;
       if (!page.more || !page.entries.length) return live;
       since = page.entries.at(-1)!.seq;
@@ -320,7 +331,7 @@ export type JoinAnswer = 'joined' | 'failed' | 'pin-required' | 'pin-wrong' | 'r
 /** Bring this browser's library or household into the one `libraryKey` opens (`RoutedLibrary`). */
 export type JoinLibrary = (
   libraryKey: string,
-  options?: { pin?: string; link?: JoinLink },
+  options?: { pin?: string; link?: JoinLink; presentation?: LibraryJoinPresentationLease },
 ) => Promise<JoinAnswer>;
 
 /** How the browser opens the household it joins: a TV it paired with, or (none) a library key kept as a link. */
@@ -329,6 +340,9 @@ export interface JoinLink {
   readonly name: string;
   readonly linkKey: string;
   readonly deviceId?: string;
+  /** A recovery has no remote receiver, but still needs exact post-commit credentials. */
+  readonly recovered?: true;
+  readonly linkedAt?: number;
 }
 
 /**
@@ -364,7 +378,9 @@ export function householdJoinPlan(
         (typeof link?.inboxKey !== 'string' ||
           typeof link.name !== 'string' ||
           typeof link.linkKey !== 'string' ||
-          (link.deviceId !== undefined && typeof link.deviceId !== 'string')))
+          (link.deviceId !== undefined && typeof link.deviceId !== 'string') ||
+          (link.recovered !== undefined && link.recovered !== true) ||
+          (link.linkedAt !== undefined && !Number.isSafeInteger(link.linkedAt))))
     )
       return null;
     return value as HouseholdJoinPlan;
@@ -397,6 +413,8 @@ export function settleHouseholdJoin(
   storage: Storage | undefined = globalThis.localStorage,
 ): void {
   try {
+    const current = householdJoinPlan(storage);
+    if (!current || JSON.stringify(current) !== JSON.stringify(plan)) return;
     if (joined && storage?.getItem(HOUSEHOLD_KEY) === plan.source)
       storage.removeItem(HOUSEHOLD_KEY);
     storage?.removeItem(JOIN_KEY);

@@ -1,13 +1,35 @@
 import { expect, test, vi } from 'vitest';
 import {
+  drainPlaybackReceiptsForCurrentAuthority,
   drainPlaybackReceiptsOnce,
   drainWhileOpen,
+  preparePlaybackReceipts,
   type ApplyOutcome,
   type OtherQueue,
   type QueuedRequest,
 } from './assistant';
+import {
+  forgetLibraryCredential,
+  holdLibraryRelayMembership,
+  useLibraryCredential,
+} from './relayFetch';
 
 const DROPBOX = { kid: '0123456789abcdef0123456789abcdef', public: 'pk-one' };
+
+test('managed playback receipt preparation is lazy, retryable, and cached only after success', async () => {
+  const signal = new AbortController().signal;
+  const ensurePlaybackReceipts = vi
+    .fn<(signal?: AbortSignal) => Promise<typeof DROPBOX | null>>()
+    .mockResolvedValueOnce(null)
+    .mockResolvedValue(DROPBOX);
+  const authority = { ensurePlaybackReceipts };
+
+  await expect(preparePlaybackReceipts(authority, signal)).resolves.toBe(false);
+  await expect(preparePlaybackReceipts(authority, signal)).resolves.toBe(true);
+  await expect(preparePlaybackReceipts(authority, signal)).resolves.toBe(true);
+  expect(ensurePlaybackReceipts).toHaveBeenCalledTimes(2);
+  expect(ensurePlaybackReceipts).toHaveBeenCalledWith(signal);
+});
 
 /** A den-edge whose queue answers `drains` in turn, then holds empty until the test stops the loop. */
 function edge(drains: QueuedRequest[][]) {
@@ -189,5 +211,171 @@ test('playback receipts share the queue transport but use their own one-shot rou
   expect(calls).toEqual([
     { path: '/playback/receipts/drain', body: undefined },
     { path: '/playback/receipts/ack', body: { upTo: 7 } },
+  ]);
+});
+
+test('an empty playback receipt lane does not enter the crypto/apply path', async () => {
+  const ensure = vi.fn(async () => DROPBOX);
+  const fetchImpl = vi.fn(async () => Response.json({ messages: [] })) as unknown as typeof fetch;
+  await drainPlaybackReceiptsForCurrentAuthority(
+    {
+      libraryId: 'lib',
+      ensure,
+      lend: async () => null,
+      apply: async () => ({ ack: null }),
+      current: () => true,
+      fetchImpl,
+    },
+    new AbortController().signal,
+  );
+  expect(ensure).not.toHaveBeenCalled();
+  expect(fetchImpl).toHaveBeenCalledOnce();
+});
+
+test('receipt work is fenced after key and profile awaits when authority is replaced', async () => {
+  for (const boundary of ['ensure', 'lend'] as const) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let current = true;
+    const apply = vi.fn(async () => ({ ack: 7 }));
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith('/drain')
+        ? Response.json({ messages: [{ seq: 7, sealed: 'receipt' }] })
+        : Response.json({ removed: 1 }),
+    );
+    const fetchImpl = fetchSpy as unknown as typeof fetch;
+    const running = drainPlaybackReceiptsForCurrentAuthority(
+      {
+        libraryId: `lib-${boundary}`,
+        ensure: async () => {
+          if (boundary === 'ensure') await held;
+          return DROPBOX;
+        },
+        lend: async () => {
+          if (boundary === 'lend') await held;
+          return { profile: 'old' };
+        },
+        apply,
+        current: () => current,
+        fetchImpl,
+      },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    current = false;
+    release();
+    await running;
+    expect(apply, boundary).not.toHaveBeenCalled();
+    expect(fetchSpy.mock.calls.some(([path]) => String(path).endsWith('/ack'))).toBe(false);
+  }
+});
+
+test('replacement or abort while receipt apply is pending cannot acknowledge through a new authority', async () => {
+  for (const boundary of ['replacement', 'abort'] as const) {
+    let finish!: (value: { ack: number | null }) => void;
+    const applying = new Promise<{ ack: number | null }>((resolve) => (finish = resolve));
+    let current = true;
+    const stop = new AbortController();
+    const claims: string[] = [];
+    const originatingFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      claims.push(`old:${path}`);
+      return path.endsWith('/drain')
+        ? Response.json({ messages: [{ seq: 8, sealed: 'receipt' }] })
+        : Response.json({ removed: 1 });
+    }) as unknown as typeof fetch;
+    const running = drainPlaybackReceiptsForCurrentAuthority(
+      {
+        libraryId: `lib-${boundary}`,
+        ensure: async () => DROPBOX,
+        lend: async () => ({ profile: 'old' }),
+        apply: async () => applying,
+        current: () => current,
+        fetchImpl: originatingFetch,
+      },
+      stop.signal,
+    );
+    await vi.waitFor(() => expect(claims).toEqual(['old:/playback/receipts/drain']));
+    if (boundary === 'replacement') current = false;
+    else stop.abort();
+    finish({ ack: 8 });
+    await running;
+    expect(claims, boundary).toEqual(['old:/playback/receipts/drain']);
+  }
+});
+
+test('an aborted receipt drain held by relay opening cannot inherit replacement membership', async () => {
+  vi.stubGlobal('location', { href: 'https://den.example/library' });
+  const claims: Array<string | null> = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      claims.push(new Headers(init?.headers).get('x-den-library-member'));
+      return Response.json({ messages: [{ seq: 9, sealed: 'receipt' }] });
+    }),
+  );
+  useLibraryCredential({ id: 'old', member: 'member-a' });
+  let opened!: () => void;
+  const releaseOpening = holdLibraryRelayMembership(
+    new Promise<void>((resolve) => (opened = resolve)),
+  );
+  let current = true;
+  const stop = new AbortController();
+  const apply = vi.fn(async () => ({ ack: 9 }));
+  const running = drainPlaybackReceiptsForCurrentAuthority(
+    {
+      libraryId: 'old',
+      ensure: async () => DROPBOX,
+      lend: async () => ({ profile: 'old' }),
+      apply,
+      current: () => current,
+    },
+    stop.signal,
+  );
+  await Promise.resolve();
+  expect(claims).toEqual([]);
+
+  useLibraryCredential({ id: 'new', member: 'member-b' });
+  current = false;
+  stop.abort();
+  opened();
+  await running;
+  expect(claims).toEqual(['old:member-a']);
+  expect(apply).not.toHaveBeenCalled();
+  releaseOpening();
+  forgetLibraryCredential();
+  vi.unstubAllGlobals();
+});
+
+test('a failed receipt key publication can be retried without acknowledging the queue', async () => {
+  let attempt = 0;
+  const calls: string[] = [];
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    calls.push(path);
+    return path.endsWith('/drain')
+      ? Response.json({ messages: [{ seq: 7, sealed: 'receipt' }] })
+      : Response.json({ removed: 1 });
+  }) as unknown as typeof fetch;
+  const options = {
+    libraryId: 'lib-retry',
+    ensure: async () => {
+      if (attempt++ === 0) throw new Error('key publication failed');
+      return DROPBOX;
+    },
+    lend: async () => null,
+    apply: async () => ({ ack: 7 }),
+    current: () => true,
+    fetchImpl,
+  };
+  await expect(
+    drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual(['/playback/receipts/drain']);
+  await drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal);
+  expect(calls).toEqual([
+    '/playback/receipts/drain',
+    '/playback/receipts/drain',
+    '/playback/receipts/ack',
   ]);
 });

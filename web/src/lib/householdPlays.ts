@@ -3,6 +3,7 @@
 // Only the TV build loads this.
 
 import type { OtherQueue } from './assistant';
+import { abortableDelay } from './abortableDelay';
 import { hex, hkdf } from './crypto';
 import { drainTv, type PlayRequest, type TransportCommand } from './inbox';
 import { fromBase64url, toBase64url } from './wire';
@@ -109,20 +110,6 @@ export async function startPlay(play: TvPlay): Promise<boolean> {
   return true;
 }
 
-const pause = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-
 /**
  * Drain this TV's household command queue until `signal` aborts. The newest fresh play of a drain (the queue keeps
  * arrival order) goes to `play`, since several in one drain would only replace each other; each play that waited too
@@ -140,14 +127,14 @@ export async function receiveTv(
   while (!signal.aborted) {
     const playKey = currentPlayKey(storage);
     if (!playKey) {
-      await pause(IDLE_MS, signal);
+      await abortableDelay(IDLE_MS, signal);
       continue;
     }
     const started = Date.now();
     const drained = await drainTv({ playKey }, { wait: WAIT_S, storage }).catch(() => null);
     if (signal.aborted) return;
     if (!drained) {
-      await pause(RETRY_MS, signal);
+      await abortableDelay(RETRY_MS, signal);
       continue;
     }
     for (const play of drained.stale) handlers.stale(play);
@@ -157,6 +144,6 @@ export async function receiveTv(
     // An empty answer that came early (no held drains on this den-edge, or its cap on them reached) must not be
     // followed straight away by another (inbox-v1 §3). One that brought something drains again at once.
     const empty = !drained.fresh.length && !drained.stale.length && !drained.transport.length;
-    if (empty) await pause(Math.max(0, DRAIN_GAP_MS - (Date.now() - started)), signal);
+    if (empty) await abortableDelay(Math.max(0, DRAIN_GAP_MS - (Date.now() - started)), signal);
   }
 }

@@ -40,11 +40,13 @@
     type InterfaceLanguage,
   } from './lib/interfaceLanguage';
   import { rememberFreshPresentationLanguage } from './lib/translationCache';
+  import { LibraryJoinPresentationOwner } from './lib/libraryJoinPresentation';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let {
     link,
     model,
+    activityModel = model,
     content,
     local = false,
     onjoin,
@@ -56,6 +58,8 @@
   }: {
     link: Link | null;
     model: LibraryModel;
+    /** The active Owner activity library; household administration remains on `model`. */
+    activityModel?: LibraryModel;
     /**
      * The active profile's own preferences. Once the household has split, `model` is the household's control log, which
      * holds no preferences; all of them (region and services included) are in the profile's library, so they are read
@@ -72,26 +76,56 @@
     oninterfacelanguage?: (language: InterfaceLanguage) => void;
   } = $props();
 
-  let connectionsLease = $state.raw(untrack(() => model.connections()));
-  const simklLease = untrack(() => model.simkl());
-  const recoveryLease = untrack(() => (__DEN_TV_LEGACY_JS_CORE__ ? undefined : model.recovery()));
-  onDestroy(() => {
-    connectionsLease?.release();
-    simklLease?.release();
-    recoveryLease?.release();
+  type SettingsAuthority = {
+    model: LibraryModel;
+    connections: ReturnType<LibraryModel['connections']>;
+    simkl?: ReturnType<LibraryModel['simkl']>;
+    recovery?: ReturnType<LibraryModel['recovery']>;
+  };
+  const acquireAuthority = (authority: LibraryModel): SettingsAuthority => ({
+    model: authority,
+    connections: authority.connections(),
+    ...(!__DEN_TV_LEGACY_JS_CORE__
+      ? { simkl: authority.simkl(), recovery: authority.recovery() }
+      : {}),
   });
-  const settings = $derived(model.settings.value);
-  const connections = $derived(connectionsLease?.snapshot.value);
-  const simkl = $derived(simklLease?.snapshot.value);
-  const recoveryView = $derived(
-    recoveryLease?.snapshot.value ? structuredClone(recoveryLease.snapshot.value) : undefined,
-  );
+  const releaseAuthority = (authority: SettingsAuthority) =>
+    [authority.connections, authority.simkl, authority.recovery].forEach((lease) =>
+      lease?.release(),
+    );
+  const joinPresentation = new LibraryJoinPresentationOwner();
+  let authority = $state.raw(untrack(() => acquireAuthority(model)));
+  // A retained Settings page can receive a replacement household authority. Keep every lazy view and every command
+  // on one exact model identity: publish the complete replacement bundle, then retire all of the old subscriptions.
+  $effect(() => {
+    const replacement = model;
+    joinPresentation.replace(replacement);
+    if (authority.model === replacement) return;
+    const previous = authority;
+    authority = untrack(() => acquireAuthority(replacement));
+    releaseAuthority(previous);
+  });
+  onDestroy(() => {
+    joinPresentation.invalidate();
+    releaseAuthority(authority);
+  });
+  const settings = $derived(authority.model.settings.value);
+  const connections = $derived(authority.connections.snapshot.value);
+  const simkl = $derived(authority.simkl?.snapshot.value);
+  const recoveryView = $derived.by(() => {
+    const view = authority.recovery?.snapshot.value;
+    return view ? structuredClone(view) : undefined;
+  });
   const effectivePreferences = $derived(preferences ? preferences.value : settings?.preferences);
   let localInterfaceLanguage = $state(
     untrack(() => (local ? readLocalInterfaceLanguage() : undefined)),
   );
-  const ready = $derived(!!settings && !!effectivePreferences && !!connections);
-  const loadError = $derived(model.settings.error ?? connectionsLease.snapshot.error);
+  const loadError = $derived(
+    authority.model.settings.error ?? authority.connections.snapshot.error,
+  );
+  // A failed selector may retain its previous value for diagnosis, but that stale authority must not keep Settings
+  // actionable or hide the retry control while a fresh binding is required.
+  const ready = $derived(!!settings && !!effectivePreferences && !!connections && !loadError);
   let retrying = $state(false);
   let failure = $state<string | null>(null);
   let saving = $state(false);
@@ -185,7 +219,7 @@
   async function patchPreferences(changes: PreferenceChanges): Promise<void> {
     if (!preferences) {
       const language = changes.interfaceLanguage;
-      await model.patchPreferences(changes);
+      await authority.model.patchPreferences(changes);
       if (language) {
         rememberFreshPresentationLanguage(language);
         if (local) {
@@ -200,7 +234,7 @@
     // guard would drop one sent to the control log. Only the maturity ceiling is not a profile preference (a
     // profile's policy lives in the directory) and stays on the control log.
     const { maturityCeiling, ...personal } = changes;
-    if ('maturityCeiling' in changes) await model.patchPreferences({ maturityCeiling });
+    if ('maturityCeiling' in changes) await authority.model.patchPreferences({ maturityCeiling });
     if (Object.keys(personal).length) await preferences.patch(personal);
     if (changes.interfaceLanguage) {
       rememberFreshPresentationLanguage(changes.interfaceLanguage);
@@ -208,7 +242,7 @@
     }
   }
   const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));
-  const removeLibraryDevice = (id: string) => run(() => model.removeDevice(id));
+  const removeLibraryDevice = (id: string) => run(() => authority.model.removeDevice(id));
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
   // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
@@ -219,7 +253,7 @@
     const installed = pluginUrls;
     const table = routes;
     let gone = false;
-    const creditsOf = async (addon: Addon | null): Promise<Credit[] | null> => {
+    const creditsOf = async (addon?: Addon | null): Promise<Credit[] | null> => {
       if (!addon) return null;
       try {
         const res = await relayFetch(`${addon.base}/manifest.json`);
@@ -243,11 +277,9 @@
     if (retrying) return;
     retrying = true;
     try {
-      if (model.connection === 'failed') await model.retry();
-      else if (connectionsLease.snapshot.error) {
-        connectionsLease.release();
-        connectionsLease = model.connections();
-      }
+      const current = authority;
+      if (current.model.connection === 'failed') await current.model.retry();
+      else if (current.connections.snapshot.error) current.connections.rebind();
     } catch {
       // The model snapshots keep the exact retryable failure and this surface stays available for another try.
     } finally {
@@ -256,7 +288,9 @@
   }
 
   async function saveSimkl(token: string | null): Promise<boolean> {
-    return run(() => (token ? model.connectSimkl(token) : model.disconnectSimkl()));
+    return run(() =>
+      token ? authority.model.connectSimkl(token) : authority.model.disconnectSimkl(),
+    );
   }
 
   const heldRemovals = $derived(simkl?.heldRemovals ?? []);
@@ -291,20 +325,24 @@
    */
   async function approveRemovals(): Promise<boolean> {
     const approvalId = simkl?.approvalId;
-    return !!approvalId && run(() => model.approveSimklRemovals(approvalId));
+    return !!approvalId && run(() => authority.model.approveSimklRemovals(approvalId));
   }
 
   // den-edge's assistant connections are asked about as `model`'s member. On a household split into profiles that is
   // the household, whose connections they are (profiles-v1 §6.1), while the page's own credential may be Owner's.
-  const assistantConnectionFetch = __DEN_TV_LEGACY_JS_CORE__
-    ? Promise.resolve(undefined)
-    : untrack(() => model.ready.then(() => model.relayMembership())).then(
+  const assistantConnectionFetch = $derived.by(() => {
+    if (__DEN_TV_LEGACY_JS_CORE__) return Promise.resolve(undefined);
+    const current = authority.model;
+    return current.ready
+      .then(() => current.relayMembership())
+      .then(
         (membership) => (membership ? householdAssistantFetch(membership) : undefined),
         (error: unknown) => {
           console.error('den: the library’s assistant membership could not be read', error);
           return undefined;
         },
       );
+  });
 
   const hasRecoveryCode = $derived(!!recoveryView?.live);
   const selfId = $derived(connections?.diagnostics.selfDeviceId ?? '');
@@ -315,32 +353,27 @@
     linkKey: string,
     grantTicket?: string,
   ) {
-    const { result } = await model.sealPairingHandover(handoverKey, host, linkKey, grantTicket);
+    const { result } = await authority.model.sealPairingHandover(
+      handoverKey,
+      host,
+      linkKey,
+      grantTicket,
+    );
     if (result.kind !== 'pairing.handover') throw new Error('wrong pairing response');
     return result;
   }
 
-  async function sealRecovery(locator: string, wrapKey: string, createdAt: number) {
-    const { result } = await model.sealRecovery(locator, wrapKey, createdAt);
-    if (result.kind !== 'recovery.seal') throw new Error('wrong recovery response');
-    return result.sealed;
-  }
-
-  async function recoveryOutcome(
-    action: () => ReturnType<LibraryModel['beginRecovery']>,
-  ): Promise<string> {
-    const { result } = await action();
-    return 'outcome' in result ? result.outcome : 'failed';
-  }
-
-  async function importHistory(items: Parameters<LibraryModel['importHistory']>[0]) {
-    const { result } = await model.importHistory(items);
+  async function importHistory(
+    items: Parameters<LibraryModel['importHistory']>[0],
+    operationId: string,
+  ) {
+    const { result } = await activityModel.importHistory(items, operationId);
     if (result.kind !== 'history.import') throw new Error('wrong history import response');
     return result;
   }
 
   async function exportHistory() {
-    const { result } = await model.exportHistory();
+    const { result } = await activityModel.exportHistory();
     if (result.kind !== 'history.export') throw new Error('wrong history export response');
     return result;
   }
@@ -381,94 +414,90 @@
           pinConfigured={connections?.parentalPinConfigured ?? false}
           {disabled}
           save={savePrefs}
-          savePin={(pin) => run(() => model.setParentalPin(pin))}
-          verifyPin={(pin) => model.verifyParentalPin(pin)}
+          savePin={(pin) => run(() => authority.model.setParentalPin(pin))}
+          verifyPin={(pin) => authority.model.verifyParentalPin(pin)}
           pinRemovable={!profileTopology}
         />
       {/if}
-      <ConnectionsSection
-        {link}
-        {content}
-        {onjoin}
-        onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
-          ? onresetkey
-          : undefined}
-        profileResetBlocked={!!link && profileTopology}
-        {hasRecoveryCode}
-        {heldReset}
-        {onadoptheld}
-        apiKeys={connections!.apiKeys}
-        simklConnected={!!simkl?.connected}
-        {saveSimkl}
-        heldRemovals={namedRemovals}
-        {approveRemovals}
-        plugins={plugins!}
-        {routes}
-        servers={structuredClone(connections!.servers)}
-        devices={structuredClone(connections!.devices)}
-        {selfId}
-        {disabled}
-        setApiKey={(service, value) => run(() => model.setApiKey(service, value))}
-        installPlugin={(url) => run(() => model.installPlugin(url))}
-        removePlugin={(url) => run(() => model.removePlugin(url))}
-        setPluginTrust={(url, key) => run(() => model.setPluginTrust(url, key))}
-        removeServer={(server) => run(() => model.patchServer(server, null))}
-        {sealHandover}
-        removeDevice={removeLibraryDevice}
-        viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
-      />
+      {#key authority.model}<ConnectionsSection
+          {link}
+          {content}
+          {onjoin}
+          onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
+            ? onresetkey
+            : undefined}
+          profileResetBlocked={!!link && profileTopology}
+          {hasRecoveryCode}
+          {heldReset}
+          {onadoptheld}
+          apiKeys={connections!.apiKeys}
+          simklConnected={!!simkl?.connected}
+          {saveSimkl}
+          heldRemovals={namedRemovals}
+          {approveRemovals}
+          plugins={plugins!}
+          {routes}
+          servers={structuredClone(connections!.servers)}
+          devices={structuredClone(connections!.devices)}
+          {selfId}
+          {disabled}
+          setApiKey={(service, value) => run(() => authority.model.setApiKey(service, value))}
+          installPlugin={(url) => run(() => authority.model.installPlugin(url))}
+          removePlugin={(url) => run(() => authority.model.removePlugin(url))}
+          setPluginTrust={(url, key) => run(() => authority.model.setPluginTrust(url, key))}
+          removeServer={(server) => run(() => authority.model.patchServer(server, null))}
+          {sealHandover}
+          removeDevice={removeLibraryDevice}
+          viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
+          presentationOwner={joinPresentation}
+        />{/key}
       {#snippet recovery()}
-        <RecoveryCode
-          view={recoveryView}
-          {ready}
-          seal={sealRecovery}
-          begin={(locator, sealed, createdAt) =>
-            recoveryOutcome(() => model.beginRecovery(locator, sealed, createdAt))}
-          confirm={(locator) => recoveryOutcome(() => model.confirmRecovery(locator))}
-          abandon={async (locator) => {
-            await model.abandonRecovery(locator);
-          }}
-          disable={async () => run(() => model.disableRecovery())}
-        />
+        {#key authority.model}
+          <RecoveryCode authority={authority.model} view={recoveryView} {ready} {run} />
+        {/key}
       {/snippet}
       {#if !__DEN_TV_LEGACY_JS_CORE__}
         <SharingSection
           {link}
-          {model}
+          model={authority.model}
           plugins={pluginUrls}
           {routes}
           ready={ready && routesLoaded}
           {sealHandover}
           {selfId}
         />
-        <AssistantsSection
-          connectionFetch={assistantConnectionFetch}
-          revokeGrant={link && !local ? (grant) => model.revokeAssistant(grant) : undefined}
-          listGrants={link && !local ? () => model.assistantGrants() : undefined}
-        />
+        {#key authority.model}
+          <AssistantsSection
+            connectionFetch={assistantConnectionFetch}
+            revokeGrant={link && !local
+              ? (grant) => authority.model.revokeAssistant(grant)
+              : undefined}
+            listGrants={link && !local ? () => authority.model.assistantGrants() : undefined}
+          />
+        {/key}
         <ImportSection
           {ready}
+          scope={activityModel}
           {content}
-          watched={model.overview.value?.watched ?? []}
+          watched={activityModel.overview.value?.watched ?? []}
           {importHistory}
           {exportHistory}
         />
       {/if}
-      <AdvancedSection
-        {link}
-        onjoin={local && onjoin
-          ? async (key: string) => (await onjoin(key)) === 'joined'
-          : undefined}
-        recovery={link && !local ? recovery : undefined}
-        remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
-        {disabled}
-        {selfId}
-        pendingActions={connections?.diagnostics.pendingChanges ?? 0}
-        {edgeVersion}
-        {libraryFormat}
-        setRemoteAccess={(credentials) => run(() => model.setRemoteAccess(credentials))}
-        viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
-      />
+      {#key authority.model}<AdvancedSection
+          {link}
+          onjoin={local && onjoin ? onjoin : undefined}
+          recovery={link && !local ? recovery : undefined}
+          remoteAccessConfigured={connections?.remoteAccessConfigured ?? false}
+          {disabled}
+          {selfId}
+          pendingActions={connections?.diagnostics.pendingChanges ?? 0}
+          {edgeVersion}
+          {libraryFormat}
+          setRemoteAccess={(credentials) => run(() => authority.model.setRemoteAccess(credentials))}
+          viewerOnly={__DEN_TV_LEGACY_JS_CORE__}
+          presentationOwner={joinPresentation}
+        />{/key}
     {/if}
     {#if !__DEN_TV_LEGACY_JS_CORE__}<AboutSection
         credits={mergeCredits([...addonCredits, [AIRING_CREDIT]])}

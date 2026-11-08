@@ -5,6 +5,7 @@ let memory: string[] = [];
 // The saved list belongs to the household's own browsing. Any other profile keeps its searches in memory for the
 // session, so neither can read, extend or clear the other's after a switch.
 let persisted = true;
+let activeScope: string | undefined;
 
 export const RECENT_SEARCHES_CHANGED = 'den:recent-searches-changed';
 
@@ -20,12 +21,14 @@ const browserStorage = (): Storage | undefined => {
 
 /**
  * Choose whose searches the default storage serves: the saved list for the household, or a fresh in-memory list for
- * a profile that does not administer it. Changing scope empties the in-memory list, so nothing typed under one
- * profile is offered to the next.
+ * one profile session. The scope is the stable profile id, or the disposable visit id for Visitor. Changing either
+ * identity or storage authority empties the in-memory list, so nothing typed under one profile is offered to the
+ * next even when both use memory.
  */
-export function scopeRecentSearches(persist: boolean): void {
-  if (persist === persisted) return;
+export function scopeRecentSearches(persist: boolean, scope: string): void {
+  if (persist === persisted && scope === activeScope) return;
   persisted = persist;
+  activeScope = scope;
   memory = [];
   changed(readRecentSearches());
 }

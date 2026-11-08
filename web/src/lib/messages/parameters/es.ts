@@ -37,6 +37,10 @@ export const parameters = {
   'settings.collapseAllIn': 'Contraer todo en {value}',
   'profile.allowedCount.one': '{count} permitido',
   'profile.allowedCount.other': '{count} permitidos',
+  'sources.late.one':
+    '{count} fuente aún estaba respondiendo cuando llegó esta lista anticipada, por lo que puede estar incompleta.',
+  'sources.late.other':
+    '{count} fuentes aún estaban respondiendo cuando llegó esta lista anticipada, por lo que puede estar incompleta.',
   'error.couldntReachDevice':
     'No se pudo conectar con {device}. Comprueba que este dispositivo esté conectado.',
   'player.switchTo': 'Cambiar a {source}',
@@ -44,6 +48,8 @@ export const parameters = {
   'player.stream': 'Emisión: {stream}',
   'player.audioTrack': 'Pista de audio: {track}',
   'player.subtitles': 'Subtítulos: {subtitles}',
+  'player.subtitleLoadFailed':
+    'No se pudieron cargar los subtítulos {subtitle}. Tus subtítulos actuales no han cambiado.',
   'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset}s)',
   'player.resetSubtitleTiming': 'Restablecer sincronización de subtítulos ({offset}s)',
   'player.next': 'Siguiente: {title}',

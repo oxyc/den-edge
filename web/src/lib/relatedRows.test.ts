@@ -23,6 +23,7 @@ import {
 import { NO_FACTS } from './titleFacts';
 import { ContentAuthority } from './contentAuthority';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import { Pager } from './pager.svelte';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
 const named = (id: number): Title => ({ type: 'movie', id, title: `T${id}` });
@@ -151,6 +152,8 @@ function answering(table: Record<string, unknown>, asked: string[] = []) {
 
 const results = (ids: number[]) => ({ results: ids.map((id) => ({ id, title: `T${id}` })) });
 const movie = (id: number) => [`/3/movie/${id}`, { id, title: `T${id}` }] as const;
+const pageOf = (start: number, size = 20) =>
+  Array.from({ length: size }, (_, index) => named(start + index));
 const ids = (row: { load: (page: number) => Promise<Title[]> }, pages: number) =>
   (async () => {
     const out: number[][] = [];
@@ -284,6 +287,7 @@ describe('moreLikeThisRow', () => {
         },
         '/atlas/index/suggest/movie/550.json?skip=2&limit=20': { mixed: [], titles: [], total: 2 },
         '/3/movie/11': { id: 11, title: 'T11', poster_path: '/11.jpg' },
+        '/3/movie/550/recommendations?page=2': results([]),
       },
       asked,
     );
@@ -422,11 +426,90 @@ describe('moreLikeThisRow', () => {
     expect(await ids(row, 5)).toEqual([[20], [21, 22], [23], [], []]);
   });
 
+  it('keeps a failed recommendation page retryable through the production Pager', async () => {
+    const asked: number[] = [];
+    let pageTwoDown = true;
+    const content: ContentServiceClientPort = {
+      query: (async (request: { kind: string; page?: number }) => {
+        if (request.kind !== 'catalog.page' || request.page === undefined)
+          throw new Error(`unexpected request: ${request.kind}`);
+        asked.push(request.page);
+        if (request.page === 2 && pageTwoDown) throw new Error('TMDB answered 500');
+        const titles =
+          request.page === 1 ? pageOf(100) : request.page === 2 ? [named(119), ...pageOf(120)] : [];
+        return { kind: 'catalog.page', titles };
+      }) as unknown as ContentServiceClientPort['query'],
+      onStatus: () => () => {},
+    };
+    const row = moreLikeThisRowImpl({ title: self }, null, { content });
+    const pager = new Pager(row.load, () => true);
+
+    await pager.more();
+    await pager.more();
+    expect(pager.failed).toBe(true);
+    expect(pager.titles.map((title) => title.id)).toEqual(pageOf(100).map((title) => title.id));
+
+    pageTwoDown = false;
+    await pager.retry();
+    expect(asked).toEqual([1, 2, 2]);
+    expect(pager.failed).toBe(false);
+    expect(pager.page).toBe(2);
+    expect(pager.titles).toHaveLength(40);
+    expect(new Set(pager.titles.map((title) => `${title.type}:${title.id}`)).size).toBe(40);
+  });
+
+  it('fences a held recommendation retry when its production Pager is disposed', async () => {
+    const asked: number[] = [];
+    let retryStarted!: () => void;
+    let releaseRetry!: () => void;
+    const started = new Promise<void>((resolve) => (retryStarted = resolve));
+    const held = new Promise<void>((resolve) => (releaseRetry = resolve));
+    let pageTwoAttempts = 0;
+    let retrySignal: AbortSignal | undefined;
+    const content: ContentServiceClientPort = {
+      query: (async (request: { kind: string; page?: number }, signal?: AbortSignal) => {
+        if (request.kind !== 'catalog.page' || request.page === undefined)
+          throw new Error(`unexpected request: ${request.kind}`);
+        asked.push(request.page);
+        if (request.page === 1) return { kind: 'catalog.page', titles: pageOf(100) };
+        pageTwoAttempts++;
+        if (pageTwoAttempts === 1) throw new Error('TMDB answered 500');
+        retrySignal = signal;
+        retryStarted();
+        await held; // Deliberately ignores abort, as a provider implementation may.
+        return { kind: 'catalog.page', titles: pageOf(200) };
+      }) as unknown as ContentServiceClientPort['query'],
+      onStatus: () => () => {},
+    };
+    const row = moreLikeThisRowImpl({ title: self }, null, { content });
+    const obsolete = new Pager(row.load, () => true);
+    await obsolete.more();
+    await obsolete.more();
+
+    const retry = obsolete.retry();
+    await started;
+    obsolete.dispose();
+    expect(retrySignal?.aborted).toBe(true);
+    releaseRetry();
+    await retry;
+
+    expect(asked).toEqual([1, 2, 2]);
+    expect(obsolete.page).toBe(1);
+    expect(obsolete.titles.map((title) => title.id)).toEqual(pageOf(100).map((title) => title.id));
+    expect(obsolete.failed).toBe(false);
+  });
+
   it('is TMDB’s recommendations alone, and asks atlas nothing, when there is no atlas', async () => {
     const none: string[] = [];
     const row = moreLikeThisRow({ title: self, more: [named(20)] }, null, {
       key: 'k',
-      fetchImpl: answering({ '/3/movie/550/recommendations?page=2': results([21]) }, none),
+      fetchImpl: answering(
+        {
+          '/3/movie/550/recommendations?page=2': results([21]),
+          '/3/movie/550/recommendations?page=3': results([]),
+        },
+        none,
+      ),
     });
     expect(await ids(row, 3)).toEqual([[20], [21], []]);
     expect(none.some((p) => p.includes('/index/') || p.startsWith('/atlas'))).toBe(false);

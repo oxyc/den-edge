@@ -57,6 +57,7 @@
   import type { JoinLibrary, JoinLink } from '../lib/browserHousehold';
   import PinInput from '../components/PinInput.svelte';
   import { parseTVLink } from '../lib/tvLink';
+  import type { LibraryJoinPresentationOwner } from '../lib/libraryJoinPresentation';
 
   let {
     link,
@@ -86,6 +87,7 @@
     heldReset = false,
     onadoptheld,
     viewerOnly = false,
+    presentationOwner,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -140,6 +142,7 @@
     onadoptheld?: () => Promise<void>;
     /** Old-engine viewer tier: expose only pairing and linked-device controls. */
     viewerOnly?: boolean;
+    presentationOwner: LibraryJoinPresentationOwner;
   } = $props();
 
   const apiService = (name: KeyService['name']): LibraryApiKeyService =>
@@ -479,6 +482,7 @@
   /** Ends a pairing this page started, hosting or joining, when the page goes. */
   const leaving = new AbortController();
   onMount(() => () => {
+    presentationOwner.invalidate();
     leaving.abort();
     answer?.(false);
     tvAnswer?.(false);
@@ -674,13 +678,15 @@
       'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
   async function joinLibrary() {
+    const presentation = presentationOwner.begin();
     joining = true;
     joinProblem = null;
     const result = await join(joinCode, {
       label: thisDevice.name,
       deviceId: selfId,
-      signal: leaving.signal,
+      signal: presentation.signal,
     });
+    if (!presentation.isCurrent()) return;
     joining = false;
     if ('error' in result) {
       joinProblem = joinFailures[result.error];
@@ -688,12 +694,17 @@
     }
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
     const { host: name, hostDeviceId, libraryKey, linkKey } = result.handover;
-    await bringInto(base64(libraryKey), {
-      inboxKey: result.inboxKey,
-      name,
-      linkKey: base64(linkKey),
-      deviceId: hostDeviceId,
-    });
+    await bringInto(
+      base64(libraryKey),
+      {
+        inboxKey: result.inboxKey,
+        name,
+        linkKey: base64(linkKey),
+        deviceId: hostDeviceId,
+      },
+      undefined,
+      presentation,
+    );
   }
 
   // The household joined has an Owner PIN, asked once before this browser's household moves in (den#295). The TV's
@@ -706,12 +717,23 @@
    * What this browser saved on its own goes into the TV's library before the browser switches to it, so a move that
    * fails leaves it where it was.
    */
-  async function bringInto(key: string, target: JoinLink, pin?: string) {
+  async function bringInto(
+    key: string,
+    target: JoinLink,
+    pin?: string,
+    presentation = presentationOwner.begin(),
+  ) {
+    if (!presentation.isCurrent()) return;
     const { name } = target;
     if (onjoin) {
       joining = true;
       joinProblem = null;
-      const answer = await onjoin(key, { link: target, ...(pin ? { pin } : {}) });
+      const answer = await onjoin(key, {
+        link: target,
+        presentation,
+        ...(pin ? { pin } : {}),
+      });
+      if (!presentation.isCurrent()) return;
       joining = false;
       if (answer === 'pin-required' || answer === 'pin-wrong') {
         joinPin = { key, link: target };
@@ -729,18 +751,18 @@
         return;
       }
     }
-    links.add(target.inboxKey, {
-      name,
-      libraryKey: key,
-      linkKey: target.linkKey,
-      deviceId: target.deviceId,
-    });
+    const committed = links.reconcileCommitted(target, key);
+    if (!presentation.isCurrent()) return;
+    if (!committed) {
+      joinProblem = `${name} was linked by another Settings presentation. Reload and try again.`;
+      return;
+    }
     joinCode = '';
     if (key === link?.libraryKey) {
       joinProblem = `${name} already shares this library: it's linked to this browser too.`;
       return;
     }
-    links.makeCurrent(target.inboxKey);
+    links.makeCurrent(committed.inboxKey);
     // A new library is a new session from the start: reloaded, the app opens the one now first in the list.
     location.assign('/');
   }

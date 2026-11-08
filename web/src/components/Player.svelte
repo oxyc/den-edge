@@ -132,7 +132,9 @@
   import {
     hlsFatalFromMessage,
     identityOf,
+    reportClientFailure,
     reportableLanguage,
+    replaceClientFailureGeneration,
     sendCastReport,
     sendPlaybackOutcome,
     sendPlaybackRoute,
@@ -174,6 +176,8 @@
     castDiscoveryMs = CAST_DISCOVERY_MS,
     castPlayMs = CAST_PLAY_MS,
     onprogress,
+    onfinalprogress,
+    onmanagedplayback,
     onnext,
     onclose,
     oncontrols,
@@ -215,6 +219,10 @@
     castPlayMs?: number;
     /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
     onprogress: (fraction: number, seconds: number, at: Episode, playing: boolean) => void;
+    /** The visit's terminal position, retained by the library until its exact command is durable. */
+    onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
+    /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
+    onmanagedplayback?: (signal: AbortSignal) => Promise<boolean>;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -228,12 +236,11 @@
       : undefined,
   );
 
-  function advanceLink(event: MouseEvent, stopCountdown = false) {
+  function advanceLink(event: MouseEvent) {
     if (!onnext) return;
-    activateLinkInPlace(event, () => {
-      if (stopCountdown) stay();
-      onnext();
-    });
+    // Every explicit Next surface can coexist with the countdown. Retire it before changing episodes so a tick at
+    // the same boundary cannot invoke `onnext` a second time.
+    activateLinkInPlace(event, () => (stay(), onnext()));
   }
 
   type Episode = { season?: number; episode?: number };
@@ -266,11 +273,6 @@
   const RECONNECT_AHEAD_SECS = 0.5;
   /** Seconds the next episode waits once this one has ended. */
   const UP_NEXT_SECS = 10;
-  /**
-   * How close to the last report a hidden page's close may be and write nothing: hiding the page already wrote it, and
-   * closing a tab hides it just before `pagehide`.
-   */
-  const HIDDEN_SLACK_SECS = 5;
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
   const tv = __DEN_TV__;
@@ -452,6 +454,10 @@
   let heldFrame = $state<string>();
   /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
   const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin ?? heldFrame);
+  /** The exact iframe document generation that announced readiness; origin alone cannot distinguish a reload. */
+  let castFrameGeneration = 0;
+  let castFrameChallenge = '';
+  let castFrameReady = $state<{ origin: string; challenge: string }>();
   let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -496,8 +502,28 @@
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  const RECEIPT_PREPARE_MS = 3_000;
+
+  function beforeAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(signal.reason);
+      signal.addEventListener('abort', aborted, { once: true });
+      void work.then(
+        (value) => {
+          signal.removeEventListener('abort', aborted);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', aborted);
+          reject(error);
+        },
+      );
+    });
+  }
   /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
   let startingSession: AbortController | undefined;
+  let clientFailureGeneration = 0;
   let ended = false;
   /** The episode playing, which the props name ahead of it once an advance asks for the next (`playEpisode`). */
   let playingEpisode: Episode = untrack(() => ({ season, episode }));
@@ -506,6 +532,7 @@
     new PlaybackProgressReporter(
       (fraction, seconds, playing) => onprogress(fraction, seconds, at, playing),
       at.season !== undefined && at.episode !== undefined ? 'episode' : 'movie',
+      (fraction, seconds) => onfinalprogress(fraction, seconds, at, false),
     );
   let progress = reporterFor(playingEpisode);
   /** Where the next session starts: a language switch picks up where the last one was. */
@@ -1103,6 +1130,8 @@
     startingSession?.abort(new DOMException('superseded session start', 'AbortError'));
     const attempt = new AbortController();
     startingSession = attempt;
+    const diagnosticGeneration = ++clientFailureGeneration;
+    replaceClientFailureGeneration('session', diagnosticGeneration);
     const {
       scout: _scout,
       subtitles: _subtitles,
@@ -1147,6 +1176,27 @@
     // longer rules it out: Scout asks TorBox to create that exact track's stream.
     const torboxTried =
       !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
+    if (playback && onmanagedplayback) {
+      let receiptReady = false;
+      try {
+        const receiptSignal = AbortSignal.any([
+          attempt.signal,
+          AbortSignal.timeout(RECEIPT_PREPARE_MS),
+        ]);
+        // The deadline owns the whole callback, including the first lazy module load and any transport reconnect.
+        // Passing it down still cancels work that observes the signal; racing it here prevents an uncooperative
+        // boundary from holding playback indefinitely.
+        receiptReady = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
+      } catch (error) {
+        if (!attempt.signal.aborted)
+          console.warn('den: managed playback receipt authority could not be prepared', error);
+      }
+      if (attempt.signal.aborted) return false;
+      if (!receiptReady)
+        unchanged = i18n.phrase(
+          'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.',
+        );
+    }
     let result = playback
       ? await startPlayback(playback, asked, undefined, attempt.signal)
       : await startSession(request, undefined, on, undefined, attempt.signal);
@@ -1199,6 +1249,34 @@
     if ('failure' in result) {
       // Only `startPlayback` adds this field, after its closed allow-list parser. Legacy Remux refusals do not.
       const cause = 'cause' in result ? (result.cause as PlaybackCause | undefined) : undefined;
+      const retries =
+        result.failure === 'busy' ||
+        result.failure === 'starting' ||
+        result.failure === 'transcode' ||
+        result.failure === 'timedOut' ||
+        result.failure === 'temporarilyUnavailable' ||
+        cause === 'torbox_rate_limited';
+      if (!retries) {
+        const status = 'httpStatus' in result ? result.httpStatus : undefined;
+        reportClientFailure({
+          operation: 'session',
+          kind:
+            typeof status === 'number'
+              ? 'http'
+              : result.failure === 'timedOut'
+                ? 'timeout'
+                : result.failure === 'unreachable'
+                  ? 'transport'
+                  : result.failure === 'protocol' || result.failure === 'request'
+                    ? 'protocol'
+                    : 'other',
+          outcome: replacing ? 'recovered' : 'terminal',
+          route: playback ? 'content_service' : 'remux_session',
+          status,
+          generation: diagnosticGeneration,
+          attempt: 1,
+        });
+      }
       playbackRouteLog({
         event: 'failed',
         requestedSource,
@@ -1348,6 +1426,8 @@
     // `Date.now()` throughout (`startupAskedAt`'s own clock), never mixed with `performance.now()`'s epoch.
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
+    subtitleSelectionGeneration += 1;
+    subtitleLoadFailure = null;
     session = result;
     directWithoutDenSubtitles = result.external === true && !compatibleSubtitles;
     if (!compatibleSubtitles) pendingDirectSubtitleRestore = undefined;
@@ -1446,21 +1526,39 @@
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
     // named was never loaded.
     if (session && subtitleChoice) {
-      const loaded = await loadExternalSubtitle(session, subtitleChoice);
-      const fallback = selectedSubtitle(session)?.fallbackTorboxTrack;
-      if (!loaded && fallback !== undefined) {
-        console.warn(
-          `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(session), torboxRequested: fallback })}`,
-        );
-        const preparing = showTransition('Subtitles failed—trying built-in…');
-        const moved = await begin(
-          { filename: session.release.filename, subtitleTrack: fallback },
-          extra,
-          session,
-          'direct',
-        );
-        if (moved !== true) clearTransition(preparing);
-        return moved;
+      const loadingSession = session;
+      const loadingValue = subtitleChoice;
+      const loadingTrack = selectedSubtitle(loadingSession, loadingValue);
+      if (
+        (loadingTrack?.delivery === 'sidecar' || loadingTrack?.source === 'opensubtitles') &&
+        loadingSession.loadExternalSubtitle &&
+        !loadingSession.externalSubtitles?.some((track) => track.value === loadingValue)
+      ) {
+        const selectionGeneration = ++subtitleSelectionGeneration;
+        const ownsLoad = () =>
+          session === loadingSession &&
+          subtitleChoice === loadingValue &&
+          selectionGeneration === subtitleSelectionGeneration;
+        const loaded = await loadExternalSubtitle(loadingSession, loadingValue, ownsLoad);
+        const fallback = loadingTrack.fallbackTorboxTrack;
+        if (!loaded && ownsLoad() && fallback !== undefined) {
+          const preparing = showTransition('Subtitles failed—trying built-in…');
+          const moved = await begin(
+            { filename: loadingSession.release.filename, subtitleTrack: fallback },
+            extra,
+            loadingSession,
+            'direct',
+          );
+          if (moved !== true) clearTransition(preparing);
+          return moved;
+        }
+        if (!loaded && ownsLoad()) {
+          subtitleChoice = null;
+          subtitleLoadFailedFlag = true;
+          subtitleLoadFailure = loadingTrack;
+          applySubtitles();
+          sendSubtitleChoice();
+        }
       }
     }
     castSubtitlePreparing = false;
@@ -2274,10 +2372,36 @@
     return () => clearInterval(tick);
   });
 
+  function readyCastFrame(origin: string): Window | null {
+    const frame = castFrame?.contentWindow;
+    return frame &&
+      castFrameReady?.origin === origin &&
+      castFrameReady.challenge === castFrameChallenge
+      ? frame
+      : null;
+  }
+
+  function castDocumentReady(origin: string, generation: unknown): boolean {
+    if (generation !== castFrameChallenge) return false;
+    castFrameReady = { origin, challenge: castFrameChallenge };
+    return true;
+  }
+
+  function castFrameLoaded(): void {
+    castFrameGeneration += 1;
+    castFrameChallenge = `${castFrameGeneration}:${crypto.randomUUID?.() ?? performance.now()}`;
+    castFrameReady = undefined;
+    const origin = frameOrigin;
+    const frame = castFrame?.contentWindow;
+    if (origin && frame)
+      frame.postMessage({ type: 'den-handshake', generation: castFrameChallenge }, origin);
+  }
+
   function sendToCastFrame(): void {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return;
+    if (!current?.castOrigin) return;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return;
     playedEngine = 'cast_page';
     // Played here only because this page could not reach the home network: the cast page, in the same browser,
     // can't either, so it is not sent there to fail. A receiver is on that network, so a cast still offers it.
@@ -2334,17 +2458,29 @@
   // Send each replacement explicitly; the frame's den-ready message remains the retry for its initial page load.
   $effect(() => {
     const [current, frame, preparing] = [session, castFrame, castSubtitlePreparing];
-    if (!current?.castOrigin || !frame || preparing) return;
+    if (
+      !current?.castOrigin ||
+      !frame ||
+      preparing ||
+      castFrameReady?.origin !== current.castOrigin ||
+      castFrameReady.challenge !== castFrameChallenge
+    )
+      return;
     untrack(sendToCastFrame);
   });
 
   function castMessage(event: MessageEvent<unknown>): void {
     const looking = castFrame?.contentWindow;
     if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
-      const message = event.data as { type?: string; available?: unknown; profile?: unknown };
-      if (message.type === 'den-ready')
+      const message = event.data as {
+        type?: string;
+        generation?: unknown;
+        available?: unknown;
+        profile?: unknown;
+      };
+      if (message.type === 'den-ready' && castDocumentReady(event.origin, message.generation)) {
         looking.postMessage({ type: 'den-discover', interfaceLanguage }, lookOrigin);
-      else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
+      } else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
         look({ kind: 'availability', available: message.available });
       else if (message.type === 'den-cast-session' && castOffer === 'choose') {
         // The receiver model the viewer keeps in the cast page's menu, else its default.
@@ -2369,9 +2505,10 @@
       profile?: string;
       maxBitrate?: number;
       available?: boolean;
+      generation?: unknown;
     };
     if (message.type === 'den-ready') {
-      sendToCastFrame();
+      castDocumentReady(event.origin, message.generation);
       return;
     }
     if (message.id !== current.playlist) return;
@@ -2411,7 +2548,10 @@
         if (restartAfterMeasure(current, publicMaxBitrate)) {
           restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
         } else
-          frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
+          readyCastFrame(current.castOrigin)?.postMessage(
+            { type: 'den-continue', id: current.playlist },
+            current.castOrigin,
+          );
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -2462,6 +2602,14 @@
       endCastSession();
       castFailed = true;
       castFailReason = castFailReasonOf(message.message ?? '');
+      reportClientFailure({
+        operation: 'cast',
+        kind: 'protocol',
+        outcome: returnsFromCast(castOffered, castMode) ? 'recovered' : 'terminal',
+        route: 'cast_receiver',
+        generation: clientFailureGeneration,
+        errorClass: 'media_error',
+      });
       // The cast page refused the load this page handed it before fetching anything: a fault in that hand-off, not
       // in the release, so no release is left out for it and no other is tried.
       if (message.message === 'Invalid media URL') {
@@ -2595,7 +2743,7 @@
     const next = castLook(castOffer, event);
     castOffer = next.offer;
     if (next.offer === 'choose' && discoveredOrigin)
-      castFrame?.contentWindow?.postMessage(
+      readyCastFrame(discoveredOrigin)?.postMessage(
         { type: 'den-choose', interfaceLanguage },
         discoveredOrigin,
       );
@@ -2700,6 +2848,14 @@
       // Handed to a receiver, it is the receiver that fetches the media, not this browser or its frame: a receiver
       // that never starts is a Cast session's failure, not a sign the home network was out of reach.
       castFailReason = castMode ? 'session_error' : castFailReasonOf(why);
+      reportClientFailure({
+        operation: 'cast',
+        kind: 'timeout',
+        outcome: returnsFromCast(castOffered, castMode) ? 'recovered' : 'terminal',
+        route: 'cast_receiver',
+        generation: clientFailureGeneration,
+        errorClass: 'media_error',
+      });
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
@@ -2937,6 +3093,9 @@
   }
 
   function playing() {
+    // Playing after `ended` is a deliberate replay, so the old episode's pending advance no longer owns the viewer.
+    // This also covers the cast page: its first unpaused progress after a receiver resumes calls this same handler.
+    stay();
     // Autoplay is only the initial-start request. Some TV engines reconsider a persistent autoplay flag after a
     // later readiness/buffering transition and can undo a deliberate pause. Once playback has begun, every future
     // start is either a viewer action or an explicitly state-preserving source replacement.
@@ -2971,6 +3130,12 @@
   /** The end: count down to the next episode, when there is one. */
   function finished() {
     if (tv) setTvPlaybackActive(false);
+    if (customTransport) {
+      tvPaused = true;
+      // Desktop controls may have hidden while the episode played. The countdown and its Stay action must be
+      // reachable without first guessing that moving over the finished picture reveals them.
+      revealWebControls(false);
+    }
     progress.complete(video?.currentTime ?? remoteTime);
     // For den-edge's own outcome report (`finish()`): this visit reached a natural end, whether or not there is
     // a next episode to count down to.
@@ -3010,6 +3175,7 @@
   let subtitleResyncNotice = $state<string | null>(null);
   let subtitleResyncRequest: AbortController | undefined;
   let subtitleSelectionGeneration = 0;
+  let subtitleLoadFailure = $state.raw<NonNullable<Session['subtitles']>[number] | null>(null);
   const alignedUrls = new SvelteSet<string>();
   fades(
     () => subtitleResyncNotice,
@@ -3197,12 +3363,6 @@
     const language = selectedSubtitleLanguage();
     const sidecars = session?.externalSubtitles ?? [];
     const sidecar = sidecars.some((track) => track.value === choice);
-    const before = Array.from(video?.textTracks ?? []).map((track) => ({
-      kind: track.kind,
-      language: track.language,
-      label: track.label,
-      mode: track.mode,
-    }));
     if (hls) {
       const languageMatch =
         language === null
@@ -3245,44 +3405,6 @@
           ? 'showing'
           : 'disabled';
     }
-    const picked = selectedSubtitle();
-    console.info(
-      `[Den subtitles] ${JSON.stringify({
-        event: 'applied',
-        choice:
-          choice === null
-            ? 'off'
-            : (picked?.source ??
-              (picked?.torboxTrack === undefined ? 'opensubtitles' : 'built-in')),
-        language,
-        torboxRequested: picked?.torboxTrack ?? null,
-        torboxSelected: session?.torboxSubtitle ?? null,
-        offered:
-          session?.subtitles?.map((track) => ({
-            source:
-              track.source ?? (track.torboxTrack === undefined ? 'opensubtitles' : 'built-in'),
-            language: track.language,
-            name: track.name,
-            torboxTrack: track.torboxTrack ?? null,
-            delivery: track.delivery ?? (track.torboxTrack === undefined ? 'sidecar' : 'torbox'),
-            selected: subtitleValue(track) === choice,
-          })) ?? [],
-        hlsSelected: hls?.subtitleTrack ?? null,
-        hlsTracks:
-          hls?.subtitleTracks.map((track, index) => ({
-            index,
-            language: track.lang,
-            name: track.name,
-          })) ?? [],
-        textTracksBefore: before,
-        textTracksAfter: textTracks.map((track) => ({
-          kind: track.kind,
-          language: track.language,
-          label: track.label,
-          mode: track.mode,
-        })),
-      })}`,
-    );
   }
 
   function adjustSubtitleOffset(change: number) {
@@ -3336,9 +3458,13 @@
     return !castMode && nativeHls(document.createElement('video'));
   }
 
-  async function loadExternalSubtitle(current: Session, value: string): Promise<boolean> {
+  async function loadExternalSubtitle(
+    current: Session,
+    value: string,
+    ownsResult: () => boolean,
+  ): Promise<boolean> {
     const track = await current.loadExternalSubtitle?.(value);
-    if (!track || session !== current) return false;
+    if (!track || !ownsResult()) return false;
     // The loader owns and deduplicates blobs; this array is render state for the `<track>` children.
     current.externalSubtitles = [
       ...(current.externalSubtitles ?? []).filter((one) => one.value !== track.value),
@@ -3350,8 +3476,9 @@
 
   function sendSubtitleChoice() {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return;
+    if (!current?.castOrigin) return;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return;
     frame.postMessage(
       {
         type: 'den-subtitle',
@@ -3427,9 +3554,10 @@
   }
 
   async function chooseSubtitle(next: string | null): Promise<void> {
+    const selectionGeneration = ++subtitleSelectionGeneration;
+    subtitleLoadFailure = null;
+    subtitleResyncRequest?.abort();
     if (next !== subtitleChoice) {
-      subtitleSelectionGeneration += 1;
-      subtitleResyncRequest?.abort();
       subtitleResyncNotice = null;
       subtitleResyncOffset =
         session?.externalSubtitles?.find((track) => track.value === next)?.alignedOffset ?? 0;
@@ -3459,34 +3587,13 @@
     const current = session;
     const previous = subtitleChoice;
     const requested = selectedSubtitle(current, next);
-    console.info(
-      `[Den subtitles] ${JSON.stringify({
-        event: 'choice',
-        from:
-          previous === null
-            ? 'off'
-            : (selectedSubtitle(current, previous)?.source ??
-              (selectedSubtitle(current, previous)?.torboxTrack === undefined
-                ? 'opensubtitles'
-                : 'built-in')),
-        to:
-          next === null
-            ? 'off'
-            : (requested?.source ??
-              (requested?.torboxTrack === undefined ? 'opensubtitles' : 'built-in')),
-        language: requested?.language ?? null,
-        torboxRequested: requested?.torboxTrack ?? null,
-        torboxSelected: current?.torboxSubtitle ?? null,
-        replacesStream:
-          current?.external === true &&
-          (current.torboxSubtitle ?? undefined) !== requested?.torboxTrack,
-      })}`,
-    );
-    subtitleChoice = next;
+    const ownsLoad = () =>
+      session === current && selectionGeneration === subtitleSelectionGeneration;
     if (current?.external) {
-      const nextTrack = selectedSubtitle(current);
+      const nextTrack = selectedSubtitle(current, next);
       const nextTorBox = nextTrack?.torboxTrack;
       if ((current.torboxSubtitle ?? undefined) !== nextTorBox) {
+        subtitleChoice = next;
         const pending = showTransition('Switching subtitles…');
         restart(
           {
@@ -3500,22 +3607,28 @@
         return;
       }
     }
-    if (next && current) {
+    if (
+      next &&
+      current &&
+      (requested?.delivery === 'sidecar' || requested?.source === 'opensubtitles') &&
+      current.loadExternalSubtitle &&
+      !current.externalSubtitles?.some((track) => track.value === next)
+    ) {
       const pending =
-        requested && requested.torboxTrack === undefined && current.loadExternalSubtitle
-          ? showTransition('Loading subtitles…')
-          : undefined;
+        requested.torboxTrack === undefined ? showTransition('Loading subtitles…') : undefined;
       let loaded = false;
       try {
-        loaded = await loadExternalSubtitle(current, next);
-      } catch (error) {
-        console.warn('A subtitle track could not be loaded.', error);
+        loaded = await loadExternalSubtitle(current, next, ownsLoad);
+      } catch {
+        /* The retry notice below owns this failure. */
       }
-      const fallback = selectedSubtitle(current)?.fallbackTorboxTrack;
+      if (!ownsLoad()) {
+        clearTransition(pending);
+        return;
+      }
+      const fallback = requested?.fallbackTorboxTrack;
       if (!loaded && fallback !== undefined) {
-        console.warn(
-          `[Den subtitles] ${JSON.stringify({ event: 'sidecar-fallback', language: selectedSubtitleLanguage(current), torboxRequested: fallback })}`,
-        );
+        subtitleChoice = next;
         restart(
           { filename: current.release.filename, subtitleTrack: fallback },
           () => (subtitleChoice = previous),
@@ -3525,7 +3638,13 @@
         return;
       }
       clearTransition(pending);
+      if (!loaded) {
+        subtitleLoadFailedFlag = true;
+        subtitleLoadFailure = requested;
+        return;
+      }
     }
+    subtitleChoice = next;
     applySubtitles();
     sendSubtitleChoice();
   }
@@ -3757,8 +3876,9 @@
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
   function seekCastFrame(time: number): boolean {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return false;
+    if (!current?.castOrigin) return false;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return false;
     frame.postMessage({ type: 'den-seek', id: current.playlist, time }, current.castOrigin);
     return true;
   }
@@ -3977,6 +4097,8 @@
   function letGo() {
     const current = session;
     if (!current) return;
+    subtitleSelectionGeneration += 1;
+    subtitleLoadFailure = null;
     carryPosition();
     watcher?.stop();
     watcher = undefined;
@@ -4004,6 +4126,8 @@
   function finish() {
     if (ended) return;
     subtitleResyncRequest?.abort();
+    subtitleSelectionGeneration += 1;
+    subtitleLoadFailure = null;
     ended = true;
     if (tv) setTvPlaybackActive(false);
     clearInterval(timer);
@@ -4013,7 +4137,16 @@
     clearTimeout(retry);
     startingSession?.abort(new DOMException('player closed', 'AbortError'));
     startingSession = undefined;
-    report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
+    // The durable retry receipt is handed off without awaiting it. Decoder and playback-session retirement below
+    // stay on the close path even when the library service is offline or a write is deliberately held.
+    if (session) {
+      const at = video?.currentTime ?? remoteTime;
+      if (at > 0)
+        progress.final(at, length(), {
+          creditsReached: reachedCredits(at),
+          naturallyFinished: reachedNaturalEnd,
+        });
+    }
     const stats = watcher?.stats();
     watcher?.stop();
     watcher = undefined;
@@ -4532,6 +4665,21 @@
     {#if subtitleResyncNotice}
       {@render banner(subtitleResyncNotice, { quiet: true })}
     {/if}
+    {#if subtitleLoadFailure}
+      {@render banner(
+        i18n.format(
+          'player.subtitleLoadFailed',
+          'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
+          { subtitle: subtitleLabel(subtitleLoadFailure) },
+        ),
+        {
+          action: {
+            label: i18n.phrase('Try again'),
+            run: () => void chooseSubtitle(subtitleValue(subtitleLoadFailure!)),
+          },
+        },
+      )}
+    {/if}
     {#if session}
       {#if swapped}
         {@render banner(swapped, { dismiss: () => (swapped = null) })}
@@ -4723,6 +4871,7 @@
           }}
           onplay={playing}
           onpause={paused}
+          onseeking={stay}
           ontimeupdate={tick}
           onended={finished}
           onerror={() => {
@@ -4933,7 +5082,7 @@
         src={frameOrigin}
         allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
         sandbox="allow-scripts allow-same-origin allow-presentation"
-        onload={sendToCastFrame}
+        onload={castFrameLoaded}
       ></iframe>
     {/if}
   </div>
@@ -5180,18 +5329,17 @@
         {#if !customTransport && active}
           <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
         {/if}
-        {#if !customTransport && onnext && next}
+        {#if onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
             <Button
               variant="primary"
               aria-label="Next: {next}"
               href={nextHref}
-              onclick={(event) => advanceLink(event, true)}
-              >Next: {next} <span aria-hidden="true">({upNext})</span></Button
+              onclick={advanceLink}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
             >
             <Button label="Stay" onclick={stay} />
-          {:else}
+          {:else if !customTransport}
             <Button
               label={i18n.format('player.next', 'Next: {title}', { title: next })}
               href={nextHref}

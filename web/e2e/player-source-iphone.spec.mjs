@@ -293,14 +293,29 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
             ? { status: 409, json: { error: 'direct_unavailable' } }
             : { json: remuxAnswer },
       });
-      expect(playback[0]).toMatchObject({ directFailed: true });
+      // Profile startup may already have sent a full native request before the automatic-subtitle constraint
+      // settles. Select the request that actually chose Remux; arrival order is not its identity.
+      await expect
+        .poll(
+          () => playback.find((request) => request.player === 'native' && request.directFailed),
+          { timeout: 30_000 },
+        )
+        .toMatchObject({ player: 'native', directFailed: true });
       const stamp = page.getByRole('button', { name: 'Spelas från Den Remux' });
+      const menuBarrier = playback.length;
       await stamp.tap();
       const sheet = page.getByRole('menu', { name: 'Spelas från Den Remux' });
+      expect(playback).toHaveLength(menuBarrier);
+      // Only a request after this action can prove that this switch asked Hearth for TorBox alone.
+      const switchBarrier = playback.length;
       await sheet.getByRole('menuitem', { name: 'Byt till TorBox' }).tap();
       await expect(sheet).toBeHidden();
-      await expect.poll(() => playback.length).toBe(2);
-      expect(playback[1]).toMatchObject({ directOnly: true });
+      await expect
+        .poll(() => playback.slice(switchBarrier).find((request) => request.directOnly), {
+          timeout: 30_000,
+        })
+        .toMatchObject({ directOnly: true });
+      expect(playback).toHaveLength(switchBarrier + 1);
       await expect(stamp).toHaveText('Den Remux');
 
       await stamp.tap();

@@ -55,6 +55,8 @@ export class PlaybackProgressReporter {
   constructor(
     private readonly write: ProgressWrite,
     private readonly content: PlaybackContent = 'movie',
+    /** Final writes have their own receipt/retry lifecycle; periodic writes remain best-effort. */
+    private readonly writeFinal: ProgressWrite = write,
   ) {}
 
   playing() {
@@ -97,6 +99,26 @@ export class PlaybackProgressReporter {
     this.write(fraction, second, this.isPlaying);
   }
 
+  /**
+   * Persist the exact position owned by this closing visit. This deliberately bypasses sampled-position
+   * de-duplication: the equal periodic write may have been rejected and is not retained for retry.
+   */
+  final(currentTime: number, duration: number, evidence: PlaybackEvidence = {}) {
+    if (this.completed) return;
+    const fraction = persistablePlaybackFraction(duration, currentTime, this.content, {
+      ...evidence,
+      sourceEverPlayed: evidence.sourceEverPlayed || this.sourceEverPlayed,
+    });
+    if (fraction === null) return;
+    const second = Math.floor(currentTime);
+    this.completed = true;
+    this.reported = second;
+    this.isPlaying = false;
+    this.reportedPlaying = false;
+    this.starting = false;
+    this.writeFinal(fraction, second, false);
+  }
+
   complete(currentTime: number) {
     if (this.completed) return;
     const second = Number.isFinite(currentTime) ? Math.max(0, Math.floor(currentTime)) : 0;
@@ -104,6 +126,6 @@ export class PlaybackProgressReporter {
     this.reported = second;
     this.isPlaying = false;
     this.reportedPlaying = false;
-    this.write(1, second, false);
+    this.writeFinal(1, second, false);
   }
 }

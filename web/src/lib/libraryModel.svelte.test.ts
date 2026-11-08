@@ -409,6 +409,87 @@ it('opens only Home-critical roots and keeps history and downloads lazy', async 
   model.close();
 });
 
+it('rebinds a failed shared selection once, drops retained authority and fences its old callback', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const first = model.connections();
+  const second = model.connections();
+  const original = service.subscriptions.find(({ selection }) => selection.kind === 'connections')!;
+  const stale = { ...connectionsValue(), parentalPinConfigured: false };
+  original.listener({
+    selection: original.selection,
+    connection: 'failed',
+    value: stale,
+    version: version(5),
+    error: { code: 'unavailable', message: 'selection failed', retryable: true },
+  });
+  expect(first.snapshot).toMatchObject({
+    connection: 'failed',
+    value: { parentalPinConfigured: false },
+    error: { message: 'selection failed' },
+  });
+
+  expect(first.rebind()).toBe(true);
+  expect(original.stopped).toBe(true);
+  expect(first.snapshot).toEqual({ connection: 'connecting' });
+  expect(second.snapshot).toBe(first.snapshot);
+  expect(second.rebind()).toBe(false);
+  const rebound = service.subscriptions.filter(
+    ({ selection }) => selection.kind === 'connections',
+  )[1]!;
+
+  // Even a misbehaving transport callback that arrives after stop belongs to the replaced binding.
+  original.listener({
+    selection: original.selection,
+    connection: 'ready',
+    value: stale,
+    version: version(6),
+  });
+  expect(first.snapshot).toEqual({ connection: 'connecting' });
+
+  rebound.listener({
+    selection: rebound.selection,
+    connection: 'ready',
+    value: connectionsValue(),
+    version: version(7),
+  });
+  expect(first.snapshot).toMatchObject({
+    connection: 'ready',
+    value: { parentalPinConfigured: true },
+  });
+
+  first.release();
+  second.release();
+  expect(rebound.stopped).toBe(true);
+  expect(first.rebind()).toBe(false);
+
+  // A replacement profile coordinator gets a new shared source; callbacks from its predecessor cannot publish into
+  // it, and closing that replacement's identity fences its own in-flight subscription too.
+  const replacement = model.connections();
+  const replacementSubscription = service.subscriptions.filter(
+    ({ selection }) => selection.kind === 'connections',
+  )[2]!;
+  expect(replacement.snapshot).toEqual({ connection: 'connecting' });
+  rebound.listener({
+    selection: rebound.selection,
+    connection: 'ready',
+    value: stale,
+    version: version(8),
+  });
+  expect(replacement.snapshot).toEqual({ connection: 'connecting' });
+  model.close();
+  expect(replacement.snapshot.connection).toBe('closed');
+  replacementSubscription.listener({
+    selection: replacementSubscription.selection,
+    connection: 'ready',
+    value: connectionsValue(),
+    version: version(9),
+  });
+  expect(replacement.snapshot.connection).toBe('closed');
+  replacement.release();
+});
+
 it('distinguishes the first ready page from the settled paged library import', async () => {
   const service = new FakeService();
   service.openProgress = 0;

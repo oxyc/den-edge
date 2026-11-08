@@ -18,6 +18,8 @@ import {
   LIBRARY_SERVICE_PROTOCOL,
   type LibraryServiceServerMessage,
 } from './libraryServiceProtocol';
+import { libraryVault } from './localVault';
+import { libraryCacheId, libraryStorageGeneration } from './libraryRetirementLease';
 
 type ServerMessage = LibraryServiceServerMessage | ContentServiceServerMessage;
 type SharedIdentity = Pick<
@@ -30,9 +32,15 @@ const prewarmed = new Map<
 >();
 
 async function sharedWorkerName(identity: SharedIdentity): Promise<string> {
+  const id = await libraryCacheId(identity.libraryKey);
+  const generation = libraryVault
+    ? await libraryStorageGeneration(libraryVault, id).catch(() => undefined)
+    : undefined;
   const bytes = await crypto.subtle.digest(
     'SHA-256',
-    new TextEncoder().encode(sharedLibraryIdentity(import.meta.url, identity)),
+    new TextEncoder().encode(
+      `${sharedLibraryIdentity(import.meta.url, identity)}:${generation ?? 'legacy'}`,
+    ),
   );
   const digest = [...new Uint8Array(bytes)]
     .slice(0, 12)

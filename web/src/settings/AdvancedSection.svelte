@@ -11,6 +11,9 @@
   import { libraryName } from './linkedDevices';
   import { links, type Link } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
+  import type { JoinLibrary } from '../lib/browserHousehold';
+  import type { LibraryJoinPresentationOwner } from '../lib/libraryJoinPresentation';
+  import { adoptRecoveredLibrary } from '../lib/libraryJoinAdoption';
 
   let {
     link,
@@ -24,11 +27,12 @@
     libraryFormat = null,
     setRemoteAccess,
     viewerOnly = false,
+    presentationOwner,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
     /** For a browser using its own library: moves what it saved into the library a recovery code opens. */
-    onjoin?: (libraryKey: string) => Promise<boolean>;
+    onjoin?: JoinLibrary;
     /** The library's recovery code; none for a browser's own library. */
     recovery?: Snippet;
     remoteAccessConfigured: boolean;
@@ -44,21 +48,20 @@
     ) => Promise<boolean>;
     /** Old-engine viewer tier: retain only unlinking. */
     viewerOnly?: boolean;
+    presentationOwner: LibraryJoinPresentationOwner;
   } = $props();
 
   /**
    * A library opened with a recovery code (recovery-code §8 step 5): what this browser saved on its own moves in
    * first, as when it links a TV; then it opens the recovered library from now on.
    */
-  async function openRecovered(libraryKey: string): Promise<boolean> {
-    if (onjoin && !(await onjoin(libraryKey))) return false;
-    links.addRecovered(libraryKey);
-    location.assign('/');
-    return true;
-  }
+  const openRecovered = (
+    libraryKey: string,
+    presentation: Parameters<typeof adoptRecoveredLibrary>[1],
+  ) => adoptRecoveredLibrary(libraryKey, presentation, onjoin);
 
-  function unlink(target: Link) {
-    links.remove(target.inboxKey);
+  async function unlink(target: Link) {
+    await links.remove(target.inboxKey);
     // The library this page was reading is gone; the app goes back to linking.
     if (target.inboxKey === link?.inboxKey) navigate('/');
   }
@@ -187,6 +190,7 @@
             ? 'This browser switches to that library. Your current library stays saved on this browser.'
             : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
           onopen={openRecovered}
+          {presentationOwner}
         />
         {@render recovery?.()}
       </SettingRow>
@@ -212,7 +216,7 @@
                 question="Sign out of your library on this browser?"
                 detail="Your other devices keep it, and you can join it again with a code."
                 confirmLabel="Sign out"
-                onconfirm={() => unlink(linked)}
+                onconfirm={() => void unlink(linked)}
               />
             {:else}
               <Confirm
@@ -220,7 +224,7 @@
                 ariaLabel="Remove the library joined through {linked.name ?? 'another device'}"
                 question="Remove this library from this browser?"
                 detail="Your other devices keep it."
-                onconfirm={() => unlink(linked)}
+                onconfirm={() => void unlink(linked)}
               />
             {/if}
           </li>

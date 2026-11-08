@@ -82,6 +82,57 @@ it('preserves unknown readiness and only trusts supplied display metadata', () =
   expect(sources[1]!.cached).toBeUndefined();
   expect(sources[1]!.probed).toBe(false);
 });
+it('maps only the bounded case-insensitive structured source badge contract', () => {
+  const sourceValues = ['remux', 'BLURAY', 'WebDl', 'WEB-dl', 'web', 'HdTv'];
+  const sources = parseSources(
+    {
+      streams: sourceValues.map((source, index) => ({
+        title: `Film-${index}.mkv`,
+        url: `http://lan:8080/p/source-${index}`,
+        attributes: { source },
+      })),
+    },
+    addon,
+    routes,
+  )!;
+  expect(sources.map((source) => source.badges)).toEqual([
+    ['REMUX'],
+    ['BluRay'],
+    ['WEB-DL'],
+    ['WEB-DL'],
+    ['WEB'],
+    ['HDTV'],
+  ]);
+});
+it('rejects rip, unknown, oversized, and malformed structured source badges without parsing filenames', () => {
+  const sourceValues: unknown[] = [
+    'rip',
+    'webrip',
+    'dvdrip',
+    'junk',
+    'unknown',
+    'w'.repeat(256),
+    ' webdl',
+    'web_dl',
+    'web.dl',
+    null,
+    { value: 'webdl' },
+  ];
+  const sources = parseSources(
+    {
+      streams: sourceValues.map((source, index) => ({
+        title: `Film-${index}.WEB-DL.mkv`,
+        url: `http://lan:8080/p/refused-source-${index}`,
+        attributes: { source },
+      })),
+    },
+    addon,
+    routes,
+  )!;
+  expect(sources.map(({ filename, badges }) => ({ filename, badges }))).toEqual(
+    sourceValues.map((_, index) => ({ filename: `Film-${index}.WEB-DL.mkv`, badges: [] })),
+  );
+});
 it('carries the season pack a probed episode came from as context, never in place of its own size', () => {
   const episode = {
     title: 'Show.S01E03.1080p.WEB-DL.mkv',
@@ -236,17 +287,51 @@ it('only an early ask carries the header', async () => {
 });
 it('hands the list and scout’s account of it back together', async () => {
   const network = (async () =>
-    Response.json({
-      streams: [raw],
-      den: { answerKind: 'partial', coverage: { sources: [] } },
-    })) as typeof fetch;
+    Response.json(
+      {
+        streams: [raw],
+        den: {
+          answerKind: 'partial',
+          degraded: 'stale_list',
+          generatedAt: '2026-09-22T12:00:00Z',
+          coverage: { sources: [{ outcome: 'late' }] },
+        },
+      },
+      { headers: { 'x-den-degraded': 'indexers', 'retry-after': '30' } },
+    )) as typeof fetch;
   const got = await fetchSourceList(addon, 'tt1', routes, undefined, undefined, undefined, network);
   expect(got.sources).toHaveLength(1);
   expect(got.answer?.kind).toBe('partial');
+  expect(got).toMatchObject({
+    retryAfterMs: 30_000,
+    reply: {
+      reply: 'answered',
+      streams: 1,
+      degraded: 'indexers',
+      answer: {
+        kind: 'partial',
+        missing: 0,
+        late: 1,
+        outage_built_at: Date.parse('2026-09-22T12:00:00Z'),
+      },
+    },
+  });
   const down = (async () => new Response('', { status: 502 })) as typeof fetch;
   expect(
     await fetchSourceList(addon, 'tt1', routes, undefined, undefined, undefined, down),
-  ).toEqual({ sources: null });
+  ).toEqual({ sources: null, reply: { reply: 'errored' } });
+});
+
+it('classifies an owned abort as timed out and does not expose response details', async () => {
+  const controller = new AbortController();
+  const network = (async (_input, init) => {
+    controller.abort();
+    if (init?.signal?.aborted) throw new DOMException('stopped', 'AbortError');
+    return Response.json({ streams: [] });
+  }) as typeof fetch;
+  await expect(
+    fetchSourceList(addon, 'tt1', routes, undefined, undefined, controller.signal, network),
+  ).resolves.toEqual({ sources: null, reply: { reply: 'timed_out' } });
 });
 it('says how long ago a held list was built', () => {
   const now = Date.parse('2026-09-22T12:00:00Z');

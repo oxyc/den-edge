@@ -72,8 +72,8 @@
     active?: boolean;
   } = $props();
 
-  const title = async (ref: { type: MediaType; id: number }) =>
-    (await content.query({ kind: 'titles', titles: [ref] })).titles[0] ?? null;
+  const title = async (ref: { type: MediaType; id: number }, signal?: AbortSignal) =>
+    (await content.query({ kind: 'titles', titles: [ref] }, signal)).titles[0] ?? null;
   const rulesKey = $derived(
     JSON.stringify([
       [...prefs.excludedGenres].sort(),
@@ -239,6 +239,12 @@
   const feedHits = $derived(
     feed.pager.titles.filter(feed.admitted).map((title): Hit => ({ kind: 'title', title })),
   );
+  // The derived feed changes ownership with the selected category. Stop its page request immediately; a provider
+  // that ignores cancellation still cannot publish into the replacement Pager.
+  $effect(() => {
+    const pager = feed.pager;
+    return () => pager.dispose();
+  });
   $effect(() => {
     if (!typing && feed.pager.page === 0) void feed.pager.more();
   });

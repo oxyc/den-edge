@@ -36,12 +36,17 @@ export const PARAMETER_FALLBACKS = {
   'settings.collapseAllIn': 'Collapse all in {value}',
   'profile.allowedCount.one': '{count} allowed',
   'profile.allowedCount.other': '{count} allowed',
+  'sources.late.one':
+    'Sources still answering when this early list arrived: {count}. It may be short.',
+  'sources.late.other':
+    'Sources still answering when this early list arrived: {count}. It may be short.',
   'error.couldntReachDevice': 'Couldn’t reach {device}. Check that this device is online.',
   'player.switchTo': 'Switch to {source}',
   'player.resumeFrom': 'Resume from {time}',
   'player.stream': 'Stream: {stream}',
   'player.audioTrack': 'Audio track: {track}',
   'player.subtitles': 'Subtitles: {subtitles}',
+  'player.subtitleLoadFailed': 'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
   'player.adjustSubtitleTiming': 'Adjust subtitle timing ({offset}s)',
   'player.resetSubtitleTiming': 'Reset subtitle timing ({offset}s)',
   'player.next': 'Next: {title}',

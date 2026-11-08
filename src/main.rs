@@ -299,7 +299,7 @@ pub struct AppState {
     /// Behind an `Arc` because a streamed body outlives the request that started it: the counter has to
     /// travel with the stream and be added to as the frames go out, not once when the headers do.
     pub media_spent: Arc<Mutex<(u64, u64)>>,
-    /// Trailer sessions admitted through the media relay, by rate-limit bucket and video.
+    /// Trailer sessions admitted through the media relay, by rate-limit bucket and member/guest audience.
     ///
     /// A session is admitted once, at its master playlist (or at a first `/play` for a video nothing has
     /// opened yet), and every request that follows belongs to that admission — segments are never refused,
@@ -307,6 +307,15 @@ pub struct AppState {
     /// lease holds one of `guest_media_slots`, which comes back once neither a request nor a frame of a body it
     /// admitted has passed for the idle time.
     pub media_leases: Mutex<HashMap<String, relay::Lease>>,
+    /// Changes whenever a library's member authority changes. A media request that verified the old authority
+    /// concurrently may finish, but cannot publish a new reusable lease after the change.
+    pub media_member_generation: std::sync::atomic::AtomicU64,
+    /// Deterministic test boundary after a media request's initial lease miss.
+    #[cfg(test)]
+    pub media_admission_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Deterministic test boundary after a grant revoke's initial member check.
+    #[cfg(test)]
+    pub grant_authority_gate: Mutex<Option<Arc<grants::AuthorityGate>>>,
     /// Guest grants' in-memory state (`grants.rs`): last use, media source addresses, sessions already ended.
     pub grants: grants::Grants,
     /// Held across every read-modify-write of recovery entries (`recovery.rs`).
@@ -460,6 +469,11 @@ impl AppState {
             media_daily_max: None,
             media_spent: Arc::new(Mutex::new((0, 0))),
             media_leases: Mutex::new(HashMap::new()),
+            media_member_generation: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            media_admission_gate: Mutex::new(None),
+            #[cfg(test)]
+            grant_authority_gate: Mutex::new(None),
             grants: grants::Grants::default(),
             recovery_lock: tokio::sync::Mutex::new(()),
             member_hints: Mutex::new(HashMap::new()),

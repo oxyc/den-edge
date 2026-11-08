@@ -16,9 +16,10 @@
   }));
   // A title page hides a card with no poster as blank (`isHidden`), and a row with only such cards with it.
   const shown = (title: Title) => Boolean(title.posterPath || title.posterUrl);
+  const remoteRecommendations = new URLSearchParams(location.search).has('remote-recommendations');
   const detail = {
     title: { type: 'movie', id: 1, title: 'The Seed' },
-    more,
+    ...(remoteRecommendations ? {} : { more }),
     genres: [],
     directors: [],
     writers: [],

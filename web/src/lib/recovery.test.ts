@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  abandon,
+  abandonPending,
   begin,
   confirm,
   DeriveFailed,
@@ -103,6 +103,39 @@ describe('a derivation that can’t finish (§3)', () => {
     expect(timings).toHaveLength(1);
     expect(timings[0]).toMatchObject({ op: 'redeem', outcome: 'timeout' });
     expect(timings[0]!.ms).toBeGreaterThanOrEqual(15);
+  });
+
+  it('cancels the Worker once and ignores its stale completion without reporting a failure', async () => {
+    const controller = new AbortController();
+    const timings: Timing[] = [];
+    let terminated = 0;
+    const replies: Array<(event: MessageEvent) => void> = [];
+    const failed = derive('GEB2LP9UC63WQ95UNSLTXM', {
+      op: 'redeem',
+      signal: controller.signal,
+      report: (timing) => timings.push(timing),
+      worker: () => {
+        const worker = {
+          onmessage: null as ((event: MessageEvent) => void) | null,
+          onerror: null,
+          postMessage() {
+            if (worker.onmessage) replies.push(worker.onmessage);
+          },
+          terminate() {
+            terminated++;
+          },
+        };
+        return worker as unknown as Worker;
+      },
+    });
+    controller.abort();
+    await expect(failed).rejects.toBe(controller.signal.reason);
+    replies[0]?.({
+      data: { locator: vectors.entries[0]!.locator, wrapKey: vectors.entries[0]!.wrapKey },
+    } as MessageEvent);
+    await Promise.resolve();
+    expect(terminated).toBe(1);
+    expect(timings).toEqual([]);
   });
 
   it('a Worker that could not grow its memory fails as memory, with the device message', async () => {
@@ -402,10 +435,27 @@ describe('making a code (§6)', () => {
       const prepared = await prepare(web, LIBRARY_KEY);
       const begun = await begin(web, prepared);
       if (!begun.ok) throw new Error('begin failed');
-      await abandon(web, prepared.locator);
+      expect(await abandonPending(web, prepared.locator)).toBe('abandoned');
       begun.done();
       expect(readRecovery(edge.row).size).toBe(0);
       expect(edge.entries.size).toBe(0);
+    },
+    SLOW,
+  );
+
+  it(
+    'pending-only cleanup preserves a confirmation committed before its response was observed',
+    async () => {
+      const edge = server();
+      const web = await device(edge, WEB, 'Mac · Safari');
+      const prepared = await prepare(web, LIBRARY_KEY);
+      const begun = await begin(web, prepared);
+      if (!begun.ok) throw new Error('begin failed');
+      expect(await confirm(web, prepared, begun.baseLive)).toEqual({ ok: true });
+      expect(await abandonPending(web, prepared.locator)).toBe('confirmed');
+      expect(readRecovery(edge.row).get(prepared.locator)?.state).toBe('live');
+      expect(edge.entries.has(prepared.locator)).toBe(true);
+      begun.done();
     },
     SLOW,
   );

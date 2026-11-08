@@ -228,6 +228,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'Avsnitten kunde inte läsas in. Inget markerades som sett.',
   'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',
+  'Couldn’t cancel that recovery code setup. Check your connection and try again.':
+    'Det gick inte att avbryta inställningen av återställningskoden. Kontrollera anslutningen och försök igen.',
+  'Couldn’t save the code. Check that this device is on your network.':
+    'Det gick inte att spara koden. Kontrollera att den här enheten är ansluten till ditt nätverk.',
+  'Couldn’t save that. Check that this device is on your network, then confirm again.':
+    'Det gick inte att spara. Kontrollera att den här enheten är ansluten till ditt nätverk och bekräfta igen.',
   'Couldn’t save that. Check your connection and try again.':
     'Det gick inte att spara. Kontrollera anslutningen och försök igen.',
   'Couldn’t start that download. Try again.': 'Hämtningen kunde inte startas. Försök igen.',
@@ -298,9 +304,13 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Tillägg får inte underlätta åtkomst till innehåll som du saknar behörighet till. Du ansvarar för att din användning följer tillämplig lag och innehållsägarnas rättigheter.',
   'Den Reel': 'Den Reel',
   'Den Scout': 'Den Scout',
+  'Den’s server can’t be reached. You’re seeing what this device saved, so some titles may be missing or out of date.':
+    'Dens server går inte att nå. Du ser det som den här enheten sparade, så vissa titlar kan saknas eller vara inaktuella.',
   'Den stops syncing your watch history with it, on every device.':
     'Den slutar synkronisera din klockhistorik med den, på alla enheter.',
   'Den Subtitles': 'Den Subtitles',
+  'Couldn’t confirm the import. Changes may already be saved; trying again is safe.':
+    'Importen kunde inte bekräftas. Ändringar kan redan ha sparats; det är säkert att försöka igen.',
   'Den uses your own TMDB key (free at themoviedb.org) for search, and every title’s poster and details.':
     'Den använder din egen TMDB-nyckel (gratis på themoviedb.org) för sökning, och varje titels affisch och detaljer.',
   'Den will accept its index without checking a signature, as before.':
@@ -339,8 +349,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Downloads: 'Hämtningar',
   'Downloads ›': 'Hämtningar ›',
   'Downloads are managed by the Owner.': 'Hämtningar hanteras av ägaren.',
+  'Downloads couldn’t be opened. Try again.': 'Hämtningarna kunde inte öppnas. Försök igen.',
+  'Downloads couldn’t be refreshed. Try again.': 'Hämtningarna kunde inte uppdateras. Försök igen.',
   'Downloads live in your library, which this browser can’t keep.':
     'Hämtningarna finns i ditt bibliotek, som den här webbläsaren inte kan behålla.',
+  'Downloads may be out of date. The last available queue is shown.':
+    'Hämtningarna kan vara inaktuella. Den senast tillgängliga kön visas.',
   Drama: 'Drama',
   Dreamlike: 'Drömlikt',
   'Drugs/Alcohol': 'Droger/Alkohol',
@@ -523,6 +537,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Make a new code': 'Gör en ny kod',
   'Make a new recovery code?': 'Skapa en ny återställningskod?',
   'Make a recovery code': 'Skapa en återställningskod',
+  'Den holds too many codes for this library just now. Try again in a minute.':
+    'Den lagrar för många koder för det här biblioteket just nu. Försök igen om en minut.',
   'Make one, or open a library with one': 'Gör en eller öppna ett bibliotek med en',
   'Making a secure link…': 'Gör en säker länk...',
   Malayalam: 'Malayalam',
@@ -640,6 +656,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Only Owner can change this profile’s age limit and unrated-title policy.':
     'Endast ägaren kan ändra den här profilens åldersgräns och policy för oklassificerad titel.',
   'Open Den': 'Öppna Den',
+  'Open a recovery code in Den on a phone or computer, then link this TV with the QR or code above.':
+    'Öppna en återställningskod i Den på en telefon eller dator och länka sedan den här TV:n med QR-koden eller koden ovan.',
   'Open on this browser': 'Öppna i den här webbläsaren',
   'Open the link on your phone, or scan the code with it: your library comes over, and so do the addons you were lent, if there is a device free for them. The link works once, for ten minutes, and asks you here before the phone gets anything.':
     'Öppna länken på din telefon, eller skanna koden med den: ditt bibliotek kommer över, och det gör även tilläggen du lånades ut, om det finns en enhet ledig för dem. Länken fungerar en gång, i tio minuter, och frågar dig här innan telefonen får något.',
@@ -649,6 +667,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Open your Den library': 'Öppna ditt Den-bibliotek',
   'Opened more times than you expect? Turn it off, then reset the library key on your Apple TV under Settings › Linked devices: turning it off alone doesn’t take back a key already opened.':
     'Öppet fler gånger än du förväntat dig? Stäng av den och återställ sedan biblioteksnyckeln på din Apple TV under Inställningar › Länkade enheter: att stänga av den ensam tar inte tillbaka en nyckel som redan är öppen.',
+  'Opening downloads…': 'Öppnar hämtningar…',
   'Opening profile directory…': 'Öppnar profilkatalog...',
   'Opening profiles…': 'Öppnar profiler...',
   or: 'eller',
@@ -930,6 +949,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Terms of Use': 'Användarvillkor',
   Thai: 'Thai',
   'That file has no viewing history in it.': 'Den filen har ingen visningshistorik.',
+  'That code collided with another. Make a new one.':
+    'Den koden kolliderade med en annan. Skapa en ny.',
+  'That isn’t the last group of your code. Check what you wrote down.':
+    'Det är inte den sista gruppen i din kod. Kontrollera vad du skrev ner.',
+  'That pending recovery code was replaced. Make a new one.':
+    'Den väntande återställningskoden ersattes. Skapa en ny.',
   'That isn’t a valid key. Paste the ed25519:… public key the plugin publishes.':
     'Det är inte en giltig nyckel. Klistra in den offentliga nyckeln ed25519:... som plugin publicerar.',
   'That isn’t one of the homelab’s browser keys.': 'Det är inte en av homelab:s webbläsarnycklar.',
@@ -1033,6 +1058,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Trending This Week': 'Populärt den här veckan',
   'True black background (OLED)': 'Äkta svart bakgrund (OLED)',
   'Try again': 'Försök igen',
+  'Couldn’t save where you stopped': 'Det gick inte att spara var du slutade',
+  'Leave unsaved': 'Lämna osparad',
   'Try another': 'Prova en annan',
   'Try another release': 'Prova en annan version',
   'Try Den Remux': 'Prova Den Remux',
@@ -1141,6 +1168,11 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Your plugins': 'Dina plugins',
   'Your recovery code no longer works: make a new one.':
     'Din återställningskod fungerar inte längre: skapa en ny.',
+  'Your recovery code is on.': 'Din återställningskod är aktiverad.',
+  'Your recovery code was already saved and remains on.':
+    'Din återställningskod hade redan sparats och är fortfarande aktiverad.',
+  'Your recovery code setup didn’t finish. The code you saw doesn’t work; make a new one.':
+    'Inställningen av återställningskoden slutfördes inte. Koden du såg fungerar inte; skapa en ny.',
   'Your recovery code still works. If anyone else may have seen it, make a new one in Settings › Linked devices.':
     'Din återställningskod fungerar fortfarande. Om någon annan kanske har sett den, skapa en ny i Inställningar › Länkade enheter.',
   'Your region': 'Din region',
@@ -1171,6 +1203,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Playing through Den Remux': 'Spelas via Den Remux',
   'Playback has no active source. Try either path explicitly.':
     'Uppspelningen har ingen aktiv källa. Prova någon av vägarna direkt.',
+  'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.':
+    'Uppspelningen kan starta, men återställning av förloppet i bakgrunden är inte tillgänglig. Håll sidan öppen för att spara var du slutade.',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'För ljud eller undertexter som webbläsaren inte kan spela, eller en ström som stannar',
   'Turns subtitles off: this player shows only Den Remux’s':
@@ -1190,4 +1224,14 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Titles: 'Titlar',
   'Dark Comedy': 'Svart komedi',
   'Most Popular': 'Mest populära',
+  'Sources are taking longer than usual. You can keep using this page.':
+    'Källorna tar längre tid än vanligt. Du kan fortsätta använda den här sidan.',
+  'Source discovery didn’t answer in time. Your previous results are still here.':
+    'Källsökningen svarade inte i tid. Dina tidigare resultat finns kvar här.',
+  'Source discovery didn’t answer in time. Try again.':
+    'Källsökningen svarade inte i tid. Försök igen.',
+  'The latest check failed, so these are your previous source results.':
+    'Den senaste kontrollen misslyckades, så detta är dina tidigare källresultat.',
+  'The availability check is degraded, so some source details may be incomplete.':
+    'Tillgänglighetskontrollen är begränsad, så vissa källuppgifter kan vara ofullständiga.',
 };

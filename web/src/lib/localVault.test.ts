@@ -230,7 +230,7 @@ describe('transactions', () => {
 });
 
 describe('indexedVault', () => {
-  it('scans one prefix in key order, deletes one exact key, and removes a whole prefix', async () => {
+  it('scans one prefix in key order and retires only that prefix with its receipt', async () => {
     const idb = fakeIndexedDB();
     vi.stubGlobal('IDBKeyRange', {
       bound: (lower: IDBValidKey, upper: IDBValidKey, lowerOpen = false, upperOpen = false) => ({
@@ -285,6 +285,29 @@ describe('indexedVault', () => {
     await vault.remove('lib:pending:');
     expect(await vault.entries('lib:pending:')).toEqual([]);
     expect(await vault.get('lib:meta')).toEqual(bytes(8));
+
+    await vault.put('generation', bytes(5));
+    await vault.put('retirement:existing', bytes(6));
+    const beforeRotation = idb.transactions.length;
+    expect(
+      await vault.rotateGeneration?.('generation', bytes(7), 'retirement:', (previous) => {
+        expect(previous).toEqual(bytes(5));
+        return { key: 'retirement:new', value: bytes(8) };
+      }),
+    ).toEqual([['retirement:existing', bytes(6)]]);
+    expect(idb.transactions).toHaveLength(beforeRotation + 1);
+    expect(await vault.get('generation')).toEqual(bytes(7));
+    expect(await vault.get('retirement:new')).toEqual(bytes(8));
+
+    await vault.put('old:a', bytes(9));
+    await vault.put('oldish:a', bytes(10));
+    await vault.put('retirement:old', bytes(11));
+    const beforeRetirement = idb.transactions.length;
+    expect(await vault.retire?.('old:', 'retirement:old', bytes(11))).toBe(true);
+    expect(idb.transactions).toHaveLength(beforeRetirement + 1);
+    expect(await vault.get('old:a')).toBeUndefined();
+    expect(await vault.get('retirement:old')).toBeUndefined();
+    expect(await vault.get('oldish:a')).toEqual(bytes(10));
   });
 
   it('reads many keys, in their order, in one transaction', async () => {

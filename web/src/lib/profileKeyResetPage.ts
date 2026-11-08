@@ -49,7 +49,7 @@ export interface CompoundResetPageDeps<Destination> {
   /** Persist `to` as the link in place of `from`, keeping the old state and the marker. */
   install(from: string, to: string): void;
   /** Drop the old library's kept state and the marker; the reset is over. */
-  release(from: string): void;
+  release(from: string): void | Promise<void>;
   /** Make the destination the live session. */
   adopt(destination: Destination, to: string): void;
 }
@@ -196,7 +196,7 @@ export class CompoundResetPage<Destination> {
         return 'waiting';
       }
     }
-    this.deps.release(pending.from);
+    await this.deps.release(pending.from);
     this.deps.adopt(destination, pending.to);
     return 'complete';
   }

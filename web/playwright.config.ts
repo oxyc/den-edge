@@ -34,7 +34,9 @@ const WORKERS = Math.max(1, Math.min(4, Math.floor((memory - GB) / (1.5 * GB))))
  * Specs that start a profile household through the real app, and so wait on its library Workers' startup deadlines:
  * they run against the production build (`playwright.production.config.ts`). From the dev server a Worker evaluates
  * some hundreds of unbundled modules before it answers, which on a loaded CI runner takes 3–19 s and runs out the
- * supervisor's startup deadline, then the Owner profile's, which no shipped page pays.
+ * supervisor's startup deadline, then the Owner profile's, which no shipped page pays. Specs that open several tabs
+ * of one library at once belong here too: each tab's Worker evaluates those modules beside the others before the
+ * page it gates (Settings) can draw.
  */
 export const PRODUCTION_BUILD_SPECS = [
   'big-library-crash.spec.mjs',
@@ -42,6 +44,8 @@ export const PRODUCTION_BUILD_SPECS = [
   'guest-library.spec.mjs',
   'hidden-start.spec.mjs',
   'household-downloads.spec.mjs',
+  'library-retirement.spec.mjs',
+  'origin-outage.spec.mjs',
   'profile-transition-failures.spec.mjs',
   'startup-fetches.spec.mjs',
 ];

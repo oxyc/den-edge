@@ -7,6 +7,8 @@
  */
 
 import { parseWarnings, type Warning } from './contentWarnings';
+import { keepingAtlasFetch } from './atlasKept';
+import { onKeptAnswers } from './keptAnswers';
 import { titlesOf } from './atlasRows';
 import { ContentServiceFault, type ContentServiceAuthority } from './contentServiceCore';
 import {
@@ -99,6 +101,12 @@ const TMDB = 'https://api.themoviedb.org/3';
 const MAX_ATLAS_TITLE_CURSORS = 64;
 /** The TV's repeat-search cache size (`SearchResultsCache`). */
 const SEARCH_CACHE_LIMIT = 40;
+/**
+ * What the page says while answers kept here stand in (`keptAnswers`): sent with the `kept` status and translated by
+ * the page from its phrase catalogs, so its startup graph carries none of it.
+ */
+const KEPT_NOTICE =
+  'Den’s server can’t be reached. You’re seeing what this device saved, so some titles may be missing or out of date.';
 
 /**
  * Row and chart answers whose poster fill den-edge did not answer (a `429` or a failure). They are handed to whoever
@@ -224,6 +232,8 @@ type BriefingFetch = typeof fetch & Partial<Pick<TmdbFetch, 'brief'>>;
 export interface ContentAuthorityOptions {
   tmdbFetch?: BriefingFetch;
   providerFetch?: typeof fetch;
+  /** `providerFetch` for an unrestricted profile's atlas reads, with the browse answers kept (`keepingAtlasFetch`). */
+  keptAtlasFetch?: typeof fetch;
   now?: () => number;
   configureGrants?: (grants: readonly { gid: string; secret: string }[]) => void;
   onGrantEnded?: (listener: (gid: string) => void) => void;
@@ -340,6 +350,7 @@ function tmdbUrl(
 export class ContentAuthority implements ContentReader, ContentServiceAuthority {
   readonly #tmdbFetch: BriefingFetch;
   readonly #providerFetch: typeof fetch;
+  readonly #keptAtlasFetch: typeof fetch;
   readonly #now: () => number;
   readonly #configureGrants: (grants: readonly { gid: string; secret: string }[]) => void;
   readonly #flights = new Map<string, Promise<unknown>>();
@@ -349,6 +360,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   readonly #imports: ContentImportAuthority;
   readonly #statusListeners = new Set<(status: ContentServiceStatusValue) => void>();
   readonly #stopThrottle: () => void;
+  readonly #stopKept: () => void;
+  #kept: ContentProvider | null = null;
 
   constructor(
     private readonly credentials: ContentCredentialSource,
@@ -356,12 +369,18 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   ) {
     this.#tmdbFetch = options.tmdbFetch ?? tmdbFetch;
     this.#providerFetch = options.providerFetch ?? relayFetch;
+    this.#keptAtlasFetch = options.keptAtlasFetch ?? keepingAtlasFetch(this.#providerFetch);
     this.#now = options.now ?? Date.now;
     this.#configureGrants = options.configureGrants ?? useHeldGrants;
     this.#imports = new ContentImportAuthority(() => this.#tmdbKey(), this.#tmdbFetch, this.#now);
     this.#stopThrottle = onTmdbThrottle(({ retryMs }) => {
       for (const listener of this.#statusListeners)
         listener({ kind: 'throttled', provider: 'tmdb', retryAfterMs: retryMs });
+    });
+    this.#stopKept = onKeptAnswers((provider, kept) => {
+      this.#kept = kept ? provider : null;
+      for (const listener of this.#statusListeners)
+        listener({ kind: 'kept', provider, notice: kept ? KEPT_NOTICE : null });
     });
     // The page holds the guest's grants and says when one ends; a `grant_expired` met here is told back to it.
     (options.onGrantEnded ?? onGrantEnded)((gid) => {
@@ -371,11 +390,14 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
 
   listen(listener: (status: ContentServiceStatusValue) => void): () => void {
     this.#statusListeners.add(listener);
+    // A page that connects while kept answers stand in (another tab on a shared Worker met the failure) is told too.
+    if (this.#kept) listener({ kind: 'kept', provider: this.#kept, notice: KEPT_NOTICE });
     return () => this.#statusListeners.delete(listener);
   }
 
   close(): void {
     this.#stopThrottle();
+    this.#stopKept();
     this.#statusListeners.clear();
     this.#atlasTitleCursors.clear();
     this.#searches.clear();
@@ -712,9 +734,16 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     }
   }
 
-  /** `providerFetch` with the profile's policy on every request to the configured atlas. */
+  /**
+   * `providerFetch` with the profile's policy on every request to the configured atlas. An unrestricted profile's
+   * browse answers are kept for when atlas cannot be reached; a restricted one's are always asked live.
+   */
   #atlasFetch(atlas: string, policy: ContentPolicy | undefined): typeof fetch {
-    return policedAtlasFetch(this.#providerFetch, atlas, policy);
+    return policedAtlasFetch(
+      isRestricted(policy) ? this.#providerFetch : this.#keptAtlasFetch,
+      atlas,
+      policy,
+    );
   }
 
   /**
@@ -1468,7 +1497,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     try {
       return await this.#wait(
         reuse(`content:manifest:${atlas}`, async () => {
-          const response = await this.#providerFetch(`${atlas}/manifest.json`);
+          const response = await this.#keptAtlasFetch(`${atlas}/manifest.json`);
           if (absent(`${atlas}/manifest.json`, response)) return { state: 'absent' } as const;
           if (!response.ok) throw new Error(`atlas answered ${response.status}`);
           const body = object(await response.json());
@@ -1553,7 +1582,9 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
             if (expectedPolicy && response.headers.get('x-den-policy') !== expectedPolicy)
               throw new Error('atlas answered a chart for another content policy');
             const titles = this.#atlasChartTitles(await response.json());
-            if (!keptByEdge(response)) rememberAtlasMetadata(titles, this.#providerFetch);
+            // A copy kept in this browser (`atlasKept`) was reported when it was fetched.
+            if (!keptByEdge(response) && !response.headers.has('x-den-kept'))
+              rememberAtlasMetadata(titles, this.#providerFetch);
             return readyFilled(titles, this.#providerFetch);
           },
           { keep: filled },

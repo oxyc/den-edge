@@ -303,7 +303,9 @@ describe('the page half of a compound key reset', () => {
       openDestination: async (key) => ({ session: key, close: () => {} }),
       link: () => ({ libraryKey: original! }),
       install: () => {},
-      release: () => world.events.push('release'),
+      release: () => {
+        world.events.push('release');
+      },
       adopt: () => {},
     });
     void page;
