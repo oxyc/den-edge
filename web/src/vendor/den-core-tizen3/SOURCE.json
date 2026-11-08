@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "sourceManifest": "../den-core/SOURCE.json",
-  "sourceDigest": "097438f63c3b73ccba38208a18e3209ed012709218b5880aeee412a2851bf5df",
+  "sourceDigest": "3dcce6e3de40c9f066b39228e5c96a5ccab5397906f13b56c76d1689e7f959dc",
   "rust": "1.95.0",
   "binaryen": 133,
   "rustflags": "-Zunstable-options -Cpanic=immediate-abort -C target-feature=-reference-types,-multivalue",
