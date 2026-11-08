@@ -1031,6 +1031,57 @@ test('an authorized Owner handoff targets Owner directly and continues only afte
   await expect.poll(() => page.evaluate(() => window.__ownerHandoffPath)).toBe('/settings');
 });
 
+for (const destination of ['current Kid', 'another non-Owner']) {
+  test(`backing out of an Owner handoff cannot send ${destination} to Owner Settings`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() =>
+      localStorage.setItem(
+        'den.profile.active.v1',
+        JSON.stringify({
+          version: 1,
+          mode: 'persistent',
+          profileId: '00000000000000000000000000000002',
+        }),
+      ),
+    );
+    await open(page, 'preview', '?pin=1234');
+    await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+
+    await page.evaluate(() => {
+      window.__ownerHandoffPath = null;
+      document.addEventListener(
+        'den:navigate',
+        (event) => (window.__ownerHandoffPath = event.detail.path),
+        { once: true },
+      );
+      window.dispatchEvent(
+        new CustomEvent('den:open-profile-switcher', {
+          detail: {
+            trigger: document.querySelector('.profile-trigger'),
+            restoreFocus: false,
+            target: 'owner',
+            successPath: '/settings',
+          },
+        }),
+      );
+    });
+
+    const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+    await dialog.getByRole('button', { name: 'Profiles' }).click();
+    if (destination === 'current Kid') {
+      await dialog.getByRole('button', { name: 'Use Kids' }).click();
+      await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+    } else {
+      await dialog.getByRole('button', { name: 'Use Visitor' }).click();
+      await page.getByLabel('Owner PIN').fill('1234');
+      await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+    }
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.__ownerHandoffPath)).toBeNull();
+  });
+}
+
 test('Visitor stays active across reload, PIN denial preserves it, and success disposes only its visit', async ({
   page,
 }) => {

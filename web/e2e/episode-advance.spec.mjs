@@ -532,6 +532,28 @@ test('receipt recovery waits for rejected final progress to become durable befor
   }
 });
 
+test('an old receipt ACK cannot hand off or close replacement playback', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['receipt-unsupported', 'hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 9);
+    await page.getByRole('button', { name: 'Connections' }).click();
+
+    await expect(player(page)).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/settings$/);
+    await page.getByRole('link', { name: /^Play/ }).first().click();
+    await expect(player(page)).toHaveAttribute('aria-label', new RegExp(`^Series ${SERIES}`));
+
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect(player(page)).toHaveAttribute('aria-label', new RegExp(`^Series ${SERIES}`));
+    await expect(page).not.toHaveURL(/\/settings$/);
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const role of ['Kid', 'Visitor']) {
   test(`receipt recovery sends a ${role} through the authorized Owner handoff`, async () => {
     const { browser, page } = await open(chromium, {

@@ -26,6 +26,10 @@
   let backdropPress = false;
   let returnFocus = $state<HTMLElement>();
   let successPath: string | undefined;
+  let successRole: ProfileChoice['role'] | undefined;
+  // Only receipt-incapable artifacts request an authorized Owner continuation. The E2E build keeps that exact path
+  // injectable so the browser suite can cover it without duplicating the much heavier Tizen 3 build transform.
+  const ownerContinuationEnabled = !__DEN_MANAGED_PLAYBACK_RECEIPTS__ || import.meta.env.DEN_E2E;
 
   const active = $derived(profiles.activeChoice);
   const pinConfigured = $derived(profiles.parentalPinConfigured);
@@ -54,9 +58,12 @@
     mismatch = false;
     returnFocus = opener;
     restoreTriggerFocus = restoreFocus;
-    successPath = path;
+    // A continuation belongs to the requested profile, not to the dialog. If the viewer backs out and chooses a
+    // different profile, that successful switch must not inherit the requested Owner's privileged destination.
+    successPath = ownerContinuationEnabled && target ? path : undefined;
+    successRole = ownerContinuationEnabled ? target?.role : undefined;
     dialog?.showModal();
-    if (target) void choose(target);
+    if (ownerContinuationEnabled && target) void choose(target);
   }
 
   function open(event: MouseEvent) {
@@ -68,6 +75,8 @@
     settingPin = false;
     firstPin = null;
     pin = '';
+    successPath = undefined;
+    successRole = undefined;
   }
 
   onMount(() =>
@@ -75,7 +84,9 @@
       show(
         opener,
         restoreFocus,
-        target ? profiles.choices.find((choice) => choice.role === target) : undefined,
+        ownerContinuationEnabled && target
+          ? profiles.choices.find((choice) => choice.role === target)
+          : undefined,
         path,
       ),
     ),
@@ -99,8 +110,10 @@
             ? await profiles.switchToPersistent(choice.id, pin)
             : await profiles.switchToVisitor(pin);
       if (result.outcome === 'success') {
-        const path = successPath;
+        const path =
+          ownerContinuationEnabled && choice.role === successRole ? successPath : undefined;
         successPath = undefined;
+        successRole = undefined;
         dialog?.close();
         if (path) navigate(path);
         return;
@@ -165,8 +178,10 @@
     denied = false;
     failed = false;
     if (choiceKey(choice) === choiceKey(active)) {
-      const path = successPath;
+      const path =
+        ownerContinuationEnabled && choice.role === successRole ? successPath : undefined;
       successPath = undefined;
+      successRole = undefined;
       dialog?.close();
       if (path) navigate(path);
       return;
@@ -228,6 +243,7 @@
     firstPin = null;
     mismatch = false;
     successPath = undefined;
+    successRole = undefined;
     requestAnimationFrame(() => {
       if (restoreTriggerFocus) returnFocus?.focus({ preventScroll: true });
       else {

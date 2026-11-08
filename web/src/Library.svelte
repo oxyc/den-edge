@@ -336,7 +336,7 @@
     finalProgressReceipts.find(({ saving }) => saving !== null),
   );
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
-  let playbackReceiptHandoffPending = $state(false);
+  let playbackReceiptHandoffPending = $state<number | null>(null);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
   // RoutedLibrary keys this whole tree by the session object. One lifetime therefore fences Owner/Kid changes and
@@ -351,8 +351,15 @@
     void tick().then(() => finalProgressRetryButton?.focus());
   });
   $effect(() => {
-    if (!playbackReceiptHandoffPending || finalProgressReceipts.length) return;
-    playbackReceiptHandoffPending = false;
+    // Ordinary capable artifacts cannot enter this recovery path. Keep the E2E seam so browser automation can run
+    // the Tizen 3 production path without giving its Chromium 87 build's heavier compatibility transform the lane.
+    if (__DEN_MANAGED_PLAYBACK_RECEIPTS__ && !import.meta.env.DEN_E2E) return;
+    const intent = playbackReceiptHandoffPending;
+    if (intent === null || finalProgressReceipts.length) return;
+    playbackReceiptHandoffPending = null;
+    // A durable reply from the closed player can arrive after the viewer has opened another one. The old handoff
+    // owns neither that replacement player nor its route, even when it happens to play the same title again.
+    if (playing || intent !== playbackIntent) return;
     if (session.administersHousehold) {
       navigate('/settings');
       return;
@@ -566,6 +573,7 @@
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
+  let playbackIntent = $state(0);
   let tvControls = $state<{
     play: () => void;
     pause: () => void;
@@ -599,6 +607,7 @@
         }),
         replace,
       );
+    playbackIntent += 1;
     playing = target;
   }
 
@@ -1542,7 +1551,7 @@
   function requestPlaybackReceiptHandoff() {
     // Player has already emitted its exact terminal receipt and released playback resources. Keep the viewer on the
     // title until that receipt is durably acknowledged, or until the visible recovery explicitly leaves it unsaved.
-    playbackReceiptHandoffPending = true;
+    playbackReceiptHandoffPending = playbackIntent;
   }
 
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
@@ -3333,9 +3342,7 @@
       onfinalprogress={(fraction, seconds, at) =>
         finalProgressed({ title: target.title, ...at }, fraction, seconds)}
       onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
-      playbackReceiptActionLabel={session.administersHousehold
-        ? i18n.text('settings.section.connections')
-        : i18n.phrase('Switch to Owner')}
+      playbackReceiptHandoffAsOwner={session.administersHousehold}
       onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}

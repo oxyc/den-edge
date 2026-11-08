@@ -177,7 +177,7 @@
     onprogress,
     onfinalprogress,
     onmanagedplayback,
-    playbackReceiptActionLabel,
+    playbackReceiptHandoffAsOwner,
     onplaybackreceipthandoff,
     onnext,
     onclose,
@@ -223,8 +223,8 @@
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
     /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
     onmanagedplayback?: (signal: AbortSignal) => Promise<PlaybackReceiptPreparation>;
-    /** The authorized recovery offered by the host (Connections for Owner, an Owner switch otherwise). */
-    playbackReceiptActionLabel: string;
+    /** Whether the authorized recovery opens Connections directly or first switches to Owner. */
+    playbackReceiptHandoffAsOwner: boolean;
     /** Leaves playback only after handing terminal progress to the host's durable recovery surface. */
     onplaybackreceipthandoff: () => void;
     onnext?: () => void;
@@ -5035,7 +5035,9 @@
         {
           dismiss: () => (receiptUnsupported = false),
           action: {
-            label: playbackReceiptActionLabel,
+            label: playbackReceiptHandoffAsOwner
+              ? i18n.text('settings.section.connections')
+              : i18n.phrase('Switch to Owner'),
             run: openPlaybackReceiptHandoff,
           },
         },
