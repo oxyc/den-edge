@@ -721,7 +721,8 @@ function rowsFor(
         values: { value: title, type: NOUN[type] },
         translateValues: ['value', 'type'],
       },
-      load: (page: number) => catalogPage(pages, { kind: 'discover', query }, page),
+      load: (page: number, signal?: AbortSignal) =>
+        catalogPage(pages, { kind: 'discover', query }, page, signal),
     };
   });
 }
@@ -794,10 +795,10 @@ export function serviceRows(
       c.query.primaryGenre === undefined
         ? undefined
         : (title: Title) => matchesPrimaryGenre(title, c.query.primaryGenre!),
-    load: (page: number) => {
+    load: (page: number, signal?: AbortSignal) => {
       const query = scoped(c.query);
       const { primaryGenre: _primaryGenre, ...contentQuery } = query;
-      return catalogPage(pages, { kind: 'discover', query: contentQuery }, page);
+      return catalogPage(pages, { kind: 'discover', query: contentQuery }, page, signal);
     },
   }));
   return [...lead, ...feed];

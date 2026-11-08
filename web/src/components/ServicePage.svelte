@@ -236,7 +236,7 @@
       <div class="hero-loading"><Loading label="Loading featured titles" /></div>
     {:else if heroFailure}
       <div class="hero-failure" role="alert">
-        <p>Featured titles couldn’t be loaded.</p>
+        <p>{i18n.phrase('Featured titles couldn’t be loaded.')}</p>
         <Button variant="secondary" label="Try again" onclick={retryHero} />
       </div>
     {/if}
