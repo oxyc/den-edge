@@ -1249,8 +1249,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'La reproducción no tiene una fuente activa. Prueba una de las dos rutas.',
   'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.':
     'La reproducción puede comenzar, pero la recuperación del progreso en segundo plano no está disponible. Mantén esta página abierta para guardar dónde te detuviste.',
-  'This TV can save progress while Den stays open, but it cannot recover managed playback after the page closes. Link a phone or computer in Settings › Connections to recover it later.':
-    'Este televisor puede guardar el progreso mientras Den permanezca abierto, pero no puede recuperar la reproducción administrada después de cerrar la página. Vincula un teléfono u ordenador en Ajustes › Conexiones para recuperarlo más tarde.',
+  'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.':
+    'Este televisor no puede recuperar el progreso de la reproducción administrada después de cerrar la página. Mantén Den abierto o vincula un teléfono u ordenador en Ajustes › Conexiones.',
   'Open Connections': 'Abrir Conexiones',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'Para audio o subtítulos que este navegador no puede reproducir, o una emisión que se detiene',

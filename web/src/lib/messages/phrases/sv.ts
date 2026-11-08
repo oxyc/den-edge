@@ -1234,8 +1234,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Uppspelningen har ingen aktiv källa. Prova någon av vägarna direkt.',
   'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.':
     'Uppspelningen kan starta, men återställning av förloppet i bakgrunden är inte tillgänglig. Håll sidan öppen för att spara var du slutade.',
-  'This TV can save progress while Den stays open, but it cannot recover managed playback after the page closes. Link a phone or computer in Settings › Connections to recover it later.':
-    'Den här TV:n kan spara förloppet medan Den är öppet, men kan inte återställa hanterad uppspelning efter att sidan stängts. Länka en telefon eller dator under Inställningar › Anslutningar för att återställa det senare.',
+  'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.':
+    'Den här TV:n kan inte återställa förloppet för hanterad uppspelning efter att sidan stängts. Håll Den öppet eller länka en telefon eller dator under Inställningar › Anslutningar.',
   'Open Connections': 'Öppna Anslutningar',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'För ljud eller undertexter som webbläsaren inte kan spela, eller en ström som stannar',

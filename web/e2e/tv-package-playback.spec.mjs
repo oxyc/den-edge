@@ -103,7 +103,7 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
 
   await expect(
     page.getByText(
-      'This TV can save progress while Den stays open, but it cannot recover managed playback after the page closes. Link a phone or computer in Settings › Connections to recover it later.',
+      'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.',
       { exact: true },
     ),
   ).toBeVisible();
