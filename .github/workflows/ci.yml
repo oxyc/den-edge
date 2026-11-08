@@ -10,9 +10,13 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
   # Superseded PR revisions are disposable. A main SHA is a potential release and its candidate must finish even
   # when another merge follows it, otherwise a tag could name a commit whose exact image was cancelled midway.
+  # Main therefore gets one group per SHA: within a shared group GitHub keeps one running and one pending run and
+  # cancels the older pending run when a third queues, even with cancel-in-progress off. On 2026-11-08 that
+  # cancelled three queued main runs (c638c71e, fe342785, ba316297) behind #1104's, and release 0.271.208 failed
+  # on "exact-main CI … finished cancelled".
+  group: ci-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
