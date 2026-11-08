@@ -10,6 +10,9 @@ test('shared Search aborts and restarts an active query when interface language 
   await guardNetwork(page);
   await page.route('**/routes', (request) => request.fulfill({ json: {} }));
   await page.route('**/atlas/**', (request) => request.fulfill({ status: 404, body: '' }));
+  await page.route('https://image.tmdb.org/**', (request) =>
+    request.fulfill({ status: 404, body: '' }),
+  );
   await page.goto(`${E2E_ORIGIN}/test/nav-search.html?at=${route}`);
   await expect
     .poll(() => page.evaluate(() => window.denSearchLanguageRace?.signals.length))
