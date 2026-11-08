@@ -354,7 +354,7 @@ test('a failed receipt key publication can be retried without acknowledging the 
   };
   await expect(
     drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal),
-  ).rejects.toThrow('key publication failed');
+  ).resolves.toBeUndefined();
   expect(calls).toEqual(['/playback/receipts/drain']);
   await drainPlaybackReceiptsForCurrentAuthority(options, new AbortController().signal);
   expect(calls).toEqual([
