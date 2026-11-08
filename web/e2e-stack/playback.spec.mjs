@@ -604,12 +604,6 @@ test.describe('the playback scenario matrix', () => {
   });
 
   test('resuming: a film closed part-way starts where it was left', async () => {
-    // Today a TorBox resume starts where it was left in some runs and from 0 in others, so neither "pass" nor
-    // "expected to fail" holds steadily; it stays out of the gate until that race is fixed (strict runs it).
-    test.fixme(
-      process.env.DEN_STACK_STRICT !== '1',
-      'https://github.com/oxyc/den-edge/issues/1123',
-    );
     stack.torbox.managed = true;
     const edgeFrom = stack.edge.lines().length;
     const { page, seen } = await household();
@@ -625,25 +619,23 @@ test.describe('the playback scenario matrix', () => {
     const from = seen.requests.length;
     await play(page, film, 'Resume');
     // The left-off second is reached by the player going there (it starts there, or seeks there), not by playing from
-    // the start through it.
+    // the start through it. Judged by what the video played, never by the order of its events: a seek's first
+    // `timeupdate`, already at the new second, can come before its `seeked`, and read that way a resume that started
+    // right there was counted as played through (https://github.com/oxyc/den-edge/issues/1123).
     const resumed = await (
       await page.waitForFunction(
         (mark) => {
           const v = document.querySelector('.player video');
           if (!v) return null;
           v.__resumed ??= new Promise((done) => {
+            let before = false;
             const played = () => {
-              if (!v.paused && v.currentTime >= mark)
-                done(v.__jumped ? 'jumped' : 'played through');
+              if (v.paused) return;
+              if (v.currentTime >= mark) done(before ? 'played through' : 'jumped');
+              else if (v.currentTime > 1) before = true;
             };
-            v.addEventListener('seeked', () => {
-              if (v.currentTime >= mark) v.__jumped = true;
-            });
-            v.addEventListener('loadedmetadata', () => {
-              if (v.currentTime >= mark) v.__jumped = true;
-            });
             v.addEventListener('timeupdate', played);
-            if (v.currentTime >= mark) v.__jumped = true;
+            played();
           });
           return v.__resumed;
         },
@@ -652,7 +644,13 @@ test.describe('the playback scenario matrix', () => {
       )
     ).jsonValue();
     expect(resumed, `reaching ${left.toFixed(1)}s, where it was left`).toBe('jumped');
-    expect(playbacks(seen, from)).toHaveLength(1);
+    // One operation, asking Hearth to start where it was left.
+    const resumes = playbacks(seen, from);
+    expect(resumes).toHaveLength(1);
+    expect(
+      Math.abs(asked(resumes[0]).startAt - left),
+      'the operation’s startAt',
+    ).toBeLessThanOrEqual(1);
     clean(seen, { edgeFrom });
   });
 
