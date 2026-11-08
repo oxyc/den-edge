@@ -46,24 +46,30 @@ async function serveNetflix(
         },
       });
     if (path.startsWith('/discover/')) {
-      const newest = !url.searchParams.has('sort_by');
+      const request = `${url.pathname}${url.search}`;
+      const newest = newReleaseCount([request]) === 1;
       if (newest && ++newReleaseRequests <= failNewReleases)
         return route.fulfill({ status: 503, json: { error: 'temporarily unavailable' } });
-      const id = newest ? 201 : url.searchParams.get('sort_by') === 'popularity.desc' ? 301 : 302;
+      const base =
+        newest ||
+        baseServiceRowCount([request], 'popularity.desc', '50') === 1 ||
+        baseServiceRowCount([request], 'vote_average.desc', '300') === 1;
+      if (!base) return route.fulfill({ json: { results: [] } });
+      const id = newest ? 201 : url.searchParams.get('sort_by') === 'popularity.desc' ? 301 : 401;
       return route.fulfill({
         json: {
-          results: [
-            {
-              id,
-              title: `Film ${id}`,
-              overview: `About film ${id}.`,
-              backdrop_path: `/backdrop-${id}.jpg`,
-              poster_path: `/poster-${id}.jpg`,
-              release_date: '2026-01-01',
-              vote_count: 500,
-              vote_average: 8,
-            },
-          ],
+          // Enough cards to fill a desktop row: the fixture must not turn one healthy first page into an artificial
+          // 500-page feed while it is checking that hero recovery leaves the rows alone.
+          results: Array.from({ length: 20 }, (_, index) => ({
+            id: id + index,
+            title: `Film ${id + index}`,
+            overview: `About film ${id + index}.`,
+            backdrop_path: `/backdrop-${id + index}.jpg`,
+            poster_path: `/poster-${id + index}.jpg`,
+            release_date: '2026-01-01',
+            vote_count: 500,
+            vote_average: 8,
+          })),
         },
       });
     }
@@ -128,7 +134,7 @@ function requestCount(asked, pathname, params = {}) {
 
 function baseServiceRowCount(asked, sort, votes) {
   const expected = {
-    ...(sort ? { sort_by: sort } : {}),
+    sort_by: sort,
     include_adult: 'false',
     'vote_count.gte': votes,
     with_watch_providers: '8',
@@ -143,6 +149,29 @@ function baseServiceRowCount(asked, sort, votes) {
     return (
       url.pathname === '/tmdb/3/discover/movie' &&
       semantic.length === Object.keys(expected).length &&
+      Object.entries(expected).every(([name, value]) => url.searchParams.get(name) === value)
+    );
+  }).length;
+}
+
+function newReleaseCount(asked) {
+  const expected = {
+    sort_by: 'primary_release_date.desc',
+    include_adult: 'false',
+    'vote_count.gte': '50',
+    with_watch_providers: '8',
+    watch_region: 'US',
+    with_watch_monetization_types: 'flatrate',
+  };
+  return asked.filter((request) => {
+    const url = new URL(request, E2E_ORIGIN);
+    const semantic = [...url.searchParams.keys()].filter(
+      (name) => name !== 'api_key' && name !== 'page',
+    );
+    return (
+      url.pathname === '/tmdb/3/discover/movie' &&
+      semantic.length === Object.keys(expected).length + 1 &&
+      /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('primary_release_date.lte') ?? '') &&
       Object.entries(expected).every(([name, value]) => url.searchParams.get(name) === value)
     );
   }).length;
@@ -244,14 +273,14 @@ test('a failed service hero stays visible and retries only its own request', asy
   };
   await expect.poll(() => servicePageRequests(asked)).toEqual(stableRows);
   const before = servicePageRequests(asked);
-  expect(baseServiceRowCount(asked, null, '50'), 'one failed initial hero request').toBe(1);
+  expect(newReleaseCount(asked), 'one failed initial hero request').toBe(1);
 
   await retry.focus();
   await expect(retry).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(failure).toHaveCount(0);
   await expect(page.locator('.billboard .slide').first()).toHaveAttribute('aria-label', 'Film 201');
-  expect(baseServiceRowCount(asked, null, '50'), 'one explicit hero retry').toBe(2);
+  expect(newReleaseCount(asked), 'one explicit hero retry').toBe(2);
   expect(servicePageRequests(asked), 'retry does not rebuild or fan out through rows').toEqual(
     before,
   );
