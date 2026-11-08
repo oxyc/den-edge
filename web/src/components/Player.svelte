@@ -503,6 +503,24 @@
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   const RECEIPT_PREPARE_MS = 3_000;
+
+  function beforeAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(signal.reason);
+      signal.addEventListener('abort', aborted, { once: true });
+      void work.then(
+        (value) => {
+          signal.removeEventListener('abort', aborted);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', aborted);
+          reject(error);
+        },
+      );
+    });
+  }
   /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
   let startingSession: AbortController | undefined;
   let clientFailureGeneration = 0;
@@ -1161,9 +1179,14 @@
     if (playback && onmanagedplayback) {
       let receiptReady = false;
       try {
-        receiptReady = await onmanagedplayback(
-          AbortSignal.any([attempt.signal, AbortSignal.timeout(RECEIPT_PREPARE_MS)]),
-        );
+        const receiptSignal = AbortSignal.any([
+          attempt.signal,
+          AbortSignal.timeout(RECEIPT_PREPARE_MS),
+        ]);
+        // The deadline owns the whole callback, including the first lazy module load and any transport reconnect.
+        // Passing it down still cancels work that observes the signal; racing it here prevents an uncooperative
+        // boundary from holding playback indefinitely.
+        receiptReady = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
       } catch (error) {
         if (!attempt.signal.aborted)
           console.warn('den: managed playback receipt authority could not be prepared', error);

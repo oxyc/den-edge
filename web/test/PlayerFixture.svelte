@@ -105,17 +105,9 @@
     onmanagedplayback={receiptBoundary
       ? async (signal) => {
           if (receiptDelayMs)
-            await new Promise<void>((resolve, reject) => {
-              const timer = setTimeout(resolve, receiptDelayMs);
-              signal.addEventListener(
-                'abort',
-                () => {
-                  clearTimeout(timer);
-                  reject(signal.reason);
-                },
-                { once: true },
-              );
-            });
+            // Deliberately ignore cancellation: Player owns the complete callback deadline, including production's
+            // lazy import and a Library Service reconnect that might not settle when the signal fires.
+            await new Promise<void>((resolve) => setTimeout(resolve, receiptDelayMs));
           const response = await fetch('/test/receipt-ready', { method: 'POST', signal });
           if (!response.ok) throw new Error('receipt authority failed');
           return true;

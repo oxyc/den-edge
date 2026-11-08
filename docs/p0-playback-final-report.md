@@ -8,28 +8,44 @@ Round-5 Astra blocker base: `0d88c9011b9b67ea2e2d3eda87619d8d7d88bd97`.
 
 ## Current-main integration follow-up
 
-The branch was rebased onto the tree merged by #1064 (`12cc8ba2`) and then corrected for production-semantic
-failures found by the exact-head Astra review:
+The branch was rebased through #1068 (`74860492`) and then corrected for production-semantic failures found by two
+exact-head Astra reviews:
 
-- Route discovery now treats the empty table returned by production `fetchRoutes` for network, non-2xx and parse
-  failures as a retryable failure. Its regression uses the real adapter with two 503 responses before success and
-  proves discovery does not begin early.
+- Route discovery now distinguishes network/non-2xx/schema/parse failure from an authoritative empty route table.
+  Only failure retries; a valid empty table still starts shared-install and same-origin Atlas/Reel fallback. The
+  production-adapter regression uses two 503 responses before success and proves discovery does not begin early;
+  the independent empty-table regression proves fallback discovery is not suppressed. If all three bounded route
+  attempts fail, discovery then proceeds once with the safe empty fallback so unrelated same-origin/shared services
+  remain usable without introducing continued polling.
 - Atlas publication now requires an acknowledgement from the current configuration generation. The A acknowledged
   -> B pending -> A replacement race therefore reconfigures the content worker back to A instead of trusting an
   obsolete retained publication.
-- Managed receipt preparation has a three-second, attempt-owned deadline and cancellable Library Service task. A
-  failure visibly explains degraded progress recovery and continues playback; a failed preparation is not cached,
-  so the next play retries. The underlying Dropbox PUT is independently bounded to five seconds.
+- Managed receipt preparation has a three-second, attempt-owned deadline around the complete callback, including its
+  first lazy import and Library Service reconnect. Reconnect waits also observe task cancellation. A failure visibly
+  explains degraded progress recovery and continues playback; a failed preparation is not cached, so the next play
+  retries. The underlying Dropbox PUT is independently bounded to five seconds.
 - Grant refresh is foreground-gated and bounded to three total attempts (initial, five seconds and thirty seconds),
   then stops until its authority inputs change. It no longer polls every five seconds for the life of the page.
 
-The matched #1064 build measured 5,007 startup and 83,932 complete non-translation gzip bytes over the fixed
-baseline. This follow-up measures 5,902 and 85,554 respectively: +895 startup and +1,622 complete. Receipt
+The matched #1068 build measured 4,997 startup and 83,926 complete non-translation gzip bytes over the fixed
+baseline. This follow-up measures 5,990 and 85,778 respectively: +993 startup and +1,852 complete. Receipt
 preparation was moved into the existing lazy assistant chunk; that removes 26 startup bytes but adds 28 bytes to the
 complete graph from the module boundary. Player notices/deadlines and diagnostics were already lazy. Route,
 configuration-generation, request-authority and cancellation fences must be available before their requests and
 cannot safely move behind a lazy boundary. Translation catalogs remain independently lazy and under their unchanged
-51,200-byte ceiling.
+51,200-byte ceiling; the final build measures 44,582 bytes. The narrowly raised startup and complete-graph caps
+retain 154 and 238 bytes respectively.
+
+One pre-existing route-I/O limitation remains tracked on #1052: `fetch('/routes')` has no owned request deadline, so
+a fetch that never settles can prevent the finite retry/fallback schedule from beginning. The current fix covers
+settled network/non-2xx/schema/parse failures and authoritative emptiness; it does not describe route I/O itself as
+time-bounded.
+
+Exact current-candidate local qualification passed: 75 focused route/receipt/cancellation tests; the production
+Coming-up journey with three refused `/routes` requests; all four WebKit retained-input cases; the full 3,153-test
+Vitest suite with 16 skips; lint including zero Svelte diagnostics and strict Cast TypeScript; production Worker,
+SSR shell and precompression verification; and the browser/TV isolation budgets above. These are source, local
+browser and engine checks, not TV hardware qualification.
 
 ## Corrected contracts
 
@@ -86,10 +102,12 @@ cannot safely move behind a lazy boundary. Translation catalogs remain independe
 - LG/webOS, current Samsung/Tizen and explicit Tizen 3 builds passed Worker, compatibility and fixture-isolation
   verification. Tizen 3's JavaScript policy matched Wasm for 166 viewer fixtures and refused 12 intentionally absent
   admin/delivery fixtures; its CSS audit reported no unpaired unsupported `:is`. No TV/device execution occurred.
-- The standalone browser-to-TV isolation budget check remains red on the exact clean round-5 base itself: its old
+- Historical round-5 evidence: the standalone browser-to-TV isolation budget check was red on that exact clean base.
+  Its old
   `c7e20146` baseline reports +2,792 initial gzip bytes there (+2,798 here). The six-byte difference is within the
   lazily shared relay chunk/build graph, while this fix introduces no new import or eager work; no budget pass is
-  claimed and no unrelated budget baseline was changed.
+  claimed for that historical head. The current-main matched result and passing narrowed budgets are recorded in
+  **Current-main integration follow-up** above.
 - No deployment, live homelab, stream probe, device run, TV packaging, or GitHub mutation was performed.
 
 ## Matched build evidence
@@ -133,8 +151,9 @@ cumulative binary patch from the original named base, with the same exclusion, h
   `PairedLibrarySession` polling, split-household row binding and durable replay rows are the native receipt
   consumers. This Edge round did not modify or device-qualify them; remaining qualification is tracked by
   [oxyc/den#719](https://github.com/oxyc/den/issues/719). Den #717 is diagnostics, not receipt ownership.
-- Tizen 3: grant/relay changes apply, but receipt crypto is explicitly unsupported. Ordinary in-page progress remains;
-  post-page managed completion has no specific recovery/handoff UI. Unsupported/recovery parity is tracked by
+- Tizen 3: reverified on the current candidate: grant/relay and route-recovery changes apply, but receipt crypto is
+  explicitly unsupported. Ordinary in-page progress remains; post-page managed completion still has no specific
+  recovery/handoff UI. Unsupported/recovery parity is tracked by
   [oxyc/den-edge#1059](https://github.com/oxyc/den-edge/issues/1059). The round-4 service-lifecycle and remux pairing
   fixes are in its shared legacy build; its additional explicit HLS exclusion selects progressive media instead.
 - Android TV: not represented by this Edge web-runtime change; no Android receipt consumer was qualified here.

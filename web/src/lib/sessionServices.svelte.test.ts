@@ -4,7 +4,7 @@ import type { LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import { SessionServices } from './sessionServices.svelte';
-import { fetchRoutes } from './routes';
+import { fetchRoutesForDiscovery } from './routes';
 
 let discoveries = 0;
 let reaches: string | undefined;
@@ -432,7 +432,9 @@ describe('SessionServices', () => {
       if (requests < 3) return new Response('{}', { status: 503 });
       return Response.json({ addons: { atlas: [{ url: '/atlas' }] } });
     }) as unknown as typeof fetch;
-    const services = new SessionServices(fakeModel(), content, () => fetchRoutes(fetchImpl));
+    const services = new SessionServices(fakeModel(), content, () =>
+      fetchRoutesForDiscovery(fetchImpl),
+    );
 
     services.configure(runtime());
     await vi.runAllTicks();
@@ -446,6 +448,47 @@ describe('SessionServices', () => {
     await vi.runAllTimersAsync();
     expect(discoveries).toBe(1);
     expect(services.routes).toEqual({ atlas: [{ url: '/atlas', access: false }] });
+    services.stop();
+  });
+
+  it('starts shared and same-origin discovery from an authoritative empty route table', async () => {
+    vi.useFakeTimers();
+    autoDiscover = false;
+    discoveries = 0;
+    const services = new SessionServices(fakeModel(), content, async () => ({}));
+
+    services.configure(runtime());
+    await vi.runAllTimersAsync();
+
+    expect(discoveries).toBe(1);
+    expect(services.routes).toEqual({});
+    services.stop();
+  });
+
+  it('starts independent fallback discovery after the route failure budget is exhausted', async () => {
+    vi.useFakeTimers();
+    autoDiscover = false;
+    discoveries = 0;
+    let requests = 0;
+    const fetchImpl = vi.fn(async () => {
+      requests++;
+      return new Response('{}', { status: 503 });
+    }) as unknown as typeof fetch;
+    const services = new SessionServices(fakeModel(), content, () =>
+      fetchRoutesForDiscovery(fetchImpl),
+    );
+
+    services.configure(runtime());
+    await vi.runAllTicks();
+    expect(discoveries).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(discoveries).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.runAllTimersAsync();
+
+    expect(requests).toBe(3);
+    expect(discoveries).toBe(1);
+    expect(services.routes).toEqual({});
     services.stop();
   });
 

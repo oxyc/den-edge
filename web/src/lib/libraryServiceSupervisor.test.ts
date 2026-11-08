@@ -51,6 +51,7 @@ class FakeClient implements LibraryServiceClientPort {
     reject: (error: LibraryServiceError) => void;
   }> = [];
   openFailure?: LibraryServiceFailure;
+  openGate?: Promise<void>;
   subscriptionFailure?: { kind: LibrarySelection['kind']; failure: LibraryServiceFailure };
   instance = 'worker-1';
   subscriptionRevision = 1;
@@ -58,6 +59,7 @@ class FakeClient implements LibraryServiceClientPort {
   async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     this.opened.push(options);
     this.events.push('open');
+    await this.openGate;
     if (this.openFailure) {
       this.fail(this.openFailure);
       throw new LibraryServiceError(this.openFailure);
@@ -294,6 +296,29 @@ it('replays an in-flight task with its original operation ID after a lost reply'
     version: second.version(1),
   });
   await expect(task).resolves.toMatchObject({ result: { outcome: 'disabled' } });
+  supervisor.close();
+});
+
+it('cancels a task while its replacement Worker open remains held', async () => {
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  second.openGate = new Promise(() => {});
+  const queue = [first, second];
+  const supervisor = new LibraryServiceSupervisor(() => queue.shift()!);
+  await supervisor.open(openOptions);
+  const owned = new AbortController();
+  const task = supervisor.task({ kind: 'recovery.disable' }, 'disable-held-open', owned.signal);
+
+  await vi.waitFor(() => expect(first.tasks).toHaveLength(1));
+  first.fail(unavailable('reply lost'));
+  await vi.waitFor(() => expect(second.opened).toHaveLength(1));
+  owned.abort();
+
+  await expect(task).rejects.toMatchObject({
+    failure: { code: 'cancelled', retryable: false },
+  });
+  expect(second.tasks).toHaveLength(0);
   supervisor.close();
 });
 

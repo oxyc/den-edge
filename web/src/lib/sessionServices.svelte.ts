@@ -10,7 +10,7 @@ import type { Immutable, LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
 import { ahead } from './privateAddresses';
 import { localNetworkRefused } from './remuxRoute';
-import { fetchRoutes, type Routes } from './routes';
+import { fetchRoutesForDiscovery, type Routes } from './routes';
 import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
 import type { ContentServiceClientPort } from './contentServiceClient';
@@ -73,7 +73,7 @@ export class SessionServices {
   constructor(
     model: LibraryModel | null,
     private readonly content: ContentServiceClientPort,
-    private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
+    private readonly fetchRouteTable: () => Promise<Routes | null> = fetchRoutesForDiscovery,
     private readonly grants: Grants = guestGrants,
   ) {
     this.#model = model;
@@ -307,15 +307,24 @@ export class SessionServices {
       for (let attempt = 0; attempt <= ROUTE_RETRY_MS.length; attempt++) {
         try {
           const candidate = await this.fetchRouteTable();
-          // `fetchRoutes` deliberately converts network, non-2xx, and parse failures to an empty table. Empty is
-          // therefore a resolved transport failure, not a successful discovery input.
-          if (Object.keys(candidate).length > 0) {
+          // Production distinguishes transport/non-2xx/parse failure (`null`) from an authoritative empty table.
+          // Empty remains useful: shared installs and same-origin Atlas/Reel fallbacks do not require route entries.
+          if (candidate !== null) {
             foundRoutes = candidate;
             break;
           }
-          if (attempt === ROUTE_RETRY_MS.length) return;
-        } catch (error) {
-          if (!current || attempt === ROUTE_RETRY_MS.length) throw error;
+          if (attempt === ROUTE_RETRY_MS.length) {
+            // Route ownership is exhausted, but shared installs and same-origin Atlas/Reel do not need the table.
+            // Continue once with the safe empty fallback instead of suppressing every independent service.
+            foundRoutes = {};
+            break;
+          }
+        } catch {
+          if (!current) return;
+          if (attempt === ROUTE_RETRY_MS.length) {
+            foundRoutes = {};
+            break;
+          }
         }
         if (!current) return;
         await new Promise<void>((resolve) => {
