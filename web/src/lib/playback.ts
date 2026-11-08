@@ -166,7 +166,10 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   const release = releaseOf(answer?.release);
   if (!answer || !playlist || !release) return null;
   const nested = record(answer.session);
-  if (!nested) {
+  // Hearth's direct TorBox answer says so (`managed_delivery`). It can still carry a `session`: one holding only the
+  // completion receipt's `endUrl`, which must not turn it into a Remux session.
+  if (!nested || text(record(answer.subtitleResync)?.reason) === 'managed_delivery') {
+    const receiptEnd = href(nested?.endUrl);
     const audioTracks = Array.isArray(answer.audioTracks)
       ? answer.audioTracks.flatMap((value): Session['audioTracks'] => {
           const track = record(value);
@@ -229,6 +232,7 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
       audioTracks,
       subtitles,
       torboxSubtitle: number(answer.torboxSubtitle) ?? null,
+      ...(receiptEnd ? { control: { end: receiptEnd } } : {}),
       startupTiming: timing ?? undefined,
     };
   }

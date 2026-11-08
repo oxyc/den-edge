@@ -339,8 +339,17 @@ enum PlaybackFinalization {
     Ambiguous,
 }
 
-type PlaybackFinalizer = (String, Bytes, Option<String>, axum::http::HeaderValue);
+/// The playback operation exactly as it was sent: Hearth matches its outcome against the request it recorded, which
+/// includes the receipt, so the outcome must carry the same receipt headers or Hearth refuses it as a conflict.
+type PlaybackFinalizer = (
+    String,
+    Bytes,
+    Option<String>,
+    axum::http::HeaderValue,
+    Option<crate::playback_receipts::PlaybackContext>,
+);
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_playback(
     state: &AppState,
     target: &str,
@@ -348,6 +357,7 @@ async fn finalize_playback(
     rid: &str,
     owner: Option<&str>,
     key: axum::http::HeaderValue,
+    receipt: Option<&crate::playback_receipts::PlaybackContext>,
     outcome: &'static str,
 ) -> PlaybackFinalization {
     let Some(secret) = state.remux_edge_secret.as_deref() else { return PlaybackFinalization::Rejected };
@@ -365,6 +375,14 @@ async fn finalize_playback(
     if let Some(owner) = owner {
         request = request.header("x-den-owner", owner);
     }
+    if let Some(receipt) = receipt {
+        request = request
+            .header("x-den-receipt-library", receipt.library.as_str())
+            .header("x-den-receipt-kid", receipt.kid.as_str())
+            .header("x-den-receipt-public", receipt.public.as_str())
+            .header("x-den-receipt-id", receipt.id.as_str())
+            .header("x-den-receipt-token", receipt.token.as_str());
+    }
     let Ok(request) = request.body(Full::new(body)) else { return PlaybackFinalization::Rejected };
     match tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await {
         Ok(Ok(response)) if response.status() == StatusCode::NO_CONTENT => PlaybackFinalization::Accepted,
@@ -381,8 +399,9 @@ async fn abort_playback(
     owner: Option<&str>,
 ) -> PlaybackFinalization {
     let outcome = match finalizer {
-        Some((target, request, owner, key)) => {
-            finalize_playback(state, &target, request, rid, owner.as_deref(), key, "abort").await
+        Some((target, request, owner, key, receipt)) => {
+            finalize_playback(state, &target, request, rid, owner.as_deref(), key, receipt.as_ref(), "abort")
+                .await
         }
         None => PlaybackFinalization::Accepted,
     };
@@ -1542,14 +1561,6 @@ async fn relay_with(
     } else {
         (method, target, body)
     };
-    let playback_finalizer = if public_playback {
-        idempotency.clone().map(|key| {
-            let owner = grant.as_ref().map(|guest| format!("grant:{}", guest.gid));
-            (target.clone(), body.clone(), owner, key)
-        })
-    } else {
-        None
-    };
     let receipt = if let Some(library) = receipt_library.as_deref() {
         match crate::playback_receipts::authorize(
             state,
@@ -1564,6 +1575,14 @@ async fn relay_with(
                 None
             }
         }
+    } else {
+        None
+    };
+    let playback_finalizer = if public_playback {
+        idempotency.clone().map(|key| {
+            let owner = grant.as_ref().map(|guest| format!("grant:{}", guest.gid));
+            (target.clone(), body.clone(), owner, key, receipt.clone())
+        })
     } else {
         None
     };
@@ -1836,9 +1855,18 @@ async fn relay_with(
             if heard(state, open_public_listener(socket, hinted.unwrap_or(address), cast).await) {
                 if playback_session {
                     let committed = match playback_finalizer.clone() {
-                        Some((target, request, owner, key)) => {
-                            finalize_playback(state, &target, request, rid, owner.as_deref(), key, "commit")
-                                .await
+                        Some((target, request, owner, key, receipt)) => {
+                            finalize_playback(
+                                state,
+                                &target,
+                                request,
+                                rid,
+                                owner.as_deref(),
+                                key,
+                                receipt.as_ref(),
+                                "commit",
+                            )
+                            .await
                         }
                         None => PlaybackFinalization::Rejected,
                     };
