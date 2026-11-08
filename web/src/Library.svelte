@@ -287,7 +287,11 @@
   $effect(() => {
     let clear: ReturnType<typeof setTimeout> | undefined;
     const stop = session.content.onStatus((status) => {
-      if (status.kind === 'kept') keptNotice = status.notice;
+      if (status.kind === 'kept') {
+        keptNotice = status.notice;
+        // den-edge answered again: atlas, if it couldn't be found, can be now (`SessionServices.retry`).
+        if (!status.notice) discovered.retry();
+      }
       if (status.kind !== 'throttled' || status.provider !== 'tmdb') return;
       tmdbLimited = true;
       if (clear) clearTimeout(clear);
@@ -2977,6 +2981,8 @@
     content={session.content}
     {atlas}
     {atlasReady}
+    atlasUnreachable={discovered.atlasUnreachable}
+    onretry={() => discovered.retry()}
     minYear={prefs.minReleaseYear}
     excludedLanguages={prefs.excludedLanguages}
     {reel}
@@ -2999,7 +3005,14 @@
 {:else if route.page === 'people' && !PeopleScreen.current}
   <ScreenLoading screen={PeopleScreen} />
 {:else if route.page === 'people'}
-  <PeopleScreen.current view={people} content={session.content} {atlas} {atlasReady} />
+  <PeopleScreen.current
+    view={people}
+    content={session.content}
+    {atlas}
+    {atlasReady}
+    atlasUnreachable={discovered.atlasUnreachable}
+    onretry={() => discovered.retry()}
+  />
 {:else if route.page === 'downloads'}
   {#if !session.administersHousehold}
     <p class="note">Downloads are managed by the Owner.</p>

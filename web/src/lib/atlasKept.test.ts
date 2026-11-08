@@ -78,7 +78,22 @@ describe('keepingAtlasFetch', () => {
     await expect(fetchImpl('/atlas/index/row/series.json')).rejects.toThrow('Failed to fetch');
   });
 
-  it('keeps only the first page of what a screen opens on, and never a refusal', async () => {
+  it('tells the page once den-edge answers after a failure that had nothing kept', async () => {
+    let answer: () => Promise<Response> = async () => new Response('', { status: 522 });
+    const fetchImpl = keepingAtlasFetch(() => answer(), memoryStore());
+    const heard: boolean[] = [];
+    const stop = onKeptAnswers((provider, kept) => provider === 'atlas' && heard.push(kept));
+    expect((await fetchImpl(ROW)).status).toBe(522);
+    // No saved copy, so nothing to say while it is down.
+    expect(heard).toEqual([]);
+    answer = async () => json({ titles: [] });
+    await fetchImpl(ROW);
+    await fetchImpl(ROW);
+    expect(heard).toEqual([false]);
+    stop();
+  });
+
+  it('keeps what a screen opens on and a row to its fifth page, and never a refusal', async () => {
     const store = memoryStore();
     const fetchImpl = keepingAtlasFetch(async (input) => {
       const url = String(input);
@@ -86,6 +101,8 @@ describe('keepingAtlasFetch', () => {
     }, store);
     await fetchImpl('/atlas/index/search.json?q=al');
     await fetchImpl('/atlas/index/row/movie.json?mood=Dark&skip=24&limit=24');
+    await fetchImpl('/atlas/index/row/movie.json?mood=Dark&skip=96&limit=24');
+    await fetchImpl('/atlas/index/row/movie.json?mood=Dark&skip=120&limit=24');
     await fetchImpl('/atlas/index/row/movie.json?mood=Dark&skip=0&limit=24');
     await fetchImpl('/atlas/index/filter/movie/titles.json?sel=primary:Action');
     await fetchImpl('/atlas/recommend', { method: 'POST', body: '{}' });
@@ -99,6 +116,8 @@ describe('keepingAtlasFetch', () => {
     expect([...store.entries.keys()].sort()).toEqual([
       '/atlas/catalog/movie/den-nfx/country=FI.json',
       '/atlas/index/row/movie.json?mood=Dark&skip=0&limit=24',
+      '/atlas/index/row/movie.json?mood=Dark&skip=24&limit=24',
+      '/atlas/index/row/movie.json?mood=Dark&skip=96&limit=24',
       '/atlas/index/title/movie/603.json',
       '/atlas/manifest.json',
       '/atlas/recommend/home.json?day=2026-11-07',

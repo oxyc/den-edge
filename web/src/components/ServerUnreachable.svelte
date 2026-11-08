@@ -1,0 +1,27 @@
+<!-- What a screen built on atlas says while Den's server can't be reached and this browser has no saved address for
+     atlas: an answer, not a load that never ends. It also clears by itself once den-edge answers again
+     (`SessionServices.retry`). -->
+<script lang="ts">
+  import Button from './Button.svelte';
+
+  let { onretry }: { onretry: () => void } = $props();
+</script>
+
+<div class="unreachable" role="alert">
+  <p class="note">Den’s server can’t be reached right now.</p>
+  <Button variant="secondary" label="Try again" onclick={onretry} />
+</div>
+
+<style>
+  .unreachable {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 16px;
+  }
+
+  .note {
+    margin: 0;
+    color: var(--muted);
+  }
+</style>

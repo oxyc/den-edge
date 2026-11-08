@@ -127,7 +127,11 @@ if (process.argv.includes('--capture')) {
   // preparation cache was moved into the existing lazy assistant chunk, saving 26 startup bytes; the remaining
   // route, generation and cancellation fences must be present before discovery or a request begins. Allow the next
   // 128-byte boundary, retaining 154 bytes on the measured build.
-  if (initialDelta > Math.min(6144, Math.floor(baseline.initialGzip * 0.032)))
+  // An unreachable atlas as an answer (den#724: a visitor or a profile never opened here, while the home server is
+  // down) adds 176 gzip bytes to startup on matched main/head builds (202,447 -> 202,623): the discovery state, its
+  // retry and the Library hook that runs it when den-edge answers again, which belong with discovery itself. The
+  // message and Retry are a lazy component. Allow the next 128-byte boundary, retaining 45 bytes.
+  if (initialDelta > Math.min(6272, Math.floor(baseline.initialGzip * 0.032)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -239,5 +243,10 @@ if (process.argv.includes('--capture')) {
   // fewer) on matched main/head builds; all of it is the lazy hls chunk, fetched only when the in-page player plays.
   // It fixes the 1.7.0 parameter-set truncation regression and alternate-audio, WebVTT, source-switch and aborted
   // fragment reload bugs the player hits. Allow the next 128-byte boundary past it, retaining 82.
-  if (coreTotalDelta > 89216) throw new Error('Browser total JS/CSS budget exceeded');
+  // Outage gaps (den#724) add 989 gzip bytes to the complete non-translation graph (89,134 -> 90,123) on matched
+  // main/head builds, 176 of them at startup: the unreachable-atlas state and its Retry (a 0.5 KiB lazy component
+  // shared by People and the service page), the Worker telling the page den-edge answered after a failure with nothing
+  // kept, and a row's pages kept on the device to its fifth. No request, timer or listener is added while the server
+  // answers. Allow the next 128-byte boundary past it, retaining 117.
+  if (coreTotalDelta > 90240) throw new Error('Browser total JS/CSS budget exceeded');
 }

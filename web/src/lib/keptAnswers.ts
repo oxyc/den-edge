@@ -10,9 +10,12 @@ type Listener = (provider: ContentProvider, kept: boolean) => void;
 const listeners = new Set<Listener>();
 /** The provider a kept answer last stood in for, while no provider has answered since. */
 let showing: ContentProvider | null = null;
+/** A request failed with nothing kept to stand in, and no provider has answered since. */
+let unanswered = false;
 
 /**
- * Hear each change: `kept` true once a kept answer stands in, false once a provider answers again. A listener that
+ * Hear each change: `kept` true once a kept answer stands in, false once a provider answers again after a kept answer
+ * or a failure (`providerUnreachable`). A listener that
  * arrives while one stands in (a second tab on a shared Worker) hears that at once.
  */
 export function onKeptAnswers(listener: Listener): () => void {
@@ -28,9 +31,18 @@ export function keptAnswerServed(provider: ContentProvider): void {
   for (const listener of listeners) listener(provider, true);
 }
 
+/**
+ * den-edge could not be reached and nothing was kept to stand in: no notice (there is no saved copy to speak of), but
+ * the next answer is still told, so what waited on den-edge (atlas discovery, `SessionServices.retry`) asks again.
+ */
+export function providerUnreachable(): void {
+  unanswered = true;
+}
+
 /** `provider` answered from the network. */
 export function providerAnswered(provider: ContentProvider): void {
-  if (!showing) return;
+  if (!showing && !unanswered) return;
   showing = null;
+  unanswered = false;
   for (const listener of listeners) listener(provider, false);
 }
