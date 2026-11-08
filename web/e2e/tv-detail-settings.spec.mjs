@@ -54,6 +54,11 @@ async function setupSeries(page, { linked = false, playback = false } = {}) {
     await page.route('**/remux/health', (route) => route.fulfill({ json: { status: 'ok' } }));
   }
   await page.route('**/tmdb/3/tv/9*', (route) => route.fulfill({ json: series }));
+  // Player resolves the identifier through the dedicated production endpoint. Keep this more-specific route
+  // after the detail route because Playwright dispatches the most recently registered matching handler first.
+  await page.route('**/tmdb/3/tv/9/external_ids', (route) =>
+    route.fulfill({ json: { imdb_id: series.external_ids.imdb_id } }),
+  );
   await page.route('**/tmdb/3/tv/9/season/**', (route) => {
     const season = Number(new URL(route.request().url()).pathname.split('/').at(-1));
     return route.fulfill({ json: episodes(season) });
