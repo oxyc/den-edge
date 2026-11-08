@@ -20,9 +20,13 @@ const cors = {
   'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
 };
 
-async function routePackagedPlayback(page) {
+async function routePackagedPlayback(page, { holdPlayback = false } = {}) {
   const requests = [];
   const ended = [];
+  let releasePlayback = () => {};
+  const playbackGate = holdPlayback
+    ? new Promise((resolve) => (releasePlayback = resolve))
+    : Promise.resolve();
   await page.route(`${API}/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -37,11 +41,13 @@ async function routePackagedPlayback(page) {
       return route.fulfill({ status: 201, headers: cors, json: session });
     if (url.pathname === '/direct/releases')
       return route.fulfill({ headers: cors, json: { releases: [] } });
-    if (url.pathname === '/den/config/playback')
+    if (url.pathname === '/den/config/playback') {
+      await playbackGate;
       return route.fulfill({
         headers: cors,
         json: { url: session.playlist, release: session.release },
       });
+    }
     if (url.pathname === '/reel/transport') {
       const body = request.postDataJSON();
       return route.fulfill({
@@ -71,7 +77,7 @@ async function routePackagedPlayback(page) {
     }
     return route.fulfill({ status: 404, headers: cors, json: { error: 'not_found' } });
   });
-  return { ended, requests };
+  return { ended, requests, releasePlayback };
 }
 
 async function remoteKey(page, key, keyCode) {
@@ -98,7 +104,7 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
     if (new URL(request.url()).pathname.endsWith('/test/receipt-ready'))
       receiptRequests.push(request.url());
   });
-  await routePackagedPlayback(page);
+  const { releasePlayback } = await routePackagedPlayback(page, { holdPlayback: true });
   await page.goto('/package/test/player.html?playback=managed&receiptBoundary=1');
 
   await expect(
@@ -109,9 +115,15 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
   ).toBeVisible();
   const recovery = page.getByRole('button', { name: 'Connections' });
   await expect(recovery).toBeVisible();
-  await recovery.focus();
-  await expect(recovery).toBeFocused();
-  await recovery.press('Enter');
+  // The managed-playback request is still held: only real remote direction keys may move off the empty stage.
+  await expect
+    .poll(async () => {
+      await remoteKey(page, 'ArrowDown', 40);
+      return recovery.evaluate((element) => element === document.activeElement);
+    })
+    .toBe(true);
+  await remoteKey(page, 'Enter', 13);
+  releasePlayback();
   await expect(page.getByTestId('receipt-settings-count')).toHaveText('1');
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
   expect(receiptRequests).toEqual([]);

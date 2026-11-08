@@ -43,6 +43,8 @@
 
   const params = new URLSearchParams(location.search);
   const playBoundary = params.has('play-boundary');
+  const receiptUnsupported = params.has('receipt-unsupported');
+  let profileHandoff = $state('');
   const populated = params.has('populated');
   let releaseContinueHint!: () => void;
   const continueHint = new Promise<void>((resolve) => (releaseContinueHint = resolve));
@@ -154,6 +156,11 @@
   // The app's Router answers a page's `navigate`; here the route just follows it, so a pick that lives in the address
   // (Watched's year) is drawn.
   onMount(() => {
+    const recordProfileHandoff = (event: Event) => {
+      const detail = (event as CustomEvent<{ target?: string; successPath?: string }>).detail;
+      profileHandoff = `${detail.target ?? ''}:${detail.successPath ?? ''}`;
+    };
+    window.addEventListener('den:open-profile-switcher', recordProfileHandoff);
     const follow = (event: Event) => {
       const { path, replace = false } = (event as CustomEvent<{ path: string; replace?: boolean }>)
         .detail;
@@ -163,7 +170,10 @@
       if (params.has('address')) history[replace ? 'replaceState' : 'pushState'](null, '', path);
     };
     document.addEventListener('den:navigate', follow);
-    return () => document.removeEventListener('den:navigate', follow);
+    return () => {
+      window.removeEventListener('den:open-profile-switcher', recordProfileHandoff);
+      document.removeEventListener('den:navigate', follow);
+    };
   });
   /** Watches in other years, and one with no time, for Watched's year picker. */
   const years = params.has('years')
@@ -536,6 +546,7 @@
             { maximumAge: 12, unknownRatings: 'block' },
             false,
             true,
+            receiptUnsupported ? [{ type: 'tv', id: 2002 }] : [],
           )
         : playBoundary
           ? activeProfileSession(
@@ -550,50 +561,51 @@
             )
           : library.session,
   );
-  if (playBoundary) {
+  if (playBoundary || receiptUnsupported) {
     session.services.scout = {
       install: 'https://hearth.test/fixture',
       base: '/den/fixture',
       playback: '/den/fixture/playback',
     };
-    (
-      window as unknown as {
-        denTestPlayBoundary: {
-          replace: (profile: 'same' | 'other' | 'owner') => void;
-          hold: () => void;
-          release: () => void;
-          stats: () => { asked: number; waiting: number; cancelled: number };
-        };
-      }
-    ).denTestPlayBoundary = {
-      replace: (profile) => {
-        const old = session;
-        const owner = profile === 'owner';
-        session = activeProfileSession(
-          persistentProfileIdentity(
-            profile === 'other'
-              ? '33333333333333333333333333333333'
-              : '22222222222222222222222222222222',
-            profile === 'other' ? 'fixture-kid-b' : owner ? 'fixture-owner' : 'fixture-kid-a',
-          ),
-          library.session.household,
-          library.session.model!,
-          null,
-          owner ? null : { maximumAge: 12, unknownRatings: 'block' },
-          owner,
-          !owner,
-          owner ? [] : [{ type: 'movie', id: 1001 }],
-        );
-        old.close();
-      },
-      hold: () => boundaryContent!.hold(),
-      release: () => boundaryContent!.release(),
-      stats: () => ({
-        asked: boundaryContent!.asked,
-        waiting: boundaryContent!.waiting.size,
-        cancelled: boundaryContent!.cancelled,
-      }),
-    };
+    if (playBoundary)
+      (
+        window as unknown as {
+          denTestPlayBoundary: {
+            replace: (profile: 'same' | 'other' | 'owner') => void;
+            hold: () => void;
+            release: () => void;
+            stats: () => { asked: number; waiting: number; cancelled: number };
+          };
+        }
+      ).denTestPlayBoundary = {
+        replace: (profile) => {
+          const old = session;
+          const owner = profile === 'owner';
+          session = activeProfileSession(
+            persistentProfileIdentity(
+              profile === 'other'
+                ? '33333333333333333333333333333333'
+                : '22222222222222222222222222222222',
+              profile === 'other' ? 'fixture-kid-b' : owner ? 'fixture-owner' : 'fixture-kid-a',
+            ),
+            library.session.household,
+            library.session.model!,
+            null,
+            owner ? null : { maximumAge: 12, unknownRatings: 'block' },
+            owner,
+            !owner,
+            owner ? [] : [{ type: 'movie', id: 1001 }],
+          );
+          old.close();
+        },
+        hold: () => boundaryContent!.hold(),
+        release: () => boundaryContent!.release(),
+        stats: () => ({
+          asked: boundaryContent!.asked,
+          waiting: boundaryContent!.waiting.size,
+          cancelled: boundaryContent!.cancelled,
+        }),
+      };
   }
   // `services`: find atlas and the rest as the app does, so Home draws its service rows.
   if ((kid || params.has('services')) && !playBoundary)
@@ -656,6 +668,7 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   {#if visitorReady}<span data-visitor-ready hidden>ready</span>{/if}
+  <output data-testid="profile-handoff" hidden>{profileHandoff}</output>
   <LibraryStatus toast={session.toast} alert={session.alert} />
   {#key session}
     <Library
@@ -663,6 +676,7 @@
       {session}
       {route}
       active={true}
+      managedPlaybackReceiptsSupported={!receiptUnsupported}
       watchedYear={route.page === 'watchlist' ? route.year : undefined}
     />
   {/key}

@@ -63,6 +63,7 @@
   import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
+  import { openProfileSwitcher } from './lib/profileSwitcherControl';
   import {
     titleHref,
     watchlistHref,
@@ -148,6 +149,7 @@
     watchedYear,
     titleSeason,
     profiles = null,
+    managedPlaybackReceiptsSupported = __DEN_MANAGED_PLAYBACK_RECEIPTS__,
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -164,6 +166,8 @@
     /** The season a series page shows, from the address as `watchedYear` is. */
     titleSeason?: TitleSeason;
     profiles?: ProfileModeCoordinator | null;
+    /** Build capability, injectable only by production-path fixtures that exercise the unsupported host. */
+    managedPlaybackReceiptsSupported?: boolean;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -332,6 +336,7 @@
     finalProgressReceipts.find(({ saving }) => saving !== null),
   );
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
+  let playbackReceiptHandoffPending = $state(false);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
   // RoutedLibrary keys this whole tree by the session object. One lifetime therefore fences Owner/Kid changes and
@@ -344,6 +349,23 @@
     const receipt = finalProgressRecovery;
     if (!receipt || receipt.saving) return;
     void tick().then(() => finalProgressRetryButton?.focus());
+  });
+  $effect(() => {
+    if (!playbackReceiptHandoffPending || finalProgressReceipts.length) return;
+    playbackReceiptHandoffPending = false;
+    if (session.administersHousehold) {
+      navigate('/settings');
+      return;
+    }
+    // Kid and Visitor Settings are intentionally personal. The app-level switcher owns the PIN check, then opens
+    // the Owner's household Settings only after that profile transition has committed.
+    const trigger = document.querySelector<HTMLElement>('.profile-trigger') ?? document.body;
+    openProfileSwitcher({
+      trigger,
+      restoreFocus: false,
+      target: 'owner',
+      successPath: '/settings',
+    });
   });
   /**
    * Where the library's services answer, found once for the session and shared by every page. The parent keys this
@@ -521,7 +543,8 @@
   async function preparePlaybackReceipts(signal: AbortSignal): Promise<PlaybackReceiptPreparation> {
     // This gate must precede both the lazy import and authority work. Tizen 3 keeps the opaque completion queued for
     // a capable linked device; this page's ordinary progress writes remain independent.
-    if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__) return 'unsupported';
+    if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__ || !managedPlaybackReceiptsSupported)
+      return 'unsupported';
     const authority = householdModel ?? model;
     if (!authority || signal.aborted) return 'temporarily-unavailable';
     const assistant = await import('./lib/assistant');
@@ -1516,8 +1539,10 @@
       );
   }
 
-  function openPlaybackReceiptRecovery() {
-    navigate('/settings');
+  function requestPlaybackReceiptHandoff() {
+    // Player has already emitted its exact terminal receipt and released playback resources. Keep the viewer on the
+    // title until that receipt is durably acknowledged, or until the visible recovery explicitly leaves it unsaved.
+    playbackReceiptHandoffPending = true;
   }
 
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
@@ -3305,7 +3330,10 @@
       onfinalprogress={(fraction, seconds, at) =>
         finalProgressed({ title: target.title, ...at }, fraction, seconds)}
       onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
-      onplaybackreceiptsettings={openPlaybackReceiptRecovery}
+      playbackReceiptActionLabel={session.administersHousehold
+        ? i18n.text('settings.section.connections')
+        : i18n.phrase('Switch to Owner')}
+      onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}

@@ -177,7 +177,8 @@
     onprogress,
     onfinalprogress,
     onmanagedplayback,
-    onplaybackreceiptsettings,
+    playbackReceiptActionLabel,
+    onplaybackreceipthandoff,
     onnext,
     onclose,
     oncontrols,
@@ -222,8 +223,10 @@
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
     /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
     onmanagedplayback?: (signal: AbortSignal) => Promise<PlaybackReceiptPreparation>;
-    /** Leaves playback for the existing authorized device-linking flow. */
-    onplaybackreceiptsettings: () => void;
+    /** The authorized recovery offered by the host (Connections for Owner, an Owner switch otherwise). */
+    playbackReceiptActionLabel: string;
+    /** Leaves playback only after handing terminal progress to the host's durable recovery surface. */
+    onplaybackreceipthandoff: () => void;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -4625,11 +4628,11 @@
     onclose();
   }
 
-  function openPlaybackReceiptSettings() {
+  function openPlaybackReceiptHandoff() {
     // Use the player's terminal path first: final progress, decoder/session retirement and an in-flight startup
     // abort must all happen before the parent leaves for the authorized linking flow.
     close();
-    onplaybackreceiptsettings();
+    onplaybackreceipthandoff();
   }
 
   /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
@@ -5032,8 +5035,8 @@
         {
           dismiss: () => (receiptUnsupported = false),
           action: {
-            label: i18n.text('settings.section.connections'),
-            run: openPlaybackReceiptSettings,
+            label: playbackReceiptActionLabel,
+            run: openPlaybackReceiptHandoff,
           },
         },
       )}

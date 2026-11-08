@@ -970,6 +970,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Svenska: 'Svenska',
   Swedish: 'svenska',
   'Switch profile': 'Byt profil',
+  'Switch to Owner': 'Byt till Ägarprofilen',
   'Switching…': 'Byter...',
   Talk: 'Prata',
   Tamil: 'Tamil',

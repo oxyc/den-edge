@@ -3,6 +3,7 @@
   import { flushSync, onMount, tick } from 'svelte';
   import type { ProfileChoice, ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { onProfileSwitcherRequest } from '../lib/profileSwitcherControl';
+  import { navigate } from '../lib/navigation';
   import PinInput from './PinInput.svelte';
   import ProfileAvatar from './ProfileAvatar.svelte';
 
@@ -24,6 +25,7 @@
   let restoreTriggerFocus = false;
   let backdropPress = false;
   let returnFocus = $state<HTMLElement>();
+  let successPath: string | undefined;
 
   const active = $derived(profiles.activeChoice);
   const pinConfigured = $derived(profiles.parentalPinConfigured);
@@ -42,7 +44,7 @@
     );
   }
 
-  function show(opener: HTMLElement, restoreFocus: boolean) {
+  function show(opener: HTMLElement, restoreFocus: boolean, target?: ProfileChoice, path?: string) {
     denied = false;
     failed = false;
     pin = '';
@@ -52,7 +54,9 @@
     mismatch = false;
     returnFocus = opener;
     restoreTriggerFocus = restoreFocus;
+    successPath = path;
     dialog?.showModal();
+    if (target) void choose(target);
   }
 
   function open(event: MouseEvent) {
@@ -67,7 +71,14 @@
   }
 
   onMount(() =>
-    onProfileSwitcherRequest(({ trigger: opener, restoreFocus }) => show(opener, restoreFocus)),
+    onProfileSwitcherRequest(({ trigger: opener, restoreFocus, target, successPath: path }) =>
+      show(
+        opener,
+        restoreFocus,
+        target ? profiles.choices.find((choice) => choice.role === target) : undefined,
+        path,
+      ),
+    ),
   );
 
   const choiceKey = (choice: ProfileChoice | null) =>
@@ -88,7 +99,10 @@
             ? await profiles.switchToPersistent(choice.id, pin)
             : await profiles.switchToVisitor(pin);
       if (result.outcome === 'success') {
+        const path = successPath;
+        successPath = undefined;
         dialog?.close();
+        if (path) navigate(path);
         return;
       }
       if (result.outcome === 'denied' && askedPin) denied = true;
@@ -151,7 +165,10 @@
     denied = false;
     failed = false;
     if (choiceKey(choice) === choiceKey(active)) {
+      const path = successPath;
+      successPath = undefined;
       dialog?.close();
+      if (path) navigate(path);
       return;
     }
     if (profiles.waitsForPin(choice.role)) return;
@@ -210,6 +227,7 @@
     settingPin = false;
     firstPin = null;
     mismatch = false;
+    successPath = undefined;
     requestAnimationFrame(() => {
       if (restoreTriggerFocus) returnFocus?.focus({ preventScroll: true });
       else {

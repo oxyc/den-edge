@@ -494,6 +494,59 @@ test('rejected final progress can be explicitly left unsaved', async () => {
   }
 });
 
+test('receipt recovery waits for rejected final progress to become durable before opening Connections', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: [
+      'receipt-unsupported',
+      'reject-final-progress',
+      'hold-final-progress-reply',
+    ],
+  });
+  try {
+    await playFirstEpisode(page);
+    const handoff = page.getByRole('button', { name: 'Connections' });
+    await expect(handoff).toBeVisible();
+    await playingPast(page, 9);
+    await handoff.click();
+
+    await expect(player(page)).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/settings$/);
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+
+    await recovery.getByRole('button', { name: 'Try again' }).click();
+    await expect(recovery).toContainText('Saving…');
+    await expect(page).not.toHaveURL(/\/settings$/);
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect(recovery).toHaveCount(0);
+    await expect(page).toHaveURL(/\/settings$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+for (const role of ['Kid', 'Visitor']) {
+  test(`receipt recovery sends a ${role} through the authorized Owner handoff`, async () => {
+    const { browser, page } = await open(chromium, {
+      libraryQuery: ['receipt-unsupported', role.toLowerCase()],
+    });
+    try {
+      if (role === 'Visitor')
+        await expect(page.locator('[data-visitor-ready]')).toBeAttached();
+      await playFirstEpisode(page);
+      const handoff = page.getByRole('button', { name: 'Switch to Owner' });
+      await expect(handoff).toBeVisible();
+      await handoff.click();
+
+      await expect(player(page)).toHaveCount(0);
+      await expect(page).not.toHaveURL(/\/settings$/);
+      await expect(page.getByTestId('profile-handoff')).toHaveText('owner:/settings');
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
 test.describe('Den Cast', () => {
   let built;
   test.beforeAll(() => {

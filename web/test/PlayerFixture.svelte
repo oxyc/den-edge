@@ -113,7 +113,8 @@
           return 'ready';
         }
       : undefined}
-    onplaybackreceiptsettings={() => (receiptSettingsCount += 1)}
+    playbackReceiptActionLabel="Connections"
+    onplaybackreceipthandoff={() => (receiptSettingsCount += 1)}
     onprogress={(fraction, seconds, _at, playing) => {
       progress = { fraction, seconds, playing };
       progressWrites += 1;

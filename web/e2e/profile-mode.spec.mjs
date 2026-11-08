@@ -981,6 +981,46 @@ test('TV remote follows profile row order when modal geometry cannot distinguish
   await expect(owner).toBeFocused();
 });
 
+test('an authorized Owner handoff targets Owner directly and continues only after PIN success', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+
+  await page.evaluate(() => {
+    window.__ownerHandoffPath = null;
+    document.addEventListener(
+      'den:navigate',
+      (event) => (window.__ownerHandoffPath = event.detail.path),
+      { once: true },
+    );
+    window.dispatchEvent(
+      new CustomEvent('den:open-profile-switcher', {
+        detail: {
+          trigger: document.querySelector('.profile-trigger'),
+          restoreFocus: false,
+          target: 'owner',
+          successPath: '/settings',
+        },
+      }),
+    );
+  });
+
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await expect(dialog.getByText('Owner approval required')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Use Kids' })).toHaveCount(0);
+  await page.getByLabel('Owner PIN').fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect.poll(() => page.evaluate(() => window.__ownerHandoffPath)).toBeNull();
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  await expect.poll(() => page.evaluate(() => window.__ownerHandoffPath)).toBe('/settings');
+});
+
 test('Visitor stays active across reload, PIN denial preserves it, and success disposes only its visit', async ({
   page,
 }) => {
