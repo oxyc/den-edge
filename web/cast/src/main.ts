@@ -814,10 +814,15 @@ async function loadCast(): Promise<void> {
     // the previous media, even though `current` already describes the requested replacement.
     const replaced = playing;
     playing = requested;
-    // The receiver plays a session of its own now. The one played before it (this page's video, or the receiver's
-    // previous media) would hold its den-remux slot until it idled out: nothing else ends it, and casting over, the
-    // player asks for a new session rather than resuming that one.
-    if (denLifecycleMedia(replaced) !== denLifecycleMedia(requested)) {
+    // The receiver plays a session of its own now. A Den Remux session played before it (this page's video, or the
+    // receiver's previous media) would hold its den-remux slot until it idled out: nothing else ends it, and casting
+    // over, the player asks for a new session rather than resuming that one. A TorBox stream is left alone: its
+    // session belongs to the player outside, and ending it can remove the torrent the receiver now plays.
+    if (
+      replaced &&
+      !replaced.external &&
+      denLifecycleMedia(replaced) !== denLifecycleMedia(requested)
+    ) {
       if (!castStarted) stopLocal();
       endMedia(replaced);
     }

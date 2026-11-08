@@ -10,7 +10,7 @@
 //  2b. that stream's receipt, closed part-way, carries where it got to and reaches den-edge (den-edge #1122: ended empty)
 //   3. a TorBox stream paused past a heartbeat sends nothing but GETs to TorBox's CDN (405s on every pause)
 //   4. a TorBox stream cast to a receiver plays there (Hearth: 409 torbox_item_not_found once the page's session ended)
-//   5. a Den Remux stream cast to a receiver is handed off once, and the page's session ends at the public listener
+//   5. a Den Remux stream cast to a receiver is handed off once, and the page's session ends at the public listener (den-edge #1124)
 //   6. every flow: no console error, no failed request, and nothing but media GETs to an origin that is not Den's
 // and the flows of the playback scenario matrix: an iPhone on Den Remux, resuming, and the next episode.
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
@@ -30,13 +30,6 @@ const DESIGNED_MISSES = [
   /^\/skipdb\//,
   /^\/capabilities\/profiles$/, // profiles are off on this name
 ];
-
-/**
- * A case that still fails on main for a bug with an open issue: expected to fail, so the gate stays a gate for
- * everything else, and turns red the day the fix lands, to have this mark removed. `DEN_STACK_STRICT=1` drops the
- * marks, to see every case fail or pass on its own.
- */
-const openBug = (issue) => test.fail(process.env.DEN_STACK_STRICT !== '1', issue);
 
 let stack;
 test.beforeAll(async () => {
