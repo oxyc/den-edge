@@ -280,12 +280,22 @@
   // on LG, AVPlay on Samsung), but exposing that implementation detail in the controls made Samsung needlessly
   // second-class. Android retains its launcher-era strip until its native playback surface adopts this contract.
   const fullTvTransport = __DEN_TV_PLATFORM__ === 'webos' || __DEN_TV_PLATFORM__ === 'tizen';
-  // A desktop browser has enough room and a precise pointer for Den's complete transport. Phones and tablets keep
+  // A browser with a precise, hovering pointer gets Den's complete transport. Touch-only phones and tablets keep
   // their native controls: on iOS those are also the only route to the system fullscreen player, AirPlay and PiP.
-  // The query is intentionally capability-based, so a desktop Safari gets the same surface as desktop Chrome while
-  // a browser merely resized to phone width does not lose useful controls.
-  const desktopTransport = !tv && matchMedia('(hover: hover) and (pointer: fine)').matches;
-  const customTransport = fullTvTransport || desktopTransport;
+  // The query is capability-based, so a desktop Safari gets the same surface as desktop Chrome while a browser
+  // merely resized to phone width does not lose useful controls. It asks whether ANY pointer is fine rather than the
+  // primary one: a touchscreen laptop (or an iPad with a trackpad) may report its touch screen as primary while a
+  // trackpad or mouse is right there. It follows the device as it changes (a mouse plugged in, tablet mode), so
+  // the element never carries native controls and Den's transport at once.
+  const desktopQuery = tv ? undefined : matchMedia('(any-hover: hover) and (any-pointer: fine)');
+  let desktopTransport = $state(desktopQuery?.matches ?? false);
+  const customTransport = $derived(fullTvTransport || desktopTransport);
+  $effect(() => {
+    if (!desktopQuery) return;
+    const follow = () => (desktopTransport = desktopQuery.matches);
+    desktopQuery.addEventListener('change', follow);
+    return () => desktopQuery.removeEventListener('change', follow);
+  });
   // The production app's platform flag is also used by desktop preview builds. Only an actual LG user agent should
   // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
   const webOsNative =
@@ -3873,6 +3883,19 @@
     if (schedule) scheduleWebControls();
   }
 
+  // Den's transport only learns the element's state from events while it is shown: taking over mid-playback, it
+  // starts from where the element is.
+  $effect(() => {
+    if (!desktopTransport || !video) return;
+    const element = video;
+    untrack(() => {
+      tvPaused = element.paused;
+      tvPosition = element.currentTime;
+      tvDuration = length();
+      revealWebControls();
+    });
+  });
+
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
   function seekCastFrame(time: number): boolean {
     const current = session;
@@ -5100,7 +5123,7 @@
     {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
-    <footer>
+    <footer class:counting-down={upNext !== null}>
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -5331,14 +5354,23 @@
         {/if}
         {#if onnext && next}
           {#if upNext !== null}
-            <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
-            <Button
-              variant="primary"
-              aria-label="Next: {next}"
-              href={nextHref}
-              onclick={advanceLink}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
-            >
-            <Button label="Stay" onclick={stay} />
+            {#snippet upNextActions()}
+              <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
+              <Button
+                variant="primary"
+                aria-label="Next: {next}"
+                href={nextHref}
+                onclick={advanceLink}
+                >Next: {next} <span aria-hidden="true">({upNext})</span></Button
+              >
+              <Button label="Stay" onclick={stay} />
+            {/snippet}
+            <!-- Desktop lifts the pair out of the icon row, which has room for icons only. -->
+            {#if desktopTransport}
+              <div class="up-next">{@render upNextActions()}</div>
+            {:else}
+              {@render upNextActions()}
+            {/if}
           {:else if !customTransport}
             <Button
               label={i18n.format('player.next', 'Next: {title}', { title: next })}
@@ -5946,11 +5978,29 @@
     pointer-events: auto;
   }
 
+  /* One row of icons, beside the transport's buttons and clear of them. Allowed to wrap, a second row climbed over
+     the timeline above; a window too narrow for the row beside them gives it a row of its own (below). */
   .web-custom-player > footer .controls {
+    flex-wrap: nowrap;
     justify-content: flex-start;
     width: fit-content;
     max-width: calc(50% - 100px);
     pointer-events: auto;
+  }
+
+  /* The countdown's two text buttons stand where the release name does, above the timeline, which they replace
+     while it runs. */
+  .web-custom-player > footer .up-next {
+    position: absolute;
+    bottom: 92px;
+    left: 0;
+    display: flex;
+    gap: 10px;
+    pointer-events: auto;
+  }
+
+  .web-custom-player > footer.counting-down .release {
+    visibility: hidden;
   }
 
   .web-custom-player .full-tv-transport {
@@ -6236,8 +6286,34 @@
   .web-custom-player.web-controls-hidden > footer,
   .web-custom-player.web-controls-hidden > footer .controls,
   .web-custom-player.web-controls-hidden > footer .release,
+  .web-custom-player.web-controls-hidden > footer .up-next,
   .web-custom-player.web-controls-hidden .full-tv-transport {
     pointer-events: none;
+  }
+
+  /* Too narrow for the icons beside the transport's buttons (seven need ~64rem): they take the bottom row, and the
+     transport and the release name move up one. */
+  @media (width < 64rem) {
+    .web-custom-player .full-tv-transport {
+      padding-bottom: calc(18px + var(--player-control-size) + 12px);
+    }
+
+    .web-custom-player > footer .controls {
+      max-width: none;
+    }
+
+    .web-custom-player > footer .release,
+    .web-custom-player > footer .up-next {
+      bottom: calc(92px + var(--player-control-size) + 12px);
+    }
+  }
+
+  /* Narrower still, the volume slider yields its width (mute stays) so the right-hand group stays clear of the
+     centre one. */
+  @media (width < 48rem) {
+    .web-custom-player .web-volume {
+      display: none;
+    }
   }
 
   @media (height <= 600px) {
