@@ -473,6 +473,7 @@ export class LibraryLogAuthority {
         try {
           const res = await this.#fetch('/assistant/dropbox', {
             method: 'PUT',
+            signal: AbortSignal.timeout(5_000),
             headers: {
               'content-type': 'application/json',
               'x-den-library-member': `${member.libraryId}:${member.memberToken}`,
@@ -1351,7 +1352,7 @@ export class LibraryLogAuthority {
         return {
           result: {
             kind: 'assistant.receipts.ensure',
-            dropbox: await this.#assistant.ensureDropbox(false),
+            dropbox: await this.#assistant.ensureDropbox(),
           },
           affected: [],
         };

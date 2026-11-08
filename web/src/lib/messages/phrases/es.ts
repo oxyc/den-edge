@@ -1216,6 +1216,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Playing through Den Remux': 'Reproduciendo mediante Den Remux',
   'Playback has no active source. Try either path explicitly.':
     'La reproducción no tiene una fuente activa. Prueba una de las dos rutas.',
+  'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.':
+    'La reproducción puede comenzar, pero la recuperación del progreso en segundo plano no está disponible. Mantén esta página abierta para guardar dónde te detuviste.',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'Para audio o subtítulos que este navegador no puede reproducir, o una emisión que se detiene',
   'Turns subtitles off: this player shows only Den Remux’s':

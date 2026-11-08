@@ -513,6 +513,13 @@
   // The household's device list, which names the TVs a play can go to (`householdTvs`).
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
+  async function preparePlaybackReceipts(signal: AbortSignal): Promise<boolean> {
+    const authority = householdModel ?? model;
+    if (!authority) return false;
+    const assistant = await import('./lib/assistant');
+    if (signal.aborted) return false;
+    return assistant.preparePlaybackReceipts(authority, signal);
+  }
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
     const lease = downloadsModel.downloads();
@@ -3274,6 +3281,7 @@
         void progressed({ title: target.title, ...at }, fraction, seconds, playing)}
       onfinalprogress={(fraction, seconds, at) =>
         finalProgressed({ title: target.title, ...at }, fraction, seconds)}
+      onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}

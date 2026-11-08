@@ -438,6 +438,36 @@ it('correlates typed administrative task results', async () => {
   client.close();
 });
 
+it('cancels a bounded task at the transport and ignores its obsolete reply', async () => {
+  const { client, transport } = await opened();
+  const controller = new AbortController();
+  const running = client.task(
+    { kind: 'assistant.receipts.ensure' },
+    'receipt-preparation',
+    controller.signal,
+  );
+  const request = transport.sent.at(-1)!;
+  if (request.type !== 'task') throw new Error('expected task');
+
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  expect(transport.sent.at(-1)).toEqual({
+    type: 'cancel',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+  });
+  transport.emit({
+    type: 'task-result',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+    operationId: request.operationId,
+    result: { kind: 'assistant.receipts.ensure', dropbox: null },
+    version: version(1),
+  });
+  client.close();
+});
+
 it('rejects pending work when closed', async () => {
   const transport = new FakeTransport();
   const client = new LibraryServiceClient(transport, 'client-1');

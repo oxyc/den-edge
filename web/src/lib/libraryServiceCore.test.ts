@@ -353,6 +353,62 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('carries playback receipt ensure and apply through the production task lane', async () => {
+    const tasks: string[] = [];
+    const held = {
+      ...authority(),
+      async task(task: { kind: string }) {
+        tasks.push(task.kind);
+        if (task.kind === 'assistant.receipts.ensure')
+          return {
+            result: {
+              kind: 'assistant.receipts.ensure' as const,
+              dropbox: { kid: 'a'.repeat(32), public: 'public-key' },
+            },
+            affected: [],
+          };
+        return {
+          result: { kind: 'assistant.receipts.apply' as const, ack: 9, applied: 1 },
+          affected: [],
+        };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+
+    const ensure = await core.dispatch({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'receipt-ensure',
+      operationId: 'receipt-ensure-op',
+      task: { kind: 'assistant.receipts.ensure' },
+    });
+    const apply = await core.dispatch({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'receipt-apply',
+      operationId: 'receipt-apply-op',
+      task: {
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 9, sealed: 'ciphertext' }],
+      },
+    });
+
+    expect(ensure).toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: expect.objectContaining({ kind: 'assistant.receipts.ensure' }),
+      }),
+    ]);
+    expect(apply).toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.receipts.apply', ack: 9, applied: 1 },
+      }),
+    ]);
+    expect(tasks).toEqual(['assistant.receipts.ensure', 'assistant.receipts.apply']);
+  });
+
   it('drains detached metadata work before closing its authority', async () => {
     let release!: () => void;
     const provider = new Promise<void>((resolve) => (release = resolve));
