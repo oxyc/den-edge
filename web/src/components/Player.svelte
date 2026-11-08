@@ -1,6 +1,6 @@
 <!-- Playback in this browser through den-remux: the title's release as HLS, played natively where the browser can
-     (Safari, and so AirPlay) and through hls.js elsewhere. The browser's own controls do the transport; the bars
-     around the video carry what Den adds — the audio language, the next episode, and waiting for a free slot. Starts
+     (Safari, and so AirPlay) and through hls.js elsewhere. Den's own transport drives it in every browser, with the
+     bar beside it carrying what Den adds — the audio language, the next episode, and waiting for a free slot. Starts
      where the library says, and reports where it got to every 30 seconds, on pause, when the page is hidden and on
      close.
      The lock screen and the system's media controls name the title and move it too. -->
@@ -280,22 +280,30 @@
   // on LG, AVPlay on Samsung), but exposing that implementation detail in the controls made Samsung needlessly
   // second-class. Android retains its launcher-era strip until its native playback surface adopts this contract.
   const fullTvTransport = __DEN_TV_PLATFORM__ === 'webos' || __DEN_TV_PLATFORM__ === 'tizen';
-  // A browser with a precise, hovering pointer gets Den's complete transport. Touch-only phones and tablets keep
-  // their native controls: on iOS those are also the only route to the system fullscreen player, AirPlay and PiP.
-  // The query is capability-based, so a desktop Safari gets the same surface as desktop Chrome while a browser
-  // merely resized to phone width does not lose useful controls. It asks whether ANY pointer is fine rather than the
+  // Every browser gets Den's complete transport, and the video never carries native controls beside it: on a phone
+  // as on a desktop, so its stream, audio, subtitle timing, play-from-beginning and skip are there too. Den draws the
+  // routes the native controls used to own on a phone: PiP, AirPlay and, on an iPhone, Apple's fullscreen player.
+  const webTransport = !tv;
+  const customTransport = fullTvTransport || webTransport;
+  // What the pointer is decides how the transport behaves, not whether it is drawn. A precise, hovering pointer
+  // (mouse, trackpad) clicks the picture to pause and reveals the controls by moving; a touch screen alone taps the
+  // picture to show or hide the controls and gets larger targets. It asks whether ANY pointer is fine rather than the
   // primary one: a touchscreen laptop (or an iPad with a trackpad) may report its touch screen as primary while a
-  // trackpad or mouse is right there. It follows the device as it changes (a mouse plugged in, tablet mode), so
-  // the element never carries native controls and Den's transport at once.
+  // trackpad or mouse is right there. It follows the device as it changes (a mouse plugged in, tablet mode).
   const desktopQuery = tv ? undefined : matchMedia('(any-hover: hover) and (any-pointer: fine)');
   let desktopTransport = $state(desktopQuery?.matches ?? false);
-  const customTransport = $derived(fullTvTransport || desktopTransport);
   $effect(() => {
     if (!desktopQuery) return;
     const follow = () => (desktopTransport = desktopQuery.matches);
     desktopQuery.addEventListener('change', follow);
     return () => desktopQuery.removeEventListener('change', follow);
   });
+  /** The kind of the last pointer pressed on the player: a tap on the picture shows or hides the controls. */
+  let lastPointer = '';
+  /** Whether the controls were showing when that press began. */
+  let shownAtPress = true;
+  /** A finger is dragging the timeline: the picture is left where it is until it lets go. */
+  let scrubbing = false;
   // The production app's platform flag is also used by desktop preview builds. Only an actual LG user agent should
   // override an incomplete canPlayType answer; preview Chromium must retain the fully testable hls.js fallback.
   const webOsNative =
@@ -3425,7 +3433,7 @@
 
   async function openSubtitleTiming() {
     tvSubtitleTimingOpen = true;
-    if (!desktopTransport) return;
+    if (!webTransport) return;
     await renderTick();
     // ActionMenu restores its trigger as its native popover closes. Move into the newly opened editor after that
     // lifecycle, so keyboard users do not have to reverse-tab past every player action to find it.
@@ -3436,7 +3444,7 @@
     );
   }
 
-  async function closeSubtitleTiming(focusTrigger = desktopTransport) {
+  async function closeSubtitleTiming(focusTrigger = webTransport) {
     tvSubtitleTimingOpen = false;
     scheduleWebControls();
     if (!focusTrigger) return;
@@ -3709,7 +3717,7 @@
   function tick() {
     const at = video?.currentTime ?? remoteTime;
     if (customTransport) {
-      tvPosition = at;
+      if (!scrubbing) tvPosition = at;
       tvDuration = length();
     }
     // Where it last was, for `carryPosition`'s fallback once the element is gone. How much actually played is
@@ -3834,10 +3842,31 @@
     playerMuted = video.muted;
   }
 
+  type FullscreenVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+
+  /**
+   * The player, Den's bar and all, fills the screen where the browser can make an element fullscreen (desktop, iPad,
+   * Android). An iPhone cannot: there fullscreen is Apple's own player for the video, and Den's bar is back as it
+   * closes (`webkitendfullscreen`).
+   */
   async function toggleFullscreen() {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else await playerRoot?.requestFullscreen();
+    else if (document.fullscreenEnabled && playerRoot?.requestFullscreen)
+      await playerRoot.requestFullscreen();
+    else (video as FullscreenVideo | undefined)?.webkitEnterFullscreen?.();
   }
+
+  $effect(() => {
+    const element = video;
+    if (!element) return;
+    const back = () => {
+      tvPaused = element.paused;
+      tvPosition = element.currentTime;
+      revealWebControls();
+    };
+    element.addEventListener('webkitendfullscreen', back);
+    return () => element.removeEventListener('webkitendfullscreen', back);
+  });
 
   type PictureInPictureVideo = HTMLVideoElement & {
     webkitPresentationMode?: string;
@@ -3868,7 +3897,7 @@
   }
 
   function scheduleWebControls() {
-    if (!desktopTransport) return;
+    if (!webTransport) return;
     clearTimeout(webControlsTimer);
     if (!video?.paused && !playerMenuOpen() && !tvSubtitleTimingOpen)
       webControlsTimer = setTimeout(() => {
@@ -3877,16 +3906,39 @@
   }
 
   function revealWebControls(schedule = true) {
-    if (!desktopTransport) return;
+    if (!webTransport) return;
     webControlsVisible = true;
     clearTimeout(webControlsTimer);
     if (schedule) scheduleWebControls();
   }
 
+  /**
+   * A press on the player. A touch anywhere but the picture is the viewer using the controls, which stay while they
+   * do; on the picture, its click decides (`pictureClick`). A mouse reveals them by moving (`onpointermove`).
+   */
+  function playerPointerDown(event: PointerEvent) {
+    lastPointer = event.pointerType;
+    shownAtPress = webControlsVisible;
+    if (event.pointerType !== 'mouse' && event.target !== video) revealWebControls();
+  }
+
+  /**
+   * A mouse click on the picture plays or pauses; a tap shows the controls, or hides them, and never pauses. Whether
+   * they were showing is read at the press: the focus a tap gives the player (Firefox) reveals them before the click.
+   */
+  function pictureClick() {
+    if (!webTransport) return;
+    if (!shownAtPress) revealWebControls();
+    else if (lastPointer === 'touch' || lastPointer === 'pen') {
+      clearTimeout(webControlsTimer);
+      webControlsVisible = false;
+    } else togglePlaying();
+  }
+
   // Den's transport only learns the element's state from events while it is shown: taking over mid-playback, it
   // starts from where the element is.
   $effect(() => {
-    if (!desktopTransport || !video) return;
+    if (!webTransport || !video) return;
     const element = video;
     untrack(() => {
       tvPaused = element.paused;
@@ -4389,13 +4441,7 @@
       }
       return;
     }
-    if (
-      !desktopTransport ||
-      event.defaultPrevented ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.altKey
-    )
+    if (!webTransport || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey)
       return;
     const target = event.target as HTMLElement | null;
     if (target?.matches('button, a, input, select, textarea, [role="menuitem"], [contenteditable]'))
@@ -4553,13 +4599,18 @@
   bind:this={playerRoot}
   class="player"
   class:full-tv-player={fullTvTransport}
-  class:web-custom-player={desktopTransport}
-  class:web-controls-hidden={desktopTransport && !webControlsVisible}
+  class:web-custom-player={webTransport}
+  class:web-touch-player={webTransport && !desktopTransport}
+  class:web-controls-hidden={webTransport && !webControlsVisible}
   role="dialog"
   tabindex="-1"
   aria-modal="true"
   aria-label={heading}
-  onpointermove={() => revealWebControls()}
+  onpointerdown={playerPointerDown}
+  onpointermove={(event) => {
+    // A finger that wobbles during a tap on the picture must not reveal what that tap is about to hide.
+    if (event.pointerType === 'mouse') revealWebControls();
+  }}
   onpointerleave={scheduleWebControls}
   onfocusin={() => revealWebControls(false)}
   onfocusout={scheduleWebControls}
@@ -4860,11 +4911,7 @@
           autoplay
           playsinline
           use:allowAirPlay
-          onclick={() => {
-            if (!desktopTransport) return;
-            if (!webControlsVisible) revealWebControls();
-            else togglePlaying();
-          }}
+          onclick={pictureClick}
           onvolumechange={() => {
             playerVolume = video?.volume ?? playerVolume;
             playerMuted = video?.muted ?? playerMuted;
@@ -4930,15 +4977,22 @@
                 aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
                 min="0"
                 max={Math.max(tvDuration, 1)}
-                step="10"
+                step={webTransport && !desktopTransport ? 'any' : '10'}
                 value={Math.min(tvPosition, Math.max(tvDuration, 1))}
                 disabled={!tvDuration}
                 style={`--tv-progress: ${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
+                onpointerdown={(event) => (scrubbing = event.pointerType !== 'mouse')}
+                onpointercancel={() => (scrubbing = false)}
                 oninput={(event) => {
-                  if (!video) return;
                   const to = Number(event.currentTarget.value);
-                  video.currentTime = to;
                   tvPosition = to;
+                  // A finger drag follows the finger to the second, and is sought once, where it is let go.
+                  if (!scrubbing && video) video.currentTime = to;
+                }}
+                onchange={(event) => {
+                  if (!scrubbing) return;
+                  scrubbing = false;
+                  if (video) video.currentTime = Number(event.currentTarget.value);
                 }}
               />
               <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
@@ -4968,7 +5022,7 @@
               >
                 {@render skipIcon('forward')}
               </button>
-              {#if desktopTransport}
+              {#if webTransport}
                 <div class="web-transport-extras">
                   <button
                     class="web-volume-button"
@@ -5048,16 +5102,16 @@
             aria-label="Subtitle timing"
             role="group"
           >
-            {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
+            {#if webTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
                 >Earlier</button
               >{:else}<span>‹ Earlier</span>{/if}
             <strong aria-live="polite"
               >{subtitleTimingOffset >= 0 ? '+' : ''}{subtitleTimingOffset.toFixed(1)}s</strong
             >
-            {#if desktopTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
+            {#if webTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
                 >Later</button
               >{:else}<span>Later ›</span>{/if}
-            {#if desktopTransport}
+            {#if webTransport}
               <div class="web-timing-actions">
                 <button
                   type="button"
@@ -5313,7 +5367,7 @@
               aria-label={next ? `Next: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
-          {#if desktopTransport && castable && !session.castOrigin && canOfferCurrentCast(session)}
+          {#if webTransport && castable && !session.castOrigin && canOfferCurrentCast(session)}
             <Button
               variant="player"
               size="icon"
@@ -5325,7 +5379,7 @@
               onclick={offerCast}
             />
           {/if}
-          {#if desktopTransport && airPlayCapable}
+          {#if webTransport && airPlayCapable}
             <Button
               variant="player"
               size="icon"
@@ -5366,7 +5420,7 @@
               <Button label="Stay" onclick={stay} />
             {/snippet}
             <!-- Desktop lifts the pair out of the icon row, which has room for icons only. -->
-            {#if desktopTransport}
+            {#if webTransport}
               <div class="up-next">{@render upNextActions()}</div>
             {:else}
               {@render upNextActions()}
@@ -5915,13 +5969,22 @@
     outline-offset: 2px;
   }
 
-  /* Desktop gets the same owned transport as the TV shells, scaled down through variables instead of maintaining a
-     second player. Touch browsers keep the ordinary grid and their system controls above. */
+  /* Every browser gets the same owned transport as the TV shells, scaled down through variables instead of
+     maintaining a second player. Its bars stay clear of a phone's notch, rounded corners and home indicator. */
   .web-custom-player {
     --player-control-size: 44px;
     --player-primary-size: 56px;
     --player-control-gap: 12px;
-    --player-side: clamp(20px, 3vw, 48px);
+    --player-safe-top: env(safe-area-inset-top, 0px);
+    --player-safe-bottom: env(safe-area-inset-bottom, 0px);
+
+    /* What a touch timeline's 44px target adds to the 24px one: what sits above the transport moves up by it. */
+    --player-timeline-extra: 0px;
+    --player-side: max(
+      clamp(20px, 3vw, 48px),
+      env(safe-area-inset-left, 0px),
+      env(safe-area-inset-right, 0px)
+    );
 
     grid-template-rows: minmax(0, 1fr);
     padding: 0;
@@ -5933,13 +5996,13 @@
     right: 0;
     left: 0;
     z-index: 5;
-    padding: 22px var(--player-side) 72px;
+    padding: calc(22px + var(--player-safe-top)) var(--player-side) 72px;
     background: linear-gradient(to bottom, rgb(0 0 0 / 0.8), transparent);
   }
 
   .web-custom-player > .notices {
     position: absolute;
-    top: 72px;
+    top: calc(72px + var(--player-safe-top));
     right: var(--player-side);
     left: auto;
     z-index: 6;
@@ -5959,7 +6022,7 @@
   .web-custom-player > footer {
     position: absolute;
     right: var(--player-side);
-    bottom: 24px;
+    bottom: calc(24px + var(--player-safe-bottom));
     left: var(--player-side);
     z-index: 5;
     display: block;
@@ -5969,7 +6032,7 @@
 
   .web-custom-player > footer .release {
     position: absolute;
-    bottom: 92px;
+    bottom: calc(92px + var(--player-timeline-extra));
     left: 0;
     width: min(55vw, 64ch);
     color: rgb(255 255 255 / 0.86);
@@ -5992,7 +6055,7 @@
      while it runs. */
   .web-custom-player > footer .up-next {
     position: absolute;
-    bottom: 92px;
+    bottom: calc(92px + var(--player-timeline-extra));
     left: 0;
     display: flex;
     gap: 10px;
@@ -6011,7 +6074,7 @@
     z-index: 4;
     display: grid;
     gap: 12px;
-    padding: 105px var(--player-side) 18px;
+    padding: 105px var(--player-side) calc(18px + var(--player-safe-bottom));
     background: linear-gradient(to top, rgb(0 0 0 / 0.92), rgb(0 0 0 / 0.52) 52%, transparent);
   }
 
@@ -6082,6 +6145,23 @@
     border: 0;
     border-radius: 50%;
     background: #fff;
+  }
+
+  /* Touch alone: a full 44px target, with a thumb a finger can see beside it. */
+  .web-touch-player .tv-timeline input[type='range'] {
+    height: 44px;
+  }
+
+  .web-touch-player .tv-timeline input[type='range']::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+    margin-top: -8px;
+    transform: none;
+  }
+
+  .web-touch-player .tv-timeline input[type='range']::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
   }
 
   .web-custom-player .tv-timeline input[type='range']:focus-visible {
@@ -6232,7 +6312,7 @@
   .web-custom-player :global(.tv-skip-overlay) {
     position: absolute;
     right: var(--player-side);
-    bottom: 160px;
+    bottom: calc(160px + var(--player-timeline-extra) + var(--player-safe-bottom));
     z-index: 7;
     border-radius: 999px;
   }
@@ -6295,7 +6375,7 @@
      transport and the release name move up one. */
   @media (width < 64rem) {
     .web-custom-player .full-tv-transport {
-      padding-bottom: calc(18px + var(--player-control-size) + 12px);
+      padding-bottom: calc(18px + var(--player-control-size) + 12px + var(--player-safe-bottom));
     }
 
     .web-custom-player > footer .controls {
@@ -6304,7 +6384,7 @@
 
     .web-custom-player > footer .release,
     .web-custom-player > footer .up-next {
-      bottom: calc(92px + var(--player-control-size) + 12px);
+      bottom: calc(92px + var(--player-timeline-extra) + var(--player-control-size) + 12px);
     }
   }
 
@@ -6314,6 +6394,54 @@
     .web-custom-player .web-volume {
       display: none;
     }
+  }
+
+  /* A phone held upright: the right-hand group (mute, PiP, fullscreen) cannot sit beside the centre buttons, so it
+     takes its own row above them, at the right, and the release name and Skip move up one more. */
+  @media (width < 33rem) {
+    .web-custom-player .tv-transport-actions {
+      flex-wrap: wrap;
+      row-gap: 12px;
+    }
+
+    .web-custom-player .web-transport-extras {
+      position: static;
+      flex: 0 0 100%;
+      order: -1;
+      justify-content: flex-end;
+    }
+
+    .web-custom-player > footer .release,
+    .web-custom-player > footer .up-next {
+      bottom: calc(92px + var(--player-timeline-extra) + 2 * (var(--player-control-size) + 12px));
+    }
+
+    .web-custom-player :global(.tv-skip-overlay) {
+      bottom: calc(
+        160px + var(--player-timeline-extra) + 2 * (var(--player-control-size) + 12px) +
+          var(--player-safe-bottom)
+      );
+    }
+  }
+
+  /* Touch alone: what sits above the timeline moves up by its taller target, and hover states that a tap would leave
+     stuck are not drawn. A phone or tablet has its own volume buttons, and iOS ignores a page's volume altogether, so
+     mute is the only volume control. */
+  .web-touch-player {
+    --player-timeline-extra: 20px;
+  }
+
+  .web-touch-player .web-volume {
+    display: none;
+  }
+
+  .web-touch-player .full-tv-transport button:hover,
+  .web-touch-player footer .player-tv-action:hover {
+    background: rgb(255 255 255 / 0.14);
+  }
+
+  .web-touch-player .full-tv-transport .tv-play-pause:hover {
+    background: rgb(255 255 255 / 0.92);
   }
 
   @media (height <= 600px) {
