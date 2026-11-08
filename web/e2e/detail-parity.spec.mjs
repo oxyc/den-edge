@@ -670,8 +670,9 @@ test('retained Detail drops a source answer that completes while another identit
       });
       if (call === 0) firstFinished();
     });
-    await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
-    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    // Production's plain ask: the cancelled lookup must neither be joined nor kept for the Detail that returns.
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9?cached-sources'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?cached-sources`);
     const active = () => page.locator('[data-active="true"]');
     await active().getByRole('button', { name: 'Sources', exact: true }).click();
     await expect.poll(() => calls).toBe(1);
