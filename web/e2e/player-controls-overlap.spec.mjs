@@ -357,8 +357,10 @@ test('an iPhone’s fullscreen is Apple’s player, and Den’s bar is back as i
     await page.getByRole('button', { name: 'Enter fullscreen' }).tap();
     expect(await page.evaluate(() => window.appleFullscreen)).toBe(1);
     expect(await page.evaluate(() => document.fullscreenElement)).toBeNull();
-    // Apple's player closes after the controls had hidden behind it: they are back, over the same video.
-    await expect(page.locator('.player')).toHaveClass(/web-controls-hidden/, { timeout: 10_000 });
+    // Apple's player closes after the controls had gone behind it (a tap hides them here; waiting for them to hide on
+    // their own needs the fixture playing, which Linux WebKit does not always do): they are back, over the same video.
+    await tapPicture(page);
+    await expect(page.locator('.player')).toHaveClass(/web-controls-hidden/);
     await video.evaluate((v) => v.dispatchEvent(new Event('webkitendfullscreen')));
     await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
     await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
