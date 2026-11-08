@@ -23,6 +23,26 @@ const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 const CHROME_ANDROID =
   'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
+/** What Den's receiver says its TV plays: unlike any model profile, Dolby Vision 8 and E-AC-3 but no HDR10. */
+const RECEIVER_PLAYABLE = {
+  h264: 0x33,
+  h264High10: 0,
+  hevcMain: 150,
+  hevcMain10: 150,
+  hevcHighTier: 0,
+  hdr: false,
+  eac3: true,
+  aacMultichannel: false,
+  dolbyVision: { p5: false, p8: true },
+  av1: 0,
+  av1Main10: 0,
+  av1Hdr: false,
+  flac: true,
+  aac71: false,
+  vp9: false,
+  vp9Profile2: false,
+};
+const DEN_APP = '5718B443';
 const hls = new URL('./media/hls/', import.meta.url);
 const web = fileURLToPath(new URL('..', import.meta.url));
 
@@ -33,7 +53,9 @@ const web = fileURLToPath(new URL('..', import.meta.url));
  * the cast page makes of the receiver is kept in `window.calls`, every LOAD in `window.loads`; the receiver plays a
  * loaded title on, a quarter second at a time, as the real one reports it. `interrupt`: a LOAD after the first is
  * answered as a receiver does, after the media it replaces reported once more and then went IDLE `INTERRUPTED`.
- * `refuse`: the receiver refuses every LOAD.
+ * `refuse`: the receiver refuses every LOAD. `report`: Den's receiver on the custom namespace — `answer` says what its
+ * TV plays (RECEIVER_PLAYABLE), `silent` never answers; unset, the session has no message channel, as before. The
+ * application id the page launched is kept in `window.appId`, every message it sent in `window.sent`.
  */
 const sdk = ({
   devices = true,
@@ -41,6 +63,7 @@ const sdk = ({
   connectMs = 300,
   interrupt = false,
   refuse = false,
+  report,
 } = {}) => `
   window.loads = [];
   window.calls = [];
@@ -89,7 +112,8 @@ const sdk = ({
     changes.forEach((fn) => fn());
   }, 250);
   const context = {
-    setOptions() {
+    setOptions(options) {
+      window.appId = options.receiverApplicationId;
       discovering = true;
       setTimeout(() => { if (present) setState('NOT_CONNECTED'); }, 50);
     },
@@ -138,6 +162,22 @@ const sdk = ({
           },
           getCastDevice() { return { friendlyName: 'Living Room TV' }; },
         };
+        if (${JSON.stringify(report ?? null)}) {
+          const heard = {};
+          window.sent = [];
+          session.addMessageListener = (ns, fn) => { (heard[ns] = heard[ns] || []).push(fn); };
+          session.removeMessageListener = (ns, fn) => { heard[ns] = (heard[ns] || []).filter((f) => f !== fn); };
+          session.sendMessage = (ns, message) => {
+            window.sent.push({ ns, message });
+            if (${JSON.stringify(report)} === 'answer' && message.type === 'den-capabilities')
+              setTimeout(() => (heard[ns] || []).forEach((fn) => fn(ns, JSON.stringify({
+                type: 'den-capabilities',
+                playable: ${JSON.stringify(RECEIVER_PLAYABLE)},
+                details: { maxHeight: 2160 },
+              }))), 200);
+            return Promise.resolve();
+          };
+        }
         player.isConnected = true;
         setState('CONNECTED');
         fire('sessionstatechanged', { sessionState: 'SESSION_STARTED' });
@@ -176,14 +216,19 @@ test.beforeAll(() => {
 });
 test.afterAll(() => rmSync(built, { recursive: true, force: true }));
 
-async function serveFile(route, file) {
+/** `appId`: what den-edge writes into the page for `CAST_APP_ID` (`src/cast.rs`). */
+async function serveFile(route, file, appId) {
   const type = file.endsWith('.html')
     ? 'text/html'
     : file.endsWith('.js')
       ? 'text/javascript'
       : 'text/css';
   // A request still on its way when its test ends (the lazily loaded hls.js) may find the build removed.
-  const body = await readFile(join(built, file)).catch(() => undefined);
+  let body = await readFile(join(built, file)).catch(() => undefined);
+  if (body && appId && file === 'index.html')
+    body = body
+      .toString()
+      .replace('name="den-cast-app" content=""', `name="den-cast-app" content="${appId}"`);
   return body ? route.fulfill({ contentType: type, body }) : route.abort().catch(() => undefined);
 }
 
@@ -198,6 +243,8 @@ async function open(
     subtitle = false,
     // As Hearth does: every ask is a newly created TorBox stream, at its own signed URL.
     freshUrls = false,
+    appId,
+    query = '',
   } = {},
 ) {
   const browser = await browserType.launch(
@@ -271,10 +318,10 @@ async function open(
   await context.route(`${CAST}/**`, (r) => {
     const path = new URL(r.request().url()).pathname;
     if (path === '/') asked.castFrames += 1;
-    return serveFile(r, path === '/' ? 'index.html' : path.slice(1));
+    return serveFile(r, path === '/' ? 'index.html' : path.slice(1), appId);
   });
   await page.goto(
-    `${ORIGIN}/test/player.html?playback=/den/config/playback&next${subtitle ? '&subtitleLanguage=en' : ''}`,
+    `${ORIGIN}/test/player.html?playback=/den/config/playback&next${subtitle ? '&subtitleLanguage=en' : ''}${query}`,
   );
   return { browser, page, asked };
 }
@@ -387,6 +434,72 @@ test('one tap opens Chrome’s device list, connects, and the TV plays from wher
     expect(await receiver(page, 'calls')).not.toEqual(
       expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
     );
+    // With no `CAST_APP_ID` and no opt-in, Google's receiver, asked nothing on Den's namespace.
+    expect(await frameOf(page).evaluate(() => window.appId)).toBe('CC1AD845');
+  } finally {
+    await browser.close();
+  }
+});
+
+/** Cast from the bar, and what the one ask for the receiver said it plays. */
+async function castOnce(page, asked) {
+  await playingPast(page, 2);
+  await reveal(page);
+  await castButton(page).click();
+  await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+  await page.waitForTimeout(1_500);
+  const cast = asked.managed.filter((request) => request.player === 'cast');
+  expect(cast, 'one ask').toHaveLength(1);
+  expect(await receiver(page, 'loads'), 'one LOAD').toHaveLength(1);
+  await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
+  return cast[0];
+}
+
+/** The Cast menu, opened from the connected button: Stop casting, and the model list or not. */
+async function castMenu(page) {
+  await castButton(page).click();
+  await expect(page.getByRole('menuitem', { name: 'Stop casting' })).toBeVisible();
+  return page.getByRole('menuitemradio');
+}
+
+for (const [how, options] of [
+  ['the box names Den’s receiver (CAST_APP_ID)', { appId: DEN_APP }],
+  ['this browser opted in (?cast-receiver=den)', { query: '&cast-receiver=den' }],
+]) {
+  test(`when ${how}, Den asks with what the receiver says it plays, and no model is asked for`, async () => {
+    const { browser, page, asked } = await open(chromium, {
+      ...options,
+      sdkOptions: { report: 'answer' },
+    });
+    try {
+      const ask = await castOnce(page, asked);
+      expect(await frameOf(page).evaluate(() => window.appId)).toBe(DEN_APP);
+      expect(await frameOf(page).evaluate(() => window.sent)).toEqual([
+        { ns: 'urn:x-cast:fi.oxy.den', message: { type: 'den-capabilities' } },
+      ]);
+      expect(ask.playable).toEqual(RECEIVER_PLAYABLE);
+      const models = await castMenu(page);
+      await expect(models).toHaveCount(0);
+      await expect(page.getByText('Which Chromecast is it?')).toHaveCount(0);
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+test('a Den receiver that does not answer within two seconds is asked as the chosen model, list and all', async () => {
+  const { browser, page, asked } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { report: 'silent' },
+  });
+  try {
+    const ask = await castOnce(page, asked);
+    expect(await frameOf(page).evaluate(() => window.sent)).toHaveLength(1);
+    // Chromecast with Google TV (4K), the default model.
+    expect(ask.playable).toMatchObject({ h264: 0x33, hevcMain: 153, hdr: true, eac3: false });
+    const models = await castMenu(page);
+    await expect(models).toHaveCount(6);
+    await expect(page.getByText('Which Chromecast is it?')).toBeVisible();
   } finally {
     await browser.close();
   }

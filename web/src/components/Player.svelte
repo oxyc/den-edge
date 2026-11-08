@@ -21,6 +21,7 @@
     returnsFromCast,
     type CastState,
   } from '../lib/castOffer';
+  import { castReceiverOptIn, playableOf } from '../lib/castReceiver';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
   import { retryWithoutHint } from '../lib/ipv4';
@@ -433,6 +434,13 @@
    * error path retries once with the conservative `legacy` profile.
    */
   let castProfile = 'google-tv-4k';
+  /**
+   * What Den's own receiver said its TV plays (castProfile `receiver`), asked with in place of a model's profile. The
+   * model list goes while it is known: the receiver has said what the viewer would otherwise be asked to pick.
+   */
+  let castReport = $state.raw<Playable | undefined>();
+  /** This browser opted in to Den's receiver before the box launches it for everyone (`castReceiverOptIn`). */
+  const castFrameQuery = castReceiverOptIn() ? '/?receiver=den' : '';
   /** The same-origin control relay: the only route whose sessions carry a public address and the cast page. */
   const RELAY = '/remux';
   /**
@@ -1123,7 +1131,9 @@
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
     // E-AC-3, so den-remux copies another release this browser does decode — never converting one mid-film.
     const can = castMode
-      ? castCapabilities(degraded ? 'legacy' : castProfile)
+      ? !degraded && castProfile === 'receiver' && castReport
+        ? castReport
+        : castCapabilities(degraded ? 'legacy' : castProfile)
       : degraded
         ? withoutRefused(claimed)
         : claimed;
@@ -2556,6 +2566,7 @@
     state?: unknown;
     device?: unknown;
     profile?: unknown;
+    playable?: unknown;
     code?: unknown;
     focused?: unknown;
     visible?: unknown;
@@ -2592,8 +2603,11 @@
         return true;
       case 'den-cast-session':
         if (typeof message.device === 'string') castDevice = message.device.slice(0, 80);
-        // The receiver model the viewer keeps, else its default.
-        if (typeof message.profile === 'string' && CAST_PROFILES.includes(message.profile))
+        // What Den's receiver said its TV plays, else the receiver model the viewer keeps, else its default.
+        castReport =
+          message.profile === 'receiver' ? (playableOf(message.playable) ?? undefined) : undefined;
+        if (castReport) castProfile = 'receiver';
+        else if (typeof message.profile === 'string' && CAST_PROFILES.includes(message.profile))
           castProfile = message.profile;
         // Chosen while this page plays: playback moves to the receiver from the second the video is at.
         if (session && !session.castOrigin) moveToCast();
@@ -2640,6 +2654,7 @@
       message?: string;
       state?: string;
       profile?: string;
+      playable?: unknown;
       device?: string;
       maxBitrate?: number;
       volume?: number;
@@ -2703,15 +2718,22 @@
         restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
       }
     } else if (message.type === 'den-cast-request') {
-      const profile = message.profile ?? 'legacy';
+      const report =
+        message.profile === 'receiver' ? (playableOf(message.playable) ?? undefined) : undefined;
+      const profile = report
+        ? 'receiver'
+        : message.profile === 'receiver'
+          ? 'legacy'
+          : (message.profile ?? 'legacy');
       if (!castMode || castProfile !== profile) {
-        const was = { castMode, castProfile };
+        const was = { castMode, castProfile, castReport };
         castProfile = profile;
+        castReport = report;
         castMode = true;
         restartForRecovery(
           'Preparing Chromecast…',
           { filename: current.release.filename },
-          () => ({ castMode, castProfile } = was),
+          () => ({ castMode, castProfile, castReport } = was),
         );
       }
     } else if (message.type === 'den-cast' && message.state === 'playing') {
@@ -5742,7 +5764,7 @@
       title={castStage ? 'Den Cast player' : 'Cast'}
       tabindex={castStage ? undefined : -1}
       inert={!castFrameBox}
-      src={frameOrigin}
+      src={frameOrigin + castFrameQuery}
       allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
       sandbox="allow-scripts allow-same-origin allow-presentation"
       onload={castFrameLoaded}
@@ -5755,12 +5777,12 @@
       heading={castDevice
         ? i18n.format('player.castingTo', 'Casting to {device}', { device: castDevice })
         : 'Chromecast'}
-      note="Which Chromecast is it? Den sends what that model can play."
+      note={castReport ? undefined : 'Which Chromecast is it? Den sends what that model can play.'}
       triggerClass="cast-menu-trigger"
       onclose={focusCastButton}
       items={() => [
         { kind: 'item', label: 'Stop casting', onselect: stopCasting },
-        ...CAST_PROFILES.map((profile) => ({
+        ...(castReport ? [] : CAST_PROFILES).map((profile) => ({
           kind: 'radio' as const,
           group: 'cast-profile',
           label: CAST_PROFILE_NAMES[profile]!,

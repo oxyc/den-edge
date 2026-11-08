@@ -81,6 +81,22 @@ const PARENT_ORIGINS: &str = match option_env!("DEN_PARENT_ORIGINS") {
     None => "https://d.oxy.fi",
 };
 
+/// A Cast application id as Google's console issues one (eight hex digits), uppercased; None for anything else.
+pub fn app_id(value: &str) -> Option<String> {
+    (value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_uppercase())
+}
+
+/// The empty slot in the page's `index.html` that names the receiver it launches (`web/cast/src/main.ts`): filled with
+/// `CAST_APP_ID` when one is set, left empty for Google's Default Media Receiver.
+const APP_ID_SLOT: &[u8] = br#"name="den-cast-app" content="""#;
+
+/// Den's Cast receiver page's policy (`receiver.html`).
+const RECEIVER_CSP: &str = "default-src 'self'; script-src 'self' https://www.gstatic.com; \
+     style-src 'self' 'unsafe-inline' https://www.gstatic.com https://fonts.googleapis.com; font-src 'self' https: data:; \
+     img-src 'self' https: http: data: blob:; media-src https: http: blob: data:; connect-src 'self' https: http: wss:; \
+     worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 /// Whether `host`, a request's normalized host (`handler::request_host`), is `CAST_ORIGIN`'s.
 pub fn is_host(cast_origin: Option<&str>, host: &str) -> bool {
     cast_origin
@@ -114,9 +130,10 @@ pub async fn serve(state: &AppState, method: &Method, path: &str) -> Response<Bo
     }
     let dir = state.cast_dir.as_deref();
     let Some(dir) = dir else { return empty(StatusCode::NOT_FOUND) };
+    let app = state.cast_app_id.as_deref();
     let path = path.strip_prefix('/').unwrap_or_default();
     if path.is_empty() {
-        return response(dir.join("index.html"), false).await;
+        return response(dir.join("index.html"), false, app).await;
     }
     let Ok(path) = percent_encoding::percent_decode_str(path).decode_utf8() else {
         // axum's own rejection, word for word.
@@ -134,9 +151,9 @@ pub async fn serve(state: &AppState, method: &Method, path: &str) -> Response<Bo
     let asset = path.starts_with("assets/");
     let candidate = dir.join(path);
     if tokio::fs::metadata(&candidate).await.is_ok_and(|m| m.is_file()) {
-        response(candidate, asset).await
+        response(candidate, asset, app).await
     } else if !asset {
-        response(dir.join("index.html"), false).await
+        response(dir.join("index.html"), false, app).await
     } else {
         empty(StatusCode::NOT_FOUND)
     }
@@ -180,8 +197,15 @@ pub async fn stage(state: &AppState, req: Request) -> Response<Body> {
     )
 }
 
-async fn response(path: PathBuf, immutable: bool) -> Response<Body> {
-    let Ok(bytes) = tokio::fs::read(&path).await else { return empty(StatusCode::NOT_FOUND) };
+async fn response(path: PathBuf, immutable: bool, app: Option<&str>) -> Response<Body> {
+    let Ok(mut bytes) = tokio::fs::read(&path).await else { return empty(StatusCode::NOT_FOUND) };
+    let name = path.file_name().and_then(|name| name.to_str());
+    if let (Some("index.html"), Some(app)) = (name, app) {
+        if let Some(at) = bytes.windows(APP_ID_SLOT.len()).position(|window| window == APP_ID_SLOT) {
+            let end = at + APP_ID_SLOT.len() - 1;
+            bytes.splice(end..end, app.bytes());
+        }
+    }
     let mime = match path.extension().and_then(|x| x.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
@@ -198,6 +222,10 @@ async fn response(path: PathBuf, immutable: bool) -> Response<Body> {
          img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
          base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
     );
+    // The receiver runs on the Chromecast, top-level and framed by nothing. Google's receiver framework comes from
+    // gstatic and draws its player with inline styles, and the receiver fetches what the sender's LOAD names: the
+    // public HTTPS address or den-remux's plain-HTTP home-network one.
+    let csp = if name == Some("receiver.html") { RECEIVER_CSP.to_owned() } else { csp };
     let length = bytes.len();
     let mut out = Response::new(Body::from(bytes));
     let headers = out.headers_mut();
@@ -344,6 +372,52 @@ mod tests {
         };
         assert_eq!(directive("style-src"), "style-src 'self'");
         assert_eq!(directive("script-src"), "script-src 'self' https://www.gstatic.com");
+    }
+
+    /// Den's receiver is a page of its own, run top-level on the Chromecast: Google's receiver framework and the media
+    /// a LOAD names, LAN HTTP included, and no frame-ancestor.
+    #[tokio::test]
+    async fn the_receiver_page_has_its_own_policy() {
+        let h = harness();
+        std::fs::write(h.state.cast_dir.as_ref().unwrap().join("receiver.html"), "<title>Den</title>")
+            .unwrap();
+        let resp = h.send("GET", "/receiver.html", None, &[("host", "cast.example")]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_SECURITY_POLICY], super::RECEIVER_CSP);
+        assert!(super::RECEIVER_CSP.contains("script-src 'self' https://www.gstatic.com;"));
+        assert!(super::RECEIVER_CSP.contains("media-src https: http: blob: data:;"));
+        assert!(super::RECEIVER_CSP.ends_with("frame-ancestors 'none'"));
+        assert_eq!(body_text(resp).await, "<title>Den</title>");
+    }
+
+    /// `CAST_APP_ID` reaches the sender page in its empty meta slot, and nothing else is rewritten.
+    #[tokio::test]
+    async fn the_sender_page_names_the_configured_receiver() {
+        let page = r#"<meta name="den-cast-app" content="" /><title>Den Cast</title>"#;
+        let mut h = harness();
+        let dir = h.state.cast_dir.clone().unwrap();
+        std::fs::write(dir.join("index.html"), page).unwrap();
+        std::fs::write(dir.join("receiver.html"), page).unwrap();
+        async fn get(h: &Harness, path: &str) -> axum::response::Response {
+            h.send("GET", path, None, &[("host", "cast.example")]).await
+        }
+        assert_eq!(body_text(get(&h, "/").await).await, page, "unset: Google's Default Media Receiver");
+        Arc::get_mut(&mut h.state).unwrap().cast_app_id = super::app_id("5718b443");
+        let named = page.replace(r#"content="""#, r#"content="5718B443""#);
+        for path in ["/", "/index.html", "/away/1"] {
+            let resp = get(&h, path).await;
+            assert_eq!(resp.headers()[header::CONTENT_LENGTH], named.len().to_string(), "{path}");
+            assert_eq!(body_text(resp).await, named, "{path}");
+        }
+        assert_eq!(body_text(get(&h, "/receiver.html").await).await, page);
+    }
+
+    #[test]
+    fn an_app_id_is_eight_hex_digits() {
+        assert_eq!(super::app_id("5718b443").as_deref(), Some("5718B443"));
+        for bad in ["", "5718B44", "5718B4430", "5718B44G", "CC1AD84 "] {
+            assert_eq!(super::app_id(bad), None, "{bad:?}");
+        }
     }
 
     #[tokio::test]

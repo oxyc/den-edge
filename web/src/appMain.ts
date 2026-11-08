@@ -10,6 +10,7 @@ import {
   reportClientFailure,
   sendPageError,
 } from './lib/diagnosticsReport';
+import { castReceiverOptIn } from './lib/castReceiver';
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
@@ -140,6 +141,9 @@ if (phoned) {
     __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
   );
 }
+
+// `?cast-receiver=den` (or `default`) on any page: this browser's Cast receiver choice, kept for the player.
+castReceiverOptIn();
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

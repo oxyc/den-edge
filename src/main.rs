@@ -216,6 +216,9 @@ pub struct AppState {
     pub cast_origin: Option<String>,
     /// The Cast page's built files (env `CAST_DIR`), served on `cast_origin`'s host.
     pub cast_dir: Option<std::path::PathBuf>,
+    /// The Cast application id the Cast page launches (env `CAST_APP_ID`, eight hex digits, uppercase): Den's own
+    /// receiver (`web/cast/receiver.html`). Unset, it launches Google's Default Media Receiver.
+    pub cast_app_id: Option<String>,
     /// Short-lived WebVTT capabilities handed to Cast receivers. The browser uploads only a chosen subtitle;
     /// neither its member/grant proof nor the addon's subtitle URL ever reaches the receiver.
     pub cast_subtitles: Mutex<cast::Subtitles>,
@@ -436,6 +439,7 @@ impl AppState {
             public_listener_unanswered: std::sync::atomic::AtomicBool::new(false),
             cast_origin: None,
             cast_dir: None,
+            cast_app_id: None,
             cast_subtitles: Mutex::new(cast::Subtitles::default()),
             new_libraries: library::NewLibraries::Open,
             tmdb_key: None,
@@ -622,6 +626,12 @@ async fn main() {
         })
     });
     state.cast_dir = env_opt("CAST_DIR").map(std::path::PathBuf::from);
+    state.cast_app_id = env_opt("CAST_APP_ID").and_then(|value| {
+        cast::app_id(&value).or_else(|| {
+            eprintln!("CAST_APP_ID must be eight hex digits — using the Default Media Receiver");
+            None
+        })
+    });
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
             eprintln!("NEW_LIBRARIES is {v:?}: expected open, members or visitors");
@@ -697,7 +707,11 @@ async fn main() {
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         state.tv_web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         match (&state.cast_origin, &state.cast_dir) {
-            (Some(origin), Some(dir)) => format!("{origin}({})", dir.display()),
+            (Some(origin), Some(dir)) => format!(
+                "{origin}({}, receiver {})",
+                dir.display(),
+                state.cast_app_id.as_deref().unwrap_or("default")
+            ),
             (Some(origin), None) => format!("{origin}(no files)"),
             (None, _) => "none".to_owned(),
         },
