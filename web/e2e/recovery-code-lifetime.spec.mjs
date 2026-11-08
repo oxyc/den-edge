@@ -20,6 +20,8 @@ test('leaving and retrying does not overlap or retain recovery derivation Worker
   await trackRecoveryWorkers(page);
   await page.goto(`${E2E_ORIGIN}/test/recovery-code.html`);
 
+  // Each derivation's answer is held, so the page is left, and retried, while one is certainly running.
+  await page.evaluate(() => globalThis.recoveryWorkers.hold());
   await page.getByRole('button', { name: 'Make a recovery code' }).click();
   await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(1);
   await page.evaluate(() => globalThis.recoveryFixture.unmount());
@@ -34,6 +36,7 @@ test('leaving and retrying does not overlap or retain recovery derivation Worker
     (started) => globalThis.recoveryWorkers.createdAt.at(-1) - started,
     retryStarted,
   );
+  await page.evaluate(() => globalThis.recoveryWorkers.release());
   await expect(page.locator('.code')).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(0);
   expect(await page.evaluate(() => globalThis.recoveryWorkers)).toMatchObject({
@@ -61,10 +64,13 @@ test('leaving and retrying redemption cancels its Worker before any stale networ
   await page.goto(`${E2E_ORIGIN}/test/recovery-redeem.html`);
   const code = 'GEB2-LP9U-C63W-Q95U-NSLT-XMFL';
   await page.getByRole('textbox', { name: 'Recovery code' }).fill(code);
+  // Held, so the page is left while its derivation is certainly running.
+  await page.evaluate(() => globalThis.recoveryWorkers.hold());
   await page.getByRole('button', { name: 'Open with code' }).click();
   await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(1);
   await page.evaluate(() => globalThis.recoveryRedeemFixture.unmount());
   await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(0);
+  await page.evaluate(() => globalThis.recoveryWorkers.release());
   expect(opens).toBe(0);
 
   await page.evaluate(() => globalThis.recoveryRedeemFixture.remount());
