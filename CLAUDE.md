@@ -59,4 +59,7 @@ say so in the comment.
 - Main CI is the release gate and artifact producer: it tests, builds, probes, scans, and records immutable
   edge/cast candidate digests. A tag only verifies and promotes those digests; it must never rebuild a
   subtly different artifact. A failed main run creates no tag and cannot move `:latest`.
+- Main CI skips its test jobs when a run in this repo already passed them on byte-identical source (the tree
+  without `VERSION`, `scripts/ci-verdict.sh`), e.g. the PR run of an un-moved merge or a version commit's
+  predecessor. It still builds, probes and scans the candidate for its own SHA.
 - This checkout is shared with other Claude sessions. Commit with an explicit pathspec, never `-a`.
