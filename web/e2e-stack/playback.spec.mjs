@@ -7,7 +7,7 @@
 // Each case is a failure a viewer met, and fails on the code before its fix:
 //   1. a member's Den Remux play is committed (den-edge #1114: the commit lacked the receipt, 409, playback_commit_failed)
 //   2. a direct TorBox answer carrying a receipt stays TorBox's stream (den-edge #1114: read as a Remux session)
-//  2b. that stream's receipt, closed part-way, carries where it got to and reaches den-edge (den-edge #1122, open)
+//  2b. that stream's receipt, closed part-way, carries where it got to and reaches den-edge (den-edge #1122: ended empty)
 //   3. a TorBox stream paused past a heartbeat sends nothing but GETs to TorBox's CDN (405s on every pause)
 //   4. a TorBox stream cast to a receiver plays there (Hearth: 409 torbox_item_not_found once the page's session ended)
 //   5. a Den Remux stream cast to a receiver is handed off once, and the page's session ends at the public listener
@@ -370,7 +370,6 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
   });
 
   test('2b. a TorBox stream closed part-way: its receipt carries where it got to, and Hearth delivers it to den-edge', async () => {
-    openBug('https://github.com/oxyc/den-edge/issues/1122');
     stack.torbox.managed = true;
     const edgeFrom = stack.edge.lines().length;
     const { page, seen } = await household();
