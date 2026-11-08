@@ -10,6 +10,9 @@ test('the production library exposes one bounded receipt retry and announces rec
   const releases = [];
   let attempts = 0;
   await page.route(`${E2E_ORIGIN}/playback/receipts/drain`, async (route) => {
+    expect(route.request().headers()['x-den-library-member']).toMatch(
+      /^[0-9a-f]{32}:[0-9a-f]{64}$/,
+    );
     const attempt = attempts++;
     await new Promise((resolve) => releases.push(resolve));
     if (attempt === 0) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
