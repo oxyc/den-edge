@@ -93,6 +93,12 @@ test('Downloads distinguishes opening, empty, failed, stale and refresh failure 
       json: { episodes: [{ episode_number: 4, name: 'Four', still_path: '/four.jpg' }] },
     }),
   );
+  // Clicking "Try again" leaves the pointer where the alert was. Once the alert goes, the retained card moves up under
+  // it, and a pointer resting on a poster warms the title's details, as it does anywhere in the app.
+  await page.route(
+    (url) => url.pathname === '/tmdb/3/tv/1399',
+    (route) => route.fulfill({ json: { id: 1399, name: 'Legacy episode' } }),
+  );
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
       contentType: 'image/svg+xml',
