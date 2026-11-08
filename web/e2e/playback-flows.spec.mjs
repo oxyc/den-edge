@@ -331,8 +331,9 @@ test('owner at home plays from the home-network listener in the page itself', as
     expect(segmentHosts()).toEqual(new Set(['lan.test']));
     expect(new Set(asked.lanAsked)).toEqual(new Set([ORIGIN]));
     await stamped(page, 'Den Remux');
-    // Casting is still offered: the page's own button, as for any session it plays.
-    await expect(page.getByRole('button', { name: 'Cast to a TV' })).toBeVisible();
+    // Casting is still offered: the cast page is loaded beside the video, as for any session it plays, and shows its
+    // button once its SDK finds a receiver (`cast-one-tap.spec.mjs`; this fixture's SDK finds none).
+    await expect(page.locator(`iframe[title="Cast"][src^="${CAST}"]`)).toHaveCount(1);
   } finally {
     await browser.close();
   }

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   canOfferCast,
-  CAST_DISCOVERY_MS,
+  CAST_CONFIG_MS,
   CAST_PLAY_MS,
-  castLook,
+  castFailureNotice,
+  castStateOf,
   fetchCastOrigin,
   returnsFromCast,
 } from './castOffer';
@@ -23,8 +24,8 @@ const CHROME_IPHONE =
 const FIREFOX =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0';
 
-it('keeps the production discovery and blank-playback budgets', () => {
-  expect(CAST_DISCOVERY_MS).toBe(6_000);
+it('keeps the production config and blank-playback budgets', () => {
+  expect(CAST_CONFIG_MS).toBe(6_000);
   expect(CAST_PLAY_MS).toBe(45_000);
 });
 
@@ -47,43 +48,26 @@ describe('canOfferCast', () => {
   });
 });
 
-describe('castLook', () => {
-  it('offers the choice once a receiver is seen, and moves playback only once one is chosen', () => {
-    expect(castLook('looking', { kind: 'availability', available: true })).toEqual({
-      offer: 'choose',
-      move: false,
-    });
-    expect(castLook('choose', { kind: 'chosen' })).toEqual({ offer: 'idle', move: true });
-    expect(castLook('choose', { kind: 'availability', available: true })).toEqual({
-      offer: 'choose',
-      move: false,
-    });
-    expect(castLook('choose', { kind: 'dismissed' })).toEqual({ offer: 'idle', move: false });
-    expect(castLook('looking', { kind: 'chosen' })).toEqual({ offer: 'looking', move: false });
+describe('castStateOf', () => {
+  it('reads the SDK state, and takes anything else for no receiver', () => {
+    expect(castStateOf('NOT_CONNECTED')).toBe('available');
+    expect(castStateOf('CONNECTING')).toBe('connecting');
+    expect(castStateOf('CONNECTED')).toBe('connected');
+    expect(castStateOf('NO_DEVICES_AVAILABLE')).toBe('none');
+    expect(castStateOf(undefined)).toBe('none');
+    expect(castStateOf('connected'), 'only the SDK’s own spelling').toBe('none');
   });
+});
 
-  it('keeps looking on "no devices", which the Cast SDK says before it has looked', () => {
-    expect(castLook('looking', { kind: 'availability', available: false })).toEqual({
-      offer: 'looking',
-      move: false,
-    });
-  });
-
-  it('finds none at the deadline, or with no cast page, and moves nothing', () => {
-    expect(castLook('looking', { kind: 'deadline' })).toEqual({ offer: 'none', move: false });
-    expect(castLook('looking', { kind: 'no-cast-page' })).toEqual({ offer: 'none', move: false });
-  });
-
-  it('ignores answers that arrive when nobody is looking', () => {
-    expect(castLook('idle', { kind: 'availability', available: true })).toEqual({
-      offer: 'idle',
-      move: false,
-    });
-    expect(castLook('none', { kind: 'availability', available: true })).toEqual({
-      offer: 'none',
-      move: false,
-    });
-    expect(castLook('idle', { kind: 'deadline' })).toEqual({ offer: 'idle', move: false });
+describe('castFailureNotice', () => {
+  it('says a receiver went missing apart from one that would not connect, never the code', () => {
+    expect(castFailureNotice('receiver_unavailable')).toMatch(
+      /^No Chromecast found on this network/,
+    );
+    for (const code of ['session_error', 'timeout', 'channel_error', 42, undefined])
+      expect(castFailureNotice(code)).toBe(
+        'Couldn’t connect to the Chromecast. Press Cast to try again.',
+      );
   });
 });
 

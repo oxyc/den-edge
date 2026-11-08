@@ -1,4 +1,4 @@
-import Hls from 'hls.js';
+import type Hls from 'hls.js';
 import { hlsConfig } from '../../src/lib/hlsConfig';
 import { nativeHls } from '../../src/lib/nativeHls';
 import { Link } from '../../src/lib/resumingLoader';
@@ -86,11 +86,16 @@ interface RemotePlayer {
   isPaused: boolean;
   playerState?: string;
   isConnected: boolean;
+  volumeLevel?: number;
+  isMuted?: boolean;
 }
 
 interface RemotePlayerController {
   addEventListener(type: string, listener: () => void): void;
   seek(): void;
+  playOrPause(): void;
+  setVolumeLevel(): void;
+  muteOrUnmute(): void;
 }
 
 interface CastGlobals {
@@ -153,23 +158,25 @@ declare global {
     __onGCastApiAvailable?: (available: boolean) => void;
     /** Google's Cast namespace: the framework is at `cast.framework`, not on `cast` itself. */
     cast?: { framework?: CastGlobals['framework'] };
-    chrome?: CastGlobals['chrome'];
+    chrome?: CastGlobals['chrome'] & { cast?: { isAvailable?: boolean } };
   }
 }
 
 const video = document.querySelector('video')!;
 const statusPill = document.querySelector<HTMLElement>('#status')!;
-const profile = document.querySelector<HTMLSelectElement>('#profile')!;
-const castOptions = document.querySelector<HTMLElement>('.cast-options')!;
-const choose = document.querySelector<HTMLButtonElement>('#choose')!;
+const castButton = document.querySelector<HTMLButtonElement>('#cast')!;
+/** The receiver models the player names (`castCapabilities`); the viewer's pick is kept on this origin. */
+const PROFILES = ['legacy', 'gen3', 'ultra', 'google-tv-hd', 'google-tv-4k', 'streamer'];
+const kept = keptProfile();
+let profile = kept && PROFILES.includes(kept) ? kept : 'google-tv-4k';
 type InterfaceLanguage = 'en' | 'es' | 'sv';
 let interfaceLanguage: InterfaceLanguage = 'en';
 const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
   es: {
-    'Choose your Chromecast': 'Elige tu Chromecast',
-    'Cast options': 'Opciones de transmisión',
-    Receiver: 'Receptor',
     'Cast to a TV': 'Transmitir a un televisor',
+    'Connecting to a Chromecast…': 'Conectando con un Chromecast…',
+    'Casting to {device}': 'Transmitiendo a {device}',
+    'your Chromecast': 'tu Chromecast',
     'Reconnecting…': 'Reconectando…',
     'Playing on this device': 'Reproduciendo en este dispositivo',
     'This browser cannot play HLS': 'Este navegador no puede reproducir HLS',
@@ -179,10 +186,10 @@ const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
     'Invalid media URL': 'URL multimedia no válida',
   },
   sv: {
-    'Choose your Chromecast': 'Välj din Chromecast',
-    'Cast options': 'Cast-alternativ',
-    Receiver: 'Mottagare',
     'Cast to a TV': 'Casta till en tv',
+    'Connecting to a Chromecast…': 'Ansluter till en Chromecast…',
+    'Casting to {device}': 'Castar till {device}',
+    'your Chromecast': 'din Chromecast',
     'Reconnecting…': 'Ansluter igen…',
     'Playing on this device': 'Spelar på den här enheten',
     'This browser cannot play HLS': 'Den här webbläsaren kan inte spela HLS',
@@ -198,14 +205,39 @@ function applyInterfaceLanguage(language: unknown): void {
   if (language !== 'en' && language !== 'es' && language !== 'sv') return;
   interfaceLanguage = language;
   document.documentElement.lang = language;
-  document.querySelector('#choose-label')!.textContent = text('Choose your Chromecast');
-  const options = document.querySelector<HTMLElement>('#cast-options-label')!;
-  options.title = text('Cast options');
-  options.setAttribute('aria-label', text('Cast options'));
-  document.querySelector('#receiver-label')!.textContent = text('Receiver');
-  const launcher = document.querySelector<HTMLElement>('google-cast-launcher');
-  launcher?.setAttribute('aria-label', text('Cast to a TV'));
-  if (launcher) launcher.title = text('Cast to a TV');
+  renderButton();
+}
+
+/**
+ * The Cast state as the SDK names it (`CastContext.getCastState`): NO_DEVICES_AVAILABLE, NOT_CONNECTED, CONNECTING or
+ * CONNECTED. Undefined until the SDK has started, and for good where it never does (Safari, Firefox).
+ */
+let castState: string | undefined;
+/** The connected receiver's own name, as its owner set it up; absent until one is connected. */
+function deviceName(): string | undefined {
+  return castContext?.getCurrentSession()?.getCastDevice?.().friendlyName || undefined;
+}
+
+/**
+ * The one Cast button: hidden until a receiver is on the network, then the outline glyph; its arcs pulse while a
+ * session starts, and the screen fills once one has. Its name says which of those it is.
+ */
+function renderButton(): void {
+  const state = castState ?? 'NO_DEVICES_AVAILABLE';
+  document.documentElement.dataset.cast = state.toLowerCase();
+  castButton.hidden = state === 'NO_DEVICES_AVAILABLE';
+  const label =
+    state === 'CONNECTED'
+      ? text('Casting to {device}').replace('{device}', deviceName() ?? text('your Chromecast'))
+      : state === 'CONNECTING'
+        ? text('Connecting to a Chromecast…')
+        : text('Cast to a TV');
+  castButton.setAttribute('aria-label', label);
+  castButton.title = label;
+  // Pressed while connected, the button opens the player's Cast menu (Stop casting) rather than Chrome's list.
+  if (state === 'CONNECTED' || state === 'CONNECTING')
+    castButton.setAttribute('aria-haspopup', 'menu');
+  else castButton.removeAttribute('aria-haspopup');
 }
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
@@ -266,13 +298,6 @@ function playUrl(id: string, media: Media): string {
   return media.lanUrl && onLan.has(id) ? media.lanUrl : media.url;
 }
 
-const kept = keptProfile();
-if (kept && [...profile.options].some((option) => option.value === kept)) profile.value = kept;
-profile.addEventListener('change', () => {
-  keepProfile(profile.value);
-  if (castContext?.getCurrentSession()) tell('den-cast-request', { profile: profile.value });
-});
-
 function signedSpeed(media: Media): boolean {
   if (!media.speed) return true;
   try {
@@ -292,6 +317,12 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
   window.parent.postMessage({ type, id: current.id, ...fields }, parentOrigin);
 }
 
+/** A message about the Cast button itself, which the player needs before anything is loaded here. */
+function say(type: string, fields: Record<string, unknown> = {}): void {
+  if (!parentOrigin) return;
+  window.parent.postMessage({ type, id: current?.id, ...fields }, parentOrigin);
+}
+
 // Pointer events stop at an iframe boundary. Without forwarding activity, the player's chrome could hide while the
 // Cast page was under the pointer and then never return: the invisible parent controls could not receive the move
 // that should reveal them. Keep this deliberately coarse; it is a presence signal, not pointer telemetry.
@@ -302,7 +333,7 @@ window.addEventListener(
     const now = performance.now();
     if (now - lastPointerActivity < 250) return;
     lastPointerActivity = now;
-    tell('den-activity');
+    say('den-activity');
   },
   { passive: true },
 );
@@ -345,13 +376,21 @@ function endPlaying(): void {
 }
 
 /**
- * Tell the player whether a Chromecast is discoverable. Also before anything is loaded here: the player asks
- * (`den-discover`) while its own video plays on, and moves playback here only once one is.
+ * Tell the player where Cast stands: whether a Chromecast is discoverable, connecting or connected, and to which. Also
+ * before anything is loaded here: the player shows this page's Cast button only while one is on the network, and its
+ * own video plays on until a receiver is chosen.
  */
 function announceDevices(): void {
+  renderButton();
   if (castDevices === undefined || !parentOrigin) return;
   window.parent.postMessage(
-    { type: 'den-cast-availability', id: current?.id, available: castDevices },
+    {
+      type: 'den-cast-state',
+      id: current?.id,
+      available: castDevices,
+      state: castState ?? 'NO_DEVICES_AVAILABLE',
+      device: castState === 'CONNECTED' ? deviceName() : undefined,
+    },
     parentOrigin,
   );
 }
@@ -407,8 +446,12 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   naturallyFinished = false;
   const start = Math.max(0, media.currentTime ?? 0);
   // The player's own rule (`nativeHls`): Chrome claims HLS too, but hls.js plays there, and only hls.js rides out a
-  // dropped connection with `resumingLoader`.
-  if (nativeHls(video)) {
+  // dropped connection with `resumingLoader`. hls.js is most of this page's script, and a page that is only the Cast
+  // button never plays anything itself: it is fetched the first time this page does.
+  const loading = playing;
+  const Hls = nativeHls(video) ? undefined : (await import('hls.js')).default;
+  if (playing !== loading) return;
+  if (!Hls) {
     video.src = url;
     watcher = watchPlayback({ video, reportUrl: media.external ? undefined : reportUrlOf(url) });
     // A native player takes a start position once it knows the stream; set before that it is ignored.
@@ -628,7 +671,7 @@ async function loadCast(): Promise<void> {
   const chrome = window.chrome?.cast;
   if (!id || !session || !media || !chrome) return;
   if (media.mode !== 'cast') {
-    tell('den-cast-request', { profile: profile.value });
+    tell('den-cast-request', { profile });
     return;
   }
   const url = playUrl(id, media);
@@ -685,7 +728,7 @@ async function loadCast(): Promise<void> {
       : undefined;
     setStatus(castingTo(session.getCastDevice?.().friendlyName));
     video.pause();
-    tell('den-cast', { state: 'playing', profile: profile.value });
+    tell('den-cast', { state: 'playing', profile, device: deviceName() });
   } catch {
     replacingCast = false;
     if (current?.id !== id) {
@@ -755,9 +798,11 @@ function initializeCast(): boolean {
   const chrome = window.chrome?.cast;
   if (!cast || !chrome) return false;
   castContext = cast.CastContext.getInstance();
-  castDevices = castContext.getCastState() !== 'NO_DEVICES_AVAILABLE';
+  castState = castContext.getCastState();
+  castDevices = castState !== 'NO_DEVICES_AVAILABLE';
   castContext.addEventListener(cast.CastContextEventType.CAST_STATE_CHANGED, (event) => {
-    castDevices = (event as { castState?: string }).castState !== 'NO_DEVICES_AVAILABLE';
+    castState = (event as { castState?: string }).castState ?? castState;
+    castDevices = castState !== 'NO_DEVICES_AVAILABLE';
     announceDevices();
   });
   remotePlayer = new cast.RemotePlayer();
@@ -771,6 +816,8 @@ function initializeCast(): boolean {
       currentTime: remotePlayer.currentTime,
       duration: remotePlayer.duration,
       paused: remotePlayer.isPaused,
+      volume: remotePlayer.volumeLevel,
+      muted: remotePlayer.isMuted,
     });
     if (remotePlayer.playerState !== 'IDLE') {
       replacingCast = false;
@@ -808,17 +855,10 @@ function initializeCast(): boolean {
   });
   castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
     const state = (event as { sessionState?: string }).sessionState;
-    // The receiver menu is for choosing what the connected Chromecast is, so it is there only while one is.
-    castOptions.hidden = !(state === 'SESSION_STARTED' || state === 'SESSION_RESUMED');
     if (state === 'SESSION_STARTED' && !current) {
-      // Chosen from the player's offer, with nothing loaded yet: the player asks for what this receiver plays and
+      // Chosen from this page's button with nothing loaded yet: the player asks for what this receiver plays and
       // hands it here. Until then its own video plays on.
-      document.documentElement.classList.remove('choosing');
-      if (parentOrigin)
-        window.parent.postMessage(
-          { type: 'den-cast-session', state: 'started', profile: profile.value },
-          parentOrigin,
-        );
+      say('den-cast-session', { state: 'started', profile, device: deviceName() });
     } else if (state === 'SESSION_STARTED') {
       void loadCast();
     } else if (state === 'SESSION_ENDED' && castStarted) {
@@ -848,40 +888,64 @@ async function castFrameworkLoaded(): Promise<boolean> {
   return true;
 }
 
-/**
- * Google's launcher, created only once Cast has started. The SDK reads the element's display when it takes it over and
- * shows it with that value later, so one that was `hidden` then (as a launcher written into the page was, until Cast
- * started) is "shown" as `display: none` forever: with a receiver found there was still no button to press.
- */
-function addCastLauncher(): void {
-  const launcher = document.createElement('google-cast-launcher');
-  launcher.setAttribute('aria-label', text('Cast to a TV'));
-  launcher.title = text('Cast to a TV');
-  castOptions.before(launcher);
-}
-
+let castApiAnswered = false;
 window.__onGCastApiAvailable = (available) => {
+  if (castApiAnswered) return;
+  castApiAnswered = true;
   if (!available) {
     castDevices = false;
     announceDevices();
     return;
   }
-  // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay in its own
-  // controls) the launcher would draw as an empty circle over the video. Google's launcher also hides itself
-  // while no receiver is on the network, so adding it is not the same as showing it.
+  // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay instead) the button stays
+  // hidden. It also stays hidden while no receiver is on the network (`renderButton`).
   void castFrameworkLoaded().then((loaded) => {
     try {
       if (!loaded || !initializeCast())
         throw new Error('the Cast SDK loaded without its framework');
-      addCastLauncher();
     } catch (error) {
       // A button that was never initialised does nothing, so it stays hidden; the console says why.
       console.error('Cast could not start:', error);
+      castState = undefined;
       castDevices = false;
     }
     announceDevices();
   });
 };
+// The SDK calls the hook once, when it is ready. This module runs after the document is parsed, so a SDK that was
+// already ready by then (from the cache) has called nothing: it is asked here instead.
+if (window.chrome?.cast?.isAvailable) window.__onGCastApiAvailable(true);
+
+/**
+ * The button is the only press that can open Chrome's device list: user activation does not pass from the player into
+ * this cross-origin page. Pressed while connected, the player shows its Cast menu instead (Stop casting).
+ */
+castButton.addEventListener('click', () => {
+  if (castState === 'CONNECTED' || castState === 'CONNECTING') {
+    say('den-cast-menu');
+    return;
+  }
+  say('den-cast-press');
+  castContext?.requestSession().catch((error: unknown) => {
+    // Closing the list without choosing is no failure: the button stays, for another press.
+    if (error === 'cancel') return;
+    console.info('Cast session did not start:', error);
+    say('den-cast-failed', { code: typeof error === 'string' ? error : 'session_error' });
+  });
+});
+castButton.addEventListener('focus', () =>
+  say('den-cast-focus', { focused: true, visible: castButton.matches(':focus-visible') }),
+);
+castButton.addEventListener('blur', () => say('den-cast-focus', { focused: false }));
+castButton.addEventListener('pointerenter', () => say('den-cast-hover', { hover: true }));
+castButton.addEventListener('pointerleave', () => say('den-cast-hover', { hover: false }));
+// As the player's control bar this page is one button: Tab moves on to the player's next control, not to the end of
+// the player, where the frame sits in its document.
+castButton.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab' || !document.documentElement.classList.contains('button')) return;
+  event.preventDefault();
+  say('den-tab', { back: event.shiftKey });
+});
 
 let parentDocumentOrigin: string | undefined;
 const authorizedParent = (event: MessageEvent<unknown>): boolean =>
@@ -1003,23 +1067,63 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   announceDevices();
 });
 
-/** The player offers casting: this page shows the one button that can open Chrome's device list. */
+/**
+ * The player's side of Cast: how this page is laid out (only the Cast button, in the player's control bar, or the
+ * whole picture where this page plays the session itself), and what Den's transport asks of the receiver.
+ */
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!authorizedParent(event)) return;
-  const message = event.data as { type?: string; interfaceLanguage?: unknown };
-  if (message.type !== 'den-choose' || !castContext) return;
-  applyInterfaceLanguage(message.interfaceLanguage);
-  parentOrigin = event.origin;
-  document.documentElement.classList.add('choosing');
-  choose.hidden = false;
-  choose.focus();
-});
-
-choose.addEventListener('click', () => {
-  // Rejected when the viewer closes the list without choosing: the offer stays, for another press.
-  castContext?.requestSession().catch((error: unknown) => {
-    console.info('No Chromecast chosen:', error);
-  });
+  const message = event.data as {
+    type?: string;
+    layout?: unknown;
+    color?: unknown;
+    iconSize?: unknown;
+    profile?: unknown;
+    level?: unknown;
+    muted?: unknown;
+  };
+  const root = document.documentElement;
+  if (message.type === 'den-layout') {
+    parentOrigin = event.origin;
+    root.classList.toggle('button', message.layout === 'button');
+    // The player's own button colour and glyph size, so the glyph drawn here is the one beside it.
+    if (typeof message.color === 'string' && CSS.supports('color', message.color))
+      root.style.setProperty('--cast-fg', message.color);
+    if (typeof message.iconSize === 'number' && message.iconSize >= 12 && message.iconSize <= 48)
+      root.style.setProperty('--cast-icon', `${message.iconSize}px`);
+  } else if (message.type === 'den-focus') {
+    castButton.focus();
+  } else if (message.type === 'den-stop') {
+    castContext?.endCurrentSession(true);
+  } else if (message.type === 'den-play' || message.type === 'den-pause') {
+    const pause = message.type === 'den-pause';
+    if (castStarted && remotePlayer && remoteController && remotePlayer.isPaused !== pause)
+      remoteController.playOrPause();
+  } else if (message.type === 'den-volume') {
+    if (!castStarted || !remotePlayer || !remoteController) return;
+    if (typeof message.level === 'number' && message.level >= 0 && message.level <= 1) {
+      remotePlayer.volumeLevel = message.level;
+      remoteController.setVolumeLevel();
+    }
+    if (typeof message.muted === 'boolean' && message.muted !== remotePlayer.isMuted)
+      remoteController.muteOrUnmute();
+  } else if (message.type === 'den-profile') {
+    if (typeof message.profile !== 'string' || !PROFILES.includes(message.profile)) return;
+    profile = message.profile;
+    keepProfile(profile);
+    if (castContext?.getCurrentSession()) tell('den-cast-request', { profile });
+  } else if (message.type === 'den-reset') {
+    // The player has gone back to playing in its own page and keeps this one for its Cast button: what was loaded
+    // here is let go as a hidden page would let it go (`pagehide`).
+    watcher?.stop();
+    watcher = undefined;
+    stopLocal();
+    video.removeAttribute('src');
+    if (!castStarted) endPlaying();
+    current = undefined;
+    waiting = undefined;
+    setStatus('');
+  }
 });
 
 /** The player kept the measured session: play it. */

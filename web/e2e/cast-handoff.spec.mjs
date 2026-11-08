@@ -240,11 +240,12 @@ async function open({
       : file.endsWith('.js')
         ? 'text/javascript'
         : 'text/css';
-    return r.fulfill({ contentType: type, body: await readFile(join(built, file)) });
+    // A request still on its way when the test ends may find the build removed: refused, not thrown into the next test.
+    const body = await readFile(join(built, file)).catch(() => undefined);
+    return body ? r.fulfill({ contentType: type, body }) : r.abort().catch(() => undefined);
   });
   const query = new URLSearchParams({
     playback: '/den/config/playback',
-    castDiscoveryMs: '5000',
     castPlayMs: String(CAST_PLAY_MS),
   });
   if (subtitle) query.set('subtitleLanguage', 'en');
@@ -290,18 +291,16 @@ async function revealPlayerControls(page) {
   await page.waitForTimeout(50);
 }
 
-/** Press Cast, wait for the cast page's own "Choose your Chromecast", and press it there. */
+/** Press the Cast button, which is the cast page's own, shown in the bar once it has found the receiver. */
 async function chooseReceiver(page, asked) {
   await revealPlayerControls(page);
-  await page.getByRole('button', { name: 'Cast to a TV' }).click();
-  const choose = castFrame(page).getByRole('button', { name: 'Choose your Chromecast' });
-  await expect(choose).toBeVisible({ timeout: 15_000 });
-  await expect(choose, 'the offer has the keyboard').toBeFocused();
+  const cast = castFrame(page).getByRole('button', { name: 'Cast to a TV' });
+  await expect(cast).toBeVisible({ timeout: 15_000 });
   // Offered, not chosen: what was playing plays on, and nothing new was asked of Hearth.
   const offeredAt = await playingPast(page, 0);
   await playingPast(page, offeredAt + 1);
   expect(asked.managed).toHaveLength(1);
-  await choose.click();
+  await cast.click();
 }
 
 test('casting keeps TorBox playing until a Chromecast is chosen, then hands that stream to it', async () => {
@@ -332,9 +331,9 @@ test('casting keeps TorBox playing until a Chromecast is chosen, then hands that
     expect(load).toMatchObject({ segments: 'ts', videoSegments: 'mpeg2_ts' });
     // From where the page had got to.
     expect(load.currentTime).toBeGreaterThan(6);
-    // The receiver has it now: the page's own video is gone, the cast page shows where it plays.
+    // The receiver has it now: the page's own video is gone, and the player says where it plays.
     await expect(page.locator('.player video')).toHaveCount(0);
-    await expect(castFrame(page).getByText('Living Room TV')).toBeVisible();
+    await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
   } finally {
     await browser.close();
   }

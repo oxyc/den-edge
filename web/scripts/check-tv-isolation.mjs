@@ -229,5 +229,11 @@ if (process.argv.includes('--capture')) {
   // complete graph (85,841 -> 86,165) and none at startup (14 bytes fewer) on matched main/head builds. All of it is
   // in the lazy Player chunk; it adds one media-query listener and no request or timer. The TV markup is left as it
   // is, which is what the duplicated up-next branch costs. Allow the next 128-byte boundary past it, retaining 107.
-  if (coreTotalDelta > 86272) throw new Error('Browser total JS/CSS budget exceeded');
+  // Cast in one tap (the cast page's own button laid over Den's, background discovery, the casting view with Den's
+  // transport as the receiver's remote, the Cast menu and the frame's focus hand-off) adds 1,827 gzip bytes to the
+  // complete graph (86,237 -> 88,064) and two at startup on matched main/head builds; all of it is in the lazy Player
+  // chunk (JS 41.62 -> 43.16 kB, CSS 3.44 -> 3.68 kB). The cast page loaded beside playback is now 13.5 kB of script
+  // instead of 191 kB: hls.js is fetched only when that page plays a session itself. Allow the next 128-byte
+  // boundary past it, retaining 128.
+  if (coreTotalDelta > 88192) throw new Error('Browser total JS/CSS budget exceeded');
 }

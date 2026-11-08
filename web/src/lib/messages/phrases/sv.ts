@@ -154,7 +154,31 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Cancel: 'Avbryt',
   'Cancel download': 'Avbryt nedladdning',
   'Cast & Crew': 'Rollista och team',
+  Cast: 'Casta',
+  'Cast options': 'Cast-alternativ',
   'Cast to a TV': 'Casta till en TV',
+  'Chromecast 1–2': 'Chromecast 1–2',
+  'Chromecast 3': 'Chromecast 3',
+  'Chromecast Ultra': 'Chromecast Ultra',
+  'Chromecast with Google TV (4K)': 'Chromecast med Google TV (4K)',
+  'Chromecast with Google TV (HD)': 'Chromecast med Google TV (HD)',
+  'Connecting to the Chromecast…': 'Ansluter till Chromecast…',
+  'Couldn’t connect to the Chromecast. Press Cast to try again.':
+    'Det gick inte att ansluta till Chromecast. Tryck på Casta för att försöka igen.',
+  'Den Cast player': 'Dens Cast-spelare',
+  'Google TV Streamer': 'Google TV Streamer',
+  'No Chromecast found on this network. Check that it is on and on the same Wi-Fi, then press Cast to try again.':
+    'Ingen Chromecast hittades i det här nätverket. Kontrollera att den är på och på samma wifi, och tryck sedan på Casta för att försöka igen.',
+  Retry: 'Försök igen',
+  'Stop casting': 'Sluta casta',
+  'The Chromecast couldn’t play this, so it’s playing here again.':
+    'Chromecast kunde inte spela det här, så det spelas här igen.',
+  'The Chromecast didn’t start playing, so it’s playing here again.':
+    'Chromecast började inte spela, så det spelas här igen.',
+  'This can’t be cast from here right now. It’s playing here again.':
+    'Det går inte att casta härifrån just nu. Det spelas här igen.',
+  'Which Chromecast is it? Den sends what that model can play.':
+    'Vilken Chromecast är det? Den skickar det den modellen kan spela.',
   'CC BY-SA 4.0': 'CC BY-SA 4.0',
   'Change PIN': 'Ändra PIN-kod',
   ChatGPT: 'ChatGPT',
