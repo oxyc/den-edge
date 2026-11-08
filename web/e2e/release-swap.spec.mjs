@@ -93,7 +93,7 @@ test('a newer shell is offered persistently and reloads only when accepted', asy
 
   expect(releaseChecks).toBe(1);
   expect(await page.evaluate(() => window.denSameDocument)).toBe(true);
-  const notice = page.getByRole('status').filter({ hasText: 'Den was updated' });
+  const notice = page.getByRole('status').filter({ hasText: 'A new version of Den is ready.' });
   await expect(notice).toBeVisible();
   await active.getByRole('link', { name: 'Verano azul' }).click();
   await expect(page).toHaveURL(/\/tv\/6066-verano-azul$/);
