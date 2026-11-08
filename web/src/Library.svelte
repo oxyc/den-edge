@@ -1522,7 +1522,6 @@
   }
 
   function openPlaybackReceiptRecovery() {
-    closePlayer();
     navigate('/settings');
   }
 

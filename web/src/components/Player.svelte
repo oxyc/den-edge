@@ -4626,6 +4626,13 @@
     onclose();
   }
 
+  function openPlaybackReceiptSettings() {
+    // Use the player's terminal path first: final progress, decoder/session retirement and an in-flight startup
+    // abort must all happen before the parent leaves for the authorized linking flow.
+    close();
+    onplaybackreceiptsettings?.();
+  }
+
   /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
   function playerMenuOpen(): boolean {
     return __DEN_TV__
@@ -5029,7 +5036,7 @@
             ? {
                 action: {
                   label: i18n.phrase('Open Connections'),
-                  run: onplaybackreceiptsettings,
+                  run: openPlaybackReceiptSettings,
                 },
               }
             : {}),

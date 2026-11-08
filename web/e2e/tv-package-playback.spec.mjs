@@ -113,6 +113,7 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
   await expect(recovery).toBeFocused();
   await recovery.press('Enter');
   await expect(page.getByTestId('receipt-settings-count')).toHaveText('1');
+  await expect(page.getByTestId('player-close-count')).toHaveText('1');
   expect(receiptRequests).toEqual([]);
 });
 
