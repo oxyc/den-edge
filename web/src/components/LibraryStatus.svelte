@@ -2,17 +2,11 @@
      the switch), and what keeps it from being written while that lasts ("Library update required"). -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
-  const receiptMessage = {
-    pending: 'receipt.pending',
-    failed: 'receipt.failed',
-    recovered: 'receipt.recovered',
-  } as const;
   let {
     toast,
     presentation = 0,
     alert,
     undo = null,
-    receipt = null,
   }: {
     toast: string | null;
     /** Changes for every notice, including equal text, so its live region is presented again. */
@@ -20,31 +14,10 @@
     alert: string | null;
     /** Offered on the toast itself — "Removed from watchlist · Undo" — for the two actions that take something away. */
     undo?: { label: string; run: () => void } | null;
-    /** One bounded managed-playback completion attempt, owned and authority-fenced by RoutedLibrary. */
-    receipt?: {
-      state: 'pending' | 'failed' | 'recovered';
-      presentation: number;
-      retry: () => void;
-    } | null;
   } = $props();
 </script>
 
 {#if alert}<p class="library-status" role="alert">{i18n.phrase(alert)}</p>{/if}
-{#key receipt?.presentation}
-  {#if receipt}
-    <p
-      class="library-status receipt"
-      class:bad={receipt.state === 'failed'}
-      role={receipt.state === 'failed' ? 'alert' : 'status'}
-      aria-busy={receipt.state === 'pending'}
-    >
-      <span>{i18n.text(receiptMessage[receipt.state])}</span>
-      {#if receipt.state === 'failed'}<button type="button" class="undo" onclick={receipt.retry}
-          >{i18n.text('receipt.retry')}</button
-        >{/if}
-    </p>
-  {/if}
-{/key}
 {#key presentation}
   {#if toast}<p class="library-status toast" role="status">
       <span>{i18n.phrase(toast)}</span>{#if undo}<button
@@ -56,7 +29,7 @@
 {/key}
 
 <style>
-  .library-status {
+  :global(.library-status) {
     position: relative;
     z-index: 4;
     margin: 0 0 18px;
@@ -67,7 +40,7 @@
     color: var(--fg);
   }
 
-  .toast {
+  :global(.library-status.toast) {
     position: fixed;
     inset: auto var(--gutter) calc(24px + env(safe-area-inset-bottom));
     z-index: 30;
@@ -81,18 +54,7 @@
     text-align: center;
   }
 
-  .receipt {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-  }
-
-  .receipt.bad {
-    border-color: var(--danger-outline, var(--accent-outline-45));
-  }
-
-  .undo {
+  :global(.library-status .undo) {
     flex: 0 0 auto;
     border: 0;
     padding: 0;
@@ -105,7 +67,7 @@
     cursor: pointer;
   }
 
-  .undo:focus-visible {
+  :global(.library-status .undo:focus-visible) {
     outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: 2px;
   }

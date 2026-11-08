@@ -5,6 +5,9 @@
 // also drains its own lane of the TV queue (§16), whose plays it starts rather than applies.
 
 import { exclusive } from './exclusive';
+import PlaybackReceiptStatus from '../components/PlaybackReceiptStatus.svelte';
+
+export { PlaybackReceiptStatus };
 import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
@@ -269,6 +272,53 @@ export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
     },
     signal,
   );
+}
+
+/** Map one authority-fenced drain into the only presentation transition its caller needs to retain. */
+export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Status>(
+  work: {
+    libraryId: string;
+    model: {
+      ensurePlaybackReceipts: () => Promise<DropboxKey | null>;
+      applyPlaybackReceipts: (
+        messages: QueuedRequest[],
+        connection: Connection,
+      ) => Promise<{ ack: number | null; applied?: number }>;
+    };
+    household: { ensurePlaybackReceipts: () => Promise<DropboxKey | null> } | null;
+    lend: () => Promise<Connection>;
+    fetchImpl?: typeof fetch;
+  },
+  current: () => boolean,
+  signal: AbortSignal,
+  recovering: boolean,
+  publish: (state: 'failed' | 'recovered' | null, expected?: Status) => Status | null,
+): Promise<void> {
+  try {
+    const result = await drainPlaybackReceiptsForCurrentAuthority(
+      {
+        libraryId: work.libraryId,
+        ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
+        lend: work.lend,
+        apply: (messages, connection) => work.model.applyPlaybackReceipts(messages, connection),
+        current,
+        ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+      },
+      signal,
+    );
+    if (result.outcome === 'retired') return;
+    if (result.outcome === 'failed') publish('failed');
+    else if (!recovering) publish(null);
+    else {
+      const recovered = publish('recovered');
+      if (recovered) setTimeout(() => publish(null, recovered), 5_000);
+    }
+  } catch (error) {
+    if (!signal.aborted) {
+      console.warn('den: playback receipts could not be applied', error);
+      publish('failed');
+    }
+  }
 }
 
 /** How often the publisher asks the library service whether a projection is due (§15: it debounces and heartbeats). */

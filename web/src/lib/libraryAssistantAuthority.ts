@@ -359,17 +359,14 @@ export class LibraryAssistantAuthority {
     return { member, rows, revoked: (await this.#load()).revoked };
   }
 
-  async #load(): Promise<AssistantRecords> {
+  async #load(strict = false): Promise<AssistantRecords> {
     try {
-      return await this.#loadStrict();
+      return readRecords(await this.port.loadRecords());
     } catch (error) {
+      if (strict) throw error;
       console.warn('den: this device’s assistant records could not be read', error);
       return { ...EMPTY };
     }
-  }
-
-  async #loadStrict(): Promise<AssistantRecords> {
-    return readRecords(await this.port.loadRecords());
   }
 
   /** Join `update` into the stored records: sets only grow (pruning aside), `renewedAt` only moves on. */
@@ -378,7 +375,7 @@ export class LibraryAssistantAuthority {
     readBack = false,
   ): Promise<AssistantRecords> {
     const run = this.#records.then(async () => {
-      const held = readBack ? await this.#loadStrict() : await this.#load();
+      const held = await this.#load(readBack);
       const revoked = [...new Set([...held.revoked, ...(update.revoked ?? [])])].sort();
       const applied = { ...held.applied, ...(update.applied ?? {}) };
       const receiptApplied = { ...held.receiptApplied, ...(update.receiptApplied ?? {}) };
@@ -400,7 +397,7 @@ export class LibraryAssistantAuthority {
         });
       else {
         await this.port.saveRecords(next);
-        const durable = await this.#loadStrict();
+        const durable = await this.#load(true);
         for (const [setting, value] of Object.entries(update.receiptApplied ?? {}))
           if (!sameConfigValue(durable.receiptApplied?.[setting], value))
             throw new Error('the playback receipt replay record was not read back');
@@ -971,7 +968,7 @@ export class LibraryAssistantAuthority {
       | { reject: string };
     await ensureAssistantPolicy();
     await this.port.refresh();
-    let records = await this.#loadStrict();
+    let records = await this.#load(true);
     let ack: number | null = null;
     let applied = 0;
     for (const message of messages) {

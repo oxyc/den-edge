@@ -51,10 +51,6 @@ export const messages = {
   'common.play': 'Spela',
   'common.resume': 'Fortsätt',
   'common.close': 'Stäng',
-  'receipt.pending': 'Kontrollerar sparade uppspelningsframsteg…',
-  'receipt.failed': 'Sparade uppspelningsframsteg kunde inte uppdateras. Försök igen.',
-  'receipt.recovered': 'Sparade uppspelningsframsteg är uppdaterade.',
-  'receipt.retry': 'Försök igen',
   'retirement.title': 'Biblioteksrensningen måste försökas igen',
   'retirement.detail':
     'Du är utloggad. Den måste fortfarande ta bort krypterade biblioteksdata som sparats på den här enheten. Du kan lämna säkert; ett nytt försök görs nästa gång.',

@@ -3,6 +3,7 @@
   import Router from './Router.svelte';
   import Library from './Library.svelte';
   import LibraryStatus from './components/LibraryStatus.svelte';
+  import type PlaybackReceiptStatusComponent from './components/PlaybackReceiptStatus.svelte';
   import type LegacyBackupRecoveryComponent from './components/LegacyBackupRecovery.svelte';
   import MobileProfileRow from './components/MobileProfileRow.svelte';
   import ProfileOwnerGate from './components/ProfileOwnerGate.svelte';
@@ -1461,7 +1462,7 @@
       work: AssistantWork,
       signal: AbortSignal,
     ) => void,
-    unavailable?: (signal: AbortSignal) => void,
+    unavailable?: (assistant: typeof import('./lib/assistant'), signal: AbortSignal) => void,
   ) {
     const current = session;
     const model = memberModel;
@@ -1474,7 +1475,7 @@
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
           console.warn('den: the library is not a member on den-edge yet; its assistants wait');
-          unavailable?.(stop.signal);
+          unavailable?.(assistant, stop.signal);
           return;
         }
         run(
@@ -1496,7 +1497,6 @@
       },
       (error: unknown) => {
         console.warn('den: the assistant connection could not be loaded', error);
-        if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
       },
     );
     return () => stop.abort();
@@ -1535,18 +1535,10 @@
   type PlaybackReceiptStatus = {
     owner: ProfileSession;
     state: 'pending' | 'failed' | 'recovered';
-    presentation: number;
   };
   let playbackReceiptStatus = $state.raw<PlaybackReceiptStatus | null>(null);
+  let PlaybackReceiptStatus = $state.raw<typeof PlaybackReceiptStatusComponent>();
   let playbackReceiptRetry = $state(0);
-  let playbackReceiptPresentation = 0;
-  let playbackReceiptRecoveredTimer: ReturnType<typeof setTimeout> | undefined;
-  onDestroy(() => clearTimeout(playbackReceiptRecoveredTimer));
-
-  function retryPlaybackReceipts() {
-    if (playbackReceiptStatus?.state !== 'failed') return;
-    playbackReceiptRetry++;
-  }
 
   // Managed playback can finish after this page is gone. Make its household drop-box available, then keep the
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
@@ -1564,62 +1556,42 @@
       return;
     }
     const recovering = heldStatus?.owner === current && heldStatus.state === 'failed';
-    const publish = (state: PlaybackReceiptStatus['state'], signal?: AbortSignal) => {
-      if (signal?.aborted || current !== session || retry !== playbackReceiptRetry) return false;
-      clearTimeout(playbackReceiptRecoveredTimer);
-      playbackReceiptStatus = {
-        owner: current,
-        state,
-        presentation: ++playbackReceiptPresentation,
-      };
-      return true;
+    const publish = (
+      state: PlaybackReceiptStatus['state'] | null,
+      signal: AbortSignal,
+      expected?: PlaybackReceiptStatus,
+    ) => {
+      if (signal.aborted || current !== session || retry !== playbackReceiptRetry) return null;
+      if (!state) {
+        if (!expected || playbackReceiptStatus === expected) playbackReceiptStatus = null;
+        return null;
+      }
+      return (playbackReceiptStatus = { owner: current, state });
     };
-    publish('pending');
     return whileNeeded(
       true,
-      ({ drainPlaybackReceiptsForCurrentAuthority }, work, signal) => {
-        void (async () => {
-          try {
-            const outcome = await drainPlaybackReceiptsForCurrentAuthority(
-              {
-                libraryId: work.libraryId,
-                ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
-                lend: work.lend,
-                apply: (messages, connection) =>
-                  work.model.applyPlaybackReceipts(messages, connection),
-                current: () => current === session,
-                ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
-              },
-              signal,
-            );
-            if (outcome.outcome === 'retired') return;
-            if (outcome.outcome === 'failed') {
-              publish('failed', signal);
-              return;
-            }
-            if (!recovering) {
-              if (current === session && retry === playbackReceiptRetry)
-                playbackReceiptStatus = null;
-              return;
-            }
-            if (!publish('recovered', signal)) return;
-            const presentation = playbackReceiptPresentation;
-            playbackReceiptRecoveredTimer = setTimeout(() => {
-              if (
-                playbackReceiptStatus?.owner === current &&
-                playbackReceiptStatus.presentation === presentation
-              )
-                playbackReceiptStatus = null;
-            }, 5_000);
-          } catch (error) {
-            if (!signal.aborted && current === session && retry === playbackReceiptRetry) {
-              console.warn('den: playback receipts could not be applied', error);
-              publish('failed', signal);
-            }
-          }
-        })();
+      (
+        { recoverPlaybackReceiptsForCurrentAuthority, PlaybackReceiptStatus: Status },
+        work,
+        signal,
+      ) => {
+        PlaybackReceiptStatus = Status;
+        publish('pending', signal);
+        void recoverPlaybackReceiptsForCurrentAuthority<
+          AssistantConnection | undefined,
+          PlaybackReceiptStatus
+        >(
+          work,
+          () => current === session,
+          signal,
+          recovering,
+          (state, expected) => publish(state, signal, expected),
+        );
       },
-      (signal) => publish('failed', signal),
+      ({ PlaybackReceiptStatus: Status }, signal) => {
+        PlaybackReceiptStatus = Status;
+        publish('failed', signal);
+      },
     );
   });
 
@@ -1868,14 +1840,13 @@
           presentation={shown.toastPresentation}
           alert={shown.alert}
           undo={shown.undo}
-          receipt={playbackReceiptStatus?.owner === shown
-            ? {
-                state: playbackReceiptStatus.state,
-                presentation: playbackReceiptStatus.presentation,
-                retry: retryPlaybackReceipts,
-              }
-            : null}
         />
+        {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === shown}
+          <PlaybackReceiptStatus
+            state={playbackReceiptStatus.state}
+            retry={() => playbackReceiptRetry++}
+          />
+        {/if}
       {/if}
       <Router
         profile={profileSessionKey(shown.identity)}
