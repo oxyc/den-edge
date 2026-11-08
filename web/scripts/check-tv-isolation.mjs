@@ -224,5 +224,10 @@ if (process.argv.includes('--capture')) {
   // assistant chunk, and diagnostics remain lazy. That receipt split adds 28 bytes to the complete graph from the
   // module boundary while removing startup work. Session discovery and request-authority code cannot load after the
   // requests it fences. Allow the next 128-byte boundary, retaining 238 bytes on the measured build.
-  if (coreTotalDelta > 86016) throw new Error('Browser total JS/CSS budget exceeded');
+  // Choosing the browser transport by any fine pointer and following that choice as the device changes, with the
+  // desktop bar held to one row and the up-next pair lifted clear of the timeline, adds 324 gzip bytes to the
+  // complete graph (85,841 -> 86,165) and none at startup (14 bytes fewer) on matched main/head builds. All of it is
+  // in the lazy Player chunk; it adds one media-query listener and no request or timer. The TV markup is left as it
+  // is, which is what the duplicated up-next branch costs. Allow the next 128-byte boundary past it, retaining 107.
+  if (coreTotalDelta > 86272) throw new Error('Browser total JS/CSS budget exceeded');
 }
