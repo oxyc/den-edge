@@ -279,7 +279,12 @@
     menu?.style.removeProperty('transform');
     menu?.style.removeProperty('transition');
     coords = null;
-    if (!suppressRefocus) trigger?.focus();
+    // The native close event is queued after the menu has already gone. A key handled before it may have moved focus
+    // on (Down from the TV player's Subtitles opens the playback details): never take that back to the trigger.
+    const active = document.activeElement;
+    const unmoved =
+      !active || active === document.body || active === trigger || !!menu?.contains(active);
+    if (!suppressRefocus && unmoved) trigger?.focus();
     suppressRefocus = false;
     onclose?.();
     // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
