@@ -4,6 +4,9 @@
   import Library from '../src/Library.svelte';
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import { parseRoute, type Explore, type PeopleView } from '../src/lib/route';
+  import type { Hit } from '../src/lib/search';
+  import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
+  import type { InterfaceLanguage } from '../src/lib/interfaceLanguage';
   import type { LibraryLog } from '../src/lib/log';
   import { legacyProfileSession } from '../src/lib/profileSession.svelte';
   import type { Row, SettingsRow, Stamp, TitleRow } from '../src/lib/wire';
@@ -96,6 +99,34 @@
   } as unknown as LibraryLog;
   const library = guest ? null : fixtureLibraryService({ log });
   const content = fixtureContentServiceContext();
+  if (new URL(location.href).searchParams.has('fixtureSearchLanguageRace')) {
+    const originalQuery = content.query.bind(content);
+    const signals: AbortSignal[] = [];
+    let releaseOld: (() => void) | undefined;
+    const hit = (id: number, title: string): Hit => ({
+      kind: 'title',
+      title: { type: 'movie', id, title, year: 2026 },
+    });
+    content.query = (async (request, signal, policy, onProgress) => {
+      if (request.kind !== 'search')
+        return originalQuery(request as never, signal, policy, onProgress as never);
+      if (signal) signals.push(signal);
+      if (signals.length === 1) {
+        // Deliberately ignore cancellation: the component must fence a provider that answers too late.
+        return new Promise((resolve) => {
+          releaseOld = () => resolve({ hits: [hit(71_501, 'Stale English')] });
+        });
+      }
+      return { hits: [hit(71_502, 'Fresh Swedish')] };
+    }) as typeof content.query;
+    Object.assign(window, {
+      denSearchLanguageRace: {
+        signals,
+        setLanguage: (language: InterfaceLanguage) => setInterfaceLanguage(language),
+        releaseOld: () => releaseOld?.(),
+      },
+    });
+  }
   const session = legacyProfileSession(
     guest ? null : 'fixture',
     true,
