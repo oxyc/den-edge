@@ -48,8 +48,9 @@ async function serveHls(route, emptyStatus = 200) {
  * that starts when `requestSession` is called — which only a press inside the cast page may do. Every LOAD the
  * receiver is sent is kept in `window.loads`; with `hang`, the receiver never answers one.
  */
-const sdk = (hang) => `
+const sdk = (hang, idleFirst = false) => `
   window.loads = [];
+  window.endedSessions = 0;
   window.chrome = window.chrome || {};
   window.chrome.cast = {
     AutoJoinPolicy: { PAGE_SCOPED: 'page_scoped' },
@@ -79,7 +80,7 @@ const sdk = (hang) => `
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     getCurrentSession() { return session; },
     getCastState() { return state; },
-    endCurrentSession() { session = null; },
+    endCurrentSession() { window.endedSessions += 1; session = null; },
     requestSession() {
       if (!navigator.userActivation.isActive) return Promise.reject('no user activation');
       session = {
@@ -92,7 +93,18 @@ const sdk = (hang) => `
             tracks: request.media.tracks,
             activeTrackIds: request.activeTrackIds,
           });
-          return ${hang} ? new Promise(() => {}) : Promise.resolve();
+          if (${hang}) return new Promise(() => {});
+          // A real receiver: the load is accepted while RemotePlayer still says IDLE and no media status has come in,
+          // then it reports playing.
+          if (${idleFirst})
+            setTimeout(() => {
+              window.remoteChange?.();
+              setTimeout(() => {
+                Object.assign(window.remotePlayer, { playerState: 'PLAYING', duration: 100, currentTime: 1 });
+                window.remoteChange?.();
+              }, 200);
+            }, 0);
+          return Promise.resolve();
         },
         getMediaSession() { return null; },
         getCastDevice() { return { friendlyName: 'Living Room TV' }; },
@@ -105,8 +117,13 @@ const sdk = (hang) => `
   window.cast = { framework: {
     CastContext: { getInstance: () => context },
     CastContextEventType: { SESSION_STATE_CHANGED: 'sessionstatechanged', CAST_STATE_CHANGED: 'caststatechanged' },
-    RemotePlayer: function () {},
-    RemotePlayerController: function () { this.addEventListener = () => {}; },
+    RemotePlayer: function () {
+      window.remotePlayer = this;
+      Object.assign(this, { playerState: 'IDLE', currentTime: 0, duration: 0, isPaused: false });
+    },
+    RemotePlayerController: function () {
+      this.addEventListener = (type, fn) => { window.remoteChange = fn; };
+    },
     RemotePlayerEventType: { ANY_CHANGE: 'anyChanged' },
   } };
   const announce = setInterval(() => {
@@ -160,6 +177,7 @@ async function open({
     release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 },
   },
   hang = false,
+  idleFirst = false,
   subtitle = false,
   clock = false,
 }) {
@@ -233,7 +251,7 @@ async function open({
     return serveHls(r);
   });
   await context.route('https://www.gstatic.com/**', (r) =>
-    r.fulfill({ contentType: 'text/javascript', body: sdk(hang) }),
+    r.fulfill({ contentType: 'text/javascript', body: sdk(hang, idleFirst) }),
   );
   await context.route(`${CAST}/**`, async (r) => {
     const path = new URL(r.request().url()).pathname;
@@ -337,6 +355,33 @@ test('casting keeps TorBox playing until a Chromecast is chosen, then hands that
     // The receiver has it now: the page's own video is gone, and the player says where it plays.
     await expect(page.locator('.player video')).toHaveCount(0);
     await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+// Reported 2026-11-08 (den-edge 0.271.209): Hearth accepted a TorBox release for the receiver, the cast page loaded
+// it, and within a second the TV quit Default Media Receiver for its home screen while the page said "Returning
+// here". The receiver accepts a load before its first media status, so RemotePlayer still reads IDLE with no
+// idleReason; that was taken for a stop, which ended the Cast session.
+test('a receiver that has not yet reported on an accepted load keeps its Cast session', async () => {
+  const { browser, page, asked } = await open({
+    idleFirst: true,
+    castAnswer: {
+      url: TORBOX,
+      release: { label: 'Fixture 2160p', filename: 'fixture.mkv', size: 1 },
+    },
+  });
+  try {
+    await playingPast(page, 2);
+    await chooseReceiver(page, asked);
+    await expect.poll(() => castLoads(page)).toHaveLength(1);
+    await page.waitForTimeout(1_000);
+    const frame = page.frames().find((candidate) => candidate.url().startsWith(CAST));
+    expect(await frame.evaluate(() => window.endedSessions)).toBe(0);
+    // Nothing asked of Hearth after the receiver's own: no return to this page, no second cast.
+    expect(asked.managed.map((request) => request.player)).toEqual(['hls.js', 'cast']);
+    await expect(page.locator('.player video')).toHaveCount(0);
   } finally {
     await browser.close();
   }

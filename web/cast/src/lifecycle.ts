@@ -1,11 +1,16 @@
-export type CastIdleAction = 'finished' | 'error' | 'replaced' | 'stopped';
+export type CastIdleAction = 'finished' | 'error' | 'replaced' | 'stopped' | 'pending';
 export type CastErrorAction = 'retry-receiver' | 'stop-receiver';
 
-/** Interpret the idle reason carried by the Cast media session, not by RemotePlayer. */
+/**
+ * Interpret the idle reason carried by the Cast media session, not by RemotePlayer. IDLE with no reason is a receiver
+ * that has not reported on the media it was just handed (no media session yet, or none of its status): nothing ended.
+ * Read as "stopped", it ended the Cast session the moment a load was accepted, and the TV went back to its home screen.
+ */
 export function castIdleAction(
   reason: string | null | undefined,
   replacing: boolean,
 ): CastIdleAction {
+  if (reason == null) return 'pending';
   if (reason === 'FINISHED') return 'finished';
   if (reason === 'ERROR') return 'error';
   if (reason === 'INTERRUPTED' && replacing) return 'replaced';
