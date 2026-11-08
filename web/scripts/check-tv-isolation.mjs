@@ -235,5 +235,9 @@ if (process.argv.includes('--capture')) {
   // chunk (JS 41.62 -> 43.16 kB, CSS 3.44 -> 3.68 kB). The cast page loaded beside playback is now 13.5 kB of script
   // instead of 191 kB: hls.js is fetched only when that page plays a session itself. Allow the next 128-byte
   // boundary past it, retaining 128.
-  if (coreTotalDelta > 88192) throw new Error('Browser total JS/CSS budget exceeded');
+  // hls.js 1.7.3 -> 1.7.4 adds 1,239 gzip bytes to the complete graph (87,895 -> 89,134) and none at startup (31
+  // fewer) on matched main/head builds; all of it is the lazy hls chunk, fetched only when the in-page player plays.
+  // It fixes the 1.7.0 parameter-set truncation regression and alternate-audio, WebVTT, source-switch and aborted
+  // fragment reload bugs the player hits. Allow the next 128-byte boundary past it, retaining 82.
+  if (coreTotalDelta > 89216) throw new Error('Browser total JS/CSS budget exceeded');
 }
