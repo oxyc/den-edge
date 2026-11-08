@@ -37,6 +37,8 @@
   const receiptDelayMs = Number(query.get('receiptDelayMs')) || 0;
   const resumeSeconds = Number(query.get('resume')) || undefined;
   const hasNext = query.has('next');
+  // Which episode is next, so the bar's next-episode button has somewhere to go.
+  const nextEpisode = query.has('nextEpisode') ? { season: 1, episode: 2 } : undefined;
   const reel = query.has('reel');
   // A guest's page names its host's install as its own (`/den/~<gid>`), as the app does for a grant.
   const scoutInstall = query.get('scout') ?? 'http://scout.test/config';
@@ -99,6 +101,7 @@
     subtitles={[]}
     resume={{ fraction: resumeSeconds ? resumeSeconds / 60 : 0, seconds: resumeSeconds }}
     next={hasNext ? 'S1 · E2' : undefined}
+    {nextEpisode}
     {castPlayMs}
     onmanagedplayback={receiptBoundary
       ? async (signal) => {

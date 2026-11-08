@@ -295,6 +295,25 @@
     desktopQuery.addEventListener('change', follow);
     return () => desktopQuery.removeEventListener('change', follow);
   });
+  // A phone held upright (the stylesheet's `width < 33rem`): every secondary control shares one row at the bottom,
+  // the transport's mute, PiP and fullscreen included, and what that row has no room for goes into its More menu.
+  const uprightQuery = tv ? undefined : matchMedia('(width < 33rem)');
+  let upright = $state(uprightQuery?.matches ?? false);
+  $effect(() => {
+    if (!uprightQuery) return;
+    const follow = () => (upright = uprightQuery.matches);
+    uprightQuery.addEventListener('change', follow);
+    return () => uprightQuery.removeEventListener('change', follow);
+  });
+  /** The width of the bar's one row on a phone held upright. */
+  let barWidth = $state(0);
+  /** Follows the bar's width. Not on a TV, whose bar never changes layout (and Tizen 3 has no ResizeObserver). */
+  function measureBar(node: HTMLElement) {
+    if (tv) return;
+    const observer = new ResizeObserver(([entry]) => (barWidth = entry?.contentRect.width ?? 0));
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
   /** The kind of the last pointer pressed on the player: a tap on the picture shows or hides the controls. */
   let lastPointer = '';
   /** Whether the controls were showing when that press began. */
@@ -507,6 +526,49 @@
       !!session &&
       (castView || (!!lookOrigin && !session.castOrigin && canOfferCurrentCast(session))),
   );
+  const airPlayLabel = $derived(
+    airPlayAvailability === 'unavailable'
+      ? 'AirPlay, no devices available'
+      : airPlayActive
+        ? 'Change AirPlay device'
+        : 'AirPlay',
+  );
+  /** A phone held upright, with the bar drawn: its secondary controls share the bar's one row. */
+  const uprightBar = $derived(webTransport && upright && !!session);
+  /**
+   * What the upright row moves into its More menu, least used first, until the rest and More fit at 44px each. Cast
+   * never moves: only a press on its own frame can open Chrome's device list.
+   */
+  const barOverflow = $derived.by(() => {
+    const moved: ('beginning' | 'pip' | 'mute' | 'airplay')[] = [];
+    if (!uprightBar || !session || !barWidth) return moved;
+    const pip = !!video && canPictureInPicture();
+    const slots = Math.floor(barWidth / 44);
+    let shown = [
+      true, // stream
+      true, // play from beginning
+      !!onnext && !!nextHref,
+      !!session.subtitles?.length,
+      session.audioTracks.length > 0,
+      castSlotShown,
+      airPlayCapable,
+      true, // mute
+      pip,
+      true, // fullscreen
+    ].filter(Boolean).length;
+    for (const [item, present] of [
+      ['beginning', true],
+      ['pip', pip],
+      ['mute', true],
+      ['airplay', airPlayCapable],
+    ] as const) {
+      if (shown + (moved.length ? 1 : 0) <= slots) break;
+      if (!present) continue;
+      moved.push(item);
+      shown -= 1;
+    }
+    return moved;
+  });
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
   const sourceRecovery = $derived(
@@ -5260,44 +5322,8 @@
               >
                 {@render skipIcon('forward')}
               </button>
-              {#if webTransport}
-                <div class="web-transport-extras">
-                  <button
-                    class="web-volume-button"
-                    type="button"
-                    aria-label={playerMuted ? 'Unmute' : 'Mute'}
-                    onclick={toggleMuted}
-                  >
-                    <ButtonIcon name={playerMuted || playerVolume === 0 ? 'mute' : 'volume'} />
-                  </button>
-                  <input
-                    class="web-volume"
-                    type="range"
-                    aria-label="Volume"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={playerMuted ? 0 : playerVolume}
-                    oninput={setVolume}
-                  />
-                  {#if canPictureInPicture()}
-                    <button
-                      class="web-pip"
-                      type="button"
-                      aria-label="Picture in picture"
-                      title="Picture in picture"
-                      onclick={() => void togglePictureInPicture()}>PiP</button
-                    >
-                  {/if}
-                  <button
-                    type="button"
-                    aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-                    title="Fullscreen"
-                    onclick={() => void toggleFullscreen()}
-                  >
-                    <ButtonIcon name="fullscreen" />
-                  </button>
-                </div>
+              {#if webTransport && !uprightBar}
+                <div class="web-transport-extras">{@render webExtras('')}</div>
               {/if}
             </div>
           </nav>
@@ -5392,7 +5418,7 @@
     {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
-    <footer class:counting-down={upNext !== null}>
+    <footer class:counting-down={upNext !== null} use:measureBar>
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -5570,12 +5596,14 @@
           </div>
         {/if}
         {#if customTransport}
-          <button
-            class="player-tv-action beginning-action"
-            type="button"
-            aria-label="Play from beginning"
-            onclick={playFromBeginning}>{@render beginningIcon()}</button
-          >
+          {#if !barOverflow.includes('beginning')}
+            <button
+              class="player-tv-action beginning-action"
+              type="button"
+              aria-label="Play from beginning"
+              onclick={playFromBeginning}>{@render beginningIcon()}</button
+            >
+          {/if}
           {#if onnext && nextHref}<a
               class="player-tv-action next-action"
               href={nextHref}
@@ -5585,17 +5613,13 @@
           {#if webTransport && castSlotShown}
             {@render castButtonSlot('player-tv-action output-action')}
           {/if}
-          {#if webTransport && airPlayCapable}
+          {#if webTransport && airPlayCapable && !barOverflow.includes('airplay')}
             <Button
               variant="player"
               size="icon"
               class="player-tv-action output-action"
               icon="airplay"
-              ariaLabel={airPlayAvailability === 'unavailable'
-                ? 'AirPlay, no devices available'
-                : airPlayActive
-                  ? 'Change AirPlay device'
-                  : 'AirPlay'}
+              ariaLabel={airPlayLabel}
               title={airPlayAvailability === 'unavailable'
                 ? 'No AirPlay devices available'
                 : 'AirPlay'}
@@ -5603,6 +5627,41 @@
               disabled={airPlayAvailability === 'unavailable'}
               onclick={offerAirPlay}
             />
+          {/if}
+          {#if uprightBar}
+            {@render webExtras('player-tv-action')}
+            {#if barOverflow.length}
+              <div class="pick-menu more-pick">
+                <ActionMenu
+                  label="More controls"
+                  heading="More controls"
+                  triggerClass="pick"
+                  onclose={scheduleWebControls}
+                  items={() => {
+                    const moved = {
+                      beginning: { label: 'Play from beginning', onselect: playFromBeginning },
+                      pip: {
+                        label: 'Picture in picture',
+                        onselect: () => void togglePictureInPicture(),
+                      },
+                      mute: { label: playerMuted ? 'Unmute' : 'Mute', onselect: toggleMuted },
+                      airplay: {
+                        label: airPlayLabel,
+                        disabled: airPlayAvailability === 'unavailable',
+                        onselect: offerAirPlay,
+                      },
+                    };
+                    // In the order they moved: least used first.
+                    return barOverflow.map((item) => ({
+                      kind: 'item' as const,
+                      ...moved[item],
+                    }));
+                  }}
+                >
+                  {#snippet glyph()}<ButtonIcon name="more" />{/snippet}
+                </ActionMenu>
+              </div>
+            {/if}
           {/if}
         {/if}
         <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip
@@ -5708,6 +5767,49 @@
     tabindex="0"
     onfocus={focusCastButton}
   ></span>
+{/snippet}
+
+{#snippet webExtras(classes: string)}
+  <!-- Mute, volume, PiP and fullscreen: beside the transport's buttons, or in the bar's row on a phone held upright,
+       where what has moved into the More menu (`barOverflow`) is left out. -->
+  {#if !barOverflow.includes('mute')}
+    <button
+      class="{classes} web-volume-button"
+      type="button"
+      aria-label={playerMuted ? 'Unmute' : 'Mute'}
+      onclick={toggleMuted}
+    >
+      <ButtonIcon name={playerMuted || playerVolume === 0 ? 'mute' : 'volume'} />
+    </button>
+  {/if}
+  <input
+    class="web-volume"
+    type="range"
+    aria-label="Volume"
+    min="0"
+    max="1"
+    step="0.05"
+    value={playerMuted ? 0 : playerVolume}
+    oninput={setVolume}
+  />
+  {#if canPictureInPicture() && !barOverflow.includes('pip')}
+    <button
+      class="{classes} web-pip"
+      type="button"
+      aria-label="Picture in picture"
+      title="Picture in picture"
+      onclick={() => void togglePictureInPicture()}>PiP</button
+    >
+  {/if}
+  <button
+    class={classes || undefined}
+    type="button"
+    aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+    title="Fullscreen"
+    onclick={() => void toggleFullscreen()}
+  >
+    <ButtonIcon name="fullscreen" />
+  </button>
 {/snippet}
 
 {#snippet skipIcon(direction: 'back' | 'forward')}
@@ -6747,34 +6849,6 @@
     }
   }
 
-  /* A phone held upright: the right-hand group (mute, PiP, fullscreen) cannot sit beside the centre buttons, so it
-     takes its own row above them, at the right, and the release name and Skip move up one more. */
-  @media (width < 33rem) {
-    .web-custom-player .tv-transport-actions {
-      flex-wrap: wrap;
-      row-gap: 12px;
-    }
-
-    .web-custom-player .web-transport-extras {
-      position: static;
-      flex: 0 0 100%;
-      order: -1;
-      justify-content: flex-end;
-    }
-
-    .web-custom-player > footer .release,
-    .web-custom-player > footer .up-next {
-      bottom: calc(92px + var(--player-timeline-extra) + 2 * (var(--player-control-size) + 12px));
-    }
-
-    .web-custom-player :global(.tv-skip-overlay) {
-      bottom: calc(
-        160px + var(--player-timeline-extra) + 2 * (var(--player-control-size) + 12px) +
-          var(--player-safe-bottom)
-      );
-    }
-  }
-
   /* Touch alone: what sits above the timeline moves up by its taller target, and hover states that a tap would leave
      stuck are not drawn. A phone or tablet has its own volume buttons, and iOS ignores a page's volume altogether, so
      mute is the only volume control. */
@@ -6793,6 +6867,75 @@
 
   .web-touch-player .full-tv-transport .tv-play-pause:hover {
     background: rgb(255 255 255 / 0.92);
+  }
+
+  /* A phone held upright: one row along the bottom holds every secondary control (`uprightBar`), the stream, play
+     from beginning and next episode at its left and the rest at its right. Above it are the centred transport, the
+     full-width timeline and the release name, all below the picture. Secondary controls are bare glyphs on 44px
+     targets, so the play button is the one that stands out. The row's targets reach 14px into the side gutter: their
+     glyphs end about level with the timeline's, and 320px holds seven of them. */
+  @media (width < 33rem) {
+    .web-custom-player > footer {
+      right: calc(var(--player-side) - 14px);
+      left: calc(var(--player-side) - 14px);
+    }
+
+    .web-custom-player > footer .release,
+    .web-custom-player > footer .up-next {
+      left: 14px;
+    }
+
+    .web-custom-player > footer .release {
+      width: calc(100% - 28px);
+    }
+
+    .web-custom-player > footer .controls {
+      width: auto;
+      gap: 0;
+    }
+
+    .web-custom-player > footer .controls > :global(*) {
+      flex-shrink: 0;
+    }
+
+    /* The left group is ordered first; this spacer pushes the rest to the right. */
+    .web-custom-player > footer .controls::before {
+      flex: 1 1 0;
+      content: '';
+    }
+
+    .web-custom-player > footer .stream-pick,
+    .web-custom-player > footer .beginning-action,
+    .web-custom-player > footer .next-action {
+      order: -1;
+    }
+
+    .web-custom-player .full-tv-transport .tv-skip,
+    .web-custom-player .full-tv-transport .tv-skip:hover,
+    .web-custom-player footer .player-tv-action,
+    .web-custom-player footer .player-tv-action:hover,
+    .web-custom-player footer .pick-menu :global(.trigger.pick),
+    .web-custom-player footer .pick-menu :global(.trigger.pick:hover),
+    .web-custom-player footer :global(.den-button.player-tv-action) {
+      --button-bg: transparent;
+      --button-border: transparent;
+
+      width: var(--player-control-size);
+      height: var(--player-control-size);
+      border-color: transparent;
+      border-radius: 999px;
+      background: transparent;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+
+    .web-custom-player .full-tv-transport .tv-skip:active,
+    .web-custom-player footer .player-tv-action:active,
+    .web-custom-player footer .pick-menu :global(.trigger.pick:active),
+    .web-custom-player footer :global(.den-button.player-tv-action:active) {
+      background: rgb(255 255 255 / 0.16);
+    }
   }
 
   @media (height <= 600px) {

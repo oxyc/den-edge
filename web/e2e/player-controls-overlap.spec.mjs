@@ -17,12 +17,15 @@ const release = {
 };
 const FINE_POINTER = '(any-hover: hover) and (any-pointer: fine)';
 
-async function mockPlayer(page) {
+async function mockPlayer(page, { subtitles = false } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
+  await page.route(`${ORIGIN}/scout/config/stream/**`, (route) =>
+    route.fulfill({ json: { streams: [] } }),
+  );
   await page.route(`${ORIGIN}/direct/releases`, (route) =>
     route.fulfill({ json: { releases: [release] } }),
   );
@@ -41,6 +44,8 @@ async function mockPlayer(page) {
           { language: 'eng', name: null, channels: 2, commentary: false },
           { language: 'swe', name: null, channels: 2, commentary: false },
         ],
+        // A subtitle rendition puts the subtitle picker in the bar too.
+        ...(subtitles ? { subtitles: [{ language: 'en', name: 'English' }] } : {}),
       },
     }),
   );
@@ -95,8 +100,8 @@ async function launch(browserType) {
   );
 }
 
-async function openPlaying(page, query = '') {
-  await mockPlayer(page);
+async function openPlaying(page, query = '', options = {}) {
+  await mockPlayer(page, options);
   await page.goto(`${ORIGIN}/test/player.html${query}`);
   const video = page.locator('.player video');
   await expect
@@ -369,6 +374,180 @@ test('an iPhone’s fullscreen is Apple’s player, and Den’s bar is back as i
     await browser.close();
   }
 });
+
+// A phone held upright, with every control the bar can show (stream, play from beginning, next episode, subtitles,
+// audio, AirPlay, mute, PiP, fullscreen): one row of them along the bottom, the stream, beginning and next at its left
+// and the rest at its right, each a bare glyph on a 44px target, nothing over anything, and the release name clear of
+// the picture. What the row has no room for is in its More menu, and works from there.
+for (const [engine, browserType] of [
+  ['Chromium', chromium],
+  ['WebKit', webkit],
+]) {
+  for (const viewport of [
+    { width: 320, height: 568 },
+    { width: 375, height: 667 },
+    { width: 430, height: 932 },
+  ]) {
+    test(`a phone upright gets one row of quiet controls, the label clear of the picture (${engine}, ${viewport.width}px)`, async () => {
+      test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+      const browser = await launch(browserType);
+      try {
+        const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+        // AirPlay, as WebKit on an iPhone offers it.
+        await context.addInitScript(() => {
+          Object.defineProperty(HTMLVideoElement.prototype, 'webkitShowPlaybackTargetPicker', {
+            configurable: true,
+            value() {},
+          });
+        });
+        const page = await context.newPage();
+        const video = await openPlaying(page, '?next&nextEpisode', { subtitles: true });
+        await showControls(page);
+        await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toBeVisible();
+        const layout = await uprightLayout(page);
+
+        // One row: every bar control on the same line, the left group wholly left of the right one, at either end.
+        const tops = layout.row.map((control) => control.top);
+        expect(Math.max(...tops) - Math.min(...tops), JSON.stringify(layout.row)).toBeLessThan(3);
+        const left = layout.row.filter((control) => LEFT_GROUP.test(control.name));
+        const right = layout.row.filter((control) => !LEFT_GROUP.test(control.name));
+        expect(left.map((control) => control.name)).toContain(layout.row[0].name);
+        expect(right.length).toBeGreaterThanOrEqual(4);
+        expect(Math.max(...left.map((c) => c.right))).toBeLessThanOrEqual(
+          Math.min(...right.map((c) => c.left)),
+        );
+        expect(right.some((control) => control.name === 'Enter fullscreen')).toBe(true);
+        expect(Math.max(...right.map((c) => c.right))).toBeGreaterThan(viewport.width - 24);
+        expect(Math.min(...left.map((c) => c.left))).toBeLessThan(24);
+        expect(Math.max(...right.map((c) => c.right))).toBeLessThanOrEqual(viewport.width);
+        expect(Math.min(...left.map((c) => c.left))).toBeGreaterThanOrEqual(0);
+
+        expect(layout.collisions).toEqual([]);
+        expect(await overlaps(page)).toEqual([]);
+        expect(layout.small).toEqual([]);
+        expect(await smallTargets(page)).toEqual([]);
+        // Bare glyphs, the play button alone filled.
+        expect(layout.filled).toEqual([]);
+        expect(layout.playFilled).toBe(true);
+        // The release name is in the controls, not over the picture.
+        expect(layout.labelOverPicture, JSON.stringify(layout.label)).toBe(false);
+
+        // What did not fit is in the More menu, least used first: play from beginning, PiP, then mute and AirPlay.
+        const pip = await video.evaluate(
+          (v) => !!document.pictureInPictureEnabled || 'webkitSetPresentationMode' in v,
+        );
+        const more = page.getByRole('button', { name: 'More controls' });
+        const names = layout.row.map((control) => control.name);
+        expect(names).toContain('Next: S1 · E2');
+        if (viewport.width >= 430 && pip) {
+          // Nine controls, nine 44px places: nothing moves.
+          await expect(more).toHaveCount(0);
+          expect(names).toEqual(
+            expect.arrayContaining(['Play from beginning', 'Picture in picture']),
+          );
+          return;
+        }
+        await expect(more).toBeVisible();
+        await more.tap();
+        const menu = page.getByRole('menu', { name: 'More controls' });
+        await expect(menu.getByRole('menuitem', { name: 'Play from beginning' })).toBeVisible();
+        const moved = await menu.getByRole('menuitem').allTextContents();
+        const order = [
+          'Play from beginning',
+          ...(pip ? ['Picture in picture'] : []),
+          'Mute',
+          'AirPlay',
+        ];
+        expect(moved.map((item) => item.trim())).toEqual(order.slice(0, moved.length));
+        for (const item of moved) expect(names).not.toContain(item.trim());
+        // Moved only because the row had no room for them: back in it, they would not fit.
+        expect((names.length - 1 + moved.length) * 44).toBeGreaterThan(layout.barWidth);
+        const before = await video.evaluate((v) => v.currentTime);
+        expect(before).toBeGreaterThan(1);
+        await menu.getByRole('menuitem', { name: 'Play from beginning' }).tap();
+        await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeLessThan(before);
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+}
+
+/** The bar's start: the stream, play from beginning and next episode. */
+const LEFT_GROUP = /^(Stream: |Play from beginning$|Next: )/;
+
+/**
+ * The upright row's controls and how they sit: any two of the row, the transport and the timeline that intersect,
+ * any target under 44×44, any secondary control with a filled background, and whether the release name crosses the
+ * picture (the part of the video's box the frame fills).
+ */
+async function uprightLayout(page) {
+  return page.evaluate(() => {
+    const visible = (element) => {
+      const r = element.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && getComputedStyle(element).visibility !== 'hidden';
+    };
+    const name = (element) => element.getAttribute('aria-label') || element.textContent?.trim();
+    const box = (element) => {
+      const r = element.getBoundingClientRect();
+      return { name: name(element), left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    };
+    const meet = (p, q) =>
+      p.left < q.right && q.left < p.right && p.top < q.bottom && q.top < p.bottom;
+    const rowElements = [
+      ...document.querySelectorAll('.player footer .controls :is(button, a, .cast-slot)'),
+    ].filter(visible);
+    const transportElements = [
+      ...document.querySelectorAll('.player .full-tv-transport :is(button, input)'),
+    ].filter(visible);
+    const row = rowElements.map(box).sort((a, b) => a.left - b.left);
+    const all = [...row, ...transportElements.map(box)];
+    const collisions = [];
+    for (let i = 0; i < all.length; i += 1)
+      for (let j = i + 1; j < all.length; j += 1)
+        if (meet(all[i], all[j])) collisions.push(`${all[i].name} × ${all[j].name}`);
+    const small = all
+      .filter((control) => control.name !== 'Playback position')
+      .filter((control) => control.right - control.left < 44 || control.bottom - control.top < 44)
+      .map((c) => `${c.name} ${Math.round(c.right - c.left)}×${Math.round(c.bottom - c.top)}`);
+    const filledStyle = (element) => {
+      const style = getComputedStyle(element);
+      const transparent =
+        style.backgroundColor === 'transparent' || /rgba\(.*,\s*0\)$/.test(style.backgroundColor);
+      return !transparent || style.backgroundImage !== 'none';
+    };
+    const filled = [
+      ...rowElements,
+      ...transportElements.filter((element) => element.matches('button:not(.tv-play-pause)')),
+    ]
+      .filter(filledStyle)
+      .map((element) => `${name(element)} ${getComputedStyle(element).backgroundColor}`);
+    const play = document.querySelector('.player .tv-play-pause');
+    const video = document.querySelector('.player video');
+    const v = video.getBoundingClientRect();
+    const scale = Math.min(v.width / video.videoWidth, v.height / video.videoHeight);
+    const w = video.videoWidth * scale;
+    const h = video.videoHeight * scale;
+    const picture = {
+      left: v.left + (v.width - w) / 2,
+      top: v.top + (v.height - h) / 2,
+      right: v.left + (v.width + w) / 2,
+      bottom: v.top + (v.height + h) / 2,
+    };
+    const release = document.querySelector('.player footer .release');
+    const label = release && visible(release) ? box(release) : null;
+    return {
+      row,
+      collisions,
+      small,
+      filled,
+      playFilled: filledStyle(play),
+      label: { label, picture },
+      labelOverPicture: !!label && meet(label, picture),
+      barWidth: document.querySelector('.player footer').getBoundingClientRect().width,
+    };
+  });
+}
 
 /** A touch-only phone: mobile emulation where the engine has it (Firefox has none; touch alone makes it coarse). */
 async function touchPage(browser, browserType, viewport) {

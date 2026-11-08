@@ -257,5 +257,10 @@ if (process.argv.includes('--capture')) {
   // catalogs. The remaining growth is the typed failure/retirement result, cancelable ACK, durable shared/local
   // readbacks and bounded status lifecycle; another lazy split cannot reduce complete-graph bytes. The current-main
   // ceiling already retains 251 bytes on the matched head, so no complete-graph allowance is added here.
-  if (coreTotalDelta > 90240) throw new Error('Browser total JS/CSS budget exceeded');
+  // An upright phone's one row of controls (mute, PiP and fullscreen joining the bar, bare glyphs, and a More menu for
+  // what does not fit) adds 874 gzip bytes to the complete non-translation graph (91,307 -> 92,181 on matched local
+  // main/head builds) and 13 at startup; all of it is in the lazy Player chunk (JS 42.74 -> 43.45 kB, CSS 3.90 ->
+  // 4.05 kB). It adds one media-query listener and one ResizeObserver on the bar, and no request or timer. Allow the
+  // next 128-byte boundary past it.
+  if (coreTotalDelta > 91136) throw new Error('Browser total JS/CSS budget exceeded');
 }
