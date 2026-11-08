@@ -1,3 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { blankTitle } from './actions';
 import { ContentAuthority, type ContentReader } from './contentAuthority';
@@ -21,6 +26,7 @@ import { readApiKey } from './prefs';
 import { TMDB_PROXY_KEY } from './tmdbCache';
 import { readFinishedLibraryViews } from './finishedLibraryViews';
 import { LIBRARY_LOCAL_AUTHORITY } from './libraryLocalAuthority';
+import { GRANTS_ROW } from './libraryAssistantAuthority';
 import type { DocumentRow } from './wire';
 
 // The real policy, counted: which den-core operations a selection costs.
@@ -87,14 +93,14 @@ function memoryVault(withFacts = false): Vault {
   return vault;
 }
 
-async function localAuthority() {
+async function localAuthority(fetchImpl?: typeof fetch, mode: 'online' | 'local' = 'local') {
   const vault = memoryVault();
-  const log = (await LibraryLog.openLocal(KEY, vault))!;
+  const log = (await LibraryLog.openLocal(KEY, vault, fetchImpl))!;
   const clock = await openClockStore(vault, {
     key: 'authority-test-clock',
     createDevice: () => '0123456789abcdef',
   });
-  return { log, authority: authority(log, clock, 'local') };
+  return { log, authority: authority(log, clock, mode, fetchImpl), vault };
 }
 
 function authority(
@@ -1880,6 +1886,122 @@ describe('LibraryLogAuthority', () => {
     });
     await reopened.close();
   });
+
+  it('joins managed movie and episode receipts from the Edge callback through durable service readback without assistant consent', async () => {
+    let published: string | null = null;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      expect(String(input)).toBe('/assistant/dropbox');
+      expect(init?.method).toBe('PUT');
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(init?.signal?.aborted).toBe(false);
+      published = (JSON.parse(String(init?.body)) as { pk: string }).pk;
+      return new Response(null, { status: 204 });
+    };
+    const { log, authority: opened, vault } = await localAuthority(fetchImpl, 'online');
+    vi.spyOn(log, 'relayMembership').mockResolvedValue({
+      libraryId: log.libraryId,
+      memberToken: 'b'.repeat(64),
+    });
+
+    const ensured = await opened.task({ kind: 'assistant.receipts.ensure' }, 'managed-playback');
+    expect(ensured.result).toMatchObject({
+      kind: 'assistant.receipts.ensure',
+      dropbox: { public: expect.any(String), kid: expect.any(String) },
+    });
+    expect(log.settings(GRANTS_ROW)).toBeUndefined();
+    expect(published).toBe(
+      (ensured.result as Extract<typeof ensured.result, { kind: 'assistant.receipts.ensure' }>)
+        .dropbox?.public,
+    );
+
+    const joined = mkdtempSync(join(tmpdir(), 'den-joined-playback-'));
+    const output = join(joined, 'receipts.json');
+    const repo = fileURLToPath(new URL('../../..', import.meta.url));
+    const now = Date.now();
+    const edge = spawnSync(
+      'cargo',
+      ['test', 'joined_production_contract_edge_bridge', '--', '--ignored'],
+      {
+        cwd: repo,
+        env: {
+          ...process.env,
+          DEN_JOINED_DROPBOX_PUBLIC: published!,
+          DEN_JOINED_LIBRARY: log.libraryId,
+          DEN_JOINED_RECEIPTS_NOW: String(now),
+          DEN_JOINED_RECEIPTS_OUT: output,
+        },
+        encoding: 'utf8',
+      },
+    );
+    expect(edge.status, `${edge.stdout}\n${edge.stderr}`).toBe(0);
+    const messages = (
+      JSON.parse(readFileSync(output, 'utf8')) as {
+        messages: Array<{ seq: number; sealed: string }>;
+      }
+    ).messages;
+    expect(messages.map(({ seq }) => seq)).toEqual([1, 2]);
+    expect(messages.every(({ sealed }) => sealed.length > 100)).toBe(true);
+
+    await opened.observe({
+      kind: 'title-shape',
+      title: { type: 'tv', id: 1399 },
+      seasons: [{ season: 1, episodes: 2 }],
+      lastAired: { season: 1, episode: 2 },
+    });
+    await expect(
+      opened.task({ kind: 'assistant.receipts.apply', messages }, 'receipt-catch-up'),
+    ).resolves.toMatchObject({
+      result: { kind: 'assistant.receipts.apply', ack: 2, applied: 2 },
+    });
+    const receiptMovie = { type: 'movie' as const, id: 550 };
+    const receiptSeries = { type: 'tv' as const, id: 1399 };
+    await expect(opened.select({ kind: 'title', title: receiptMovie })).resolves.toMatchObject({
+      standing: 'in-progress',
+      progress: { fraction: 5 / 6, seconds: 5_000 },
+    });
+    await expect(opened.select({ kind: 'title', title: receiptSeries })).resolves.toMatchObject({
+      standing: 'in-progress',
+      episodes: expect.arrayContaining([
+        expect.objectContaining({
+          season: 1,
+          episode: 2,
+          fraction: 0.5,
+          seconds: 1_200,
+        }),
+      ]),
+    });
+    await opened.close();
+
+    const reopenedLog = (await LibraryLog.openExistingLocal(KEY, vault, fetchImpl))!;
+    const reopenedClock = await openClockStore(vault, {
+      key: 'authority-test-clock',
+      createDevice: () => 'fedcba9876543210',
+    });
+    const reopened = authority(reopenedLog, reopenedClock, 'online', fetchImpl);
+    await reopened.observe({
+      kind: 'title-shape',
+      title: receiptSeries,
+      seasons: [{ season: 1, episodes: 2 }],
+      lastAired: { season: 1, episode: 2 },
+    });
+    await expect(reopened.select({ kind: 'title', title: receiptMovie })).resolves.toMatchObject({
+      standing: 'in-progress',
+      progress: { fraction: 5 / 6, seconds: 5_000 },
+    });
+    await expect(reopened.select({ kind: 'title', title: receiptSeries })).resolves.toMatchObject({
+      standing: 'in-progress',
+      episodes: expect.arrayContaining([
+        expect.objectContaining({
+          season: 1,
+          episode: 2,
+          fraction: 0.5,
+          seconds: 1_200,
+        }),
+      ]),
+    });
+    expect(reopenedLog.settings(GRANTS_ROW)).toBeUndefined();
+    await reopened.close();
+  }, 60_000);
 
   it('owns every synced preference with semantic default and explicit-empty patches', async () => {
     const { log, authority } = await localAuthority();

@@ -46,7 +46,7 @@
   import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
-  import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
+  import { householdAssistantFetch } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { thisDevice } from './lib/device.svelte';
@@ -290,7 +290,9 @@
     const profileModel = session.model;
     if (!model) return;
     const name = thisDevice.name;
-    const libraryKey = session.identity.libraryKey;
+    // The play key belongs to the household library whose device list publishes it (inbox-v1 §5), not to the active
+    // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
+    const libraryKey = session.household.identity.libraryKey;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
@@ -1465,11 +1467,12 @@
     const household = assistantHousehold;
     if (!needed || !model) return;
     const stop = new AbortController();
-    void Promise.all([import('./lib/assistant'), household?.relayMembership() ?? null]).then(
+    const authority = household ?? model;
+    void Promise.all([import('./lib/assistant'), authority.relayMembership()]).then(
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
-        if (household && !membership) {
-          console.warn('den: the household is not a member on den-edge yet; its assistants wait');
+        if (!membership) {
+          console.warn('den: the library is not a member on den-edge yet; its assistants wait');
           return;
         }
         run(
@@ -1477,8 +1480,8 @@
           {
             model,
             household,
-            libraryId: membership?.libraryId ?? libraryCredentialId() ?? 'library',
-            ...(membership ? { fetchImpl: householdAssistantFetch(membership) } : {}),
+            libraryId: membership.libraryId,
+            fetchImpl: householdAssistantFetch(membership),
             lend: async () => {
               if (!household) return undefined;
               const connection = await household.assistantConnection();
@@ -1528,27 +1531,29 @@
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
   $effect(() => {
     const current = session;
-    return whileNeeded(session.foregrounded, ({ drainPlaybackReceiptsOnce }, work, signal) => {
-      void (async () => {
-        try {
-          const dropbox = await (work.household ?? work.model).ensurePlaybackReceipts();
-          if (!dropbox) return;
-        } catch (error) {
-          console.warn('den: playback receipt key could not be published', error);
-          return;
-        }
-        if (signal.aborted || current !== session) return;
-        await drainPlaybackReceiptsOnce(
-          {
-            libraryId: work.libraryId,
-            apply: async (messages) =>
-              work.model.applyPlaybackReceipts(messages, await work.lend()),
-            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
-          },
-          signal,
-        );
-      })();
-    });
+    return whileNeeded(
+      session.foregrounded,
+      ({ drainPlaybackReceiptsForCurrentAuthority }, work, signal) => {
+        void (async () => {
+          try {
+            await drainPlaybackReceiptsForCurrentAuthority(
+              {
+                libraryId: work.libraryId,
+                ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
+                lend: work.lend,
+                apply: (messages, connection) =>
+                  work.model.applyPlaybackReceipts(messages, connection),
+                current: () => current === session,
+                ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+              },
+              signal,
+            );
+          } catch (error) {
+            console.warn('den: playback receipts could not be applied', error);
+          }
+        })();
+      },
+    );
   });
 
   // An LG or Samsung TV also drains its own lane of the assistant's TV queue (den-spec assistant-v1 §16), so an

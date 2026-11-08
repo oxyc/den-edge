@@ -67,3 +67,29 @@ test('a direct den-remux address is given no claim, and neither is a page with n
   await startSession(WANT);
   expect(claim(spy)).toBeNull();
 });
+
+test('an actual 428 retries the same grant and exact playback identity with only the requested hint added', async () => {
+  useLibraryCredential({ id: 'abc123', member: 'def456' });
+  const calls: Array<{ body: Record<string, unknown>; claim: string | null }> = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        claim: new Headers(init?.headers).get(HEADER),
+      });
+      return calls.length === 1
+        ? Response.json({ error: 'ipv4_hint_wanted' }, { status: 428 })
+        : Response.json({ playlist: '/remux/s/id/sig/master.m3u8' }, { status: 201 });
+    }),
+  );
+
+  await expect(
+    startSession(WANT, undefined, '/remux', async () => '192.0.2.44'),
+  ).resolves.not.toHaveProperty('failure');
+  expect(calls).toHaveLength(2);
+  expect(calls.map(({ claim }) => claim)).toEqual(['abc123:def456', 'abc123:def456']);
+  const { subtitles: _subtitles, subtitleLanguages: _languages, ...identity } = WANT;
+  expect(calls[0]!.body).toEqual(identity);
+  expect(calls[1]!.body).toEqual({ ...identity, ipv4Hint: '192.0.2.44' });
+});

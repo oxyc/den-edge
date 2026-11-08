@@ -123,7 +123,11 @@ if (process.argv.includes('--capture')) {
   // The source-wait Worker boundary adds 135 gzip bytes to startup on the post-outage-cache parent. Request
   // ownership and the policy codec must be present with the always-loaded authority; Detail's presentation stays
   // lazy. Raise the absolute/proportional caps by the smallest rounded allowance, retaining 82 bytes on this build.
-  if (initialDelta > Math.min(5024, Math.floor(baseline.initialGzip * 0.026)))
+  // Current-main playback recovery adds 993 gzip bytes to startup on matched builds (4,997 -> 5,990). The receipt
+  // preparation cache was moved into the existing lazy assistant chunk, saving 26 startup bytes; the remaining
+  // route, generation and cancellation fences must be present before discovery or a request begins. Allow the next
+  // 128-byte boundary, retaining 154 bytes on the measured build.
+  if (initialDelta > Math.min(6144, Math.floor(baseline.initialGzip * 0.032)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -215,5 +219,10 @@ if (process.argv.includes('--capture')) {
   // lazy failure chunk. Splitting visible recovery state again would add a request, while request ownership belongs in
   // the Worker. Spend the old 556-byte margin and allow 2.625 KiB more, retaining 416 bytes of total margin and the
   // catalog limits.
-  if (coreTotalDelta > 84186) throw new Error('Browser total JS/CSS budget exceeded');
+  // Against the current-main tree, the complete non-translation graph grows 1,852 gzip bytes (83,926 -> 85,778).
+  // Player deadline/notices remain in the lazy Player chunk, receipt preparation moved to the existing lazy
+  // assistant chunk, and diagnostics remain lazy. That receipt split adds 28 bytes to the complete graph from the
+  // module boundary while removing startup work. Session discovery and request-authority code cannot load after the
+  // requests it fences. Allow the next 128-byte boundary, retaining 238 bytes on the measured build.
+  if (coreTotalDelta > 86016) throw new Error('Browser total JS/CSS budget exceeded');
 }

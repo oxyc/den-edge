@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fetchRoutes, within } from './routes';
+import { fetchRoutes, fetchRoutesForDiscovery, within } from './routes';
 
 describe('fetchRoutes', () => {
   it('reads den-edge’s table, and is empty when it has none', async () => {
@@ -17,6 +17,10 @@ describe('fetchRoutes', () => {
     });
     expect(await fetchRoutes(answer('<!doctype html>'))).toEqual({});
     expect(await fetchRoutes(answer('{}', 404))).toEqual({});
+    expect(await fetchRoutesForDiscovery(answer('{"addons":{}}'))).toEqual({});
+    expect(await fetchRoutesForDiscovery(answer('{}'))).toEqual({});
+    expect(await fetchRoutesForDiscovery(answer('<!doctype html>'))).toBeNull();
+    expect(await fetchRoutesForDiscovery(answer('{}', 503))).toBeNull();
   });
 });
 

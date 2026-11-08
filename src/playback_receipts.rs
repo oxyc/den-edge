@@ -483,6 +483,22 @@ mod tests {
         (harness, context)
     }
 
+    async fn setup_with_public(public: &str, request_name: &str) -> (Harness, PlaybackContext) {
+        let harness = write_harness().await;
+        let claim = member();
+        let response = harness
+            .send(
+                "PUT",
+                "/assistant/dropbox",
+                Some(json!({"pk": public}).to_string()),
+                &[("content-type", "application/json"), (crate::library::MEMBER_HEADER, &claim)],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let context = authorize(&harness.state, LIB, request_name).await.unwrap().unwrap();
+        (harness, context)
+    }
+
     #[tokio::test]
     async fn authorization_reuses_one_request_without_reusing_another() {
         let (harness, first) = setup().await;
@@ -521,6 +537,80 @@ mod tests {
             &[label; den_assistant::ESEED_LEN],
         )
         .unwrap()
+    }
+
+    fn sealed_episode(context: &PlaybackContext, label: u8, now: u64) -> String {
+        let public = den_assistant::b64url_decode(&context.public).unwrap();
+        let title = json!({"type": "tv", "id": 1399});
+        den_assistant::seal_playback_receipt(
+            &public,
+            &den_assistant::PlaybackReceipt {
+                library: &context.library,
+                kid: &context.kid,
+                id: &context.id,
+                title: &title,
+                season: Some(1),
+                episode: Some(2),
+                position_seconds: 1_200,
+                duration_seconds: 2_400,
+                completed: false,
+                ended_at: now,
+                expires_at: now + 86_400_000,
+            },
+            &[label; den_assistant::ESEED_LEN],
+        )
+        .unwrap()
+    }
+
+    /// The browser production-contract test supplies the real Library Service drop-box and consumes this actual
+    /// Edge callback/drain output. Kept ignored on its own because the joining test owns its required environment.
+    #[tokio::test]
+    #[ignore = "run by libraryLogAuthority's joined playback receipt contract"]
+    async fn joined_production_contract_edge_bridge() {
+        let public = std::env::var("DEN_JOINED_DROPBOX_PUBLIC").expect("joined drop-box public key");
+        let output = std::env::var("DEN_JOINED_RECEIPTS_OUT").expect("joined receipt output path");
+        let library = std::env::var("DEN_JOINED_LIBRARY").expect("joined library id");
+        let now = std::env::var("DEN_JOINED_RECEIPTS_NOW")
+            .expect("joined receipt time")
+            .parse::<u64>()
+            .expect("receipt time is u64");
+        let (harness, movie_context) = setup_with_public(&public, "joined-movie").await;
+        let episode_context = authorize(&harness.state, LIB, "joined-episode").await.unwrap().unwrap();
+        assert_eq!(movie_context.kid, episode_context.kid);
+        let mut movie_receipt = movie_context.clone();
+        movie_receipt.library = library.clone();
+        let mut episode_receipt = episode_context.clone();
+        episode_receipt.library = library;
+
+        for (context, sealed) in [
+            (&movie_context, sealed(&movie_receipt, 21, now)),
+            (&episode_context, sealed_episode(&episode_receipt, 22, now)),
+        ] {
+            let bearer = format!("Bearer {}", context.token);
+            let (status, accepted) = request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(accepted["queued"], accepted["seq"]);
+        }
+
+        let claim = member();
+        let (status, drained) = request(
+            &harness,
+            "POST",
+            "/playback/receipts/drain",
+            json!({}),
+            &[(crate::library::MEMBER_HEADER, &claim)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(drained["messages"].as_array().unwrap().len(), 2);
+        std::fs::write(output, serde_json::to_vec(&drained).unwrap()).expect("write joined receipts");
     }
 
     #[tokio::test]

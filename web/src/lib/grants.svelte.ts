@@ -31,6 +31,7 @@ export interface GuestGrant {
 }
 
 export type RedeemFailure = 'malformed' | 'invalid' | 'throttled' | 'unreachable';
+export type GrantRefreshOutcome = 'verified' | 'retained-unverified';
 
 /** Why a device ticket gave this device no slot. `full` names the host to ask for another. */
 export type TicketFailure =
@@ -276,9 +277,10 @@ export class GuestGrants {
   }
 
   /** Ask den-edge what each held grant gives now: a renamed host, a moved end date, or the access ended. */
-  async refresh(fetchImpl: typeof fetch = fetch): Promise<void> {
+  async refresh(fetchImpl: typeof fetch = fetch): Promise<GrantRefreshOutcome> {
     pruneSecrets();
     const before = JSON.stringify(this.list);
+    let verified = true;
     const next = await Promise.all(
       this.list
         // An expired grant is asked again, since den-edge keeps it for a while so its host can extend it.
@@ -289,11 +291,15 @@ export class GuestGrants {
           if (reply.status === 410) return { ...grant, ended: true };
           // Revoked and unknown read alike to den-edge: the access is gone for good, so its secret is dropped.
           if (reply.status === 404) return { ...grant, ended: true, secret: '' };
+          // `grantAddons` deliberately turns transport failures into status 0 instead of rejecting. A 5xx likewise
+          // preserves the cached grant, but cannot verify that it is still authority for this page.
+          verified = false;
           return grant;
         }),
     );
     const merged = this.list.map((grant) => next.find((n) => n.gid === grant.gid) ?? grant);
     if (JSON.stringify(merged) !== before) this.set(merged);
+    return verified ? 'verified' : 'retained-unverified';
   }
 
   /** Leave a grant. False when den-edge couldn't be reached, which leaves it held so leaving can be retried. */

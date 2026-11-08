@@ -151,15 +151,20 @@ export class LibraryServiceClient {
   async task(
     task: LibraryTask,
     operationId: string = crypto.randomUUID(),
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     const requestId = this.#requestId();
-    const reply = await this.#request({
-      type: 'task',
-      protocol: LIBRARY_SERVICE_PROTOCOL,
-      requestId,
-      operationId,
-      task,
-    });
+    const reply = await this.#request(
+      {
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        operationId,
+        task,
+      },
+      undefined,
+      signal,
+    );
     if (reply.type !== 'task-result') throw this.#unexpected(reply, 'task-result');
     return { result: reply.result, version: reply.version };
   }

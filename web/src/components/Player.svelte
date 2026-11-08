@@ -177,6 +177,7 @@
     castPlayMs = CAST_PLAY_MS,
     onprogress,
     onfinalprogress,
+    onmanagedplayback,
     onnext,
     onclose,
     oncontrols,
@@ -220,6 +221,8 @@
     onprogress: (fraction: number, seconds: number, at: Episode, playing: boolean) => void;
     /** The visit's terminal position, retained by the library until its exact command is durable. */
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
+    /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
+    onmanagedplayback?: (signal: AbortSignal) => Promise<boolean>;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -451,6 +454,10 @@
   let heldFrame = $state<string>();
   /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
   const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin ?? heldFrame);
+  /** The exact iframe document generation that announced readiness; origin alone cannot distinguish a reload. */
+  let castFrameGeneration = 0;
+  let castFrameChallenge = '';
+  let castFrameReady = $state<{ origin: string; challenge: string }>();
   let directAttempt: 'initial' | 'refreshed' | null = null;
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -495,6 +502,25 @@
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  const RECEIPT_PREPARE_MS = 3_000;
+
+  function beforeAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(signal.reason);
+      signal.addEventListener('abort', aborted, { once: true });
+      void work.then(
+        (value) => {
+          signal.removeEventListener('abort', aborted);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', aborted);
+          reject(error);
+        },
+      );
+    });
+  }
   /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
   let startingSession: AbortController | undefined;
   let clientFailureGeneration = 0;
@@ -1150,6 +1176,27 @@
     // longer rules it out: Scout asks TorBox to create that exact track's stream.
     const torboxTried =
       !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
+    if (playback && onmanagedplayback) {
+      let receiptReady = false;
+      try {
+        const receiptSignal = AbortSignal.any([
+          attempt.signal,
+          AbortSignal.timeout(RECEIPT_PREPARE_MS),
+        ]);
+        // The deadline owns the whole callback, including the first lazy module load and any transport reconnect.
+        // Passing it down still cancels work that observes the signal; racing it here prevents an uncooperative
+        // boundary from holding playback indefinitely.
+        receiptReady = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
+      } catch (error) {
+        if (!attempt.signal.aborted)
+          console.warn('den: managed playback receipt authority could not be prepared', error);
+      }
+      if (attempt.signal.aborted) return false;
+      if (!receiptReady)
+        unchanged = i18n.phrase(
+          'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.',
+        );
+    }
     let result = playback
       ? await startPlayback(playback, asked, undefined, attempt.signal)
       : await startSession(request, undefined, on, undefined, attempt.signal);
@@ -2325,10 +2372,36 @@
     return () => clearInterval(tick);
   });
 
+  function readyCastFrame(origin: string): Window | null {
+    const frame = castFrame?.contentWindow;
+    return frame &&
+      castFrameReady?.origin === origin &&
+      castFrameReady.challenge === castFrameChallenge
+      ? frame
+      : null;
+  }
+
+  function castDocumentReady(origin: string, generation: unknown): boolean {
+    if (generation !== castFrameChallenge) return false;
+    castFrameReady = { origin, challenge: castFrameChallenge };
+    return true;
+  }
+
+  function castFrameLoaded(): void {
+    castFrameGeneration += 1;
+    castFrameChallenge = `${castFrameGeneration}:${crypto.randomUUID?.() ?? performance.now()}`;
+    castFrameReady = undefined;
+    const origin = frameOrigin;
+    const frame = castFrame?.contentWindow;
+    if (origin && frame)
+      frame.postMessage({ type: 'den-handshake', generation: castFrameChallenge }, origin);
+  }
+
   function sendToCastFrame(): void {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return;
+    if (!current?.castOrigin) return;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return;
     playedEngine = 'cast_page';
     // Played here only because this page could not reach the home network: the cast page, in the same browser,
     // can't either, so it is not sent there to fail. A receiver is on that network, so a cast still offers it.
@@ -2385,17 +2458,29 @@
   // Send each replacement explicitly; the frame's den-ready message remains the retry for its initial page load.
   $effect(() => {
     const [current, frame, preparing] = [session, castFrame, castSubtitlePreparing];
-    if (!current?.castOrigin || !frame || preparing) return;
+    if (
+      !current?.castOrigin ||
+      !frame ||
+      preparing ||
+      castFrameReady?.origin !== current.castOrigin ||
+      castFrameReady.challenge !== castFrameChallenge
+    )
+      return;
     untrack(sendToCastFrame);
   });
 
   function castMessage(event: MessageEvent<unknown>): void {
     const looking = castFrame?.contentWindow;
     if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
-      const message = event.data as { type?: string; available?: unknown; profile?: unknown };
-      if (message.type === 'den-ready')
+      const message = event.data as {
+        type?: string;
+        generation?: unknown;
+        available?: unknown;
+        profile?: unknown;
+      };
+      if (message.type === 'den-ready' && castDocumentReady(event.origin, message.generation)) {
         looking.postMessage({ type: 'den-discover', interfaceLanguage }, lookOrigin);
-      else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
+      } else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
         look({ kind: 'availability', available: message.available });
       else if (message.type === 'den-cast-session' && castOffer === 'choose') {
         // The receiver model the viewer keeps in the cast page's menu, else its default.
@@ -2420,9 +2505,10 @@
       profile?: string;
       maxBitrate?: number;
       available?: boolean;
+      generation?: unknown;
     };
     if (message.type === 'den-ready') {
-      sendToCastFrame();
+      castDocumentReady(event.origin, message.generation);
       return;
     }
     if (message.id !== current.playlist) return;
@@ -2462,7 +2548,10 @@
         if (restartAfterMeasure(current, publicMaxBitrate)) {
           restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
         } else
-          frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
+          readyCastFrame(current.castOrigin)?.postMessage(
+            { type: 'den-continue', id: current.playlist },
+            current.castOrigin,
+          );
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -2654,7 +2743,7 @@
     const next = castLook(castOffer, event);
     castOffer = next.offer;
     if (next.offer === 'choose' && discoveredOrigin)
-      castFrame?.contentWindow?.postMessage(
+      readyCastFrame(discoveredOrigin)?.postMessage(
         { type: 'den-choose', interfaceLanguage },
         discoveredOrigin,
       );
@@ -3387,8 +3476,9 @@
 
   function sendSubtitleChoice() {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return;
+    if (!current?.castOrigin) return;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return;
     frame.postMessage(
       {
         type: 'den-subtitle',
@@ -3786,8 +3876,9 @@
   /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
   function seekCastFrame(time: number): boolean {
     const current = session;
-    const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || !frame) return false;
+    if (!current?.castOrigin) return false;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return false;
     frame.postMessage({ type: 'den-seek', id: current.playlist, time }, current.castOrigin);
     return true;
   }
@@ -4991,7 +5082,7 @@
         src={frameOrigin}
         allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
         sandbox="allow-scripts allow-same-origin allow-presentation"
-        onload={sendToCastFrame}
+        onload={castFrameLoaded}
       ></iframe>
     {/if}
   </div>

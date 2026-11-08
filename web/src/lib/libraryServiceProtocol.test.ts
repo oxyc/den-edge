@@ -310,6 +310,40 @@ describe('library service client protocol', () => {
       expect(decodeTask({ kind: 'assistant.apply', messages: [], tv })).toMatchObject({
         ok: false,
       });
+    expect(decodeTask({ kind: 'assistant.receipts.ensure' })).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 1, sealed: 'ciphertext' }],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 1, sealed: 'ciphertext', plaintext: 'leak' }],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: Array.from({ length: 100 }, (_, seq) => ({ seq, sealed: 'x'.repeat(2_539) })),
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: Array.from({ length: 101 }, (_, seq) => ({ seq, sealed: 'ciphertext' })),
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 1, sealed: 'x'.repeat(2_540) }],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(decodeTask({ kind: 'assistant.receipts.apply', messages: null })).toMatchObject({
+      ok: false,
+    });
     expect(
       decodeTask({
         kind: 'history.import',
@@ -447,6 +481,49 @@ describe('library service client protocol', () => {
         requestId: 'request-task',
         operationId: 'operation-task',
         result: { kind: 'history.import', written: 2, total: 2, complete: true },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-key-absent',
+        operationId: 'receipt-key-absent-op',
+        result: { kind: 'assistant.receipts.ensure', dropbox: null },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-apply-malformed',
+        operationId: 'receipt-apply-malformed-op',
+        result: { kind: 'assistant.receipts.apply', ack: '2', applied: 1 },
+        version,
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-key',
+        operationId: 'receipt-key-op',
+        result: {
+          kind: 'assistant.receipts.ensure',
+          dropbox: { kid: 'a'.repeat(32), public: 'sealed-public-key' },
+        },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-apply',
+        operationId: 'receipt-apply-op',
+        result: { kind: 'assistant.receipts.apply', ack: 2, applied: 1 },
         version,
       }),
     ).toMatchObject({ ok: true });
