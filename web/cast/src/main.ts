@@ -288,6 +288,17 @@ function deviceName(): string | undefined {
 }
 
 /**
+ * The Cast state with the receiver app it applies to, for the console a viewer can share. Chrome finds devices per
+ * receiver app, so a hidden Cast button with Den's receiver (NO_DEVICES_AVAILABLE) means no Chromecast on the network
+ * can launch that app yet, while Google's Default Media Receiver still finds them.
+ */
+function logCastState(): void {
+  console.info(
+    `[Den cast] ${JSON.stringify({ event: 'cast-state', state: castContext?.getCastState() ?? castState ?? null, receiver: receiverApp ?? 'default' })}`,
+  );
+}
+
+/**
  * The one Cast button: hidden until a receiver is on the network, then the outline glyph; its arcs pulse while a
  * session starts, and the screen fills once one has. Its name says which of those it is.
  */
@@ -881,6 +892,7 @@ function initializeCast(): boolean {
   castContext.addEventListener(cast.CastContextEventType.CAST_STATE_CHANGED, (event) => {
     castState = (event as { castState?: string }).castState ?? castState;
     castDevices = castState !== 'NO_DEVICES_AVAILABLE';
+    logCastState();
     announceDevices();
   });
   remotePlayer = new cast.RemotePlayer();
@@ -933,6 +945,7 @@ function initializeCast(): boolean {
     // the phone silently started streaming it to a TV. Casting begins only when the Cast button is pressed.
     autoJoinPolicy: chrome.AutoJoinPolicy.PAGE_SCOPED,
   });
+  logCastState();
   castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
     const state = (event as { sessionState?: string }).sessionState;
     if (state === 'SESSION_STARTED') {
