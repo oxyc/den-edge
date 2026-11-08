@@ -484,7 +484,6 @@
   const castActive = $derived(casting || castState === 'connecting' || castState === 'connected');
   /** The picture is on the receiver: the stage shows its poster and where it plays, under Den's transport. */
   const castView = $derived(castActive && (!!session?.castOrigin || !!heldFrame));
-  const customTransport = $derived(fullTvTransport || webTransport);
   /** The exact iframe document generation that announced readiness; origin alone cannot distinguish a reload. */
   let castFrameGeneration = 0;
   let castFrameChallenge = '';
