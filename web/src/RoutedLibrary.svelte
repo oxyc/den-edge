@@ -290,7 +290,9 @@
     const profileModel = session.model;
     if (!model) return;
     const name = thisDevice.name;
-    const libraryKey = session.identity.libraryKey;
+    // The play key belongs to the household library whose device list publishes it (inbox-v1 §5), not to the active
+    // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
+    const libraryKey = session.household.identity.libraryKey;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {

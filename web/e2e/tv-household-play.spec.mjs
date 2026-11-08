@@ -1,7 +1,7 @@
 // A TV in the library takes plays from any device holding it (den-spec inbox-v1 §5): it makes a household play key
 // when it checks in, drains the queue that key derives, and starts a fresh play as its own Play would. The plays are
 // sealed here exactly as a sender seals them, so nothing of the TV's own sending path is involved.
-import { createCipheriv, hkdfSync, randomBytes } from 'node:crypto';
+import { createCipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { CODE, newEdge, routeGuestEdge } from './guest-edge.mjs';
@@ -154,13 +154,22 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     await tv.getByLabel('Owner PIN').fill('1234');
     await expect(tv.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible();
 
-    // The TV makes its play key when it checks in with the library.
-    const storedKey = () =>
-      tv.evaluate(
-        () => JSON.parse(localStorage.getItem('den.tvPlayKey.v1') ?? 'null')?.key ?? null,
-      );
-    await expect.poll(storedKey, { timeout: 30_000 }).not.toBeNull();
-    const playKey = await storedKey();
+    // The TV makes its play key when it checks in, for the household library whose device list publishes it. The
+    // Owner profile's own library has another key: a play key made for that would replace the published one as soon
+    // as the Owner profile opened, and a play sent to the first would never be drained (inbox-v1 §5).
+    const stored = () =>
+      tv.evaluate(() => ({
+        made: JSON.parse(localStorage.getItem('den.tvPlayKey.v1') ?? 'null'),
+        household: JSON.parse(localStorage.getItem('den.links') ?? '[]')[0]?.libraryKey,
+      }));
+    await expect
+      .poll(async () => (await stored()).made?.key ?? null, { timeout: 30_000 })
+      .not.toBeNull();
+    const { made, household } = await stored();
+    expect(made.library).toBe(
+      createHash('sha256').update(household).digest().subarray(0, 16).toString('hex'),
+    );
+    const playKey = made.key;
 
     const play = (id, sentAt) =>
       seal(playKey, { type: 'play', tmdbId: id, mediaType: 'movie', title: `Movie ${id}` }, sentAt);
