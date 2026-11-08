@@ -211,7 +211,10 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
     await expect.poll(() => page.evaluate(() => window.toSender.length)).toBe(1);
     const [answer] = await page.evaluate(() => window.toSender);
     expect(answer).toMatchObject({ ns: 'urn:x-cast:fi.oxy.den', senderId: 'phone' });
-    expect(answer.message).toMatchObject({ type: 'den-capabilities', details: { maxHeight: 2160 } });
+    expect(answer.message).toMatchObject({
+      type: 'den-capabilities',
+      details: { maxHeight: 2160 },
+    });
     expect(answer.message.playable).toEqual({
       h264: 0x33,
       h264High10: 0,

@@ -10,7 +10,6 @@ import {
   reportClientFailure,
   sendPageError,
 } from './lib/diagnosticsReport';
-import { castReceiverOptIn } from './lib/castReceiver';
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
@@ -142,8 +141,10 @@ if (phoned) {
   );
 }
 
-// `?cast-receiver=den` (or `default`) on any page: this browser's Cast receiver choice, kept for the player.
-castReceiverOptIn();
+// `?cast-receiver=den` (or `default`) on any page: this browser's Cast receiver choice, kept for the player. Loaded
+// only when asked, so startup carries none of it.
+if (location.search.includes('cast-receiver='))
+  void import('./lib/castReceiver').then(({ castReceiverOptIn }) => castReceiverOptIn());
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');
