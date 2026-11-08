@@ -107,7 +107,7 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
       { exact: true },
     ),
   ).toBeVisible();
-  const recovery = page.getByRole('button', { name: 'Open Connections' });
+  const recovery = page.getByRole('button', { name: 'Connections' });
   await expect(recovery).toBeVisible();
   await recovery.focus();
   await expect(recovery).toBeFocused();

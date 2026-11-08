@@ -1251,7 +1251,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'La reproducción puede comenzar, pero la recuperación del progreso en segundo plano no está disponible. Mantén esta página abierta para guardar dónde te detuviste.',
   'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.':
     'Este televisor no puede recuperar el progreso de la reproducción administrada después de cerrar la página. Mantén Den abierto o vincula un teléfono u ordenador en Ajustes › Conexiones.',
-  'Open Connections': 'Abrir Conexiones',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'Para audio o subtítulos que este navegador no puede reproducir, o una emisión que se detiene',
   'Turns subtitles off: this player shows only Den Remux’s':

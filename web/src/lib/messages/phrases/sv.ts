@@ -1236,7 +1236,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Uppspelningen kan starta, men återställning av förloppet i bakgrunden är inte tillgänglig. Håll sidan öppen för att spara var du slutade.',
   'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.':
     'Den här TV:n kan inte återställa förloppet för hanterad uppspelning efter att sidan stängts. Håll Den öppet eller länka en telefon eller dator under Inställningar › Anslutningar.',
-  'Open Connections': 'Öppna Anslutningar',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'För ljud eller undertexter som webbläsaren inte kan spela, eller en ström som stannar',
   'Turns subtitles off: this player shows only Den Remux’s':

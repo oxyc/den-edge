@@ -176,7 +176,7 @@ test('Tizen 3 preserves queued managed-playback receipts for a capable linked de
       { exact: true },
     ),
   ).toBeVisible();
-  const recovery = page.getByRole('button', { name: 'Open Connections' });
+  const recovery = page.getByRole('button', { name: 'Connections' });
   await expect(recovery).toBeVisible();
   await recovery.focus();
   await page.keyboard.press('Enter');

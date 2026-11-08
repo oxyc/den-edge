@@ -223,7 +223,7 @@
     /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
     onmanagedplayback?: (signal: AbortSignal) => Promise<PlaybackReceiptPreparation>;
     /** Leaves playback for the existing authorized device-linking flow. */
-    onplaybackreceiptsettings?: () => void;
+    onplaybackreceiptsettings: () => void;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -4564,7 +4564,6 @@
     releases = [];
     releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
-    receiptUnsupported = false;
     clearTransition();
     showTransition('Starting next…');
     switchCount = 0;
@@ -4630,7 +4629,7 @@
     // Use the player's terminal path first: final progress, decoder/session retirement and an in-flight startup
     // abort must all happen before the parent leaves for the authorized linking flow.
     close();
-    onplaybackreceiptsettings?.();
+    onplaybackreceiptsettings();
   }
 
   /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
@@ -5032,14 +5031,10 @@
         ),
         {
           dismiss: () => (receiptUnsupported = false),
-          ...(onplaybackreceiptsettings
-            ? {
-                action: {
-                  label: i18n.phrase('Open Connections'),
-                  run: openPlaybackReceiptSettings,
-                },
-              }
-            : {}),
+          action: {
+            label: i18n.text('settings.section.connections'),
+            run: openPlaybackReceiptSettings,
+          },
         },
       )}
     {/if}
