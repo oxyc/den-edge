@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Publish a release without rebuilding or retesting it. Main CI has already built, behavior-probed, and scanned
 # an immutable candidate image for its exact SHA; the vX.Y.Z workflow only verifies and promotes that digest.
+# That CI includes playback through this commit and den-hearth's latest release (`stack_e2e`, web/e2e-stack/), so a
+# release that breaks playback across the two is never tagged.
 set -euo pipefail
 
 version="${1:-}"

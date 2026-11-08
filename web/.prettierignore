@@ -10,6 +10,7 @@ test-results/
 test-results-tv/
 test-results-keyboard/
 test-results-keyboard-port/
+test-results-stack/
 playwright-report/
 coverage/
 .vite/

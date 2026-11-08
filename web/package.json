@@ -29,6 +29,7 @@
     "test:worker-build": "node scripts/test-library-service-worker.mjs",
     "test:e2e": "playwright test --grep-invert @soak",
     "test:e2e:production": "playwright test --config playwright.production.config.ts --grep-invert @soak",
+    "test:e2e:stack": "playwright test --config playwright.stack.config.ts",
     "test:e2e:budgets": "playwright test --config playwright.budgets.config.ts",
     "test:e2e:budgets:shared": "playwright test --config playwright.budgets-shared.config.ts",
     "rehearse:household": "node scripts/rehearse-household.mjs",

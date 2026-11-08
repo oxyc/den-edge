@@ -19,6 +19,7 @@ export default defineConfig(
     'test-results/**',
     'test-results-tv/**',
     'test-results-keyboard*/**',
+    'test-results-stack/**',
     'playwright-report/**',
     'coverage/**',
     '.vite/**',
@@ -38,7 +39,7 @@ export default defineConfig(
     },
   },
   {
-    files: ['src/**', 'test/**', 'e2e/**'],
+    files: ['src/**', 'test/**', 'e2e/**', 'e2e-stack/**'],
     languageOptions: {
       globals: {
         ...globals.browser,
@@ -62,6 +63,7 @@ export default defineConfig(
       '*.{js,mjs,ts}',
       'scripts/**',
       'e2e/**',
+      'e2e-stack/**',
       'src/**/*.test.ts',
       'test/sync-policy-browser.mjs',
     ],
