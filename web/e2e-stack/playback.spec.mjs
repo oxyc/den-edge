@@ -10,7 +10,7 @@
 //  2b. that stream's receipt, closed part-way, carries where it got to and reaches den-edge (den-edge #1122: ended empty)
 //   3. a TorBox stream paused past a heartbeat sends nothing but GETs to TorBox's CDN (405s on every pause)
 //   4. a TorBox stream cast to a receiver plays there (Hearth: 409 torbox_item_not_found once the page's session ended)
-//   5. a Den Remux stream cast to a receiver is handed off once, and the page's session ends at the public listener
+//   5. a Den Remux stream cast to a receiver is handed off once, and the page's session ends at the public listener (den-edge #1124)
 //   6. every flow: no console error, no failed request, and nothing but media GETs to an origin that is not Den's
 // and the flows of the playback scenario matrix: an iPhone on Den Remux, resuming, and the next episode.
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
@@ -30,13 +30,6 @@ const DESIGNED_MISSES = [
   /^\/skipdb\//,
   /^\/capabilities\/profiles$/, // profiles are off on this name
 ];
-
-/**
- * A case that still fails on main for a bug with an open issue: expected to fail, so the gate stays a gate for
- * everything else, and turns red the day the fix lands, to have this mark removed. `DEN_STACK_STRICT=1` drops the
- * marks, to see every case fail or pass on its own.
- */
-const openBug = (issue) => test.fail(process.env.DEN_STACK_STRICT !== '1', issue);
 
 let stack;
 test.beforeAll(async () => {
@@ -465,7 +458,6 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
   });
 
   test('5. a Den Remux stream cast to a receiver: one handoff, and the page’s session ended at the public listener', async () => {
-    openBug('https://github.com/oxyc/den-edge/issues/1124');
     stack.torbox.managed = false;
     const edgeFrom = stack.edge.lines().length;
     const { page, seen } = await household();
@@ -477,16 +469,23 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
     const endsFrom = stack.exchanges.length;
     const loaded = await castToReceiver(page);
     expect((await receiverGet(loaded.url)).status).toBe(200);
-    // The session the page played is ended where it lives, on the public listener's own origin, and answered.
+    // The session the page played is ended where it lives, on the public listener's own origin, and answered: a
+    // `DELETE` of the session, or its `POST …/end` twin (which a receipt's end uses). Not the receiver's session.
+    const receiverSession = new URL(loaded.url).pathname.replace(/\/master\.m3u8$/, '');
     await expect
       .poll(
         () =>
           stack.exchanges
             .slice(endsFrom)
-            .find((r) => r.label === 'public' && r.method === 'POST' && /\/end$/.test(r.path))
-            ?.status,
+            .find(
+              (r) =>
+                r.label === 'public' &&
+                !r.path.startsWith(receiverSession) &&
+                ((r.method === 'POST' && /\/end$/.test(r.path)) ||
+                  (r.method === 'DELETE' && /^\/remux\/s\/[^/]+\/[^/]+$/.test(r.path))),
+            )?.status,
         {
-          message: 'the page’s session /end reached the public listener and was answered',
+          message: 'the page’s session was ended at the public listener and answered',
           timeout: 30_000,
         },
       )

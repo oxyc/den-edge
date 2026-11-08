@@ -435,9 +435,14 @@ function fail(message: string, code = 0, owner: PlayingMedia | undefined = playi
 
 /** End the session this page played, so it stops holding den-remux and the media listener open. */
 function endPlaying(): void {
-  if (!playing) return;
-  const lifecycle = denLifecycleMedia(playing);
+  const ended = playing;
   playing = undefined;
+  endMedia(ended);
+}
+
+/** End a session this page played, at den-remux, with where it got to (`lastPosition`) when it carries a receipt. */
+function endMedia(media: PlayingMedia | undefined): void {
+  const lifecycle = denLifecycleMedia(media);
   if (!lifecycle) return;
   const base = lifecycle.replace(/\/master\.m3u8$/, '');
   const receipt = /\/den\/_receipt\/[A-Za-z0-9_-]{43}$/.test(new URL(base).pathname);
@@ -807,7 +812,20 @@ async function loadCast(): Promise<void> {
     }
     // A LOAD replaces the receiver only once it succeeds. Until then its events and lifecycle still belong to
     // the previous media, even though `current` already describes the requested replacement.
+    const replaced = playing;
     playing = requested;
+    // The receiver plays a session of its own now. A Den Remux session played before it (this page's video, or the
+    // receiver's previous media) would hold its den-remux slot until it idled out: nothing else ends it, and casting
+    // over, the player asks for a new session rather than resuming that one. A TorBox stream is left alone: its
+    // session belongs to the player outside, and ending it can remove the torrent the receiver now plays.
+    if (
+      replaced &&
+      !replaced.external &&
+      denLifecycleMedia(replaced) !== denLifecycleMedia(requested)
+    ) {
+      if (!castStarted) stopLocal();
+      endMedia(replaced);
+    }
     if (current?.id !== id) {
       void loadCast();
       return;
