@@ -311,6 +311,71 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('keeps a source lookup through a device heartbeat, and aborts it when the plugins change', async () => {
+    const aborted: string[] = [];
+    const held = {
+      ...authority(),
+      async command(command: LibraryCommand) {
+        return {
+          outcome: 'applied' as const,
+          delivery: 'queued' as const,
+          // As the log authority answers: a heartbeat rewrites the device list, and a write still on its way to
+          // den-edge adds the sync status (`connections`). Installing a plugin changes what a lookup reads (`runtime`).
+          affected:
+            command.kind === 'plugin.install'
+              ? [{ kind: 'connections' as const }, { kind: 'runtime' as const }]
+              : [{ kind: 'devices' as const }, { kind: 'connections' as const }],
+        };
+      },
+      async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind !== 'download.sources') throw new Error('unsupported query');
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener(
+            'abort',
+            () => {
+              aborted.push(query.title.name);
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        return { kind: 'download.sources' as const, sources: null };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    const lookup = (requestId: string) =>
+      core.dispatch({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        query: { kind: 'download.sources', title: { target: title, name: requestId }, early: true },
+      });
+    const command = (requestId: string, payload: LibraryCommand) =>
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        operationId: `operation-${requestId}`,
+        command: payload,
+      });
+
+    void lookup('before-heartbeat');
+    await Promise.resolve();
+    await command('heartbeat', {
+      kind: 'device.heartbeat',
+      name: 'Mac · Safari',
+      deviceKind: 'browser',
+    });
+    expect(aborted).toEqual([]);
+
+    await command('install', {
+      kind: 'plugin.install',
+      manifestUrl: 'https://scout.example/manifest.json',
+    });
+    expect(aborted).toEqual(['before-heartbeat']);
+  });
+
   it('does not hold the command actor lane while an assistant projection is built and sent', async () => {
     let release!: () => void;
     const building = new Promise<void>((resolve) => (release = resolve));
