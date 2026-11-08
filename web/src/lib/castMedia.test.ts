@@ -62,6 +62,26 @@ describe('managed media URLs the Cast sender accepts', () => {
     );
     expect(managedMedia('https://tb-cdn.io.example/x?scrobbling_enabled=false')).toBe(false);
   });
+
+  it('takes the URL TorBox actually hands over: `False`, on any of its CDN domains', () => {
+    // As TorBox's createstream answered on 2026-11-08 (token and ids replaced).
+    expect(
+      managedMedia(
+        'https://flux-002.wnam.tb-cdn.io/stream/uuid/null/null/0/playlist.m3u8?token=t&scrobbling_enabled=False',
+      ),
+    ).toBe(true);
+    expect(
+      managedMedia(
+        'https://nexus-244.latm.tb-cdn.cx/stream/uuid/playlist.m3u8?scrobbling_enabled=false',
+      ),
+    ).toBe(true);
+    expect(managedMedia('https://a.tb-cdn.earth/x.m3u8?scrobbling_enabled=false')).toBe(true);
+    expect(managedMedia('https://a.tb-cdn.io/x.m3u8?scrobbling_enabled=True')).toBe(false);
+    expect(managedMedia('https://tb-cdn.cx/x.m3u8?scrobbling_enabled=false')).toBe(false);
+    expect(managedMedia('https://a.tb-cdn.cx.evil.example/x.m3u8?scrobbling_enabled=false')).toBe(
+      false,
+    );
+  });
 });
 
 describe('Cast media lifecycle ownership during replacements', () => {

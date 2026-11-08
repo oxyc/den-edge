@@ -32,7 +32,24 @@ export function lanHttpMedia(url: string): boolean {
   return privateLanRemuxPlaylist(url) && signedMedia(url);
 }
 
-/** A TorBox-managed HLS capability. Its query explicitly disables provider scrobbling before it may leave Den. */
+/**
+ * TorBox's managed-stream CDN domains, the same explicit list Hearth accepts (den-hearth `MANAGED_HLS_CDN_SUFFIXES`).
+ * TorBox serves from any of them, so a URL Hearth handed over must not be refused here for its domain.
+ */
+const MANAGED_CDN_SUFFIXES = [
+  '.tb-cdn.cx',
+  '.tb-cdn.io',
+  '.tb-cdn.pw',
+  '.tb-cdn.sh',
+  '.tb-cdn.st',
+  '.tb-cdn.to',
+  '.tb-cdn.earth',
+];
+
+/**
+ * A TorBox-managed HLS capability. Its query explicitly disables provider scrobbling before it may leave Den: TorBox
+ * writes that flag as `False`, so it is compared without regard to case.
+ */
 export function managedMedia(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -42,12 +59,13 @@ export function managedMedia(url: string): boolean {
       !parsed.username &&
       !parsed.password &&
       !parsed.port &&
-      parsed.hostname.endsWith('.tb-cdn.io') &&
-      parsed.hostname.length > '.tb-cdn.io'.length &&
+      MANAGED_CDN_SUFFIXES.some(
+        (suffix) => parsed.hostname.endsWith(suffix) && parsed.hostname.length > suffix.length,
+      ) &&
       parsed.pathname !== '/' &&
       !parsed.hash &&
       scrobbling.length === 1 &&
-      scrobbling[0] === 'false'
+      scrobbling[0]!.toLowerCase() === 'false'
     );
   } catch {
     return false;
