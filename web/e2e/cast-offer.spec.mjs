@@ -7,6 +7,7 @@
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage } from './player-options.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const ORIGIN = E2E_ORIGIN;
@@ -313,10 +314,9 @@ test('managed direct HLS refreshes TorBox once on Cast failure without switching
     const video = page.locator('.player video');
     await expect(video).toHaveAttribute('x-webkit-airplay', 'allow');
     await expect(castButton(page)).toBeVisible();
-    // Desktop's owned transport keeps output routing with the other circular playback actions, rather than leaving
-    // Chromecast as unrelated header chrome. Pointer semantics are covered with the complete app stylesheet by the
-    // cross-engine player test; this fixture intentionally mounts only the component's scoped CSS.
-    await expect(page.locator('.player footer .cast-slot')).toHaveCount(1);
+    // Output routing has one fixed slot at the top bar's right end on every size, so nothing the dock gains or loses
+    // moves the cast page's frame drawn over it.
+    await expect(page.locator('.player header .web-output .cast-slot')).toHaveCount(1);
     expect(asked.managed).toHaveLength(1);
     expect(asked.direct, 'direct TorBox-style HLS did not create a legacy Remux session').toEqual(
       [],
@@ -604,7 +604,7 @@ test('a release picked mid-film names the session it replaces, which the page en
     await playingPast(page, 3);
     expect(asked.direct[0]).not.toHaveProperty('replaces');
     await revealControls(page);
-    await page.getByRole('button', { name: /^Stream: / }).click();
+    await openOptionsPage(page, 'Stream');
     await page.getByRole('menuitemradio').filter({ hasText: 'other.mkv' }).click();
     await expect.poll(() => asked.direct.length).toBe(2);
     expect(asked.direct[1]).toMatchObject({

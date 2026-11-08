@@ -1,14 +1,16 @@
 // The stamp saying how a stream is delivered, on an iPhone, through the real app: a guest's Hearth, the title's page,
 // Play, and the player as Library mounts it. Where WebKit plays HLS itself, a subtitle the viewer wants starts on Den
 // Remux (`subtitle-system-player.spec.mjs`): the page rules TorBox out itself, so Hearth never tries it and says
-// nothing about it. That stamp was a plain label there, and a tap on it did nothing. It is a menu now: the switch to
-// TorBox where TorBox may play, and, where it can't, the reason, with the switch shown and disabled.
+// nothing about it. That stamp was a plain label there, and a tap on it did nothing. The path is now named in the
+// player's options, whose Source page offers the switch to TorBox where TorBox may play, and, where it can't, the
+// reason, with the switch shown and disabled.
 import { test, expect, devices, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { CODE, GID, newEdge, routeGuestEdge } from './guest-edge.mjs';
 import { routeTmdb } from './network.mjs';
+import { openOptionsPage, revealControls } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const TITLE = 1002;
@@ -209,7 +211,18 @@ async function guestPlayer(page, { hearth, originalLanguage, automaticSubtitles 
   return playback;
 }
 
-/** What a tap at the stamp's centre lands on: the stamp itself (or something inside it), or what is over it. */
+/** The options' Source page, in Swedish, opened by taps as a finger does; the sheet it is on. */
+async function swedishSourceSheet(page) {
+  await revealControls(page, { tap: true });
+  const more = page.getByRole('button', { name: 'Fler uppspelningsalternativ' });
+  expect(await tapLandsOnStamp(more)).toBe(true);
+  await more.tap();
+  const sheet = page.getByRole('menu', { name: 'Fler uppspelningsalternativ' });
+  await sheet.getByRole('menuitem', { name: /^Källa, / }).tap();
+  return sheet;
+}
+
+/** What a tap at a control's centre lands on: the control itself (or something inside it), or what is over it. */
 const tapLandsOnStamp = (stamp) =>
   stamp.evaluate((el) => {
     const box = el.getBoundingClientRect();
@@ -235,11 +248,9 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(playback).toHaveLength(1);
       expect(playback[0]).toMatchObject({ player: 'native', directFailed: true });
 
-      const stamp = page.getByRole('button', { name: 'Spelas från Den Remux' });
+      const stamp = page.getByTestId('playback-source');
       await expect(stamp).toHaveText('Den Remux');
-      expect(await tapLandsOnStamp(stamp)).toBe(true);
-      await stamp.tap();
-      const sheet = page.getByRole('menu', { name: 'Spelas från Den Remux' });
+      const sheet = await swedishSourceSheet(page);
       await expect(sheet).toBeVisible();
       await expect(sheet).toContainText('Spelas via Den Remux');
       const toTorbox = sheet.getByRole('menuitem', { name: 'Byt till TorBox' });
@@ -249,8 +260,7 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(playback).toHaveLength(1);
 
       await toTorbox.tap();
-      const torboxStamp = page.getByRole('button', { name: 'Spelas från TorBox' });
-      await expect(torboxStamp).toHaveText('TorBox', { timeout: 30_000 });
+      await expect(stamp).toHaveText('TorBox', { timeout: 30_000 });
       expect(playback).toHaveLength(2);
       expect(playback[1]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
       expect(playback[1]).not.toHaveProperty('directFailed');
@@ -263,10 +273,8 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         ),
       ).toBe(false);
 
-      // And back, from the TorBox stamp's own sheet.
-      expect(await tapLandsOnStamp(torboxStamp)).toBe(true);
-      await torboxStamp.tap();
-      const back = page.getByRole('menu', { name: 'Spelas från TorBox' });
+      // And back, from the same page while TorBox plays.
+      const back = await swedishSourceSheet(page);
       await expect(back).toContainText('Spelas direkt från TorBox');
       await back.getByRole('menuitem', { name: 'Byt till Den Remux' }).tap();
       await expect(stamp).toHaveText('Den Remux', { timeout: 30_000 });
@@ -301,10 +309,9 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
           { timeout: 30_000 },
         )
         .toMatchObject({ player: 'native', directFailed: true });
-      const stamp = page.getByRole('button', { name: 'Spelas från Den Remux' });
+      const stamp = page.getByTestId('playback-source');
       const menuBarrier = playback.length;
-      await stamp.tap();
-      const sheet = page.getByRole('menu', { name: 'Spelas från Den Remux' });
+      const sheet = await swedishSourceSheet(page);
       expect(playback).toHaveLength(menuBarrier);
       // Only a request after this action can prove that this switch asked Hearth for TorBox alone.
       const switchBarrier = playback.length;
@@ -318,7 +325,7 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(playback).toHaveLength(switchBarrier + 1);
       await expect(stamp).toHaveText('Den Remux');
 
-      await stamp.tap();
+      await swedishSourceSheet(page);
       await expect(sheet).toContainText('Den här Hearth har ingen TorBox att spela från');
       await expect(sheet.getByRole('menuitem', { name: 'Byt till TorBox' })).toHaveAttribute(
         'aria-disabled',
@@ -333,7 +340,7 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
     }
   });
 
-  test('where Hearth has no TorBox, the stamp opens a sheet that says so, its switch disabled', async () => {
+  test('where Hearth has no TorBox, the options’ Source page says so, its switch disabled', async () => {
     const browser = await webkit.launch();
     try {
       const page = await (await iphone(browser, 'en-US')).newPage();
@@ -346,10 +353,9 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(playback).toHaveLength(1);
       expect(playback[0]).not.toHaveProperty('directFailed');
 
-      const stamp = page.getByRole('button', { name: 'Playing from Den Remux' });
+      const stamp = page.getByTestId('playback-source');
       await expect(stamp).toHaveText('Den Remux');
-      await stamp.tap();
-      const sheet = page.getByRole('menu', { name: 'Playing from Den Remux' });
+      const sheet = await openOptionsPage(page, 'Source', { tap: true });
       await expect(sheet).toBeVisible();
       await expect(sheet).toContainText('This Hearth has no TorBox to play from');
       const toTorbox = sheet.getByRole('menuitem', { name: 'Switch to TorBox' });

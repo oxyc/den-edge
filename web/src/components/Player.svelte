@@ -303,6 +303,11 @@
     desktopQuery.addEventListener('change', follow);
     return () => desktopQuery.removeEventListener('change', follow);
   });
+  /**
+   * Where the player's menus open as a bottom sheet: a phone, upright or on its side. A tablet and every pointer window
+   * get a popover beside the button that opened it. The layout itself follows the same widths in CSS.
+   */
+  const PHONE_SHEET = '(width < 33rem), (height < 32rem) and (pointer: coarse)';
   /** The kind of the last pointer pressed on the player: a tap on the picture shows or hides the controls. */
   let lastPointer = '';
   /** Whether the controls were showing when that press began. */
@@ -417,6 +422,29 @@
   let airPlayAvailability = $state<'unknown' | 'available' | 'unavailable'>('unknown');
   let webControlsVisible = $state(true);
   let webControlsTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The top bar, and the timeline with its dock: the pointer over either holds the controls up. */
+  let webTop = $state<HTMLElement>();
+  let webBar = $state<HTMLElement>();
+  /** A pointer holds the timeline: the controls stay while it drags. */
+  let timelineHeld = false;
+  /** Where the pointer is over the timeline, for the time bubble above it (`x` as a fraction of its width). */
+  let timelineHover = $state<{ x: number; at: number } | null>(null);
+  /** Seeks by ten that follow one another closely add up, shown as one ripple on their side (`stackSeek`). */
+  let seekStreak = $state<{ side: -1 | 1; count: number; at: number } | null>(null);
+  let seekStreakTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The last tap on the picture: a second one soon after on either side seeks instead (`pictureTap`). */
+  let lastTap: { at: number; side: -1 | 0 | 1; shown: boolean } | null = null;
+  /** A mouse click on the picture waits this long for a second one, which makes it a double-click (fullscreen). */
+  let clickHold: ReturnType<typeof setTimeout> | undefined;
+  /** The pause glyph shown for a moment as a click on the picture starts playback again. */
+  let pictureFlash = $state(false);
+  /** The subtitle last shown, which C turns back on. */
+  let lastSubtitle: string | null = null;
+  /** Said once as a visit opens mid-title, with the way back to the start. */
+  let resumedAt = $state<string | null>(null);
+  let resumeOffered = false;
+  /** Said as the keyboard changes the volume. */
+  let volumeNotice = $state<string | null>(null);
   let tvDetailsOpen = $state(false);
   let tvSubtitleTimingOpen = $state(false);
   let subtitleTimingPanel = $state<HTMLElement>();
@@ -938,23 +966,40 @@
       stallNoticeVisible = false;
       return;
     }
-    const timer = setTimeout(() => {
-      if (stalling && !autoSwitch) stallNoticeVisible = true;
-    }, STATUS_REVEAL_MS);
+    // A browser's play button turns to a ring at once; a stall says so in words only once it is a long one.
+    const timer = setTimeout(
+      () => {
+        if (stalling && !autoSwitch) stallNoticeVisible = true;
+      },
+      webTransport ? STALL_NOTICE_MS : STATUS_REVEAL_MS,
+    );
     return () => clearTimeout(timer);
   });
   const visibleBufferLine = $derived(stallNoticeVisible ? bufferLine : null);
+  /** How long a browser's stall shows only as the ring on Play before the buffering line says it. */
+  const STALL_NOTICE_MS = 3_000;
 
-  /** How long a notice that asks nothing of the viewer stays up. */
-  const NOTICE_MS = 6_000;
+  /** How long a notice that asks nothing of the viewer stays up: a browser's toast lane is one at a time. */
+  const NOTICE_MS = webTransport ? 4_000 : 6_000;
+  /** The resume notice stays longer: it carries Start over. */
+  const RESUME_NOTICE_MS = 6_000;
   /** Clear a notice NOTICE_MS after `shown` says it is up; a new text starts the time over. */
-  function fades(shown: () => unknown, clear: () => void) {
+  function fades(shown: () => unknown, clear: () => void, ms = NOTICE_MS) {
     $effect(() => {
       if (!shown()) return;
-      const timer = setTimeout(clear, NOTICE_MS);
+      const timer = setTimeout(clear, ms);
       return () => clearTimeout(timer);
     });
   }
+  fades(
+    () => volumeNotice,
+    () => (volumeNotice = null),
+  );
+  fades(
+    () => resumedAt,
+    () => (resumedAt = null),
+    RESUME_NOTICE_MS,
+  );
   fades(
     () => swapped,
     () => (swapped = null),
@@ -3339,6 +3384,12 @@
     const total = length();
     if (!video || !total) return;
     const from = startAt ?? resume;
+    // Opening mid-title says where, once a visit, with the way back to the start (`resumedAt`).
+    if (webTransport && startAt === null && !resumeOffered) {
+      resumeOffered = true;
+      const at = started ?? resume.seconds ?? resume.fraction * total;
+      if (at > 5 && at / total < WATCHED) resumedAt = clockTime(at);
+    }
     startAt = null;
     if (started !== undefined) {
       // den-remux was asked to start there: hls.js was given it as its start position, and Safari's own player reads
@@ -3704,7 +3755,8 @@
     scheduleWebControls();
     if (!focusTrigger) return;
     await renderTick();
-    playerRoot?.querySelector<HTMLElement>('button[aria-label^="Subtitles:"]')?.focus();
+    // Back to the ⋯ button whose Subtitle timing page opened it.
+    playerRoot?.querySelector<HTMLElement>('button.web-more')?.focus();
   }
 
   function displayedSubtitleTracks(tracks: NonNullable<Session['subtitles']>) {
@@ -3978,6 +4030,10 @@
     // Where it last was, for `carryPosition`'s fallback once the element is gone. How much actually played is
     // `totalPlayedSecs`, from the element's own `played` ranges — never summed here.
     lastPosition = at;
+    if (webTransport) {
+      tvBuffered = bufferedEnd();
+      describeNext(at);
+    }
     // The first part-way position once playback starts or resumes goes out now, not a minute later.
     if (session && !(video ? video.paused : remotePaused))
       progress.reportStart(at, length(), { creditsReached: reachedCredits(at) });
@@ -3991,6 +4047,56 @@
 
   /** Whether the next episode has already been warmed. Not `$state`: nothing renders it. */
   let warmedNext = false;
+
+  /** How far the media is buffered past the play head (the range holding it), for the timeline's lighter fill. */
+  let tvBuffered = $state(0);
+  function bufferedEnd(): number {
+    const ranges = video?.buffered;
+    const at = video?.currentTime ?? 0;
+    if (!ranges) return 0;
+    for (let n = 0; n < ranges.length; n++)
+      if (ranges.start(n) <= at + 0.5 && at <= ranges.end(n)) return ranges.end(n);
+    return 0;
+  }
+  // `timeupdate` stops while paused, but buffering goes on: `progress` says so.
+  $effect(() => {
+    const element = video;
+    if (!webTransport || !element) return;
+    const update = () => (tvBuffered = bufferedEnd());
+    element.addEventListener('progress', update);
+    return () => element.removeEventListener('progress', update);
+  });
+
+  /**
+   * The next episode as its season lists it (still, name, runtime), for the up-next card. Asked once, as this one
+   * nears its end (`NEXT_DETAIL_LEAD_SECS`), never at open, through the content service that Detail and the TV player read
+   * seasons through, with its caching and TMDB rules. Absent, the card shows the episode's numbers alone.
+   */
+  let nextDetail = $state.raw<EpisodeDetail | null>(null);
+  /** How long before the end the next episode is described: well ahead of the card, which shows at the end. */
+  const NEXT_DETAIL_LEAD_SECS = 30;
+  let nextDetailRequest: AbortController | undefined;
+  function describeNext(at: number) {
+    const to = nextEpisode;
+    if (nextDetailRequest || title.type !== 'tv' || !onnext) return;
+    if (to?.season === undefined || to.episode === undefined) return;
+    if (!shouldWarmNext(at, length(), NEXT_DETAIL_LEAD_SECS)) return;
+    const request = new AbortController();
+    nextDetailRequest = request;
+    const asked = { season: to.season, episode: to.episode };
+    content
+      .query(
+        { kind: 'season', title: { type: 'tv', id: title.id }, season: asked.season },
+        request.signal,
+      )
+      .then(({ episodes }) => {
+        if (request.signal.aborted || episodes.state !== 'ready') return;
+        nextDetail = episodes.value.find((item) => item.number === asked.episode) ?? null;
+      })
+      .catch((error: unknown) => {
+        if (!request.signal.aborted) console.warn('The next episode’s details didn’t load.', error);
+      });
+  }
 
   /**
    * Resolve the next episode shortly before this one ends, and keep its current season pack ready when possible.
@@ -4112,19 +4218,7 @@
   });
 
   function setVolume(event: Event) {
-    const volume = Number((event.currentTarget as HTMLInputElement).value);
-    if (castView) {
-      if (tellReceiver({ type: 'den-volume', level: volume, muted: volume === 0 })) {
-        playerVolume = volume;
-        playerMuted = volume === 0;
-      }
-      return;
-    }
-    if (!video) return;
-    video.volume = volume;
-    video.muted = volume === 0;
-    playerVolume = volume;
-    playerMuted = video.muted;
+    applyVolume(Number((event.currentTarget as HTMLInputElement).value));
   }
 
   function toggleMuted() {
@@ -4191,15 +4285,20 @@
     }
   }
 
+  /**
+   * Hide the controls once left alone while playing: 2.5 s after a mouse last moved, 3 s after a touch. Casting, this
+   * page is the remote and there is no picture here to uncover, so they stay (`webControlsMayHide`).
+   */
   function scheduleWebControls() {
     if (!webTransport) return;
     clearTimeout(webControlsTimer);
-    // Casting, this page is the remote and there is no picture here to uncover: its controls stay.
-    if (castView) return;
-    if (!video?.paused && !playerMenuOpen() && !tvSubtitleTimingOpen && !castFocus)
-      webControlsTimer = setTimeout(() => {
-        if (!playerMenuOpen() && !tvSubtitleTimingOpen && !castFocus) webControlsVisible = false;
-      }, 3_500);
+    if (webControlsMayHide())
+      webControlsTimer = setTimeout(
+        () => {
+          if (webControlsMayHide()) webControlsVisible = false;
+        },
+        desktopTransport ? 2_500 : 3_000,
+      );
   }
 
   function revealWebControls(schedule = true) {
@@ -4223,13 +4322,17 @@
    * A mouse click on the picture plays or pauses; a tap shows the controls, or hides them, and never pauses. Whether
    * they were showing is read at the press: the focus a tap gives the player (Firefox) reveals them before the click.
    */
-  function pictureClick() {
+  function pictureClick(event: MouseEvent) {
     if (!webTransport) return;
-    if (!shownAtPress) revealWebControls();
-    else if (lastPointer === 'touch' || lastPointer === 'pen') {
-      clearTimeout(webControlsTimer);
-      webControlsVisible = false;
-    } else togglePlaying();
+    if (lastPointer === 'touch' || lastPointer === 'pen') pictureTap(event);
+    else if (!shownAtPress) revealWebControls();
+    else pictureClickMouse(event);
+  }
+
+  /** The mouse leaving the window hides the controls at once, when nothing holds them. */
+  function playerPointerLeave(event: PointerEvent) {
+    if (event.pointerType === 'mouse' && webControlsMayHide()) hideWebControls();
+    else scheduleWebControls();
   }
 
   // Becoming the receiver's remote, the transport starts from where the receiver said it was, and stays shown.
@@ -4513,6 +4616,7 @@
   function finish() {
     if (ended) return;
     subtitleResyncRequest?.abort();
+    nextDetailRequest?.abort();
     subtitleSelectionGeneration += 1;
     subtitleLoadFailure = null;
     ended = true;
@@ -4666,6 +4770,9 @@
     segmentRequest += 1;
     for (const kind of Object.keys(skipped) as SkipKind[]) delete skipped[kind];
     warmedNext = false;
+    nextDetailRequest?.abort();
+    nextDetailRequest = undefined;
+    nextDetail = null;
     hold = null;
     startsIn = null;
     // Only what is on screen is held: after a failure there is no video to keep.
@@ -4708,6 +4815,577 @@
   }
 
   /** ActionMenu is a popover in browsers and a modal dialog on TV engines that do not implement popovers. */
+  type Notice = {
+    text: string;
+    dismiss?: () => void;
+    action?: { label: string; run: () => void };
+    quiet?: boolean;
+    busy?: boolean;
+    /** An error or an offer: it stays until answered, and the toast lane shows it before any other. */
+    urgent?: boolean;
+  };
+  /** What playback says as it goes, in the order the TV's stack shows it. */
+  const notices = $derived.by(() => {
+    const list: Notice[] = [];
+    if (transitionNotice) list.push({ text: transitionNotice, quiet: true, busy: true });
+    if (subtitleResyncNotice) list.push({ text: subtitleResyncNotice, quiet: true });
+    const failed = subtitleLoadFailure;
+    if (failed)
+      list.push({
+        text: i18n.format(
+          'player.subtitleLoadFailed',
+          'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
+          { subtitle: subtitleLabel(failed) },
+        ),
+        action: {
+          label: i18n.phrase('Try again'),
+          run: () => void chooseSubtitle(subtitleValue(failed)),
+        },
+        urgent: true,
+      });
+    if (session) {
+      if (swapped) list.push({ text: swapped, dismiss: () => (swapped = null) });
+      if (autoSwitch)
+        list.push({ text: autoSwitch, dismiss: () => (autoSwitch = null), busy: switching });
+      else if (visibleBufferLine) list.push({ text: visibleBufferLine, quiet: true, busy: true });
+      if (slowPick)
+        list.push({
+          text: `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
+          dismiss: () => (slowPick = null),
+          action: { label: 'Try another release', run: tryAnother },
+          urgent: true,
+        });
+      if (struggling)
+        list.push({
+          text: `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
+          dismiss: () => (struggling = null),
+        });
+      if (unchanged) list.push({ text: unchanged, dismiss: () => (unchanged = null) });
+    }
+    if (receiptUnsupported)
+      list.push({
+        text: i18n.phrase(
+          'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.',
+        ),
+        dismiss: () => (receiptUnsupported = false),
+        action: {
+          label: playbackReceiptHandoffAsOwner
+            ? i18n.text('settings.section.connections')
+            : i18n.phrase('Switch to Owner'),
+          run: openPlaybackReceiptHandoff,
+        },
+        urgent: true,
+      });
+    return list;
+  });
+  /**
+   * The browser's one toast: an error or offer first, which waits to be answered; otherwise the newest kind of quiet
+   * notice — the volume as it changes, then the rest in the stack's order. Cast failures and the resume notice live
+   * here too rather than over the picture.
+   */
+  const webToast = $derived.by((): Notice | undefined => {
+    if (!webTransport) return undefined;
+    const list: Notice[] = [];
+    if (volumeNotice) list.push({ text: volumeNotice, quiet: true });
+    list.push(...notices);
+    const cast = castNotice;
+    if (cast)
+      list.push({
+        text: i18n.phrase(cast.text),
+        dismiss: () => (castNotice = null),
+        action:
+          cast.retry && castState === 'connected' ? { label: 'Retry', run: cast.retry } : undefined,
+        urgent: true,
+      });
+    if (resumedAt)
+      list.push({
+        text: i18n.format('player.resumedAt', 'Resumed at {time}', { time: resumedAt }),
+        action: {
+          label: 'Start over',
+          run: () => {
+            resumedAt = null;
+            playFromBeginning();
+          },
+        },
+        dismiss: () => (resumedAt = null),
+      });
+    return list.find((notice) => notice.urgent) ?? list[0];
+  });
+
+  /** The path playing: TorBox's own player (Hearth's direct path) or a Den Remux session. */
+  const playbackSource = $derived(session ? (session.external ? 'TorBox' : 'Den Remux') : 'Source');
+  /** Why the switch to TorBox is off while Den Remux plays, for a cause that will not pass by trying again. */
+  const sourceRuledOut = $derived(
+    session?.external === true
+      ? undefined
+      : (torboxRuledOut(managedCause) ??
+          (typeof torbox === 'object' ? torbox.unavailable : undefined)),
+  );
+
+  function sourceLabel(): string {
+    return session
+      ? i18n.format('player.playingFrom', 'Playing from {source}', { source: playbackSource })
+      : i18n.phrase('Choose playback source');
+  }
+
+  /** Which path plays and why, said above the switch to the other one. */
+  function sourceNote(): string {
+    if (!session) return i18n.phrase('Playback has no active source. Try either path explicitly.');
+    if (session.external)
+      return directWithoutDenSubtitles
+        ? session.subtitles?.some((track) => track.torboxTrack !== undefined)
+          ? i18n.phrase(
+              'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.',
+            )
+          : i18n.phrase(
+              'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.',
+            )
+        : i18n.phrase('Playing directly from TorBox');
+    return sourceRuledOut
+      ? i18n.format('player.playingThroughReason', 'Playing through Den Remux. {reason}.', {
+          reason: i18n.phrase(sourceRuledOut),
+        })
+      : i18n.phrase('Playing through Den Remux');
+  }
+
+  /**
+   * The switch to the other path — disabled, with the note saying why, where TorBox can't play here: a stream restarts
+   * only on that choice. With no session, either path may be tried.
+   */
+  function sourceItems(): MenuItem[] {
+    const ruledOut = sourceRuledOut;
+    if (!session)
+      return [
+        {
+          kind: 'item',
+          label: i18n.phrase('Try TorBox without Den subtitles'),
+          description: i18n.phrase(ruledOut ?? 'Play the release directly, without Den subtitles'),
+          disabled: !!ruledOut || deliverySwitching || switching,
+          onselect: () => trySourceWithoutSession('torbox'),
+        },
+        {
+          kind: 'item',
+          label: 'Try Den Remux',
+          description: 'Use the home player for compatible audio and subtitles',
+          disabled: deliverySwitching || switching,
+          onselect: () => trySourceWithoutSession('den-remux'),
+        },
+      ];
+    const external = session.external === true;
+    // The system player shows only a playlist's subtitles, and TorBox's names none: the switch turns one off.
+    const dropsSubtitle = !external && subtitleChoice !== null && subtitlesNeedPlaylist();
+    return [
+      {
+        kind: 'item',
+        label: i18n.format('player.switchTo', 'Switch to {source}', {
+          source: external ? 'Den Remux' : 'TorBox',
+        }),
+        description: external
+          ? i18n.phrase('For audio or subtitles this browser can’t play, or a stream that stalls')
+          : ruledOut
+            ? undefined
+            : dropsSubtitle
+              ? i18n.phrase('Turns subtitles off: this player shows only Den Remux’s')
+              : i18n.phrase('Straight from the source, no conversion'),
+        disabled: !!ruledOut || deliverySwitching || switching,
+        onselect: () => {
+          if (!dropsSubtitle) return switchDelivery();
+          const previous = subtitleChoice;
+          subtitleChoice = null;
+          switchDelivery(() => (subtitleChoice = previous));
+        },
+      },
+    ];
+  }
+
+  function releaseNote(): string | undefined {
+    return releaseListing === 'loading'
+      ? 'Finding the other available streams…'
+      : releaseListing === 'failed'
+        ? 'Couldn’t refresh the stream list. The stream already playing is still available.'
+        : releaseListing === 'ready' && releaseChoices().length === 1
+          ? 'One stream is available.'
+          : undefined;
+  }
+
+  /** Each stream with what tells them apart — quality and size over the release's file name — the playing one ticked. */
+  function releaseItems(): MenuItem[] {
+    const playingFile = session?.release.filename;
+    return releaseChoices().map((release) => ({
+      kind: 'radio',
+      key: release.filename,
+      group: 'release',
+      label: optionLabel(release),
+      description: release.filename,
+      checked: release.filename === playingFile,
+      disabled: release.plays === 'no',
+      onselect: () => switchRelease(release.filename),
+    }));
+  }
+
+  /**
+   * A row of the browser's options (`optionRows`): what it is set to now (`value`), the section it is listed under, or a
+   * page of rows it opens in place (`page`).
+   */
+  type OptionItem = MenuItem & {
+    value?: string;
+    section?: string;
+    page?: { heading?: string; note?: string; items: () => OptionItem[] };
+  };
+  const NO_ACTION = () => {};
+
+  function audioTrackItems(section?: string): OptionItem[] {
+    const current = session;
+    if (!current) return [];
+    return [
+      ...current.audioTracks.map((track, n) => ({
+        kind: 'radio' as const,
+        group: 'audio',
+        label: trackLabel(track, n),
+        checked: n === current.audioTrack,
+        onselect: () => switchAudioIndex(n),
+        section,
+      })),
+      { kind: 'item', label: 'Re-sync audio & video', onselect: resyncAudioVideo, section },
+    ];
+  }
+
+  /** Den owns the subtitle choice so it can tell built-in tracks from OpenSubtitles candidates, with their match. */
+  function subtitleTrackItems(section?: string): OptionItem[] {
+    const current = session;
+    if (!current) return [];
+    return [
+      {
+        kind: 'radio',
+        group: 'subtitle',
+        label: 'Off',
+        checked: subtitleChoice === null,
+        onselect: () => void chooseSubtitle(null),
+        section,
+      },
+      ...(current.subtitles ?? []).map((track) => ({
+        kind: 'radio' as const,
+        group: 'subtitle',
+        label: subtitleLabel(track),
+        description: subtitleDescription(current, track),
+        checked: subtitleValue(track) === subtitleChoice,
+        onselect: () => void chooseSubtitle(subtitleValue(track)),
+        section,
+      })),
+      ...subtitleResyncItems().map((item) => ({ ...item, section })),
+    ];
+  }
+
+  function subtitleTimingItems(): MenuItem[] {
+    const offset = `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}`;
+    return [
+      {
+        kind: 'item',
+        label: i18n.format('player.adjustSubtitleTiming', 'Adjust subtitle timing ({offset}s)', {
+          offset,
+        }),
+        onselect: openSubtitleTiming,
+      },
+      {
+        kind: 'item',
+        label: i18n.format('player.resetSubtitleTiming', 'Reset subtitle timing ({offset}s)', {
+          offset,
+        }),
+        disabled: subtitleOffset === 0,
+        onselect: () => {
+          subtitleOffset = 0;
+          avplay?.setSubtitleOffset(0);
+          retimeSubtitles();
+        },
+      },
+    ];
+  }
+
+  /** What plays now, audio then subtitles, for the dock's button and the options' first row. */
+  function audioSubtitleSummary(): { audio: string; subtitles: string } {
+    const current = session;
+    const track = current?.audioTracks[current.audioTrack] ?? current?.audioTracks[0];
+    const subtitle = preferredSubtitleTrack(current?.subtitles ?? [], subtitleChoice);
+    return {
+      audio: track && current ? trackLabel(track, current.audioTrack) : '',
+      subtitles: subtitle ? subtitleLabel(subtitle) : i18n.phrase('Off'),
+    };
+  }
+
+  /** Audio and subtitles on one page, the way Apple's player lists them. */
+  function audioSubtitleItems(): OptionItem[] {
+    const current = session;
+    if (!current) return [];
+    return [
+      ...(current.audioTracks.length ? audioTrackItems(i18n.phrase('Audio')) : []),
+      ...(current.subtitles?.length ? subtitleTrackItems(i18n.phrase('Subtitles')) : []),
+    ];
+  }
+
+  /** Keys the player answers, listed on the desktop's options so they can be found. */
+  const SHORTCUTS: [string, string][] = [
+    ['Play or pause', 'Space · K'],
+    ['Back or forward 10 seconds', '← → · J L'],
+    ['Volume', '↑ ↓'],
+    ['Mute', 'M'],
+    ['Fullscreen', 'F'],
+    ['Subtitles on or off', 'C'],
+    ['Next episode', 'Shift N'],
+    ['Close', 'Esc'],
+  ];
+
+  /**
+   * The ⋯ menu: every setting used once a title rather than mid-scene, each row with its current value. Without a
+   * session (a source to choose after a failure) only the Source row.
+   */
+  function optionItems(): OptionItem[] {
+    const current = session;
+    const items: OptionItem[] = [];
+    const page = (label: string, value: string | undefined, opens: OptionItem['page']) =>
+      items.push({ kind: 'item', label, value, onselect: NO_ACTION, page: opens });
+    if (current) {
+      if (audioSubtitleItems().length) {
+        const now = audioSubtitleSummary();
+        page('Audio & subtitles', [now.audio, now.subtitles].filter(Boolean).join(' · '), {
+          items: audioSubtitleItems,
+        });
+      }
+      page('Stream', pickLabel(current.release), {
+        heading: 'Streams',
+        note: releaseNote(),
+        items: releaseItems,
+      });
+    }
+    if (!casting && playback && (current || sourceRecovery))
+      page('Source', playbackSource, {
+        heading: sourceLabel(),
+        note: sourceNote(),
+        items: sourceItems,
+      });
+    if (current && subtitleChoice !== null)
+      page(
+        'Subtitle timing',
+        `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)} s`,
+        { items: subtitleTimingItems },
+      );
+    if (current)
+      items.push({ kind: 'item', label: 'Play from beginning', onselect: playFromBeginning });
+    if (desktopTransport)
+      page('Keyboard shortcuts', undefined, {
+        items: () =>
+          SHORTCUTS.map(([label, keys]) => ({
+            kind: 'item',
+            label,
+            value: keys,
+            disabled: true,
+            onselect: NO_ACTION,
+          })),
+      });
+    return items;
+  }
+
+  /** The options' open page, by its row's label; null on their first page. */
+  let optionsPage = $state<string | null>(null);
+  /** That page as the rows describe it now, so its note follows what is happening (a stream list still loading). */
+  function openOptionsPage() {
+    return optionsPage === null
+      ? undefined
+      : optionItems().find((item) => item.label === optionsPage)?.page;
+  }
+
+  /**
+   * Into a row's page, or back out of it (`label` null): the options stay open — a popover keeps its bottom edge where
+   * it was, above its button, as it grows or shrinks — and focus goes to the page's first row or, coming back, to the
+   * row that opened it.
+   */
+  async function showOptionsPage(label: string | null) {
+    const from = optionsPage;
+    const menu = document.querySelector<HTMLElement>('.menu:popover-open:has(.options-rows)');
+    const bottom = menu?.getBoundingClientRect().bottom;
+    optionsPage = label;
+    await renderTick();
+    if (menu && bottom !== undefined && !menu.classList.contains('sheet'))
+      menu.style.top = `${Math.max(8, bottom - menu.offsetHeight)}px`;
+    const rows = Array.from(
+      menu?.querySelectorAll<HTMLElement>(
+        '.options-rows [role^="menuitem"]:not([aria-disabled="true"])',
+      ) ?? [],
+    );
+    const target = label
+      ? rows.find((row) => !row.classList.contains('back'))
+      : rows.find((row) => from && row.getAttribute('aria-label')?.startsWith(i18n.phrase(from)));
+    (target ?? rows[0])?.focus();
+  }
+
+  /** Consecutive rows of one section under its name; rows without one stand alone. */
+  function optionSections(items: OptionItem[]) {
+    const out: { section?: string; rows: { item: OptionItem; i: number }[] }[] = [];
+    items.forEach((item, i) => {
+      const last = out.at(-1);
+      if (last && last.section === item.section) last.rows.push({ item, i });
+      else out.push({ section: item.section, rows: [{ item, i }] });
+    });
+    return out;
+  }
+
+  /**
+   * Ten seconds back or forward. Within `SEEK_STACK_MS` of the last on the same side it adds up, shown as one ripple
+   * ("−20 s"), as a double-tap followed by more taps does, and as J or L pressed again does.
+   */
+  function stackSeek(side: -1 | 1) {
+    const now = performance.now();
+    const streak = seekStreak;
+    seekStreak = {
+      side,
+      count:
+        streak && streak.side === side && now - streak.at < SEEK_STACK_MS ? streak.count + 1 : 1,
+      at: now,
+    };
+    seekBy(side * SKIP_SECS);
+    clearTimeout(seekStreakTimer);
+    seekStreakTimer = setTimeout(() => (seekStreak = null), SEEK_STACK_MS);
+  }
+  const SEEK_STACK_MS = 600;
+  /** How soon a second tap on the picture makes the first a double-tap. */
+  const DOUBLE_TAP_MS = 300;
+  /** How long a click on the picture is held for a second one (a double-click is fullscreen). */
+  const CLICK_HOLD_MS = 250;
+  const FLASH_MS = 400;
+
+  /**
+   * A tap on the picture shows or hides the controls and never pauses. A second within `DOUBLE_TAP_MS` on the left or
+   * right 40% seeks ten seconds that way instead, leaving the controls up, and each tap after it adds ten more; in the
+   * middle a double-tap undoes the first tap's toggle and does nothing else.
+   */
+  function pictureTap(event: MouseEvent) {
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = box.width ? (event.clientX - box.left) / box.width : 0.5;
+    const side = x < 0.4 ? -1 : x > 0.6 ? 1 : 0;
+    const now = performance.now();
+    const streak = seekStreak;
+    if (side && streak?.side === side && now - streak.at < SEEK_STACK_MS) {
+      stackSeek(side);
+      revealWebControls();
+      return;
+    }
+    const first = lastTap;
+    if (first && now - first.at < DOUBLE_TAP_MS) {
+      lastTap = null;
+      if (side && first.side === side) {
+        stackSeek(side);
+        revealWebControls();
+      } else if (first.shown) revealWebControls();
+      else hideWebControls();
+      return;
+    }
+    lastTap = { at: now, side, shown: shownAtPress };
+    if (!shownAtPress) revealWebControls();
+    else hideWebControls();
+  }
+
+  /**
+   * A mouse click on the picture plays or pauses, a moment late: a second click within `CLICK_HOLD_MS` makes it a
+   * double-click, which is fullscreen and leaves playback as it was.
+   */
+  function pictureClickMouse(event: MouseEvent) {
+    clearTimeout(clickHold);
+    if (event.detail > 1) return;
+    clickHold = setTimeout(() => {
+      const resuming = tvPaused;
+      togglePlaying();
+      revealWebControls();
+      if (!resuming) return;
+      pictureFlash = true;
+      setTimeout(() => (pictureFlash = false), FLASH_MS);
+    }, CLICK_HOLD_MS);
+  }
+
+  function pictureDoubleClick() {
+    if (!webTransport || lastPointer === 'touch' || lastPointer === 'pen') return;
+    clearTimeout(clickHold);
+    void toggleFullscreen();
+  }
+
+  /** C: subtitles off, or back on — the last one shown, else the preferred language's. */
+  function toggleSubtitles() {
+    const tracks = session?.subtitles ?? [];
+    if (!tracks.length) return;
+    if (subtitleChoice !== null) {
+      lastSubtitle = subtitleChoice;
+      void chooseSubtitle(null);
+      return;
+    }
+    const track =
+      preferredSubtitleTrack(tracks, lastSubtitle ?? subtitleLanguage ?? interfaceLanguage) ??
+      tracks[0];
+    if (track) void chooseSubtitle(subtitleValue(track));
+  }
+
+  /** The volume set here, or the receiver's while casting. */
+  function applyVolume(volume: number) {
+    if (castView) {
+      if (tellReceiver({ type: 'den-volume', level: volume, muted: volume === 0 })) {
+        playerVolume = volume;
+        playerMuted = volume === 0;
+      }
+      return;
+    }
+    if (!video) return;
+    video.volume = volume;
+    video.muted = volume === 0;
+    playerVolume = volume;
+    playerMuted = video.muted;
+  }
+
+  /** Up and Down, or the wheel over the slider: five per cent a step, said in the toast lane. */
+  function nudgeVolume(change: number) {
+    const from = playerMuted ? 0 : playerVolume;
+    const to = Math.round(Math.max(0, Math.min(1, from + change)) * 100) / 100;
+    applyVolume(to);
+    volumeNotice = i18n.format('player.volume', 'Volume {percent}%', {
+      percent: Math.round(to * 100),
+    });
+  }
+
+  /** A focused timeline: ten seconds a step either way, a minute for Page Up and Page Down. */
+  function timelineKey(event: KeyboardEvent) {
+    const step =
+      event.key === 'ArrowLeft'
+        ? -SKIP_SECS
+        : event.key === 'ArrowRight'
+          ? SKIP_SECS
+          : event.key === 'PageDown'
+            ? -60
+            : event.key === 'PageUp'
+              ? 60
+              : 0;
+    if (!step) return;
+    event.preventDefault();
+    seekBy(step);
+  }
+
+  /** Whether the controls may hide now: never while there is something to read, hold or press in them. */
+  function webControlsMayHide(): boolean {
+    // A failure's message and the options to recover from it stay up, as does a paused or casting player.
+    if (!webTransport || castView || failure || video?.paused) return false;
+    if (playerMenuOpen() || tvSubtitleTimingOpen || castFocus || timelineHeld || upNext !== null)
+      return false;
+    // The pointer over the top bar or the dock, or keyboard focus among the controls, holds them up.
+    if (webTop?.matches(':hover') || webBar?.matches(':hover')) return false;
+    const focused = document.activeElement;
+    return !(
+      focused instanceof HTMLElement &&
+      focused !== playerRoot &&
+      playerRoot?.contains(focused) &&
+      focused.matches(':focus-visible')
+    );
+  }
+
+  function hideWebControls() {
+    clearTimeout(webControlsTimer);
+    webControlsVisible = false;
+  }
+
   function playerMenuOpen(): boolean {
     return __DEN_TV__
       ? document.querySelector('.player dialog[role="menu"][open]') !== null
@@ -4768,11 +5446,19 @@
     if (target?.matches('button, a, input, select, textarea, [role="menuitem"], [contenteditable]'))
       return;
     const key = event.key.toLowerCase();
-    if (key === ' ' || key === 'k') togglePlaying();
-    else if (event.key === 'ArrowLeft') seekBy(-SKIP_SECS);
-    else if (event.key === 'ArrowRight') seekBy(SKIP_SECS);
+    // Shift is held only for Shift+N: any other key with it is left to the browser.
+    if (event.shiftKey) {
+      if (key !== 'n' || !onnext || !next) return;
+      stay();
+      onnext();
+    } else if (key === ' ' || key === 'k') togglePlaying();
+    else if (event.key === 'ArrowLeft' || key === 'j') stackSeek(-1);
+    else if (event.key === 'ArrowRight' || key === 'l') stackSeek(1);
+    else if (event.key === 'ArrowUp') nudgeVolume(0.05);
+    else if (event.key === 'ArrowDown') nudgeVolume(-0.05);
     else if (key === 'm') toggleMuted();
     else if (key === 'f') void toggleFullscreen();
+    else if (key === 'c') toggleSubtitles();
     else return;
     revealWebControls();
     event.preventDefault();
@@ -4923,6 +5609,8 @@
   class:web-custom-player={webTransport}
   class:web-touch-player={webTransport && !desktopTransport}
   class:web-controls-hidden={webTransport && !webControlsVisible}
+  class:web-casting={webTransport && castView}
+  class:web-counting={webTransport && upNext !== null}
   role="dialog"
   tabindex="-1"
   aria-modal="true"
@@ -4932,194 +5620,108 @@
     // A finger that wobbles during a tap on the picture must not reveal what that tap is about to hide.
     if (event.pointerType === 'mouse') revealWebControls();
   }}
-  onpointerleave={scheduleWebControls}
+  onpointerleave={playerPointerLeave}
   onfocusin={() => revealWebControls(false)}
   onfocusout={scheduleWebControls}
 >
-  <header>
-    <b>{heading}</b>
-    {#if session || sourceRecovery}
-      <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
-           Remux session. Wherever Hearth chooses the path it opens a menu saying so, with the switch to the other in
-           it — disabled, and the note saying why, where TorBox can't play here: a stream restarts only on that choice,
-           never on a press of the stamp itself. -->
-      {@const source = session ? (session.external ? 'TorBox' : 'Den Remux') : 'Source'}
-      {#if !casting && playback}
-        {@const external = session?.external === true}
-        {@const ruledOut = !external
-          ? (torboxRuledOut(managedCause) ??
-            (typeof torbox === 'object' ? torbox.unavailable : undefined))
-          : undefined}
-        <!-- The system player shows only a playlist's subtitles, and TorBox's names none: the switch turns one off. -->
-        {@const dropsSubtitle =
-          !!session && !external && subtitleChoice !== null && subtitlesNeedPlaylist()}
-        <ActionMenu
-          label={session
-            ? i18n.format('player.playingFrom', 'Playing from {source}', { source })
-            : i18n.phrase('Choose playback source')}
-          note={session
-            ? external
-              ? directWithoutDenSubtitles
-                ? session.subtitles?.some((track) => track.torboxTrack !== undefined)
-                  ? i18n.phrase(
-                      'Playing directly from TorBox. Den subtitles were not requested; embedded TorBox subtitles remain available.',
-                    )
-                  : i18n.phrase(
-                      'Playing directly from TorBox. Den subtitles were not requested, and this release has no embedded TorBox subtitles.',
-                    )
-                : i18n.phrase('Playing directly from TorBox')
-              : ruledOut
-                ? i18n.format(
-                    'player.playingThroughReason',
-                    'Playing through Den Remux. {reason}.',
-                    { reason: i18n.phrase(ruledOut) },
-                  )
-                : i18n.phrase('Playing through Den Remux')
-            : i18n.phrase('Playback has no active source. Try either path explicitly.')}
-          triggerClass="den-button den-button-player den-button-compact player-source-switch"
-          onclose={scheduleWebControls}
-          items={() =>
-            session
-              ? [
-                  {
-                    kind: 'item',
-                    label: i18n.format('player.switchTo', 'Switch to {source}', {
-                      source: external ? 'Den Remux' : 'TorBox',
-                    }),
-                    description: external
-                      ? i18n.phrase(
-                          'For audio or subtitles this browser can’t play, or a stream that stalls',
-                        )
-                      : ruledOut
-                        ? undefined
-                        : dropsSubtitle
-                          ? i18n.phrase('Turns subtitles off: this player shows only Den Remux’s')
-                          : i18n.phrase('Straight from the source, no conversion'),
-                    disabled: !!ruledOut || deliverySwitching || switching,
-                    onselect: () => {
-                      if (!dropsSubtitle) return switchDelivery();
-                      const previous = subtitleChoice;
-                      subtitleChoice = null;
-                      switchDelivery(() => (subtitleChoice = previous));
-                    },
-                  },
-                ]
-              : [
-                  {
-                    kind: 'item',
-                    label: i18n.phrase('Try TorBox without Den subtitles'),
-                    description: i18n.phrase(
-                      ruledOut ?? 'Play the release directly, without Den subtitles',
-                    ),
-                    disabled: !!ruledOut || deliverySwitching || switching,
-                    onselect: () => trySourceWithoutSession('torbox'),
-                  },
-                  {
-                    kind: 'item',
-                    label: 'Try Den Remux',
-                    description: 'Use the home player for compatible audio and subtitles',
-                    disabled: deliverySwitching || switching,
-                    onselect: () => trySourceWithoutSession('den-remux'),
-                  },
-                ]}
-        >
-          {#snippet glyph()}<span data-testid="playback-source">{source}</span>{/snippet}
-        </ActionMenu>
-      {:else}
-        <span class="source-stamp" data-testid="playback-source">{source}</span>
+  {#if webTransport}
+    <!-- Close and what is playing at the top, and the one output slot at its right end: Cast or AirPlay, the same place
+         on every size. The slot's box depends only on this bar, so the cast page's frame drawn over it moves only as
+         the window does, never as the dock below gains or loses a button. -->
+    <header class="web-top" bind:this={webTop}>
+      <button
+        class="web-glyph web-close"
+        type="button"
+        aria-label="Close player"
+        data-tip={i18n.phrase('Close')}
+        data-key="Esc"
+        onclick={close}
+      >
+        <ButtonIcon name="close" />
+      </button>
+      <div class="web-heading">
+        <b>{title.title}</b>
+        {#if season !== undefined}<span>S{season} · E{episode}</span>{/if}
+      </div>
+      <span class="web-output">
+        {#if session && airPlayCapable}
+          <button
+            class="web-glyph output-action"
+            class:web-on={airPlayActive}
+            type="button"
+            aria-label={airPlayAvailability === 'unavailable'
+              ? 'AirPlay, no devices available'
+              : airPlayActive
+                ? 'Change AirPlay device'
+                : 'AirPlay'}
+            aria-pressed={airPlayActive}
+            data-tip={i18n.phrase('AirPlay')}
+            disabled={airPlayAvailability === 'unavailable'}
+            onclick={offerAirPlay}
+          >
+            <ButtonIcon name="airplay" />
+          </button>
+        {/if}
+        {#if castSlotShown}
+          {@render castButtonSlot('web-glyph output-action')}
+        {/if}
+      </span>
+    </header>
+    <!-- One toast at a time, under the top bar: in the black band above an upright phone's picture, never over it. An
+         actionable one or an error stays until it is answered and holds back the rest; quiet ones fade (`fades`). -->
+    <div class="notices web-toasts">
+      {#if webToast}
+        {@render banner(webToast.text, webToast)}
       {/if}
-    {/if}
-    {#if !customTransport && castSlotShown}
-      {@render castButtonSlot(
-        'den-button den-button-player den-button-icon player-header-action cast',
-      )}
-    {/if}
-    <Button
-      variant="player"
-      size="icon"
-      class="player-header-action"
-      icon="close"
-      ariaLabel="Close"
-      onclick={close}
-    />
-  </header>
-  <!-- What playback says as it goes, above the video and apart from what is playing below it: banners that fade
-       on their own (`fades`) unless they offer something to do, and the buffering line, which clears itself the
-       moment playback resumes. -->
-  <div class="notices">
-    {#if transitionNotice}
-      {@render banner(transitionNotice, { quiet: true, busy: true })}
-    {/if}
-    {#if subtitleResyncNotice}
-      {@render banner(subtitleResyncNotice, { quiet: true })}
-    {/if}
-    {#if subtitleLoadFailure}
-      {@render banner(
-        i18n.format(
-          'player.subtitleLoadFailed',
-          'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
-          { subtitle: subtitleLabel(subtitleLoadFailure) },
-        ),
-        {
-          action: {
-            label: i18n.phrase('Try again'),
-            run: () => void chooseSubtitle(subtitleValue(subtitleLoadFailure!)),
-          },
-        },
-      )}
-    {/if}
-    {#if session}
-      {#if swapped}
-        {@render banner(swapped, { dismiss: () => (swapped = null) })}
+    </div>
+  {:else}
+    <header>
+      <b>{heading}</b>
+      {#if session || sourceRecovery}
+        <!-- Which path is playing, so anyone can tell at a glance: TorBox's own player (Hearth's direct path) or a Den
+             Remux session. Wherever Hearth chooses the path it opens a menu saying so, with the switch to the other
+             in it (`sourceItems`): a stream restarts only on that choice, never on a press of the stamp itself. -->
+        {#if !casting && playback}
+          <ActionMenu
+            label={sourceLabel()}
+            note={sourceNote()}
+            triggerClass="den-button den-button-player den-button-compact player-source-switch"
+            onclose={scheduleWebControls}
+            items={sourceItems}
+          >
+            {#snippet glyph()}<span data-testid="playback-source">{playbackSource}</span>{/snippet}
+          </ActionMenu>
+        {:else}
+          <span class="source-stamp" data-testid="playback-source">{playbackSource}</span>
+        {/if}
       {/if}
-      {#if autoSwitch}
-        {@render banner(autoSwitch, {
-          dismiss: () => (autoSwitch = null),
-          busy: switching,
-        })}
-      {:else if visibleBufferLine}
-        {@render banner(visibleBufferLine, { quiet: true, busy: true })}
-      {/if}
-      {#if slowPick}
-        {@render banner(
-          `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
-          {
-            dismiss: () => (slowPick = null),
-            action: { label: 'Try another release', run: tryAnother },
-          },
+      {#if !customTransport && castSlotShown}
+        {@render castButtonSlot(
+          'den-button den-button-player den-button-icon player-header-action cast',
         )}
       {/if}
-      {#if struggling}
-        {@render banner(
-          `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
-          { dismiss: () => (struggling = null) },
-        )}
-      {/if}
-      {#if unchanged}
-        {@render banner(unchanged, { dismiss: () => (unchanged = null) })}
-      {/if}
-    {/if}
-    {#if receiptUnsupported}
-      {@render banner(
-        i18n.phrase(
-          'This TV cannot recover managed-playback progress after the page closes. Keep Den open, or link a phone or computer in Settings › Connections.',
-        ),
-        {
-          dismiss: () => (receiptUnsupported = false),
-          action: {
-            label: playbackReceiptHandoffAsOwner
-              ? i18n.text('settings.section.connections')
-              : i18n.phrase('Switch to Owner'),
-            run: openPlaybackReceiptHandoff,
-          },
-        },
-      )}
-    {/if}
-  </div>
+      <Button
+        variant="player"
+        size="icon"
+        class="player-header-action"
+        icon="close"
+        ariaLabel="Close"
+        onclick={close}
+      />
+    </header>
+    <!-- What playback says as it goes, above the video and apart from what is playing below it: banners that fade
+         on their own (`fades`) unless they offer something to do, and the buffering line, which clears itself the
+         moment playback resumes. -->
+    <div class="notices">
+      {#each notices as notice, n (n)}
+        {@render banner(notice.text, notice)}
+      {/each}
+    </div>
+  {/if}
   <div class="stage" bind:this={stageElement}>
-    {#if castNotice}
+    {#if castNotice && !webTransport}
       <!-- A Cast failure belongs to the Cast control, not the playback layout: one stable surface over the picture,
-           which neither moves nor resizes what is playing. -->
+           which neither moves nor resizes what is playing. A browser says it in its toast lane. -->
       {@const notice = castNotice}
       <div class="cast-status">
         {@render banner(i18n.phrase(notice.text), {
@@ -5238,6 +5840,7 @@
           playsinline
           use:allowAirPlay
           onclick={pictureClick}
+          ondblclick={pictureDoubleClick}
           onvolumechange={() => {
             playerVolume = video?.volume ?? playerVolume;
             playerMuted = video?.muted ?? playerMuted;
@@ -5297,6 +5900,14 @@
         <!-- The picture is on the TV: what plays there, and where, with Den's transport as its remote below. -->
         <div class="cast-view">
           {#if title.posterPath}
+            {#if webTransport}
+              <!-- The poster again, blurred and dimmed, where the picture would be. -->
+              <img
+                class="cast-backdrop"
+                src={`https://image.tmdb.org/t/p/w500${title.posterPath}`}
+                alt=""
+              />
+            {/if}
             <img src={`https://image.tmdb.org/t/p/w500${title.posterPath}`} alt="" />
           {/if}
           <p role="status">
@@ -5309,7 +5920,8 @@
         </div>
       {/if}
       {#if !session?.castOrigin || castView}
-        {#if customTransport}
+        <!-- A browser's transport is drawn over the whole player instead (`webControls`). -->
+        {#if fullTvTransport}
           <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
             <div class="tv-timeline">
               <span aria-hidden="true">{clockTime(tvPosition)}</span>
@@ -5365,45 +5977,6 @@
               >
                 {@render skipIcon('forward')}
               </button>
-              {#if webTransport}
-                <div class="web-transport-extras">
-                  <button
-                    class="web-volume-button"
-                    type="button"
-                    aria-label={playerMuted ? 'Unmute' : 'Mute'}
-                    onclick={toggleMuted}
-                  >
-                    <ButtonIcon name={playerMuted || playerVolume === 0 ? 'mute' : 'volume'} />
-                  </button>
-                  <input
-                    class="web-volume"
-                    type="range"
-                    aria-label="Volume"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={playerMuted ? 0 : playerVolume}
-                    oninput={setVolume}
-                  />
-                  {#if canPictureInPicture()}
-                    <button
-                      class="web-pip"
-                      type="button"
-                      aria-label="Picture in picture"
-                      title="Picture in picture"
-                      onclick={() => void togglePictureInPicture()}>PiP</button
-                    >
-                  {/if}
-                  <button
-                    type="button"
-                    aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-                    title="Fullscreen"
-                    onclick={() => void toggleFullscreen()}
-                  >
-                    <ButtonIcon name="fullscreen" />
-                  </button>
-                </div>
-              {/if}
             </div>
           </nav>
         {:else if tv}
@@ -5430,7 +6003,7 @@
             <button type="button" onclick={close}>Close</button>
           </nav>
         {/if}
-        {#if customTransport && active}
+        {#if fullTvTransport && active}
           <Button
             variant="primary"
             class="tv-skip-overlay"
@@ -5491,9 +6064,10 @@
       <a href={titleHref(title)}>{title.type === 'tv' ? 'Series details' : 'Movie details'}</a>
     </section>
   {/if}
-  {#if session}
+  {#if webTransport}
+    {#if session || sourceRecovery}{@render webControls()}{/if}
+  {:else if session}
     {@const parts = releaseParts(session)}
-    {@const playingFile = session.release.filename}
     {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
@@ -5515,26 +6089,10 @@
           <ActionMenu
             label={i18n.format('player.stream', 'Stream: {stream}', { stream: short })}
             heading="Streams"
-            note={releaseListing === 'loading'
-              ? 'Finding the other available streams…'
-              : releaseListing === 'failed'
-                ? 'Couldn’t refresh the stream list. The stream already playing is still available.'
-                : releaseListing === 'ready' && releaseChoices().length === 1
-                  ? 'One stream is available.'
-                  : undefined}
+            note={releaseNote()}
             triggerClass="pick"
             onclose={scheduleWebControls}
-            items={() =>
-              releaseChoices().map((release) => ({
-                kind: 'radio',
-                key: release.filename,
-                group: 'release',
-                label: optionLabel(release),
-                description: release.filename,
-                checked: release.filename === playingFile,
-                disabled: release.plays === 'no',
-                onselect: () => switchRelease(release.filename),
-              }))}
+            items={releaseItems}
           >
             {#snippet glyph()}
               {@render plates()}
@@ -5555,20 +6113,7 @@
                 heading="Audio Track"
                 triggerClass="pick"
                 onclose={scheduleWebControls}
-                items={() => [
-                  ...session!.audioTracks.map((track, n) => ({
-                    kind: 'radio' as const,
-                    group: 'audio',
-                    label: trackLabel(track, n),
-                    checked: n === session!.audioTrack,
-                    onselect: () => switchAudioIndex(n),
-                  })),
-                  {
-                    kind: 'item' as const,
-                    label: 'Re-sync audio & video',
-                    onselect: resyncAudioVideo,
-                  },
-                ]}
+                items={() => audioTrackItems()}
               >
                 {#snippet glyph()}{@render globe()}{/snippet}
               </ActionMenu>
@@ -5613,53 +6158,8 @@
               triggerClass="pick"
               onclose={scheduleWebControls}
               items={() => [
-                {
-                  kind: 'radio',
-                  group: 'subtitle',
-                  label: 'Off',
-                  checked: subtitleChoice === null,
-                  onselect: () => void chooseSubtitle(null),
-                },
-                ...(session!.subtitles ?? []).map((track) => ({
-                  kind: 'radio' as const,
-                  group: 'subtitle',
-                  label: subtitleLabel(track),
-                  description: subtitleDescription(session!, track),
-                  checked: subtitleValue(track) === subtitleChoice,
-                  onselect: () => void chooseSubtitle(subtitleValue(track)),
-                })),
-                ...subtitleResyncItems(),
-                ...(customTransport && subtitleChoice !== null
-                  ? [
-                      {
-                        kind: 'item' as const,
-                        label: i18n.format(
-                          'player.adjustSubtitleTiming',
-                          'Adjust subtitle timing ({offset}s)',
-                          {
-                            offset: `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}`,
-                          },
-                        ),
-                        onselect: openSubtitleTiming,
-                      },
-                      {
-                        kind: 'item' as const,
-                        label: i18n.format(
-                          'player.resetSubtitleTiming',
-                          'Reset subtitle timing ({offset}s)',
-                          {
-                            offset: `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}`,
-                          },
-                        ),
-                        disabled: subtitleOffset === 0,
-                        onselect: () => {
-                          subtitleOffset = 0;
-                          avplay?.setSubtitleOffset(0);
-                          retimeSubtitles();
-                        },
-                      },
-                    ]
-                  : []),
+                ...subtitleTrackItems(),
+                ...(customTransport && subtitleChoice !== null ? subtitleTimingItems() : []),
               ]}
             >
               {#snippet glyph()}
@@ -5687,28 +6187,6 @@
               aria-label={next ? `Next: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
-          {#if webTransport && castSlotShown}
-            {@render castButtonSlot('player-tv-action output-action')}
-          {/if}
-          {#if webTransport && airPlayCapable}
-            <Button
-              variant="player"
-              size="icon"
-              class="player-tv-action output-action"
-              icon="airplay"
-              ariaLabel={airPlayAvailability === 'unavailable'
-                ? 'AirPlay, no devices available'
-                : airPlayActive
-                  ? 'Change AirPlay device'
-                  : 'AirPlay'}
-              title={airPlayAvailability === 'unavailable'
-                ? 'No AirPlay devices available'
-                : 'AirPlay'}
-              pressed={airPlayActive}
-              disabled={airPlayAvailability === 'unavailable'}
-              onclick={offerAirPlay}
-            />
-          {/if}
         {/if}
         <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
@@ -5719,23 +6197,14 @@
         {/if}
         {#if onnext && next}
           {#if upNext !== null}
-            {#snippet upNextActions()}
-              <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
-              <Button
-                variant="primary"
-                aria-label="Next: {next}"
-                href={nextHref}
-                onclick={advanceLink}
-                >Next: {next} <span aria-hidden="true">({upNext})</span></Button
-              >
-              <Button label="Stay" onclick={stay} />
-            {/snippet}
-            <!-- Desktop lifts the pair out of the icon row, which has room for icons only. -->
-            {#if webTransport}
-              <div class="up-next">{@render upNextActions()}</div>
-            {:else}
-              {@render upNextActions()}
-            {/if}
+            <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
+            <Button
+              variant="primary"
+              aria-label="Next: {next}"
+              href={nextHref}
+              onclick={advanceLink}>Next: {next} <span aria-hidden="true">({upNext})</span></Button
+            >
+            <Button label="Stay" onclick={stay} />
           {:else if !customTransport}
             <Button
               label={i18n.format('player.next', 'Next: {title}', { title: next })}
@@ -5813,6 +6282,404 @@
     tabindex="0"
     onfocus={focusCastButton}
   ></span>
+{/snippet}
+
+<!-- A browser's controls, as Apple's own player has them: −10 · play · +10 over the middle of the picture on a touch
+     screen, the timeline, then one dock row — Audio & subtitles and Next at its left; Mute, PiP, Fullscreen and ⋯ at its
+     right. With a mouse the transport moves into the dock's left end beside the volume and the time. Skip and the
+     up-next card float above the timeline and stay while the rest hides. Both transports are drawn and CSS shows the
+     one for the window's size (`.web-centre`, `.web-dock-transport`); which pointer it is decides behaviour alone. -->
+{#snippet webControls()}
+  {@const transport = !!session && (!session.castOrigin || castView)}
+  <nav class="web-transport" aria-label="Playback controls">
+    {#if session && (active || (onnext && next && upNext !== null))}
+      <div class="web-floating">
+        {#if active}
+          <Button
+            variant="primary"
+            class="web-skip"
+            label={SKIP_LABEL[active.kind]}
+            onclick={skipActive}
+          />
+        {/if}
+        {#if onnext && next && upNext !== null}
+          <div
+            class="web-up-next"
+            style:--up-next-progress={`${((UP_NEXT_SECS - upNext) / UP_NEXT_SECS) * 100}%`}
+          >
+            <!-- Said once: the seconds stay out of what is announced and out of the button's name. -->
+            <p class="web-sr" role="status">
+              {i18n.format('player.nextIn', 'Next episode in {seconds} seconds', {
+                seconds: UP_NEXT_SECS,
+              })}
+            </p>
+            <div class="web-up-next-top" aria-hidden="true">
+              {#if nextDetail?.stillPath}
+                <span class="web-up-next-thumb">
+                  <img src={`https://image.tmdb.org/t/p/w300${nextDetail.stillPath}`} alt="" />
+                  {#if nextDetail.runtime}<span class="web-up-next-runtime"
+                      >{nextDetail.runtime} min</span
+                    >{/if}
+                </span>
+              {/if}
+              <p class="web-up-next-text">
+                <small>{i18n.format('player.upNext', 'Up next · {title}', { title: next })}</small>
+                {#if nextDetail?.name}<b>{nextDetail.name}</b>{/if}
+                <span
+                  >{i18n.format('player.playsIn', 'Plays in {seconds} s', {
+                    seconds: upNext,
+                  })}{#if nextDetail?.runtime && !nextDetail.stillPath}
+                    · {nextDetail.runtime} min{/if}</span
+                >
+              </p>
+            </div>
+            <div class="web-up-next-actions">
+              <Button
+                variant="primary"
+                class="web-play-now"
+                ariaLabel={i18n.format('player.playNow', 'Play now: {title}', { title: next })}
+                href={nextHref}
+                onclick={advanceLink}><span>Play now</span></Button
+              >
+              <Button label="Stay" onclick={stay} />
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+    {#if transport && !castView}
+      <div class="web-centre">{@render webTransportButtons()}</div>
+      <!-- A mouse plays and pauses on the picture itself: while paused, and for a moment as a click resumes, the
+           middle says which. -->
+      {#if tvPaused && (played || awaitingPress)}
+        <span class="web-centre-glyph" aria-hidden="true"><ButtonIcon name="play" filled /></span>
+      {:else if pictureFlash}
+        <span class="web-centre-glyph web-flash" aria-hidden="true"
+          ><ButtonIcon name="pause" filled /></span
+        >
+      {/if}
+    {/if}
+    {#if seekStreak}
+      <span class="web-ripple" class:web-ripple-forward={seekStreak.side > 0} aria-hidden="true"
+        >{seekStreak.side < 0 ? '−' : '+'}{seekStreak.count * SKIP_SECS} s</span
+      >
+    {/if}
+    <div class="web-bar" bind:this={webBar}>
+      {#if transport}
+        <div class="web-timeline">
+          <input
+            class="web-track"
+            type="range"
+            aria-label="Playback position"
+            aria-valuetext={`${clockTime(tvPosition)} of ${clockTime(tvDuration)}`}
+            min="0"
+            max={Math.max(tvDuration, 1)}
+            step={desktopTransport ? '10' : 'any'}
+            value={Math.min(tvPosition, Math.max(tvDuration, 1))}
+            disabled={!tvDuration}
+            style:--tv-progress={`${tvDuration ? Math.min(100, (tvPosition / tvDuration) * 100) : 0}%`}
+            style:--tv-hover={timelineHover ? `${timelineHover.x * 100}%` : undefined}
+            style:--tv-buffered={`${tvDuration ? Math.min(100, (tvBuffered / tvDuration) * 100) : 0}%`}
+            onpointerdown={(event) => {
+              timelineHeld = true;
+              scrubbing = event.pointerType !== 'mouse';
+            }}
+            onpointerup={() => {
+              timelineHeld = false;
+              scheduleWebControls();
+            }}
+            onpointercancel={() => {
+              timelineHeld = false;
+              scrubbing = false;
+            }}
+            onpointermove={(event) => {
+              if (event.pointerType !== 'mouse') return;
+              const box = event.currentTarget.getBoundingClientRect();
+              const x = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
+              timelineHover = { x, at: x * tvDuration };
+            }}
+            onpointerleave={() => (timelineHover = null)}
+            onkeydown={timelineKey}
+            oninput={(event) => {
+              const to = Number(event.currentTarget.value);
+              tvPosition = to;
+              // A finger drag follows the finger to the second, and a receiver is asked once the thumb is let go:
+              // both are sought at `change`, not at every step.
+              if (!scrubbing && !castView) seekTo(to);
+            }}
+            onchange={(event) => {
+              timelineHeld = false;
+              if (!scrubbing && !castView) return;
+              scrubbing = false;
+              seekTo(Number(event.currentTarget.value));
+            }}
+          />
+          <span class="web-elapsed" aria-hidden="true">{clockTime(tvPosition)}</span>
+          <span class="web-remaining" aria-hidden="true"
+            >−{clockTime(Math.max(0, tvDuration - tvPosition))}</span
+          >
+          {#if timelineHover}
+            <span class="web-bubble" style:left={`${timelineHover.x * 100}%`} aria-hidden="true"
+              >{clockTime(timelineHover.at)}</span
+            >
+          {/if}
+        </div>
+        {#if castView}
+          <!-- Casting, this page is the receiver's remote: the transport sits under the timeline, not on a picture. -->
+          <div class="web-remote">{@render webTransportButtons()}</div>
+        {/if}
+      {/if}
+      <div class="web-dock">
+        <div class="web-dock-group">
+          {#if transport}
+            <div class="web-dock-transport">
+              {@render webTransportButtons(true)}
+              {@render muteButton()}
+              <input
+                class="web-volume"
+                type="range"
+                aria-label="Volume"
+                min="0"
+                max="1"
+                step="0.05"
+                value={playerMuted ? 0 : playerVolume}
+                oninput={setVolume}
+                onwheel={(event) => {
+                  event.preventDefault();
+                  nudgeVolume(event.deltaY < 0 ? 0.05 : -0.05);
+                }}
+              />
+              <span class="web-time">{clockTime(tvPosition)} / {clockTime(tvDuration)}</span>
+            </div>
+          {/if}
+          {#if session && (session.audioTracks.length || session.subtitles?.length)}
+            {@const now = audioSubtitleSummary()}
+            <span class="web-tip" data-tip={i18n.phrase('Audio & subtitles')}>
+              <ActionMenu
+                label={i18n.format(
+                  'player.audioAndSubtitles',
+                  'Audio and subtitles: {audio}, subtitles {subtitles}',
+                  { audio: now.audio, subtitles: now.subtitles },
+                )}
+                heading="Audio & subtitles"
+                note={session.external && directWithoutDenSubtitles
+                  ? 'Den subtitles were not requested for this direct stream. This release’s embedded TorBox subtitles remain available.'
+                  : undefined}
+                rows={optionRows}
+                triggerClass="web-glyph web-labelled web-audio-subtitles"
+                sheetQuery={PHONE_SHEET}
+                onclose={scheduleWebControls}
+                items={audioSubtitleItems}
+              >
+                {#snippet glyph()}{@render subtitlesIcon()}<span class="web-label"
+                    >Audio & subtitles</span
+                  >{/snippet}
+              </ActionMenu>
+            </span>
+          {/if}
+          {#if session && onnext && nextHref}
+            <a
+              class="web-glyph web-labelled"
+              href={nextHref}
+              aria-label={i18n.format('player.nextEpisode', 'Next episode: {title}', {
+                title: next ?? '',
+              })}
+              data-tip={i18n.phrase('Next episode')}
+              data-key="Shift N"
+              onclick={advanceLink}
+              >{@render nextIcon()}<span class="web-label">Next episode</span></a
+            >
+          {/if}
+        </div>
+        <div class="web-dock-group">
+          {#if transport && !castView}
+            <span class="web-touch-mute">{@render muteButton()}</span>
+            {#if canPictureInPicture()}
+              <button
+                class="web-glyph"
+                type="button"
+                aria-label="Picture in picture"
+                data-tip={i18n.phrase('Picture in picture')}
+                onclick={() => void togglePictureInPicture()}>{@render pipIcon()}</button
+              >
+            {/if}
+            <button
+              class="web-glyph"
+              type="button"
+              aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              data-tip={i18n.phrase('Fullscreen')}
+              data-key="F"
+              onclick={() => void toggleFullscreen()}
+            >
+              <ButtonIcon name="fullscreen" />
+            </button>
+          {/if}
+          <span class="web-tip" data-tip={i18n.phrase('More')}>
+            <ActionMenu
+              label="More playback options"
+              heading={openOptionsPage()?.heading ?? optionsPage ?? 'Playback options'}
+              note={openOptionsPage()?.note}
+              rows={moreRows}
+              triggerClass="web-glyph web-more"
+              sheetQuery={PHONE_SHEET}
+              onclose={() => {
+                optionsPage = null;
+                scheduleWebControls();
+              }}
+              items={() => openOptionsPage()?.items() ?? optionItems()}
+            >
+              {#snippet glyph()}<ButtonIcon name="more" /><span
+                  class="web-source"
+                  data-testid="playback-source">{playbackSource}</span
+                >{/snippet}
+            </ActionMenu>
+          </span>
+        </div>
+      </div>
+    </div>
+  </nav>
+{/snippet}
+
+<!-- −10 · Play · +10 over the picture; in a mouse window's dock, Play first, as a desktop player has it. -->
+{#snippet webTransportButtons(playFirst = false)}
+  {#snippet play()}
+    <button
+      class="web-glyph web-play"
+      type="button"
+      aria-label={tvPaused ? 'Play' : 'Pause'}
+      aria-busy={stalling || (!!session && !played && !awaitingPress) || undefined}
+      data-tip={tvPaused ? i18n.phrase('Play') : i18n.phrase('Pause')}
+      data-key="K"
+      onclick={togglePlaying}
+    >
+      <ButtonIcon name={tvPaused ? 'play' : 'pause'} filled />
+    </button>
+  {/snippet}
+  {#if playFirst}{@render play()}{/if}
+  <button
+    class="web-glyph web-skip-back"
+    type="button"
+    aria-label="Rewind 10 seconds"
+    data-tip={i18n.phrase('Back 10 seconds')}
+    data-key="J"
+    onclick={() => seekBy(-SKIP_SECS)}
+  >
+    {@render skipIcon('back')}
+  </button>
+  {#if !playFirst}{@render play()}{/if}
+  <button
+    class="web-glyph web-skip-forward"
+    type="button"
+    aria-label="Forward 10 seconds"
+    data-tip={i18n.phrase('Forward 10 seconds')}
+    data-key="L"
+    onclick={() => seekBy(SKIP_SECS)}
+  >
+    {@render skipIcon('forward')}
+  </button>
+{/snippet}
+
+{#snippet muteButton()}
+  <button
+    class="web-glyph"
+    type="button"
+    aria-label={playerMuted ? 'Unmute' : 'Mute'}
+    data-tip={playerMuted ? i18n.phrase('Unmute') : i18n.phrase('Mute')}
+    data-key="M"
+    onclick={toggleMuted}
+  >
+    <ButtonIcon name={playerMuted || playerVolume === 0 ? 'mute' : 'volume'} />
+  </button>
+{/snippet}
+
+<!-- The options' rows, drawn into ActionMenu's own list and keyboard model: a page's way back, rows grouped under their
+     section (audio, then subtitles), each with its current value, and a page's row opening it in place. -->
+{#snippet optionRows(items: MenuItem[], run: (item: MenuItem, event: MouseEvent) => void)}
+  <div class="options-rows" role="none">
+    {#each optionSections(items) as group, g (group.section ?? `#${g}`)}
+      {#if group.section}
+        <div class="options-section" role="group" aria-label={group.section}>
+          <p class="options-section-heading" aria-hidden="true">{group.section}</p>
+          {#each group.rows as { item, i } (item.key ?? `${item.kind}:${item.label}:${i}`)}
+            {@render optionRow(item, i, run)}
+          {/each}
+        </div>
+      {:else}
+        {#each group.rows as { item, i } (item.key ?? `${item.kind}:${item.label}:${i}`)}
+          {@render optionRow(item, i, run)}
+        {/each}
+      {/if}
+    {/each}
+  </div>
+{/snippet}
+
+<!-- The ⋯ options: on their first page what is playing heads them, below a sheet's grab area so its text can be
+     selected; on a row's page, its name and the way back. -->
+{#snippet moreRows(items: MenuItem[], run: (item: MenuItem, event: MouseEvent) => void)}
+  {#if optionsPage === null}
+    {@render optionsHeader()}
+  {:else}
+    <!-- A sheet's head names the page already. -->
+    {#if !matchMedia(PHONE_SHEET).matches}
+      <p class="options-page-heading">{openOptionsPage()?.heading ?? optionsPage}</p>
+    {/if}
+    <Button
+      variant="menu"
+      role="menuitem"
+      class="item back"
+      label="Back"
+      onclick={() => void showOptionsPage(null)}
+    />
+  {/if}
+  {@render optionRows(items, run)}
+{/snippet}
+
+{#snippet optionRow(item: OptionItem, i: number, run: (item: MenuItem, event: MouseEvent) => void)}
+  <Button
+    variant="menu"
+    size="regular"
+    label={item.label}
+    ariaLabel={item.value ? `${i18n.phrase(item.label)}, ${item.value}` : undefined}
+    role={item.kind === 'radio' ? 'menuitemradio' : 'menuitem'}
+    aria-checked={item.kind === 'radio' ? item.checked : undefined}
+    aria-haspopup={item.page ? 'menu' : undefined}
+    aria-disabled={item.disabled || undefined}
+    aria-describedby={item.description ? `option-${i}` : undefined}
+    class={item.description ? 'item described' : item.value || item.page ? 'item valued' : 'item'}
+    onclick={(event) => (item.page ? void showOptionsPage(item.label) : run(item, event))}
+  >
+    {#if item.description}<span class="item-description" id={`option-${i}`}
+        >{i18n.phrase(item.description)}</span
+      >{/if}
+    {#if item.value}<span class="item-value" aria-hidden="true">{item.value}</span>{/if}
+    {#if item.page}<span class="item-chevron" aria-hidden="true">›</span>{/if}
+  </Button>
+{/snippet}
+
+<!-- What the options open with: what is playing, the release in full (selectable, to look up or report), and the path. -->
+{#snippet optionsHeader()}
+  <div class="options-head">
+    <b>{title.title}{season !== undefined ? ` · S${season} · E${episode}` : ''}</b>
+    {#if session}
+      {@const parts = releaseParts(session)}
+      <p class="options-release">
+        {#if parts.converted}
+          <span>Converted here to {parts.converted}</span>
+          <span>from {parts.release}</span>
+        {:else}
+          <span>{parts.release}</span>
+        {/if}
+      </p>
+    {/if}
+    <span class="options-chip">{playbackSource}</span>
+  </div>
+{/snippet}
+
+{#snippet pipIcon()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
+    <rect class="filled" x="12" y="11.3" width="7" height="5.7" rx="1.2" />
+  </svg>
 {/snippet}
 
 {#snippet skipIcon(direction: 'back' | 'forward')}
@@ -6416,45 +7283,35 @@
     outline-offset: 2px;
   }
 
-  /* Every browser gets the same owned transport as the TV shells, scaled down through variables instead of
-     maintaining a second player. Its bars stay clear of a phone's notch, rounded corners and home indicator. */
+  /* A browser's player, laid out as Apple's own: close and what plays at the top; −10 · play · +10 over the middle of the
+     picture on a touch screen; the timeline, then one dock row at the bottom. In an upright phone's black bands the bars
+     cover nothing; on a picture, scrims keep their glyphs readable. Which pointer it is decides behaviour (the
+     `web-touch-player` class); the window's size decides geometry, here. Bars stay clear of a phone's notch, rounded
+     corners and home indicator. */
   .web-custom-player {
-    --player-control-size: 44px;
-    --player-primary-size: 56px;
-    --player-control-gap: 12px;
     --player-safe-top: env(safe-area-inset-top, 0px);
     --player-safe-bottom: env(safe-area-inset-bottom, 0px);
-
-    /* What a touch timeline's 44px target adds to the 24px one: what sits above the transport moves up by it. */
-    --player-timeline-extra: 0px;
     --player-side: max(
-      clamp(20px, 3vw, 48px),
-      env(safe-area-inset-left, 0px),
-      env(safe-area-inset-right, 0px)
+      clamp(16px, 3vw, 48px),
+      calc(env(safe-area-inset-left, 0px) + 16px),
+      calc(env(safe-area-inset-right, 0px) + 16px)
     );
+    --player-top: max(12px, var(--player-safe-top));
+    --player-bottom: max(8px, var(--player-safe-bottom));
+
+    /* The timeline and the dock together: what floats above them (Skip, up next) sits this far up. */
+    --web-bar: 68px;
+    --web-remote: 0px;
+    --web-glass: var(--glass-bg, rgb(28 28 34 / 0.62));
+    --web-glass-edge: var(--glass-edge, rgb(255 255 255 / 0.13));
+    --web-glass-blur: var(--glass-blur, blur(24px) saturate(160%));
 
     grid-template-rows: minmax(0, 1fr);
     padding: 0;
   }
 
-  .web-custom-player > header {
-    position: absolute;
-    top: 0;
-    right: 0;
-    left: 0;
-    z-index: 5;
-    padding: calc(22px + var(--player-safe-top)) var(--player-side) 72px;
-    background: linear-gradient(to bottom, rgb(0 0 0 / 0.8), transparent);
-  }
-
-  .web-custom-player > .notices {
-    position: absolute;
-    top: calc(72px + var(--player-safe-top));
-    right: var(--player-side);
-    left: auto;
-    z-index: 6;
-    width: min(36rem, calc(100% - 2 * var(--player-side)));
-    justify-items: end;
+  .web-touch-player {
+    --web-bar: 88px;
   }
 
   .web-custom-player > .stage {
@@ -6462,262 +7319,172 @@
     inset: 0;
   }
 
-  .web-custom-player .cast-view {
-    padding-block: 88px 220px;
-  }
-
   .web-custom-player video {
     cursor: pointer;
   }
 
-  .web-custom-player > footer {
+  /* Left alone, the mouse goes with the controls. */
+  .web-custom-player.web-controls-hidden:not(.web-touch-player),
+  .web-custom-player.web-controls-hidden:not(.web-touch-player) video {
+    cursor: none;
+  }
+
+  .web-custom-player > header.web-top {
     position: absolute;
-    right: var(--player-side);
-    bottom: calc(24px + var(--player-safe-bottom));
-    left: var(--player-side);
+    top: 0;
+    right: 0;
+    left: 0;
     z-index: 5;
-    display: block;
-    padding: 0;
+    gap: 4px;
+    justify-content: flex-start;
+    padding: var(--player-top) calc(var(--player-side) - 10px) 64px;
+    background: linear-gradient(rgb(0 0 0 / 0.62), transparent);
     pointer-events: none;
   }
 
-  .web-custom-player > footer .release {
-    position: absolute;
-    bottom: calc(92px + var(--player-timeline-extra));
-    left: 0;
-    width: min(55vw, 64ch);
-    color: rgb(255 255 255 / 0.86);
-    font-size: 13px;
-    text-shadow: 0 1px 5px #000;
+  .web-top > * {
     pointer-events: auto;
   }
 
-  /* One row of icons, beside the transport's buttons and clear of them. Allowed to wrap, a second row climbed over
-     the timeline above; a window too narrow for the row beside them gives it a row of its own (below). */
-  .web-custom-player > footer .controls {
-    flex-wrap: nowrap;
-    justify-content: flex-start;
-    width: fit-content;
-    max-width: calc(50% - 100px);
-    pointer-events: auto;
-  }
-
-  /* The countdown's two text buttons stand where the release name does, above the timeline, which they replace
-     while it runs. */
-  .web-custom-player > footer .up-next {
-    position: absolute;
-    bottom: calc(92px + var(--player-timeline-extra));
-    left: 0;
+  .web-heading {
     display: flex;
-    gap: 10px;
-    pointer-events: auto;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    padding: 0 4px;
+    line-height: 1.25;
   }
 
-  .web-custom-player > footer.counting-down .release {
-    visibility: hidden;
-  }
-
-  .web-custom-player .full-tv-transport {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    z-index: 4;
-    display: grid;
-    gap: 12px;
-    padding: 105px var(--player-side) calc(18px + var(--player-safe-bottom));
-    background: linear-gradient(to top, rgb(0 0 0 / 0.92), rgb(0 0 0 / 0.52) 52%, transparent);
-  }
-
-  .web-custom-player .tv-timeline {
-    display: grid;
-    grid-template-columns: 6ch minmax(0, 1fr) 6ch;
-    gap: 14px;
-    align-items: center;
-    color: rgb(255 255 255 / 0.9);
-    font-size: 13px;
-    font-variant-numeric: tabular-nums;
+  .web-heading b {
+    font-size: 15px;
     font-weight: 600;
   }
 
-  .web-custom-player .tv-timeline span:last-child {
-    text-align: right;
+  .web-heading span {
+    overflow: hidden;
+    color: rgb(255 255 255 / 0.66);
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .web-custom-player .tv-timeline input[type='range'] {
-    width: 100%;
-    height: 24px;
-    margin: 0;
+  /* The output slot: one fixed 44px box at the bar's right end, whichever of Cast and AirPlay is in it. */
+  .web-output {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Every control is a bare glyph on a 44px target; only Play is filled. Pressed, a faint circle behind it. */
+  .web-custom-player :global(.web-glyph) {
+    --button-icon-size: 24px;
+
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    height: 44px;
     padding: 0;
     border: 0;
-    appearance: none;
-    background: transparent;
+    border-radius: 22px;
+    background: none;
+    color: rgb(255 255 255 / 0.94);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    text-decoration: none;
     cursor: pointer;
   }
 
-  .web-custom-player .tv-timeline input[type='range']::-webkit-slider-runnable-track {
-    height: 4px;
-    border-radius: 999px;
-    background: linear-gradient(
-      to right,
-      #fff 0 var(--tv-progress),
-      rgb(255 255 255 / 0.32) var(--tv-progress) 100%
-    );
-  }
-
-  .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
-    width: 14px;
-    height: 14px;
-    margin-top: -5px;
-    border: 0;
-    border-radius: 50%;
-    appearance: none;
-    background: #fff;
-    box-shadow: 0 2px 10px rgb(0 0 0 / 0.5);
-    transform: scale(0.72);
-    transition: transform 120ms ease;
-  }
-
-  .web-custom-player .tv-timeline input[type='range']::-moz-range-track {
-    height: 4px;
-    border-radius: 999px;
-    background: rgb(255 255 255 / 0.32);
-  }
-
-  .web-custom-player .tv-timeline input[type='range']::-moz-range-progress {
-    height: 4px;
-    border-radius: 999px;
-    background: #fff;
-  }
-
-  .web-custom-player .tv-timeline input[type='range']::-moz-range-thumb {
-    width: 14px;
-    height: 14px;
-    border: 0;
-    border-radius: 50%;
-    background: #fff;
-  }
-
-  /* Touch alone: a full 44px target, with a thumb a finger can see beside it. */
-  .web-touch-player .tv-timeline input[type='range'] {
-    height: 44px;
-  }
-
-  .web-touch-player .tv-timeline input[type='range']::-webkit-slider-thumb {
-    width: 20px;
-    height: 20px;
-    margin-top: -8px;
-    transform: none;
-  }
-
-  .web-touch-player .tv-timeline input[type='range']::-moz-range-thumb {
-    width: 20px;
-    height: 20px;
-  }
-
-  .web-custom-player .tv-timeline input[type='range']:focus-visible {
-    outline: 0;
-  }
-
-  .web-custom-player .tv-timeline input[type='range']:focus-visible::-webkit-slider-thumb {
-    transform: scale(1.15);
-    box-shadow:
-      0 0 0 3px #000,
-      0 0 0 6px #fff;
-  }
-
-  .web-custom-player .tv-timeline input[type='range']:focus-visible::-moz-range-thumb {
-    box-shadow:
-      0 0 0 3px #000,
-      0 0 0 6px #fff;
-  }
-
-  .web-custom-player .tv-timeline input[type='range']:disabled {
-    cursor: default;
-    opacity: 0.5;
-  }
-
-  .web-custom-player .tv-transport-actions {
-    position: relative;
-    display: flex;
-    gap: var(--player-control-gap);
-    align-items: center;
-    justify-content: center;
-  }
-
-  .web-custom-player .full-tv-transport button,
-  .web-custom-player footer .player-tv-action,
-  .web-custom-player footer .pick-menu :global(.trigger.pick) {
-    display: grid;
-    place-items: center;
-    width: var(--player-control-size);
-    min-width: var(--player-control-size);
-    max-width: var(--player-control-size);
-    height: var(--player-control-size);
-    min-height: var(--player-control-size);
-    padding: 0;
-    border: 1px solid rgb(255 255 255 / 0.12);
-    border-radius: 999px;
+  .web-custom-player :global(.web-glyph)::before {
+    position: absolute;
+    inset: 2px;
+    content: '';
+    border-radius: 22px;
     background: rgb(255 255 255 / 0.14);
-    color: #fff;
-    font: inherit;
-    text-decoration: none;
-    box-shadow: 0 5px 18px rgb(0 0 0 / 0.28);
-    transition:
-      background 120ms ease,
-      transform 120ms ease;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
   }
 
-  .web-custom-player .tv-subtitle-timing button {
-    min-height: 40px;
-    padding: 0 14px;
-    border: 1px solid rgb(255 255 255 / 0.18);
-    border-radius: 999px;
-    background: rgb(255 255 255 / 0.12);
-    color: #fff;
-    font: inherit;
+  .web-centre :global(.web-glyph)::before,
+  .web-remote :global(.web-glyph)::before {
+    border-radius: 50%;
   }
 
-  .web-custom-player .full-tv-transport button:hover,
-  .web-custom-player footer .player-tv-action:hover,
-  .web-custom-player footer .pick-menu :global(.trigger.pick:hover) {
-    background: rgb(255 255 255 / 0.26);
+  /* Buffering: a ring on Play's edge instead of a line of text. */
+  .web-custom-player :global(.web-play[aria-busy='true'])::before {
+    inset: -2px;
+    border: 2px solid transparent;
+    border-top-color: #fff;
+    border-radius: 50%;
+    background: none;
+    opacity: 1;
+    animation: status-spin 800ms linear infinite;
   }
 
-  .web-custom-player footer .cast-slot.cast-hover {
-    background: rgb(255 255 255 / 0.26);
+  .web-custom-player :global(.web-glyph:active)::before {
+    opacity: 1;
   }
 
-  .web-custom-player .full-tv-transport button:focus-visible,
-  .web-custom-player footer .player-tv-action:focus-visible,
-  .web-custom-player footer .cast-slot.cast-focused,
-  .web-custom-player footer .pick-menu :global(.trigger.pick:focus-visible) {
-    border-color: transparent;
-    outline: var(--ring-width) solid #fff;
-    outline-offset: 3px;
-    transform: scale(1.06);
+  /* A tap would leave a hover state stuck: only a mouse draws one. */
+  .web-custom-player:not(.web-touch-player) :global(.web-glyph:hover)::before {
+    opacity: 1;
   }
 
-  .web-custom-player .full-tv-transport .tv-play-pause {
-    --button-icon-size: 27px;
+  .web-custom-player :global(.web-glyph:disabled) {
+    opacity: 0.38;
+    cursor: default;
+  }
 
-    width: var(--player-primary-size);
-    min-width: var(--player-primary-size);
-    height: var(--player-primary-size);
-    background: rgb(255 255 255 / 0.92);
-    color: #111;
+  .web-custom-player :global(.web-glyph:focus-visible),
+  .web-custom-player .cast-slot.cast-focused {
+    outline: var(--ring-width, 3px) solid #fff;
+    outline-offset: -3px;
+  }
+
+  .web-custom-player :global(.web-glyph.web-on) {
+    color: #8fb0ff;
+  }
+
+  .web-custom-player .cast-slot.cast-hover {
+    background: rgb(255 255 255 / 0.14);
+  }
+
+  .web-transport .icon {
+    width: 24px;
+    height: 24px;
+    opacity: 1;
+  }
+
+  .web-custom-player .icon .filled {
+    fill: currentcolor;
+    stroke: none;
   }
 
   .web-custom-player .skip-icon,
   .web-custom-player .transport-icon {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     overflow: visible;
     fill: none;
     stroke: currentcolor;
     stroke-linecap: round;
     stroke-linejoin: round;
     stroke-width: 2.5;
+  }
+
+  .web-custom-player .transport-icon {
+    width: 24px;
+    height: 24px;
   }
 
   .web-custom-player .skip-icon text {
@@ -6734,43 +7501,638 @@
     stroke: none;
   }
 
-  .web-custom-player .web-transport-extras {
+  /* A label beside the glyph where there is room for one: on its side, a tablet, a wide window. */
+  .web-custom-player :global(.web-labelled) {
+    padding: 0 12px 0 10px;
+  }
+
+  .web-tip {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .web-source {
+    display: none;
+  }
+
+  .web-sr {
     position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* Tooltips name the control and its key, half a second after the mouse settles on it. */
+  .web-custom-player:not(.web-touch-player) [data-tip]::after {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    z-index: 8;
+    content: attr(data-tip) '   ' attr(data-key);
+    padding: 5px 9px;
+    border: 1px solid rgb(255 255 255 / 0.14);
+    border-radius: 7px;
+    background: rgb(20 20 24 / 0.94);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: pre;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%);
+    transition: opacity 120ms ease;
+  }
+
+  .web-custom-player:not(.web-touch-player) [data-tip]:hover::after {
+    opacity: 1;
+    transition-delay: 500ms;
+  }
+
+  .web-custom-player:not(.web-touch-player) .web-top [data-tip]::after {
+    top: calc(100% + 6px);
+    bottom: auto;
+    left: 0;
+    transform: none;
+  }
+
+  .web-custom-player:not(.web-touch-player) .web-output [data-tip]::after,
+  .web-custom-player:not(.web-touch-player) .web-dock-group:last-child [data-tip]::after {
     right: 0;
+    left: auto;
+    transform: none;
+  }
+
+  /* One toast at a time under the top bar, centred: never more than 480px, nor two lines. It stays while the controls
+     hide, and a mouse shows over one that offers something. */
+  .web-custom-player > .web-toasts {
+    position: absolute;
+    top: calc(var(--player-top) + 52px);
+    right: var(--player-side);
+    left: var(--player-side);
+    z-index: 7;
+    gap: 0;
+    pointer-events: none;
+  }
+
+  .web-custom-player .web-toasts .notice {
+    min-height: 36px;
+    max-width: min(100%, 480px);
+    margin: 0;
+    padding: 4px 4px 4px 14px;
+    border: 1px solid var(--web-glass-edge);
+    border-radius: 18px;
+    pointer-events: auto;
+    cursor: auto;
+  }
+
+  .web-toasts .notice:last-of-type {
+    margin-bottom: 0;
+  }
+
+  .web-toasts .notice-copy {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    padding: 4px 0;
+  }
+
+  /* A toast's offer is a quiet chip, white on 12% white; dismissing it is a bare glyph. */
+  .web-toasts :global(.notice-action) {
+    padding: 3px 12px;
+    border: 0;
+    border-radius: 12px;
+    background: rgb(255 255 255 / 0.12);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+  }
+
+  .web-toasts :global(.notice-dismiss) {
+    border: 0;
+    border-radius: 18px;
+    background: none;
+    color: rgb(255 255 255 / 0.8);
+  }
+
+  .web-transport {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    pointer-events: none;
+  }
+
+  /* −10 · play · +10 over the middle of the picture: the stage's middle is the picture's, which it fills and centres. */
+  .web-centre {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    display: none;
+    gap: 40px;
+    align-items: center;
+    transform: translate(-50%, -50%);
+  }
+
+  .web-touch-player .web-centre {
     display: flex;
-    gap: 8px;
+  }
+
+  .web-centre > *,
+  .web-bar > *,
+  .web-floating > * {
+    pointer-events: auto;
+  }
+
+  .web-centre :global(.web-play),
+  .web-remote :global(.web-play) {
+    --button-icon-size: 28px;
+
+    width: 64px;
+    height: 64px;
+    border: 1px solid var(--web-glass-edge);
+    border-radius: 50%;
+    background: var(--web-glass);
+    backdrop-filter: var(--web-glass-blur);
+    -webkit-backdrop-filter: var(--web-glass-blur);
+  }
+
+  .web-centre .web-skip-back,
+  .web-centre .web-skip-forward,
+  .web-remote .web-skip-back,
+  .web-remote .web-skip-forward {
+    width: 52px;
+    height: 52px;
+  }
+
+  .web-centre .skip-icon,
+  .web-remote .skip-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  /* A mouse pauses on the picture: while paused the middle shows Play, and a resume flashes Pause there. */
+  .web-centre-glyph {
+    --button-icon-size: 32px;
+
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    display: grid;
+    place-items: center;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: var(--web-glass);
+    transform: translate(-50%, -50%);
+  }
+
+  .web-flash {
+    animation: web-flash 400ms ease-out forwards;
+  }
+
+  @keyframes web-flash {
+    to {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(1.3);
+    }
+  }
+
+  .web-touch-player .web-centre-glyph {
+    display: none;
+  }
+
+  /* Double-tap seeks add up on their side: "−20 s". */
+  .web-ripple {
+    position: absolute;
+    top: 50%;
+    left: 15%;
+    display: grid;
+    place-items: center;
+    width: 128px;
+    height: 128px;
+    border-radius: 50%;
+    background: radial-gradient(closest-side, rgb(255 255 255 / 0.22), transparent);
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    transform: translate(-50%, -50%);
+  }
+
+  .web-ripple-forward {
+    left: 85%;
+  }
+
+  .web-floating {
+    position: absolute;
+    right: var(--player-side);
+    bottom: calc(var(--web-bar) + var(--web-remote) + var(--player-bottom) + 12px);
+    left: var(--player-side);
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-end;
+  }
+
+  .web-floating :global(.web-skip) {
+    min-height: 44px;
+    padding: 0 18px;
+    border: 1px solid rgb(255 255 255 / 0.22);
+    border-radius: 22px;
+    background: var(--web-glass);
+    color: #fff;
+    font-weight: 600;
+    backdrop-filter: var(--web-glass-blur);
+    -webkit-backdrop-filter: var(--web-glass-blur);
+  }
+
+  .web-up-next {
+    display: grid;
+    gap: 10px;
+    box-sizing: border-box;
+    width: min(420px, 100%);
+    padding: 12px;
+    border: 1px solid var(--web-glass-edge);
+    border-radius: 16px;
+    background: var(--web-glass);
+    backdrop-filter: var(--web-glass-blur);
+    -webkit-backdrop-filter: var(--web-glass-blur);
+  }
+
+  .web-up-next-top {
+    display: flex;
+    gap: 12px;
     align-items: center;
   }
 
-  .web-custom-player .web-volume {
-    width: 84px;
+  /* The episode's still, with its length on it. */
+  .web-up-next-thumb {
+    position: relative;
+    flex: none;
+    overflow: hidden;
+    width: 112px;
+    height: 63px;
+    border-radius: 8px;
+    background: #111;
+  }
+
+  .web-up-next-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .web-up-next-runtime {
+    position: absolute;
+    right: 5px;
+    bottom: 4px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgb(0 0 0 / 0.6);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .web-up-next-text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .web-up-next-text b {
+    overflow: hidden;
+    font-size: 16px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .web-up-next-text small {
+    color: rgb(255 255 255 / 0.66);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .web-up-next-text span {
+    color: rgb(255 255 255 / 0.66);
+    font-size: 13px;
+  }
+
+  .web-up-next-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .web-up-next-actions :global(.den-button) {
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 22px;
+    background: rgb(255 255 255 / 0.1);
+    color: #fff;
+    font-weight: 600;
+  }
+
+  /* Play now fills as the countdown runs. */
+  .web-up-next-actions :global(.web-play-now) {
+    flex: 1;
+    background: linear-gradient(
+      to right,
+      #fff var(--up-next-progress),
+      rgb(255 255 255 / 0.58) var(--up-next-progress)
+    );
+    color: #0b0b0f;
+  }
+
+  .web-bar {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 5;
+    display: grid;
+    padding: 72px var(--player-side) var(--player-bottom);
+    background: linear-gradient(transparent, rgb(0 0 0 / 0.74));
+    pointer-events: none;
+  }
+
+  .web-timeline {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'track';
+    column-gap: 12px;
+    align-items: center;
+    color: rgb(255 255 255 / 0.8);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    line-height: 16px;
+  }
+
+  .web-elapsed,
+  .web-remaining {
+    display: none;
+  }
+
+  .web-elapsed {
+    grid-area: elapsed;
+  }
+
+  .web-remaining {
+    grid-area: remaining;
+    text-align: right;
+  }
+
+  .web-track {
+    --web-track: 4px;
+    --web-thumb: 14px;
+
+    grid-area: track;
+    width: 100%;
+    height: 24px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .web-track::-webkit-slider-runnable-track {
+    height: var(--web-track);
+    border-radius: 999px;
+
+    /* Played, then where a mouse hovers, then what is buffered past both, then the rest. A stop before the one ahead
+       of it is drawn at that one, so each fill shows only past the fills above it. */
+    background: linear-gradient(
+      to right,
+      #fff 0 var(--tv-progress),
+      rgb(255 255 255 / 0.6) var(--tv-progress) var(--tv-hover, var(--tv-progress)),
+      rgb(255 255 255 / 0.42) var(--tv-hover, var(--tv-progress)) var(--tv-buffered, 0%),
+      rgb(255 255 255 / 0.26) var(--tv-buffered, 0%) 100%
+    );
+  }
+
+  .web-track::-webkit-slider-thumb {
+    width: var(--web-thumb);
+    height: var(--web-thumb);
+    margin-top: calc((var(--web-track) - var(--web-thumb)) / 2);
+    border: 0;
+    border-radius: 50%;
+    appearance: none;
+    background: #fff;
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.4);
+  }
+
+  .web-track::-moz-range-track {
+    height: var(--web-track);
+    border-radius: 999px;
+    background: linear-gradient(
+      to right,
+      rgb(255 255 255 / 0.42) 0 var(--tv-buffered, 0%),
+      rgb(255 255 255 / 0.26) var(--tv-buffered, 0%) 100%
+    );
+  }
+
+  .web-track::-moz-range-progress {
+    height: var(--web-track);
+    border-radius: 999px;
+    background: #fff;
+  }
+
+  .web-track::-moz-range-thumb {
+    width: var(--web-thumb);
+    height: var(--web-thumb);
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+  }
+
+  /* A finger's timeline: a 44px target, the times at its two ends. */
+  .web-touch-player .web-track {
+    height: 44px;
+  }
+
+  /* Held, the track thickens and the thumb grows; a mouse hovering thickens it too (below). */
+  .web-track:active {
+    --web-track: 6px;
+    --web-thumb: 20px;
+  }
+
+  .web-track:focus-visible {
+    outline: 0;
+  }
+
+  .web-track:focus-visible::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 3px #000,
+      0 0 0 6px #fff;
+  }
+
+  .web-track:focus-visible::-moz-range-thumb {
+    box-shadow:
+      0 0 0 3px #000,
+      0 0 0 6px #fff;
+  }
+
+  .web-track:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .web-custom-player:not(.web-touch-player) .web-track:hover {
+    --web-track: 6px;
+  }
+
+  /* Where the pointer is on the timeline, in time. */
+  .web-bubble {
+    position: absolute;
+    bottom: calc(100% - 2px);
+    padding: 4px 9px;
+    border: 1px solid rgb(255 255 255 / 0.14);
+    border-radius: 7px;
+    background: rgb(20 20 24 / 0.94);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    pointer-events: none;
+    transform: translateX(-50%);
+  }
+
+  .web-touch-player .web-timeline {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: 'elapsed track remaining';
+  }
+
+  .web-touch-player .web-elapsed,
+  .web-touch-player .web-remaining {
+    display: block;
+  }
+
+  .web-dock {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+
+    /* The targets reach into the gutter, so their glyphs line up with the timeline's ends. */
+    margin: 0 -10px;
+  }
+
+  .web-dock-group,
+  .web-dock-transport {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .web-touch-player .web-dock-transport {
+    display: none;
+  }
+
+  .web-touch-mute {
+    display: none;
+  }
+
+  .web-touch-player .web-touch-mute {
+    display: contents;
+  }
+
+  .web-dock-transport :global(.web-play) {
+    --button-icon-size: 28px;
+  }
+
+  .web-volume {
+    width: 96px;
+    margin: 0 8px 0 2px;
     accent-color: #fff;
   }
 
-  .web-custom-player .web-pip {
-    font-size: 11px;
-    font-weight: 750;
+  .web-time {
+    padding: 0 8px;
+    color: rgb(255 255 255 / 0.85);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
-  .web-custom-player footer .pick-menu {
-    flex: 0 0 var(--player-control-size);
-    width: var(--player-control-size);
-    min-width: var(--player-control-size);
-    max-width: var(--player-control-size);
+  /* Casting, this page is the receiver's remote: its transport under the timeline, and the controls never hide. */
+  .web-remote {
+    display: none;
+    gap: 40px;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 0;
   }
 
-  .web-custom-player footer .pick-menu .icon {
-    width: 22px;
-    height: 22px;
-    opacity: 1;
+  .web-touch-player.web-casting {
+    --web-remote: 72px;
   }
 
-  .web-custom-player :global(.tv-skip-overlay) {
+  .web-touch-player .web-remote {
+    display: flex;
+  }
+
+  .web-custom-player .cast-view {
+    overflow: hidden;
+    padding-block: calc(var(--player-top) + 56px)
+      calc(var(--web-bar) + var(--web-remote) + var(--player-bottom) + 24px);
+  }
+
+  .web-custom-player .cast-view > * {
+    position: relative;
+  }
+
+  .web-custom-player .cast-view .cast-backdrop {
     position: absolute;
-    right: var(--player-side);
-    bottom: calc(160px + var(--player-timeline-extra) + var(--player-safe-bottom));
-    z-index: 7;
-    border-radius: 999px;
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    border-radius: 0;
+    object-fit: cover;
+    box-shadow: none;
+    filter: blur(28px) brightness(0.38) saturate(1.2);
+    transform: scale(1.35);
+    aspect-ratio: auto;
+  }
+
+  .web-custom-player .cast-view img:not(.cast-backdrop) {
+    width: 168px;
+    max-width: none;
+    height: 252px;
+  }
+
+  .web-custom-player > header,
+  .web-custom-player .web-centre,
+  .web-bar {
+    transition: opacity 250ms ease;
+  }
+
+  .web-custom-player:not(.web-controls-hidden) > header,
+  .web-custom-player:not(.web-controls-hidden) .web-centre,
+  .web-custom-player:not(.web-controls-hidden) .web-bar {
+    transition-duration: 150ms;
+  }
+
+  .web-custom-player.web-controls-hidden > header,
+  .web-custom-player.web-controls-hidden .web-centre,
+  .web-custom-player.web-controls-hidden .web-centre-glyph,
+  .web-custom-player.web-controls-hidden .web-bar {
+    opacity: 0;
+  }
+
+  /* Invisible controls cannot intercept a pointer meant for the picture. Keyboard focus reveals them before it acts. */
+  .web-custom-player.web-controls-hidden .web-top > *,
+  .web-custom-player.web-controls-hidden .web-centre > *,
+  .web-custom-player.web-controls-hidden .web-bar > * {
+    pointer-events: none;
   }
 
   .web-custom-player .tv-subtitle-timing {
@@ -6791,6 +8153,16 @@
     backdrop-filter: blur(20px);
   }
 
+  .web-custom-player .tv-subtitle-timing button {
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid rgb(255 255 255 / 0.18);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.12);
+    color: #fff;
+    font: inherit;
+  }
+
   .web-custom-player .tv-subtitle-timing strong {
     font-size: 30px;
     font-variant-numeric: tabular-nums;
@@ -6804,125 +8176,283 @@
     justify-content: center;
   }
 
-  .web-custom-player > header,
-  .web-custom-player > footer,
-  .web-custom-player .full-tv-transport {
-    transition: opacity 180ms ease;
+  /* The options: a 380px popover beside its button; on a phone, a sheet from the bottom, or the right edge on its side.
+     They open with what is playing (`optionsHeader`). */
+  :global(div.menu:not(.sheet):has(.options-rows)) {
+    width: 380px;
+    max-width: calc(100vw - 16px);
   }
 
-  .web-custom-player.web-controls-hidden > header,
-  .web-custom-player.web-controls-hidden > footer,
-  .web-custom-player.web-controls-hidden .full-tv-transport {
-    opacity: 0;
+  :global(div.menu.sheet:has(.options-rows)) {
+    max-height: 62dvh;
   }
 
-  /* Invisible controls cannot intercept a pointer meant for a notice or the picture. Footer children normally opt
-     back into pointer events, so name them here too. Keyboard focus still reveals the controls before it acts. */
-  .web-custom-player.web-controls-hidden > header,
-  .web-custom-player.web-controls-hidden > footer,
-  .web-custom-player.web-controls-hidden > footer .controls,
-  .web-custom-player.web-controls-hidden > footer .release,
-  .web-custom-player.web-controls-hidden > footer .up-next,
-  .web-custom-player.web-controls-hidden .full-tv-transport {
-    pointer-events: none;
+  /* A row with its current value at its end, quieter than its name; a page's row adds a chevron. */
+  :global(div.menu:has(.options-rows) .item.valued) {
+    gap: 12px;
+    min-height: 50px;
   }
 
-  /* Too narrow for the icons beside the transport's buttons (seven need ~64rem): they take the bottom row, and the
-     transport and the release name move up one. */
-  @media (width < 64rem) {
-    .web-custom-player .full-tv-transport {
-      padding-bottom: calc(18px + var(--player-control-size) + 12px + var(--player-safe-bottom));
-    }
-
-    .web-custom-player > footer .controls {
-      max-width: none;
-    }
-
-    .web-custom-player > footer .release,
-    .web-custom-player > footer .up-next {
-      bottom: calc(92px + var(--player-timeline-extra) + var(--player-control-size) + 12px);
-    }
+  :global(div.menu:has(.options-rows) .item.valued .den-button-label) {
+    flex: 1 0 auto;
   }
 
-  /* Narrower still, the volume slider yields its width (mute stays) so the right-hand group stays clear of the
-     centre one. */
+  :global(div.menu:has(.options-rows) .item.back)::before {
+    content: '‹';
+    margin-right: 8px;
+    color: var(--muted, rgb(255 255 255 / 0.6));
+  }
+
+  .item-value {
+    min-width: 0;
+    overflow: hidden;
+    font-weight: 400;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .item-value,
+  .item-chevron,
+  .options-section-heading,
+  .item-description {
+    color: var(--muted, rgb(255 255 255 / 0.6));
+  }
+
+  .item-description {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    font-size: 12px;
+    font-weight: 400;
+    overflow-wrap: anywhere;
+  }
+
+  .options-page-heading {
+    margin: 6px 10px 8px;
+    color: var(--muted, rgb(255 255 255 / 0.6));
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .options-section + .options-section {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--line, rgb(255 255 255 / 0.1));
+  }
+
+  .options-section-heading {
+    margin: 0;
+    padding: 8px 12px 4px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .options-head {
+    display: grid;
+    gap: 2px;
+    justify-items: start;
+    margin-bottom: 4px;
+    padding: 4px 12px 10px;
+    border-bottom: 1px solid rgb(255 255 255 / 0.08);
+    color: #fff;
+  }
+
+  .options-head b {
+    font-size: 17px;
+    font-weight: 600;
+  }
+
+  .options-release {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 0.5ch;
+    margin: 0;
+    color: rgb(255 255 255 / 0.62);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .options-chip {
+    margin-top: 6px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: rgb(255 255 255 / 0.1);
+    color: rgb(255 255 255 / 0.85);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  /* A mouse window: the transport in the dock beside the volume and the time; the volume slider folds into Mute below
+     48rem and the time below 40rem, where the dock's labels drop to glyphs with tooltips too. */
   @media (width < 48rem) {
-    .web-custom-player .web-volume {
+    .web-volume {
       display: none;
     }
   }
 
-  /* A phone held upright: the right-hand group (mute, PiP, fullscreen) cannot sit beside the centre buttons, so it
-     takes its own row above them, at the right, and the release name and Skip move up one more. */
+  @media (width < 40rem) {
+    .web-custom-player:not(.web-touch-player) .web-label,
+    .web-time {
+      display: none;
+    }
+
+    .web-custom-player:not(.web-touch-player) :global(.web-labelled) {
+      padding: 0;
+    }
+  }
+
+  /* A phone held upright, or a window as narrow: the transport over the picture, glyphs only, the times under the
+     timeline. */
   @media (width < 33rem) {
-    .web-custom-player .tv-transport-actions {
-      flex-wrap: wrap;
-      row-gap: 12px;
+    .web-custom-player {
+      --web-bar: 104px;
     }
 
-    .web-custom-player .web-transport-extras {
-      position: static;
-      flex: 0 0 100%;
-      order: -1;
-      justify-content: flex-end;
+    .web-custom-player .web-centre {
+      display: flex;
     }
 
-    .web-custom-player > footer .release,
-    .web-custom-player > footer .up-next {
-      bottom: calc(92px + var(--player-timeline-extra) + 2 * (var(--player-control-size) + 12px));
-    }
-
-    .web-custom-player :global(.tv-skip-overlay) {
-      bottom: calc(
-        160px + var(--player-timeline-extra) + 2 * (var(--player-control-size) + 12px) +
-          var(--player-safe-bottom)
-      );
-    }
-  }
-
-  /* Touch alone: what sits above the timeline moves up by its taller target, and hover states that a tap would leave
-     stuck are not drawn. A phone or tablet has its own volume buttons, and iOS ignores a page's volume altogether, so
-     mute is the only volume control. */
-  .web-touch-player {
-    --player-timeline-extra: 20px;
-  }
-
-  .web-touch-player .web-volume {
-    display: none;
-  }
-
-  .web-touch-player .full-tv-transport button:hover,
-  .web-touch-player footer .player-tv-action:hover {
-    background: rgb(255 255 255 / 0.14);
-  }
-
-  .web-touch-player .full-tv-transport .tv-play-pause:hover {
-    background: rgb(255 255 255 / 0.92);
-  }
-
-  @media (height <= 600px) {
-    .web-custom-player > footer .release {
+    .web-centre-glyph,
+    .web-label {
       display: none;
     }
 
-    .web-custom-player .full-tv-transport {
-      padding-top: 72px;
+    .web-custom-player .web-dock-transport {
+      display: none;
+    }
+
+    .web-touch-mute {
+      display: contents;
+    }
+
+    .web-remote {
+      display: flex;
+    }
+
+    .web-custom-player.web-casting {
+      --web-remote: 72px;
+    }
+
+    .web-custom-player :global(.web-labelled) {
+      padding: 0;
+    }
+
+    .web-custom-player .web-track {
+      height: 44px;
+    }
+
+    .web-custom-player .web-elapsed,
+    .web-custom-player .web-remaining {
+      display: block;
+    }
+  }
+
+  @media (width < 33rem), (orientation: portrait) {
+    .web-touch-player {
+      --web-bar: 104px;
+    }
+
+    .web-touch-player .web-timeline {
+      grid-template:
+        'track track' 44px
+        'elapsed remaining' 16px / 1fr 1fr;
+    }
+  }
+
+  @media (width < 33rem) {
+    .web-custom-player .web-timeline {
+      grid-template:
+        'track track' 44px
+        'elapsed remaining' 16px / 1fr 1fr;
+    }
+
+    .web-up-next {
+      width: 100%;
+    }
+  }
+
+  @media (orientation: portrait) {
+    .web-touch-player .web-up-next {
+      width: 100%;
+    }
+  }
+
+  /* A phone on its side: the up-next card is then the one thing to press, and the transport would meet it. */
+  @media (height < 32rem) {
+    .web-custom-player.web-counting .web-centre {
+      display: none;
+    }
+
+    .web-up-next-thumb {
+      width: 120px;
+      height: 68px;
+    }
+
+    .web-custom-player .web-toasts .notice {
+      max-width: min(100%, 420px);
+    }
+
+    .web-custom-player .cast-view img:not(.cast-backdrop) {
+      width: 112px;
+      height: 168px;
+    }
+
+    :global(div.menu.sheet:has(.options-rows)) {
+      inset: 0 0 0 auto;
+      left: auto;
+      width: calc(380px + env(safe-area-inset-right, 0px));
+      max-width: 100%;
+      height: 100%;
+      max-height: none;
+      padding-right: max(8px, env(safe-area-inset-right, 0px));
+      border-radius: 0;
+    }
+  }
+
+  /* A tablet: the same layout as a phone, at a larger size. */
+  @media (width >= 33rem) and (height >= 32rem) {
+    .web-touch-player .web-centre :global(.web-play),
+    .web-touch-player .web-remote :global(.web-play) {
+      --button-icon-size: 40px;
+
+      width: 80px;
+      height: 80px;
+    }
+
+    .web-custom-player .cast-view img:not(.cast-backdrop) {
+      width: 200px;
+      height: 300px;
+    }
+  }
+
+  @media (width >= 48rem) {
+    .web-heading b {
+      font-size: 17px;
+    }
+
+    .web-heading span {
+      font-size: 14px;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .status-spinner {
-      animation: none;
+    .web-custom-player > header,
+    .web-custom-player .web-centre,
+    .web-bar,
+    .web-custom-player :global(.web-glyph)::before {
+      transition: none;
     }
 
-    .web-custom-player > header,
-    .web-custom-player > footer,
-    .web-custom-player .full-tv-transport,
-    .web-custom-player .full-tv-transport button,
-    .web-custom-player footer .player-tv-action,
-    .web-custom-player footer .pick-menu :global(.trigger.pick),
-    .web-custom-player .tv-timeline input[type='range']::-webkit-slider-thumb {
-      transition: none;
+    .status-spinner,
+    .web-flash,
+    .web-custom-player :global(.web-play[aria-busy='true'])::before {
+      animation: none;
     }
   }
 

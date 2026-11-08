@@ -605,8 +605,9 @@ test('Den’s transport drives the receiver, and Stop casting resumes here at it
 
     await transport.getByRole('button', { name: 'Pause' }).click();
     await expect.poll(() => receiver(page, 'calls')).toContain('pause');
-    await expect(transport.getByRole('button', { name: 'Play' })).toBeVisible();
-    await transport.getByRole('button', { name: 'Play' }).click();
+    // Exactly: "More playback options" names a play too.
+    await expect(transport.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+    await transport.getByRole('button', { name: 'Play', exact: true }).click();
     await expect.poll(() => receiver(page, 'calls')).toContain('play');
 
     const before = await frameOf(page).evaluate(
@@ -683,7 +684,8 @@ test('the keyboard reaches the Cast button in the bar, and Tab leaves it to the 
     await playingPast(page, 2);
     await reveal(page);
     await expect(castButton(page)).toBeVisible();
-    const before = page.getByRole('button', { name: 'Play from beginning' });
+    // The output slot is at the top bar's right end, after Close.
+    const before = page.getByRole('button', { name: 'Close player' });
     await before.focus();
     await page.keyboard.press('Tab');
     await expect(castButton(page)).toBeFocused();
@@ -729,12 +731,79 @@ test('on an Android phone the one tap casts, and Den’s transport is the remote
     await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
     const transport = page.getByRole('navigation', { name: 'Playback controls' });
     await expect(transport).toBeVisible();
+    // The remote: the timeline, then −10 · play · +10 under it, then the dock without the picture's own controls.
+    const timeline = await transport.getByLabel('Playback position').boundingBox();
+    const play = await transport.getByRole('button', { name: 'Pause' }).boundingBox();
+    const more = await transport
+      .getByRole('button', { name: 'More playback options' })
+      .boundingBox();
+    expect(play.y).toBeGreaterThanOrEqual(timeline.y + timeline.height - 1);
+    expect(more.y).toBeGreaterThanOrEqual(play.y + play.height - 1);
+    for (const name of ['Mute', 'Picture in picture', 'Enter fullscreen'])
+      await expect(transport.getByRole('button', { name })).toHaveCount(0);
+    // Its poster where the picture was, clear of the remote.
+    const poster = page.locator('.cast-view p');
+    expect((await poster.boundingBox()).y + (await poster.boundingBox()).height).toBeLessThan(
+      timeline.y,
+    );
+    // Casting, the controls never hide.
+    await page.waitForTimeout(4_000);
+    await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
     await transport.getByRole('button', { name: 'Pause' }).tap();
     await expect.poll(() => receiver(page, 'calls')).toContain('pause');
   } finally {
     await browser.close();
   }
 });
+
+// The Cast button is the cast page's frame laid over Den's slot, moved only by measurement: the slot sits at the top
+// bar's right end on every size, so the frame's box changes only with the window, never as the dock gains or loses Next,
+// PiP or the up-next card.
+for (const [name, options] of [
+  ['a desktop window', { viewport: { width: 1280, height: 800 } }],
+  [
+    'an Android phone',
+    { userAgent: CHROME_ANDROID, viewport: { width: 412, height: 915 }, mobile: true },
+  ],
+]) {
+  test(`the Cast slot stays put while the dock changes (${name})`, async () => {
+    const { browser, page } = await open(chromium, { ...options, query: '&nextEpisode' });
+    try {
+      // The next episode's streams, warmed as this one nears its end.
+      await page.route(`${ORIGIN}/scout/**`, (route) => route.fulfill({ json: { streams: [] } }));
+      // Every box the frame is given, from its first placement on.
+      await page.evaluate((cast) => {
+        window.frameBoxes = [];
+        const record = () => {
+          const frame = document.querySelector(`iframe[src^="${cast}"]`);
+          if (!frame || frame.classList.contains('cast-frame-unplaced')) return;
+          const box = `${frame.style.left} ${frame.style.top} ${frame.style.width} ${frame.style.height}`;
+          if (window.frameBoxes.at(-1) !== box) window.frameBoxes.push(box);
+        };
+        new MutationObserver(record).observe(document.body, {
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['style', 'class'],
+          childList: true,
+        });
+        record();
+      }, CAST);
+      await playingPast(page, 2);
+      await expect(castButton(page)).toBeVisible();
+      await expect.poll(() => frameOverSlot(page)).toBe(true);
+      await expect(page.getByRole('link', { name: 'Next episode: S1 · E2' })).toBeVisible();
+      // To the end: the up-next card comes, and Play now and Stay with it.
+      await page.locator('.player video').evaluate((v) => (v.currentTime = v.duration - 1));
+      await expect(page.locator('.web-up-next')).toBeVisible({ timeout: 15_000 });
+      await page.getByRole('button', { name: 'Stay' }).click();
+      await expect(page.locator('.web-up-next')).toBeHidden();
+      await expect.poll(() => frameOverSlot(page)).toBe(true);
+      expect(await page.evaluate(() => window.frameBoxes)).toHaveLength(1);
+    } finally {
+      await browser.close();
+    }
+  });
+}
 
 for (const [engine, browserType] of [
   ['Firefox', firefox],

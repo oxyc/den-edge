@@ -10,6 +10,7 @@ import { test, expect, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { showsSubtitles, subtitleChoice, subtitlesButton } from './player-options.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const ORIGIN = E2E_ORIGIN;
@@ -127,8 +128,9 @@ test.describe('a guest whose browser is Swedish and never set a subtitle languag
         { timeout: 30_000 },
       );
       expect(await page.evaluate(shownLanguage)).toBeNull();
-      await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-      await page.getByRole('menuitemradio', { name: /English/ }).click();
+      await showsSubtitles(page, 'Off');
+      await subtitlesButton(page).click();
+      await subtitleChoice(page, /English/).click();
       await expect.poll(() => page.evaluate(shownLanguage), { timeout: 10_000 }).toBe('en');
     } finally {
       await browser.close();

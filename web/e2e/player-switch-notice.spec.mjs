@@ -77,8 +77,8 @@ test('a session that errors mid-play names the switch, then names what it landed
     await routeMedia(page);
     await page.goto(`${ORIGIN}/test/player.html`);
 
-    // The release list loaded enough to count: the picker is there, which it is only for more than one.
-    await expect(page.getByRole('button', { name: /^Stream: / })).toBeVisible();
+    // The player's controls are up, with the options where the stream is picked.
+    await expect(page.getByRole('button', { name: 'More playback options' })).toBeAttached();
     await page.waitForFunction(
       () => (document.querySelector('.player video')?.currentTime ?? 0) > 0,
       undefined,
@@ -151,8 +151,8 @@ test('a throttled segment mid-play shows the buffering line with real numbers, t
     // first frame itself.
     // hls.js prefetches sequentially from the very start, so the delay has to outlast real playback actually
     // reaching seg3's own position (6s in) — issued at ~t0, not when the play head gets there — or it lands
-    // before it is ever missed.
-    await routeMedia(page, { delayMs: (file) => (file === 'seg3.m4s' ? 9_000 : 0) });
+    // before it is ever missed. And the stall has to outlast 3s: a shorter one shows only as the ring on Play.
+    await routeMedia(page, { delayMs: (file) => (file === 'seg3.m4s' ? 13_000 : 0) });
     await page.goto(`${ORIGIN}/test/player.html`);
 
     await expect(page.getByText('Buffering —', { exact: false })).toBeVisible({ timeout: 25_000 });

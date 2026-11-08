@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage, optionsButton, optionsMenu } from './player-options.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const ORIGIN = E2E_ORIGIN;
@@ -311,10 +312,11 @@ async function revealPlayerControls(page) {
   if (!box) throw new Error('player has no box');
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 }
-/** The stamp's menu, opened, and its switch to `to` chosen. */
+/** The options' Source page, opened while `from` plays, and its switch to `to` chosen. */
 async function switchFromStamp(page, from, to) {
   await revealPlayerControls(page);
-  await page.getByRole('button', { name: `Playing from ${from}` }).click();
+  await stamped(page, from);
+  await openOptionsPage(page, 'Source');
   await page.getByRole('menuitem', { name: `Switch to ${to}` }).click();
 }
 
@@ -460,8 +462,7 @@ test('a viewer whose Hearth has only Remux gets the switch disabled, and the rea
     await playingPast(pageVideo(page), 3);
     await stamped(page, 'Den Remux');
     await revealPlayerControls(page);
-    await page.getByRole('button', { name: 'Playing from Den Remux' }).click();
-    const menu = page.getByRole('menu', { name: 'Playing from Den Remux' });
+    const menu = await openOptionsPage(page, 'Source');
     await expect(menu).toContainText('This Hearth has no TorBox to play from');
     await expect(menu.getByRole('menuitem', { name: 'Switch to TorBox' })).toHaveAttribute(
       'aria-disabled',
@@ -544,10 +545,14 @@ test('a guest on the host’s Hearth plays, and lists releases under its own nam
     expect(segmentHosts()).toEqual(new Set(['media.test']));
     await expect.poll(() => asked.releases.length).toBeGreaterThan(0);
     expect(asked.releases[0].scout).toBe(`${ORIGIN}/den/~${GUEST}`);
-    const streamPicker = page.getByRole('button', { name: /^Stream:/ });
-    await streamPicker.focus();
-    await streamPicker.press('Enter');
-    const choices = page.getByRole('menu', { name: /^Stream:/ }).getByRole('menuitemradio');
+    // From the keyboard: the options, then their Stream page.
+    const more = optionsButton(page);
+    await more.focus();
+    await more.press('Enter');
+    const streamRow = optionsMenu(page).getByRole('menuitem', { name: /^Stream, / });
+    await streamRow.focus();
+    await streamRow.press('Enter');
+    const choices = optionsMenu(page).getByRole('menuitemradio');
     await expect(choices).toHaveCount(sharedReleases.length);
     for (const [index, { label, filename }] of sharedReleases.entries()) {
       await expect(choices.nth(index)).toContainText(label);

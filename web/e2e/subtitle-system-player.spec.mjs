@@ -8,6 +8,12 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import {
+  openOptionsPage,
+  showsSubtitles,
+  subtitleChoice,
+  subtitlesButton,
+} from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const release = { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 };
@@ -188,9 +194,9 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
       expect(operations[0].originalLanguage).toBe('en');
       // Nothing is named showing that the system player could not show.
       expect(await page.evaluate(shown)).toBeNull();
-      const menu = page.getByRole('button', { name: 'Subtitles: Off' });
-      await menu.click();
-      const english = page.getByRole('menuitemradio', { name: 'English' });
+      await showsSubtitles(page, 'Off');
+      await subtitlesButton(page).click();
+      const english = subtitleChoice(page, 'English');
       await expect(english).toHaveAccessibleDescription(/OpenSubtitles/);
       await english.click();
       await expect.poll(() => operations.length, { timeout: 10_000 }).toBe(2);
@@ -200,9 +206,9 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
         .poll(() => page.evaluate(shown), { timeout: 15_000 })
         .toMatchObject({ language: 'en', label: 'English (in file)' });
       await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
-      const selected = page.getByRole('button', { name: 'Subtitles: English (in file)' });
-      await selected.click();
-      await expect(page.getByRole('menuitemradio', { name: 'English (in file)' })).toBeChecked();
+      await showsSubtitles(page, 'English (in file)');
+      await subtitlesButton(page).click();
+      await expect(subtitleChoice(page, 'English (in file)')).toBeChecked();
     } finally {
       await browser.close();
     }
@@ -267,8 +273,9 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
     await playing(page);
     // English audio for an English browser: nothing comes up unasked, and the menu says so.
     expect(await page.evaluate(shown)).toBeNull();
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await showsSubtitles(page, 'Off');
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English').click();
     await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
     releaseSubtitle();
     await expect
@@ -278,9 +285,11 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
     await expect(page.getByText('Loading subtitles…')).toHaveCount(0);
     expect(operations).toHaveLength(1);
 
-    // Desktop keeps subtitle selection and timing inside the player rather than sending either below the video.
-    await page.getByRole('button', { name: 'Subtitles: English' }).click();
-    await page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
+    // Desktop keeps subtitle selection and timing inside the player rather than sending either below the video:
+    // timing is a page of the options.
+    await showsSubtitles(page, 'English');
+    const options = await openOptionsPage(page, 'Subtitle timing');
+    await options.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
     const timing = page.getByRole('group', { name: 'Subtitle timing' });
     await expect(timing).toBeVisible();
     await expect(timing.getByRole('button', { name: 'Earlier' })).toBeFocused();
@@ -288,7 +297,7 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
     await expect(timing.getByText('+0.5s')).toBeVisible();
     await timing.getByRole('button', { name: 'Done' }).click();
     await expect(timing).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Subtitles: English' })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'More playback options' })).toBeFocused();
   } finally {
     await browser.close();
   }
@@ -315,21 +324,21 @@ test('a failed lazy subtitle keeps the working choice and retries that exact tra
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
 
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English').click();
     await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
-    await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toBeVisible();
+    await showsSubtitles(page, 'Off');
     expect(await page.evaluate(shown)).toBeNull();
 
     releaseFailure();
     const notice = page.getByText('Couldn’t load English subtitles. Current subtitles unchanged.');
     await expect(notice).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toBeVisible();
+    await showsSubtitles(page, 'Off');
     await page.getByRole('button', { name: 'Try again' }).click();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
       .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
-    await expect(page.getByRole('button', { name: 'Subtitles: English' })).toBeVisible();
+    await showsSubtitles(page, 'English');
     await expect(notice).toHaveCount(0);
     expect(subtitleAttempts).toBe(2);
   } finally {
@@ -359,21 +368,22 @@ test('a newer external subtitle wins while an older load is still pending', asyn
     );
     await playing(page);
 
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English').click();
     await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
     await expect(page.getByRole('menuitemradio', { name: 'Swedish' })).toHaveCount(0);
-    const subtitles = page.getByRole('button', { name: 'Subtitles: Off' });
+    const subtitles = subtitlesButton(page);
+    await showsSubtitles(page, 'Off');
     await expect(subtitles).toBeFocused();
     await subtitles.click();
-    await page.getByRole('menuitemradio', { name: 'Swedish' }).click();
+    await subtitleChoice(page, 'Swedish').click();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
       .toMatchObject({ language: 'sv', label: 'opensubtitles:1' });
 
     releaseEnglish();
     await expect.poll(() => englishReturned).toBe(true);
-    await expect(page.getByRole('button', { name: 'Subtitles: Swedish' })).toBeVisible();
+    await showsSubtitles(page, 'Swedish');
     await expect.poll(() => page.evaluate(shown)).toMatchObject({ language: 'sv' });
     await expect(page.getByText(/Current subtitles unchanged/)).toHaveCount(0);
   } finally {
@@ -401,9 +411,7 @@ test('an automatic external subtitle failure is visible and recoverable', async 
     await playing(page);
 
     await expect(page.getByText(/Current subtitles unchanged/)).toBeVisible();
-    await expect(page.getByRole('button', { name: /^Subtitles:/ })).toHaveAccessibleName(
-      'Subtitles: Off',
-    );
+    await showsSubtitles(page, 'Off');
     await page.getByRole('button', { name: 'Try again' }).click();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
@@ -427,8 +435,8 @@ test('closing playback retires a pending external subtitle load', async () => {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
 
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English').click();
     await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
     await page.getByRole('button', { name: 'Close' }).click();
     await expect(page.locator('.player')).toHaveCount(0);
@@ -453,8 +461,8 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English (in file)' }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English (in file)').click();
     await expect.poll(() => operations.length).toBe(2);
     await expect(page.getByRole('status')).toHaveText('Switching subtitles…');
     releaseSubtitle();
@@ -504,15 +512,15 @@ test('switching a chosen TorBox built-in to Remux keeps that language and lists 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
     await playing(page);
 
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English (in file)' }).click();
-    await page.getByRole('button', { name: 'Playing from TorBox' }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English (in file)').click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Switch to Den Remux' }).click();
 
-    const selected = page.getByRole('button', { name: 'Subtitles: English (in file)' });
-    await expect(selected).toBeVisible({ timeout: 30_000 });
-    await selected.click();
-    const menu = page.getByRole('menu', { name: 'Subtitles' });
+    await expect(page.getByTestId('playback-source')).toHaveText('Den Remux', { timeout: 30_000 });
+    await showsSubtitles(page, 'English (in file)');
+    await subtitlesButton(page).click();
+    const menu = page.getByRole('group', { name: 'Subtitles' });
     await expect(menu.getByRole('menuitemradio', { name: 'English (in file)' })).toBeChecked();
     await expect(menu.getByRole('menuitemradio', { name: 'English', exact: true })).toBeVisible();
     await expect(
@@ -537,9 +545,9 @@ test('hls.js shows the subtitle it picks itself on a TorBox stream, not only nam
       `${ORIGIN}/test/player.html?playback=managed&originalLanguage=he&interfaceLanguage=sv`,
     );
     await playing(page);
-    const menu = page.getByRole('button', { name: /^Subtitles:/ });
+    const menu = subtitlesButton(page);
     await expect(menu).toBeVisible();
-    await expect(menu).not.toHaveAccessibleName('Subtitles: Off');
+    await expect(menu).not.toHaveAccessibleName(/subtitles Off$/);
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
       .toMatchObject({ language: 'sv', label: 'opensubtitles:1' });

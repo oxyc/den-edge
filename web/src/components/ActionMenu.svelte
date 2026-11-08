@@ -18,7 +18,9 @@
     heading,
     note,
     glyph,
+    rows,
     triggerClass = '',
+    sheetQuery = '(max-width: 759px), (pointer: coarse)',
     onclose,
   }: {
     /** Called once the menu has closed and focus has gone back to the trigger. */
@@ -35,6 +37,13 @@
     glyph: Snippet;
     /** Extra classes on the trigger, so a poster's corner button and an episode's circle can differ. */
     triggerClass?: string;
+    /**
+     * The rows drawn by the caller instead (the player's header, pages, sections and current values), each a
+     * `menuitem*` this menu's keyboard model moves through; `run` selects one as a row of its own would.
+     */
+    rows?: Snippet<[MenuItem[], (item: MenuItem, event: MouseEvent) => void]>;
+    /** Where the menu is a bottom sheet rather than a popover beside its trigger. */
+    sheetQuery?: string;
   } = $props();
 
   const menuId = $props.id();
@@ -107,10 +116,7 @@
   // popovers ensure only one menu is open, so listener work stays constant however many posters a long row retains.
   $effect(() => {
     if (!prepared) return;
-    const query =
-      typeof matchMedia === 'undefined'
-        ? undefined
-        : matchMedia('(max-width: 759px), (pointer: coarse)');
+    const query = typeof matchMedia === 'undefined' ? undefined : matchMedia(sheetQuery);
     // A TV may expose its remote as a coarse pointer. That does not make a ten-foot modal a phone bottom sheet:
     // TV packages always use the centred remote-navigable menu, while the browser keeps its responsive sheet.
     const update = () => (mobile = !__DEN_TV__ && query!.matches);
@@ -196,7 +202,6 @@
   export function focus() {
     trigger?.focus();
   }
-
   export function close() {
     if (!showing()) return;
     if (!closing)
@@ -552,31 +557,34 @@
     {/if}
     <!-- Only a wrapper, so the menu still owns its items; on the sheet, what scrolls under the head. -->
     <div class="items" role="presentation" bind:this={list} onpointerdown={sheetPointerDown}>
-      <!-- A live menu may grow around its focused item. Callers with stable identities can preserve that exact DOM
-           control; ordinary static menus retain the positional fallback that disambiguates equal labels. -->
-      {#each shownItems as item, i (item.key ?? `${item.kind}:${item.label}:${i}`)}
-        <Button
-          variant="menu"
-          size="regular"
-          label={item.label}
-          href={item.kind === 'link' ? item.href : undefined}
-          role={item.kind === 'item' || item.kind === 'link'
-            ? 'menuitem'
-            : item.kind === 'checkbox'
-              ? 'menuitemcheckbox'
-              : 'menuitemradio'}
-          aria-checked={item.kind === 'item' || item.kind === 'link' ? undefined : item.checked}
-          aria-disabled={item.disabled || undefined}
-          aria-describedby={item.description ? `${menuId}-${i}` : undefined}
-          class={item.description ? 'item described' : 'item'}
-          onclick={(event) => run(item, event)}
-        >
-          {#if item.description}<span class="item-description" id={`${menuId}-${i}`}
-              >{i18n.phrase(item.description)}</span
-            >{/if}
-        </Button>
-      {/each}
+      {@render (rows ?? ownRows)(shownItems, run)}
     </div>
+  {/snippet}
+  {#snippet ownRows(shown: MenuItem[])}
+    <!-- A live menu may grow around its focused item. Callers with stable identities can preserve that exact DOM
+         control; ordinary static menus retain the positional fallback that disambiguates equal labels. -->
+    {#each shown as item, i (item.key ?? `${item.kind}:${item.label}:${i}`)}
+      <Button
+        variant="menu"
+        size="regular"
+        label={item.label}
+        href={item.kind === 'link' ? item.href : undefined}
+        role={item.kind === 'item' || item.kind === 'link'
+          ? 'menuitem'
+          : item.kind === 'checkbox'
+            ? 'menuitemcheckbox'
+            : 'menuitemradio'}
+        aria-checked={item.kind === 'item' || item.kind === 'link' ? undefined : item.checked}
+        aria-disabled={item.disabled || undefined}
+        aria-describedby={item.description ? `${menuId}-${i}` : undefined}
+        class={item.description ? 'item described' : 'item'}
+        onclick={(event) => run(item, event)}
+      >
+        {#if item.description}<span class="item-description" id={`${menuId}-${i}`}
+            >{i18n.phrase(item.description)}</span
+          >{/if}
+      </Button>
+    {/each}
   {/snippet}
   {#if __DEN_TV__}
     <dialog

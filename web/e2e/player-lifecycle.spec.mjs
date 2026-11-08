@@ -2,6 +2,7 @@ import { test, expect, chromium, webkit } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const session = {
@@ -253,7 +254,7 @@ test('an old release’s late SkipDB answer does not reopen the new release’s 
     });
     await page.goto(`${ORIGIN}/test/player.html`);
     await expect.poll(() => skipRequests.length).toBe(1);
-    await page.getByRole('button', { name: /^Stream: / }).click();
+    await openOptionsPage(page, 'Stream');
     await expect(page.getByRole('menuitemradio')).toHaveCount(2);
     await page.getByRole('menuitemradio').filter({ hasText: 'other.mkv' }).click();
     await expect.poll(() => skipRequests.length).toBe(2);

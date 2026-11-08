@@ -112,9 +112,16 @@ async function fixture(page, platform, { fail = false, held = false, hashMatch =
     await video.evaluate((element) => element.play());
   }
   await expect.poll(() => video.evaluate((el) => el.currentTime)).toBeGreaterThan(0);
-  const menu = page.getByRole('button', { name: /^Subtitles:/ });
+  // A browser lists audio and subtitles on one page behind its dock's Audio & subtitles button; a TV has a Subtitles
+  // picker and an Audio track picker of their own.
+  const menu =
+    platform === 'browser'
+      ? page.locator('button.web-audio-subtitles')
+      : page.getByRole('button', { name: /^Subtitles:/ });
   // The saved language preference must resolve to the concrete first candidate without a manual menu pick.
-  await expect(menu).toHaveAttribute('aria-label', 'Subtitles: English 1');
+  if (platform === 'browser')
+    await expect(menu).toHaveAttribute('aria-label', /subtitles English 1$/);
+  else await expect(menu).toHaveAttribute('aria-label', 'Subtitles: English 1');
   return {
     video,
     menu,
@@ -125,8 +132,21 @@ async function fixture(page, platform, { fail = false, held = false, hashMatch =
   };
 }
 
+/** Where subtitle timing is set: a browser's options page of that name, a TV's Subtitles picker. */
+async function openTiming(page, menu, platform) {
+  if (platform !== 'browser') return menu.click();
+  await page.getByRole('button', { name: 'More playback options' }).click();
+  await page.getByRole('menuitem', { name: /^Subtitle timing/ }).click();
+}
+
+/** Where Re-sync audio & video is: a browser's Audio & subtitles page, a TV's Audio track picker. */
+async function openAudio(page, menu, platform) {
+  if (platform === 'browser') return menu.click();
+  await page.getByRole('button', { name: /^Audio track:/ }).click();
+}
+
 async function manualOffset(page, menu, platform) {
-  await menu.click();
+  await openTiming(page, menu, platform);
   await page.getByRole('menuitem', { name: /^Adjust subtitle timing/ }).click();
   // The TV editor uses remote Left/Right; desktop has visible half-second controls.
   if (platform !== 'browser') await page.keyboard.press('ArrowRight');
@@ -166,17 +186,21 @@ export function subtitleResyncJourneys(platform = 'browser') {
       'aria-checked',
       'true',
     );
+    if (platform === 'browser') {
+      await page.keyboard.press('Escape');
+      await openTiming(page, f.menu, platform);
+    }
     await expect(
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (-10.0s)', exact: true }),
     ).toBeVisible();
     await page.keyboard.press('Escape');
     await manualOffset(page, f.menu, platform);
-    await f.menu.click();
+    await openTiming(page, f.menu, platform);
     await expect(
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (-9.5s)', exact: true }),
     ).toBeVisible();
     await page.getByRole('menuitem', { name: /^Reset subtitle timing/ }).click();
-    await f.menu.click();
+    await openTiming(page, f.menu, platform);
     await expect(
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (-10.0s)', exact: true }),
     ).toBeVisible();
@@ -188,7 +212,7 @@ export function subtitleResyncJourneys(platform = 'browser') {
     await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
     const notice = page.getByText('Subtitles re-synced · -10.0s', { exact: true });
     await expect(notice).toBeVisible();
-    await page.getByRole('button', { name: /^Audio track:/ }).click();
+    await openAudio(page, f.menu, platform);
     await page.getByRole('menuitem', { name: 'Re-sync audio & video', exact: true }).click();
     await expect.poll(f.starts).toBe(2);
     // Session replacement must clear it immediately, before the normal six-second notice timer.
@@ -206,7 +230,7 @@ export function subtitleResyncJourneys(platform = 'browser') {
       }),
     ).toBeVisible();
     await expect(page.locator('track[label="candidate:1"]')).toHaveAttribute('src', ORIGINAL);
-    await f.menu.click();
+    await openTiming(page, f.menu, platform);
     await expect(
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.5s)', exact: true }),
     ).toBeVisible();
@@ -247,7 +271,7 @@ export function subtitleResyncJourneys(platform = 'browser') {
     await f.menu.click();
     await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
     await expect.poll(f.requested).toBe(1);
-    await page.getByRole('button', { name: /^Audio track:/ }).click();
+    await openAudio(page, f.menu, platform);
     await page.getByRole('menuitem', { name: 'Re-sync audio & video', exact: true }).click();
     await expect.poll(f.starts).toBe(2);
     f.releaseAlignment();

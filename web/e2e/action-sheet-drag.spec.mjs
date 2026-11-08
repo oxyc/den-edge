@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const releases = Array.from({ length: 30 }, (_, i) => ({
@@ -76,8 +77,8 @@ async function openSheet(browserType, { reducedMotion } = {}) {
   await expect
     .poll(() => page.locator('.player video').evaluate((v) => v.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(1);
-  await page.getByRole('button', { name: /^Stream: / }).tap();
-  const sheet = page.getByRole('menu', { name: /^Stream: / });
+  // The player's options, at their Stream page: a sheet headed with the page's name.
+  const sheet = await openOptionsPage(page, 'Stream', { tap: true });
   await expect(sheet).toBeVisible();
   const heading = sheet.getByText('Streams', { exact: true });
   await expect(heading).toBeVisible();

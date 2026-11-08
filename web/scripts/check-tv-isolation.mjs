@@ -146,7 +146,12 @@ if (process.argv.includes('--capture')) {
   // renderer must stay in the always-loaded release recovery: it runs in an old tab after a deploy has removed that
   // tab's lazy chunks. Raise the absolute/proportional startup caps and the total to the next 128-byte boundary,
   // retaining 152 and 182 bytes.
-  if (initialDelta > Math.min(7296, Math.floor(baseline.initialGzip * 0.0372)))
+  // The browser player's A · Cinema layout adds 76 gzip bytes to startup on matched main/head builds (203,636 ->
+  // 203,712): 65 are ActionMenu's two optional seams, a caller's own rows (`rows`) and where it is a sheet
+  // (`sheetQuery`), in the `actions` chunk the poster menus load at startup (3,658 -> 3,723); the rest is the startup
+  // phrase map. The player's pages, sections, current values and header are drawn in its lazy chunk instead. That left
+  // no margin: raise the absolute/proportional startup caps to the next 128-byte boundary, retaining 108.
+  if (initialDelta > Math.min(7424, Math.floor(baseline.initialGzip * 0.0378)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -281,5 +286,14 @@ if (process.argv.includes('--capture')) {
   // startup on matched main/head builds, all in the lazy Player chunk and a castReceiver chunk that startup fetches
   // only for `?cast-receiver=`: the receiver report's schema guard, the opt-in, and the model list hidden behind it.
   // The receiver itself is its own page in the Cast build. Allow the next 128-byte boundary past it, retaining 106.
-  if (coreTotalDelta > 93440) throw new Error('Browser total JS/CSS budget exceeded');
+  // The browser player's A · Cinema redesign (top bar with one fixed output slot, the touch transport over the picture
+  // and the mouse one in the dock, one dock row, the options' pages with current values, one toast lane, double-tap
+  // and keyboard seeking, hover reveal and tooltips, the up-next card's still, title and runtime, and the timeline's
+  // buffered fill) adds 6,005 gzip bytes to the complete non-translation graph (93,397 -> 99,402) and 76 at startup on
+  // matched main/head builds. All but those 76 are in the lazy Player chunk (JS 43,120 -> 47,263, CSS 3,882 ->
+  // 5,718), fetched only when a title plays; TV builds compile it out. Its one request, the next episode's season,
+  // goes through the existing content service (the path Detail and the TV player read seasons through) 30 s before an
+  // episode ends, and timers run only while the viewer acts (a click's double-click hold, the seek ripple).
+  // Allow the 128-byte boundary past it that keeps cross-machine gzip variance, retaining 182.
+  if (coreTotalDelta > 99584) throw new Error('Browser total JS/CSS budget exceeded');
 }

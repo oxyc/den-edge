@@ -81,6 +81,15 @@ async function mockPlayer(page, { releaseGate, replacementGate, audioTracks = []
   return asked;
 }
 
+/** The options' Stream row, which names the stream playing, opened to its page of streams. */
+async function openStreams(page, playing, options = {}) {
+  await page.getByRole('button', { name: 'More playback options' }).click();
+  const row = page.getByRole('menuitem', { name: `Stream, ${playing}` });
+  await expect(row).toBeVisible(options);
+  await row.click();
+  return page.getByRole('menu', { name: 'More playback options' });
+}
+
 test('a chosen stream is acknowledged while its replacement is opening', async ({ page }) => {
   let openReplacement;
   const replacementGate = {
@@ -92,7 +101,7 @@ test('a chosen stream is acknowledged while its replacement is opening', async (
     .poll(() => page.locator('.player video').evaluate((v) => v.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(1);
 
-  await page.getByRole('button', { name: 'Stream: 4K · 11 GB' }).click();
+  await openStreams(page, '4K · 11 GB');
   await page
     .getByRole('menuitemradio', { name: '4K · WEB-DL · HDR · 9 GB · from a 105 GB pack' })
     .click();
@@ -104,10 +113,8 @@ test('a chosen stream is acknowledged while its replacement is opening', async (
   await expect(status.locator('.status-spinner')).toBeVisible();
 
   openReplacement();
-  await expect(page.getByRole('button', { name: 'Stream: 4K · 9 GB' })).toBeVisible({
-    timeout: 30_000,
-  });
-  await expect(status).toHaveCount(0);
+  await expect(status).toHaveCount(0, { timeout: 30_000 });
+  await openStreams(page, '4K · 9 GB');
 });
 
 test('an audio choice requests that exact track and stays acknowledged until it opens', async ({
@@ -127,8 +134,14 @@ test('an audio choice requests that exact track and stays acknowledged until it 
     .poll(() => page.locator('.player video').evaluate((v) => v.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(1);
 
-  await page.getByRole('button', { name: 'Audio track: English 5.1' }).click();
-  await page.getByRole('menuitemradio', { name: 'Russian 5.1' }).click();
+  // Audio and subtitles share one page behind the dock's button, which names the track playing.
+  const audio = page.locator('button.web-audio-subtitles');
+  await expect(audio).toHaveAccessibleName(/^Audio and subtitles: English 5\.1,/);
+  await audio.click();
+  await page
+    .getByRole('group', { name: 'Audio' })
+    .getByRole('menuitemradio', { name: 'Russian 5.1' })
+    .click();
 
   await expect.poll(() => asked.length).toBe(2);
   expect(asked[1]).toMatchObject({ audioTrack: 1, filename: releases[0].filename });
@@ -137,7 +150,7 @@ test('an audio choice requests that exact track and stays acknowledged until it 
   await expect(status.locator('.status-spinner')).toBeVisible();
 
   openReplacement();
-  await expect(page.getByRole('button', { name: 'Audio track: Russian 5.1' })).toBeVisible({
+  await expect(audio).toHaveAccessibleName(/^Audio and subtitles: Russian 5\.1,/, {
     timeout: 30_000,
   });
   await expect(status).toHaveCount(0);
@@ -193,9 +206,7 @@ test('a pending stream search is named and keeps the playing choice focused as r
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect(page.locator('.player video')).toBeVisible();
 
-  const picker = page.getByRole('button', { name: 'Stream: 4K · 11 GB' });
-  await picker.click();
-  const menu = page.getByRole('menu', { name: 'Stream: 4K · 11 GB' });
+  const menu = await openStreams(page, '4K · 11 GB');
   await expect(menu).toContainText('Finding the other available streams…');
   const playing = menu.getByRole('menuitemradio', {
     name: '4K · BluRay REMUX · Dolby Vision · Atmos · 11 GB',
@@ -271,20 +282,19 @@ for (const [engine, browserType] of [
           await expect(video).not.toHaveAttribute('controls', '');
           const player = page.locator('.player');
           if (/web-controls-hidden/.test((await player.getAttribute('class')) ?? '')) {
+            // Between the toast lane at the top and the transport at the picture's centre.
             const box = await video.boundingBox();
-            await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+            await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height * 0.38);
           }
           await expect(player).not.toHaveClass(/web-controls-hidden/);
           await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
         }
 
-        const picker = page.getByRole('button', { name: 'Stream: 4K · 11 GB' });
-        await expect(picker).toBeVisible();
-        await expect(picker).toHaveAttribute('aria-haspopup', 'menu');
-        await picker.click();
-        const menu = page.getByRole('menu', { name: 'Stream: 4K · 11 GB' });
+        const more = page.getByRole('button', { name: 'More playback options' });
+        await expect(more).toHaveAttribute('aria-haspopup', 'menu');
+        const menu = await openStreams(page, '4K · 11 GB');
         await expect(menu).toBeVisible();
-        if (layout === 'phone') await expect(menu.getByText('Streams')).toBeVisible();
+        await expect(menu.getByText('Streams', { exact: true })).toBeVisible();
 
         const items = menu.getByRole('menuitemradio');
         await expect(items).toHaveCount(3);
@@ -322,9 +332,11 @@ for (const [engine, browserType] of [
         await items.nth(1).click();
         await expect.poll(() => asked.length).toBe(2);
         expect(asked[1]).toMatchObject({ filename: releases[1].filename, transcode: 'never' });
-        const next = page.getByRole('button', { name: 'Stream: 4K · 9 GB' });
-        await expect(next).toBeVisible({ timeout: 30_000 });
-        await next.click();
+        await expect(page.getByRole('status').filter({ hasText: 'Switching stream…' })).toHaveCount(
+          0,
+          { timeout: 30_000 },
+        );
+        await openStreams(page, '4K · 9 GB');
         await expect(
           page.getByRole('menuitemradio', {
             name: '4K · WEB-DL · HDR · 9 GB · from a 105 GB pack',

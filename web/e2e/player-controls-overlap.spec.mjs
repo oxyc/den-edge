@@ -106,64 +106,39 @@ async function openPlaying(page, query = '') {
 }
 
 /**
- * Every pair of a Den bar control and a transport control (or the video's own box), and of the transport's own
- * groups, whose rectangles intersect.
+ * Every pair of the player's visible controls — top bar, transport, timeline, times, dock, Skip and the up-next card's
+ * buttons — whose rectangles intersect.
  */
 async function overlaps(page) {
   return page.evaluate(() => {
-    const box = (element) => {
-      const r = element.getBoundingClientRect();
-      return {
-        left: r.left,
-        top: r.top,
-        right: r.right,
-        bottom: r.bottom,
-        w: r.width,
-        h: r.height,
-      };
-    };
     const name = (element) =>
       element.getAttribute('aria-label') ||
       element.textContent?.trim().slice(0, 30) ||
       element.className;
-    const visible = (element) => {
+    const controls = [
+      ...document.querySelectorAll(
+        '.player :is(header, .web-transport) :is(button, a, input, .cast-slot, .web-elapsed, .web-remaining, .web-time)',
+      ),
+    ].filter((element) => {
       const r = element.getBoundingClientRect();
       return r.width > 0 && r.height > 0 && getComputedStyle(element).visibility !== 'hidden';
-    };
-    const bar = [
-      ...document.querySelectorAll(
-        '.player footer .controls :is(button, a, select), .player footer .release',
-      ),
-    ].filter(visible);
-    const transport = [
-      ...document.querySelectorAll(
-        '.player .full-tv-transport :is(button, input), .player .tv-timeline span',
-      ),
-    ].filter(visible);
+    });
     const found = [];
-    const pairs = bar.flatMap((a) => transport.map((b) => [a, b]));
-    // Inside the transport too: its right-hand group (volume, PiP, fullscreen) against its centre buttons.
-    const centre = [...document.querySelectorAll('.player .tv-transport-actions > button')];
-    const extras = [
-      ...document.querySelectorAll('.player .web-transport-extras :is(button, input)'),
-    ].filter(visible);
-    for (const a of extras) for (const b of centre) pairs.push([a, b]);
-    for (const [a, b] of pairs) {
-      const p = box(a);
-      const q = box(b);
-      if (p.left < q.right && q.left < p.right && p.top < q.bottom && q.top < p.bottom)
-        found.push(`${name(a)} × ${name(b)}`);
-    }
-    // Native controls are drawn inside the video's own box, along its bottom: Den's bar must stay out of it.
-    const video = document.querySelector('.player video');
-    if (video?.hasAttribute('controls')) {
-      const v = box(video);
-      for (const a of bar) {
-        const p = box(a);
-        if (p.left < v.right && v.left < p.right && p.top < v.bottom && v.top < p.bottom)
-          found.push(`${name(a)} × native controls`);
+    controls.forEach((a, i) => {
+      for (const b of controls.slice(i + 1)) {
+        if (a.contains(b) || b.contains(a)) continue;
+        const p = a.getBoundingClientRect();
+        const q = b.getBoundingClientRect();
+        // A pixel of anti-aliasing at a shared edge is not an overlap.
+        if (
+          p.left < q.right - 1 &&
+          q.left < p.right - 1 &&
+          p.top < q.bottom - 1 &&
+          q.top < p.bottom - 1
+        )
+          found.push(`${name(a)} × ${name(b)}`);
       }
-    }
+    });
     return found;
   });
 }
@@ -217,9 +192,16 @@ for (const [engine, browserType] of engines) {
         await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
         expect(await overlaps(page)).toEqual([]);
         expect(await smallTargets(page)).toEqual([]);
-        // The phone gets what the desktop gets: play from the beginning, and Den's own fullscreen.
-        await expect(page.getByRole('button', { name: 'Play from beginning' })).toBeVisible();
+        // The phone gets what the desktop gets: play from the beginning (among the options), and Den's own fullscreen.
         await expect(page.getByRole('button', { name: 'Enter fullscreen' })).toBeVisible();
+        await showControls(page);
+        await page.getByRole('button', { name: 'More playback options' }).tap();
+        await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toBeVisible();
+        // A tap outside the sheet, which covers the dock, closes it.
+        const title = await page.locator('.player header b').boundingBox();
+        await page.touchscreen.tap(title.x + title.width / 2, title.y + title.height / 2);
+        await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
+        await expect(page.getByTestId('player-close-count')).toHaveText('0');
 
         await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
         expect(await overlaps(page)).toEqual([]);
@@ -380,10 +362,10 @@ async function touchPage(browser, browserType, viewport) {
   return context.newPage();
 }
 
-/** Tap the middle of the picture, as a finger does. */
+/** Tap the picture as a finger does: between the toast lane at the top and the transport at its centre. */
 async function tapPicture(page) {
   const box = await page.locator('.player video').boundingBox();
-  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height * 0.38);
 }
 
 /** The controls showing, by a tap on the picture if they had hidden. */
@@ -395,14 +377,14 @@ async function showControls(page) {
 }
 
 /**
- * Every visible control of the transport and the bar smaller than a 44px target, by name and size. Den's shared
- * `Button`s (AirPlay) take their 44px `den-button-icon` box from the app stylesheet, which this fixture does not load.
+ * Every visible control of the top bar, the transport and the dock smaller than a 44px target, by name and size. Den's
+ * shared `Button`s (the up-next card's) take their box from the app stylesheet, which this fixture does not load.
  */
 async function smallTargets(page) {
   return page.evaluate(() =>
     [
       ...document.querySelectorAll(
-        '.player .full-tv-transport :is(button, input), .player footer .controls :is(button, a, select)',
+        '.player :is(header, .web-transport) :is(button, a, input:not(.web-volume))',
       ),
     ]
       .filter(
