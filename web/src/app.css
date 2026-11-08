@@ -50,9 +50,14 @@
   --presentation-width: 100vw;
   --presentation-edge: 50vw;
 
+  /* Where the floating bar sits. The update bar (`updateNotice.ts`) sets `--update-bar-h` to its own height while it
+     is shown, which already includes the safe area, and everything pinned under the top edge moves down by it. */
+  --update-bar-h: 0px;
+  --bar-top: max(12px, env(safe-area-inset-top), calc(var(--update-bar-h) + 12px));
+
   /* What the floating bar takes off the top of a page: its own height, where it sits, and the air under it.
      Pages pad by it, and a full-bleed hero pulls back through it to reach the top of the window. */
-  --bar-space: calc(max(12px, env(safe-area-inset-top)) + 46px + 16px);
+  --bar-space: calc(var(--bar-top) + 46px + 16px);
   --glass-bg: rgb(28 28 34 / 0.55);
   --glass-edge: rgb(255 255 255 / 0.12);
   --glass-blur: blur(24px) saturate(160%);

@@ -59,12 +59,18 @@ for (const [name, launch] of Object.entries(launchers)) {
       try {
         const page = await browser.newPage({ viewport: { width: 390, height: 780 } });
         await guardNetwork(page);
-        await page.goto(`${ORIGIN}/test/router.html`);
-        await page.locator('[data-route-page][data-active="true"]').waitFor();
+        await page.goto(`${ORIGIN}/test/navigation-bar.html`);
+        const nav = page.locator('.bar');
+        await expect(nav).toBeVisible();
+        const navTop = (await nav.boundingBox()).y;
         await waiting(page);
 
         const bar = page.getByRole('status').filter({ hasText: 'A new version of Den is ready.' });
         await expect(bar).toBeVisible();
+        // The navigation bar moves down to sit below the update bar instead of being covered by it.
+        await expect
+          .poll(async () => (await nav.boundingBox()).y)
+          .toBeGreaterThanOrEqual((await bar.boundingBox()).y + (await bar.boundingBox()).height);
         await expect(bar).not.toContainText('—');
         const box = await bar.boundingBox();
         expect(box.y).toBe(0);
@@ -79,6 +85,7 @@ for (const [name, launch] of Object.entries(launchers)) {
 
         await bar.getByRole('button', { name: 'Dismiss' }).click();
         await expect(bar).toHaveCount(0);
+        await expect.poll(async () => (await nav.boundingBox()).y).toBe(navTop);
         // The page learning of the same release again does not bring it back.
         await waiting(page);
         await page.waitForTimeout(200);

@@ -523,7 +523,7 @@
 
   .bar {
     position: fixed;
-    top: max(12px, env(safe-area-inset-top));
+    top: var(--bar-top);
     right: var(--gutter);
     left: var(--gutter);
     z-index: 10;
@@ -954,7 +954,7 @@
        keeps the same viewport geometry without leaving any fixed ancestor above the native editing control. */
     .bar-anchor {
       position: sticky;
-      top: max(12px, env(safe-area-inset-top));
+      top: var(--bar-top);
       z-index: 10;
       display: block;
       height: 0;

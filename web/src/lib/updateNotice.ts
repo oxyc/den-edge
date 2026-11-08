@@ -77,9 +77,18 @@ export function showUpdateNotice(reloadPage: () => void): void {
   // A player opening or closing is a node added or removed, the one signal every host of it gives.
   const observer = new MutationObserver(sync);
   observer.observe(document.body, { childList: true, subtree: true });
+  // The navigation bar and the pages' top space sit below the bar rather than under it (`--bar-top`, app.css); a
+  // hidden bar measures 0.
+  const root = document.documentElement.style;
+  const size = new ResizeObserver(() =>
+    root.setProperty('--update-bar-h', `${notice.offsetHeight}px`),
+  );
+  size.observe(notice);
   dismiss.addEventListener('click', () => {
     dismissed = true;
     observer.disconnect();
+    size.disconnect();
+    root.removeProperty('--update-bar-h');
     notice.remove();
   });
   sync();
