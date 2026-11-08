@@ -6,6 +6,31 @@ Round-3 blocker base: `2312314d19aaa7682795b7d894dcaffa46f4f244`.
 Round-4 Astra blocker base: `4a71f19511af2d982a976f526047794700d4977f`.
 Round-5 Astra blocker base: `0d88c9011b9b67ea2e2d3eda87619d8d7d88bd97`.
 
+## Current-main integration follow-up
+
+The branch was rebased onto the tree merged by #1064 (`12cc8ba2`) and then corrected for production-semantic
+failures found by the exact-head Astra review:
+
+- Route discovery now treats the empty table returned by production `fetchRoutes` for network, non-2xx and parse
+  failures as a retryable failure. Its regression uses the real adapter with two 503 responses before success and
+  proves discovery does not begin early.
+- Atlas publication now requires an acknowledgement from the current configuration generation. The A acknowledged
+  -> B pending -> A replacement race therefore reconfigures the content worker back to A instead of trusting an
+  obsolete retained publication.
+- Managed receipt preparation has a three-second, attempt-owned deadline and cancellable Library Service task. A
+  failure visibly explains degraded progress recovery and continues playback; a failed preparation is not cached,
+  so the next play retries. The underlying Dropbox PUT is independently bounded to five seconds.
+- Grant refresh is foreground-gated and bounded to three total attempts (initial, five seconds and thirty seconds),
+  then stops until its authority inputs change. It no longer polls every five seconds for the life of the page.
+
+The matched #1064 build measured 5,007 startup and 83,932 complete non-translation gzip bytes over the fixed
+baseline. This follow-up measures 5,902 and 85,554 respectively: +895 startup and +1,622 complete. Receipt
+preparation was moved into the existing lazy assistant chunk; that removes 26 startup bytes but adds 28 bytes to the
+complete graph from the module boundary. Player notices/deadlines and diagnostics were already lazy. Route,
+configuration-generation, request-authority and cancellation fences must be available before their requests and
+cannot safely move behind a lazy boundary. Translation catalogs remain independently lazy and under their unchanged
+51,200-byte ceiling.
+
 ## Corrected contracts
 
 - `SessionServices.configure` now reads guest plugin authority synchronously so its production Svelte effect observes

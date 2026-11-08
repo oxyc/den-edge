@@ -35,6 +35,32 @@ export interface DropboxKey {
   public: string;
 }
 
+type PlaybackReceiptAuthority = {
+  ensurePlaybackReceipts(signal?: AbortSignal): Promise<DropboxKey | null>;
+};
+const preparedReceiptAuthorities = new WeakSet<PlaybackReceiptAuthority>();
+const receiptPreparations = new WeakMap<PlaybackReceiptAuthority, Promise<boolean>>();
+
+/** Lazily establish managed-playback completion recovery without adding assistant crypto to app startup. */
+export function preparePlaybackReceipts(
+  authority: PlaybackReceiptAuthority,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (preparedReceiptAuthorities.has(authority)) return Promise.resolve(true);
+  const pending = receiptPreparations.get(authority);
+  if (pending) return pending;
+  const preparation = authority
+    .ensurePlaybackReceipts(signal)
+    .then((dropbox) => {
+      if (!dropbox) return false;
+      preparedReceiptAuthorities.add(authority);
+      return true;
+    })
+    .finally(() => receiptPreparations.delete(authority));
+  receiptPreparations.set(authority, preparation);
+  return preparation;
+}
+
 /** What the library service made of a drain. */
 export interface ApplyOutcome {
   /** Per request, in the order handled: applied (with what it did), or refused with den-core's reason. */

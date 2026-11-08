@@ -3,6 +3,7 @@ import {
   drainPlaybackReceiptsForCurrentAuthority,
   drainPlaybackReceiptsOnce,
   drainWhileOpen,
+  preparePlaybackReceipts,
   type ApplyOutcome,
   type OtherQueue,
   type QueuedRequest,
@@ -14,6 +15,21 @@ import {
 } from './relayFetch';
 
 const DROPBOX = { kid: '0123456789abcdef0123456789abcdef', public: 'pk-one' };
+
+test('managed playback receipt preparation is lazy, retryable, and cached only after success', async () => {
+  const signal = new AbortController().signal;
+  const ensurePlaybackReceipts = vi
+    .fn<(signal?: AbortSignal) => Promise<typeof DROPBOX | null>>()
+    .mockResolvedValueOnce(null)
+    .mockResolvedValue(DROPBOX);
+  const authority = { ensurePlaybackReceipts };
+
+  await expect(preparePlaybackReceipts(authority, signal)).resolves.toBe(false);
+  await expect(preparePlaybackReceipts(authority, signal)).resolves.toBe(true);
+  await expect(preparePlaybackReceipts(authority, signal)).resolves.toBe(true);
+  expect(ensurePlaybackReceipts).toHaveBeenCalledTimes(2);
+  expect(ensurePlaybackReceipts).toHaveBeenCalledWith(signal);
+});
 
 /** A den-edge whose queue answers `drains` in turn, then holds empty until the test stops the loop. */
 function edge(drains: QueuedRequest[][]) {
