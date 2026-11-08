@@ -141,6 +141,14 @@ const ROW_OVERHEAD: usize = 192;
 const MAX_LOG_LINE: usize = 6 * (MAX_VALUE + 128) + 128;
 const MAX_CACHED_LIBRARIES: usize = 128;
 const PAGE_BYTES: usize = 512 * 1024;
+/// Before a selected read touches row payloads, reserve enough for every requested row at the wire-4 cap, the
+/// largest valid key and JSON envelope, bounded chunks, and one streaming-gzip output frame. The charge is reduced
+/// to the chunks actually retained once they are built.
+const SELECTED_ROW_RESERVATION_BYTES: usize = MAX_VALUE_V4 + 128 + 64;
+const SELECTED_RESPONSE_OVERHEAD_BYTES: usize = 4 * v3::RESPONSE_CHUNK_BYTES;
+// A fast-gzip frame can be a little larger than its incompressible input. `Vec` then rounds its backing allocation
+// up, so retain twice the input chunk while that one backpressured output frame is live.
+const GZIP_RESPONSE_FRAME_BYTES: usize = 2 * v3::RESPONSE_CHUNK_BYTES;
 /// Held `/changes?wait=` requests per library (`hold.rs`); past it a request is answered at once. A household holds
 /// one per TV and per open browser.
 pub const MAX_HELD_PER_LIBRARY: usize = 4;
@@ -666,7 +674,7 @@ async fn library_store_locked(
     }
 }
 
-pub async fn handle(state: &AppState, req: Request) -> Response {
+pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
     let Some(rest) = path.strip_prefix("/lib/") else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
@@ -894,9 +902,15 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .clamp(1, MAX_LIMIT);
             let (_, gzip, identity) = crate::web::encodings(req.headers());
             let read = if let Some(keys) = query_param(&req, "keys") {
-                let keys: Vec<String> = keys.split(',').map(str::to_owned).collect();
-                if keys.len() > MAX_SELECTED_KEYS || keys.iter().any(|key| !valid_hex_id(key)) {
+                let requested: Vec<&str> = keys.split(',').collect();
+                if requested.len() > MAX_SELECTED_KEYS || requested.iter().any(|key| !valid_hex_id(key)) {
                     return json_reply(StatusCode::BAD_REQUEST, &error("invalid_keys"));
+                }
+                let mut keys: Vec<String> = Vec::with_capacity(requested.len());
+                for key in requested {
+                    if !keys.iter().any(|selected| selected.as_str() == key) {
+                        keys.push(key.to_owned());
+                    }
                 }
                 Read::Keys(keys)
             } else if let Some(before) = query_param(&req, "before").and_then(|s| s.parse().ok()) {
@@ -935,8 +949,12 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         ("batch" | "changes" | "member" | "" | "rewrite", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     };
-    let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
-    with_wire_headers(state, response, latest.as_ref())
+    if response.headers().contains_key(GENERATION_HEADER) {
+        response
+    } else {
+        let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
+        with_wire_headers(state, response, latest.as_ref())
+    }
 }
 
 async fn rewrite_open(
@@ -1210,7 +1228,7 @@ async fn rewrite_abort(
 
 /// Replace the temporary legacy membership proof with the key derived specifically for relay membership.
 async fn register_member(
-    state: &AppState,
+    state: &Arc<AppState>,
     id: &str,
     token_hash: [u8; 32],
     authority: &RequestAuthority,
@@ -1258,7 +1276,22 @@ async fn register_member(
         }
         return *response;
     }
-    match tokio::task::spawn_blocking(move || store.register_member(member_hash)).await {
+    // Close the old fast path before changing authority. A request that had already selected it may finish, while
+    // a later one proves the credential against the store. The blocking mutation keeps running if the client
+    // cancels its request, so give that task ownership of the final invalidation too: anything that re-proved the
+    // legacy credential while the task was waiting to run is removed after a successful replacement.
+    crate::relay::invalidate_member_media_leases(state, id);
+    let invalidation_state = Arc::clone(state);
+    let invalidation_id = id.to_owned();
+    let registered = tokio::task::spawn_blocking(move || {
+        let registered = store.register_member(member_hash);
+        if registered.is_ok() {
+            crate::relay::invalidate_member_media_leases(&invalidation_state, &invalidation_id);
+        }
+        registered
+    })
+    .await;
+    match registered {
         Ok(Ok(_)) => {}
         Ok(Err(v3::StoreError::Invalid(message))) if message == "member_already_registered" => {
             return json_reply(StatusCode::CONFLICT, &error("member_already_registered"));
@@ -1416,6 +1449,7 @@ async fn retire_owned_marked(
     // The marker is written: the library is retired, and the answer is 200 from here on. A client told anything else
     // would take its move as failed and delete the only copy left; cleanup that fails is logged and left behind.
     slot.authority.store(AUTHORITY_MOVED, Ordering::Release);
+    crate::relay::invalidate_member_media_leases(state, id);
     // Retired: a member check now fails, so recovery may go on while the database is removed.
     drop(recovery);
     // A held reader is told now that the library moved, rather than at the end of its wait.
@@ -1933,12 +1967,7 @@ async fn batch(
         Ok(Err(error)) => return internal("library write", v3_io(error)),
         Err(error) => return internal("library write task", io::Error::other(error)),
     };
-    let protocol_store = Arc::clone(&store);
-    let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
-        Ok(Ok(protocol)) => protocol,
-        Ok(Err(error)) => return internal("library protocol", v3_io(error)),
-        Err(error) => return internal("library protocol task", io::Error::other(error)),
-    };
+    let protocol = &result.protocol;
     if !result.applied.is_empty() {
         state.library_holds.wake(id);
         maintain_v3(state, id, store).await;
@@ -1965,11 +1994,12 @@ async fn batch(
         })
         .collect();
     state.metrics.record_library_writes(applied.len(), conflicts.len());
-    json_reply(
+    let response = json_reply(
         StatusCode::OK,
         &json!({ "head": result.head, "applied": applied, "conflicts": conflicts,
             "generation": full_generation(state, &protocol.generation) }),
-    )
+    );
+    with_wire_headers(state, response, Some(protocol))
 }
 
 #[derive(Serialize)]
@@ -2001,6 +2031,34 @@ fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str, 
     body
 }
 
+fn selected_response_reservation(keys: usize) -> usize {
+    keys.checked_mul(SELECTED_ROW_RESERVATION_BYTES)
+        .and_then(|bytes| bytes.checked_add(SELECTED_RESPONSE_OVERHEAD_BYTES))
+        .expect("the selected-key limit has a bounded response reservation")
+}
+
+async fn response_permit(state: &AppState, bytes: usize) -> (tokio::sync::OwnedSemaphorePermit, bool) {
+    let bytes = u32::try_from(bytes).expect("a library response reservation fits the semaphore API");
+    let semaphore = Arc::clone(&state.library_response_bytes);
+    match Arc::clone(&semaphore).try_acquire_many_owned(bytes) {
+        Ok(permit) => (permit, false),
+        Err(tokio::sync::TryAcquireError::NoPermits) => (
+            semaphore.acquire_many_owned(bytes).await.expect("the library response budget is never closed"),
+            true,
+        ),
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            unreachable!("the library response budget is never closed")
+        }
+    }
+}
+
+fn retain_response_permits(permit: &mut tokio::sync::OwnedSemaphorePermit, bytes: usize) {
+    let excess = permit.num_permits().checked_sub(bytes).expect("the selected response fits its reservation");
+    if excess > 0 {
+        drop(permit.split(excess).expect("the selected response reservation contains its excess"));
+    }
+}
+
 struct ChunkBody {
     chunks: std::vec::IntoIter<axum::body::Bytes>,
     left: usize,
@@ -2009,6 +2067,19 @@ struct ChunkBody {
 struct HeldLibraryBody {
     body: Body,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    _accounting: crate::metrics::ByteAdmission,
+}
+
+struct GzippedLibraryBody {
+    inner: ChunkBody,
+    encoder: Option<flate2::write::GzEncoder<Vec<u8>>>,
+    slots: Arc<tokio::sync::Semaphore>,
+    waiting: Option<Pin<Box<dyn std::future::Future<Output = tokio::sync::OwnedSemaphorePermit> + Send>>>,
+    pending: Option<axum::body::Bytes>,
+    finished_inner: bool,
+    job: Option<crate::metrics::CompressionJob>,
+    input: usize,
+    output: usize,
 }
 
 impl http_body::Body for HeldLibraryBody {
@@ -2031,10 +2102,119 @@ impl http_body::Body for HeldLibraryBody {
     }
 }
 
+impl Drop for GzippedLibraryBody {
+    fn drop(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.finished(self.input, None);
+        }
+    }
+}
+
+impl http_body::Body for GzippedLibraryBody {
+    type Data = axum::body::Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::io::Write as _;
+
+        loop {
+            if self.encoder.is_none() {
+                return Poll::Ready(None);
+            }
+            if self.pending.is_none() && !self.finished_inner {
+                match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {
+                    Some(Ok(frame)) => {
+                        self.pending =
+                            Some(frame.into_data().expect("a library chunk body has only data frames"));
+                    }
+                    Some(Err(never)) => match never {},
+                    None => self.finished_inner = true,
+                }
+            }
+            let compression_permit = if let Some(waiting) = self.waiting.as_mut() {
+                let permit = std::task::ready!(waiting.as_mut().poll(cx));
+                self.waiting = None;
+                permit
+            } else {
+                match Arc::clone(&self.slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        let slots = Arc::clone(&self.slots);
+                        self.waiting = Some(Box::pin(async move {
+                            slots.acquire_owned().await.expect("the library compression pool is never closed")
+                        }));
+                        continue;
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        unreachable!("the library compression pool is never closed")
+                    }
+                }
+            };
+            if let Some(data) = self.pending.take() {
+                self.input += data.len();
+                let encoder = self.encoder.as_mut().expect("checked above");
+                if let Err(error) = encoder.write_all(&data) {
+                    self.encoder = None;
+                    let input = self.input;
+                    if let Some(job) = self.job.take() {
+                        job.finished(input, None);
+                    }
+                    return Poll::Ready(Some(Err(error)));
+                }
+                let out = std::mem::take(encoder.get_mut());
+                drop(compression_permit);
+                if !out.is_empty() {
+                    self.output += out.len();
+                    return Poll::Ready(Some(Ok(http_body::Frame::data(axum::body::Bytes::from(out)))));
+                }
+            } else {
+                debug_assert!(self.finished_inner);
+                let finished = self.encoder.take().expect("checked above").finish();
+                drop(compression_permit);
+                match finished {
+                    Ok(out) => {
+                        self.output += out.len();
+                        let (input, output) = (self.input, self.output);
+                        if let Some(job) = self.job.take() {
+                            job.finished(input, Some(output));
+                        }
+                        return Poll::Ready(Some(Ok(http_body::Frame::data(axum::body::Bytes::from(out)))));
+                    }
+                    Err(error) => {
+                        let input = self.input;
+                        if let Some(job) = self.job.take() {
+                            job.finished(input, None);
+                        }
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.encoder.is_none()
+    }
+}
+
 impl ChunkBody {
     fn new(page: v3::ChunkPage) -> Self {
         Self { chunks: page.chunks.into_iter(), left: page.len }
     }
+}
+
+fn held_library_body(
+    state: &AppState,
+    body: Body,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    waited: bool,
+) -> Body {
+    let bytes = permit.num_permits();
+    let accounting = state.metrics.byte_admitted(crate::metrics::BytePool::LibraryResponse, bytes, waited);
+    Body::new(HeldLibraryBody { body, _permit: permit, _accounting: accounting })
 }
 
 impl http_body::Body for ChunkBody {
@@ -2082,7 +2262,7 @@ async fn changes(
     };
     // Registered before the head is read: a write that lands after the read must still wake the wait.
     let mut hold = hold.and_then(|hold| Some((state.library_holds.hold(id, &[id])?, hold)));
-    let (store, generation) = loop {
+    let store = loop {
         let slot = state.libraries.slot(id, state.now());
         let mut library = slot.library.lock().await;
         match authority(state, &slot, id).await {
@@ -2130,42 +2310,110 @@ async fn changes(
                 continue;
             }
         }
-        break (store, generation);
+        break store;
     };
-    let response_permit = Arc::clone(&state.library_response_bytes)
-        .acquire_many_owned(PAGE_BYTES as u32)
-        .await
-        .expect("the library response budget is never closed");
+    let reservation = match &read {
+        Read::Keys(keys) => selected_response_reservation(keys.len()),
+        _ => PAGE_BYTES,
+    };
+    // Selected rows are not touched until their worst-case retained representation has capacity. Cancellation while
+    // waiting therefore allocates no oversized response. Once built, only the chunk allocations that remain live
+    // stay charged.
+    let (mut response_permit, response_waited) = response_permit(state, reservation).await;
+    let generation_prefix = state.store.generation().to_owned();
+    let (selected_keys, read) = match read {
+        Read::Keys(keys) => (Some(keys), None),
+        read => (None, Some(read)),
+    };
+    if let Some(keys) = selected_keys {
+        let page = match tokio::task::spawn_blocking(move || store.selected_chunks(&keys, &generation_prefix))
+            .await
+        {
+            Ok(Ok(page)) => page,
+            Ok(Err(reason)) => return internal("library read", v3_io(reason)),
+            Err(reason) => return internal("library read task", io::Error::other(reason)),
+        };
+        let protocol = page.protocol.clone();
+        let length = page.len;
+        let compression = if gzip && length >= 1024 {
+            match Arc::clone(&state.library_compression_slots).try_acquire_owned() {
+                Ok(permit) => {
+                    drop(permit);
+                    true
+                }
+                Err(_) => {
+                    state.metrics.compression_busy();
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let retained = page.retained + usize::from(compression) * GZIP_RESPONSE_FRAME_BYTES;
+        retain_response_permits(&mut response_permit, retained);
+        let chunks = ChunkBody::new(page);
+        let body = if compression {
+            Body::new(GzippedLibraryBody {
+                inner: chunks,
+                encoder: Some(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast())),
+                slots: Arc::clone(&state.library_compression_slots),
+                waiting: None,
+                pending: None,
+                finished_inner: false,
+                job: Some(state.metrics.compression_started()),
+                input: 0,
+                output: 0,
+            })
+        } else {
+            Body::new(chunks)
+        };
+        let body = held_library_body(state, body, response_permit, response_waited);
+        let mut response = raw_json(StatusCode::OK, body, true);
+        if compression {
+            response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+        } else {
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
+            );
+        }
+        return with_wire_headers(state, response, Some(&protocol));
+    }
+    let Some(read) = read else { unreachable!("a selected read returned above") };
     if !gzip && matches!(read, Read::Since(_)) {
-        let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
+        let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation_prefix) {
             page
         } else {
-            match tokio::task::spawn_blocking(move || store.range_chunks(since, limit, &generation)).await {
+            match tokio::task::spawn_blocking(move || store.range_chunks(since, limit, &generation_prefix))
+                .await
+            {
                 Ok(Ok(page)) => page,
                 Ok(Err(reason)) => return internal("library read", v3_io(reason)),
                 Err(reason) => return internal("library read task", io::Error::other(reason)),
             }
         };
+        let protocol = page.protocol.clone();
         let length = page.len;
         let body = Body::new(ChunkBody::new(page));
-        let mut response =
-            raw_json(StatusCode::OK, Body::new(HeldLibraryBody { body, _permit: response_permit }), true);
+        let body = held_library_body(state, body, response_permit, response_waited);
+        let mut response = raw_json(StatusCode::OK, body, true);
         response.headers_mut().insert(
             header::CONTENT_LENGTH,
             HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
         );
-        return response;
+        return with_wire_headers(state, response, Some(&protocol));
     }
     // Named in the answer, so a client can tell the read it asked for from an older den-edge's ignoring it.
     let marker = match read {
         Read::Since(_) => "",
         Read::Before(_) => r#","order":"desc""#,
-        Read::Keys(_) => r#","selected":true"#,
+        Read::Keys(_) => unreachable!("selected reads return through the chunked path"),
     };
     let page = match tokio::task::spawn_blocking(move || match read {
         Read::Since(since) => store.range(since, limit),
         Read::Before(before) => store.range_before(before, limit),
-        Read::Keys(keys) => store.rows(&keys),
+        Read::Keys(_) => unreachable!("selected reads return through the chunked path"),
     })
     .await
     {
@@ -2173,6 +2421,7 @@ async fn changes(
         Ok(Err(reason)) => return internal("library read", v3_io(reason)),
         Err(reason) => return internal("library read task", io::Error::other(reason)),
     };
+    let generation = full_generation(state, &page.protocol.generation);
     let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
     // A newest-first read also says how many rows the library holds, so a client counts its progress in rows.
     let extra = match page.rows {
@@ -2195,14 +2444,11 @@ async fn changes(
             match compressed {
                 Ok((_, Some(compressed))) => {
                     let body = Body::from(compressed);
-                    let mut resp = raw_json(
-                        StatusCode::OK,
-                        Body::new(HeldLibraryBody { body, _permit: response_permit }),
-                        true,
-                    );
+                    let body = held_library_body(state, body, response_permit, response_waited);
+                    let mut resp = raw_json(StatusCode::OK, body, true);
                     resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                     resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-                    return resp;
+                    return with_wire_headers(state, resp, Some(&page.protocol));
                 }
                 Ok((identity, None)) => body = identity,
                 Err(error) => {
@@ -2215,7 +2461,8 @@ async fn changes(
         }
     }
     let body = Body::from(body);
-    raw_json(StatusCode::OK, Body::new(HeldLibraryBody { body, _permit: response_permit }), true)
+    let body = held_library_body(state, body, response_permit, response_waited);
+    with_wire_headers(state, raw_json(StatusCode::OK, body, true), Some(&page.protocol))
 }
 
 /// A sync page gzipped, when that is worth the bytes. The rows are ciphertext under random nonces and nothing of the
@@ -2337,6 +2584,57 @@ pub async fn is_household_member(state: &AppState, member: Option<&str>) -> bool
         Err(e) => {
             eprintln!("library tier check: {e}");
             false
+        }
+    }
+}
+
+/// Run a durable household mutation only while `claim` is still the exact member authority for `id`.
+///
+/// Callers may parse an untrusted body before entering here, but publication stays under the library slot. Library
+/// retirement already takes that slot before its grants cascade, so a delayed mutation is ordered wholly before or
+/// after retirement rather than recreating state after the cascade. Member-proof replacement uses the same slot.
+pub(crate) async fn with_current_household_member<F, Fut>(
+    state: &AppState,
+    id: &str,
+    claim: &str,
+    commit: F,
+) -> Response
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    let Some((claimed_id, token)) = claim.split_once(':') else {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    };
+    if claimed_id != id || !valid_hex_id(id) || token.is_empty() || token.len() > 256 {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    let slot = state.libraries.slot(id, state.now());
+    let library = slot.library.lock().await;
+    let current = if let Some(library) = library.as_ref() {
+        constant_time_eq(library.member_hash.as_ref().unwrap_or(&library.token_hash), &hash)
+    } else {
+        match header_of(state, &slot, id).await {
+            Ok(Some((token_hash, member_hash))) => {
+                constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), &hash)
+            }
+            Ok(None) => false,
+            Err(reason) => {
+                eprintln!("library member commit check: {reason}");
+                false
+            }
+        }
+    };
+    if !current {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
+    match library_is_visitor(state, id).await {
+        Ok(false) => commit().await,
+        Ok(true) => json_reply(StatusCode::FORBIDDEN, &error("forbidden")),
+        Err(reason) => {
+            eprintln!("library tier commit check: {reason}");
+            json_reply(StatusCode::FORBIDDEN, &error("forbidden"))
         }
     }
 }
@@ -2737,6 +3035,68 @@ mod tests {
         eprintln!("BENCH {} B batch parse {:?}", body.len(), started.elapsed() / 50);
     }
 
+    /// Manual matched release probe for #945. Kept ignored: every sample includes the real durable library and
+    /// protocol-index commits, and is therefore intentionally unsuitable for CI timing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn protocol_outcome_batch_benchmark() {
+        async fn update(h: &Harness, keys: &[String], bases: &[u64], bytes: usize) -> Vec<u64> {
+            let writes: Vec<_> = keys
+                .iter()
+                .zip(bases)
+                .enumerate()
+                .map(|(n, (key, base))| {
+                    json!({"k": key, "base": base, "v": format!("{n:08x}").repeat(bytes.div_ceil(8))})
+                })
+                .collect();
+            let (status, body) = batch(h, TOKEN, json!(writes)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["applied"].as_array().unwrap().iter().map(|row| row["seq"].as_u64().unwrap()).collect()
+        }
+
+        let small = Harness::new();
+        let one = vec![K1.to_owned()];
+        let first_started = std::time::Instant::now();
+        let mut one_base = update(&small, &one, &[0], 32).await;
+        let first = first_started.elapsed();
+        let started = std::time::Instant::now();
+        for _ in 0..30 {
+            one_base = update(&small, &one, &one_base, 32).await;
+        }
+        let warm_small = started.elapsed() / 30;
+        assert_eq!(one_base.len(), 1);
+
+        let large = Harness::new();
+        let keys: Vec<_> = (0..8).map(|n| format!("{n:016x}")).collect();
+        let mut bases = vec![0; keys.len()];
+        bases = update(&large, &keys, &bases, 16 << 10).await;
+        let started = std::time::Instant::now();
+        for _ in 0..12 {
+            bases = update(&large, &keys, &bases, 16 << 10).await;
+        }
+        let warm_large = started.elapsed() / 12;
+        assert_eq!(bases.len(), 8);
+
+        let contended = Harness::new();
+        let keys: Vec<_> = (10..14).map(|n| format!("{n:016x}")).collect();
+        let mut bases = update(&contended, &keys, &[0; 4], 256).await;
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            let (a, b, c, d) = tokio::join!(
+                update(&contended, &keys[0..1], &bases[0..1], 256),
+                update(&contended, &keys[1..2], &bases[1..2], 256),
+                update(&contended, &keys[2..3], &bases[2..3], 256),
+                update(&contended, &keys[3..4], &bases[3..4], 256),
+            );
+            bases = vec![a[0], b[0], c[0], d[0]];
+        }
+        let contended_each = started.elapsed() / 40;
+        assert_eq!(bases.len(), 4);
+        eprintln!(
+            "ISSUE945 first={first:?} warm_small={warm_small:?} warm_large={warm_large:?} contended_each={contended_each:?}"
+        );
+    }
+
     /// The length a value is checked at is the length `serde_json` writes it at, for every byte that escapes.
     #[test]
     fn a_value_is_measured_as_it_is_stored() {
@@ -3051,6 +3411,7 @@ mod tests {
         assert_eq!(first.status(), StatusCode::OK);
         let generation = first.headers()[super::GENERATION_HEADER].to_str().unwrap().to_owned();
         assert_ne!(generation, "0");
+        assert_eq!(body_json(first).await["generation"], generation);
 
         let stale = h
             .send(
@@ -3755,6 +4116,10 @@ mod tests {
             "the current value"
         );
         assert_eq!((page["selected"].clone(), page["more"].clone()), (json!(true), json!(false)));
+        let (_, repeated) = changes(&h, TOKEN, &format!("?keys={K1},{K1},{K2}")).await;
+        let repeated = repeated["entries"].as_array().unwrap();
+        assert_eq!(repeated.len(), 2, "a repeated key is returned once");
+        assert_eq!((repeated[0]["k"].clone(), repeated[1]["k"].clone()), (json!(K2), json!(K1)));
         assert_eq!(changes(&h, TOKEN, "?keys=not-hex").await.0, StatusCode::BAD_REQUEST);
         let many = vec!["a".repeat(64); super::MAX_SELECTED_KEYS + 1].join(",");
         assert_eq!(changes(&h, TOKEN, &format!("?keys={many}")).await.0, StatusCode::BAD_REQUEST);
@@ -4418,7 +4783,110 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(h.state.library_response_bytes.available_permits(), before - super::PAGE_BYTES);
+        assert!(h.state.metrics.render().contains(&format!(
+            r#"den_edge_byte_admission_used_bytes{{pool="library_response"}} {}"#,
+            super::PAGE_BYTES
+        )));
         drop(response);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="library_response"} 0"#));
+    }
+
+    #[tokio::test]
+    async fn selected_reads_are_deduplicated_chunked_and_charged_while_their_bodies_live() {
+        let h = Harness::new();
+        let keys: Vec<String> = (0..super::MAX_ROWS).map(|i| format!("{i:016x}")).collect();
+        let mut generation = "0".to_owned();
+        for chunk in keys.chunks(4) {
+            let writes: Vec<_> = chunk
+                .iter()
+                .map(|key| json!({ "k": key, "base": 0, "v": "a".repeat(super::MAX_VALUE_V4) }))
+                .collect();
+            let response =
+                wired(&h, &format!("{LIB}/batch"), "4", &generation, json!({ "writes": writes })).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            generation = generation_of(&response);
+        }
+        let selected = format!("/lib/{LIB}/changes?keys={}", keys.join(","));
+        let headers = [
+            ("x-den-library-token", TOKEN),
+            (super::WIRE_HEADER, "4"),
+            (super::GENERATION_HEADER, generation.as_str()),
+            ("accept-encoding", "identity"),
+        ];
+        let before = h.state.library_response_bytes.available_permits();
+        let response = h.send("GET", &selected, None, &headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let length: usize =
+            response.headers()[axum::http::header::CONTENT_LENGTH].to_str().unwrap().parse().unwrap();
+        let selected_charge = before - h.state.library_response_bytes.available_permits();
+        assert!(selected_charge >= length, "{selected_charge} charged for {length} response bytes");
+        assert!(selected_charge > super::PAGE_BYTES, "maximum selected rows are not a range page");
+
+        let range = h.send("GET", &format!("/lib/{LIB}/changes?since=0&limit=1"), None, &headers).await;
+        assert_eq!(
+            h.state.library_response_bytes.available_permits(),
+            before - selected_charge - super::PAGE_BYTES,
+            "selected and range bodies share the byte pool"
+        );
+        drop(range);
+        drop(response);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+
+        let repeated_keys =
+            std::iter::repeat_n(keys[0].as_str(), super::MAX_SELECTED_KEYS).collect::<Vec<_>>().join(",");
+        let repeated =
+            h.send("GET", &format!("/lib/{LIB}/changes?keys={repeated_keys}"), None, &headers).await;
+        let repeated_charge = before - h.state.library_response_bytes.available_permits();
+        assert!(repeated_charge < super::PAGE_BYTES, "one repeated row retained {repeated_charge} bytes");
+        let repeated = body_json(repeated).await;
+        assert_eq!(repeated["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+
+        let mut gzip_headers = headers;
+        gzip_headers[3] = ("accept-encoding", "gzip");
+        let zipped = h.send("GET", &selected, None, &gzip_headers).await;
+        assert_eq!(zipped.headers()[axum::http::header::CONTENT_ENCODING], "gzip");
+        let gzip_charge = before - h.state.library_response_bytes.available_permits();
+        assert!(gzip_charge >= selected_charge, "streaming gzip keeps a bounded output-frame allowance");
+        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut text).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["entries"].as_array().unwrap().len(),
+            keys.len()
+        );
+
+        let dropped = h.send("GET", &selected, None, &gzip_headers).await;
+        assert!(h.state.library_response_bytes.available_permits() < before);
+        assert_eq!(
+            h.state.library_compression_slots.available_permits(),
+            super::COMPRESSION_JOBS,
+            "a slow selected response does not monopolize a compression worker"
+        );
+        drop(dropped);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
+        assert_eq!(h.state.library_compression_slots.available_permits(), super::COMPRESSION_JOBS);
+
+        let held =
+            Arc::clone(&h.state.library_response_bytes).acquire_many_owned(before as u32).await.unwrap();
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            h.send("GET", &selected, None, &headers),
+        )
+        .await;
+        assert!(blocked.is_err(), "selected materialization waits for its worst-case response capacity");
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="library_response"} 0"#));
+        drop(held);
         assert_eq!(h.state.library_response_bytes.available_permits(), before);
     }
 
@@ -4571,6 +5039,100 @@ mod tests {
         let answer = tokio::time::timeout(PROMPT, held).await.expect("the commit wakes it");
         assert_eq!(answer.status(), StatusCode::OK);
         assert_ne!(answer.headers()[super::GENERATION_HEADER].to_str().unwrap(), generation);
+    }
+
+    /// Response admission is global and asynchronous. A rewrite that commits while any read shape waits for byte
+    /// capacity must not let new rows leave under the protocol snapshot captured before that wait.
+    #[tokio::test]
+    async fn reads_delayed_by_response_capacity_return_one_rewrite_snapshot() {
+        async fn run(path: String, encoding: &'static str) {
+            let h = Harness::new();
+            let first = wired(
+                &h,
+                &format!("{LIB}/batch"),
+                "3",
+                "0",
+                json!({ "writes": [{ "k": K1, "base": 0, "v": "old" }] }),
+            )
+            .await;
+            assert_eq!(first.status(), StatusCode::OK);
+            let generation = generation_of(&first);
+            drop(first);
+
+            let available = h.state.library_response_bytes.available_permits();
+            let held = Arc::clone(&h.state.library_response_bytes)
+                .acquire_many_owned(available as u32)
+                .await
+                .unwrap();
+            let headers = [
+                ("x-den-library-token", TOKEN),
+                (super::WIRE_HEADER, "3"),
+                (super::GENERATION_HEADER, generation.as_str()),
+                ("accept-encoding", encoding),
+            ];
+            let mut waiting = Box::pin(h.send("GET", &path, None, &headers));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting).await.is_err(),
+                "the read reached response admission before the rewrite"
+            );
+
+            let opened = wired(&h, &format!("{LIB}/rewrite"), "4", &generation, json!({})).await;
+            assert_eq!(opened.status(), StatusCode::OK);
+            let opened = body_json(opened).await;
+            let rewrite = opened["rewrite"].as_str().unwrap();
+            let staged = wired(
+                &h,
+                &format!("{LIB}/rewrite/{rewrite}/rows"),
+                "4",
+                &generation,
+                json!({ "writes": [{ "k": K2, "v": "n".repeat(2048) }] }),
+            )
+            .await;
+            assert_eq!(staged.status(), StatusCode::OK);
+            let committed = wired(
+                &h,
+                &format!("{LIB}/rewrite/{rewrite}/commit"),
+                "4",
+                &generation,
+                json!({ "base": opened["base"], "wireMin": 4 }),
+            )
+            .await;
+            assert_eq!(committed.status(), StatusCode::OK);
+            let latest_generation = generation_of(&committed);
+            drop(committed);
+            drop(held);
+
+            let response =
+                tokio::time::timeout(PROMPT, waiting).await.expect("capacity release answers the read");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(generation_of(&response), latest_generation, "headers name the row snapshot");
+            assert_eq!(response.headers()[super::WIRE_MIN_HEADER], "4", "wire minimum is from that snapshot");
+            let compressed = response.headers().get(axum::http::header::CONTENT_ENCODING).is_some();
+            assert_eq!(compressed, encoding == "gzip", "the requested representation was exercised");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = if compressed {
+                let mut decoded = String::new();
+                std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut decoded)
+                    .unwrap();
+                serde_json::from_str::<Value>(&decoded).unwrap()
+            } else {
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            };
+            assert_eq!(body["generation"], latest_generation, "body and headers share authority");
+            assert_eq!(body["entries"][0]["k"], K2);
+            assert_eq!(body["entries"][0]["v"].as_str().map(str::len), Some(2048));
+        }
+
+        for (query, encoding) in [
+            ("since=0".to_owned(), "identity"),
+            ("since=0".to_owned(), "gzip"),
+            ("before=100".to_owned(), "identity"),
+            ("before=100".to_owned(), "gzip"),
+            (format!("keys={K2}"), "identity"),
+            (format!("keys={K2}"), "gzip"),
+        ] {
+            run(format!("/lib/{LIB}/changes?{query}"), encoding).await;
+        }
     }
 
     #[tokio::test]

@@ -116,7 +116,18 @@ if (process.argv.includes('--capture')) {
   // page the one-date overlay, the new-episode search and its billboard slide, the Continue Watching badge and the
   // two Home rows. Measured 4.1 KiB over main's complete graph (3.2 KiB of it in the initial graph, which stays
   // 2.7 KiB below baseline). Allow five KiB including gzip variance; the initial and catalog ceilings are unchanged.
-  if (initialDelta > Math.min(2560, Math.floor(baseline.initialGzip * 0.01325)))
+  // Durable linked-library retirement adds 2,154 gzip bytes to startup and 3,976 bytes to the non-translation graph
+  // on matched main/head builds. Receipt reconciliation and the exclusive pre-Worker fence must run before a reload
+  // can relink; only the 0.35 KiB recovery notice/CSS is lazy, and it adds no request unless cleanup needs attention.
+  // Allow 2.25 KiB at startup and four KiB total for that privacy boundary, including gzip variance.
+  // The source-wait Worker boundary adds 135 gzip bytes to startup on the post-outage-cache parent. Request
+  // ownership and the policy codec must be present with the always-loaded authority; Detail's presentation stays
+  // lazy. Raise the absolute/proportional caps by the smallest rounded allowance, retaining 82 bytes on this build.
+  // Current-main playback recovery adds 993 gzip bytes to startup on matched builds (4,997 -> 5,990). The receipt
+  // preparation cache was moved into the existing lazy assistant chunk, saving 26 startup bytes; the remaining
+  // route, generation and cancellation fences must be present before discovery or a request begins. Allow the next
+  // 128-byte boundary, retaining 154 bytes on the measured build.
+  if (initialDelta > Math.min(6144, Math.floor(baseline.initialGzip * 0.032)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -149,5 +160,69 @@ if (process.argv.includes('--capture')) {
   // viewer, and following narrowed to the series the viewer is caught up on add 0.6 KiB. A series sampled once or
   // seasons behind no longer reaches Home's airing row, billboard or Continue lead. Allow one KiB more; the initial
   // and catalog ceilings are unchanged.
-  if (coreTotalDelta > 69120) throw new Error('Browser total JS/CSS budget exceeded');
+  // Parental-control selection recovery and retryable new-episode source searches each passed from their own base,
+  // but their merged graph is 91 gzip bytes over the preceding ceiling. Allow 128 bytes for that combined baseline;
+  // the initial and catalog ceilings stay unchanged. Movie reactivation remains five bytes below that merged base.
+  // The bounded structured-source allowlist shared by browser, webOS and Tizen adds 220 gzip bytes: one six-character
+  // guard, a fixed token check and display normalization, with no network, storage or background work. Allow a quarter
+  // KiB for that audited parity contract; the initial and catalog ceilings stay unchanged.
+  // Exact profile and Visitor-visit scoping for recent searches adds 94 bytes gzip to the complete graph versus
+  // its release base. Keep that privacy boundary inside 128 bytes; the independent initial ceiling is unchanged.
+  // Explicit Downloads opening/failure/stale/retry states add 387 bytes gzip on the merged profile-isolation base
+  // and two bytes at startup. Keep that recovery UI inside half a KiB; the independent initial ceiling is fixed.
+  // Kid Settings PIN service-failure, busy and retry states plus stale-attempt/profile fencing add 409 gzip bytes
+  // to the complete graph and 88 bytes to startup versus v0.271.195. They add no polling or background request,
+  // and busy state suppresses duplicate submissions. Allow half a KiB; the independent initial ceiling remains.
+  // Superseded Explore cancellation and activity-owned, idempotent import recovery add 414 gzip bytes together
+  // versus v0.271.196, only 10 bytes of it at startup. Cancellation stops obsolete provider/network work; import
+  // recovery stays in lazy Settings and adds no polling. Their independently fitting graphs overlap 142 bytes past
+  // the prior ceiling, so allow a quarter KiB for the reviewed combination without changing the startup limit.
+  // Rejecting contradictory library-generation evidence before any consumer commits rows, heads or delete authority
+  // adds 273 gzip bytes to the complete graph and 114 bytes at startup versus main. It adds no request, storage or
+  // background work: one header lookup and bounded string comparison per changes page. Allow 384 bytes; the
+  // independent startup ceiling remains unchanged.
+  // Preserving Scout's early-answer `late` count through the library authority and rendering its accessible Detail
+  // notice adds 224 gzip bytes to the complete app graph versus main and two bytes to the initial graph.
+  // Keep that bounded wire/UI contract inside a quarter KiB; it adds no request, retry, polling or startup work.
+  // Retaining rejected final playback progress for an exact, idempotent retry adds 678 gzip bytes to the complete
+  // graph (71,406 -> 72,084) and 603 bytes at startup (1,097 -> 1,700) on matched current-main/head builds. Decoder
+  // and session teardown still happen immediately, with no polling or background retry. Preserve main's existing
+  // 146-byte total margin around that reviewed contract; the independent startup ceiling remains unchanged. Receipt
+  // ownership and the durable command must remain in the always-loaded Library; splitting only the tiny failure
+  // dialog would delay its sole recovery path and add chunk-loader overhead while leaving that authority at startup.
+  // Recovery derivation cancellation and stale-attempt fencing add 261 gzip bytes to the complete graph and six
+  // bytes at startup on matched current-main/head builds, after removing a dedicated cancellation error and redundant
+  // attempt state. The UI stays in the existing lazy Settings/redeem chunks and the lifecycle belongs beside Worker
+  // creation, so another split would add a request without removing startup code. Allow 384 bytes including gzip
+  // variance; the independently enforced initial ceiling remains unchanged.
+  // Settings presentation ownership, exact post-commit link reconciliation and recovery adoption add 691 gzip bytes
+  // to the complete graph and 291 bytes to startup on matched parent/head builds. They add no request, polling or
+  // retained work; the pairing relay request counts are unchanged. Settings and LinkTV already own lazy boundaries.
+  // Splitting the small reconciliation helper again would add a request to the sole recovery action, while the join's
+  // durable authority must remain with always-loaded RoutedLibrary. Allow 768 bytes including gzip variance, leaving
+  // 317 bytes of total margin and 554 bytes at the independently enforced startup ceiling on this build.
+  // Privacy-minimized failure reporting adds 3,032 gzip bytes to the complete graph and 417 bytes to startup on
+  // matched current-main/head builds. Its 2.29 KiB queue/transport chunk is fetched only after the first reportable
+  // failure; the healthy path creates no queue, retry timer or online listener. Allow 3.25 KiB including gzip variance
+  // while retaining the independent startup, translation, TV-isolation, body, rate and deduplication ceilings.
+  // Browsing while the home server is unreachable (den#724) adds 729 gzip bytes to the complete graph (80,250 ->
+  // 80,979) and 101 bytes to startup (4,706 -> 4,807) on matched main/head builds. Almost all of it is in the shared
+  // library Worker: the first page of atlas's browse answers kept in IndexedDB and handed out only when atlas cannot
+  // be reached, and the saved-copy notice, whose copy the Worker sends so the page carries none of it. It adds no
+  // request or background work while the server answers. It was 173 bytes past the prior ceiling, which rises by
+  // 194; the startup ceiling is unchanged and this build sits 57 bytes under it.
+  // Owned source lookup deadlines, cancellation, retained-list recovery and canonical den-core outcome selection add
+  // 2,791 gzip bytes to the non-translation graph on the matched outage-cache parent/head hosted build, only 135
+  // bytes of it at startup.
+  // The wait adapter stays in the existing Library Worker beside den-core's deferred policy, so Detail never creates a
+  // second Wasm realm and WebKit navigation cannot strand its module initialization. Reporting stays in the existing
+  // lazy failure chunk. Splitting visible recovery state again would add a request, while request ownership belongs in
+  // the Worker. Spend the old 556-byte margin and allow 2.625 KiB more, retaining 416 bytes of total margin and the
+  // catalog limits.
+  // Against the current-main tree, the complete non-translation graph grows 1,852 gzip bytes (83,926 -> 85,778).
+  // Player deadline/notices remain in the lazy Player chunk, receipt preparation moved to the existing lazy
+  // assistant chunk, and diagnostics remain lazy. That receipt split adds 28 bytes to the complete graph from the
+  // module boundary while removing startup work. Session discovery and request-authority code cannot load after the
+  // requests it fences. Allow the next 128-byte boundary, retaining 238 bytes on the measured build.
+  if (coreTotalDelta > 86016) throw new Error('Browser total JS/CSS budget exceeded');
 }

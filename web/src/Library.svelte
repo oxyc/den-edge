@@ -2,7 +2,7 @@
   import { i18n } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
-  import { untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Billboard from './components/Billboard.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
@@ -75,6 +75,7 @@
   import { pressedCard } from './lib/detail';
   import { yieldTask } from './lib/taskYield';
   import { scheduleAfterStartupMilestone } from './lib/startupScheduling';
+  import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
   import type { AtlasCatalog } from './lib/services';
   import type { Service } from './settings/services';
@@ -130,6 +131,7 @@
     type Airing,
     type FollowCandidates,
     type NewEpisode,
+    type NewEpisodeClaim,
   } from './lib/airing';
   import { airingStore } from './lib/airing.svelte';
   import { recheckEpisode } from './lib/seasonDownloads.svelte';
@@ -276,9 +278,16 @@
   });
   let shelfPlan = $state.raw<{ continue: boolean; watchlist: boolean } | null>(null);
   let tmdbLimited = $state(false);
+  /**
+   * That answers this browser kept stand in for live ones (`keptAnswers`). The content Worker sends the copy, so a
+   * healthy start carries none of it; it takes the TMDB limit's place, since with den-edge unreachable the saved copy
+   * is what is worth saying.
+   */
+  let keptNotice = $state<string | null>(null);
   $effect(() => {
     let clear: ReturnType<typeof setTimeout> | undefined;
     const stop = session.content.onStatus((status) => {
+      if (status.kind === 'kept') keptNotice = status.notice;
       if (status.kind !== 'throttled' || status.provider !== 'tmdb') return;
       tmdbLimited = true;
       if (clear) clearTimeout(clear);
@@ -304,6 +313,33 @@
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  type FinalProgressReceipt = {
+    readonly operationId: string;
+    readonly target: Target;
+    readonly fraction: number;
+    readonly seconds: number;
+    readonly observedAt: number;
+    /** null while the first unobtrusive save runs; false after rejection; true during an explicit retry. */
+    saving: boolean | null;
+  };
+  let finalProgressReceipts = $state<FinalProgressReceipt[]>([]);
+  const finalProgressRecovery = $derived(
+    finalProgressReceipts.find(({ saving }) => saving !== null),
+  );
+  let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
+  let finalProgressAlive = true;
+  onDestroy(() => (finalProgressAlive = false));
+  // RoutedLibrary keys this whole tree by the session object. One lifetime therefore fences Owner/Kid changes and
+  // reopening the same profile alike: work admitted by the old mount cannot route, notify or write into the new one.
+  const playLifetime = new AbortController();
+  const playSignal = playLifetime.signal;
+  onDestroy(() => playLifetime.abort());
+  const playStopped = (signal?: AbortSignal) => playSignal.aborted || signal?.aborted === true;
+  $effect(() => {
+    const receipt = finalProgressRecovery;
+    if (!receipt || receipt.saving) return;
+    void tick().then(() => finalProgressRetryButton?.focus());
+  });
   /**
    * Where the library's services answer, found once for the session and shared by every page. The parent keys this
    * whole tree by the session object, so the session is fixed for its life.
@@ -477,6 +513,13 @@
   // The household's device list, which names the TVs a play can go to (`householdTvs`).
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
+  async function preparePlaybackReceipts(signal: AbortSignal): Promise<boolean> {
+    const authority = householdModel ?? model;
+    if (!authority) return false;
+    const assistant = await import('./lib/assistant');
+    if (signal.aborted) return false;
+    return assistant.preparePlaybackReceipts(authority, signal);
+  }
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
     const lease = downloadsModel.downloads();
@@ -792,6 +835,7 @@
   });
   /** Which released episodes have sources. Searched for afresh, never more than every half hour each. */
   const newEpisodes = new NewEpisodes();
+  onDestroy(() => newEpisodes.retain());
   /**
    * For each released episode a viewer is caught up to, the episode that plays: their Continue Watching entry, which
    * is the released one itself week to week and where they are in a season that came out at once (S2E1, never the
@@ -829,48 +873,66 @@
   const SEARCH_SETTLE_MS = 2_000;
   $effect(() => {
     void airingTick;
-    const due = unstartedEpisodes.filter((episode) => newEpisodes.due(episode));
+    const candidates = unstartedEpisodes;
+    newEpisodes.retain(candidates);
     const library = downloadsModel;
-    if (!active || !library || !due.length) return;
-    // Marked before the first await, so this effect running again meanwhile does not search the same episodes twice.
-    // Each search runs to its answer, which is kept for whenever Home is shown next.
-    for (const released of due) newEpisodes.started(released);
+    if (!active || route.page !== 'library') {
+      newEpisodes.retain();
+      return;
+    }
+    if (!library || !candidates.length) return;
+    const claimed: Array<[NewEpisode, NewEpisodeClaim]> = [];
+    for (const episode of candidates) {
+      const claim = newEpisodes.claim(episode);
+      if (claim) claimed.push([episode, claim]);
+    }
+    if (!claimed.length) return;
     void (async () => {
       // Continue Watching is published a moment after the layout that lets it name a resume point: let it land, then
       // search only what is still unstarted. Nothing waits on this search.
       await new Promise((resolve) => setTimeout(resolve, SEARCH_SETTLE_MS));
-      for (const released of due) {
-        const key = NewEpisodes.key(released);
-        if (!untrack(() => unstartedEpisodes).some((one) => NewEpisodes.key(one) === key)) continue;
-        const imdb = await session.content
-          .query({ kind: 'title.external-id', title: { type: 'tv', id: released.series } })
-          .then((answer) => (answer.imdbId.state === 'ready' ? answer.imdbId.value : null))
-          .catch(() => null);
-        // A followed series need not be on any shelf, so it may not be named yet; its slide and card need the name.
+      const check = async (released: NewEpisode, claim: NewEpisodeClaim) => {
+        if (
+          !newEpisodes.owns(claim) ||
+          !untrack(() => unstartedEpisodes).some(
+            (one) => NewEpisodes.key(one) === NewEpisodes.key(released),
+          )
+        )
+          return null;
+        const imdb = (
+          await session.content.query({
+            kind: 'title.external-id',
+            title: { type: 'tv', id: released.series },
+          })
+        ).imdbId;
+        if (!newEpisodes.owns(claim) || imdb.state !== 'ready') return null;
+        // A followed series need not be on any shelf, so its slide and card may still need a name.
         if (!session.displayTitle({ type: 'tv', id: released.series }))
-          await nameLibraryTitles(session, [{ type: 'tv', id: released.series }]).catch(() => {});
+          await nameLibraryTitles(session, [{ type: 'tv', id: released.series }]);
+        if (!newEpisodes.owns(claim)) return null;
         const title = session.displayTitle({ type: 'tv', id: released.series });
+        if (!title) return null;
         const date = airingEpisode(
           airings.get(released.series),
           released.season,
           released.episode,
         )?.date;
-        const checked =
-          imdb && title
-            ? await recheckEpisode(
-                library,
-                imdb,
-                released.season,
-                { number: released.episode, name: '', ...(date ? { airDate: date } : {}) },
-                title,
-              ).catch(() => null)
-            : null;
-        // A limited rebuild returned the held list. It is no verdict about this just-released episode and must not
-        // make the episode look freshly found (or freshly absent); NewEpisodes will try again on its normal cadence.
-        const found = typeof checked === 'number' ? checked : null;
-        newEpisodes.checked(released, found);
-        // Found with sources: the verdict its series' poster then asks about (`availability.follow`).
-        if (found) availability.confirm({ type: 'tv', id: released.series }, released, true);
+        return recheckEpisode(
+          library,
+          imdb.value,
+          released.season,
+          { number: released.episode, name: '', ...(date ? { airDate: date } : {}) },
+          title,
+        );
+      };
+      for (const [released, claim] of claimed) {
+        const checked = await check(released, claim).catch(() => null);
+        // Only an authoritative source count consumes the throttle. A stale owner cannot publish it.
+        if (typeof checked !== 'number' || !newEpisodes.settle(claim, checked)) {
+          newEpisodes.settle(claim);
+          continue;
+        }
+        if (checked) availability.confirm({ type: 'tv', id: released.series }, released, true);
         newEpisodesVersion++;
       }
     })();
@@ -1252,7 +1314,9 @@
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
             restricted: session.restricted,
+            signal: playSignal,
           });
+          if (playStopped()) return;
           if (blocked) {
             busy = false;
             failure = blocked;
@@ -1260,6 +1324,7 @@
             return;
           }
           const queue = await householdQueue(tv.play);
+          if (playStopped()) return;
           const sealed = await sendToTV(queue, {
             type: 'play',
             tmdbId: title.id,
@@ -1268,6 +1333,7 @@
             season,
             episode,
           });
+          if (playStopped()) return;
           busy = false;
           if (sealed)
             playOnTv.start(queue, sealed, tv.name, {
@@ -1333,7 +1399,9 @@
             region: detailPrefs.region,
             ceiling: detailPrefs.ceiling,
             restricted: session.restricted,
+            signal: playSignal,
           });
+          if (playStopped()) return false;
           if (blocked) {
             failure = blocked;
             session.notify(blocked);
@@ -1354,18 +1422,22 @@
    * Start a play sent from another device as this TV's own Play would, through `playHere` and its parental guard.
    * Nobody at the TV asked, so a refusal is not offered a PIN: the guard's message says why.
    */
-  async function startPushed(push: PlayRequest) {
+  async function startPushed(push: PlayRequest, signal?: AbortSignal) {
     // A TV opened to take this play may still be finding its sources: give that a moment, well inside the play's two
     // minutes, before saying there is none.
-    for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500)
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500) {
+      await abortableDelay(500, playSignal, signal);
+      if (playStopped(signal)) return;
+    }
     const start = untrack(() => playHere);
+    if (playStopped(signal)) return;
     if (!start) {
       session.notify(`No playable source for “${push.title}”`);
       return;
     }
     const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
     if (!(await start(title, push.season, push.episode))) return;
+    if (playStopped(signal)) return;
     session.notify(push.title ? `Starting “${push.title}”…` : 'Starting…');
     void householdModel
       ?.markPlayed()
@@ -1387,11 +1459,11 @@
           navigate(
             titleHref({ type: play.mediaType, id: play.tmdbId, title: play.title, trailer: true }),
           );
-        else await startPushed(play);
+        else await startPushed(play, stop.signal);
       });
       return receiveTv(
         {
-          play: startPushed,
+          play: (play) => startPushed(play, stop.signal),
           stale: (push) => session.notify(`Ignored an old “Play on TV” for “${push.title}”`),
           transport: (command) => {
             const target = untrack(() => playing);
@@ -1593,7 +1665,9 @@
       region: detailPrefs.region,
       ceiling: detailPrefs.ceiling,
       restricted: session.restricted,
+      signal: playSignal,
     });
+    if (playStopped()) return;
     if (blocked) {
       playing = null;
       session.notify(blocked);
@@ -1623,32 +1697,103 @@
   }
 
   /** Where playback got to, written as the TV's player writes it. */
-  async function progressed(target: Target, fraction: number, seconds: number, playing: boolean) {
+  function writeProgress(
+    target: Target,
+    fraction: number,
+    seconds: number,
+    playing: boolean,
+    observedAt: number,
+    operationId?: string,
+  ) {
     if (!model && !profileActivity) return;
     const { title, season, episode } = target;
-    return runCommand(
-      profileActivity
-        ? () =>
-            profileActivity.recordProgress(
-              title,
-              fraction,
-              seconds,
-              season !== undefined && episode !== undefined ? { season, episode } : undefined,
-              playing,
-            )
-        : () =>
-            model!.recordProgress({
-              title,
-              ...(season !== undefined && episode !== undefined
-                ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
-                : {}),
-              fraction,
-              seconds,
-              playing,
-              observedAt: Date.now(),
-            }),
-      title,
+    remember(title);
+    return profileActivity
+      ? profileActivity.recordProgress(
+          title,
+          fraction,
+          seconds,
+          season !== undefined && episode !== undefined ? { season, episode } : undefined,
+          playing,
+        )
+      : model!.recordProgress(
+          {
+            title,
+            ...(season !== undefined && episode !== undefined
+              ? { episode: { type: 'tv' as const, id: title.id, season, episode } }
+              : {}),
+            fraction,
+            seconds,
+            playing,
+            observedAt,
+          },
+          operationId,
+        );
+  }
+
+  async function progressed(target: Target, fraction: number, seconds: number, playing: boolean) {
+    if (!model && !profileActivity) return;
+    return runCommand(() => writeProgress(target, fraction, seconds, playing, Date.now())!);
+  }
+
+  function removeFinalProgress(operationId: string) {
+    const index = finalProgressReceipts.findIndex((receipt) => receipt.operationId === operationId);
+    if (index >= 0) finalProgressReceipts.splice(index, 1);
+  }
+
+  async function saveFinalProgress(receipt: FinalProgressReceipt) {
+    const current = finalProgressReceipts.find(
+      (candidate) => candidate.operationId === receipt.operationId,
     );
+    if (!current || current.saving === true || !finalProgressAlive) return;
+    receipt = current;
+    if (receipt.saving !== null) receipt.saving = true;
+    try {
+      await writeProgress(
+        receipt.target,
+        receipt.fraction,
+        receipt.seconds,
+        false,
+        receipt.observedAt,
+        receipt.operationId,
+      );
+      // The awaited command result is the library service's durable receipt/readback boundary. A late answer from
+      // an older playback can remove only that exact receipt, never a replacement player's recovery.
+      if (finalProgressAlive) removeFinalProgress(receipt.operationId);
+    } catch (error) {
+      console.error('final playback progress failed', error);
+      if (!finalProgressAlive) return;
+      const current = finalProgressReceipts.find(
+        (candidate) => candidate.operationId === receipt.operationId,
+      );
+      if (current) current.saving = false;
+    }
+  }
+
+  function finalProgressed(target: Target, fraction: number, seconds: number) {
+    if (!model && !profileActivity) return;
+    const targetIdentity = `${titleKey(target.title)}:${target.season ?? ''}:${target.episode ?? ''}`;
+    const existing = finalProgressReceipts.find(
+      (receipt) =>
+        `${titleKey(receipt.target.title)}:${receipt.target.season ?? ''}:${receipt.target.episode ?? ''}` ===
+          targetIdentity &&
+        receipt.fraction === fraction &&
+        receipt.seconds === seconds,
+    );
+    if (existing) return;
+    const receipt: FinalProgressReceipt = {
+      operationId: crypto.randomUUID(),
+      target: { ...target, title: { ...target.title } },
+      fraction,
+      seconds,
+      observedAt: Date.now(),
+      saving: null,
+    };
+    // The recovery surface is modal, so another interactive playback cannot start until these are resolved. Keep a
+    // small hard ceiling as a defense against synthetic lifecycle storms; the player itself also emits once/visit.
+    finalProgressReceipts.push(receipt);
+    if (finalProgressReceipts.length > 8) finalProgressReceipts.shift();
+    void saveFinalProgress(receipt);
   }
 
   /**
@@ -2741,9 +2886,11 @@
   }}
 />
 
-{#if tmdbLimited}
+{#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.
+    {keptNotice
+      ? i18n.phrase(keptNotice)
+      : 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'}
   </p>
 {/if}
 
@@ -3132,11 +3279,41 @@
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
       onprogress={(fraction, seconds, at, playing) =>
         void progressed({ title: target.title, ...at }, fraction, seconds, playing)}
+      onfinalprogress={(fraction, seconds, at) =>
+        finalProgressed({ title: target.title, ...at }, fraction, seconds)}
+      onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}
     />
   {/key}
+{/if}
+
+{#if finalProgressRecovery}
+  {@const receipt = finalProgressRecovery}
+  <div
+    class="player-screen final-progress-recovery"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="final-progress-title"
+  >
+    <h2 id="final-progress-title">
+      {receipt.saving ? i18n.phrase('Saving…') : i18n.phrase('Couldn’t save where you stopped')}
+    </h2>
+    {#if !receipt.saving}
+      <button
+        bind:this={finalProgressRetryButton}
+        type="button"
+        class="retry"
+        onclick={() => void saveFinalProgress(receipt)}
+      >
+        {i18n.phrase('Try again')}
+      </button>
+      <button type="button" class="close" onclick={() => removeFinalProgress(receipt.operationId)}>
+        {i18n.phrase('Leave unsaved')}
+      </button>
+    {/if}
+  </div>
 {/if}
 
 <style>
@@ -3206,5 +3383,13 @@
     background: none;
     color: inherit;
     cursor: pointer;
+  }
+
+  .final-progress-recovery {
+    z-index: 70;
+  }
+
+  .final-progress-recovery h2 {
+    max-width: 520px;
   }
 </style>

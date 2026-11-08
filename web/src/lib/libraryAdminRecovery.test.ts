@@ -6,6 +6,9 @@ import type { Vault } from './localVault';
 const recovery = vi.hoisted(() => ({
   begin: vi.fn(),
   confirm: vi.fn(),
+  abandonPending: vi.fn(
+    async (): Promise<'abandoned' | 'confirmed' | 'lost' | 'failed'> => 'abandoned',
+  ),
   done: vi.fn(),
   resumeMaking: vi.fn(() => vi.fn()),
   reconcile: vi.fn(async () => null),
@@ -13,6 +16,7 @@ const recovery = vi.hoisted(() => ({
 
 vi.mock('./recovery', () => ({
   abandon: vi.fn(async () => undefined),
+  abandonPending: recovery.abandonPending,
   begin: recovery.begin,
   confirm: recovery.confirm,
   makingWaits: vi.fn(() => false),
@@ -127,4 +131,78 @@ it('restores a begun recovery transaction after authority replacement', async ()
     afterLostReply.task({ kind: 'recovery.confirm', locator: 'a'.repeat(32) }, 'confirm-1'),
   ).resolves.toMatchObject({ result: { outcome: 'confirmed' } });
   expect(recovery.confirm).toHaveBeenCalledOnce();
+});
+
+it('serializes teardown cleanup behind confirmation and preserves the committed code', async () => {
+  const kept = new Map<string, unknown>();
+  const log = {
+    libraryId: 'library-id',
+    memberProof: 'member-proof',
+    newestStamp: () => [0, 0, ''] as [number, number, string],
+    kept: async <T>(name: string) => structuredClone(kept.get(name)) as T | undefined,
+    keep: async (name: string, value: unknown) => void kept.set(name, structuredClone(value)),
+  } as unknown as LibraryLog;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  recovery.confirm.mockImplementationOnce(async () => {
+    await held;
+    return { ok: true };
+  });
+  const admin = new LibraryAdminAuthority(log, clock, {
+    mode: 'online',
+    libraryKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(1))),
+    vault,
+  });
+  const locator = 'b'.repeat(32);
+  await admin.task(
+    { kind: 'recovery.begin', locator, sealed: 'sealed', createdAt: 10 },
+    'begin-held',
+  );
+  const confirming = admin.task({ kind: 'recovery.confirm', locator }, 'confirm-held');
+  await vi.waitFor(() => expect(recovery.confirm).toHaveBeenCalledOnce());
+  const cleanup = admin.task({ kind: 'recovery.abandon', locator }, 'cleanup-held');
+  expect(recovery.abandonPending).not.toHaveBeenCalled();
+  release();
+  await expect(confirming).resolves.toMatchObject({ result: { outcome: 'confirmed' } });
+  await expect(cleanup).resolves.toMatchObject({ result: { outcome: 'confirmed' } });
+  expect(recovery.abandonPending).not.toHaveBeenCalled();
+
+  await admin.close();
+  const replacement = new LibraryAdminAuthority(log, clock, {
+    mode: 'online',
+    libraryKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(1))),
+    vault,
+  });
+  await expect(
+    replacement.task({ kind: 'recovery.confirm', locator }, 'confirm-held'),
+  ).resolves.toMatchObject({ result: { outcome: 'confirmed' } });
+  expect(recovery.confirm).toHaveBeenCalledOnce();
+});
+
+it('keeps a failed teardown cleanup pending without retaining its make heartbeat', async () => {
+  const kept = new Map<string, unknown>();
+  const log = {
+    libraryId: 'library-id',
+    memberProof: 'member-proof',
+    newestStamp: () => [0, 0, ''] as [number, number, string],
+    kept: async <T>(name: string) => structuredClone(kept.get(name)) as T | undefined,
+    keep: async (name: string, value: unknown) => void kept.set(name, structuredClone(value)),
+  } as unknown as LibraryLog;
+  recovery.abandonPending.mockResolvedValueOnce('failed');
+  const admin = new LibraryAdminAuthority(log, clock, {
+    mode: 'online',
+    libraryKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(1))),
+    vault,
+  });
+  const locator = 'c'.repeat(32);
+  await admin.task(
+    { kind: 'recovery.begin', locator, sealed: 'sealed', createdAt: 10 },
+    'begin-failed-cleanup',
+  );
+  await expect(
+    admin.task({ kind: 'recovery.abandon', locator }, 'cleanup-failed'),
+  ).resolves.toMatchObject({ result: { outcome: 'failed' } });
+  expect(recovery.done).toHaveBeenCalledOnce();
+  await admin.close();
+  expect(recovery.done).toHaveBeenCalledOnce();
 });

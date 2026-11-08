@@ -7,6 +7,42 @@ const pageOf = (start: number, size = 20) =>
   Array.from({ length: size }, (_, i) => film(start + i));
 
 describe('Pager', () => {
+  it.each([
+    ['success', false],
+    ['failure', true],
+  ])('releases superseded A while B remains current after A’s late %s', async (_name, fails) => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let aSignal: AbortSignal | undefined;
+    const a = new Pager(
+      async (_page, signal) => {
+        aSignal = signal;
+        await held;
+        if (fails) throw new Error('late A failure');
+        return pageOf(100);
+      },
+      () => true,
+    );
+    const aLoad = a.more();
+    await Promise.resolve();
+
+    const b = new Pager(
+      async () => pageOf(200),
+      () => true,
+    );
+    await b.more();
+    a.dispose();
+    expect(aSignal?.aborted).toBe(true);
+    release();
+    await aLoad;
+
+    expect(a.titles).toEqual([]);
+    expect(a.page).toBe(0);
+    expect(a.failed).toBe(false);
+    expect(b.titles[0]).toEqual(film(200));
+    expect(b.page).toBe(1);
+  });
+
   it('loads one page when it fills a screenful, and the next only when asked', async () => {
     const asked: number[] = [];
     const pager = new Pager(

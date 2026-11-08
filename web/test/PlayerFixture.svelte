@@ -34,6 +34,8 @@
   const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
+  const receiptBoundary = query.has('receiptBoundary');
+  const receiptDelayMs = Number(query.get('receiptDelayMs')) || 0;
   const resumeSeconds = Number(query.get('resume')) || undefined;
   const hasNext = query.has('next');
   const reel = query.has('reel');
@@ -100,7 +102,22 @@
     next={hasNext ? 'S1 · E2' : undefined}
     {castDiscoveryMs}
     {castPlayMs}
+    onmanagedplayback={receiptBoundary
+      ? async (signal) => {
+          if (receiptDelayMs)
+            // Deliberately ignore cancellation: Player owns the complete callback deadline, including production's
+            // lazy import and a Library Service reconnect that might not settle when the signal fires.
+            await new Promise<void>((resolve) => setTimeout(resolve, receiptDelayMs));
+          const response = await fetch('/test/receipt-ready', { method: 'POST', signal });
+          if (!response.ok) throw new Error('receipt authority failed');
+          return true;
+        }
+      : undefined}
     onprogress={(fraction, seconds, _at, playing) => {
+      progress = { fraction, seconds, playing };
+      progressWrites += 1;
+    }}
+    onfinalprogress={(fraction, seconds, _at, playing) => {
       progress = { fraction, seconds, playing };
       progressWrites += 1;
     }}

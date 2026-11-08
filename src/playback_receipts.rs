@@ -41,6 +41,22 @@ struct Callback {
     id: String,
     #[serde(rename = "expiresAt")]
     expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accepted: Option<Accepted>,
+    /// Missing on capabilities issued before accepted bindings existed. Such a capability can recover from a
+    /// still-queued entry, but must fail closed once that entry is gone because its first ciphertext is unknowable.
+    #[serde(default, rename = "bindingVersion", skip_serializing_if = "is_zero")]
+    binding_version: u8,
+}
+
+/// The queue entry is the first durable binding. This copy survives acknowledgement, so the capability remains
+/// idempotent for its whole lifetime. `sealed` is a digest rather than the ciphertext: Edge still retains only one
+/// copy of a waiting ciphertext, and SHA-256 binds its exact wire representation.
+#[derive(Clone, Serialize, Deserialize)]
+struct Accepted {
+    #[serde(rename = "sealedHash")]
+    sealed: String,
+    seq: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -69,6 +85,14 @@ fn callback_id(token: &str) -> String {
 
 fn request_id(request: &str) -> String {
     crate::hex(&Sha256::digest(request.as_bytes()))
+}
+
+fn sealed_id(sealed: &str) -> String {
+    crate::hex(&Sha256::digest(sealed.as_bytes()))
+}
+
+fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 fn queue_key(library: &str) -> String {
@@ -112,10 +136,14 @@ async fn save_queue(state: &AppState, library: &str, queue: &Queue) -> std::io::
 
 /// Called while `assistant_lock` is held by library retirement: no callback can race the queue removal.
 pub async fn delete_library_locked(state: &AppState, library: &str) -> std::io::Result<()> {
-    state.store.delete(NS, &queue_key(library)).await?;
     let mut callbacks = load_callbacks(state, state.now()).await?;
     callbacks.entries.retain(|entry| entry.library != library);
     save_callbacks(state, &callbacks).await?;
+    // Retire the capabilities durably before their queue. A crash can leave an unreachable orphaned queue, but
+    // never a live unbound capability after its binding was removed with the queue.
+    state.store.sync_dir(NS).await?;
+    state.store.delete(NS, &queue_key(library)).await?;
+    state.store.sync_dir(NS).await?;
     state.assistant_holds.wake(&format!("playback:{library}"));
     Ok(())
 }
@@ -164,6 +192,8 @@ pub async fn authorize(
         public: dropbox.pk.clone(),
         id: id.clone(),
         expires_at: state.now().saturating_add(TTL_MS),
+        accepted: None,
+        binding_version: 1,
     };
     if callbacks.entries.len() >= MAX_CALLBACKS {
         return Ok(None);
@@ -229,23 +259,57 @@ async fn callback(state: &AppState, req: Request) -> Response {
     };
     let _write = state.assistant_lock.lock().await;
     let now = state.now();
-    let callbacks = match load_callbacks(state, now).await {
+    let mut callbacks = match load_callbacks(state, now).await {
         Ok(callbacks) => callbacks,
         Err(error) => return internal("playback receipt callback read", error),
     };
-    let Some(record) = callbacks.entries.iter().find(|entry| entry.hash == callback_id).cloned() else {
+    let Some(record_index) = callbacks.entries.iter().position(|entry| entry.hash == callback_id) else {
         return json_reply(StatusCode::UNAUTHORIZED, &error("invalid_callback"));
     };
-    let mut queue = match load_queue(state, &record.library, now).await {
+    let library = callbacks.entries[record_index].library.clone();
+    let mut queue = match load_queue(state, &library, now).await {
         Ok(queue) => queue,
         Err(error) => return internal("playback receipt queue read", error),
     };
+    let sealed_id = sealed_id(sealed);
+    if let Some(accepted) = &callbacks.entries[record_index].accepted {
+        if accepted.sealed != sealed_id {
+            return json_reply(StatusCode::CONFLICT, &error("callback_conflict"));
+        }
+        if let Some(existing) = queue.messages.iter().find(|entry| entry.callback == callback_id) {
+            if existing.seq != accepted.seq || existing.sealed != sealed {
+                return internal(
+                    "playback receipt binding read",
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "callback binding disagrees with queue",
+                    ),
+                );
+            }
+        }
+        // Absence means the accepted entry was acknowledged (or aged out). It must not recreate delivery work.
+        return json_reply(StatusCode::OK, &json!({"seq": accepted.seq, "queued": queue.messages.len()}));
+    }
     if let Some(existing) = queue.messages.iter().find(|entry| entry.callback == callback_id) {
-        return if existing.sealed == sealed {
-            json_reply(StatusCode::OK, &json!({"seq": existing.seq, "queued": queue.messages.len()}))
-        } else {
-            json_reply(StatusCode::CONFLICT, &error("callback_conflict"))
-        };
+        if existing.sealed != sealed {
+            return json_reply(StatusCode::CONFLICT, &error("callback_conflict"));
+        }
+        // Recover an interruption after queue insertion. Until this write is durable the queue entry remains the
+        // authoritative binding, and acknowledgement performs the same transfer before deleting it.
+        callbacks.entries[record_index].accepted = Some(Accepted { sealed: sealed_id, seq: existing.seq });
+        callbacks.entries[record_index].binding_version = 1;
+        if let Err(error) = save_callbacks(state, &callbacks).await {
+            return internal("playback receipt callback binding write", error);
+        }
+        if let Err(error) = state.store.sync_dir(NS).await {
+            return internal("playback receipt callback binding sync", error);
+        }
+        return json_reply(StatusCode::OK, &json!({"seq": existing.seq, "queued": queue.messages.len()}));
+    }
+    if callbacks.entries[record_index].binding_version != 1 {
+        // An old unbound record may be genuinely unused or may have lost its binding through acknowledgement.
+        // Refusing both cases is the only safe migration: accepting would let a changed ciphertext claim it.
+        return json_reply(StatusCode::UNAUTHORIZED, &error("invalid_callback"));
     }
     if queue.messages.len() >= MAX_QUEUED {
         return json_reply(StatusCode::CONFLICT, &error("queue_full"));
@@ -253,10 +317,23 @@ async fn callback(state: &AppState, req: Request) -> Response {
     let seq = queue.next;
     queue.next += 1;
     queue.messages.push(Entry { seq, sealed: sealed.to_owned(), callback: callback_id, received_at: now });
-    if let Err(error) = save_queue(state, &record.library, &queue).await {
+    if let Err(error) = save_queue(state, &library, &queue).await {
         return internal("playback receipt queue write", error);
     }
-    state.assistant_holds.wake(&format!("playback:{}", record.library));
+    if let Err(error) = state.store.sync_dir(NS).await {
+        return internal("playback receipt queue sync", error);
+    }
+    // The queue is already a durable binding if the second write fails. Ack transfers it before deletion.
+    callbacks.entries[record_index].accepted = Some(Accepted { sealed: sealed_id, seq });
+    if let Err(error) = save_callbacks(state, &callbacks).await {
+        state.assistant_holds.wake(&format!("playback:{library}"));
+        return internal("playback receipt callback binding write", error);
+    }
+    if let Err(error) = state.store.sync_dir(NS).await {
+        state.assistant_holds.wake(&format!("playback:{library}"));
+        return internal("playback receipt callback binding sync", error);
+    }
+    state.assistant_holds.wake(&format!("playback:{library}"));
     json_reply(StatusCode::OK, &json!({"seq": seq, "queued": queue.messages.len()}))
 }
 
@@ -313,9 +390,56 @@ async fn ack(state: &AppState, req: Request) -> Response {
         Ok(queue) => queue,
         Err(error) => return internal("playback receipt queue read", error),
     };
+    let removed: Vec<_> = queue.messages.iter().filter(|entry| entry.seq <= up_to).collect();
+    if !removed.is_empty() {
+        let mut callbacks = match load_callbacks(state, state.now()).await {
+            Ok(callbacks) => callbacks,
+            Err(error) => return internal("playback receipt ack binding read", error),
+        };
+        let mut changed = false;
+        for entry in &removed {
+            let Some(callback) =
+                callbacks.entries.iter_mut().find(|callback| callback.hash == entry.callback)
+            else {
+                continue;
+            };
+            let accepted = Accepted { sealed: sealed_id(&entry.sealed), seq: entry.seq };
+            if let Some(existing) = &callback.accepted {
+                if existing.sealed != accepted.sealed || existing.seq != accepted.seq {
+                    return internal(
+                        "playback receipt ack binding read",
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "callback binding disagrees with acknowledged queue entry",
+                        ),
+                    );
+                }
+            } else {
+                callback.accepted = Some(accepted);
+                changed = true;
+            }
+            if callback.binding_version != 1 {
+                callback.binding_version = 1;
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(error) = save_callbacks(state, &callbacks).await {
+                return internal("playback receipt ack binding write", error);
+            }
+            // This ordering is the transaction boundary: after it completes, either the queue entry or the
+            // callback record (usually both) remains durable across a crash.
+            if let Err(error) = state.store.sync_dir(NS).await {
+                return internal("playback receipt ack binding sync", error);
+            }
+        }
+    }
     queue.messages.retain(|entry| entry.seq > up_to);
     if let Err(error) = save_queue(state, &library, &queue).await {
         return internal("playback receipt queue write", error);
+    }
+    if let Err(error) = state.store.sync_dir(NS).await {
+        return internal("playback receipt queue sync", error);
     }
     json_reply(StatusCode::OK, &json!({"queued": queue.messages.len()}))
 }
@@ -359,6 +483,22 @@ mod tests {
         (harness, context)
     }
 
+    async fn setup_with_public(public: &str, request_name: &str) -> (Harness, PlaybackContext) {
+        let harness = write_harness().await;
+        let claim = member();
+        let response = harness
+            .send(
+                "PUT",
+                "/assistant/dropbox",
+                Some(json!({"pk": public}).to_string()),
+                &[("content-type", "application/json"), (crate::library::MEMBER_HEADER, &claim)],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let context = authorize(&harness.state, LIB, request_name).await.unwrap().unwrap();
+        (harness, context)
+    }
+
     #[tokio::test]
     async fn authorization_reuses_one_request_without_reusing_another() {
         let (harness, first) = setup().await;
@@ -373,6 +513,7 @@ mod tests {
         assert_eq!(callbacks.entries.len(), 2);
         assert!(callbacks.entries.iter().all(|entry| entry.request.len() == 64));
         assert!(callbacks.entries.iter().all(|entry| entry.request != "test-playback"));
+        assert!(callbacks.entries.iter().all(|entry| entry.binding_version == 1));
     }
 
     fn sealed(context: &PlaybackContext, label: u8, now: u64) -> String {
@@ -398,16 +539,90 @@ mod tests {
         .unwrap()
     }
 
+    fn sealed_episode(context: &PlaybackContext, label: u8, now: u64) -> String {
+        let public = den_assistant::b64url_decode(&context.public).unwrap();
+        let title = json!({"type": "tv", "id": 1399});
+        den_assistant::seal_playback_receipt(
+            &public,
+            &den_assistant::PlaybackReceipt {
+                library: &context.library,
+                kid: &context.kid,
+                id: &context.id,
+                title: &title,
+                season: Some(1),
+                episode: Some(2),
+                position_seconds: 1_200,
+                duration_seconds: 2_400,
+                completed: false,
+                ended_at: now,
+                expires_at: now + 86_400_000,
+            },
+            &[label; den_assistant::ESEED_LEN],
+        )
+        .unwrap()
+    }
+
+    /// The browser production-contract test supplies the real Library Service drop-box and consumes this actual
+    /// Edge callback/drain output. Kept ignored on its own because the joining test owns its required environment.
+    #[tokio::test]
+    #[ignore = "run by libraryLogAuthority's joined playback receipt contract"]
+    async fn joined_production_contract_edge_bridge() {
+        let public = std::env::var("DEN_JOINED_DROPBOX_PUBLIC").expect("joined drop-box public key");
+        let output = std::env::var("DEN_JOINED_RECEIPTS_OUT").expect("joined receipt output path");
+        let library = std::env::var("DEN_JOINED_LIBRARY").expect("joined library id");
+        let now = std::env::var("DEN_JOINED_RECEIPTS_NOW")
+            .expect("joined receipt time")
+            .parse::<u64>()
+            .expect("receipt time is u64");
+        let (harness, movie_context) = setup_with_public(&public, "joined-movie").await;
+        let episode_context = authorize(&harness.state, LIB, "joined-episode").await.unwrap().unwrap();
+        assert_eq!(movie_context.kid, episode_context.kid);
+        let mut movie_receipt = movie_context.clone();
+        movie_receipt.library = library.clone();
+        let mut episode_receipt = episode_context.clone();
+        episode_receipt.library = library;
+
+        for (context, sealed) in [
+            (&movie_context, sealed(&movie_receipt, 21, now)),
+            (&episode_context, sealed_episode(&episode_receipt, 22, now)),
+        ] {
+            let bearer = format!("Bearer {}", context.token);
+            let (status, accepted) = request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(accepted["queued"], accepted["seq"]);
+        }
+
+        let claim = member();
+        let (status, drained) = request(
+            &harness,
+            "POST",
+            "/playback/receipts/drain",
+            json!({}),
+            &[(crate::library::MEMBER_HEADER, &claim)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(drained["messages"].as_array().unwrap().len(), 2);
+        std::fs::write(output, serde_json::to_vec(&drained).unwrap()).expect("write joined receipts");
+    }
+
     #[tokio::test]
     async fn callback_retries_are_idempotent_and_members_drain_then_ack() {
         let (harness, context) = setup().await;
-        let sealed = sealed(&context, 7, harness.state.now());
+        let first_sealed = sealed(&context, 7, harness.state.now());
         let bearer = format!("Bearer {}", context.token);
         let first = request(
             &harness,
             "POST",
             "/playback/receipts/callback",
-            json!({"sealed": sealed}),
+            json!({"sealed": first_sealed}),
             &[("authorization", &bearer)],
         )
         .await;
@@ -417,7 +632,7 @@ mod tests {
             &harness,
             "POST",
             "/playback/receipts/callback",
-            json!({"sealed": sealed}),
+            json!({"sealed": first_sealed}),
             &[("authorization", &bearer)],
         )
         .await;
@@ -433,7 +648,7 @@ mod tests {
         )
         .await;
         assert_eq!(drained["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(drained["messages"][0]["sealed"], sealed);
+        assert_eq!(drained["messages"][0]["sealed"], first_sealed);
 
         let (_, acked) = request(
             &harness,
@@ -444,6 +659,211 @@ mod tests {
         )
         .await;
         assert_eq!(acked, json!({"queued": 0}));
+
+        assert_eq!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::OK, json!({"seq": 1, "queued": 0})),
+            "an acknowledged retry keeps its original result without recreating delivery"
+        );
+        assert!(load_queue(&harness.state, LIB, harness.state.now()).await.unwrap().messages.is_empty());
+        let changed_sealed = sealed(&context, 8, harness.state.now());
+        assert_eq!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": changed_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::CONFLICT, json!({"error": "callback_conflict"}))
+        );
+
+        let dir = harness.dir.clone();
+        drop(harness);
+        let restarted = Harness::in_dir(dir);
+        assert_eq!(
+            request(
+                &restarted,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::OK, json!({"seq": 1, "queued": 0}))
+        );
+        assert_eq!(
+            request(
+                &restarted,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": changed_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::CONFLICT, json!({"error": "callback_conflict"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_callbacks_choose_one_ciphertext_and_one_delivery() {
+        let (harness, context) = setup().await;
+        let bearer = format!("Bearer {}", context.token);
+        let now = harness.state.now();
+        let first_sealed = sealed(&context, 1, now);
+        let second_sealed = sealed(&context, 2, now);
+        let headers = [("authorization", bearer.as_str())];
+        let (first, second) = tokio::join!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &headers,
+            ),
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": second_sealed}),
+                &headers,
+            )
+        );
+        assert_eq!((first.0 == StatusCode::OK) as usize + (second.0 == StatusCode::OK) as usize, 1);
+        assert_eq!(
+            (first.0 == StatusCode::CONFLICT) as usize + (second.0 == StatusCode::CONFLICT) as usize,
+            1
+        );
+        let queue = load_queue(&harness.state, LIB, now).await.unwrap();
+        assert_eq!(queue.messages.len(), 1);
+        assert_eq!(queue.messages[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn ack_recovers_a_queue_binding_left_by_an_interrupted_first_callback() {
+        let (harness, context) = setup().await;
+        let first_sealed = sealed(&context, 3, harness.state.now());
+        let callback = callback_id(&context.token);
+        let mut queue = load_queue(&harness.state, LIB, harness.state.now()).await.unwrap();
+        queue.next = 2;
+        queue.messages.push(Entry {
+            seq: 1,
+            sealed: first_sealed.clone(),
+            callback,
+            received_at: harness.state.now(),
+        });
+        save_queue(&harness.state, LIB, &queue).await.unwrap();
+        harness.state.store.sync_dir(NS).await.unwrap();
+        assert!(load_callbacks(&harness.state, harness.state.now()).await.unwrap().entries[0]
+            .accepted
+            .is_none());
+
+        let dir = harness.dir.clone();
+        drop(harness);
+        let restarted = Harness::in_dir(dir);
+        let claim = member();
+        assert_eq!(
+            request(
+                &restarted,
+                "POST",
+                "/playback/receipts/ack",
+                json!({"upTo": 1}),
+                &[(crate::library::MEMBER_HEADER, &claim)],
+            )
+            .await,
+            (StatusCode::OK, json!({"queued": 0}))
+        );
+        let bound = load_callbacks(&restarted.state, restarted.state.now()).await.unwrap();
+        assert_eq!(bound.entries[0].accepted.as_ref().unwrap().seq, 1);
+
+        let dir = restarted.dir.clone();
+        drop(restarted);
+        let restarted = Harness::in_dir(dir);
+        let bearer = format!("Bearer {}", context.token);
+        assert_eq!(
+            request(
+                &restarted,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::OK, json!({"seq": 1, "queued": 0}))
+        );
+        assert_eq!(
+            request(
+                &restarted,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": sealed(&context, 4, restarted.state.now())}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::CONFLICT, json!({"error": "callback_conflict"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_callback_cannot_retry_its_accepted_ciphertext() {
+        let (harness, context) = setup().await;
+        let first_sealed = sealed(&context, 1, harness.state.now());
+        let bearer = format!("Bearer {}", context.token);
+        assert_eq!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        harness.advance(TTL_MS);
+        assert_eq!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::UNAUTHORIZED, json!({"error": "invalid_callback"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_old_unbound_callback_fails_closed_when_its_queue_binding_is_gone() {
+        let (harness, context) = setup().await;
+        let mut callbacks = load_callbacks(&harness.state, harness.state.now()).await.unwrap();
+        callbacks.entries[0].binding_version = 0;
+        save_callbacks(&harness.state, &callbacks).await.unwrap();
+        harness.state.store.sync_dir(NS).await.unwrap();
+
+        let bearer = format!("Bearer {}", context.token);
+        assert_eq!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": sealed(&context, 1, harness.state.now())}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::UNAUTHORIZED, json!({"error": "invalid_callback"}))
+        );
+        assert!(load_queue(&harness.state, LIB, harness.state.now()).await.unwrap().messages.is_empty());
     }
 
     #[tokio::test]
@@ -484,12 +904,13 @@ mod tests {
     async fn retiring_a_library_removes_its_queue_and_callback_capabilities() {
         let (harness, context) = setup().await;
         let bearer = format!("Bearer {}", context.token);
+        let first_sealed = sealed(&context, 1, harness.state.now());
         assert_eq!(
             request(
                 &harness,
                 "POST",
                 "/playback/receipts/callback",
-                json!({"sealed": sealed(&context, 1, harness.state.now())}),
+                json!({"sealed": first_sealed}),
                 &[("authorization", &bearer)],
             )
             .await
@@ -500,5 +921,16 @@ mod tests {
         crate::assistant::delete_library(&harness.state, LIB).await.unwrap();
         assert!(load_queue(&harness.state, LIB, harness.state.now()).await.unwrap().messages.is_empty());
         assert!(load_callbacks(&harness.state, harness.state.now()).await.unwrap().entries.is_empty());
+        assert_eq!(
+            request(
+                &harness,
+                "POST",
+                "/playback/receipts/callback",
+                json!({"sealed": first_sealed}),
+                &[("authorization", &bearer)],
+            )
+            .await,
+            (StatusCode::UNAUTHORIZED, json!({"error": "invalid_callback"}))
+        );
     }
 }

@@ -94,7 +94,8 @@
   onDestroy(() => clearTimeout(releaseTimer));
 
   const visibleHere = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
-  const pager = new Pager((page) => row.load(page), visibleHere);
+  const pager = new Pager((page, signal) => row.load(page, signal), visibleHere);
+  onDestroy(() => pager.dispose());
   const visible = $derived(pager.titles.filter(visibleHere));
   const done = $derived(pager.done);
   const key = (t: Title) => `${t.type}:${t.id}`;

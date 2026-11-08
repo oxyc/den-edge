@@ -5,6 +5,7 @@
 // also drains its own lane of the TV queue (§16), whose plays it starts rather than applies.
 
 import { exclusive } from './exclusive';
+import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
 
@@ -32,6 +33,32 @@ export interface QueuedRequest {
 export interface DropboxKey {
   kid: string;
   public: string;
+}
+
+type PlaybackReceiptAuthority = {
+  ensurePlaybackReceipts(signal?: AbortSignal): Promise<DropboxKey | null>;
+};
+const preparedReceiptAuthorities = new WeakSet<PlaybackReceiptAuthority>();
+const receiptPreparations = new WeakMap<PlaybackReceiptAuthority, Promise<boolean>>();
+
+/** Lazily establish managed-playback completion recovery without adding assistant crypto to app startup. */
+export function preparePlaybackReceipts(
+  authority: PlaybackReceiptAuthority,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (preparedReceiptAuthorities.has(authority)) return Promise.resolve(true);
+  const pending = receiptPreparations.get(authority);
+  if (pending) return pending;
+  const preparation = authority
+    .ensurePlaybackReceipts(signal)
+    .then((dropbox) => {
+      if (!dropbox) return false;
+      preparedReceiptAuthorities.add(authority);
+      return true;
+    })
+    .finally(() => receiptPreparations.delete(authority));
+  receiptPreparations.set(authority, preparation);
+  return preparation;
 }
 
 /** What the library service made of a drain. */
@@ -148,6 +175,7 @@ export function drainPlaybackReceiptsOnce(
   loop: {
     libraryId: string;
     apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null }>;
+    canAck?: () => boolean;
     fetchImpl?: typeof fetch;
   },
   signal: AbortSignal,
@@ -155,10 +183,73 @@ export function drainPlaybackReceiptsOnce(
   return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
     const fetchImpl = loop.fetchImpl ?? relayFetch;
     const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
-    if (signal.aborted || messages === null || !messages.length) return;
-    const result = await loop.apply(messages);
-    if (result.ack !== null) await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
+    if (signal.aborted) return;
+    if (messages === null) {
+      reportClientFailure({
+        operation: 'receipt',
+        kind: 'transport',
+        outcome: 'terminal',
+        route: 'receipt_drain',
+      });
+      return;
+    }
+    if (!messages.length) return;
+    let result: { ack: number | null };
+    try {
+      result = await loop.apply(messages);
+    } catch (error) {
+      if (!signal.aborted)
+        reportClientFailure({
+          operation: 'receipt',
+          kind: 'other',
+          outcome: 'terminal',
+          route: 'receipt_apply',
+          errorClass: clientFailureErrorClass(error),
+        });
+      return;
+    }
+    if (signal.aborted || (loop.canAck && !loop.canAck())) return;
+    if (result.ack !== null) {
+      const acknowledged = await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
+      if (!acknowledged && !signal.aborted)
+        reportClientFailure({
+          operation: 'receipt',
+          kind: 'http',
+          outcome: 'terminal',
+          route: 'receipt_ack',
+        });
+    }
   });
+}
+
+/** Drain one receipt batch only while the same foreground library/profile authority still owns every await. */
+export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
+  loop: {
+    libraryId: string;
+    ensure: () => Promise<DropboxKey | null>;
+    lend: () => Promise<Connection>;
+    apply: (messages: QueuedRequest[], connection: Connection) => Promise<{ ack: number | null }>;
+    current: () => boolean;
+    fetchImpl?: typeof fetch;
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  await drainPlaybackReceiptsOnce(
+    {
+      libraryId: loop.libraryId,
+      apply: async (messages) => {
+        if (signal.aborted || !loop.current()) return { ack: null };
+        const dropbox = await loop.ensure();
+        if (!dropbox || signal.aborted || !loop.current()) return { ack: null };
+        const connection = await loop.lend();
+        if (signal.aborted || !loop.current()) return { ack: null };
+        return loop.apply(messages, connection);
+      },
+      canAck: () => !signal.aborted && loop.current(),
+      ...(loop.fetchImpl ? { fetchImpl: loop.fetchImpl } : {}),
+    },
+    signal,
+  );
 }
 
 /** How often the publisher asks the library service whether a projection is due (§15: it debounces and heartbeats). */

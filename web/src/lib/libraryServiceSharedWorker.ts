@@ -24,6 +24,7 @@ import {
   isSharedWorkerPresence,
   LIBRARY_SHARED_WORKER_PROTOCOL,
 } from './librarySharedWorkerProtocol';
+import { holdLibraryRetirementLease } from './libraryRetirementLease';
 
 const IDLE_CLOSE_MS = 5_000;
 const entries = new Map<string, SharedEntry>();
@@ -59,6 +60,7 @@ class SharedEntry {
   #ready?: Extract<LibraryServiceServerMessage, { type: 'ready' }>;
   #openFailure?: Extract<LibraryServiceServerMessage, { type: 'error' }>;
   #opening?: Promise<LibraryServiceServerMessage[]>;
+  #retirementLease?: Promise<() => void>;
   #idle?: ReturnType<typeof setTimeout>;
   constructor(
     readonly key: string,
@@ -97,12 +99,15 @@ class SharedEntry {
       return;
     }
     if (!this.#opening) {
-      this.#opening = this.runtime.library
-        .dispatch({
-          ...this.hello,
-          requestId: prefix(client, requestId),
-          clientId: `shared:${this.key}`,
-        })
+      this.#retirementLease ??= holdLibraryRetirementLease(this.hello.libraryKey);
+      this.#opening = this.#retirementLease
+        .then(() =>
+          this.runtime.library.dispatch({
+            ...this.hello,
+            requestId: prefix(client, requestId),
+            clientId: `shared:${this.key}`,
+          }),
+        )
         .catch((error): LibraryServiceServerMessage[] => [
           {
             type: 'error',
@@ -214,8 +219,10 @@ class SharedEntry {
         if (this.clients.size) return;
         entries.delete(this.key);
         this.#stop();
-        void this.runtime.close();
-        closeEmptyRealm();
+        void this.runtime.close().finally(async () => {
+          (await this.#retirementLease?.catch(() => () => {}))?.();
+          closeEmptyRealm();
+        });
       };
       if (this.#openFailure) retire();
       else this.#idle = setTimeout(retire, IDLE_CLOSE_MS);

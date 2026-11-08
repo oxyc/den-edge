@@ -37,6 +37,8 @@ export const messages = {
   'profile.ownerPinPrompt': 'Ange ägarens PIN-kod för att öppna profilens inställningar.',
   'profile.ownerPin': 'Ägarens PIN-kod',
   'profile.pinMismatch': 'PIN-koden stämde inte.',
+  'profile.checkingOwnerPin': 'Kontrollerar ägarens PIN-kod…',
+  'profile.pinCheckFailed': 'Det gick inte att kontrollera ägarens PIN-kod. Försök igen.',
   'profile.openSettings': 'Öppna inställningar',
   'profile.visitor': 'Besökarprofil',
   'profile.kid': 'Barnprofil',
@@ -49,4 +51,9 @@ export const messages = {
   'common.play': 'Spela',
   'common.resume': 'Fortsätt',
   'common.close': 'Stäng',
+  'retirement.title': 'Biblioteksrensningen måste försökas igen',
+  'retirement.detail':
+    'Du är utloggad. Den måste fortfarande ta bort krypterade biblioteksdata som sparats på den här enheten. Du kan lämna säkert; ett nytt försök görs nästa gång.',
+  'retirement.waiting': 'En annan Den-flik avslutar fortfarande arbete för det biblioteket.',
+  'retirement.retry': 'Försök rensa igen',
 } as const satisfies MessageCatalog;

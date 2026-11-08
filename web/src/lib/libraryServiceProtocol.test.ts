@@ -93,6 +93,17 @@ describe('library service client protocol', () => {
         value: { kind: 'watchlist', titles: [{ type: 'movie', id: 7 }] },
       }),
     ).toMatchObject({ ok: true });
+    for (const outcome of ['abandoned', 'confirmed', 'lost', 'failed'])
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'task-result',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'request-task',
+          operationId: 'operation-task',
+          result: { kind: 'recovery.abandon', outcome },
+          version,
+        }),
+      ).toMatchObject({ ok: true });
     expect(
       decodeLibraryServiceServerMessage({
         type: 'update',
@@ -136,8 +147,22 @@ describe('library service client protocol', () => {
       update([{ id: 'living-room', name: 'Living Room', kind: 'tv', memberToken: 'secret' }]),
     ).toMatchObject({ ok: false });
     expect(
+      update([{ id: 'living-room', name: 'Living Room', kind: 'tv', 'id,name': true }]),
+    ).toMatchObject({ ok: false });
+    expect(
       update(Array.from({ length: 513 }, (_, id) => ({ id: String(id), name: 'TV', kind: 'tv' }))),
     ).toMatchObject({ ok: false });
+
+    for (const extra of ['kin', 'ind'])
+      expect(
+        decodeLibraryServiceClientMessage({
+          type: 'subscribe',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: extra,
+          subscriptionId: extra,
+          selection: { kind: 'devices', [extra]: true },
+        }),
+      ).toMatchObject({ ok: false });
   });
 
   it('accepts a handshake and semantic, idempotent commands', () => {
@@ -285,6 +310,40 @@ describe('library service client protocol', () => {
       expect(decodeTask({ kind: 'assistant.apply', messages: [], tv })).toMatchObject({
         ok: false,
       });
+    expect(decodeTask({ kind: 'assistant.receipts.ensure' })).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 1, sealed: 'ciphertext' }],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 1, sealed: 'ciphertext', plaintext: 'leak' }],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: Array.from({ length: 100 }, (_, seq) => ({ seq, sealed: 'x'.repeat(2_539) })),
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: Array.from({ length: 101 }, (_, seq) => ({ seq, sealed: 'ciphertext' })),
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeTask({
+        kind: 'assistant.receipts.apply',
+        messages: [{ seq: 1, sealed: 'x'.repeat(2_540) }],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(decodeTask({ kind: 'assistant.receipts.apply', messages: null })).toMatchObject({
+      ok: false,
+    });
     expect(
       decodeTask({
         kind: 'history.import',
@@ -422,6 +481,49 @@ describe('library service client protocol', () => {
         requestId: 'request-task',
         operationId: 'operation-task',
         result: { kind: 'history.import', written: 2, total: 2, complete: true },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-key-absent',
+        operationId: 'receipt-key-absent-op',
+        result: { kind: 'assistant.receipts.ensure', dropbox: null },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-apply-malformed',
+        operationId: 'receipt-apply-malformed-op',
+        result: { kind: 'assistant.receipts.apply', ack: '2', applied: 1 },
+        version,
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-key',
+        operationId: 'receipt-key-op',
+        result: {
+          kind: 'assistant.receipts.ensure',
+          dropbox: { kid: 'a'.repeat(32), public: 'sealed-public-key' },
+        },
+        version,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'receipt-apply',
+        operationId: 'receipt-apply-op',
+        result: { kind: 'assistant.receipts.apply', ack: 2, applied: 1 },
         version,
       }),
     ).toMatchObject({ ok: true });
@@ -1358,11 +1460,63 @@ describe('library service server protocol', () => {
               ...source,
             },
           ],
-          answer: { kind: 'partial', missing: 1 },
+          answer: { kind: 'partial', missing: 1, late: 2 },
           fresh: 'limited',
         },
       });
     expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    const outcome = {
+      result: 'failed_retryable',
+      category: 'source_discovery',
+      list: 'retained',
+      caveat: { staleSince: null, missing: 1, late: 0, failedAddons: 1 },
+      mayMarkUnavailable: false,
+      retryable: true,
+    };
+    const recovered = decodeLibraryServiceServerMessage({
+      type: 'query-result',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'download-sources-outcome',
+      version,
+      result: {
+        kind: 'download.sources',
+        sources: [],
+        outcome,
+        retryAfterMs: 30_000,
+        failure: 'unreachable',
+      },
+    });
+    expect(recovered).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-sources-outcome',
+        version,
+        result: {
+          kind: 'download.sources',
+          sources: [],
+          outcome: { ...outcome, mayMarkUnavailable: true },
+          retryAfterMs: 60_001,
+          failure: 'unreachable',
+        },
+      }),
+    ).toMatchObject({ ok: false });
+    for (const late of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2']) {
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'query-result',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'download-sources-late-boundary',
+          version,
+          result: {
+            kind: 'download.sources',
+            sources: [],
+            answer: { kind: 'partial', missing: 0, late },
+          },
+        }),
+      ).toMatchObject({ ok: false });
+    }
     expect(
       decodeLibraryServiceServerMessage({
         type: 'query-result',
@@ -1402,6 +1556,35 @@ describe('library service server protocol', () => {
         },
       }),
     ).toMatchObject({ ok: true });
+  });
+
+  it('bounds canonical source wait questions and answers at the Worker boundary', () => {
+    const ask = (query: Record<string, unknown>) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'source-wait',
+        query: { kind: 'source.wait', elapsedMs: 5_000, attempt: 0, ...query },
+      });
+    expect(ask({ onlineRestored: true, retryAfterMs: 30_000, jitter: 0.25 })).toMatchObject({
+      ok: true,
+    });
+    expect(ask({ jitter: Number.NaN })).toMatchObject({ ok: false });
+    expect(ask({ attempt: 17 })).toMatchObject({ ok: false });
+    expect(ask({ elapsedMs: -1 })).toMatchObject({ ok: false });
+
+    const answer = (result: Record<string, unknown>) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'source-wait',
+        version,
+        result: { kind: 'source.wait', phase: 'slow', nextMs: 15_000, retryInMs: null, ...result },
+      });
+    expect(answer({})).toMatchObject({ ok: true });
+    expect(answer({ phase: 'waiting' })).toMatchObject({ ok: false });
+    expect(answer({ nextMs: -1 })).toMatchObject({ ok: false });
+    expect(answer({ retryInMs: Number.POSITIVE_INFINITY })).toMatchObject({ ok: false });
   });
 
   it('carries a wanted download: asked for without a release, and its waiting states', () => {

@@ -160,7 +160,7 @@ async function serveHls(route) {
  * desktop Chrome's, on a direct den-remux route, with Google's sender stubbed. `asked.playback` is every playback
  * request's body; `asked.media` every media path fetched.
  */
-async function open(browserType, { cast, answer = torboxAnswer } = {}) {
+async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [] } = {}) {
   const browser = await browserType.launch(
     browserType === chromium
       ? {
@@ -241,6 +241,7 @@ async function open(browserType, { cast, answer = torboxAnswer } = {}) {
   query.set('local', '');
   query.set('services', '');
   query.set('address', '');
+  for (const name of libraryQuery) query.set(name, '');
   await page.goto(`${ORIGIN}/test/library.html?${query}`);
   return { browser, page, asked };
 }
@@ -367,6 +368,43 @@ for (const [name, browserType, available] of [
   });
 }
 
+test('replaying a finished episode cancels its advance, and a later finish advances once', async () => {
+  test.setTimeout(60_000);
+  const { browser, page, asked } = await open(chromium);
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 1);
+
+    // Reach a real media end. The desktop custom transport used to hide the only Stay action, while the timer
+    // continued to own the player even after Play from beginning had visibly resumed episode 1.
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect.poll(() => pageVideo(page).evaluate((video) => video.ended)).toBe(true);
+    await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible();
+    await page.getByRole('button', { name: 'Play from beginning' }).click();
+    await playingPast(page, 1);
+
+    // Wait beyond the complete ten-second countdown. Episode 1 remains active and its replay progress is durable.
+    await page.waitForTimeout(10_500);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
+    await expect(page).toHaveURL(
+      `${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=1&play=1`,
+    );
+    // Progress seconds are stored as whole seconds; a replay just beyond the 2% floor may persist as exactly 1.
+    await expect
+      .poll(async () => (await progressOf(page, 1))?.seconds ?? 0)
+      .toBeGreaterThanOrEqual(1);
+    expect((await progressOf(page, 1)).value).toBeLessThan(0.5);
+
+    // Completion still owns a fresh countdown after the replay, and that countdown advances exactly once.
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect.poll(() => asked.playback.map(itemOf), { timeout: 30_000 }).toEqual(['e1', 'e2']);
+    await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E2`);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('closing the player and playing another title opens a fresh player', async () => {
   const { browser, page, asked } = await open(chromium);
   try {
@@ -392,6 +430,63 @@ test('closing the player and playing another title opens a fresh player', async 
     expect(
       await page.evaluate(() => document.querySelector('.player video') === window.__seriesVideo),
     ).toBe(false);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('rejected final progress retains its exact durable retry without holding player resources', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['reject-final-progress', 'hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 9);
+    await revealPlayerControls(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+
+    // Closing never awaits storage: the video/decoder is gone while the rejected receipt becomes actionable.
+    await expect(player(page)).toHaveCount(0);
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+    await expect(recovery.getByRole('button', { name: 'Try again' })).toBeVisible();
+    await expect(recovery.getByRole('button', { name: 'Leave unsaved' })).toBeVisible();
+
+    await recovery.getByRole('button', { name: 'Try again' }).click();
+    await expect(recovery).toContainText('Saving…');
+    await expect
+      .poll(() => progressOf(page, 1))
+      .toMatchObject({ value: expect.any(Number), viewing: 0 });
+
+    const finalOperationIds = await page.evaluate(() => window.denTestProgressOperationIds());
+    expect(finalOperationIds.slice(-2)).toEqual([
+      finalOperationIds.at(-1),
+      finalOperationIds.at(-1),
+    ]);
+    // The authority has published the row, but the modal remains until the exact semantic reply/readback arrives.
+    await expect(recovery).toBeVisible();
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect(recovery).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('rejected final progress can be explicitly left unsaved', async () => {
+  const { browser, page } = await open(chromium, {
+    libraryQuery: ['reject-final-progress'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 9);
+    await revealPlayerControls(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+    await recovery.getByRole('button', { name: 'Leave unsaved' }).click();
+    await expect(recovery).toHaveCount(0);
+    await expect(player(page)).toHaveCount(0);
   } finally {
     await browser.close();
   }

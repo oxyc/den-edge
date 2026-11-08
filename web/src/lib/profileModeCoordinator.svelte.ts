@@ -221,6 +221,8 @@ export class ProfileModeCoordinator {
   readonly #openingModels = new Set<ProfileActivityModelHandle>();
   #pendingOwner: ProfileSession | null;
   #transition = 0;
+  /** Newest-wins ownership for Settings PIN checks that share an unchanged active Kid session. */
+  #settingsUnlockAttempt = 0;
   #restoring = $state(0);
   #disposed = false;
   readonly #startsKid: ((pin: string) => Promise<boolean>) | null;
@@ -294,8 +296,11 @@ export class ProfileModeCoordinator {
     this.#assertOpen();
     const session = this.#session;
     if (this.mode !== 'kid' || !session) return true;
-    if (!(await this.#verifyPin(pin))) return false;
-    if (this.#session !== session) return false;
+    const attempt = ++this.#settingsUnlockAttempt;
+    const allowed = await this.#verifyPin(pin);
+    if (this.#disposed || attempt !== this.#settingsUnlockAttempt || this.#session !== session)
+      return false;
+    if (!allowed) return false;
     // Kept in memory for this unlock only: changing the Kid's policy from its Settings is authorized by the same PIN.
     this.#settingsPin = pin;
     return true;
@@ -368,10 +373,25 @@ export class ProfileModeCoordinator {
     return this.#directory && id ? this.#publicChoice(this.#choice(id)) : (this.choices[0] ?? null);
   }
 
-  /** Undefined only while the existing Settings-owned connection view is opening. */
-  get parentalPinConfigured(): boolean | undefined {
+  /** A security decision is current only while its exact Connections selection is authoritative. */
+  get parentalControls(): boolean | null | undefined {
     if (this.#preview) return true;
-    return this.#connections.snapshot.value?.parentalPinConfigured;
+    const snapshot = this.#connections.snapshot;
+    if (snapshot.connection === 'ready' && snapshot.value)
+      return snapshot.value.parentalPinConfigured;
+    return snapshot.connection === 'failed' || snapshot.connection === 'closed' ? null : undefined;
+  }
+
+  /** Undefined while parental-control authority is opening or failed; callers therefore remain fail-closed. */
+  get parentalPinConfigured(): boolean | undefined {
+    return this.parentalControls ?? undefined;
+  }
+
+  /** Reacquire only the failed household security selection; the ready service and its other views stay intact. */
+  retryParentalControls(): boolean {
+    this.#assertOpen();
+    if (this.parentalControls !== null) return false;
+    return this.#connections.rebind();
   }
 
   get preview(): boolean {

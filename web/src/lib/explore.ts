@@ -1115,7 +1115,7 @@ export interface FeedSources {
   /** Settings' release-year floor, applied to a genre as its browse row applies it. */
   minYear?: number;
   /** A title as TMDB draws it (`SearchSources.title`), for an atlas title with no poster. */
-  title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
+  title?: (ref: { type: MediaType; id: number }, signal?: AbortSignal) => Promise<Title | null>;
   /** Worker-owned normalized content used by recommendations and missing-card hydration. */
   content: ContentServiceClientPort;
 }
@@ -1135,7 +1135,7 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
   // Kept only when every seed answered: a seed that failed is asked again the next time the feed starts, rather
   // than its recommendations being missing for as long as the feed is kept.
   let personal: Promise<Title[]> | undefined;
-  const recommended = () => {
+  const recommended = (signal?: AbortSignal) => {
     if (personal) return personal;
     let failed = false;
     const asked = Promise.all(
@@ -1147,7 +1147,9 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
             pages,
             { kind: 'recommendations', title: { type: seed.type, id: seed.id } },
             1,
+            signal,
           ).catch((error: unknown): Title[] => {
+            if (signal?.aborted) throw error;
             console.warn(
               'explore: For You has no recommendations for',
               `${seed.type}:${seed.id}`,
@@ -1166,22 +1168,22 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
     personal = asked;
     return asked;
   };
-  const tail = (page: number) =>
+  const tail = (page: number, signal?: AbortSignal) =>
     type === 'tv'
-      ? catalogPage(pages, { kind: 'top-rated', media: 'tv' }, page)
-      : catalogPage(pages, { kind: 'popular', media: 'movie' }, page);
+      ? catalogPage(pages, { kind: 'top-rated', media: 'tv' }, page, signal)
+      : catalogPage(pages, { kind: 'popular', media: 'movie' }, page, signal);
   /** Whether this run of the feed's first page was the recommendations, which shifts the tail a page on. */
   let led = false;
   return {
     id: `${FOR_YOU}-${type}`,
     title: 'For You',
-    load: async (page) => {
+    load: async (page, signal) => {
       if (page === 1) {
-        const mine = await recommended();
+        const mine = await recommended(signal);
         led = mine.length > 0;
         if (led) return mine;
       }
-      return tail(led ? page - 1 : page);
+      return tail(led ? page - 1 : page, signal);
     },
   };
 }
@@ -1279,7 +1281,7 @@ export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDe
     title: '',
     filter: (title) => sides.find((side) => side.type === title.type)?.row.filter?.(title) ?? true,
     // Pages are the sides' own: a page that holds only titles already given reads on rather than ending the feed.
-    load: async (page) => {
+    load: async (page, signal) => {
       if (page === 1) {
         ended.fill(false);
         next.fill(1);
@@ -1295,12 +1297,13 @@ export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDe
           sides.map(async ({ row }, at) => {
             if (!asking[at]) return [];
             try {
-              const titles = await row.load(next[at]!);
+              const titles = await row.load(next[at]!, signal);
               next[at]!++;
               failures[at] = 0;
               if (!titles.length) ended[at] = true;
               return titles;
             } catch (error) {
+              if (signal?.aborted) throw error;
               console.warn('explore: one side of All failed, the other goes on:', row.id, error);
               failures[at]!++;
               failed.add(at);
@@ -1353,17 +1356,18 @@ function filterFirst(
     title: '',
     // atlas's answer is the selection already; the fallback's needs its own narrowing.
     filter: (title) => from === undefined || (local.filter?.(title) ?? true),
-    load: async (page) => {
+    load: async (page, signal) => {
       if (from === undefined) {
         try {
-          return await titles.load(page);
+          return await titles.load(page, signal);
         } catch (error) {
+          if (signal?.aborted) throw error;
           if (!(error instanceof FilterUnavailable)) throw error;
           if (error.deployed) console.warn('explore: atlas filter gave way:', error.message, id);
           from = page - 1;
         }
       }
-      return local.load(page - from);
+      return local.load(page - from, signal);
     },
   };
 }

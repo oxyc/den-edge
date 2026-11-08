@@ -24,6 +24,84 @@ async function open(page, enabled, suffix = '') {
     .toBe(true);
 }
 
+async function openRememberedKid(page, suffix = '') {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000002',
+      }),
+    ),
+  );
+  await open(page, true, `?realProfiles&settings&locked${suffix}`);
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+}
+
+test('Kid Settings reports a household PIN query rejection and accepts a later retry', async ({
+  page,
+}) => {
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await openRememberedKid(page, '&pinFailure=once');
+
+  const pin = page.getByRole('textbox', { name: 'Owner PIN', exact: true });
+  await pin.fill('1234');
+  await expect(page.getByRole('alert')).toHaveText('Owner PIN couldn’t be checked. Try again.');
+  await expect(pin).toBeEnabled();
+  await expect(pin).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+
+  await pin.fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(pin).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+
+  await pin.fill('1234');
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().pinChecks))
+    .toBe(3);
+  expect(pageErrors).toEqual([]);
+});
+
+test('a pending Kid Settings PIN check cannot overlap or unlock a replacement profile', async ({
+  page,
+}) => {
+  await openRememberedKid(page, '&twoKids&holdPin');
+
+  const pin = page.getByRole('textbox', { name: 'Owner PIN', exact: true });
+  await pin.fill('1234');
+  await expect(pin).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Checking Owner PIN…' })).toBeDisabled();
+  await expect(page.getByRole('status')).toHaveText('Checking Owner PIN…');
+  // Even a duplicate completion event cannot bypass the busy guard and start a second query.
+  await pin.evaluate((input) => {
+    input.value = '0000';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().pinChecks))
+    .toBe(1);
+
+  const replacement = await page.evaluate(() =>
+    window.denProfileModeFixture.replaceWithSecondKid(),
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().activeProfileId))
+    .toBe(replacement);
+  await page.evaluate(() => window.denProfileModeFixture.resolveHeldPin(true));
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByLabel('Owner PIN')).toBeEnabled();
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().pinChecks))
+    .toBe(1);
+});
+
 test('default-off capability leaves the legacy Owner path and storage untouched', async ({
   page,
 }) => {
@@ -245,6 +323,103 @@ test('missing active mode requires the configured Owner PIN and persists success
     .toBe(JSON.stringify({ mode: 'owner' }));
 });
 
+test('a failed lazy parental-controls selection stays closed and a fresh subscription restores the PIN flow', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234&connections=fail');
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText('Owner couldn’t be opened. Try again.');
+  await expect(page.getByText('Checking parental controls…')).toHaveCount(0);
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await expect(page.getByLabel('Owner PIN')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(2);
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await page.getByLabel('Owner PIN').fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(page.locator('[data-mode]')).toHaveCount(0);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+});
+
+test('a failed selection never trusts its retained no-PIN value and retry restores the continue flow', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=none&connections=stale&orphan');
+
+  await expect(page.getByRole('heading', { name: 'Owner access' })).toBeVisible();
+  await expect(page.getByText('Continue to the Owner profile.')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Use Owner' })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().parentalControls))
+    .toMatchObject({
+      kind: 'failed',
+      error: { message: 'fixture Connections selection failed' },
+    });
+
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByText('Continue to the Owner profile.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Use Owner' })).toBeFocused();
+  await page.getByRole('button', { name: 'Use Owner' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem('den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity'),
+      ),
+    )
+    .toBeNull();
+});
+
+test('repeated failures remain retryable by touch, keyboard and TV activation without subscription storms', async ({
+  page,
+}) => {
+  await open(page, true, '?pin=1234&connections=repeat&connectionFailures=2');
+  let retry = page.getByRole('button', { name: 'Try again' });
+
+  await retry.dispatchEvent('pointerdown', { pointerType: 'touch' });
+  await retry.dispatchEvent('click');
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(2);
+  retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeFocused();
+
+  await retry.press('Enter');
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(3);
+  retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeFocused();
+
+  await page.evaluate(async () => {
+    const { installTVNavigation } = await import('/src/tv/navigation.ts');
+    installTVNavigation();
+  });
+  await page.keyboard.press('Enter');
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+    )
+    .toBe(4);
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+  await page.waitForTimeout(100);
+  expect(
+    await page.evaluate(() => window.denProfileModeFixture.snapshot().connectionSubscriptions),
+  ).toBe(4);
+});
+
 test('a corrupt active marker cannot expose Owner without its PIN', async ({ page }) => {
   const orphan = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   await page.addInitScript((visit) => {
@@ -352,6 +527,67 @@ test('preview directory switches sticky Kids and Visitor without a launch picker
   await page.getByRole('button', { name: 'Use Owner' }).click();
   await page.getByLabel('Owner PIN').fill('1234');
   await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+});
+
+test('recent searches follow the exact profile and Visitor visit while Owner recents stay durable', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${FIXTURE}?pin=1234&twoKids&recentSearches`);
+  await page.getByLabel('Owner PIN').fill('1234');
+
+  const search = () => page.getByRole('searchbox', { name: /Search titles/ });
+  const remember = async (query) => {
+    await search().fill(query);
+    await search().press('Enter');
+  };
+  const expectOnlyRecent = async (query) => {
+    await search().fill('');
+    await search().focus();
+    await expect(page.getByRole('button', { name: query, exact: true })).toBeVisible();
+    await expect(page.locator('#recent-searches .recent-query')).toHaveCount(1);
+  };
+  const switchTo = async (current, next) => {
+    await page.getByRole('button', { name: `Switch profile, current ${current}` }).click();
+    await page.getByRole('button', { name: `Use ${next}`, exact: true }).click();
+  };
+
+  await remember('Owner durable search');
+  await expectOnlyRecent('Owner durable search');
+
+  await switchTo('Owner', 'Kids');
+  await expect(search()).toHaveValue('');
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Kid A search');
+  await expectOnlyRecent('Kid A search');
+
+  await switchTo('Kids', 'Kids Two');
+  await expect(search()).toHaveValue('');
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Kid B search');
+
+  await switchTo('Kids Two', 'Visitor');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(search()).toHaveValue('');
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Visitor search');
+
+  await switchTo('Visitor', 'Owner');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(search()).toHaveValue('');
+  await expectOnlyRecent('Owner durable search');
+  await expect(page.getByRole('button', { name: 'Kid A search', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Kid B search', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Visitor search', exact: true })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('den.recentSearches')))
+    .toBe(JSON.stringify(['Owner durable search']));
 });
 
 test('preview Kid and Visitor Settings are personal while household administration stays unreachable', async ({

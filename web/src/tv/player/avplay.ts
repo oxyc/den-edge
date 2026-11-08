@@ -83,6 +83,64 @@ class Ranges implements TimeRanges {
 
 const emptyRanges = new Ranges([]);
 
+// AVPlay is process-global even though Player mounts are not. Keep ownership until an outgoing mount has finished
+// every asynchronous native operation and closed the pipeline, so its deferred cleanup cannot tear down a newer
+// session. A wedged Samsung callback must not leave every later Player waiting forever.
+const OWNERSHIP_WAIT_MS = 8_000;
+type AvplayOwner = object;
+interface OwnershipWaiter {
+  owner: AvplayOwner;
+  resolve(): void;
+  reject(error: Error): void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+let avplayOwner: AvplayOwner | undefined;
+const ownershipWaiters: OwnershipWaiter[] = [];
+
+function acquireAvplay(owner: AvplayOwner): Promise<void> {
+  if (!avplayOwner) {
+    avplayOwner = owner;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const waiter: OwnershipWaiter = {
+      owner,
+      resolve,
+      reject,
+      timeout: setTimeout(() => {
+        const index = ownershipWaiters.indexOf(waiter);
+        if (index < 0) return;
+        ownershipWaiters.splice(index, 1);
+        reject(new Error('Samsung AVPlay ownership did not become available'));
+      }, OWNERSHIP_WAIT_MS),
+    };
+    ownershipWaiters.push(waiter);
+  });
+}
+
+function releaseAvplay(owner: AvplayOwner) {
+  if (avplayOwner !== owner) return;
+  const next = ownershipWaiters.shift();
+  if (!next) {
+    avplayOwner = undefined;
+    return;
+  }
+  clearTimeout(next.timeout);
+  avplayOwner = next.owner;
+  next.resolve();
+}
+
+function cancelAvplayWait(owner: AvplayOwner) {
+  const index = ownershipWaiters.findIndex((waiter) => waiter.owner === owner);
+  if (index < 0) return false;
+  const [waiter] = ownershipWaiters.splice(index, 1);
+  if (!waiter) return false;
+  clearTimeout(waiter.timeout);
+  waiter.reject(new DOMException('Samsung AVPlay was closed', 'AbortError'));
+  return true;
+}
+
 function languageOf(track: AvplayTrack): string | undefined {
   let info = track.extra_info;
   if (typeof info === 'string') {
@@ -155,6 +213,10 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   let platformBusy = false;
   let platformIdle = Promise.resolve();
   let finishPlatformOperation: (() => void) | undefined;
+  let completionStop = Promise.resolve();
+  let replaying: Promise<void> | undefined;
+  const owner: AvplayOwner = {};
+  let ownsAvplay = false;
 
   const beginPlatformOperation = () => {
     platformBusy = true;
@@ -358,12 +420,85 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   // open() can throw before start() reaches its await; retain the rejection for awaiters without a global error.
   void prepared.catch(() => undefined);
 
+  const replayAfterCompletion = async () => {
+    if (replaying) return replaying;
+    const replay = (async () => {
+      // Completion retires Samsung's decoder immediately. Replaying the same visible player therefore needs a
+      // fresh legal IDLE -> READY transition; seekTo and play are both invalid while AVPlay remains IDLE.
+      await completionStop;
+      if (!active || !ended || mediaError) return;
+      try {
+        api.open(apiUrl(url));
+        api.setListener(listener);
+        api.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX');
+        updateRect();
+        beginPlatformOperation();
+        await new Promise<void>((resolve, reject) =>
+          api.prepareAsync(
+            () => {
+              endPlatformOperation();
+              resolve();
+            },
+            (error) => {
+              endPlatformOperation();
+              reject(error);
+            },
+          ),
+        );
+        if (!active) return;
+        ready = true;
+        firstFrame = false;
+        duration = Math.max(0, api.getDuration() / 1000);
+        currentTime = 0;
+        event(element, 'durationchange');
+        event(element, 'canplay');
+
+        // currentTime may have been assigned while completion's stop was settling. Only now is seekTo legal.
+        if (queuedSeek !== undefined) {
+          if (!seeking) {
+            seeking = true;
+            event(element, 'seeking');
+            pendingSeek = new Promise<void>((resolve) => {
+              finishPendingSeek = resolve;
+            });
+          }
+          beginPlatformOperation();
+          runQueuedSeek();
+          await pendingSeek;
+          if (!active || mediaError) return;
+        }
+
+        api.play();
+        // Keep the completed facade intact until the native decoder has really accepted play. A preparation or
+        // seek failure must remain an ended, paused player and flow through the ordinary visible recovery notice.
+        ended = false;
+        paused = false;
+        event(element, 'play');
+        applyAudioTrack();
+        applySubtitle();
+      } catch (error) {
+        if (platformBusy) endPlatformOperation();
+        fail(error);
+      }
+    })();
+    replaying = replay;
+    try {
+      await replay;
+    } finally {
+      if (replaying === replay) replaying = undefined;
+    }
+  };
+
   const play = async () => {
     try {
       await prepared;
+      if (ended) {
+        await replayAfterCompletion();
+        return;
+      }
       // `loadedmetadata` applies Den's resume point through the facade's setter. Wait for that asynchronous seek.
       await pendingSeek;
-      if (!active || ended || !paused || mediaError) return;
+      if (!active || !paused || mediaError) return;
       api.play();
       paused = false;
       event(element, 'play');
@@ -448,7 +583,7 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   };
 
   const seek = (seconds: number) => {
-    if (!active || !ready || !Number.isFinite(seconds)) return;
+    if (!active || !Number.isFinite(seconds) || (!ready && !ended)) return;
     const to = Math.max(0, duration ? Math.min(seconds, duration - 0.001) : seconds);
     requestedTime = to;
     queuedSeek = to;
@@ -458,6 +593,9 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
     pendingSeek = new Promise<void>((resolve) => {
       finishPendingSeek = resolve;
     });
+    // The completed native pipeline has already been (or is being) stopped. Retain the viewer's target until
+    // play() has reopened and prepared it instead of issuing Samsung's invalid IDLE-state seekTo call.
+    if (ended) return;
     beginPlatformOperation();
     runQueuedSeek();
   };
@@ -529,9 +667,12 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
       paused = true;
       lastPlayingTime = undefined;
       event(element, 'timeupdate');
-      afterPlatformOperation(() => {
+      const idle = platformBusy ? platformIdle : Promise.resolve();
+      completionStop = idle.then(() => {
+        if (!active) return;
         try {
           api.stop();
+          ready = false;
         } catch {
           console.warn('Samsung AVPlay could not stop after completion.');
         }
@@ -550,6 +691,13 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
   const start = async () => {
     if (!active) return;
     try {
+      await acquireAvplay(owner);
+      ownsAvplay = true;
+      if (!active) {
+        releaseAvplay(owner);
+        ownsAvplay = false;
+        return;
+      }
       event(element, 'loadstart');
       api.open(apiUrl(url));
       api.setListener(listener);
@@ -609,15 +757,29 @@ export function mountSamsungAvplay(options: SamsungAvplayOptions): SamsungAvplay
       element.removeEventListener('load', renderCaptions, true);
       captions.remove();
       removeEventListener('resize', updateRect);
-      afterPlatformOperation(() => {
+      const close = () => {
         try {
           const state = api.getState();
           if (state !== 'NONE' && state !== 'IDLE') api.stop();
           if (api.getState() !== 'NONE') api.close();
         } catch {
           console.warn('Samsung AVPlay cleanup failed.');
+        } finally {
+          if (ownsAvplay) {
+            ownsAvplay = false;
+            releaseAvplay(owner);
+          }
         }
-      }, true);
+      };
+      if (!cancelAvplayWait(owner)) {
+        if (avplayOwner === owner && !ownsAvplay) {
+          // Ownership can be granted in the microtask between acquireAvplay() and start() resuming. No AVPlay call
+          // has happened yet, so it is safe to pass the singleton directly to the next waiter.
+          releaseAvplay(owner);
+        } else if (ownsAvplay) {
+          afterPlatformOperation(close, true);
+        }
+      }
       preparedReject?.(new DOMException('Samsung AVPlay was closed', 'AbortError'));
       restoreFacade();
       element.classList.remove('den-avplay-placeholder');

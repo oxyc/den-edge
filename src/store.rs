@@ -126,9 +126,10 @@ impl Store {
         for ns in NAMESPACES {
             std::fs::create_dir_all(dir.join(ns))?;
             // Guest grants hold a bearer copy of a host's addon installs (`grants.rs`); the assistants' connections
-            // hold which library or grant each one speaks for (`oauth.rs`).
+            // hold which library or grant each one speaks for (`oauth.rs`). Playback receipts and wake callbacks hold
+            // short-lived bearer tokens. Repair existing directories as well as restricting newly created ones.
             #[cfg(unix)]
-            if ns == "grants" || ns == "oauth" || ns == "assistant" || ns == "wake" {
+            if matches!(ns, "grants" | "oauth" | "assistant" | "playback-receipts" | "wake") {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(dir.join(ns), std::fs::Permissions::from_mode(0o700))?;
             }
@@ -370,6 +371,21 @@ async fn file_len(path: &Path) -> u64 {
 mod tests {
     use super::Store;
     use std::io::ErrorKind::StorageFull;
+
+    #[cfg(unix)]
+    #[test]
+    fn playback_receipt_bearers_are_owner_only_on_create_and_reopen() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::handler::tests::temp_dir();
+        Store::open(&dir, 10).unwrap();
+        let receipts = dir.join("playback-receipts");
+        assert_eq!(std::fs::metadata(&receipts).unwrap().permissions().mode() & 0o777, 0o700);
+
+        std::fs::set_permissions(&receipts, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Store::open(&dir, 10).unwrap();
+        assert_eq!(std::fs::metadata(receipts).unwrap().permissions().mode() & 0o777, 0o700);
+    }
 
     #[tokio::test]
     async fn a_write_past_the_cap_is_refused_and_freed_room_is_counted() {

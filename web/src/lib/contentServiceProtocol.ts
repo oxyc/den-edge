@@ -395,7 +395,13 @@ export type ContentServiceStatusValue =
   | { kind: 'throttled'; provider: ContentProvider; retryAfterMs: number }
   | { kind: 'unavailable'; provider?: ContentProvider; error: ContentServiceFailure }
   /** den-edge answered one of the Worker's calls for this grant with `grant_expired`. */
-  | { kind: 'grant-ended'; gid: string };
+  | { kind: 'grant-ended'; gid: string }
+  /**
+   * Answers this browser kept are standing in for `provider`, which den-edge could not reach (`keptAnswers`): `notice`
+   * is the English copy that says so, which the page translates; null once a provider answers again. The copy lives in
+   * the Worker so the page's startup graph carries none of it.
+   */
+  | { kind: 'kept'; provider: ContentProvider; notice: string | null };
 
 interface ContentClientMessage {
   protocol: ContentServiceProtocol;

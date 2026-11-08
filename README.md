@@ -171,6 +171,28 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 | `OAUTH_RESOURCE` | `OAUTH_ISSUER` | the origin assistants reach `/mcp` on, when it is not the issuer's; tokens are issued for `<it>/mcp` |
 | `OAUTH_CONSENT_ORIGIN` | `OAUTH_ISSUER` | where the web app's consent page is, when the issuer is a name that does not serve the web app (the device API's) |
 
+### Client failure diagnostics
+
+During friends-and-family testing, Web, webOS and Tizen send privacy-minimized terminal failures to
+`POST /diagnostics/failure` without a consent prompt. The route uses the ordinary request log: enable
+`LOG_REQUESTS=1`, then query by client correlation with, for example,
+`journalctl -u den-edge --since today | rg 'failure=.*correlation:0123456789abcdef'`. `rid=` on the same line is
+den-edge's request correlation for adjacent Edge/Hearth logs. Reports never enter den-edge's data store or a
+separate diagnostics file.
+
+The body is capped at 2 KiB and strictly rejects unknown fields. The in-memory client queue holds at most 16
+reports for five minutes, tries each delivery at most twice, and sends at most 20 requests a minute; den-edge
+independently accepts at most 20 reports a minute per address and logs an identical failure fingerprint at most
+once a minute. A maximal allowlisted `failure=` tag is 391 ASCII bytes, so application log text is bounded
+to roughly 10 KiB/minute per continuously failing address before journal metadata/compression. Actual retained
+bytes depend on the host's journald policy and must be measured there.
+
+Retention is therefore exactly the service journal's retention, not an additional Den policy. On the standard
+volatile journal it expires on normal rotation/reboot. Operators can inspect the active bound with
+`journalctl --disk-usage`; changing `RuntimeMaxUse`/`RuntimeMaxFileSec` changes retention for the whole volatile
+journal. A manual `journalctl --rotate --vacuum-time=<duration>` likewise expires the whole system journal, not
+only Den failure lines, and should be used only with that system-wide scope understood.
+
 ## The Den web app
 
 `web/` is the Den web app (Svelte 5 on Vite), the Apple TV app's screens in a browser. The image builds it

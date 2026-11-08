@@ -145,6 +145,7 @@ export class DeriveFailed extends Error {
   }
 }
 
+/** The presentation that owned a derivation went away. This is not a device failure or a timing sample. */
 /** What a person is told when this device can't derive (§3): another device can. */
 export const deviceCouldNot = {
   make: 'This device couldn’t make the code — try Den Web on a computer.',
@@ -196,6 +197,8 @@ export interface DeriveOptions {
   op: Timing['op'];
   /** Where the derivation runs: a module Worker, as Den Web runs it. Tests stand one in. */
   worker?: () => Pick<Worker, 'postMessage' | 'terminate' | 'onmessage' | 'onerror'>;
+  /** The presentation owner. Aborting it terminates the Worker before a replacement may start. */
+  signal?: AbortSignal;
   timeoutMs?: number;
   report?: (timing: Timing) => void;
 }
@@ -226,39 +229,59 @@ export function derive(data: string, options: DeriveOptions = { op: 'redeem' }):
       : () => new Worker(new URL('./recoveryWorker.ts', import.meta.url), { type: 'module' }));
   if (!makeWorker) {
     return ensureRecoveryPolicy()
-      .then(() =>
-        answer(
-          recoveryPolicy<{ locator: string; wrapKey: string }>({ op: 'recovery_derive', data }),
-        ),
-      )
+      .then(() => {
+        options.signal?.throwIfAborted();
+        const out = recoveryPolicy<{ locator: string; wrapKey: string }>({
+          op: 'recovery_derive',
+          data,
+        });
+        options.signal?.throwIfAborted();
+        return answer(out);
+      })
       .catch((error: unknown) => {
-        throw error instanceof DeriveFailed ? error : new DeriveFailed('error');
+        if (options.signal?.aborted || error instanceof DeriveFailed) throw error;
+        throw new DeriveFailed('error');
       });
   }
   return new Promise((resolve, reject) => {
+    options.signal?.throwIfAborted();
     const worker = makeWorker();
-    const timer = setTimeout(() => {
+    let finished = false;
+    const finish = (done: () => void) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', cancel);
       worker.terminate();
-      settle('timeout');
-      reject(new DeriveFailed('timeout'));
-    }, options.timeoutMs ?? DERIVE_TIMEOUT_MS);
+      done();
+    };
+    const cancel = () => finish(() => reject(options.signal?.reason));
+    const timer = setTimeout(
+      () =>
+        finish(() => {
+          settle('timeout');
+          reject(new DeriveFailed('timeout'));
+        }),
+      options.timeoutMs ?? DERIVE_TIMEOUT_MS,
+    );
     worker.onmessage = (
       event: MessageEvent<{ locator?: string; wrapKey?: string; error?: string }>,
     ) => {
-      clearTimeout(timer);
-      worker.terminate();
-      try {
-        resolve(answer(event.data));
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
+      finish(() => {
+        try {
+          resolve(answer(event.data));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
     };
     worker.onerror = () => {
-      clearTimeout(timer);
-      worker.terminate();
-      settle('error');
-      reject(new DeriveFailed('error'));
+      finish(() => {
+        settle('error');
+        reject(new DeriveFailed('error'));
+      });
     };
+    options.signal?.addEventListener('abort', cancel, { once: true });
     worker.postMessage(data);
   });
 }
@@ -661,6 +684,37 @@ export async function abandon(
   if (!deleteFirst) await remove(ctx, locator);
 }
 
+export type PendingAbandonOutcome = 'abandoned' | 'confirmed' | 'lost' | 'failed';
+
+/**
+ * Cleanup of a presentation-owned make. Read through the current head before deciding: after a lost confirmation
+ * response, a cached pending row is not evidence that the ceremony did not commit. The library row is authoritative;
+ * den-edge is deleted only after that row demonstrably ended pending or no longer names the locator.
+ */
+export async function abandonPending(
+  ctx: RecoveryContext,
+  locator: string,
+): Promise<PendingAbandonOutcome> {
+  if (!(await ctx.log.readToHead())) return 'failed';
+  let outcome: Exclude<PendingAbandonOutcome, 'failed'> = 'lost';
+  const settled = await update(ctx, (entries) => {
+    const entry = entries.get(locator);
+    if (!entry) {
+      outcome = 'lost';
+      return null;
+    }
+    if (entry.state === 'live') {
+      outcome = 'confirmed';
+      return null;
+    }
+    outcome = 'abandoned';
+    return { [locator]: null };
+  });
+  if (!settled) return 'failed';
+  if ((outcome as PendingAbandonOutcome) !== 'confirmed') await remove(ctx, locator);
+  return outcome as PendingAbandonOutcome;
+}
+
 /** §6 *Turning off*: the live entry nulled, then deleted at den-edge. */
 export async function turnOff(ctx: RecoveryContext): Promise<boolean> {
   let ended: string[] = [];
@@ -820,37 +874,45 @@ export type RedeemError =
 export async function redeem(
   text: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<{ libraryKey: string } | { error: RedeemError; retryAfter?: number }> {
   const read = await readCode(text);
   if ('error' in read) return read;
   let derived: Derived;
   try {
-    derived = await derive(read.data, { op: 'redeem' });
-  } catch {
+    derived = await derive(read.data, { op: 'redeem', signal });
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return { error: 'device' };
   }
   try {
+    signal?.throwIfAborted();
     const res = await fetchImpl('/recovery/open', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ locator: derived.locator }),
+      signal,
     });
     if (res.status === 404) return { error: 'unknown_code' };
     if (res.status === 429)
       return { error: 'rate_limited', retryAfter: Number(res.headers.get('retry-after')) || 60 };
     if (!res.ok) return { error: 'unreachable' };
     const key = await unseal(derived, ((await res.json()) as { sealed: string }).sealed);
-    derived.wrapKey.fill(0);
     if (!key) return { error: 'unreadable' };
+    signal?.throwIfAborted();
     const keys = await deriveKeys(key);
     const library = await fetchImpl(`/lib/${keys.id}/changes?since=0&limit=1`, {
       headers: { 'x-den-library-token': keys.token },
+      signal,
     });
     if (library.status === 410) return { error: 'library_moved' };
     if (!library.ok) return { error: library.status === 404 ? 'library_missing' : 'unreachable' };
     return { libraryKey: btoa(String.fromCharCode(...key)) };
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return { error: 'unreachable' };
+  } finally {
+    derived.wrapKey.fill(0);
   }
 }
 

@@ -232,6 +232,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudieron cargar los episodios. No se marcó ninguno como visto.',
   'Couldn’t remove that download. Try again.':
     'No se pudo quitar esa descarga. Inténtalo de nuevo.',
+  'Couldn’t cancel that recovery code setup. Check your connection and try again.':
+    'No se pudo cancelar la configuración del código de recuperación. Comprueba la conexión e inténtalo de nuevo.',
+  'Couldn’t save the code. Check that this device is on your network.':
+    'No se pudo guardar el código. Comprueba que este dispositivo esté conectado a tu red.',
+  'Couldn’t save that. Check that this device is on your network, then confirm again.':
+    'No se pudo guardar. Comprueba que este dispositivo esté conectado a tu red y vuelve a confirmar.',
   'Couldn’t save that. Check your connection and try again.':
     'No se pudo guardar. Comprueba la conexión e inténtalo de nuevo.',
   'Couldn’t start that download. Try again.':
@@ -305,9 +311,13 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Los complementos no deben facilitar el acceso a contenido para el que no tengas autorización. Eres responsable de que tu uso cumpla la legislación aplicable y los derechos de los propietarios del contenido.',
   'Den Reel': 'Den Reel',
   'Den Scout': 'Den Scout',
+  'Den’s server can’t be reached. You’re seeing what this device saved, so some titles may be missing or out of date.':
+    'No se puede conectar con el servidor de Den. Ves lo que este dispositivo guardó, así que pueden faltar títulos o estar desactualizados.',
   'Den stops syncing your watch history with it, on every device.':
     'Den deja de sincronizar su historial de reproducciones con él, en todos los dispositivos.',
   'Den Subtitles': 'Den Subtitles',
+  'Couldn’t confirm the import. Changes may already be saved; trying again is safe.':
+    'No se pudo confirmar la importación. Es posible que los cambios ya se hayan guardado; es seguro intentarlo de nuevo.',
   'Den uses your own TMDB key (free at themoviedb.org) for search, and every title’s poster and details.':
     'Den usa su propia clave TMDB (gratuita en themoviedb.org) para realizar búsquedas y el póster y los detalles de cada título.',
   'Den will accept its index without checking a signature, as before.':
@@ -347,8 +357,14 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Downloads: 'Descargas',
   'Downloads ›': 'Descargas ›',
   'Downloads are managed by the Owner.': 'Las descargas son gestionadas por el Propietario.',
+  'Downloads couldn’t be opened. Try again.':
+    'No se pudieron abrir las descargas. Inténtalo de nuevo.',
+  'Downloads couldn’t be refreshed. Try again.':
+    'No se pudieron actualizar las descargas. Inténtalo de nuevo.',
   'Downloads live in your library, which this browser can’t keep.':
     'Las descargas se encuentran en su biblioteca, que este navegador no puede conservar.',
+  'Downloads may be out of date. The last available queue is shown.':
+    'Las descargas pueden estar desactualizadas. Se muestra la última cola disponible.',
   Drama: 'Drama',
   Dreamlike: 'De ensueño',
   'Drugs/Alcohol': 'Drogas/Alcohol',
@@ -532,6 +548,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Make a new code': 'Hacer un nuevo código',
   'Make a new recovery code?': '¿Crear un nuevo código de recuperación?',
   'Make a recovery code': 'Hacer un código de recuperación',
+  'Den holds too many codes for this library just now. Try again in a minute.':
+    'Den guarda demasiados códigos para esta biblioteca en este momento. Inténtalo de nuevo en un minuto.',
   'Make one, or open a library with one': 'Crea uno o abre una biblioteca con uno',
   'Making a secure link…': 'Creando un enlace seguro…',
   Malayalam: 'malayalam',
@@ -651,6 +669,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Only Owner can change this profile’s age limit and unrated-title policy.':
     'Solo el Propietario puede cambiar el límite de edad de este perfil y la política de títulos no clasificados.',
   'Open Den': 'Abrir Den',
+  'Open a recovery code in Den on a phone or computer, then link this TV with the QR or code above.':
+    'Abre un código de recuperación en Den desde un teléfono u ordenador y, a continuación, vincula este televisor con el código QR o el código de arriba.',
   'Open on this browser': 'Abrir en este navegador',
   'Open the link on your phone, or scan the code with it: your library comes over, and so do the addons you were lent, if there is a device free for them. The link works once, for ten minutes, and asks you here before the phone gets anything.':
     'Abre el enlace en tu teléfono o escanea el código con él: tu biblioteca aparece, y también los complementos que te prestaron, si hay un dispositivo libre para ellos. El enlace funciona una vez, durante diez minutos, y le pregunta aquí antes de que el teléfono reciba algo.',
@@ -660,6 +680,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Open your Den library': 'Abra su biblioteca Den',
   'Opened more times than you expect? Turn it off, then reset the library key on your Apple TV under Settings › Linked devices: turning it off alone doesn’t take back a key already opened.':
     '¿Abrió más veces de las que esperaba? Apáguelo, luego restablezca la clave de la biblioteca en su Apple TV en Configuración>Dispositivos vinculados: apagarlo por sí solo no recupera una clave ya abierta.',
+  'Opening downloads…': 'Abriendo descargas…',
   'Opening profile directory…': 'Abriendo directorio de perfiles…',
   'Opening profiles…': 'Abriendo perfiles…',
   or: 'o',
@@ -940,6 +961,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Terms of Use': 'Términos de uso',
   Thai: 'tailandés',
   'That file has no viewing history in it.': 'Ese archivo no tiene historial de visualización.',
+  'That code collided with another. Make a new one.':
+    'Ese código coincidió con otro. Crea uno nuevo.',
+  'That isn’t the last group of your code. Check what you wrote down.':
+    'Ese no es el último grupo de tu código. Comprueba lo que anotaste.',
+  'That pending recovery code was replaced. Make a new one.':
+    'Ese código de recuperación pendiente fue reemplazado. Crea uno nuevo.',
   'That isn’t a valid key. Paste the ed25519:… public key the plugin publishes.':
     'Esa no es una clave válida. Pegue la clave pública ed25519:… que publica el complemento.',
   'That isn’t one of the homelab’s browser keys.':
@@ -1043,6 +1070,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Trending This Week': 'Tendencias de esta semana',
   'True black background (OLED)': 'Fondo negro verdadero (OLED)',
   'Try again': 'Inténtalo de nuevo',
+  'Couldn’t save where you stopped': 'No se pudo guardar dónde te quedaste',
+  'Leave unsaved': 'Dejar sin guardar',
   'Try another': 'prueba con otro',
   'Try another release': 'Prueba con otra versión',
   'Try Den Remux': 'Pruebe Den Remux',
@@ -1152,6 +1181,11 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Your plugins': 'Tus complementos',
   'Your recovery code no longer works: make a new one.':
     'Tu código de recuperación ya no funciona: crea uno nuevo.',
+  'Your recovery code is on.': 'Tu código de recuperación está activado.',
+  'Your recovery code was already saved and remains on.':
+    'Tu código de recuperación ya se había guardado y sigue activado.',
+  'Your recovery code setup didn’t finish. The code you saw doesn’t work; make a new one.':
+    'La configuración del código de recuperación no terminó. El código que viste no funciona; crea uno nuevo.',
   'Your recovery code still works. If anyone else may have seen it, make a new one in Settings › Linked devices.':
     'Tu código de recuperación aún funciona. Si alguien más lo ha visto, cree uno nuevo en Configuración>Dispositivos vinculados.',
   'Your region': 'Tu región',
@@ -1182,6 +1216,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Playing through Den Remux': 'Reproduciendo mediante Den Remux',
   'Playback has no active source. Try either path explicitly.':
     'La reproducción no tiene una fuente activa. Prueba una de las dos rutas.',
+  'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.':
+    'La reproducción puede comenzar, pero la recuperación del progreso en segundo plano no está disponible. Mantén esta página abierta para guardar dónde te detuviste.',
   'For audio or subtitles this browser can’t play, or a stream that stalls':
     'Para audio o subtítulos que este navegador no puede reproducir, o una emisión que se detiene',
   'Turns subtitles off: this player shows only Den Remux’s':
@@ -1202,4 +1238,14 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Titles: 'Títulos',
   'Dark Comedy': 'Comedia negra',
   'Most Popular': 'Más populares',
+  'Sources are taking longer than usual. You can keep using this page.':
+    'Las fuentes están tardando más de lo habitual. Puedes seguir usando esta página.',
+  'Source discovery didn’t answer in time. Your previous results are still here.':
+    'La búsqueda de fuentes no respondió a tiempo. Tus resultados anteriores siguen aquí.',
+  'Source discovery didn’t answer in time. Try again.':
+    'La búsqueda de fuentes no respondió a tiempo. Inténtalo de nuevo.',
+  'The latest check failed, so these are your previous source results.':
+    'La última comprobación falló, así que estos son tus resultados anteriores.',
+  'The availability check is degraded, so some source details may be incomplete.':
+    'La comprobación de disponibilidad está degradada, por lo que algunos datos pueden estar incompletos.',
 };

@@ -13,6 +13,8 @@ export const BLOCKED_MESSAGE = 'Blocked by parental controls';
 
 export interface PlayGuardOptions {
   content: ContentServiceClientPort;
+  /** The mounted playback boundary's lifetime. Cancellation refuses without starting another provider read. */
+  signal?: AbortSignal;
   region?: string;
   ceiling?: 'pg13' | 'r';
   /** The active profile runs under a numeric content policy (`ProfileSession.restricted`). */
@@ -26,11 +28,13 @@ export interface PlayGuardOptions {
  */
 export async function titleAllowed(
   ref: { type: MediaType; id: number },
-  { content, restricted }: Pick<PlayGuardOptions, 'content' | 'restricted'>,
+  { content, restricted, signal }: Pick<PlayGuardOptions, 'content' | 'restricted' | 'signal'>,
 ): Promise<boolean> {
+  if (signal?.aborted) return false;
   if (!restricted) return true;
   const asked = { type: ref.type, id: ref.id };
-  return content.query({ kind: 'title.eligibility', titles: [asked] }).then(
+  const request = { kind: 'title.eligibility' as const, titles: [asked] };
+  return (signal ? content.query(request, signal) : content.query(request)).then(
     (answer) => answer.allowed.length === 1,
     () => false,
   );
@@ -46,13 +50,16 @@ export async function titleAllowed(
  */
 export async function playGuard(
   ref: { type: MediaType; id: number },
-  { content, region = 'US', ceiling, restricted }: PlayGuardOptions,
+  { content, region = 'US', ceiling, restricted, signal }: PlayGuardOptions,
 ): Promise<string | null> {
-  if (!(await titleAllowed(ref, { content, restricted }))) return BLOCKED_MESSAGE;
+  if (!(await titleAllowed(ref, { content, restricted, signal }))) return BLOCKED_MESSAGE;
+  if (signal?.aborted) return BLOCKED_MESSAGE;
   if (!ceiling) return null;
-  const answer = await content
-    .query({ kind: 'title.detail', title: ref, region })
-    .catch(() => null);
+  const request = { kind: 'title.detail' as const, title: ref, region };
+  const answer = await (signal ? content.query(request, signal) : content.query(request)).catch(
+    () => null,
+  );
+  if (signal?.aborted) return BLOCKED_MESSAGE;
   const detail = answer?.detail.state === 'ready' ? answer.detail.value : null;
   if (!detail) return BLOCKED_MESSAGE;
   return isBlocked(detail.certifications, region, ceiling) ? BLOCKED_MESSAGE : null;

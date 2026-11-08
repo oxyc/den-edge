@@ -241,6 +241,8 @@ export const guestLimits: Record<'ipv6' | 'cast', string> = {
 /** A refusal, and — when den-remux said so — how long it asked to be left alone for. */
 export interface Refused {
   failure: Failure;
+  /** The terminal HTTP answer, when one was received. The response body and URL never leave this module. */
+  httpStatus?: number;
   /** From its `Retry-After`; absent when it named none, and the caller's own interval stands. */
   retryMs?: number;
 }
@@ -996,7 +998,8 @@ export async function startSession(
     const named = retryAfterMs(res, 0) || undefined;
     return {
       failure: failureOf(res.status, error, !!sharedInstallOf(want.scout)),
-      retryMs: named,
+      httpStatus: res.status,
+      ...(named ? { retryMs: named } : {}),
     };
   }
   return { failure: 'unreachable' };

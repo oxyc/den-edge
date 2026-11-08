@@ -26,6 +26,15 @@ export interface Vault {
   delete(key: string): Promise<void>;
   /** Drop every value whose key starts with `prefix`. */
   remove(prefix: string): Promise<void>;
+  /** Drop one exact prefix and its matching durable retirement receipt in the same transaction. */
+  retire?(prefix: string, receipt: string, expected: Uint8Array): Promise<boolean>;
+  /** Atomically rotate a generation and keep a receipt derived from its prior value. */
+  rotateGeneration?(
+    generation: string,
+    next: Uint8Array,
+    receiptPrefix: string,
+    receipt: (previous: Uint8Array | undefined) => { key: string; value: Uint8Array },
+  ): Promise<Array<[key: string, value: Uint8Array]>>;
   /** Apply prepared writes and exact deletions in one object-store transaction. */
   commit?(changes: readonly VaultChange[]): Promise<void>;
   /**
@@ -281,6 +290,43 @@ export function indexedVault(factory: IDBFactory): Vault {
     },
     remove: async (prefix) => {
       await run('readwrite', (kept) => kept.delete(prefixRange(prefix)));
+    },
+    retire: async (prefix, receipt, expected) => {
+      const retired = await run('readwrite', (kept) => {
+        const read = kept.get(receipt) as IDBRequest<Uint8Array | undefined>;
+        let matches = false;
+        let remaining: IDBRequest<IDBValidKey[]> | undefined;
+        read.onsuccess = () => {
+          matches = sameBytes(read.result, expected);
+          if (!matches) return;
+          kept.delete(prefixRange(prefix));
+          kept.delete(receipt);
+          // Requests execute in order, so this is a durable readback after both exact deletions.
+          remaining = kept.getAllKeys(prefixRange(prefix));
+        };
+        return () => matches && remaining?.result.length === 0;
+      });
+      return retired ?? false;
+    },
+    rotateGeneration: async (generation, next, receiptPrefix, receipt) => {
+      const found = await run('readwrite', (kept) => {
+        const previous = kept.get(generation) as IDBRequest<Uint8Array | undefined>;
+        const range = prefixRange(receiptPrefix);
+        const keys = kept.getAllKeys(range);
+        const values = kept.getAll(range) as IDBRequest<Uint8Array[]>;
+        values.onsuccess = () => {
+          const prepared = receipt(previous.result);
+          kept.put(next, generation);
+          kept.put(prepared.value, prepared.key);
+        };
+        return () =>
+          keys.result.flatMap((key, index) =>
+            typeof key === 'string' && values.result[index]
+              ? [[key, values.result[index]!] as [string, Uint8Array]]
+              : [],
+          );
+      });
+      return found ?? [];
     },
     commit: async (changes) => {
       await run('readwrite', (kept) => {

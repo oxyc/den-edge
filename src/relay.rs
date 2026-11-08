@@ -16,6 +16,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -439,6 +440,14 @@ const MEDIA_LIFETIME: Duration =
 pub struct Lease {
     until: u64,
     slot: Option<Arc<Slot>>,
+    /// The verified credential that opened a member lease. A digest keeps the proof itself out of process
+    /// metadata; guest leases have no identity and continue to be shared by address.
+    member: Option<MemberLease>,
+}
+
+struct MemberLease {
+    library: Box<str>,
+    claim: [u8; 32],
 }
 
 /// A guest's slot, shared by its lease and every body the lease admitted.
@@ -465,6 +474,18 @@ impl Drop for Lease {
             crate::lock(&slot.permit).take();
         }
     }
+}
+
+fn claim_digest(claim: &str) -> [u8; 32] {
+    Sha256::digest(claim.as_bytes()).into()
+}
+
+/// A changed member proof or a retired library must not leave the credential's fast media path alive. Bodies
+/// already in flight keep their bounded response permits, but the next request proves the new authority.
+pub(crate) fn invalidate_member_media_leases(state: &AppState, library: &str) {
+    let mut leases = crate::lock(&state.media_leases);
+    state.media_member_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    leases.retain(|_, lease| lease.member.as_ref().is_none_or(|member| member.library.as_ref() != library));
 }
 
 /// What admission decided.
@@ -529,37 +550,104 @@ fn media_video(path: &str) -> Option<&str> {
 /// billboard is one viewer however many trailers it opens.
 ///
 /// Members and guests are held apart, so a visitor on the household's own network cannot ride the
-/// lease a member opened. Which one to look for is read from whether a claim is present at all; what
-/// is stored is decided by whether that claim proved out, so a forged one lands on the guest lease
-/// and spends a guest slot.
+/// lease a member opened. A member lease remembers a digest of the exact verified claim; only that claim can
+/// take its fast path. A changed or forged claim is proved before it can select member admission, and on
+/// failure joins the address's guest lease and spends its guest budget.
 async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted {
     let now = (state.clock)();
     let side = |member: bool| format!("{bucket}|{}", if member { "member" } else { "guest" });
+    let asked = claim.map(claim_digest);
     {
         let mut leases = crate::lock(&state.media_leases);
         leases.retain(|_, lease| !lease.over(now));
-        if let Some(lease) = leases.get_mut(&side(claim.is_some())) {
+        let lease = if claim.is_none() {
+            leases.get_mut(&side(false))
+        } else {
+            leases.get_mut(&side(true)).filter(|lease| {
+                lease
+                    .member
+                    .as_ref()
+                    .zip(asked.as_ref())
+                    .is_some_and(|(member, asked)| crate::handler::constant_time_eq(&member.claim, asked))
+            })
+        };
+        if let Some(lease) = lease {
             lease.until = now + LEASE_IDLE_MS;
             return Admitted::Yes { slot: lease.slot.clone() };
         }
     }
-    // Nothing open for this address: this is a session starting, and the only place membership is
-    // asked. Once per session, never per segment — the lease remembers the answer.
-    let member = crate::library::is_household_member(state, claim).await;
-    let slot = if member {
-        None
-    } else {
-        if !media_allowance_left(state) {
-            return Admitted::Spent;
+    #[cfg(test)]
+    let gate = { crate::lock(&state.media_admission_gate).clone() };
+    #[cfg(test)]
+    if let Some(gate) = gate {
+        gate.wait().await;
+    }
+    // Nothing open for this address: this is a session starting, and the only place membership is normally
+    // asked. If authority changes while the asynchronous check is running, ask again before publishing a
+    // reusable lease. The invalidator and this insertion use the same mutex, so neither can slip past the
+    // other.
+    loop {
+        let generation = state.media_member_generation.load(std::sync::atomic::Ordering::Relaxed);
+        let member = crate::library::is_household_member(state, claim).await;
+        if !member {
+            break;
         }
-        match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
-            Ok(permit) => Some(Arc::new(Slot { permit: Mutex::new(Some(permit)), sent: 0.into() })),
-            Err(_) => return Admitted::Busy,
+        let now = (state.clock)();
+        let mut leases = crate::lock(&state.media_leases);
+        if generation != state.media_member_generation.load(std::sync::atomic::Ordering::Relaxed) {
+            drop(leases);
+            continue;
         }
+        let claim = claim.expect("a proved member has a claim");
+        let library = claim.split_once(':').expect("a proved member claim names its library").0.into();
+        leases.insert(
+            side(true),
+            Lease {
+                until: now + LEASE_IDLE_MS,
+                slot: None,
+                member: Some(MemberLease {
+                    library,
+                    claim: asked.expect("a proved member claim has a digest"),
+                }),
+            },
+        );
+        return Admitted::Yes { slot: None };
+    }
+
+    // A nonempty claim could not select the guest lease until it had failed authentication. Once it has,
+    // preserve the address-sharing behavior of an ordinary guest instead of taking a second slot or refusing
+    // its segments.
+    let now = (state.clock)();
+    {
+        let mut leases = crate::lock(&state.media_leases);
+        leases.retain(|_, lease| !lease.over(now));
+        if let Some(lease) = leases.get_mut(&side(false)) {
+            lease.until = now + LEASE_IDLE_MS;
+            return Admitted::Yes { slot: lease.slot.clone() };
+        }
+    }
+    if !media_allowance_left(state) {
+        return Admitted::Spent;
+    }
+    let slot = match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
+        Ok(permit) => Arc::new(Slot { permit: Mutex::new(Some(permit)), sent: 0.into() }),
+        Err(_) => return Admitted::Busy,
     };
-    crate::lock(&state.media_leases)
-        .insert(side(member), Lease { until: now + LEASE_IDLE_MS, slot: slot.clone() });
-    Admitted::Yes { slot }
+    // Authentication and permit acquisition are asynchronous, so another request for this address can publish
+    // while they run. Join that winner instead of replacing it: every response must update the slot the live lease
+    // owns, and the unused contender permit returns when `slot` is dropped here.
+    let now = (state.clock)();
+    let mut leases = crate::lock(&state.media_leases);
+    leases.retain(|_, lease| !lease.over(now));
+    if let Some(lease) = leases.get_mut(&side(false)) {
+        lease.until = now + LEASE_IDLE_MS;
+        return Admitted::Yes { slot: lease.slot.clone() };
+    }
+    leases.insert(
+        side(false),
+        Lease { until: now + LEASE_IDLE_MS, slot: Some(Arc::clone(&slot)), member: None },
+    );
+    Admitted::Yes { slot: Some(slot) }
 }
 
 /// Is there anything left of today's guest allowance (env `MEDIA_DAILY_MAX_BYTES`)?
@@ -1927,6 +2015,9 @@ fn answer_response(
         // What the answer is built from, so the deploy that changes it can purge Cloudflare's copy by name
         // (atlas's `atlas`). Cloudflare strips it before a browser sees the answer.
         header::HeaderName::from_static("cache-tag"),
+        // How long Cloudflare alone may keep it, and hand it out while the addon cannot answer (atlas's dataset
+        // answers). Dropped below wherever the answer may not be kept by a shared cache at all.
+        crate::cache::CDN_CACHE_CONTROL,
     ] {
         if playback && matches!(name, header::ETAG | header::LAST_MODIFIED | header::VARY) {
             continue;
@@ -1939,6 +2030,11 @@ fn answer_response(
     // no cache in front of this origin keeps one.
     if no_store {
         resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    }
+    // Cloudflare reads this header in place of `Cache-Control`, so an answer made private or `no-store` here must not
+    // keep the addon's.
+    if no_store || private_only {
+        resp.headers_mut().remove(crate::cache::CDN_CACHE_CONTROL);
     }
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
     // is answered at all, so a shared cache in front of it — Cloudflare's — must not keep one to hand a stranger.
@@ -5236,6 +5332,7 @@ mod tests {
         Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/atlas={addon}"));
         let tuned = h.send("GET", TUNED, None, &[]).await;
         assert_eq!(tuned.headers()["cache-control"], "no-store");
+        assert!(!tuned.headers().contains_key("cdn-cache-control"), "nor Cloudflare, which reads this first");
         let browsing = h.send("GET", "/atlas/recommend", None, &[]).await;
         assert_eq!(browsing.headers()["cache-control"], "public, max-age=300, stale-while-revalidate=60");
     }
@@ -5331,6 +5428,209 @@ mod tests {
         let mut h = Harness::new();
         Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays("/reel=http://127.0.0.1:9");
         h
+    }
+
+    /// A real local Reel endpoint. Every admitted request is reported before its response; a path containing
+    /// `hold` never answers, so a caller can cancel after admission without an `admit`-only test.
+    async fn local_reel() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (asked, requests) = tokio::sync::mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let asked = asked.clone();
+            async move {
+                let path = req.uri().path().to_owned();
+                let hold = path.contains("hold");
+                let _ = asked.send(path);
+                if hold {
+                    return std::future::pending::<StatusCode>().await;
+                }
+                StatusCode::NO_CONTENT
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), requests)
+    }
+
+    fn reel_at(origin: &str, dir: Option<std::path::PathBuf>) -> Harness {
+        let mut h = dir.map_or_else(Harness::new, Harness::in_dir);
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/reel={origin}"));
+        state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.guest_media_slots = Arc::new(tokio::sync::Semaphore::new(0));
+        h
+    }
+
+    async fn saw_upstream(requests: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(2), requests.recv())
+            .await
+            .expect("the admitted request never reached Reel")
+            .expect("the Reel request recorder closed")
+    }
+
+    fn saw_no_upstream(requests: &mut tokio::sync::mpsc::UnboundedReceiver<String>) {
+        assert!(
+            matches!(requests.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "a refused request reached Reel"
+        );
+    }
+
+    /// TEST-SHARED06: the real media handler, proof store, admission cache and upstream fetch must agree on
+    /// the identity that owns a warm member lease. A nonempty header is not itself member authority.
+    #[tokio::test]
+    async fn a_warm_member_media_lease_is_bound_to_its_verified_claim() {
+        let (origin, mut requests) = local_reel().await;
+        let h = reel_at(&origin, None);
+        let member = registered_library(&h).await;
+
+        for path in ["/reel/hls/aaaaaaaaaaa.m3u8", "/reel/hls/bbbbbbbbbbb.m3u8"] {
+            let admitted = h.send("GET", path, None, &[("x-den-library-member", &member)]).await;
+            assert_eq!(admitted.status(), StatusCode::NO_CONTENT, "the verified claim keeps its lease");
+            drop(admitted);
+            saw_upstream(&mut requests).await;
+        }
+
+        for claim in [Some(format!("{LIB}:wrong-proof")), Some("arbitrary-nonempty-claim".into()), None] {
+            let headers =
+                claim.as_deref().map_or_else(Vec::new, |claim| vec![("x-den-library-member", claim)]);
+            let refused = h.send("GET", "/reel/hls/ccccccccccc.m3u8", None, &headers).await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(refused.headers().contains_key("retry-after"));
+            saw_no_upstream(&mut requests);
+        }
+
+        let public = h
+            .send(
+                "GET",
+                "/reel/hls/ddddddddddd.m3u8",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(public.status(), StatusCode::NOT_FOUND, "the public face still refuses relayed media");
+        saw_no_upstream(&mut requests);
+
+        let other_address = h
+            .send(
+                "GET",
+                "/reel/hls/eeeeeeeeeee.m3u8",
+                None,
+                &[("x-forwarded-for", "203.0.113.8"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(other_address.status(), StatusCode::NO_CONTENT);
+        drop(other_address);
+        saw_upstream(&mut requests).await;
+
+        h.advance(super::LEASE_IDLE_MS + 1);
+        let after_expiry =
+            h.send("GET", "/reel/hls/fffffffffff.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(
+            after_expiry.status(),
+            StatusCode::NO_CONTENT,
+            "the valid proof starts again after expiry"
+        );
+        drop(after_expiry);
+        saw_upstream(&mut requests).await;
+    }
+
+    /// The legacy proof is authority until registration replaces it, and retirement revokes the registered
+    /// proof. Neither transition may leave its old warm member classification behind.
+    #[tokio::test]
+    async fn member_media_leases_follow_proof_rotation_and_retirement() {
+        let (origin, mut requests) = local_reel().await;
+        let h = reel_at(&origin, None);
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK);
+        let legacy = format!("{LIB}:{TOKEN}");
+        let warmed =
+            h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[("x-den-library-member", &legacy)]).await;
+        assert_eq!(warmed.status(), StatusCode::NO_CONTENT);
+        drop(warmed);
+        saw_upstream(&mut requests).await;
+
+        let member = format!("{LIB}:{MEMBER}");
+        let registered = h
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/member"),
+                None,
+                &[("x-den-library-token", TOKEN), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(registered.status(), StatusCode::OK);
+
+        let old =
+            h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[("x-den-library-member", &legacy)]).await;
+        assert_eq!(old.status(), StatusCode::SERVICE_UNAVAILABLE, "registration revokes the legacy lease");
+        assert!(old.headers().contains_key("retry-after"));
+        saw_no_upstream(&mut requests);
+
+        let rotated =
+            h.send("GET", "/reel/hls/ccccccccccc.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(rotated.status(), StatusCode::NO_CONTENT, "the registered proof can retry immediately");
+        drop(rotated);
+        saw_upstream(&mut requests).await;
+
+        let retired = h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(retired.status(), StatusCode::OK);
+        let revoked =
+            h.send("GET", "/reel/hls/ddddddddddd.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(revoked.status(), StatusCode::SERVICE_UNAVAILABLE, "retirement revokes the warm lease");
+        assert!(revoked.headers().contains_key("retry-after"));
+        saw_no_upstream(&mut requests);
+    }
+
+    /// Cancelling after real upstream admission leaves the lease bound to the same proof. A restart keeps the
+    /// durable proof but no in-memory classification, so both paths still refuse a forged claim before Reel.
+    #[tokio::test]
+    async fn cancelled_and_restarted_member_media_requests_keep_the_claim_boundary() {
+        let (origin, mut requests) = local_reel().await;
+        let h = Arc::new(reel_at(&origin, None));
+        let member = registered_library(&h).await;
+        let held = tokio::spawn({
+            let h = Arc::clone(&h);
+            let member = member.clone();
+            async move {
+                h.send("GET", "/reel/hls/hold0000000.m3u8", None, &[("x-den-library-member", &member)])
+                    .await
+                    .status()
+            }
+        });
+        saw_upstream(&mut requests).await;
+        held.abort();
+        let _ = held.await;
+
+        let forged = format!("{LIB}:not-the-member-proof");
+        let refused =
+            h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[("x-den-library-member", &forged)]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        saw_no_upstream(&mut requests);
+        let retried =
+            h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+        drop(retried);
+        saw_upstream(&mut requests).await;
+
+        let restarted = reel_at(&origin, Some(h.dir.clone()));
+        let refused = restarted
+            .send("GET", "/reel/hls/ccccccccccc.m3u8", None, &[("x-den-library-member", &forged)])
+            .await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        saw_no_upstream(&mut requests);
+        let admitted = restarted
+            .send("GET", "/reel/hls/ddddddddddd.m3u8", None, &[("x-den-library-member", &member)])
+            .await;
+        assert_eq!(
+            admitted.status(),
+            StatusCode::NO_CONTENT,
+            "the durable registered proof survives restart"
+        );
+        drop(admitted);
+        saw_upstream(&mut requests).await;
     }
 
     /// The cap is on viewers at once, because that is what spends the household's upload — not on
@@ -5468,6 +5768,77 @@ mod tests {
         state.relays = crate::parse_relays(&format!("/reel=http://{addr}"));
         state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
         h
+    }
+
+    /// Two first requests from one address can both miss the lease while membership is checked. They must converge
+    /// on the one published viewer slot: otherwise one body updates a detached slot and can keep streaming after the
+    /// live lease's unrelated activity expires.
+    #[tokio::test]
+    async fn concurrent_first_guest_media_requests_share_the_published_viewer_slot() {
+        use http_body_util::BodyExt;
+
+        let mut h = reel_mid_stream(10).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.media_slots = Arc::new(tokio::sync::Semaphore::new(8));
+        state.guest_media_slots = Arc::new(tokio::sync::Semaphore::new(3));
+        let gate = Arc::new(tokio::sync::Barrier::new(3));
+        *crate::lock(&state.media_admission_gate) = Some(Arc::clone(&gate));
+        let h = Arc::new(h);
+        let ask = |path: &'static str| {
+            let h = Arc::clone(&h);
+            tokio::spawn(
+                async move { h.send("GET", path, None, &[("x-forwarded-for", "203.0.113.1")]).await },
+            )
+        };
+        let first = ask("/reel/hls/aaaaaaaaaaa.m3u8");
+        let second = ask("/reel/hls/bbbbbbbbbbb.m3u8");
+        tokio::time::timeout(std::time::Duration::from_secs(2), gate.wait()).await.unwrap();
+        crate::lock(&h.state.media_admission_gate).take();
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert_eq!((first.status(), second.status()), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(h.state.guest_media_slots.available_permits(), 2, "one address is one viewer");
+
+        let published = crate::lock(&h.state.media_leases)
+            .values()
+            .find_map(|lease| lease.slot.clone())
+            .expect("published guest lease");
+        let mut first = first.into_body();
+        let mut second = second.into_body();
+        h.advance(1);
+        assert!(first.frame().await.unwrap().unwrap().is_data());
+        assert_eq!(published.sent.load(std::sync::atomic::Ordering::Relaxed), h.state.now());
+        h.advance(1);
+        assert!(second.frame().await.unwrap().unwrap().is_data());
+        assert_eq!(
+            published.sent.load(std::sync::atomic::Ordering::Relaxed),
+            h.state.now(),
+            "both racing bodies update the slot retained by the winning lease"
+        );
+
+        let third = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        let fourth = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.3")]).await;
+        assert_eq!((third.status(), fourth.status()), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(h.state.guest_media_slots.available_permits(), 0);
+        let refused = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.4")]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE, "a fourth viewer cannot enter");
+
+        drop(first);
+        assert_eq!(
+            h.state.guest_media_slots.available_permits(),
+            0,
+            "cancelling either racing response cannot release their published viewer slot"
+        );
+        drop(second);
+        assert_eq!(
+            h.state.guest_media_slots.available_permits(),
+            0,
+            "the shared lease remains charged until its documented idle expiry"
+        );
+        drop((third, fourth));
+        h.advance(super::LEASE_IDLE_MS + 1);
+        let retried = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.4")]).await;
+        assert_eq!(retried.status(), StatusCode::OK, "idle completed bodies return viewer capacity");
     }
 
     /// An addon that sends its head and part of its body, then goes silent, is given up on at the deadline rather than
@@ -5941,6 +6312,9 @@ mod tests {
         drop(body);
     }
 
+    /// The `CDN-Cache-Control` `public_addon` sends: atlas's for a dataset answer.
+    const EDGE_POLICY: &str = "max-age=2592000, stale-while-revalidate=86400, stale-if-error=604800";
+
     /// An addon that says its answer may be kept by anyone, and echoes the validator it was sent.
     async fn public_addon() -> String {
         use axum::http::{header, HeaderValue};
@@ -5958,6 +6332,7 @@ mod tests {
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=300, stale-while-revalidate=60"),
             );
+            resp.headers_mut().insert("cdn-cache-control", HeaderValue::from_static(EDGE_POLICY));
             resp.headers_mut().insert("cache-tag", HeaderValue::from_static("atlas"));
             resp
         });
@@ -6095,6 +6470,8 @@ mod tests {
                 &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
             )
             .await;
+        // Cloudflare reads `CDN-Cache-Control` in place of `Cache-Control`: a private answer keeps neither.
+        assert!(!web.headers().contains_key("cdn-cache-control"), "a member's answer has no shared lifetime");
         assert_eq!(policy(web), "private, max-age=300, stale-while-revalidate=60");
         let lan = h.send("GET", "/scout/cfg/manifest.json", None, &[]).await;
         assert_eq!(
@@ -6103,8 +6480,10 @@ mod tests {
             "anyone may ask on the LAN"
         );
         let atlas = h.send("GET", "/atlas/recommend", None, &[("host", "d.oxy.fi")]).await;
-        // Its tag too, which is what purges Cloudflare's copy when atlas or its dataset changes.
+        // Its tag too, which is what purges Cloudflare's copy when atlas or its dataset changes, and how long
+        // Cloudflare keeps it and hands it out while atlas cannot answer.
         assert_eq!(atlas.headers()["cache-tag"], "atlas");
+        assert_eq!(atlas.headers()["cdn-cache-control"], EDGE_POLICY);
         assert_eq!(policy(atlas), "public, max-age=300, stale-while-revalidate=60", "atlas answers everyone");
 
         assert_eq!(super::private(&"no-store".parse().unwrap()), "no-store");

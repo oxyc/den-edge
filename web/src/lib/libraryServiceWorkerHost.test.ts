@@ -177,6 +177,36 @@ it('rejects malformed input and replaces a malformed dispatcher batch', async ()
   await host.close();
 });
 
+it('rejects an oversized playback receipt drain before it reaches the authority dispatcher', async () => {
+  const scope = new FakeScope();
+  const dispatch = vi.fn(async () => []);
+  const host = new LibraryServiceWorkerHost(scope, {
+    dispatch,
+    listen: () => () => {},
+    close() {},
+  });
+  scope.emit({
+    type: 'task',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: 'receipt-oversized',
+    operationId: 'receipt-oversized-op',
+    task: {
+      kind: 'assistant.receipts.apply',
+      messages: Array.from({ length: 101 }, (_, seq) => ({ seq, sealed: 'ciphertext' })),
+    },
+  });
+  await expect.poll(() => scope.posted.length).toBe(1);
+  expect(scope.posted[0]).toEqual([
+    expect.objectContaining({
+      type: 'error',
+      requestId: 'receipt-oversized',
+      error: expect.objectContaining({ code: 'invalid-request', retryable: false }),
+    }),
+  ]);
+  expect(dispatch).not.toHaveBeenCalled();
+  await host.close();
+});
+
 it('refuses an invalid content request to its requester alone', async () => {
   const scope = new FakeScope();
   const contentDispatch = vi.fn(async () => []);

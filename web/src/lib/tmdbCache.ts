@@ -5,6 +5,7 @@
 // TMDB for what it showed last time; an older one TMDB can't refresh is served stale rather than not at all, and
 // nothing is kept past TMDB's six-month limit on cached content.
 
+import { keptAnswerServed, providerAnswered } from './keptAnswers';
 import { transactions } from './localVault';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
@@ -473,13 +474,18 @@ export function cachingFetch(
     // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
     void network(proxied(url), { ...init, signal: AbortSignal.timeout(SHARED_MS) })
       .then(async (res) => {
+        if (res.status >= 500) keptAnswerServed('tmdb');
         if (!res.ok) return;
+        providerAnswered('tmdb');
         const body = await res.text();
         const parsed = keepable(body);
         const refreshed = entry(url, res, body, parsed);
-        if (refreshed) await keep(key, url, refreshed, parsed);
+        if (refreshed) await keep(key, url, refreshed, parsed).catch(() => undefined);
       })
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        // The kept answer stood in for one den-edge could not give; a refresh that timed out says the same.
+        if ((error as Error)?.name !== 'AbortError') keptAnswerServed('tmdb');
+      })
       .finally(() => refreshing.delete(key));
   };
   /**
@@ -573,9 +579,13 @@ export function cachingFetch(
           );
         }
         // A refusal to answer now, like den-edge or TMDB failing, is no reason to drop the answer already kept.
-        if (kept && (res.status >= 500 || res.status === 429)) return keptAnswer(kept);
+        if (kept && (res.status >= 500 || res.status === 429)) {
+          if (res.status >= 500) keptAnswerServed('tmdb');
+          return keptAnswer(kept);
+        }
         return res;
       }
+      providerAnswered('tmdb');
       const body = await res.text();
       const parsed = keepable(body);
       const fetched = entry(url, res, body, parsed);
@@ -583,6 +593,10 @@ export function cachingFetch(
       if (fetched) void keep(key, url, fetched, parsed).catch(() => undefined);
       return answer(body, parsed);
     } catch (error) {
+      if (kept && !init?.signal?.aborted) {
+        keptAnswerServed('tmdb');
+        return keptAnswer(kept);
+      }
       if (kept) return keptAnswer(kept);
       throw error;
     }
@@ -642,7 +656,7 @@ function indexedStore(): Store | null {
 }
 
 /** One object store of `Kept` values, each dated by its `fetchedAt`. */
-function indexedKept<T extends { fetchedAt: number }>(
+export function indexedKept<T extends { fetchedAt: number }>(
   factory: IDBFactory,
   name: string,
   storeName: string,
