@@ -47,6 +47,10 @@ export const ENGLISH_MESSAGES = {
   'common.play': 'Play',
   'common.resume': 'Resume',
   'common.close': 'Close',
+  'receipt.pending': 'Checking saved playback progress…',
+  'receipt.failed': 'Saved playback progress couldn’t be updated. Try again.',
+  'receipt.recovered': 'Saved playback progress is up to date.',
+  'receipt.retry': 'Try again',
   'retirement.title': 'Library cleanup needs another try',
   'retirement.detail':
     'You’re signed out. Den still needs to remove encrypted library data kept on this device. You can leave safely; it will try again next time.',

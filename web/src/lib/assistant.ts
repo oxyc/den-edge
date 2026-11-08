@@ -71,6 +71,13 @@ export interface ApplyOutcome {
   dropbox: DropboxKey | null;
 }
 
+/** The visible result of one bounded managed-playback receipt attempt. */
+export type PlaybackReceiptDrainOutcome =
+  | { outcome: 'empty' }
+  | { outcome: 'completed'; applied: number }
+  | { outcome: 'failed'; stage: 'drain' | 'apply' | 'ack' }
+  | { outcome: 'retired' };
+
 export type ApplyResult =
   | {
       seq: number;
@@ -156,13 +163,16 @@ export async function ackQueue(
   fetchImpl: typeof fetch = relayFetch,
   queue?: OtherQueue,
   endpoint = 'assistant',
+  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
     const res = await fetchImpl(`/${endpoint}/ack${queue ? `?${queue.query}` : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ upTo }),
-      signal: AbortSignal.timeout(15_000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+        : AbortSignal.timeout(15_000),
     });
     return res.ok;
   } catch {
@@ -174,16 +184,16 @@ export async function ackQueue(
 export function drainPlaybackReceiptsOnce(
   loop: {
     libraryId: string;
-    apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null }>;
+    apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null; applied?: number }>;
     canAck?: () => boolean;
     fetchImpl?: typeof fetch;
   },
   signal: AbortSignal,
-): Promise<void> {
+): Promise<PlaybackReceiptDrainOutcome> {
   return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
     const fetchImpl = loop.fetchImpl ?? relayFetch;
     const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
-    if (signal.aborted) return;
+    if (signal.aborted) return { outcome: 'retired' };
     if (messages === null) {
       reportClientFailure({
         operation: 'receipt',
@@ -191,10 +201,10 @@ export function drainPlaybackReceiptsOnce(
         outcome: 'terminal',
         route: 'receipt_drain',
       });
-      return;
+      return { outcome: 'failed', stage: 'drain' };
     }
-    if (!messages.length) return;
-    let result: { ack: number | null };
+    if (!messages.length) return { outcome: 'empty' };
+    let result: { ack: number | null; applied?: number };
     try {
       result = await loop.apply(messages);
     } catch (error) {
@@ -206,19 +216,25 @@ export function drainPlaybackReceiptsOnce(
           route: 'receipt_apply',
           errorClass: clientFailureErrorClass(error),
         });
-      return;
+      return signal.aborted ? { outcome: 'retired' } : { outcome: 'failed', stage: 'apply' };
     }
-    if (signal.aborted || (loop.canAck && !loop.canAck())) return;
-    if (result.ack !== null) {
-      const acknowledged = await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
-      if (!acknowledged && !signal.aborted)
+    if (signal.aborted || (loop.canAck && !loop.canAck())) return { outcome: 'retired' };
+    if (result.ack === null) return { outcome: 'failed', stage: 'apply' };
+    const ack = result.ack;
+    const acknowledged = await ackQueue(ack, fetchImpl, undefined, 'playback/receipts', signal);
+    if (signal.aborted || (loop.canAck && !loop.canAck())) return { outcome: 'retired' };
+    if (!acknowledged) {
+      if (!signal.aborted)
         reportClientFailure({
           operation: 'receipt',
           kind: 'http',
           outcome: 'terminal',
           route: 'receipt_ack',
         });
+      return { outcome: 'failed', stage: 'ack' };
     }
+    if (messages.some(({ seq }) => seq > ack)) return { outcome: 'failed', stage: 'apply' };
+    return { outcome: 'completed', applied: result.applied ?? 0 };
   });
 }
 
@@ -228,13 +244,16 @@ export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
     libraryId: string;
     ensure: () => Promise<DropboxKey | null>;
     lend: () => Promise<Connection>;
-    apply: (messages: QueuedRequest[], connection: Connection) => Promise<{ ack: number | null }>;
+    apply: (
+      messages: QueuedRequest[],
+      connection: Connection,
+    ) => Promise<{ ack: number | null; applied?: number }>;
     current: () => boolean;
     fetchImpl?: typeof fetch;
   },
   signal: AbortSignal,
-): Promise<void> {
-  await drainPlaybackReceiptsOnce(
+): Promise<PlaybackReceiptDrainOutcome> {
+  return drainPlaybackReceiptsOnce(
     {
       libraryId: loop.libraryId,
       apply: async (messages) => {

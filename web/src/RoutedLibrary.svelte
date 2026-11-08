@@ -1461,6 +1461,7 @@
       work: AssistantWork,
       signal: AbortSignal,
     ) => void,
+    unavailable?: (signal: AbortSignal) => void,
   ) {
     const current = session;
     const model = memberModel;
@@ -1473,6 +1474,7 @@
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
           console.warn('den: the library is not a member on den-edge yet; its assistants wait');
+          unavailable?.(stop.signal);
           return;
         }
         run(
@@ -1492,7 +1494,10 @@
           stop.signal,
         );
       },
-      (error: unknown) => console.warn('den: the assistant connection could not be loaded', error),
+      (error: unknown) => {
+        console.warn('den: the assistant connection could not be loaded', error);
+        if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
+      },
     );
     return () => stop.abort();
   }
@@ -1527,16 +1532,55 @@
     });
   });
 
+  type PlaybackReceiptStatus = {
+    owner: ProfileSession;
+    state: 'pending' | 'failed' | 'recovered';
+    presentation: number;
+  };
+  let playbackReceiptStatus = $state.raw<PlaybackReceiptStatus | null>(null);
+  let playbackReceiptRetry = $state(0);
+  let playbackReceiptPresentation = 0;
+  let playbackReceiptRecoveredTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(playbackReceiptRecoveredTimer));
+
+  function retryPlaybackReceipts() {
+    if (playbackReceiptStatus?.state !== 'failed') return;
+    playbackReceiptRetry++;
+  }
+
   // Managed playback can finish after this page is gone. Make its household drop-box available, then keep the
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
   $effect(() => {
+    // Tizen 3's explicit unsupported/handoff product surface remains owned by #1059/#1083. Do not drain its queued
+    // ciphertext or offer the capable-build retry here; a linked capable device may still settle that work.
+    if (__DEN_TV_LEGACY_JS_CORE__) return;
     const current = session;
+    const retry = playbackReceiptRetry;
+    const heldStatus = untrack(() => playbackReceiptStatus);
+    if (heldStatus && heldStatus.owner !== current) playbackReceiptStatus = null;
+    if (!session.foregrounded || !memberModel) {
+      if (heldStatus?.owner === current && heldStatus.state === 'pending')
+        playbackReceiptStatus = null;
+      return;
+    }
+    const recovering = heldStatus?.owner === current && heldStatus.state === 'failed';
+    const publish = (state: PlaybackReceiptStatus['state'], signal?: AbortSignal) => {
+      if (signal?.aborted || current !== session || retry !== playbackReceiptRetry) return false;
+      clearTimeout(playbackReceiptRecoveredTimer);
+      playbackReceiptStatus = {
+        owner: current,
+        state,
+        presentation: ++playbackReceiptPresentation,
+      };
+      return true;
+    };
+    publish('pending');
     return whileNeeded(
-      session.foregrounded,
+      true,
       ({ drainPlaybackReceiptsForCurrentAuthority }, work, signal) => {
         void (async () => {
           try {
-            await drainPlaybackReceiptsForCurrentAuthority(
+            const outcome = await drainPlaybackReceiptsForCurrentAuthority(
               {
                 libraryId: work.libraryId,
                 ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
@@ -1548,11 +1592,34 @@
               },
               signal,
             );
+            if (outcome.outcome === 'retired') return;
+            if (outcome.outcome === 'failed') {
+              publish('failed', signal);
+              return;
+            }
+            if (!recovering) {
+              if (current === session && retry === playbackReceiptRetry)
+                playbackReceiptStatus = null;
+              return;
+            }
+            if (!publish('recovered', signal)) return;
+            const presentation = playbackReceiptPresentation;
+            playbackReceiptRecoveredTimer = setTimeout(() => {
+              if (
+                playbackReceiptStatus?.owner === current &&
+                playbackReceiptStatus.presentation === presentation
+              )
+                playbackReceiptStatus = null;
+            }, 5_000);
           } catch (error) {
-            console.warn('den: playback receipts could not be applied', error);
+            if (!signal.aborted && current === session && retry === playbackReceiptRetry) {
+              console.warn('den: playback receipts could not be applied', error);
+              publish('failed', signal);
+            }
           }
         })();
       },
+      (signal) => publish('failed', signal),
     );
   });
 
@@ -1801,6 +1868,13 @@
           presentation={shown.toastPresentation}
           alert={shown.alert}
           undo={shown.undo}
+          receipt={playbackReceiptStatus?.owner === shown
+            ? {
+                state: playbackReceiptStatus.state,
+                presentation: playbackReceiptStatus.presentation,
+                retry: retryPlaybackReceipts,
+              }
+            : null}
         />
       {/if}
       <Router
