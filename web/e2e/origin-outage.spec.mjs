@@ -20,10 +20,11 @@ async function routeAtlasRows(page) {
     route.fulfill({
       headers: { 'cache-control': 'public, max-age=300' },
       json: {
-        // One page: a later one is the row's end.
-        titles: (new URL(route.request().url()).searchParams.get('skip') === '0'
-          ? [0, 1, 2]
-          : []
+        // Two pages, and an empty third: the row's end.
+        titles: (
+          { 0: [0, 1, 2], 24: [3, 4, 5] }[
+            Number(new URL(route.request().url()).searchParams.get('skip'))
+          ] ?? []
         ).map((i) => ({
           type: 'movie',
           id: ROW_FILM + i,
@@ -73,6 +74,96 @@ async function scrollToAtlasRow(page) {
 const keptNotice = (page) =>
   page.getByRole('alert').filter({ hasText: 'Den’s server can’t be reached' });
 
+/** The origin answering again: no routes table, atlas with no people, and TMDB with nothing to say. */
+async function originBack(page) {
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/atlas/manifest.json', (route) =>
+    route.fulfill({ json: { id: 'com.den.atlas', catalogs: [] } }),
+  );
+  await page.route('**/atlas/index/**', (route) =>
+    route.fulfill({ json: { people: [], total: 0, labels: {}, values: [], complete: true } }),
+  );
+  await page.route('**/tmdb/3/**', (route) => route.fulfill({ json: { results: [] } }));
+}
+
+const unreachable = (page) =>
+  page.getByRole('alert').filter({ hasText: 'Den’s server can’t be reached right now.' });
+/** People's own controls, drawn only once atlas is configured. */
+const peopleRail = (page) => page.getByRole('textbox', { name: 'Born from (year)' });
+/** In-app navigation, as a link does it: the same page, no reload. */
+const go = (page, path) =>
+  page.evaluate(
+    (to) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: to } })),
+    path,
+  );
+/** A browser with no library looks around as a visitor, then opens People. */
+async function visitPeople(page) {
+  await page.goto(`${E2E_ORIGIN}/`);
+  const asked = page.waitForResponse((response) => response.url().includes('/tmdb/3/'), {
+    timeout: 60_000,
+  });
+  await page.getByRole('button', { name: 'Look around instead' }).click({ timeout: 60_000 });
+  // Home's rows ask TMDB through den-edge before People is opened.
+  await asked;
+  await go(page, '/people');
+}
+
+test('a visitor with nothing saved is told the server is down, and People comes back by itself', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    test.setTimeout(180_000);
+    const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+    const page = await context.newPage();
+    const restore = await originDown(page);
+    // Home first, as a visitor opens Den: its TMDB rows fail with nothing saved.
+    await visitPeople(page);
+    // An answer with a way out, not a load that never ends.
+    await expect(unreachable(page)).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('section.people')).toHaveAttribute('aria-busy', 'false');
+
+    // Retry while it is still down asks again, and says the same.
+    await unreachable(page).getByRole('button', { name: 'Try again' }).click();
+    await expect(unreachable(page)).toBeVisible({ timeout: 60_000 });
+
+    // The server is back. Without Retry or a reload, its next answer (Home's TMDB rows) finds atlas again.
+    await restore();
+    await originBack(page);
+    const answered = page.waitForResponse(
+      (response) => response.url().includes('/tmdb/3/') && response.ok(),
+      { timeout: 60_000 },
+    );
+    await go(page, '/');
+    await answered;
+    await go(page, '/people');
+    await expect(peopleRail(page)).toBeVisible({ timeout: 60_000 });
+    await expect(unreachable(page)).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a visitor’s Retry finds atlas once the server is back', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    test.setTimeout(180_000);
+    const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+    const page = await context.newPage();
+    const restore = await originDown(page);
+    await visitPeople(page);
+    await expect(unreachable(page)).toBeVisible({ timeout: 60_000 });
+    await restore();
+    await originBack(page);
+    await unreachable(page).getByRole('button', { name: 'Try again' }).click();
+    await expect(peopleRail(page)).toBeVisible({ timeout: 60_000 });
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a returning household opens Home from what it kept while the origin is down, and says so', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -92,6 +183,12 @@ test('a returning household opens Home from what it kept while the origin is dow
     await expect(atlasRow(healthy).getByRole('link', { name: `Film ${ROW_FILM}` })).toBeVisible({
       timeout: 60_000,
     });
+    // Its second page, asked at once since the row's end is in reach.
+    await expect(atlasRow(healthy).getByRole('link', { name: `Film ${ROW_FILM + 3}` })).toBeVisible(
+      {
+        timeout: 60_000,
+      },
+    );
     await expect(keptNotice(healthy)).toHaveCount(0);
     // The kept answer's write is gathered for a moment (`indexedKept`), and the services found are retained a second
     // after they settle (`SessionServices`).
@@ -105,10 +202,16 @@ test('a returning household opens Home from what it kept while the origin is dow
     const restore = await originDown(page);
     await page.goto(`${E2E_ORIGIN}/`);
     await scrollToAtlasRow(page);
-    // The row's first page is the kept one; only where it would page on does it say it couldn't.
+    // The row's pages are the kept ones, through to its end: nothing in it says it couldn't load.
     await expect(atlasRow(page).getByRole('link', { name: `Film ${ROW_FILM}` })).toBeVisible({
       timeout: 60_000,
     });
+    await expect(atlasRow(page).getByRole('link', { name: `Film ${ROW_FILM + 3}` })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(atlasRow(page).getByRole('button', { name: /Couldn’t load these/ })).toHaveCount(
+      0,
+    );
     await expect(keptNotice(page)).toBeVisible();
     await expect(page.getByText('Profiles couldn’t be opened')).toHaveCount(0);
 

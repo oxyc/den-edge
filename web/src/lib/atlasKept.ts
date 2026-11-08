@@ -3,18 +3,22 @@
 // opens on the rows, charts and billboard this browser last saw rather than a wall of failed rows. Only a failure
 // reads what is kept: while atlas answers, every answer is the live one and is kept in place of the last.
 //
-// Only the first page of what a screen opens on is kept, never a search or a filter, which would churn the store a
+// Only what a screen opens on is kept (a row to `KEPT_DEPTH`), never a search or a filter, which would churn the store a
 // keystroke at a time, and only for a profile without a content policy (`ContentAuthority`): a Kid's answers stay
 // live-only.
 
-import { keptAnswerServed, providerAnswered } from './keptAnswers';
+import { keptAnswerServed, providerAnswered, providerUnreachable } from './keptAnswers';
 import { indexedKept, type Kept } from './tmdbCache';
 
 const DAY = 86_400_000;
 /** How long a kept answer may stand in. Atlas's answers move with its dataset, at most daily. */
 export const RETENTION = 30 * DAY;
-/** The most answers kept: a row or chart page is some kilobytes, so the store stays at a few megabytes. */
-export const MOST_KEPT = 300;
+/**
+ * The most answers kept: a row page is ~4.4 KB and a title record ~3 KB (measured), so the store stays near 2.6 MB.
+ * Twice the first pages' 300, since a row keeps its next page as well: a wide screen asks for it at once (the row's
+ * end is within the two row-widths `BrowseRow` reads ahead), so each row a screen opens on is two answers.
+ */
+export const MOST_KEPT = 600;
 /** One prune per Worker drops at most this many: a session keeps only first pages, so it cannot outgrow it far. */
 const PRUNE_BATCH = 100;
 
@@ -40,10 +44,12 @@ const defaultStore = indexedStore();
 const KEPT_ROUTE =
   /\/(?:index\/row\/[\w-]+\.json|index\/title\/(?:movie|series)\/\d+\.json|recommend\/[\w/-]+\.json|catalog\/(?:movie|series)\/[^/]+\/country=[\w-]+\.json|manifest\.json)$/;
 /**
- * A row's later pages: a screen opens on the first, and a row scrolled far along (rows page on without end) would
- * otherwise push every other screen's first page out of the store.
+ * Where a row stops being kept: its first five pages (120 titles), so a kept row scrolls on as far as it was seen
+ * rather than ending at its first page. A row scrolled further (rows page on without end) would otherwise push every
+ * other screen's pages out of the store.
  */
-const LATER_PAGE = /[?&]skip=(?!0(?:&|$))/;
+const KEPT_DEPTH = 120;
+const deep = (href: string) => Number(/[?&]skip=(\d+)/.exec(href)?.[1] ?? 0) >= KEPT_DEPTH;
 
 /**
  * `network`, with atlas's answers to `KEPT_ROUTE` GETs kept in `store`, and handed out in place of a failed request (a
@@ -61,7 +67,7 @@ export function keepingAtlasFetch(
     const method = (
       init?.method ?? (input instanceof Request ? input.method : 'GET')
     ).toUpperCase();
-    if (method !== 'GET' || !KEPT_ROUTE.test(href.split(/[?#]/)[0]!) || LATER_PAGE.test(href))
+    if (method !== 'GET' || !KEPT_ROUTE.test(href.split(/[?#]/)[0]!) || deep(href))
       return network(input, init);
     if (!pruned) {
       pruned = true;
@@ -69,7 +75,10 @@ export function keepingAtlasFetch(
     }
     const kept = async (failed: () => Response | Promise<Response>): Promise<Response> => {
       const answer = await store.get(href).catch(() => undefined);
-      if (!answer || now() - answer.fetchedAt >= RETENTION) return failed();
+      if (!answer || now() - answer.fetchedAt >= RETENTION) {
+        providerUnreachable();
+        return failed();
+      }
       keptAnswerServed('atlas');
       return new Response(answer.body, {
         headers: { 'content-type': 'application/json', 'x-den-kept': String(answer.fetchedAt) },
