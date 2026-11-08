@@ -5,16 +5,18 @@
      ends up exactly as deep as the service is rather than promising a catalogue it doesn't have. -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
-  import { servicePage } from '../lib/services';
+  import { servicePage, type ServiceHeroResult } from '../lib/services';
   import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
   import { contentServices, matches, type Service } from '../settings/services';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
+  import Button from './Button.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
   import ServerUnreachable from './ServerUnreachable.svelte';
@@ -33,6 +35,7 @@
     reel = null,
     routes = {},
     shown,
+    authority = '',
     active = true,
   }: {
     /** The provider id, as TMDB and atlas both name it. */
@@ -58,6 +61,8 @@
     /** The routes table, for the address the trailer's video loads from. */
     routes?: Routes;
     shown: (title: Title) => boolean;
+    /** Stable identity of the active profile/policy and every rule read by `shown`. */
+    authority?: unknown;
     /** The page on screen, rather than one kept behind it. */
     active?: boolean;
   } = $props();
@@ -102,6 +107,9 @@
   let featured = $state.raw<Title[]>([]);
   /** Until the hero has answered, its place shows that something is coming rather than a dark, empty frame. */
   let heroLoading = $state(true);
+  /** A refused request is distinct from a valid service with no featured titles. */
+  let heroFailure = $state<Extract<ServiceHeroResult, { state: 'failed' }> | null>(null);
+  let retryHero = $state.raw<() => void>(() => {});
   /**
    * The excluded languages by value. Settings are re-read into a new Set whenever the library refreshes, and a new
    * Set with the same languages must not rebuild the page.
@@ -109,12 +117,16 @@
   const languagesKey = $derived([...excludedLanguages].sort().join(','));
   /** Which service, country and tab the rows on screen are for. */
   let shownFor = '';
+  /** Hero authority is narrower than row identity: old hero titles must not survive a policy/source replacement. */
+  let heroFor = '';
+  let authorityFor: unknown = {};
   $effect(() => {
     const selected = service;
     const here = atlas;
     const addonsSettled = atlasReady;
     const mediaType = only;
     const year = minYear;
+    const heroAuthority = authority;
     void languagesKey;
     const languages = untrack(() => excludedLanguages);
     let current = true;
@@ -124,10 +136,17 @@
     if (showing !== shownFor) {
       shownFor = showing;
       rows = [];
+    }
+    const featuring = `${showing}:${here ?? ''}:${year ?? ''}:${languagesKey}`;
+    if (featuring !== heroFor || heroAuthority !== authorityFor) {
+      heroFor = featuring;
+      authorityFor = heroAuthority;
       featured = [];
+      heroFailure = null;
       heroLoading = true;
     }
     if (!selected || !addonsSettled) return;
+    let controller: AbortController | null = new AbortController();
     // A tile's hover may already have asked all of this (`primeServicePage`); asking again joins it.
     const page = servicePage(content, selected, country, here, {
       minYear: year,
@@ -135,26 +154,37 @@
       excludedLanguages: languages,
       // Read when the hero answers, not here: a new `shown` must not rebuild the whole page.
       shown: (title) => shown(title),
+      signal: controller.signal,
     });
     void page.rows.then((settled) => {
       if (!current) return;
       build++;
       rows = settled;
     });
-    void page.hero
-      .then(
-        (titles) => {
-          if (current) featured = titles;
-        },
-        () => {
-          // No hero, then — the page is its rows, which is what it was before it had one.
-        },
-      )
-      .finally(() => {
-        if (current) heroLoading = false;
+    let attempt = 0;
+    const showHero = (answer: Promise<ServiceHeroResult>) => {
+      const run = ++attempt;
+      heroLoading = true;
+      heroFailure = null;
+      void answer.then((result) => {
+        if (!current || run !== attempt || result.state === 'cancelled') return;
+        if (result.state === 'ready') featured = result.titles;
+        else heroFailure = result;
+        heroLoading = false;
       });
+    };
+    const retry = () => {
+      controller?.abort();
+      controller = new AbortController();
+      showHero(page.retryHero(controller.signal));
+    };
+    retryHero = retry;
+    showHero(page.hero);
     return () => {
       current = false;
+      attempt++;
+      controller?.abort();
+      if (retryHero === retry) retryHero = () => {};
     };
   });
 
@@ -182,6 +212,11 @@
     />
     {#if heroLoading && !waiting}
       <div class="hero-loading"><Loading label="Loading featured titles" /></div>
+    {:else if heroFailure}
+      <div class="hero-failure" role="alert">
+        <p>{i18n.phrase('Featured titles couldn’t be loaded.')}</p>
+        <Button variant="secondary" label="Try again" onclick={retryHero} />
+      </div>
     {/if}
     <header class="brand">
       {#if service.logoPath}
@@ -228,6 +263,24 @@
     display: grid;
     place-items: center;
     pointer-events: none;
+  }
+
+  .hero-failure {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: var(--gutter);
+    text-align: center;
+  }
+
+  .hero-failure p {
+    margin: 0;
+    color: var(--muted);
   }
 
   .brand {

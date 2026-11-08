@@ -424,6 +424,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Fear & Disgust': 'Miedo y asco',
   'Feel-Good Movies': 'Películas para sentirse bien',
   'Feel-Good Series': 'Serie para sentirse bien',
+  'Featured titles couldn’t be loaded.': 'No se pudieron cargar los títulos destacados.',
   'files, which Den can’t play in a browser yet. Try again once another release is out, or play it on your TV.':
     'archivos, que Den aún no puede reproducir en un navegador. Vuelve a intentarlo cuando salga otro lanzamiento o reprodúcelo en tu televisor.',
   Filmography: 'Filmografía',

@@ -68,7 +68,7 @@ export type AtlasServiceRow = RowDef & {
    * The chart's titles before the art atlas could not name is filled in (`fillPosters`): enough to decide whether the
    * row exists and what the hero shows, without waiting on a dozen TMDB lookups per chart. `load(1)` is these, filled.
    */
-  listed?: () => Promise<Title[]>;
+  listed?: (signal?: AbortSignal) => Promise<Title[]>;
 };
 
 /**
@@ -98,7 +98,7 @@ const FILL_HEAD = 12;
 export async function fillPosters(
   titles: Title[],
   content: ContentServiceClientPort,
-  { head = FILL_HEAD } = {},
+  { head = FILL_HEAD, signal }: { head?: number; signal?: AbortSignal } = {},
 ): Promise<Title[]> {
   // Only TMDB's own path counts as art already named. A chart's `poster` is metahub's, and metahub answers
   // from images.metahub.space with a redirect to live.metahub.space — a host the page's own CSP does not
@@ -107,10 +107,13 @@ export async function fillPosters(
   const wanted = titles.filter((title) => !title.posterPath).slice(0, head);
   if (!wanted.length) return titles;
   const key_ = (title: Pick<Title, 'type' | 'id'>) => `${title.type}:${title.id}`;
-  const answer = await content.query({
-    kind: 'titles',
-    titles: wanted.map(({ type, id }) => ({ type, id })),
-  });
+  const answer = await content.query(
+    {
+      kind: 'titles',
+      titles: wanted.map(({ type, id }) => ({ type, id })),
+    },
+    signal,
+  );
   const found = new Map(answer.titles.map((title) => [key_(title), title]));
   const retryable = new Set(answer.retryable.map(key_));
   const asked = new Set(wanted.map(key_));
@@ -156,15 +159,19 @@ export function atlasServiceRows(
     .slice()
     .sort((a, b) => rank(a.id) - rank(b.id))
     .map((catalog) => {
-      const listed = async () => {
-        const answer = await content.query({
-          kind: 'atlas.service.chart',
-          catalog: { id: catalog.id, type: catalog.type },
-          country,
-        });
+      const listed = async (signal?: AbortSignal) => {
+        const answer = await content.query(
+          {
+            kind: 'atlas.service.chart',
+            catalog: { id: catalog.id, type: catalog.type },
+            country,
+          },
+          signal,
+        );
         return answer.titles.state === 'ready' ? answer.titles.value : [];
       };
-      const filled = () => listed().then((titles) => fillPosters(titles, content));
+      const filled = (signal?: AbortSignal) =>
+        listed(signal).then((titles) => fillPosters(titles, content, { signal }));
       return {
         id: `service-atlas-${service.id}-${country}-${catalog.id}-${catalog.type}`,
         title: mixed ? `${catalog.name} · ${NOUN[catalog.type]}` : catalog.name,
@@ -177,7 +184,7 @@ export function atlasServiceRows(
             ? undefined
             : ('popular' as const),
         listed,
-        load: async (page: number) => (page > 1 ? [] : filled()),
+        load: async (page: number, signal?: AbortSignal) => (page > 1 ? [] : filled(signal)),
       };
     });
 }
@@ -495,16 +502,22 @@ const HERO_SLIDES = 12;
 export async function serviceHero(
   atlas: readonly AtlasServiceRow[],
   tmdb: readonly RowDef[],
+  signal?: AbortSignal,
 ): Promise<Title[]> {
   const lead = tmdb[0];
   if (!lead) return [];
   // The chart that takes the lead row's place when it answers (`settleServiceRows`).
   const chart = atlas.find((row) => row.replaces === 'new' && lead.id.endsWith(`-new-${row.type}`));
   if (chart) {
-    const titles = await (chart.listed ? chart.listed() : chart.load(1)).catch(() => []);
+    const titles = await (chart.listed ? chart.listed(signal) : chart.load(1, signal)).catch(
+      (error: unknown) => {
+        if (signal?.aborted) throw error;
+        return [];
+      },
+    );
     if (titles.length) return distinct(titles);
   }
-  return distinct(await lead.load(1));
+  return distinct(await lead.load(1, signal));
 }
 
 /**
@@ -518,17 +531,20 @@ export async function serviceHero(
 export async function withBackdrops(
   titles: Title[],
   content: ContentServiceClientPort,
-  { head = HERO_SLIDES }: { head?: number } = {},
+  { head = HERO_SLIDES, signal }: { head?: number; signal?: AbortSignal } = {},
 ): Promise<Title[]> {
   const candidates = titles.slice(0, head);
   const looked: (Title | null)[] = [...candidates];
   const missing = candidates.flatMap((title, at) => (title.backdropPath ? [] : [{ title, at }]));
   const absent = new Set<number>();
   if (missing.length) {
-    const answer = await content.query({
-      kind: 'titles',
-      titles: missing.map(({ title: { type, id } }) => ({ type, id })),
-    });
+    const answer = await content.query(
+      {
+        kind: 'titles',
+        titles: missing.map(({ title: { type, id } }) => ({ type, id })),
+      },
+      signal,
+    );
     const key = (title: Pick<Title, 'type' | 'id'>) => `${title.type}:${title.id}`;
     const found = new Map(answer.titles.map((title) => [key(title), title]));
     const retryable = new Set(answer.retryable.map(key));
@@ -555,6 +571,21 @@ export interface ServicePageOptions {
   excludedLanguages?: Set<string>;
   /** What the viewer has hidden; the hero leaves it out before looking anything up for it. */
   shown?: (title: Title) => boolean;
+  /** Cancels this caller's initial hero wait without cancelling shared provider work for other callers. */
+  signal?: AbortSignal;
+}
+
+/** A failed request is not an authoritative empty hero; cancellation belongs to a replaced page/attempt. */
+export type ServiceHeroResult =
+  | { state: 'ready'; titles: Title[] }
+  | { state: 'failed'; reason: 'unreachable' }
+  | { state: 'cancelled' };
+
+export interface ServicePageResult {
+  rows: Promise<RowDef[]>;
+  hero: Promise<ServiceHeroResult>;
+  /** Starts only the hero path again; rows and their loaders keep their existing identity and state. */
+  retryHero(signal?: AbortSignal): Promise<ServiceHeroResult>;
 }
 
 /**
@@ -567,8 +598,8 @@ export function servicePage(
   service: Service,
   country: string,
   atlas: string | null,
-  { minYear, only, excludedLanguages, shown = () => true }: ServicePageOptions = {},
-): { rows: Promise<RowDef[]>; hero: Promise<Title[]> } {
+  { minYear, only, excludedLanguages, shown = () => true, signal }: ServicePageOptions = {},
+): ServicePageResult {
   const tmdb = serviceRows(service, country, contentPages(content), {
     minYear,
     only,
@@ -579,6 +610,19 @@ export function servicePage(
         atlasServiceRows(catalogs, service, country, { only, content }),
       )
     : Promise.resolve([]);
+  const retryHero = (signal?: AbortSignal): Promise<ServiceHeroResult> =>
+    own
+      .catch((error: unknown): AtlasServiceRow[] => {
+        if (signal?.aborted) throw error;
+        return [];
+      })
+      .then((rows) => serviceHero(rows, tmdb, signal))
+      .then((titles) => withBackdrops(titles.filter(shown), content, { signal }))
+      .then(
+        (titles): ServiceHeroResult => ({ state: 'ready', titles }),
+        (): ServiceHeroResult =>
+          signal?.aborted ? { state: 'cancelled' } : { state: 'failed', reason: 'unreachable' },
+      );
   return {
     // Manifest failure is a settled answer too: the complete TMDB page, once, with stable row keys.
     rows: atlas
@@ -587,10 +631,8 @@ export function servicePage(
           () => tmdb,
         )
       : Promise.resolve(tmdb),
-    hero: own
-      .catch((): AtlasServiceRow[] => [])
-      .then((rows) => serviceHero(rows, tmdb))
-      .then((titles) => withBackdrops(titles.filter(shown), content)),
+    hero: retryHero(signal),
+    retryHero,
   };
 }
 
@@ -675,7 +717,8 @@ function rowsFor(
         values: { value: title, type: NOUN[type] },
         translateValues: ['value', 'type'],
       },
-      load: (page: number) => catalogPage(pages, { kind: 'discover', query }, page),
+      load: (page: number, signal?: AbortSignal) =>
+        catalogPage(pages, { kind: 'discover', query }, page, signal),
     };
   });
 }
@@ -748,10 +791,10 @@ export function serviceRows(
       c.query.primaryGenre === undefined
         ? undefined
         : (title: Title) => matchesPrimaryGenre(title, c.query.primaryGenre!),
-    load: (page: number) => {
+    load: (page: number, signal?: AbortSignal) => {
       const query = scoped(c.query);
       const { primaryGenre: _primaryGenre, ...contentQuery } = query;
-      return catalogPage(pages, { kind: 'discover', query: contentQuery }, page);
+      return catalogPage(pages, { kind: 'discover', query: contentQuery }, page, signal);
     },
   }));
   return [...lead, ...feed];

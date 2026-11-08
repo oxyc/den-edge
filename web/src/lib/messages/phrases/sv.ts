@@ -412,6 +412,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Fear & Disgust': 'Rädsla & Avsky',
   'Feel-Good Movies': 'Feel-good-filmer',
   'Feel-Good Series': 'Feel-good-serien',
+  'Featured titles couldn’t be loaded.': 'Det gick inte att läsa in utvalda titlar.',
   'files, which Den can’t play in a browser yet. Try again once another release is out, or play it on your TV.':
     'filer, som Den inte kan spela upp i en webbläsare ännu. Försök igen när en annan version är ute, eller spela upp den på din TV.',
   Filmography: 'Filmografi',
