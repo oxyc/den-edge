@@ -55,6 +55,7 @@ export const parameters = {
   'player.next': 'Siguiente: {title}',
   'player.playingFrom': 'Reproduciendo desde {source}',
   'player.playingThroughReason': 'Reproduciendo mediante Den Remux. {reason}.',
+  'player.castingTo': 'Transmitiendo a {device}',
   'search.removeRecent': 'Quitar {value} de las búsquedas recientes',
   'sharing.deviceCount.one': '{count} dispositivo',
   'sharing.deviceCount.other': '{count} dispositivos',

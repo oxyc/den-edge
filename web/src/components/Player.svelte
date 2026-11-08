@@ -14,13 +14,12 @@
   import { WATCHED } from '../lib/actions';
   import {
     canOfferCast,
-    CAST_DISCOVERY_MS,
     CAST_PLAY_MS,
-    castLook,
+    castFailureNotice,
+    castStateOf,
     fetchCastOrigin,
     returnsFromCast,
-    type CastLook,
-    type CastOffer,
+    type CastState,
   } from '../lib/castOffer';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
@@ -173,7 +172,6 @@
     resume,
     next,
     nextEpisode,
-    castDiscoveryMs = CAST_DISCOVERY_MS,
     castPlayMs = CAST_PLAY_MS,
     onprogress,
     onfinalprogress,
@@ -214,8 +212,7 @@
     next?: string;
     /** That episode's own numbers, so it can be warmed before the advance (`shouldWarmNext`). */
     nextEpisode?: { season?: number; episode?: number };
-    /** Timer seams for the browser fixture; the app always uses the production defaults. */
-    castDiscoveryMs?: number;
+    /** Timer seam for the browser fixture; the app always uses the production default. */
     castPlayMs?: number;
     /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
     onprogress: (fraction: number, seconds: number, at: Episode, playing: boolean) => void;
@@ -433,15 +430,26 @@
    */
   let route = $state.raw(untrack(() => remux));
   let routeBeforeCast = untrack(() => remux);
-  /** Where a press of Cast stands (`castLook`): playback moves to the relay only once a receiver was seen. */
-  let castOffer = $state<CastOffer>('idle');
-  /** The cast page, loaded beside the playing video to look for a receiver and offer it; unset otherwise. */
-  let lookOrigin = $state<string>();
   /**
-   * The cast page in which the viewer chose a receiver. Its frame is kept, the same document, for the session cast
-   * from it: the Cast session started there belongs to that page, and a new frame would have none.
+   * The cast page, loaded beside the playing video once it plays, for good: it watches for a receiver in the background
+   * and is the Cast button itself (`castSlot`). The same document throughout, so the Cast session started in it — which
+   * belongs to that page — is never lost.
    */
-  let chooserOrigin = $state<string>();
+  let lookOrigin = $state<string>();
+  /** Asked once per player: whether this title may be cast, and where the cast page is (`/config`). */
+  let castPageAsked = false;
+  /** Where Cast stands, as the cast page's SDK says (`den-cast-state`). */
+  let castState = $state<CastState>('none');
+  /** The connected receiver's own name, once one is connected. */
+  let castDevice = $state<string>();
+  /** A Cast failure in plain words, with a way back when this page can offer one. */
+  let castNotice = $state<{ text: string; retry?: () => void } | null>(null);
+  /** Where the Cast button is drawn: Den's own button surface, which the cast page's frame lies exactly over. */
+  let castSlot = $state<HTMLElement>();
+  /** The frame's button has focus — from the keyboard, so Den's focus ring shows — or the pointer is over it. */
+  let castFocus = $state<'keyboard' | 'pointer' | null>(null);
+  let castHover = $state(false);
+  let castMenu = $state<ReturnType<typeof ActionMenu>>();
   /** The trusted Cast-page origin that discovered the receiver now receiving an external managed stream. */
   let directCastOrigin: string | undefined;
   /** Set while playback was moved to the relay to cast: a failure there goes back to the player it left. */
@@ -470,8 +478,13 @@
    */
   let holding = $state(false);
   let heldFrame = $state<string>();
-  /** One cast page frame at a time — looking, choosing, then playing or casting — so a Cast session is never lost. */
-  const frameOrigin = $derived(chooserOrigin ?? lookOrigin ?? session?.castOrigin ?? heldFrame);
+  /** One cast page frame at a time — the Cast button, then playing or casting — so a Cast session is never lost. */
+  const frameOrigin = $derived(lookOrigin ?? session?.castOrigin ?? heldFrame);
+  /** A receiver has, or is taking, what the cast page was given: this page is its remote. */
+  const castActive = $derived(casting || castState === 'connecting' || castState === 'connected');
+  /** The picture is on the receiver: the stage shows its poster and where it plays, under Den's transport. */
+  const castView = $derived(castActive && (!!session?.castOrigin || !!heldFrame));
+  const customTransport = $derived(fullTvTransport || webTransport);
   /** The exact iframe document generation that announced readiness; origin alone cannot distinguish a reload. */
   let castFrameGeneration = 0;
   let castFrameChallenge = '';
@@ -484,6 +497,17 @@
   let failure = $state<
     Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
   >(null);
+  /** The cast page plays the session itself (away from home): its frame is the picture, its button in the corner. */
+  const castStage = $derived(
+    (!!session?.castOrigin || !!heldFrame) && !failure && !castView && !castActive,
+  );
+  /** Den's Cast button, drawn where the player's other output buttons are; it shows once a receiver is found. */
+  const castSlotShown = $derived(
+    !castStage &&
+      castState !== 'none' &&
+      !!session &&
+      (castView || (!!lookOrigin && !session.castOrigin && canOfferCurrentCast(session))),
+  );
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
   const sourceRecovery = $derived(
@@ -931,10 +955,6 @@
     if (!failure) return;
     clearTransition();
   });
-  fades(
-    () => castOffer === 'none',
-    () => (castOffer = 'idle'),
-  );
 
   const episodeHeading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
@@ -1592,8 +1612,8 @@
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
     if (castOffered && !result.castOrigin) {
-      castOffer = 'none';
       leaveCast();
+      castNotice = { text: 'This can’t be cast from here right now. It’s playing here again.' };
       return true;
     }
     // A mid-film replacement names itself through `switchAway`'s own `autoSwitch`, not through this: `swapNotice`
@@ -2487,31 +2507,110 @@
     untrack(sendToCastFrame);
   });
 
-  function castMessage(event: MessageEvent<unknown>): void {
-    const looking = castFrame?.contentWindow;
-    if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
-      const message = event.data as {
-        type?: string;
-        generation?: unknown;
-        available?: unknown;
-        profile?: unknown;
-      };
-      if (message.type === 'den-ready' && castDocumentReady(event.origin, message.generation)) {
-        looking.postMessage({ type: 'den-discover', interfaceLanguage }, lookOrigin);
-      } else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
-        look({ kind: 'availability', available: message.available });
-      else if (message.type === 'den-cast-session' && castOffer === 'choose') {
-        // The receiver model the viewer keeps in the cast page's menu, else its default.
+  /** What the frame's Cast button needs from this page: its layout, and the player's own glyph colour and size. */
+  function sendCastLayout(): void {
+    const origin = frameOrigin;
+    const frame = origin ? readyCastFrame(origin) : null;
+    if (!origin || !frame) return;
+    const style = castSlot ? getComputedStyle(castSlot) : undefined;
+    frame.postMessage(
+      {
+        type: 'den-layout',
+        layout: castStage ? 'stage' : 'button',
+        color: style?.color,
+        iconSize: Number.parseFloat(style?.getPropertyValue('--button-icon-size') ?? '') || 22,
+      },
+      origin,
+    );
+  }
+
+  $effect(() => {
+    // Again whenever the layout, the slot (desktop bar or phone header) or the frame's document changes.
+    void [castStage, castSlot, castFrameReady];
+    untrack(sendCastLayout);
+  });
+
+  /** Messages about the Cast button itself, which come before, and apart from, any session loaded in the frame. */
+  function castButtonMessage(message: {
+    type?: string;
+    state?: unknown;
+    device?: unknown;
+    profile?: unknown;
+    code?: unknown;
+    focused?: unknown;
+    visible?: unknown;
+    hover?: unknown;
+    back?: unknown;
+  }): boolean {
+    switch (message.type) {
+      case 'den-cast-state':
+        castState = castStateOf(message.state);
+        castDevice =
+          castState === 'connected' && typeof message.device === 'string'
+            ? message.device.slice(0, 80)
+            : castState === 'connected'
+              ? castDevice
+              : undefined;
+        if (castState === 'none') castFocus = null;
+        return true;
+      case 'den-cast-press':
+        reachCast('attempted');
+        castNotice = null;
+        return true;
+      case 'den-cast-failed':
+        castFailed = true;
+        castFailReason = 'session_error';
+        castNotice = { text: castFailureNotice(message.code) };
+        reportClientFailure({
+          operation: 'cast',
+          kind: 'protocol',
+          outcome: 'terminal',
+          route: 'cast_receiver',
+          generation: clientFailureGeneration,
+          errorClass: 'unknown',
+        });
+        return true;
+      case 'den-cast-session':
+        if (typeof message.device === 'string') castDevice = message.device.slice(0, 80);
+        // The receiver model the viewer keeps, else its default.
         if (typeof message.profile === 'string' && CAST_PROFILES.includes(message.profile))
           castProfile = message.profile;
-        look({ kind: 'chosen' });
-      }
-      return;
+        // Chosen while this page plays: playback moves to the receiver from the second the video is at.
+        if (session && !session.castOrigin) moveToCast();
+        return true;
+      case 'den-cast-menu':
+        openCastMenu();
+        return true;
+      case 'den-cast-focus':
+        castFocus = message.focused === true ? (message.visible ? 'keyboard' : 'pointer') : null;
+        if (castFocus) revealWebControls(false);
+        else scheduleWebControls();
+        return true;
+      case 'den-cast-hover':
+        castHover = message.hover === true;
+        return true;
+      case 'den-tab':
+        castTab(message.back === true);
+        return true;
+      case 'den-activity':
+        // The pointer is over the frame, where this page's own pointer events do not reach.
+        revealWebControls();
+        return true;
     }
-    const current = session;
+    return false;
+  }
+
+  function castMessage(event: MessageEvent<unknown>): void {
     const frame = castFrame?.contentWindow;
-    if (!current?.castOrigin || event.origin !== current.castOrigin || event.source !== frame)
-      return;
+    if (!frame || event.source !== frame || !frameOrigin || event.origin !== frameOrigin) return;
+    const button = event.data as Parameters<typeof castButtonMessage>[0] & { generation?: unknown };
+    if (button.type === 'den-ready' && castDocumentReady(event.origin, button.generation)) {
+      frame.postMessage({ type: 'den-discover', interfaceLanguage }, event.origin);
+      sendCastLayout();
+    }
+    if (castButtonMessage(button)) return;
+    const current = session;
+    if (!current?.castOrigin || event.origin !== current.castOrigin) return;
     const message = event.data as {
       type?: string;
       id?: string;
@@ -2521,20 +2620,19 @@
       message?: string;
       state?: string;
       profile?: string;
+      device?: string;
       maxBitrate?: number;
-      available?: boolean;
-      generation?: unknown;
+      volume?: number;
+      muted?: boolean;
     };
-    if (message.type === 'den-ready') {
-      castDocumentReady(event.origin, message.generation);
-      return;
-    }
-    if (message.id !== current.playlist) return;
-    if (message.type === 'den-activity') {
-      revealWebControls();
-    } else if (message.type === 'den-progress') {
+    if (message.type === 'den-ready' || message.id !== current.playlist) return;
+    if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
+      // The receiver's own volume, which Den's volume control now sets.
+      if (castView && Number.isFinite(message.volume))
+        playerVolume = Math.min(1, Math.max(0, message.volume ?? 1));
+      if (castView && typeof message.muted === 'boolean') playerMuted = message.muted;
       // A length is known only once the playlist came through the media listener.
       if (remoteDuration > 0) {
         played = true;
@@ -2598,6 +2696,8 @@
       }
     } else if (message.type === 'den-cast' && message.state === 'playing') {
       casting = true;
+      castNotice = null;
+      if (typeof message.device === 'string') castDevice = message.device.slice(0, 80);
       reachCast('started');
       castSessionStartedAt = performance.now();
     } else if (message.type === 'den-cast' && message.state === 'stopped') {
@@ -2650,6 +2750,10 @@
         // the release: the player that was playing it goes on from the same second.
         reportFailure(current, 0, message.message ?? 'cast player failed');
         leaveCast();
+        castNotice = {
+          text: 'The Chromecast couldn’t play this, so it’s playing here again.',
+          retry: moveToCast,
+        };
         return;
       }
       // A receiver that can't play what it was sent: a copy its conservative profile takes, as a decoder's refusal.
@@ -2657,8 +2761,11 @@
     }
   }
 
-  /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
-  const castable = !__DEN_TV_LEGACY_JS_CORE__ && canOfferCast();
+  /**
+   * Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. Not a TV shell:
+   * their web views have no Cast sender, so the cast page would be loaded beside every playback for nothing.
+   */
+  const castable = !tv && !__DEN_TV_LEGACY_JS_CORE__ && canOfferCast();
 
   type AirPlayVideo = HTMLVideoElement & {
     webkitCurrentPlaybackTargetIsWireless?: boolean;
@@ -2725,51 +2832,37 @@
     castSessionStartedAt = undefined;
   }
 
-  // The Cast control was available to press — the same condition the header's button renders under — whether or
-  // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened. A direct
-  // CDN result is offered too: once a receiver is found, `look` asks Hearth again with player=cast. Hearth still
-  // chooses delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
+  // The Cast control was there to press — a receiver on the network, the button showing — whether or not the viewer
+  // ever did; den-edge's own cast report (`finish()`) is sent only once this has happened. A direct CDN result is
+  // offered too: once a receiver is chosen, `moveToCast` asks Hearth again with player=cast. Hearth still chooses
+  // delivery; a managed URL goes straight to the receiver, while a later direct failure asks for Remux.
   $effect(() => {
-    if (castable && session && !session.castOrigin && canOfferCurrentCast(session))
-      reachCast('offered');
+    if (castSlotShown && !castView) reachCast('offered');
   });
 
   /**
-   * The Cast button for a plain in-page player. The cast page is loaded unseen beside the video, which plays on, to
-   * look for a receiver (`look`). Once it sees one it shows its own "Choose your Chromecast" button over the video —
-   * Chrome's device list opens only from a press inside that cross-origin page — and only once the viewer has chosen
-   * a receiver there does Hearth get asked for what it plays, and the video here stop.
+   * The cast page is loaded beside the video once it plays (not before: nothing about Cast may slow a start), and kept.
+   * Its Cast SDK watches for a receiver in the background, and its button shows in the control bar only once one is
+   * found. Handing the film to another screen is a boundary of its own, so the active profile's policy is asked first:
+   * a title that may not be cast never shows the button.
    */
-  async function offerCast() {
-    if (!session || castOffer === 'looking') return;
-    reachCast('attempted');
-    castOffer = 'looking';
-    // Handing the film to another screen is a boundary of its own: the active profile's policy is asked again.
-    if (!(await titleAllowed(title, { content, restricted: true }))) {
-      castOffer = 'none';
-      return;
-    }
-    const origin = await fetchCastOrigin();
-    if (castOffer !== 'looking' || ended) return;
-    if (origin) lookOrigin = origin;
-    else look({ kind: 'no-cast-page' });
-  }
+  $effect(() => {
+    if (castPageAsked || !castable || !played || !session || session.castOrigin) return;
+    if (!canOfferCurrentCast(session)) return;
+    castPageAsked = true;
+    void (async () => {
+      if (!(await titleAllowed(title, { content, restricted: true }))) return;
+      const origin = await fetchCastOrigin();
+      if (origin && !ended) lookOrigin = origin;
+    })();
+  });
 
-  /** A step of the look for a receiver; one chosen moves playback to it at the second the video is at. */
-  function look(event: CastLook) {
-    const discoveredOrigin = lookOrigin;
-    const next = castLook(castOffer, event);
-    castOffer = next.offer;
-    if (next.offer === 'choose' && discoveredOrigin)
-      readyCastFrame(discoveredOrigin)?.postMessage(
-        { type: 'den-choose', interfaceLanguage },
-        discoveredOrigin,
-      );
-    if (next.offer !== 'looking' && next.offer !== 'choose') lookOrigin = undefined;
-    if (!next.move || !session) return;
+  /** A receiver chosen in the cast page: playback moves to it at the second the video is at. */
+  function moveToCast() {
+    if (!session || !lookOrigin) return;
+    castNotice = null;
     castOffered = true;
-    directCastOrigin = discoveredOrigin;
-    chooserOrigin = discoveredOrigin;
+    directCastOrigin = lookOrigin;
     routeBeforeCast = route;
     // A receiver can fetch a signed Hearth playlist over private-LAN HTTP. Keep that already-proven route instead
     // of replacing it with Edge's public relay; the HTTPS Cast sender only hands the URL to the receiver.
@@ -2786,7 +2879,6 @@
       () => {
         castOffered = false;
         directCastOrigin = undefined;
-        chooserOrigin = undefined;
         route = routeBeforeCast;
         castMode = false;
       },
@@ -2795,16 +2887,100 @@
     );
   }
 
-  // The offer, once shown, has the keyboard: its frame is focused, and the cast page focuses its button.
+  /** Pressed while a receiver is connected: Den's Cast menu, under the button the press was on. */
+  function openCastMenu() {
+    const box = castSlot?.getBoundingClientRect();
+    if (box) castMenu?.openAt(box.left, box.top);
+  }
+
+  function stopCasting() {
+    const origin = frameOrigin;
+    if (origin) readyCastFrame(origin)?.postMessage({ type: 'den-stop' }, origin);
+  }
+
+  /** The cast page keeps the model and asks for what it plays (`den-cast-request`), which sets `castProfile`. */
+  function chooseCastProfile(profile: string) {
+    const origin = frameOrigin;
+    if (origin) readyCastFrame(origin)?.postMessage({ type: 'den-profile', profile }, origin);
+  }
+
+  /** Focus into the frame's button, from Tab on Den's side of it or from a menu closing. */
+  function focusCastButton() {
+    const origin = frameOrigin;
+    const frame = origin ? readyCastFrame(origin) : null;
+    if (!origin || !frame) return;
+    castFrame?.focus();
+    frame.postMessage({ type: 'den-focus' }, origin);
+  }
+
+  /**
+   * Tab from the frame's button. The frame sits at the end of the player in its document, apart from the bar it is
+   * drawn in, so the next control is found from the slot's place in the bar instead.
+   */
+  function castTab(back: boolean) {
+    const slot = castSlot;
+    if (!slot) return;
+    const focusable = playerTabStops();
+    const at = focusable.indexOf(slot);
+    const next = focusable[back ? at - 1 : at + 1];
+    if (next) next.focus();
+    else (back ? focusable.at(-1) : focusable[0])?.focus();
+  }
+
+  // The cast page's frame is the Cast button (`castSlot`) or, away from home, the picture: it lies exactly over the one
+  // it is now, measured here, since it cannot move in the document without being reloaded and losing its session.
+  let castFrameBox = $state<{ left: number; top: number; width: number; height: number }>();
+  let stageElement = $state<HTMLElement>();
   $effect(() => {
-    if (castOffer === 'choose') castFrame?.focus();
+    const target = castStage ? stageElement : castSlotShown ? castSlot : undefined;
+    const root = playerRoot;
+    if (!target || !root) {
+      castFrameBox = undefined;
+      return;
+    }
+    const place = () => {
+      const box = target.getBoundingClientRect();
+      const origin = root.getBoundingClientRect();
+      const next = {
+        left: box.left - origin.left,
+        top: box.top - origin.top,
+        width: box.width,
+        height: box.height,
+      };
+      const last = castFrameBox;
+      if (
+        !last ||
+        last.left !== next.left ||
+        last.top !== next.top ||
+        last.width !== next.width ||
+        last.height !== next.height
+      )
+        castFrameBox = next;
+    };
+    place();
+    // A button beside it appearing (an audio track, AirPlay) moves it without resizing it: its row is watched too.
+    const observer = new ResizeObserver(place);
+    observer.observe(target);
+    if (target.parentElement) observer.observe(target.parentElement);
+    observer.observe(root);
+    return () => observer.disconnect();
+  });
+
+  // Back to playing in this page, the frame stays for its button: what it had loaded is let go there.
+  let castFrameLoad: string | undefined;
+  $effect(() => {
+    const current = session;
+    if (current?.castOrigin) castFrameLoad = current.playlist;
+    else if (castFrameLoad && current && !heldFrame && frameOrigin) {
+      castFrameLoad = undefined;
+      untrack(() => readyCastFrame(frameOrigin)?.postMessage({ type: 'den-reset' }, frameOrigin));
+    }
   });
 
   /** Back to the route this page started on, at the second the cast page got to — or the one Cast was pressed at. */
   function leaveCast() {
     castOffered = false;
     directCastOrigin = undefined;
-    chooserOrigin = undefined;
     casting = false;
     route = routeBeforeCast;
     castMode = false;
@@ -2843,15 +3019,6 @@
     return current.external === true || route !== RELAY || playsHome(current);
   }
 
-  // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none. The
-  // window opens when the cast page is asked (`lookOrigin`), so the profile check and the `/config` read before it
-  // are not spent from it: a slow answer there must not read as a network with no Chromecast.
-  $effect(() => {
-    if (castOffer !== 'looking' || !lookOrigin) return;
-    const wait = setTimeout(() => look({ kind: 'deadline' }), castDiscoveryMs);
-    return () => clearTimeout(wait);
-  });
-
   // A session moved to the cast page that shows nothing — no error either, as when neither of its addresses answers
   // and hls.js is still retrying — goes back to the player it left, rather than sitting at 00:00. One that plays in
   // the cast page because this browser is away from home has no other player to go back to: it fails, and says so,
@@ -2877,13 +3044,25 @@
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
+        castNotice = {
+          text: 'The Chromecast didn’t start playing, so it’s playing here again.',
+          retry: moveToCast,
+        };
       } else if (!castOffered && !castMode) void broke(0, why, 'other', 'cast_page_silent');
     }, castPlayMs);
     return () => clearTimeout(wait);
   });
 
-  /** The receiver models the cast page's menu names (`castCapabilities`). */
+  /** The receiver models Den's Cast menu names (`castCapabilities`). */
   const CAST_PROFILES = ['legacy', 'gen3', 'ultra', 'google-tv-hd', 'google-tv-4k', 'streamer'];
+  const CAST_PROFILE_NAMES: Record<string, string> = {
+    legacy: 'Chromecast 1–2',
+    gen3: 'Chromecast 3',
+    ultra: 'Chromecast Ultra',
+    'google-tv-hd': 'Chromecast with Google TV (HD)',
+    'google-tv-4k': 'Chromecast with Google TV (4K)',
+    streamer: 'Google TV Streamer',
+  };
 
   /** Receiver model profiles from Google's published codec matrix. `castProfile` says which one is asked for;
    * `legacy` (H.264 High@4.1, stereo AAC) is the conservative retry after a receiver refused a load. */
@@ -3795,6 +3974,11 @@
   /** The native Den Apple TV exposes this beside its track/stream actions. TV browsers can seek the active decoder
    * directly: the Samsung facade turns this assignment into a serialized AVPlay seek. */
   function playFromBeginning() {
+    if (castView) {
+      seekTo(0);
+      tellReceiver({ type: 'den-play' });
+      return;
+    }
     if (!video) return;
     video.currentTime = 0;
     tvPosition = 0;
@@ -3802,16 +3986,40 @@
   }
 
   function seekBy(seconds: number) {
-    if (!video) return;
     const total = length();
-    video.currentTime = Math.max(
-      0,
-      total ? Math.min(video.currentTime + seconds, total) : video.currentTime + seconds,
-    );
+    const from = video ? video.currentTime : remoteTime;
+    seekTo(Math.max(0, total ? Math.min(from + seconds, total) : from + seconds));
+  }
+
+  /** Den's transport moves the picture here, or the receiver's while casting. */
+  function seekTo(time: number) {
+    if (castView) {
+      if (!seekCastFrame(time)) return;
+      remoteTime = time;
+      tvPosition = time;
+      return;
+    }
+    if (!video) return;
+    video.currentTime = time;
     tvPosition = video.currentTime;
   }
 
+  /** While casting, Den's transport is the receiver's remote: what it asks goes to the cast page's Cast session. */
+  function tellReceiver(message: { type: string; [field: string]: unknown }): boolean {
+    const current = session;
+    if (!castView || !current?.castOrigin) return false;
+    const frame = readyCastFrame(current.castOrigin);
+    if (!frame) return false;
+    frame.postMessage({ ...message, id: current.playlist }, current.castOrigin);
+    return true;
+  }
+
   function togglePlaying() {
+    if (castView) {
+      // Shown at once; the receiver's next progress says whether it did.
+      if (tellReceiver({ type: tvPaused ? 'den-play' : 'den-pause' })) tvPaused = !tvPaused;
+      return;
+    }
     if (!video) return;
     if (video.paused) void video.play();
     else video.pause();
@@ -3828,8 +4036,15 @@
   });
 
   function setVolume(event: Event) {
-    if (!video) return;
     const volume = Number((event.currentTarget as HTMLInputElement).value);
+    if (castView) {
+      if (tellReceiver({ type: 'den-volume', level: volume, muted: volume === 0 })) {
+        playerVolume = volume;
+        playerMuted = volume === 0;
+      }
+      return;
+    }
+    if (!video) return;
     video.volume = volume;
     video.muted = volume === 0;
     playerVolume = volume;
@@ -3837,6 +4052,10 @@
   }
 
   function toggleMuted() {
+    if (castView) {
+      if (tellReceiver({ type: 'den-volume', muted: !playerMuted })) playerMuted = !playerMuted;
+      return;
+    }
     if (!video) return;
     video.muted = !video.muted;
     playerMuted = video.muted;
@@ -3899,9 +4118,11 @@
   function scheduleWebControls() {
     if (!webTransport) return;
     clearTimeout(webControlsTimer);
-    if (!video?.paused && !playerMenuOpen() && !tvSubtitleTimingOpen)
+    // Casting, this page is the remote and there is no picture here to uncover: its controls stay.
+    if (castView) return;
+    if (!video?.paused && !playerMenuOpen() && !tvSubtitleTimingOpen && !castFocus)
       webControlsTimer = setTimeout(() => {
-        if (!playerMenuOpen() && !tvSubtitleTimingOpen) webControlsVisible = false;
+        if (!playerMenuOpen() && !tvSubtitleTimingOpen && !castFocus) webControlsVisible = false;
       }, 3_500);
   }
 
@@ -3934,6 +4155,18 @@
       webControlsVisible = false;
     } else togglePlaying();
   }
+
+  // Becoming the receiver's remote, the transport starts from where the receiver said it was, and stays shown.
+  $effect(() => {
+    if (!castView) return;
+    untrack(() => {
+      tvPaused = remotePaused;
+      tvPosition = remoteTime;
+      tvDuration = length();
+      clearTimeout(webControlsTimer);
+      webControlsVisible = true;
+    });
+  });
 
   // Den's transport only learns the element's state from events while it is shown: taking over mid-playback, it
   // starts from where the element is.
@@ -4708,17 +4941,10 @@
         <span class="source-stamp" data-testid="playback-source">{source}</span>
       {/if}
     {/if}
-    {#if !customTransport && castable && session && !session.castOrigin && canOfferCurrentCast(session)}
-      <Button
-        variant="player"
-        size="icon"
-        class="player-header-action cast"
-        icon="cast"
-        ariaLabel="Cast to a TV"
-        title="Cast to a TV"
-        disabled={castOffer === 'looking' || castOffer === 'choose'}
-        onclick={offerCast}
-      />
+    {#if !customTransport && castSlotShown}
+      {@render castButtonSlot(
+        'den-button den-button-player den-button-icon player-header-action cast',
+      )}
     {/if}
     <Button
       variant="player"
@@ -4786,23 +5012,19 @@
       {/if}
     {/if}
   </div>
-  <div class="stage">
-    {#if session && castOffer !== 'idle'}
-      <!-- Discovery belongs to the Cast control, not the playback layout. Keeping its one stable surface over the
-           picture means neither its arrival nor its longer empty-state copy moves or resizes what is playing. -->
+  <div class="stage" bind:this={stageElement}>
+    {#if castNotice}
+      <!-- A Cast failure belongs to the Cast control, not the playback layout: one stable surface over the picture,
+           which neither moves nor resizes what is playing. -->
+      {@const notice = castNotice}
       <div class="cast-status">
-        {#if castOffer === 'looking'}
-          {@render banner('Looking for a Chromecast…', { busy: true, quiet: true })}
-        {:else if castOffer === 'choose'}
-          {@render banner('A Chromecast is on your network. Choose it below to cast this to it.', {
-            dismiss: () => look({ kind: 'dismissed' }),
-          })}
-        {:else}
-          {@render banner(
-            'No Chromecast found. Check that it is awake and on the same network as this device.',
-            { dismiss: () => (castOffer = 'idle') },
-          )}
-        {/if}
+        {@render banner(i18n.phrase(notice.text), {
+          dismiss: () => (castNotice = null),
+          action:
+            notice.retry && castState === 'connected'
+              ? { label: 'Retry', run: notice.retry }
+              : undefined,
+        })}
       </div>
     {/if}
     {#if failure === 'login'}
@@ -4967,6 +5189,22 @@
             />
           {/each}
         </video>
+      {:else if castView}
+        <!-- The picture is on the TV: what plays there, and where, with Den's transport as its remote below. -->
+        <div class="cast-view">
+          {#if title.posterPath}
+            <img src={`https://image.tmdb.org/t/p/w500${title.posterPath}`} alt="" />
+          {/if}
+          <p role="status">
+            {casting
+              ? i18n.format('player.castingTo', 'Casting to {device}', {
+                  device: castDevice ?? 'Chromecast',
+                })
+              : i18n.phrase('Connecting to the Chromecast…')}
+          </p>
+        </div>
+      {/if}
+      {#if !session?.castOrigin || castView}
         {#if customTransport}
           <nav class="tv-transport full-tv-transport" aria-label="Playback controls">
             <div class="tv-timeline">
@@ -4986,13 +5224,14 @@
                 oninput={(event) => {
                   const to = Number(event.currentTarget.value);
                   tvPosition = to;
-                  // A finger drag follows the finger to the second, and is sought once, where it is let go.
-                  if (!scrubbing && video) video.currentTime = to;
+                  // A finger drag follows the finger to the second, and a receiver is asked once the thumb is let
+                  // go: both are sought at `change`, not at every step.
+                  if (!scrubbing && !castView) seekTo(to);
                 }}
                 onchange={(event) => {
-                  if (!scrubbing) return;
+                  if (!scrubbing && !castView) return;
                   scrubbing = false;
-                  if (video) video.currentTime = Number(event.currentTarget.value);
+                  seekTo(Number(event.currentTarget.value));
                 }}
               />
               <span aria-hidden="true">−{clockTime(Math.max(0, tvDuration - tvPosition))}</span>
@@ -5138,29 +5377,6 @@
           })}
         {/if}
       {/if}
-    {/if}
-    {#if frameOrigin && (lookOrigin || chooserOrigin || heldFrame || (session?.castOrigin && !failure))}
-      {@const shown = (!!session?.castOrigin || !!heldFrame) && !failure}
-      {@const choosing = !shown && castOffer === 'choose'}
-      <!-- The cast page: unseen while it looks for a receiver, a "Choose your Chromecast" button while it offers one,
-           then the player or the receiver's remote. One frame throughout, so the Cast session chosen in it is kept.
-           `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
-           and Chrome lets a cross-origin frame reach a private address only when the page delegates it. -->
-      <iframe
-        bind:this={castFrame}
-        class:cast-look={!shown && !choosing}
-        class:cast-choose={choosing}
-        title={shown
-          ? 'Den Cast player'
-          : choosing
-            ? 'Choose your Chromecast'
-            : 'Looking for a Chromecast'}
-        inert={!shown && !choosing}
-        src={frameOrigin}
-        allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
-        sandbox="allow-scripts allow-same-origin allow-presentation"
-        onload={castFrameLoaded}
-      ></iframe>
     {/if}
   </div>
   {#if fullTvTransport && tvDetailsOpen && session}
@@ -5367,17 +5583,8 @@
               aria-label={next ? `Next: ${next}` : 'Next episode'}
               onclick={advanceLink}>{@render nextIcon()}</a
             >{/if}
-          {#if webTransport && castable && !session.castOrigin && canOfferCurrentCast(session)}
-            <Button
-              variant="player"
-              size="icon"
-              class="player-tv-action output-action"
-              icon="cast"
-              ariaLabel="Cast to a TV"
-              title="Chromecast"
-              disabled={castOffer === 'looking' || castOffer === 'choose'}
-              onclick={offerCast}
-            />
+          {#if webTransport && castSlotShown}
+            {@render castButtonSlot('player-tv-action output-action')}
           {/if}
           {#if webTransport && airPlayCapable}
             <Button
@@ -5436,7 +5643,73 @@
       </div>
     </footer>
   {/if}
+  {#if frameOrigin && (lookOrigin || heldFrame || (session?.castOrigin && !failure))}
+    <!-- The cast page, one frame throughout so the Cast session started in it is kept. It is the Cast button, lying
+         exactly over Den's button surface (`castSlot`): only a press inside it can open Chrome's device list, since
+         user activation does not pass into a cross-origin frame. Away from home it is also the picture, playing the
+         session itself. Its place here is fixed and it is moved by measurement (`castFrameBox`): moved in the
+         document, it would reload and drop the Cast session. `local-network-access`: at home the cast page plays from
+         den-remux's home-network address (`lanBase`), and Chrome lets a cross-origin frame reach a private address
+         only when the page delegates it. As the button it is out of the Tab order: Tab reaches it through its slot. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <iframe
+      bind:this={castFrame}
+      class="cast-frame"
+      class:cast-frame-stage={castStage}
+      class:cast-frame-unplaced={!castFrameBox}
+      class:cast-focused={castFocus === 'keyboard'}
+      style:left={castFrameBox ? `${castFrameBox.left}px` : undefined}
+      style:top={castFrameBox ? `${castFrameBox.top}px` : undefined}
+      style:width={castFrameBox ? `${castFrameBox.width}px` : undefined}
+      style:height={castFrameBox ? `${castFrameBox.height}px` : undefined}
+      title={castStage ? 'Den Cast player' : 'Cast'}
+      tabindex={castStage ? undefined : -1}
+      inert={!castFrameBox}
+      src={frameOrigin}
+      allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
+      sandbox="allow-scripts allow-same-origin allow-presentation"
+      onload={castFrameLoaded}
+    ></iframe>
+    <!-- Pressing the Cast button while a receiver is connected opens this, beside it: the frame is a button, with no
+         room for a menu of its own. -->
+    <ActionMenu
+      bind:this={castMenu}
+      label="Cast options"
+      heading={castDevice
+        ? i18n.format('player.castingTo', 'Casting to {device}', { device: castDevice })
+        : 'Chromecast'}
+      note="Which Chromecast is it? Den sends what that model can play."
+      triggerClass="cast-menu-trigger"
+      onclose={focusCastButton}
+      items={() => [
+        { kind: 'item', label: 'Stop casting', onselect: stopCasting },
+        ...CAST_PROFILES.map((profile) => ({
+          kind: 'radio' as const,
+          group: 'cast-profile',
+          label: CAST_PROFILE_NAMES[profile]!,
+          checked: profile === castProfile,
+          onselect: () => chooseCastProfile(profile),
+        })),
+      ]}
+    >
+      {#snippet glyph()}<ButtonIcon name="cast" />{/snippet}
+    </ActionMenu>
+  {/if}
 </div>
+
+{#snippet castButtonSlot(classes: string)}
+  <!-- Den's own button surface for Cast: its look, hover and focus ring, under the cast page's frame, which draws the
+       glyph and takes the press. Tab lands here and is handed into the frame's button. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <span
+    bind:this={castSlot}
+    class="{classes} cast-slot"
+    class:cast-hover={castHover}
+    class:cast-focused={castFocus === 'keyboard'}
+    tabindex="0"
+    onfocus={focusCastButton}
+  ></span>
+{/snippet}
 
 {#snippet skipIcon(direction: 'back' | 'forward')}
   <svg class="skip-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
@@ -5657,8 +5930,7 @@
     transform: translateX(-50%);
   }
 
-  video,
-  iframe {
+  video {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -5667,33 +5939,104 @@
     border: 0;
   }
 
-  /* Chromium can ring both the video host and the focused native control inside its shadow tree. The native
-     play/timeline control remains visibly focused; remove only the redundant rectangle around the whole picture. */
-  video:focus {
-    outline: none;
+  /* The cast page's frame, placed over whichever it is now (`castFrameBox`): the Cast button, above the bars it sits
+     in, with nothing of its own but the glyph (`color-scheme` matches the page's, or Chromium paints the frame an
+     opaque ground). */
+  .cast-frame {
+    position: absolute;
+    z-index: 6;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color-scheme: dark;
+    transition:
+      opacity 180ms ease,
+      transform 120ms ease;
   }
 
-  /* Out of sight and out of the way of the video's controls, but rendered, so the Cast SDK in it runs as usual. */
-  iframe.cast-look {
-    inset: auto;
+  /* Away from home it is the picture, under the player's own bars. */
+  .cast-frame-stage {
+    z-index: auto;
+    border-radius: 0;
+    background: #000;
+  }
+
+  /* Before it has a place, rendered but unseen, so the Cast SDK in it runs as usual. */
+  .cast-frame-unplaced {
+    top: 0;
+    left: 0;
     width: 1px;
     height: 1px;
     opacity: 0;
     pointer-events: none;
   }
 
-  /* The cast page's own "Choose your Chromecast" button, under the offer's notice: only a press in that page can
-     open Chrome's device list. */
-  iframe.cast-choose {
-    /* Above the owned player's header gradient and buttons: this is the one cross-origin press that may open
-       Chrome's receiver chooser, so looking visible while the header intercepted it made Cast appear inert. */
-    z-index: 8;
-    top: calc(12px + 76px + 8px);
-    left: 50%;
-    width: min(18rem, calc(100% - 24px));
-    height: 48px;
-    border-radius: 999px;
-    transform: translateX(-50%);
+  .web-controls-hidden > .cast-frame:not(.cast-frame-stage) {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .web-custom-player > .cast-frame.cast-focused {
+    transform: scale(1.06);
+  }
+
+  /* A 44px target wherever it is drawn, whatever classes it borrows its look from. */
+  .cast-slot {
+    display: inline-block;
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+  }
+
+  /* The frame's button has the keyboard: Den's ring, on Den's surface under it. */
+  .cast-slot.cast-focused {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: var(--ring-offset);
+  }
+
+  :global(.den-button.cast-slot.cast-hover) {
+    border-color: var(--button-hover-border, var(--button-border));
+    background-color: var(--button-hover-bg, var(--button-bg));
+  }
+
+  /* Den's Cast menu opens from the frame's button, never from a trigger of its own. */
+  :global(button.trigger.cast-menu-trigger) {
+    display: none;
+  }
+
+  /* Casting: the poster and where it plays, clear of the transport below. */
+  .cast-view {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    gap: 16px;
+    place-content: center;
+    justify-items: center;
+    padding: 24px;
+    color: rgb(255 255 255 / 0.86);
+    text-align: center;
+  }
+
+  .cast-view img {
+    width: auto;
+    max-width: 40vw;
+    height: min(320px, 38vh);
+    aspect-ratio: 2 / 3;
+    border-radius: 12px;
+    object-fit: cover;
+    box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
+  }
+
+  .cast-view p {
+    margin: 0;
+    font-weight: 600;
+  }
+
+  /* Chromium can ring both the video host and the focused native control inside its shadow tree. The native
+     play/timeline control remains visibly focused; remove only the redundant rectangle around the whole picture. */
+  video:focus {
+    outline: none;
   }
 
   form {
@@ -6015,6 +6358,10 @@
     inset: 0;
   }
 
+  .web-custom-player .cast-view {
+    padding-block: 88px 220px;
+  }
+
   .web-custom-player video {
     cursor: pointer;
   }
@@ -6233,8 +6580,13 @@
     background: rgb(255 255 255 / 0.26);
   }
 
+  .web-custom-player footer .cast-slot.cast-hover {
+    background: rgb(255 255 255 / 0.26);
+  }
+
   .web-custom-player .full-tv-transport button:focus-visible,
   .web-custom-player footer .player-tv-action:focus-visible,
+  .web-custom-player footer .cast-slot.cast-focused,
   .web-custom-player footer .pick-menu :global(.trigger.pick:focus-visible) {
     border-color: transparent;
     outline: var(--ring-width) solid #fff;

@@ -33,6 +33,21 @@ function target() {
 const correlation = () => '0123456789abcdef';
 
 describe('FailureReporter production transport', () => {
+  it('sends with the page’s own fetch, which refuses any other receiver as browsers do', async () => {
+    const sent: unknown[] = [];
+    vi.stubGlobal('fetch', function (this: unknown, input: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+      sent.push(input);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    try {
+      new FailureReporter({ correlation }).report(base);
+      await vi.waitFor(() => expect(sent).toEqual(['/diagnostics/failure']));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('copies only allowlisted fields and drops unsafe text rather than trying to scrub it', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     const reporter = new FailureReporter({ fetchImpl, correlation });

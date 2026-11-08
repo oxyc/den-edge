@@ -271,7 +271,9 @@ export class FailureReporter {
   #controller?: { operation: FailureOperation; generation?: number; value: AbortController };
 
   constructor(options: FailureReporterOptions = {}) {
-    this.#fetch = options.fetchImpl ?? fetch;
+    // Called as `this.#fetch(…)`, the native fetch would get this reporter as its receiver, which browsers refuse
+    // ("Illegal invocation"): every report was retried once and dropped, and none reached den-edge.
+    this.#fetch = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.#now = options.now ?? Date.now;
     this.#online = options.online ?? (() => globalThis.navigator?.onLine !== false);
     this.#target = options.target ?? (typeof window === 'undefined' ? undefined : window);

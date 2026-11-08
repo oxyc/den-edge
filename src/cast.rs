@@ -190,12 +190,11 @@ async fn response(path: PathBuf, immutable: bool) -> Response<Body> {
         Some("png") => "image/png",
         _ => "application/octet-stream",
     };
-    // Inline styles are allowed because the Cast SDK reveals `<google-cast-launcher>` by setting its `style`; under
-    // `style-src 'self'` the button stays `display: none` and nothing can be cast. Google serves the SDK unversioned,
-    // so a hash of today's style would break on its next update. Scripts stay strict, and the page draws no user
-    // content.
+    // No inline style or script: the page's Cast button is its own, not Google's `<google-cast-launcher>` (which
+    // revealed itself through its `style` attribute and needed 'unsafe-inline'). The player's colour reaches the
+    // button through the CSSOM, which `style-src` does not govern. The page draws no user content.
     let csp = format!(
-        "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; \
+        "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; \
          img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
          base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
     );
@@ -235,7 +234,7 @@ mod tests {
 
     fn expected_csp() -> String {
         format!(
-            "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; \
+            "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; \
              img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
              base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
         )
@@ -334,17 +333,16 @@ mod tests {
         );
     }
 
-    /// The Cast SDK reveals its launcher with an inline style, which the page's policy must admit; its scripts stay
-    /// limited to the page's own and the SDK's.
+    /// The page admits no inline style or script: its styles and scripts are its own, plus the Cast SDK's script.
     #[tokio::test]
-    async fn the_cast_page_admits_inline_styles_and_no_inline_script() {
+    async fn the_cast_page_admits_no_inline_style_or_script() {
         let h = harness();
         let resp = h.send("GET", "/", None, &[("host", "cast.example")]).await;
         let csp = resp.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
         let directive = |name: &str| {
             csp.split(';').map(str::trim).find(|d| d.starts_with(&format!("{name} "))).unwrap().to_owned()
         };
-        assert_eq!(directive("style-src"), "style-src 'self' 'unsafe-inline'");
+        assert_eq!(directive("style-src"), "style-src 'self'");
         assert_eq!(directive("script-src"), "script-src 'self' https://www.gstatic.com");
     }
 
