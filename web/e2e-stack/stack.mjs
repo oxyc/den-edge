@@ -489,6 +489,9 @@ export async function startStack() {
     REMUX_MAX_SESSIONS: '64',
     REMUX_MAX_SESSIONS_PER_INSTALL: '64',
     REMUX_EDGE_SECRET: SECRET,
+    // den-edge is the proxy whose `x-forwarded-for` names the viewer, as the box trusts it: without
+    // this every device of the file shared one budget of new sessions a minute, and a flow late in the file met 429s.
+    REMUX_TRUSTED_PROXIES: '127.0.0.1',
     REMUX_PUBLIC_SESSION_PROXY: '127.0.0.1',
     REMUX_EDGE_REPORT_URL: `http://127.0.0.1:${reportPort}`,
     REMUX_WEB_ORIGINS: `${EDGE},${castOrigin}`,
