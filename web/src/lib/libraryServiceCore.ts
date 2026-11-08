@@ -467,9 +467,12 @@ export class LibraryServiceCore {
       request.command,
       request.operationId,
     );
+    // A source lookup reads the installed plugins and the private addresses, which is the `runtime` selection. Only a
+    // change to those makes a lookup in flight stale. `connections` also changes for a device heartbeat, or for any
+    // write still waiting to reach den-edge (its sync status), and aborting on those failed a viewer's lookup.
     if (
       outcome === 'applied' &&
-      affected.some((scope) => scope.kind === 'connections' || scope.kind === 'runtime')
+      affected.some((scope) => scope.kind === 'runtime' || scope.kind === 'all')
     )
       for (const controller of this.#queryControllers.values()) controller.abort();
     if (outcome === 'applied') this.#revision++;
