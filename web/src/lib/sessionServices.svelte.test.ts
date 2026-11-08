@@ -761,6 +761,40 @@ describe('SessionServices', () => {
     services.stop();
   });
 
+  /**
+   * A guest (no library, so nothing retained) or a profile never opened here, while den-edge is down: atlas is
+   * neither found nor absent. The screens built on it say so, and `retry` (their Retry, or den-edge answering again)
+   * runs discovery again without a reload.
+   */
+  it('says atlas is unreachable when nothing names it, and finds it again on retry', async () => {
+    atlasUnreachable = true;
+    discoveries = 0;
+    const services = new SessionServices(null, content, async () => ({}));
+    services.configure(runtime());
+    await vi.waitFor(() => expect(services.atlasUnreachable).toBe(true));
+    expect(services.atlasReady).toBe(false);
+
+    // Retry while it is still down: asked again, and still unreachable.
+    services.retry();
+    expect(services.atlasUnreachable).toBe(false);
+    await vi.waitFor(() => expect(discoveries).toBe(2));
+    await vi.waitFor(() => expect(services.atlasUnreachable).toBe(true));
+
+    // den-edge is back.
+    atlasUnreachable = false;
+    services.retry();
+    await vi.waitFor(() => expect(services.atlasReady).toBe(true));
+    expect(discoveries).toBe(3);
+    expect(services.atlas).toBe('/atlas-3');
+    expect(services.atlasUnreachable).toBe(false);
+
+    // Once found, each later answer from den-edge asks nothing more.
+    services.retry();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(discoveries).toBe(3);
+    services.stop();
+  });
+
   it('treats a rejected retained hint as a cache miss', async () => {
     const services = new SessionServices(
       fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),

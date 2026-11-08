@@ -328,6 +328,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Tillägg får inte underlätta åtkomst till innehåll som du saknar behörighet till. Du ansvarar för att din användning följer tillämplig lag och innehållsägarnas rättigheter.',
   'Den Reel': 'Den Reel',
   'Den Scout': 'Den Scout',
+  'Den’s server can’t be reached right now.': 'Dens server går inte att nå just nu.',
   'Den’s server can’t be reached. You’re seeing what this device saved, so some titles may be missing or out of date.':
     'Dens server går inte att nå. Du ser det som den här enheten sparade, så vissa titlar kan saknas eller vara inaktuella.',
   'Den stops syncing your watch history with it, on every device.':

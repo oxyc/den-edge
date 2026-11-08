@@ -45,6 +45,11 @@ export class SessionServices {
   scout = $state.raw<Addon | null>(null);
   atlas = $state<string | null>(null);
   atlasReady = $state(false);
+  /**
+   * Atlas couldn't be reached and nothing this browser retained names it (a first visit, or a profile never opened
+   * here): not an answer, so a screen built on atlas says so and offers `retry`, rather than loading until a reload.
+   */
+  atlasUnreachable = $state(false);
   reel = $state<string | null>(null);
   routes = $state.raw<Routes>({});
   remux = $state<string | null>(null);
@@ -68,6 +73,8 @@ export class SessionServices {
   #foregroundReady = false;
   #atlasGeneration = 0;
   #atlasAcknowledgedGeneration = 0;
+  /** The current discovery run's inputs, run again by `retry`. */
+  #rerun?: () => void;
   readonly #model: LibraryModel | null;
 
   constructor(
@@ -77,6 +84,17 @@ export class SessionServices {
     private readonly grants: Grants = guestGrants,
   ) {
     this.#model = model;
+  }
+
+  /**
+   * Discover again, once atlas couldn't be reached: the screen's Retry, or den-edge answering again, which is what
+   * clears the saved-copy notice (the content Worker's `kept` status, heard in `Library`).
+   */
+  retry(): void {
+    if (!this.atlasUnreachable || this.#stopped) return;
+    this.atlasUnreachable = false;
+    this.#for = 'invalidated';
+    this.#rerun?.();
   }
 
   /**
@@ -100,6 +118,7 @@ export class SessionServices {
         // acknowledged, nor a ready flag paired with a stale address.
         this.atlas = base;
         this.atlasReady = true;
+        this.atlasUnreachable = false;
         this.#atlasAcknowledgedGeneration = generation;
         this.#settled();
       },
@@ -224,6 +243,7 @@ export class SessionServices {
     this.debrid = null;
     this.atlas = null;
     this.atlasReady = false;
+    this.atlasUnreachable = false;
     this.reel = null;
     this.remux = null;
     this.remuxAway = false;
@@ -238,6 +258,7 @@ export class SessionServices {
     shared: readonly string[] = this.grants.pluginUrls(),
   ): void {
     if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
+    this.#rerun = () => this.#configure(library, libraryPlugins, remux, shared);
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
     );
@@ -374,7 +395,10 @@ export class SessionServices {
           : {}),
         atlas: (found) => {
           if (!current) return;
-          if (found === undefined) return;
+          if (found === undefined) {
+            if (!this.atlasReady) this.atlasUnreachable = true;
+            return;
+          }
           liveAtlas = true;
           this.#configureAtlas(found?.base ?? null, () => current);
         },

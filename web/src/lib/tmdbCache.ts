@@ -5,7 +5,7 @@
 // TMDB for what it showed last time; an older one TMDB can't refresh is served stale rather than not at all, and
 // nothing is kept past TMDB's six-month limit on cached content.
 
-import { keptAnswerServed, providerAnswered } from './keptAnswers';
+import { keptAnswerServed, providerAnswered, providerUnreachable } from './keptAnswers';
 import { transactions } from './localVault';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
@@ -583,6 +583,7 @@ export function cachingFetch(
           if (res.status >= 500) keptAnswerServed('tmdb');
           return keptAnswer(kept);
         }
+        if (res.status >= 500) providerUnreachable();
         return res;
       }
       providerAnswered('tmdb');
@@ -598,6 +599,7 @@ export function cachingFetch(
         return keptAnswer(kept);
       }
       if (kept) return keptAnswer(kept);
+      if (!init?.signal?.aborted) providerUnreachable();
       throw error;
     }
   };

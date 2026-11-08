@@ -17,6 +17,7 @@
   import Browse from './Browse.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
+  import ServerUnreachable from './ServerUnreachable.svelte';
   import TypeFilter from './TypeFilter.svelte';
 
   let {
@@ -25,6 +26,8 @@
     content,
     atlas = null,
     atlasReady = true,
+    atlasUnreachable = false,
+    onretry = () => {},
     minYear,
     excludedLanguages = new Set<string>(),
     reel = null,
@@ -42,6 +45,10 @@
     atlas?: string | null;
     /** False while addon discovery is unresolved; null Atlas is final only once this becomes true. */
     atlasReady?: boolean;
+    /** The search for atlas couldn't reach Den's server: the page says so rather than loading on. */
+    atlasUnreachable?: boolean;
+    /** Search for atlas again. */
+    onretry?: () => void;
     /** Settings' release-year floor, applied to every row here as it is everywhere else. */
     minYear?: number;
     /** Settings' excluded languages: a row about nothing else is not offered here either. */
@@ -78,6 +85,8 @@
 
   /** A pick can name a variant TMDB has since demoted, so the directory is searched by fold, not by id. */
   const service = $derived(directory?.find((entry) => matches(entry, id)) ?? null);
+  /** The rows wait on atlas discovery, which couldn't reach Den's server. */
+  const waiting = $derived(!atlasReady && atlasUnreachable);
   /** Which of a service's catalogue is shown; null is all of it. Offered only where the service carries both. */
   let tab = $state<MediaType | null>(null);
   const both = $derived(!!service?.movies && !!service.series);
@@ -163,8 +172,15 @@
   <div class="hero branded">
     <!-- Billboard reserves its final responsive height even with no titles. Keeping it mounted makes directory,
          atlas, poster and trailer latency unable to move the service rows below it. -->
-    <Billboard titles={featured} {content} {reel} {routes} {active} loading={heroLoading} />
-    {#if heroLoading}
+    <Billboard
+      titles={featured}
+      {content}
+      {reel}
+      {routes}
+      {active}
+      loading={heroLoading && !waiting}
+    />
+    {#if heroLoading && !waiting}
       <div class="hero-loading"><Loading label="Loading featured titles" /></div>
     {/if}
     <header class="brand">
@@ -186,7 +202,11 @@
       <TypeFilter value={tab} onchange={(value) => (tab = value)} label="Show on this service" />
     </div>
   {/if}
-  <Browse {rows} {shown} {build} />
+  {#if waiting}
+    <ServerUnreachable {onretry} />
+  {:else}
+    <Browse {rows} {shown} {build} />
+  {/if}
 {:else if unreachable}
   <p class="note">Couldn’t reach the service directory. Check your connection and try again.</p>
 {:else if directory}

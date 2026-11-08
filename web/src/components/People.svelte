@@ -11,6 +11,7 @@
   import ExploreTabs from './ExploreTabs.svelte';
   import FacetSuggestions from './FacetSuggestions.svelte';
   import Loading from './Loading.svelte';
+  import ServerUnreachable from './ServerUnreachable.svelte';
   import Picks from './Picks.svelte';
   import SearchResults from './SearchResults.svelte';
   import TypeFilter from './TypeFilter.svelte';
@@ -70,6 +71,8 @@
     content,
     atlas,
     atlasReady = true,
+    atlasUnreachable = false,
+    onretry = () => {},
   }: {
     /** What is browsed, from the address. */
     view?: PeopleView;
@@ -77,6 +80,10 @@
     atlas: string | null;
     /** Whether the search for atlas has finished: until then, no atlas is not yet an answer. */
     atlasReady?: boolean;
+    /** The search for atlas couldn't reach Den's server (`SessionServices.atlasUnreachable`). */
+    atlasUnreachable?: boolean;
+    /** Search for atlas again. */
+    onretry?: () => void;
   } = $props();
 
   const type = $derived<ExploreType>(view.type ?? 'all');
@@ -437,7 +444,11 @@
   }
 </script>
 
-<section class="people" aria-label="People" aria-busy={total === null && !done}>
+<section
+  class="people"
+  aria-label="People"
+  aria-busy={total === null && !done && !atlasUnreachable}
+>
   <ExploreTabs
     current="people"
     explore={searchHref('', exploreFromPeople(view))}
@@ -445,6 +456,8 @@
   />
   {#if !atlas && atlasReady}
     <p class="note">People comes from atlas, which this page can’t reach right now.</p>
+  {:else if !atlas && atlasUnreachable}
+    <ServerUnreachable {onretry} />
   {:else if !atlas}
     <Loading label="Loading" />
   {:else}
