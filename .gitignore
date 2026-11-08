@@ -20,4 +20,5 @@
 /web/test-results-tv
 /web/test-results-keyboard
 /web/test-results-keyboard-port
+/web/test-results-stack
 /web/playwright-report
