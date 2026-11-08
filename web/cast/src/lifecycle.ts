@@ -1,5 +1,4 @@
 export type CastIdleAction = 'finished' | 'error' | 'replaced' | 'stopped' | 'pending';
-export type CastErrorAction = 'retry-receiver' | 'stop-receiver';
 
 /**
  * Interpret the idle reason carried by the Cast media session, not by RemotePlayer. IDLE with no reason is a receiver
@@ -28,9 +27,4 @@ export function statusShown(text: string): boolean {
 /** What the pill says while a Cast receiver plays it, so it is never unclear where the picture is. */
 export function castingTo(device: string | null | undefined): string {
   return `Casting to ${device?.trim() || 'your TV'}`;
-}
-
-/** Keep the Cast session for one conservative retry, then end it if that fallback also fails. */
-export function castErrorAction(terminal: boolean): CastErrorAction {
-  return terminal ? 'stop-receiver' : 'retry-receiver';
 }

@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  castErrorAction,
-  castIdleAction,
-  castingTo,
-  PLAYING_HERE,
-  statusShown,
-} from '../../cast/src/lifecycle';
+import { castIdleAction, castingTo, PLAYING_HERE, statusShown } from '../../cast/src/lifecycle';
 
 describe('Cast status pill', () => {
   it('stays off the video unless it says something the picture does not', () => {
@@ -46,10 +40,5 @@ describe('Cast idle lifecycle', () => {
     expect(castIdleAction('ERROR', false)).toBe('error');
     expect(castIdleAction('INTERRUPTED', true)).toBe('replaced');
     expect(castIdleAction('INTERRUPTED', false)).toBe('stopped');
-  });
-
-  it('keeps the receiver for one conservative retry, then stops on a terminal attempt', () => {
-    expect(castErrorAction(false)).toBe('retry-receiver');
-    expect(castErrorAction(true)).toBe('stop-receiver');
   });
 });

@@ -455,6 +455,8 @@
   let castDevice = $state<string>();
   /** A Cast failure in plain words, with a way back when this page can offer one. */
   let castNotice = $state<{ text: string; retry?: () => void } | null>(null);
+  /** This move to Cast has spent its one retry of a TorBox stream the receiver couldn't play. */
+  let castRetried = false;
   /** Where the Cast button is drawn: Den's own button surface, which the cast page's frame lies exactly over. */
   let castSlot = $state<HTMLElement>();
   /** The frame's button has focus — from the keyboard, so Den's focus ring shows — or the pointer is over it. */
@@ -2503,7 +2505,6 @@
               name: track.name,
               url: track.castUrl!,
             }))[0],
-          terminal: degraded || current.video?.transcoded === true || castProfile === 'legacy',
           external: current.external === true,
         },
       },
@@ -2756,10 +2757,25 @@
         failure = 'protocol';
         return;
       }
-      // A receiver failure of a managed direct URL is one explicit Hearth fallback. It keeps Cast intent and sends
-      // directFailed=true, so Hearth alone chooses the Remux session that replaces it.
+      // A TorBox stream the receiver couldn't play stays TorBox: Den Remux is used only when the viewer picks it. A
+      // fresh TorBox stream of the same release is tried once on the receiver, then the viewer is told and playback
+      // carries on here. The Cast session is kept either way; only Stop casting ends it.
       if (current.external) {
-        void broke(0, message.message ?? 'cast player failed', 'decode', 'cast_page_error');
+        if (!castRetried) {
+          castRetried = true;
+          restart(
+            sameStream(current),
+            undefined,
+            'direct',
+            showTransition('Trying the Chromecast again…'),
+          );
+          return;
+        }
+        leaveCast();
+        castNotice = {
+          text: 'The Chromecast couldn’t play this TorBox release, so it’s playing here again.',
+          retry: moveToCast,
+        };
         return;
       }
       // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
@@ -2876,10 +2892,27 @@
     })();
   });
 
+  /**
+   * The stream playing, to ask for again on another player: its release and, for TorBox, the built-in subtitle burned
+   * into it. Asked for by release alone, Hearth hands over TorBox's stream without that subtitle, and `begin` then asks
+   * again for the one with it: a second hand-off, and a second LOAD on a receiver, seconds after the first.
+   */
+  function sameStream(current: Session): { filename: string; subtitleTrack?: number } {
+    return {
+      filename: current.release.filename,
+      ...(current.external &&
+      current.torboxSubtitle !== null &&
+      current.torboxSubtitle !== undefined
+        ? { subtitleTrack: current.torboxSubtitle }
+        : {}),
+    };
+  }
+
   /** A receiver chosen in the cast page: playback moves to it at the second the video is at. */
   function moveToCast() {
     if (!session || !lookOrigin) return;
     castNotice = null;
+    castRetried = false;
     castOffered = true;
     directCastOrigin = lookOrigin;
     routeBeforeCast = route;
@@ -2896,7 +2929,7 @@
     // A TorBox stream is cast as TorBox only: Remux is not a usable path to a Chromecast for remote households, so a
     // receiver Hearth says can't take this release (`torbox_receiver_unsupported`) is refused and named, not remuxed.
     restart(
-      { filename: session.release.filename },
+      sameStream(session),
       () => {
         castOffered = false;
         directCastOrigin = undefined;
@@ -3007,7 +3040,7 @@
     castMode = false;
     if (session) {
       const pending = showTransition('Returning here…');
-      restart({ filename: session.release.filename }, undefined, undefined, pending);
+      restart(sameStream(session), undefined, undefined, pending);
     }
   }
 
