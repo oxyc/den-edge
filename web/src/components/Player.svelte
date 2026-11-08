@@ -6155,7 +6155,7 @@
     gap: 4px 12px;
     align-items: center;
     box-sizing: border-box;
-    width: max-content;
+    width: fit-content;
     max-width: min(100%, 36rem);
     margin: 0;
     padding: 8px 8px 8px 14px;

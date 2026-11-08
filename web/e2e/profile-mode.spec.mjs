@@ -11,7 +11,10 @@ async function open(page, enabled, suffix = '') {
   await guardNetwork(page);
   await page.route('**/capabilities/profiles', (route) =>
     enabled
-      ? route.fulfill({ headers: { 'cache-control': 'no-store' }, json: { enabled: true } })
+      ? route.fulfill({
+          headers: { 'cache-control': 'no-store' },
+          json: { enabled: true, ...(enabled === 'preview' ? { preview: true } : {}) },
+        })
       : route.fulfill({
           status: 404,
           headers: { 'cache-control': 'no-store' },
@@ -984,10 +987,17 @@ test('TV remote follows profile row order when modal geometry cannot distinguish
 test('an authorized Owner handoff targets Owner directly and continues only after PIN success', async ({
   page,
 }) => {
-  await open(page, true, '?pin=1234');
-  await page.getByLabel('Owner PIN').fill('1234');
-  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
-  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000002',
+      }),
+    ),
+  );
+  await open(page, 'preview', '?pin=1234');
   await expect(page.locator('[data-mode]')).toHaveText('Kids active');
 
   await page.evaluate(() => {

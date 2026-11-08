@@ -135,7 +135,13 @@ if (process.argv.includes('--capture')) {
   // (202,635 -> 202,878). Its presentation, localized copy and result controller remain in the existing assistant
   // chunk; only the session/foreground/retry fence stays before that import because splitting it would let replacement
   // authority publish stale work. Allow the next 128-byte boundary, retaining 46 bytes on the matched build.
-  if (initialDelta > Math.min(6528, Math.floor(baseline.initialGzip * 0.034)))
+  // Tizen 3 receipt exclusion and its durable Owner handoff add 338 gzip bytes at startup on matched base/head
+  // builds after replacing the Visitor proxy snapshot with the existing JSON persistence boundary. Player copy,
+  // layout and D-pad recovery stay in the existing lazy Player/remote chunks; receipt crypto already stays in the
+  // existing lazy assistant chunk and is compile-time absent on Tizen 3. The remaining Library/ProfileSwitcher
+  // authority must be present before playback closes or an Owner transition begins, so another split would add a
+  // request to the only recovery path. Allow the next 384-byte boundary, retaining 173 bytes on this build.
+  if (initialDelta > Math.min(6912, Math.floor(baseline.initialGzip * 0.036)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -257,5 +263,7 @@ if (process.argv.includes('--capture')) {
   // catalogs. The remaining growth is the typed failure/retirement result, cancelable ACK, durable shared/local
   // readbacks and bounded status lifecycle; another lazy split cannot reduce complete-graph bytes. The current-main
   // ceiling already retains 251 bytes on the matched head, so no complete-graph allowance is added here.
-  if (coreTotalDelta > 90240) throw new Error('Browser total JS/CSS budget exceeded');
+  // The same Tizen 3 recovery contract adds 500 gzip bytes to the complete non-translation graph after the startup
+  // trim above. Keep it within the next 512-byte boundary, retaining 140 bytes against the fixed baseline.
+  if (coreTotalDelta > 90752) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -1746,10 +1746,13 @@
   ) {
     if (!model && !profileActivity) return;
     const { title, season, episode } = target;
-    remember(title);
+    // `playing` is deep reactive state, so its title is a Svelte proxy. Visitor activity persists JSON-safe title
+    // metadata; cross that same serialization boundary before its structured clone sees the proxy.
+    const progressTitle = profileActivity ? (JSON.parse(JSON.stringify(title)) as Title) : title;
+    remember(progressTitle);
     return profileActivity
       ? profileActivity.recordProgress(
-          title,
+          progressTitle,
           fraction,
           seconds,
           season !== undefined && episode !== undefined ? { season, episode } : undefined,

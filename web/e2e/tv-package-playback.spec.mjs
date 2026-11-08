@@ -122,7 +122,9 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
       return recovery.evaluate((element) => element === document.activeElement);
     })
     .toBe(true);
-  await remoteKey(page, 'Enter', 13);
+  // Native Enter activation supplies the browser's button click after the player's capture handler leaves the
+  // focused action alone; a synthetic dispatchEvent has no default activation behaviour.
+  await page.keyboard.press('Enter');
   releasePlayback();
   await expect(page.getByTestId('receipt-settings-count')).toHaveText('1');
   await expect(page.getByTestId('player-close-count')).toHaveText('1');

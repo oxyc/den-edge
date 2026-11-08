@@ -209,6 +209,17 @@ export function installTvRemote(actions: TvRemoteActions): () => void {
         fallback?.focus({ preventScroll: true });
         return !!fallback;
       }
+      // A notice's dismiss glyph may own startup focus even though its primary recovery action is beside it, not
+      // geometrically above or below it. A direction key from that dead-end must still reach the useful action.
+      if (current.matches('.notice-dismiss')) {
+        const action = current
+          .closest<HTMLElement>('.notice')
+          ?.querySelector<HTMLElement>('.notice-action');
+        if (action) {
+          action.focus({ preventScroll: true });
+          return true;
+        }
+      }
       const from = current.getBoundingClientRect();
       const x = from.left + from.width / 2;
       const y = from.top + from.height / 2;
