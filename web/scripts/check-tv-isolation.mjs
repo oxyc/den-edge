@@ -271,5 +271,10 @@ if (process.argv.includes('--capture')) {
   // (91,770 -> 92,112) and 3 at startup on matched main/head builds, all in the lazy Player and remux chunks: Hearth's
   // refusal reason named in the unchanged notice, two closed cause codes, and the uncredentialed cross-origin session
   // end. No request, timer or listener is added. Allow the next 128-byte boundary past it, retaining 48.
-  if (coreTotalDelta > 92160) throw new Error('Browser total JS/CSS budget exceeded');
+  // The player's state kept in its address (`playerAddress.ts`: release, path, audio, subtitles, offset and position
+  // restored on reload or from a link) adds 1,240 gzip bytes to the complete non-translation graph (92,112 -> 93,352)
+  // and none at startup (16 fewer) on matched main/head builds, all in the lazy Player chunk (43.22 -> 44.52 kB). No
+  // request, timer or listener is added: writes ride the player's own events. Allow the next 128-byte boundary past
+  // it, retaining 88.
+  if (coreTotalDelta > 93440) throw new Error('Browser total JS/CSS budget exceeded');
 }
