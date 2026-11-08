@@ -30,9 +30,13 @@ test('the production library exposes one bounded receipt retry and announces rec
   await expect(page.getByRole('alert')).toContainText(
     'Saved playback progress couldn’t be updated. Try again.',
   );
-  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
 
-  await page.getByRole('button', { name: 'Try again' }).click();
+  // The notice is announced as an alert; its only action remains a native keyboard/remote focus stop.
+  await retry.focus();
+  await expect(retry).toBeFocused();
+  await retry.press('Enter');
   await expect.poll(() => attempts).toBe(2);
   await expect(page.getByRole('status')).toContainText('Checking saved playback progress…');
   releases.shift()();

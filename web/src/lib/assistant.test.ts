@@ -395,7 +395,7 @@ test('receipt transport, partial application, and acknowledgement failures stay 
     ),
   ).resolves.toEqual({ outcome: 'failed', stage: 'drain' });
 
-  const partialFetch = vi.fn(async (input: RequestInfo | URL) =>
+  const partialFetch = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) =>
     String(input).endsWith('/drain')
       ? Response.json({
           messages: [
@@ -415,6 +415,11 @@ test('receipt transport, partial application, and acknowledgement failures stay 
       new AbortController().signal,
     ),
   ).resolves.toEqual({ outcome: 'failed', stage: 'apply' });
+  expect(partialFetch.mock.calls.map(([path]) => String(path))).toEqual([
+    '/playback/receipts/drain',
+    '/playback/receipts/ack',
+  ]);
+  expect(JSON.parse(String(partialFetch.mock.calls[1]?.[1]?.body))).toEqual({ upTo: 1 });
 
   const ackFetch = vi.fn(async (input: RequestInfo | URL) =>
     String(input).endsWith('/drain')
