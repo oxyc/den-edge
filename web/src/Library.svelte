@@ -83,11 +83,7 @@
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
   import { sharedInstallOf } from './lib/grants';
-  import {
-    preparePlaybackReceiptCapability,
-    playbackReceiptsSupported,
-    type PlaybackReceiptPreparation,
-  } from './lib/playbackReceiptSupport';
+  import type { PlaybackReceiptPreparation } from './lib/playbackReceiptSupport';
   import { installsOf } from './lib/scout';
   import {
     billboardScope,
@@ -523,17 +519,16 @@
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
   async function preparePlaybackReceipts(signal: AbortSignal): Promise<PlaybackReceiptPreparation> {
+    // This gate must precede both the lazy import and authority work. Tizen 3 keeps the opaque completion queued for
+    // a capable linked device; this page's ordinary progress writes remain independent.
+    if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__) return 'unsupported';
     const authority = householdModel ?? model;
-    return preparePlaybackReceiptCapability({
-      supported: playbackReceiptsSupported,
-      authority,
-      signal,
-      prepare: async (current, currentSignal) => {
-        const assistant = await import('./lib/assistant');
-        if (currentSignal.aborted) return false;
-        return assistant.preparePlaybackReceipts(current, currentSignal);
-      },
-    });
+    if (!authority || signal.aborted) return 'temporarily-unavailable';
+    const assistant = await import('./lib/assistant');
+    if (signal.aborted) return 'temporarily-unavailable';
+    return (await assistant.preparePlaybackReceipts(authority, signal))
+      ? 'ready'
+      : 'temporarily-unavailable';
   }
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
