@@ -276,9 +276,12 @@
     if (!keyboardInput() && !proxy.matches(':focus-visible')) return;
     const slot = proxy.parentElement;
     focusedKey = itemKey(item);
-    void tick().then(() =>
-      slot?.querySelector<HTMLElement>('.card')?.focus({ preventScroll: true }),
-    );
+    void tick().then(() => {
+      // As in BrowseRow: a press handled before this lands has moved on, and keeps its place.
+      const active = document.activeElement;
+      if (active && active !== document.body && !slot?.contains(active)) return;
+      slot?.querySelector<HTMLElement>('.card')?.focus({ preventScroll: true });
+    });
   }
 
   function focusWithin(event: FocusEvent, item: T, index: number) {

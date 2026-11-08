@@ -8,9 +8,8 @@ import { newEdge, routeGuestEdge } from './guest-edge.mjs';
 
 const ROW = [2001, 2002, 2003, 2004];
 
-test('a poster the remote rests on fetches its details; one it passes does not', async ({
-  page,
-}) => {
+/** A guest's Home whose atlas rows list the four titles of `ROW`. */
+async function routeHome(page) {
   await routeGuestEdge(page, newEdge());
   await page.route('**/atlas/manifest.json', (route) =>
     route.fulfill({
@@ -44,6 +43,12 @@ test('a poster the remote rests on fetches its details; one it passes does not',
   await page.route('**/atlas/recommend**', (route) =>
     route.fulfill({ json: { version: 1, slides: [{ type: 'movie', id: 1002 }] } }),
   );
+}
+
+test('a poster the remote rests on fetches its details; one it passes does not', async ({
+  page,
+}) => {
+  await routeHome(page);
   /** Each of the row's titles whose details were asked of TMDB: atlas already named them, so only a warm asks. */
   const detailed = [];
   page.on('request', (request) => {
@@ -56,6 +61,10 @@ test('a poster the remote rests on fetches its details; one it passes does not',
   const row = page.getByRole('region', { name: 'Mind-Bending' });
   const card = (id) => row.getByRole('link', { name: new RegExp(`Movie ${id}`) });
   await expect(card(2004)).toBeAttached({ timeout: 30_000 });
+  // The row fills its cards a couple per animation frame once it nears the screen, and the paused clock below also
+  // pauses those frames. Bring it on screen and let it fill first: a remote cannot move onto a card not yet there.
+  await row.evaluate((region) => region.scrollIntoView({ block: 'center', behavior: 'instant' }));
+  await expect(row.locator('a.proxy')).toHaveCount(0, { timeout: 30_000 });
   // The page's clock from here on: each card is focused for exactly 100 ms of it, however slowly this machine runs
   // the steps between, so the dwell is measured by the test rather than by the runner's load.
   await page.clock.install();
@@ -75,4 +84,32 @@ test('a poster the remote rests on fetches its details; one it passes does not',
     detailed.filter((id) => id !== 2004),
     'a card focus only passed over',
   ).toEqual([]);
+});
+
+// A card not yet mounted is a light proxy link. Focusing one mounts its card and moves focus onto it a render later.
+// A press handled before that render (a busy TV can land the next one first) has moved on, and keeps its place.
+test('a remote press made before a focused placeholder becomes its card keeps its place', async ({
+  page,
+}) => {
+  await routeHome(page);
+  await page.goto(E2E_ORIGIN);
+  await page.getByRole('button', { name: 'Look around instead' }).click();
+  // The row is still placeholders until it nears the screen.
+  const placeholder = page
+    .getByRole('region', { name: 'Mind-Bending' })
+    .locator('a.proxy[aria-label="Movie 2001"]');
+  await expect(placeholder).toBeAttached({ timeout: 30_000 });
+  const home = page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', {
+    name: 'Home',
+  });
+
+  // Focus lands on the placeholder, and the next press moves on before its card has rendered.
+  await placeholder.evaluate((proxy) => {
+    proxy.focus();
+    document.querySelector('nav[aria-label="Main navigation"] a[href="/"]').focus();
+  });
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  await expect(home).toBeFocused();
 });
