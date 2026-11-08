@@ -20,6 +20,13 @@ import {
   type PlayingMedia,
 } from './media';
 import { keepProfile, keptProfile } from './profile';
+import {
+  DEN_RECEIVER_APP_ID,
+  playableOf,
+  RECEIVER_NAMESPACE,
+  RECEIVER_REPORT_MS,
+} from '../../src/lib/castReceiver';
+import type { Playable } from '../../src/lib/playable';
 import './style.css';
 
 interface Media {
@@ -60,6 +67,15 @@ interface CastSession {
   loadMedia(request: unknown): Promise<unknown>;
   getMediaSession(): CastMedia | null;
   getCastDevice(): { friendlyName?: string };
+  addMessageListener?(
+    namespace: string,
+    listener: (namespace: string, message: string) => void,
+  ): void;
+  removeMessageListener?(
+    namespace: string,
+    listener: (namespace: string, message: string) => void,
+  ): void;
+  sendMessage?(namespace: string, message: unknown): Promise<unknown>;
 }
 
 interface CastMedia {
@@ -168,6 +184,60 @@ const castButton = document.querySelector<HTMLButtonElement>('#cast')!;
 const PROFILES = ['legacy', 'gen3', 'ultra', 'google-tv-hd', 'google-tv-4k', 'streamer'];
 const kept = keptProfile();
 let profile = kept && PROFILES.includes(kept) ? kept : 'google-tv-4k';
+/**
+ * Den's own receiver, when this page launches it: the one den-edge names (`CAST_APP_ID`), else the one this browser
+ * opted in to (`?receiver=den` from the player). Undefined launches Google's Default Media Receiver.
+ */
+const configuredApp = document.querySelector<HTMLMetaElement>('meta[name="den-cast-app"]')?.content;
+const receiverApp = /^[0-9A-F]{8}$/.test(configuredApp ?? '')
+  ? configuredApp
+  : new URLSearchParams(location.search).get('receiver') === 'den'
+    ? DEN_RECEIVER_APP_ID
+    : undefined;
+/** What the connected Den receiver said its TV plays; asked with in place of `profile` while it is known. */
+let receiverPlayable: Playable | undefined;
+
+/** The profile the player asks with: the receiver's own report, or the Chromecast model chosen. */
+function asking(): { profile: string; playable?: Playable } {
+  return receiverPlayable ? { profile: 'receiver', playable: receiverPlayable } : { profile };
+}
+
+/**
+ * Ask Den's receiver what its TV plays, waiting RECEIVER_REPORT_MS for the answer. With none (Google's receiver, an
+ * older Den receiver, a slow one), the chosen model's profile is asked with as before.
+ */
+async function learnReceiver(session: CastSession | null | undefined): Promise<void> {
+  receiverPlayable = undefined;
+  if (!receiverApp || !session?.addMessageListener || !session.sendMessage) return;
+  const { addMessageListener, sendMessage } = session;
+  receiverPlayable = await new Promise<Playable | undefined>((resolve) => {
+    const done = (can?: Playable) => {
+      clearTimeout(timer);
+      session.removeMessageListener?.(RECEIVER_NAMESPACE, heard);
+      resolve(can);
+    };
+    const heard = (_namespace: string, raw: string) => {
+      let message: { type?: unknown; playable?: unknown; details?: unknown } | null;
+      try {
+        message = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      } catch {
+        return;
+      }
+      if (message?.type !== 'den-capabilities') return;
+      const can = playableOf(message.playable) ?? undefined;
+      console.info(
+        `[Den cast] ${JSON.stringify({ event: 'receiver-capabilities', playable: can ?? null, details: message.details ?? null })}`,
+      );
+      done(can);
+    };
+    const timer = setTimeout(() => {
+      console.info(`[Den cast] ${JSON.stringify({ event: 'receiver-capabilities-timeout' })}`);
+      done();
+    }, RECEIVER_REPORT_MS);
+    addMessageListener.call(session, RECEIVER_NAMESPACE, heard);
+    sendMessage.call(session, RECEIVER_NAMESPACE, { type: 'den-capabilities' }).catch(() => done());
+  });
+}
 type InterfaceLanguage = 'en' | 'es' | 'sv';
 let interfaceLanguage: InterfaceLanguage = 'en';
 const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
@@ -675,7 +745,7 @@ async function loadCast(): Promise<void> {
   const chrome = window.chrome?.cast;
   if (!id || !session || !media || !chrome) return;
   if (media.mode !== 'cast') {
-    tell('den-cast-request', { profile });
+    tell('den-cast-request', asking());
     return;
   }
   const url = playUrl(id, media);
@@ -737,7 +807,7 @@ async function loadCast(): Promise<void> {
       : undefined;
     setStatus(castingTo(session.getCastDevice?.().friendlyName));
     video.pause();
-    tell('den-cast', { state: 'playing', profile, device: deviceName() });
+    tell('den-cast', { state: 'playing', profile: asking().profile, device: deviceName() });
   } catch {
     replacingCast = false;
     if (current?.id !== id) {
@@ -858,20 +928,27 @@ function initializeCast(): boolean {
     }
   });
   castContext.setOptions({
-    receiverApplicationId: chrome.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+    receiverApplicationId: receiverApp ?? chrome.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
     // Not ORIGIN_SCOPED: that re-joined any earlier Cast session for this origin on load, so opening a title on
     // the phone silently started streaming it to a TV. Casting begins only when the Cast button is pressed.
     autoJoinPolicy: chrome.AutoJoinPolicy.PAGE_SCOPED,
   });
   castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
     const state = (event as { sessionState?: string }).sessionState;
-    if (state === 'SESSION_STARTED' && !current) {
-      // Chosen from this page's button with nothing loaded yet: the player asks for what this receiver plays and
-      // hands it here. Until then its own video plays on.
-      say('den-cast-session', { state: 'started', profile, device: deviceName() });
-    } else if (state === 'SESSION_STARTED') {
-      void loadCast();
-    } else if (state === 'SESSION_ENDED' && castStarted) {
+    if (state === 'SESSION_STARTED') {
+      // Den's receiver says what its TV plays before the player asks Hearth for anything: one ask, one LOAD.
+      void learnReceiver(castContext?.getCurrentSession()).then(() => {
+        if (!castContext?.getCurrentSession()) return;
+        // Chosen from this page's button with nothing loaded yet: the player asks for what this receiver plays and
+        // hands it here. Until then its own video plays on.
+        if (!current)
+          say('den-cast-session', { state: 'started', ...asking(), device: deviceName() });
+        else void loadCast();
+      });
+    } else if (state === 'SESSION_ENDED') {
+      receiverPlayable = undefined;
+    }
+    if (state === 'SESSION_ENDED' && castStarted) {
       console.info(`[Den cast] ${JSON.stringify({ event: 'receiver-session-ended' })}`);
       castStarted = false;
       replacingCast = false;
@@ -1122,7 +1199,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     if (typeof message.profile !== 'string' || !PROFILES.includes(message.profile)) return;
     profile = message.profile;
     keepProfile(profile);
-    if (castContext?.getCurrentSession()) tell('den-cast-request', { profile });
+    if (castContext?.getCurrentSession()) tell('den-cast-request', asking());
   } else if (message.type === 'den-reset') {
     // The player has gone back to playing in its own page and keeps this one for its Cast button: what was loaded
     // here is let go as a hidden page would let it go (`pagehide`).

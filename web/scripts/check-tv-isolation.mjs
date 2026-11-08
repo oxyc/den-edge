@@ -277,5 +277,9 @@ if (process.argv.includes('--capture')) {
   // (91,770 -> 92,112) and 3 at startup on matched main/head builds, all in the lazy Player and remux chunks: Hearth's
   // refusal reason named in the unchanged notice, two closed cause codes, and the uncredentialed cross-origin session
   // end. No request, timer or listener is added. Allow the next 128-byte boundary past it, retaining 48.
-  if (coreTotalDelta > 92800) throw new Error('Browser total JS/CSS budget exceeded');
+  // Den's own Cast receiver adds 716 gzip bytes to the complete non-translation graph (92,618 -> 93,334) and 73 at
+  // startup on matched main/head builds, all in the lazy Player chunk and a castReceiver chunk that startup fetches
+  // only for `?cast-receiver=`: the receiver report's schema guard, the opt-in, and the model list hidden behind it.
+  // The receiver itself is its own page in the Cast build. Allow the next 128-byte boundary past it, retaining 106.
+  if (coreTotalDelta > 93440) throw new Error('Browser total JS/CSS budget exceeded');
 }
