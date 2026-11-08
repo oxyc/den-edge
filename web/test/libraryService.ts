@@ -142,7 +142,7 @@ class FixtureService {
     };
   }
 
-  async query(query: LibraryQuery) {
+  async query(query: LibraryQuery, signal?: AbortSignal) {
     const historyDetails = query.kind === 'history.episodes';
     if (historyDetails) this.historyDetails.attempts++;
     try {
@@ -152,7 +152,8 @@ class FixtureService {
         this.refreshDownloadSources && query.kind === 'download.sources'
           ? { ...query, refresh: true as const }
           : query;
-      const result = await this.authority.query(requested);
+      // Production's Worker owns each source lookup by its request id and aborts it on cancel; so does this one.
+      const result = await this.authority.query(requested, signal);
       if (query.kind === 'download.refresh') await this.publish([{ kind: 'downloads' }]);
       if (historyDetails && result.kind === 'history.episodes') {
         this.historyDetails.successes++;

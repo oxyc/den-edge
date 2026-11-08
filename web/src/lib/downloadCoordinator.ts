@@ -433,6 +433,9 @@ export class DownloadCoordinator {
     const run: Promise<DownloadSourceSnapshot> = this.effects
       .resolve(title, fresh, early, signal)
       .then(({ sources, answer, fresh: admission, imdb, reply, retryAfterMs, failure }) => {
+        // A cancelled lookup says nothing about the sources: the provider read ends as a timed-out reply. Keeping it
+        // would hand the next viewer of this title an invented failure for the snapshot's lifetime, with no request.
+        signal?.throwIfAborted();
         const prior = early ? (this.#sourceCache.get(key) ?? cached)?.snapshot : undefined;
         const outcome =
           early && imdb

@@ -27,7 +27,8 @@
   const library = fixtureLibraryService({
     log: testLog().log,
     // The parity spec changes Scout's answer between opening Sources and using the episode's direct Download action.
-    refreshDownloadSources: true,
+    // `?cached-sources` keeps production's plain ask, so the Worker's short-lived source snapshot is in play.
+    refreshDownloadSources: !new URLSearchParams(location.search).has('cached-sources'),
     effects: {
       resolve: async (title, fresh, early, signal) =>
         title.imdbId
