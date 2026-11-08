@@ -54,7 +54,6 @@ export const parameters = {
   'player.next': 'Nästa: {title}',
   'player.playingFrom': 'Spelas från {source}',
   'player.playingThroughReason': 'Spelas via Den Remux. {reason}.',
-  'player.castingTo': 'Castar till {device}',
   'search.removeRecent': 'Ta bort {value} från senaste sökningar',
   'sharing.deviceCount.one': '{count} enhet',
   'sharing.deviceCount.other': '{count} enheter',

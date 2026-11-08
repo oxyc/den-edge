@@ -122,9 +122,6 @@ export async function guardNetwork(target, origin = E2E_ORIGIN) {
     // So is a screen's stalls report, sent as a screen that stalled is left (`screenPerformance.ts`).
     if (url.origin === origin && url.pathname === '/performance/event')
       return route.fulfill({ status: 204 });
-    // And a terminal client failure (`failureReport.ts`), which a spec observes with its own page route.
-    if (url.origin === origin && url.pathname === '/diagnostics/failure')
-      return route.fulfill({ status: 204 });
     // Profiles are a host-scoped, default-off canary. Specs that opt in install a page route first; every other
     // application fixture receives the shipped explicit disabled response required to reveal the legacy Owner path.
     if (url.origin === origin && url.pathname === '/capabilities/profiles')

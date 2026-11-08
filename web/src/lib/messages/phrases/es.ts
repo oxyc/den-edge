@@ -157,31 +157,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Cancel: 'Cancelar',
   'Cancel download': 'Cancelar descarga',
   'Cast & Crew': 'Reparto y equipo',
-  Cast: 'Transmitir',
-  'Cast options': 'Opciones de transmisión',
   'Cast to a TV': 'Transmitir a un televisor',
-  'Chromecast 1–2': 'Chromecast 1–2',
-  'Chromecast 3': 'Chromecast 3',
-  'Chromecast Ultra': 'Chromecast Ultra',
-  'Chromecast with Google TV (4K)': 'Chromecast con Google TV (4K)',
-  'Chromecast with Google TV (HD)': 'Chromecast con Google TV (HD)',
-  'Connecting to the Chromecast…': 'Conectando con el Chromecast…',
-  'Couldn’t connect to the Chromecast. Press Cast to try again.':
-    'No se pudo conectar con el Chromecast. Pulsa Transmitir para volver a intentarlo.',
-  'Den Cast player': 'Reproductor de transmisión de Den',
-  'Google TV Streamer': 'Google TV Streamer',
-  'No Chromecast found on this network. Check that it is on and on the same Wi-Fi, then press Cast to try again.':
-    'No se encontró ningún Chromecast en esta red. Comprueba que esté encendido y en la misma wifi, y pulsa Transmitir para volver a intentarlo.',
-  Retry: 'Reintentar',
-  'Stop casting': 'Dejar de transmitir',
-  'The Chromecast couldn’t play this, so it’s playing here again.':
-    'El Chromecast no pudo reproducir esto, así que vuelve a reproducirse aquí.',
-  'The Chromecast didn’t start playing, so it’s playing here again.':
-    'El Chromecast no empezó a reproducir, así que vuelve a reproducirse aquí.',
-  'This can’t be cast from here right now. It’s playing here again.':
-    'Ahora no se puede transmitir desde aquí. Vuelve a reproducirse aquí.',
-  'Which Chromecast is it? Den sends what that model can play.':
-    '¿Qué Chromecast es? Den envía lo que ese modelo puede reproducir.',
   'CC BY-SA 4.0': 'CC BY-SA 4.0',
   'Change PIN': 'Cambiar PIN',
   ChatGPT: 'ChatGPT',

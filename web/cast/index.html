@@ -6,23 +6,38 @@
     <title>Den Cast</title>
   </head>
   <body>
-    <!-- The Cast button. The press that opens Chrome's device list has to happen in this page, since a press in the
-         player does not reach into this cross-origin frame: in the player's control bar this page is only this button
-         (`html.button`), drawn over the player's own button surface. main.ts shows it once the Cast SDK has found a
-         receiver (Chromium only; Safari has AirPlay instead). -->
-    <button id="cast" class="cast-button" type="button" aria-label="Cast to a TV" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path class="screen" d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
-        <path class="fill" d="M6 8h12v8h-3.4A12.5 12.5 0 0 0 6 8.8Z" />
-        <path class="arc arc-outer" d="M2 12a9 9 0 0 1 8 8" />
-        <path class="arc arc-inner" d="M2 16a5 5 0 0 1 4 4" />
-        <path class="arc arc-dot" d="M2 20h.01" />
+    <!-- Shown only while the player outside offers casting (`den-choose`): the press that opens Chrome's device list
+         has to happen in this page, since a press in the player does not reach into this cross-origin frame. -->
+    <button id="choose" class="choose" type="button" hidden>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor">
+        <path
+          d="M1 18v3h3a3 3 0 0 0-3-3Zm0-4v2a5 5 0 0 1 5 5h2a7 7 0 0 0-7-7Zm0-4v2a9 9 0 0 1 9 9h2A11 11 0 0 0 1 10Zm20-7H3a2 2 0 0 0-2 2v3h2V5h18v14h-7v2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z"
+        />
       </svg>
+      <span id="choose-label">Choose your Chromecast</span>
     </button>
     <main>
       <video controls playsinline x-webkit-airplay="allow"></video>
       <div class="overlay">
         <span id="status" class="pill" role="status" hidden></span>
+        <!-- main.ts puts Google's launcher before this menu once the Cast SDK has started (Chromium only; Safari has
+             AirPlay instead and would draw an empty circle). The menu is revealed only while a session is connected. -->
+        <details class="cast-options" hidden>
+          <summary id="cast-options-label" aria-label="Cast options" title="Cast options">
+            ⋯
+          </summary>
+          <label>
+            <span id="receiver-label">Receiver</span>
+            <select id="profile">
+              <option value="legacy">Chromecast 1–2</option>
+              <option value="gen3">Chromecast 3</option>
+              <option value="ultra">Chromecast Ultra</option>
+              <option value="google-tv-hd">Chromecast with Google TV (HD)</option>
+              <option value="google-tv-4k" selected>Chromecast with Google TV (4K)</option>
+              <option value="streamer">Google TV Streamer</option>
+            </select>
+          </label>
+        </details>
       </div>
     </main>
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>

@@ -56,21 +56,6 @@ const sdk = (frameworkDelay) => `
   }
 `;
 
-/**
- * A file of the built cast page. A request still on its way when its test ends (the page's lazily loaded hls.js) may
- * find the build already removed: it is refused then, rather than failing whichever test runs next in this worker.
- */
-async function serveBuilt(route, path) {
-  const file = path === '/' ? 'index.html' : path.slice(1);
-  const type = file.endsWith('.html')
-    ? 'text/html'
-    : file.endsWith('.js')
-      ? 'text/javascript'
-      : 'text/css';
-  const body = await readFile(join(built, file)).catch(() => undefined);
-  return body ? route.fulfill({ contentType: type, body }) : route.abort().catch(() => undefined);
-}
-
 let built;
 test.beforeAll(() => {
   built = mkdtempSync(join(tmpdir(), 'den-cast-sdk-'));
@@ -94,7 +79,16 @@ test('a Cast SDK whose framework arrives after its availability callback still f
     await context.route('https://www.gstatic.com/**', (r) =>
       r.fulfill({ contentType: 'text/javascript', body: sdk(500) }),
     );
-    await context.route(`${CAST}/**`, (r) => serveBuilt(r, new URL(r.request().url()).pathname));
+    await context.route(`${CAST}/**`, async (r) => {
+      const path = new URL(r.request().url()).pathname;
+      const file = path === '/' ? 'index.html' : path.slice(1);
+      const type = file.endsWith('.html')
+        ? 'text/html'
+        : file.endsWith('.js')
+          ? 'text/javascript'
+          : 'text/css';
+      return r.fulfill({ contentType: type, body: await readFile(join(built, file)) });
+    });
     // The player, as far as the cast page can tell: it embeds the page and asks whether a receiver is there.
     await page.route(`${ORIGIN}/cast-parent`, (r) =>
       r.fulfill({
@@ -104,7 +98,7 @@ test('a Cast SDK whose framework arrives after its availability callback still f
           addEventListener('message', (e) => {
             if (e.origin !== '${CAST}') return;
             if (e.data.type === 'den-ready') e.source.postMessage({ type: 'den-discover' }, '${CAST}');
-            if (e.data.type === 'den-cast-state') window.answers.push(e.data.available);
+            if (e.data.type === 'den-cast-availability') window.answers.push(e.data.available);
           });
         </script><iframe src="${CAST}/" onload="this.contentWindow.postMessage({ type: 'den-handshake', generation: 'sdk-test' }, '${CAST}')"></iframe>`,
       }),
@@ -113,7 +107,9 @@ test('a Cast SDK whose framework arrives after its availability callback still f
     const cast = () => page.frames().find((frame) => frame.url().startsWith(CAST));
     await expect.poll(() => cast()?.evaluate(() => window.castOptionsSet === true)).toBe(true);
     await expect.poll(() => page.evaluate(() => window.answers.at(-1))).toBe(true);
-    expect(await cast().evaluate(() => document.querySelector('#cast').hidden)).toBe(false);
+    expect(await cast().evaluate(() => document.querySelector('google-cast-launcher').hidden)).toBe(
+      false,
+    );
     expect(errors.filter((e) => e.includes('Cast could not start'))).toEqual([]);
   } finally {
     await browser.close();
@@ -132,8 +128,14 @@ test('the real Cast document ignores media until its own handshake and replays c
     );
     await context.route(`${CAST}/**`, async (r) => {
       const path = new URL(r.request().url()).pathname;
-      if (path.endsWith('.js')) await new Promise((resolve) => setTimeout(resolve, 250));
-      return serveBuilt(r, path);
+      const file = path === '/' ? 'index.html' : path.slice(1);
+      if (file.endsWith('.js')) await new Promise((resolve) => setTimeout(resolve, 250));
+      const type = file.endsWith('.html')
+        ? 'text/html'
+        : file.endsWith('.js')
+          ? 'text/javascript'
+          : 'text/css';
+      return r.fulfill({ contentType: type, body: await readFile(join(built, file)) });
     });
     await page.route(`${ORIGIN}/cast-fence-parent`, (r) =>
       r.fulfill({

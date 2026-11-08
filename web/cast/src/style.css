@@ -32,11 +32,10 @@ video {
   object-fit: contain;
 }
 
-/* Clear of the Cast button in the corner beside it. */
 .overlay {
   position: absolute;
   top: 0.5rem;
-  right: calc(0.5rem + 52px);
+  right: 0.5rem;
   left: 0.5rem;
   display: flex;
   align-items: center;
@@ -63,98 +62,87 @@ video {
   white-space: nowrap;
 }
 
-/* Where this page plays the session itself, the Cast button floats over the picture's corner, as Den's player
-   buttons do. */
-.cast-button {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  z-index: 1;
+/* `display` below would otherwise win over the hidden attribute. */
+.cast-options[hidden] {
+  display: none;
+}
+
+google-cast-launcher,
+.cast-options summary {
   display: grid;
-  width: 44px;
-  height: 44px;
-  padding: 0;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
   place-items: center;
-  border: 1px solid rgb(255 255 255 / 0.12);
   border-radius: 50%;
-  background: rgb(28 28 34 / 0.55);
-  color: var(--cast-fg, #fff);
+  background: rgb(0 0 0 / 0.45);
+  --connected-color: #f5b942;
+  --disconnected-color: #f6f3ec;
+}
+
+.cast-options {
+  position: relative;
+}
+
+.cast-options summary {
   cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
+  font-size: 1.1rem;
+  line-height: 1;
+  list-style: none;
 }
 
-.cast-button[hidden] {
+.cast-options summary::-webkit-details-marker {
   display: none;
 }
 
-.cast-button:focus-visible {
-  outline: 3px solid #fff;
-  outline-offset: 3px;
+.cast-options[open] label {
+  position: absolute;
+  top: 2.4rem;
+  right: 0;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.6rem;
+  border-radius: 0.6rem;
+  background: rgb(20 20 20 / 0.92);
+  color: #aaa59c;
+  font-size: 0.75rem;
 }
 
-.cast-button svg {
-  width: var(--cast-icon, 22px);
-  height: var(--cast-icon, 22px);
-  fill: none;
-  stroke: currentcolor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-/* Connected: the screen fills, as every Cast sender draws it. */
-.cast-button .fill {
-  fill: currentcolor;
-  stroke: none;
-  opacity: 0;
-}
-
-html[data-cast='connected'] .cast-button .fill {
-  opacity: 1;
-}
-
-/* Connecting: the waves pulse outward until the receiver answers. */
-html[data-cast='connecting'] .cast-button .arc {
-  animation: cast-connecting 1.2s ease-in-out infinite;
-}
-
-html[data-cast='connecting'] .cast-button .arc-inner {
-  animation-delay: 0.2s;
-}
-
-html[data-cast='connecting'] .cast-button .arc-outer {
-  animation-delay: 0.4s;
-}
-
-@keyframes cast-connecting {
-  50% {
-    opacity: 0.25;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html[data-cast='connecting'] .cast-button .arc {
-    animation: none;
-    opacity: 0.55;
-  }
-}
-
-/* In the player's control bar: the page is the button and nothing else. Its surface, hover and focus ring are the
-   player's own, drawn under this frame, so this page draws only the glyph on a transparent ground. */
-html.button,
-html.button body {
-  background: transparent;
-}
-
-html.button main {
+/* Choosing a receiver: the button is the whole page, sized by the player's frame. */
+.choose {
   display: none;
 }
 
-html.button .cast-button {
-  inset: 0;
+html.choosing main {
+  display: none;
+}
+
+html.choosing .choose {
+  display: flex;
   width: 100%;
   height: 100%;
-  border: 0;
-  background: transparent;
-  outline: none;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #f5b942;
+  border-radius: 999px;
+  background: #171717;
+  color: #f6f3ec;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+html.choosing .choose:focus-visible {
+  outline: 2px solid #f5b942;
+  outline-offset: -4px;
+}
+
+select {
+  max-width: 12rem;
+  border: 1px solid #57534c;
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: #171717;
+  color: #f6f3ec;
 }

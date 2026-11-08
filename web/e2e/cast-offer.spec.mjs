@@ -17,27 +17,18 @@ const LAN = 'http://192.168.86.20:8090';
 const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 const hls = new URL('./media/hls/', import.meta.url);
+const TEST_CAST_DISCOVERY_MS = 500;
 const TEST_CAST_PLAY_MS = 1_000;
 
 /**
  * The cast page, as far as the player can tell: `none` sees no receiver, `receiver` sees one but cannot play what is
- * loaded into it (an error), `silent` sees one and never plays what is loaded (no error either). Its Cast button shows
- * once it has seen one, and pressing it is the viewer picking the receiver at once: a Cast session starts with nothing
- * loaded.
+ * loaded into it (an error), `silent` sees one and never plays what is loaded (no error either). Offered the choice
+ * (`den-choose`), the viewer here picks the receiver at once: a Cast session starts with nothing loaded.
  */
-const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html>
-  <button id="cast" aria-label="Cast to a TV" hidden style="position:fixed;inset:0;width:100%;height:100%">Cast</button>
-  <script>
+const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html><script>
   window.loads = [];
   window.messages = [];
   window.handshakes = [];
-  let parentOrigin;
-  const button = document.getElementById('cast');
-  const state = (castState) => parent.postMessage({ type: 'den-cast-state', state: castState }, parentOrigin);
-  button.addEventListener('click', () => {
-    state('CONNECTED');
-    parent.postMessage({ type: 'den-cast-session', state: 'started', profile: 'google-tv-4k' }, parentOrigin);
-  });
   addEventListener('message', (event) => {
     const message = event.data || {};
     if (message.type === 'den-handshake') {
@@ -46,17 +37,14 @@ const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html>
       return;
     }
     window.messages.push(message.type);
-    if (message.type === 'den-discover') {
-      parentOrigin = event.origin;
-      setTimeout(() => {
-        button.hidden = ${mode === 'none'};
-        state(${mode === 'none'} ? 'NO_DEVICES_AVAILABLE' : 'NOT_CONNECTED');
-      }, ${discoveryDelay});
-    }
+    if (message.type === 'den-discover')
+      setTimeout(() => parent.postMessage({ type: 'den-cast-availability', available: ${mode !== 'none'} }, event.origin), ${discoveryDelay});
+    if (message.type === 'den-choose')
+      parent.postMessage({ type: 'den-cast-session', state: 'started', profile: 'google-tv-4k' }, event.origin);
     if (message.type !== 'den-load') return;
     window.loads.push(message.media);
     if (${mode === 'none'})
-      state('NO_DEVICES_AVAILABLE');
+      parent.postMessage({ type: 'den-cast-availability', id: message.id, available: false }, event.origin);
     else if (${mode === 'direct-fail'} && message.media.external)
       setTimeout(() => parent.postMessage({ type: 'den-error', id: message.id, message: 'Chromecast could not load this release' }, event.origin), 250);
     else if (${mode === 'direct-fail'})
@@ -132,6 +120,7 @@ async function open(
     receiptBoundary = false,
     receiptDelayMs = 0,
     configDelay = 0,
+    discoveryMs = mode === 'none' ? TEST_CAST_DISCOVERY_MS : undefined,
   } = {},
 ) {
   const browser = await chromium.launch({
@@ -261,6 +250,10 @@ async function open(
     r.fulfill({ contentType: 'text/html', body: castPage(mode, castDiscoveryDelay, castReady) }),
   );
   const query = new URLSearchParams({ castPlayMs: String(TEST_CAST_PLAY_MS) });
+  // The discovery window only ends a look that found nothing. A cast page with a receiver answers at once, so only
+  // the `none` page is shortened to keep its test brief; a short window for the others only races a loaded machine
+  // loading the page.
+  if (discoveryMs) query.set('castDiscoveryMs', String(discoveryMs));
   if (managed) {
     // The complete app always reaches Hearth through the ordinary `/remux` face. A managed answer may still be a
     // direct TorBox capability, which must retain Chromecast even though an old Remux-only gate sees this route.
@@ -312,11 +305,12 @@ test('managed direct HLS refreshes TorBox once on Cast failure without switching
     await playingPast(page, 3);
     const video = page.locator('.player video');
     await expect(video).toHaveAttribute('x-webkit-airplay', 'allow');
-    await expect(castButton(page)).toBeVisible();
+    const castButton = page.getByRole('button', { name: 'Cast to a TV' });
+    await expect(castButton).toBeVisible();
     // Desktop's owned transport keeps output routing with the other circular playback actions, rather than leaving
     // Chromecast as unrelated header chrome. Pointer semantics are covered with the complete app stylesheet by the
     // cross-engine player test; this fixture intentionally mounts only the component's scoped CSS.
-    await expect(page.locator('.player footer .cast-slot')).toHaveCount(1);
+    await expect(castButton.locator('xpath=ancestor::footer')).toBeVisible();
     expect(asked.managed).toHaveLength(1);
     expect(asked.direct, 'direct TorBox-style HLS did not create a legacy Remux session').toEqual(
       [],
@@ -448,13 +442,10 @@ async function revealControls(page) {
   await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
 }
 
-/** The cast page's own Cast button, which shows in the bar once it has seen a receiver. */
-const castButton = (page) => page.frameLocator(`iframe[src^="${CAST}"]`).locator('#cast');
-
-/** Press Cast, an output action in the auto-hiding transport: the press lands in the cast page's frame. */
+/** Press Cast, an output action in the auto-hiding transport. */
 async function clickCast(page) {
   await revealControls(page);
-  await castButton(page).click();
+  await page.getByRole('button', { name: 'Cast to a TV' }).click();
 }
 
 async function playerGeometry(page) {
@@ -467,27 +458,59 @@ async function playerGeometry(page) {
   });
 }
 
+/**
+ * Record each Cast status the page renders (`window.castStatuses`), measured as the DOM changes. "Looking" lasts only
+ * the fixture's discovery window, which a busy machine can spend before a test's next call reaches the page; read
+ * from the test, that state is missed or measured as it is replaced.
+ */
+async function recordCastStatus(page) {
+  await page.locator('.player').evaluate((player) => {
+    const box = (element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    window.castStatuses = [];
+    new MutationObserver(() => {
+      const notice = player.querySelector('.cast-status .notice');
+      const text = notice?.querySelector('.notice-copy')?.textContent ?? null;
+      if (text === null || text === window.castStatuses.at(-1)?.text) return;
+      window.castStatuses.push({
+        text,
+        notice: box(notice),
+        geometry: {
+          stage: box(player.querySelector('.stage')),
+          video: box(player.querySelector('video')),
+        },
+      });
+    }).observe(player, { subtree: true, childList: true, characterData: true });
+  });
+}
+
 for (const viewport of [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'narrow', width: 390, height: 844 },
 ]) {
-  test(`background Cast discovery with no receiver leaves the ${viewport.name} video as it was`, async () => {
-    const { browser, page, asked } = await open('none', {
+  test(`Cast discovery keeps the ${viewport.name} video fixed through searching and no devices`, async () => {
+    const { browser, page } = await open('none', {
       viewport,
       castDiscoveryDelay: 250,
     });
     try {
       await playingPast(page, 1);
       const idle = await playerGeometry(page);
-      // The cast page was asked and answered: there is no receiver, so there is nothing to press and nothing to say.
-      await expect.poll(() => castMessages(page)).toContain('den-discover');
-      await page.waitForTimeout(500);
-      await revealControls(page);
-      await expect(page.locator('.cast-slot')).toHaveCount(0);
-      await expect(castButton(page)).toBeHidden();
-      await expect(page.locator('.cast-status')).toHaveCount(0);
-      expect(await playerGeometry(page)).toEqual(idle);
-      expect(asked.relay).toEqual([]);
+      await recordCastStatus(page);
+
+      await clickCast(page);
+      await expect(page.getByText('No Chromecast found.')).toBeVisible();
+      const statuses = await page.evaluate(() => window.castStatuses);
+      expect(statuses.map((status) => status.text)).toEqual([
+        'Looking for a Chromecast…',
+        'No Chromecast found. Check that it is awake and on the same network as this device.',
+      ]);
+      const [searching, none] = statuses;
+      expect(searching.geometry).toEqual(idle);
+      expect(none.geometry).toEqual(idle);
+      expect(none.notice).toEqual(searching.notice);
     } catch (error) {
       await savePageTrace(page);
       throw error;
@@ -497,13 +520,18 @@ for (const viewport of [
   });
 }
 
-// `/config` is read in the background once the video plays: a slow answer only delays the button.
-test('a slow /config read only delays the Cast button', async () => {
-  const { browser, page, asked } = await open('receiver', { configDelay: 1_500 });
+// The discovery window is the cast page's time to answer, not the time the player spends getting to it.
+test('a slow /config read does not spend the discovery window', async () => {
+  const { browser, page, asked } = await open('receiver', {
+    configDelay: 3 * TEST_CAST_DISCOVERY_MS,
+    discoveryMs: TEST_CAST_DISCOVERY_MS,
+  });
   try {
     await playingPast(page, 3);
     await clickCast(page);
+    // The receiver answers as soon as the page is asked, though that is after the window's length has passed.
     await expect.poll(() => asked.relay.length).toBe(1);
+    await expect(page.getByText('No Chromecast found.')).toHaveCount(0);
   } catch (error) {
     await savePageTrace(page);
     throw error;
@@ -569,17 +597,21 @@ test('Cast with no Chromecast on the network leaves the video playing', async ()
   const { browser, page, asked } = await open('none');
   try {
     const before = await playingPast(page, 3);
-    await expect.poll(() => castMessages(page)).toContain('den-discover');
+    await clickCast(page);
+    await expect(page.getByText('No Chromecast found.')).toBeVisible({ timeout: 15_000 });
     // The same element, never replaced, and still going: nothing was restarted or moved.
     const video = page.locator('.player video[data-before="cast"]');
     await expect(video).toHaveCount(1);
     await expect
       .poll(() => video.evaluate((v) => (v.paused ? -1 : v.currentTime)))
       .toBeGreaterThan(before + 3);
-    await expect(page.locator('.cast-slot')).toHaveCount(0);
     expect(asked.relay, 'no session was moved to the relay').toEqual([]);
     expect(asked.direct).toHaveLength(1);
     expect(asked.ended, 'the playing session was not ended').toEqual([]);
+    // Only information: dismissing it leaves playback as it is.
+    await page.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(page.getByText('No Chromecast found.')).toHaveCount(0);
+    await expect(video).toHaveCount(1);
   } finally {
     await browser.close();
   }
