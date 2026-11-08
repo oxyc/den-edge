@@ -42,6 +42,8 @@ import type {
   RuntimeDiscoveryView,
   SettingsView,
   SimklView,
+  SourceWaitAnswer,
+  SourceWaitRequest,
   TitleRef,
   TitleView,
   WatchlistView,
@@ -823,6 +825,13 @@ export class LibraryModel {
       kind: 'download.refresh',
       ...(target ? { target: wireDownloadTarget(target) } : {}),
     });
+  }
+
+  async sourceWait(request: SourceWaitRequest, signal?: AbortSignal): Promise<SourceWaitAnswer> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'source.wait', ...request }, signal);
+    if (result.kind !== 'source.wait') throw wrongQueryResult('source.wait');
+    return { phase: result.phase, nextMs: result.nextMs, retryInMs: result.retryInMs };
   }
 
   async libraryMetadata(titles: readonly TitleRef[]): Promise<{

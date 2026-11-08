@@ -103,6 +103,7 @@ import type { ContentReader } from './contentAuthority';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
 import { profilesApplyPolicy } from './profilesCore';
 import { exclusive } from './exclusive';
+import { sourceWait } from './sourceDiscoveryPolicy';
 import { joinHousehold, joinHouseholdOf, type JoinState } from './householdJoin';
 import { validateStoredProfileDirectory } from './profileDirectory';
 import {
@@ -805,6 +806,8 @@ export class LibraryLogAuthority {
           kind: 'download.refresh',
           refreshed: (await this.#options.refreshDownloads?.(query.target)) ?? false,
         };
+      case 'source.wait':
+        return { kind: 'source.wait', ...(await sourceWait(query)) };
       case 'download.sources': {
         await ensureDeferredSyncPolicy();
         const title = internalDownloadTitle(query.title);

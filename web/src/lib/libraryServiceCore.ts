@@ -181,6 +181,7 @@ export class LibraryServiceCore {
     if (
       isLibraryMetadataRequest(input) ||
       isAssistantPublish(input) ||
+      isSourceWaitRequest(input) ||
       isDownloadSourcesRequest(input)
     ) {
       const admitted = this.#requests;
@@ -638,6 +639,14 @@ function isDownloadSourcesRequest(
     typeof request.requestId === 'string' &&
     request.query?.kind === 'download.sources'
   );
+}
+
+function isSourceWaitRequest(
+  input: unknown,
+): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
+  const request = input as { type?: unknown; query?: { kind?: unknown } };
+  return request.type === 'query' && request.query?.kind === 'source.wait';
 }
 
 function isAssistantPublish(input: unknown): boolean {

@@ -205,10 +205,13 @@ if (process.argv.includes('--capture')) {
   // request or background work while the server answers. It was 173 bytes past the prior ceiling, which rises by
   // 194; the startup ceiling is unchanged and this build sits 57 bytes under it.
   // Owned source lookup deadlines, cancellation, retained-list recovery and canonical den-core outcome selection add
-  // 2,520 gzip bytes to the non-translation graph on matched parent/head builds, only 93 bytes of it at startup. The
-  // canonical adapter lives in the already-lazy Detail chunk beside its sole consumer and den-core's policy Wasm stays
-  // deferred; reporting stays in the existing lazy failure chunk. Splitting the visible recovery state again would
-  // add a request, while Worker cancellation must remain with the always-loaded request authority. Spend the old
-  // 556-byte margin and allow 2.25 KiB more, retaining 340 bytes of total margin and unchanged startup/catalog limits.
-  if (coreTotalDelta > 83304) throw new Error('Browser total JS/CSS budget exceeded');
+  // 2,828 gzip bytes to the non-translation graph on matched pre-outage parent/head builds, only 155 bytes of it at
+  // startup. The merged outage-cache parent measures 80,979 bytes; its contribution and this one's measured delta
+  // are independently retained here, with the post-rebase clean hosted build checking their compression interaction.
+  // The wait adapter stays in the existing Library Worker beside den-core's deferred policy, so Detail never creates a
+  // second Wasm realm and WebKit navigation cannot strand its module initialization. Reporting stays in the existing
+  // lazy failure chunk. Splitting visible recovery state again would add a request, while request ownership belongs in
+  // the Worker. Spend the old 556-byte margin and allow 2.625 KiB more, retaining 416 bytes of total margin and the
+  // unchanged startup/catalog limits.
+  if (coreTotalDelta > 84223) throw new Error('Browser total JS/CSS budget exceeded');
 }

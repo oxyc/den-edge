@@ -13,6 +13,7 @@
     DownloadTitleDescriptor,
     DownloadsView,
     DownloadViewItem,
+    SourceWaitAnswer,
   } from '../lib/libraryServiceProtocol';
   import { ageOf } from '../lib/titleSources';
   import { availability } from '../lib/availability.svelte';
@@ -21,7 +22,6 @@
   import { activateLinkInPlace } from '../lib/linkActivation';
   import { i18n } from '../lib/i18n.svelte';
   import { reportClientFailure, replaceClientFailureGeneration } from '../lib/diagnosticsReport';
-  import { sourceWait } from '../lib/sourceDiscoveryPolicy';
   let {
     imdb,
     season,
@@ -201,33 +201,32 @@
         attempt,
       });
     };
-    const recovery = async (facts: { online_restored?: boolean; retry_after_ms?: number }) => {
+    const recovery = async (facts: { onlineRestored?: boolean; retryAfterMs?: number }) => {
       if (!recoverable || attempt > 0 || retryTimer) return;
-      let decision: Awaited<ReturnType<typeof sourceWait>>;
+      let decision: SourceWaitAnswer;
       try {
-        decision = await sourceWait({
-          elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+        decision = await service.sourceWait({
+          elapsedMs: Math.max(0, Math.round(performance.now() - started)),
           attempt,
           ...facts,
         });
       } catch {
-        // A document being replaced can cancel WebKit's deferred Wasm request. The owned lookup teardown handles
-        // that document; a current document keeps its visible manual Retry rather than leaking a rejected promise.
+        // Authority replacement fences this local policy query. A current page keeps its visible manual Retry.
         return;
       }
       if (generation !== sourceGeneration || !recoverable || attempt > 0) return;
-      if (decision.retry_in_ms === null) return;
+      if (decision.retryInMs === null) return;
       retryTimer = setTimeout(() => {
         retryTimer = undefined;
         attempt = 1;
         void run(true);
-      }, decision.retry_in_ms);
+      }, decision.retryInMs);
     };
     const advanceWait = async (request: number) => {
-      let decision: Awaited<ReturnType<typeof sourceWait>>;
+      let decision: SourceWaitAnswer;
       try {
-        decision = await sourceWait({
-          elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+        decision = await service.sourceWait({
+          elapsedMs: Math.max(0, Math.round(performance.now() - started)),
           attempt,
         });
       } catch {
@@ -236,8 +235,8 @@
       }
       if (!current(request)) return;
       waitPhase = decision.phase;
-      if (decision.next_ms !== null) {
-        waitTimer = setTimeout(() => void advanceWait(request), decision.next_ms);
+      if (decision.nextMs !== null) {
+        waitTimer = setTimeout(() => void advanceWait(request), decision.nextMs);
         return;
       }
       // The page owns the terminal deadline. Cancelling the query sends an exact request-id cancel to the library
@@ -306,8 +305,7 @@
           generation,
           attempt,
         });
-      if (loaded?.retryAfterMs !== undefined)
-        void recovery({ retry_after_ms: loaded.retryAfterMs });
+      if (loaded?.retryAfterMs !== undefined) void recovery({ retryAfterMs: loaded.retryAfterMs });
       // An authoritative nonempty list heals the poster's fade. Unknown/degraded outcomes never fade it.
       const { target } = requested;
       if (loaded?.sources?.length && loaded.outcome?.list !== 'retained')
@@ -317,7 +315,7 @@
           true,
         );
     };
-    const online = () => void recovery({ online_restored: true });
+    const online = () => void recovery({ onlineRestored: true });
     window.addEventListener('online', online);
     void run();
     return () => {

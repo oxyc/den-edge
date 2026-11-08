@@ -9,9 +9,10 @@
  * Version 10 makes History a revision-bound, materialized keyset page instead of one whole-library reply. Version 11
  * adds the `airing` observation and Continue Watching's `upcoming` day. Version 12 carries fresh-source admission
  * separately from the source list's coverage. Version 13 preserves the count of sources still answering when an
- * early source list was returned.
+ * early source list was returned. Version 14 asks the authority Worker for den-core's source wait decision, keeping
+ * the deferred policy module out of the page realm.
  */
-export const LIBRARY_SERVICE_PROTOCOL = 13 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 14 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -232,6 +233,21 @@ export interface DownloadSourceOutcome {
   } | null;
   mayMarkUnavailable: boolean;
   retryable: boolean;
+}
+
+/** Page/Worker binding of den-core `source_wait`; timing decisions remain authoritative in den-core. */
+export interface SourceWaitRequest {
+  elapsedMs: number;
+  attempt: number;
+  onlineRestored?: boolean;
+  retryAfterMs?: number;
+  jitter?: number;
+}
+
+export interface SourceWaitAnswer {
+  phase: 'loading' | 'slow' | 'deadline';
+  nextMs: number | null;
+  retryInMs: number | null;
 }
 
 export type LibraryCommand =
@@ -997,6 +1013,7 @@ export type LibraryQuery =
     }
   | { kind: 'relay.membership' }
   | { kind: 'download.refresh'; target?: DownloadTarget }
+  | ({ kind: 'source.wait' } & SourceWaitRequest)
   /**
    * `fresh`: rebuilt by scout past its caches (`?fresh=1`) — a viewer checking for sources again. `early`: the list a
    * viewer is looking at, which scout may answer before its slowest indexer (`fetchSourceList`); never one a download
@@ -1088,6 +1105,7 @@ export type LibraryQueryResult =
       capability: { libraryId: string; memberToken: string } | null;
     }
   | { kind: 'download.refresh'; refreshed: boolean }
+  | ({ kind: 'source.wait' } & SourceWaitAnswer)
   | {
       kind: 'download.sources';
       sources: DownloadSourceOption[] | null;

@@ -837,6 +837,30 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'download.refresh')
     return exact(value, ',kind,target,') && optional(value.target, downloadTarget);
+  if (value.kind === 'source.wait')
+    return (
+      exact(value, ',kind,elapsedMs,attempt,onlineRestored,retryAfterMs,jitter,') &&
+      integer(value.elapsedMs) &&
+      value.elapsedMs >= 0 &&
+      value.elapsedMs <= 86_400_000 &&
+      integer(value.attempt) &&
+      value.attempt >= 0 &&
+      value.attempt <= 16 &&
+      optional(value.onlineRestored, bool) &&
+      optional(
+        value.retryAfterMs,
+        (candidate): candidate is number =>
+          integer(candidate) && candidate >= 0 && candidate <= 86_400_000,
+      ) &&
+      optional(
+        value.jitter,
+        (candidate): candidate is number =>
+          typeof candidate === 'number' &&
+          Number.isFinite(candidate) &&
+          candidate >= 0 &&
+          candidate <= 1,
+      )
+    );
   if (value.kind === 'download.sources')
     return (
       exact(value, ',kind,title,fresh,refresh,early,') &&
@@ -2003,6 +2027,15 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   }
   if (value.kind === 'download.refresh')
     return exact(value, ',kind,refreshed,') && bool(value.refreshed);
+  if (value.kind === 'source.wait')
+    return (
+      exact(value, ',kind,phase,nextMs,retryInMs,') &&
+      (value.phase === 'loading' || value.phase === 'slow' || value.phase === 'deadline') &&
+      (value.nextMs === null ||
+        (integer(value.nextMs) && value.nextMs >= 0 && value.nextMs <= 86_400_000)) &&
+      (value.retryInMs === null ||
+        (integer(value.retryInMs) && value.retryInMs >= 0 && value.retryInMs <= 86_400_000))
+    );
   if (value.kind === 'download.sources') {
     const source = (candidate: unknown): candidate is Record<string, unknown> =>
       record(candidate) &&
