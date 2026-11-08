@@ -246,6 +246,10 @@ test('settings re-read with nothing changed leave the page as it is', async ({ b
   // Rows below may keep loading while this one is visible; wait on this screen's exact leading questions instead of
   // sampling an unrelated global request count and guessing that 500 ms of quiet means the page is finished.
   await expect.poll(() => servicePageRequests(asked)).toEqual(COMPLETE_SERVICE_PAGE);
+  // A row fills its light slots with full cards two per frame (`BrowseRow`'s `materializeNext`), each replacing the
+  // slot's placeholder link. Mark the cards once none is still a placeholder, or a card filled in afterwards reads as
+  // one the reread rebuilt.
+  await expect(page.locator('a.proxy[href^="/movie/10"]:not(.billboard *)')).toHaveCount(0);
   const shown = await cards.count();
   await cards.evaluateAll((all) => all.forEach((card) => (card.dataset.kept = '')));
 
