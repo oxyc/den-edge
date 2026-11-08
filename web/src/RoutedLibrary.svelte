@@ -1462,7 +1462,7 @@
       work: AssistantWork,
       signal: AbortSignal,
     ) => void,
-    unavailable?: (assistant: typeof import('./lib/assistant'), signal: AbortSignal) => void,
+    unavailable?: (signal: AbortSignal) => void,
   ) {
     const current = session;
     const model = memberModel;
@@ -1470,12 +1470,18 @@
     if (!needed || !model) return;
     const stop = new AbortController();
     const authority = household ?? model;
-    void Promise.all([import('./lib/assistant'), authority.relayMembership()]).then(
+    const assistant =
+      import.meta.env.DEN_E2E &&
+      (globalThis as typeof globalThis & { __denFailAssistantImport?: boolean })
+        .__denFailAssistantImport
+        ? Promise.reject(new TypeError('fixture assistant module is offline'))
+        : import('./lib/assistant');
+    void Promise.all([assistant, authority.relayMembership()]).then(
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
           console.warn('den: the library is not a member on den-edge yet; its assistants wait');
-          unavailable?.(assistant, stop.signal);
+          unavailable?.(stop.signal);
           return;
         }
         run(
@@ -1497,6 +1503,7 @@
       },
       (error: unknown) => {
         console.warn('den: the assistant connection could not be loaded', error);
+        if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
       },
     );
     return () => stop.abort();
@@ -1588,10 +1595,7 @@
           (state, expected) => publish(state, signal, expected),
         );
       },
-      ({ PlaybackReceiptStatus: Status }, signal) => {
-        PlaybackReceiptStatus = Status;
-        publish('failed', signal);
-      },
+      (signal) => publish('failed', signal),
     );
   });
 
@@ -1841,10 +1845,18 @@
           alert={shown.alert}
           undo={shown.undo}
         />
-        {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === shown}
+        {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
           <PlaybackReceiptStatus
             state={playbackReceiptStatus.state}
             retry={() => playbackReceiptRetry++}
+          />
+        {:else if playbackReceiptStatus?.owner === session && playbackReceiptStatus.state === 'failed'}
+          <!-- The assistant chunk itself can be unavailable. Reuse the eager status renderer so this bootstrap
+               failure stays localized and actionable without pulling recovery code across its lazy boundary. -->
+          <LibraryStatus
+            toast={null}
+            alert="Saved playback progress couldn’t be updated. Try again."
+            alertRetry={() => playbackReceiptRetry++}
           />
         {/if}
       {/if}

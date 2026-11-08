@@ -7,6 +7,7 @@
     presentation = 0,
     alert,
     undo = null,
+    alertRetry = null,
   }: {
     toast: string | null;
     /** Changes for every notice, including equal text, so its live region is presented again. */
@@ -14,10 +15,18 @@
     alert: string | null;
     /** Offered on the toast itself — "Removed from watchlist · Undo" — for the two actions that take something away. */
     undo?: { label: string; run: () => void } | null;
+    /** A recovery action owned by an alert which cannot live in its lazy feature chunk. */
+    alertRetry?: (() => void) | null;
   } = $props();
 </script>
 
-{#if alert}<p class="library-status" role="alert">{i18n.phrase(alert)}</p>{/if}
+{#if alert}<p class="library-status" role="alert">
+    <span>{i18n.phrase(alert)}</span>{#if alertRetry}<button
+        type="button"
+        class="undo"
+        onclick={alertRetry}>{i18n.phrase('Try again')}</button
+      >{/if}
+  </p>{/if}
 {#key presentation}
   {#if toast}<p class="library-status toast" role="status">
       <span>{i18n.phrase(toast)}</span>{#if undo}<button
