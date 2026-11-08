@@ -225,12 +225,16 @@
     const advanceWait = async (request: number) => {
       let decision: SourceWaitAnswer;
       try {
-        decision = await service.sourceWait({
-          elapsedMs: Math.max(0, Math.round(performance.now() - started)),
-          attempt,
-        });
+        decision = await service.sourceWait(
+          {
+            elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+            attempt,
+          },
+          controller?.signal,
+        );
       } catch {
-        stop(request, 'other', 'fast');
+        // This policy query shares the provider request's lifetime. Replacement/cancellation can reject it before
+        // the provider answer settles; that must not turn a healthy provider answer into an invented outage.
         return;
       }
       if (!current(request)) return;
@@ -254,13 +258,16 @@
       waitPhase = 'loading';
       refreshing = rechecking || automatic;
       started = performance.now();
-      void advanceWait(request);
-      const loaded = await loadDownloadSources(
+      // Admit the owned provider request before asking for its wait schedule. Both use deferred den-core policy in
+      // the Worker; provider-first ordering prevents a wait-policy transport failure from starving source lookup.
+      const loading = loadDownloadSources(
         service,
         requested,
         rechecking || automatic,
         controller.signal,
       );
+      void advanceWait(request);
+      const loaded = await loading;
       if (!current(request)) return;
       if (waitTimer) clearTimeout(waitTimer);
       waitTimer = undefined;
