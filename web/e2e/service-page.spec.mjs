@@ -55,6 +55,8 @@ async function serveNetflix(
         baseServiceRowCount([request], 'popularity.desc', '50') === 1 ||
         baseServiceRowCount([request], 'vote_average.desc', '300') === 1;
       if (!base) return route.fulfill({ json: { results: [] } });
+      if (url.searchParams.get('page') !== '1')
+        return route.fulfill({ json: { results: [] } });
       const id = newest ? 201 : url.searchParams.get('sort_by') === 'popularity.desc' ? 301 : 401;
       return route.fulfill({
         json: {
