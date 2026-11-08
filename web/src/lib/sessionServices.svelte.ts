@@ -65,6 +65,7 @@ export class SessionServices {
   #stopped = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
+  #atlasAcknowledgedGeneration = 0;
   readonly #model: LibraryModel | null;
 
   constructor(
@@ -81,7 +82,11 @@ export class SessionServices {
    * retained hint or stopped discovery run can finish later, but can never replace the current answer.
    */
   #configureAtlas(base: string | null, current: () => boolean): void {
-    if (this.atlasReady && this.atlas === base) {
+    if (
+      this.atlasReady &&
+      this.atlas === base &&
+      this.#atlasAcknowledgedGeneration === this.#atlasGeneration
+    ) {
       this.#settled();
       return;
     }
@@ -93,6 +98,7 @@ export class SessionServices {
         // acknowledged, nor a ready flag paired with a stale address.
         this.atlas = base;
         this.atlasReady = true;
+        this.#atlasAcknowledgedGeneration = generation;
         this.#settled();
       },
       (error: unknown) => {
@@ -284,18 +290,25 @@ export class SessionServices {
       let foundRoutes: Routes | undefined;
       for (let attempt = 0; attempt <= ROUTE_RETRY_MS.length; attempt++) {
         try {
-          foundRoutes = await this.fetchRouteTable();
-          break;
+          const candidate = await this.fetchRouteTable();
+          // `fetchRoutes` deliberately converts network, non-2xx, and parse failures to an empty table. Empty is
+          // therefore a resolved transport failure, not a successful discovery input.
+          if (Object.keys(candidate).length > 0) {
+            foundRoutes = candidate;
+            break;
+          }
+          if (attempt === ROUTE_RETRY_MS.length) return;
         } catch (error) {
           if (!current || attempt === ROUTE_RETRY_MS.length) throw error;
-          await new Promise<void>((resolve) => {
-            releaseRouteRetry = resolve;
-            routeRetry = setTimeout(resolve, ROUTE_RETRY_MS[attempt]);
-          });
-          routeRetry = undefined;
-          releaseRouteRetry = undefined;
-          if (!current) return;
         }
+        if (!current) return;
+        await new Promise<void>((resolve) => {
+          releaseRouteRetry = resolve;
+          routeRetry = setTimeout(resolve, ROUTE_RETRY_MS[attempt]);
+        });
+        routeRetry = undefined;
+        releaseRouteRetry = undefined;
+        if (!current) return;
       }
       if (!foundRoutes) return;
       if (!current) return;

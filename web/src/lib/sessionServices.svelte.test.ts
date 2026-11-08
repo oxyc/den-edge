@@ -4,6 +4,7 @@ import type { LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import { SessionServices } from './sessionServices.svelte';
+import { fetchRoutes } from './routes';
 
 let discoveries = 0;
 let reaches: string | undefined;
@@ -69,6 +70,7 @@ const content = {
   query: vi.fn(async () => ({ kind: 'sources.configure' })),
   onStatus: () => () => {},
 } as unknown as ContentServiceClientPort;
+const availableRoutes = () => ({ atlas: [] });
 
 const fakeModel = (overrides: Record<string, unknown> = {}) =>
   ({
@@ -117,7 +119,7 @@ describe('SessionServices', () => {
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
     const model = fakeModel();
-    const services = new SessionServices(model, content, async () => ({}));
+    const services = new SessionServices(model, content, async () => availableRoutes());
     services.configure(runtime());
     await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
     expect(connect).not.toHaveBeenCalledWith(services.scout, content);
@@ -176,10 +178,8 @@ describe('SessionServices', () => {
       reel: null,
       remux: null,
     });
-    const services = new SessionServices(
-      fakeModel({ retainedServices }),
-      content,
-      async () => ({}),
+    const services = new SessionServices(fakeModel({ retainedServices }), content, async () =>
+      availableRoutes(),
     );
     services.configure(runtime());
     await Promise.resolve();
@@ -201,7 +201,7 @@ describe('SessionServices', () => {
     refreshGrants = async () => {
       throw new Error('offline');
     };
-    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
     services.configure(runtime());
     await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
     expect(services.plugins).toEqual([]);
@@ -223,10 +223,8 @@ describe('SessionServices', () => {
     refreshGrants = () =>
       new Promise<'verified'>((resolve) => (refreshed = () => resolve('verified')));
     const retainedServices = vi.fn().mockResolvedValue(null);
-    const services = new SessionServices(
-      fakeModel({ retainedServices }),
-      content,
-      async () => ({}),
+    const services = new SessionServices(fakeModel({ retainedServices }), content, async () =>
+      availableRoutes(),
     );
     services.configure(runtime());
     services.stop();
@@ -241,7 +239,7 @@ describe('SessionServices', () => {
     autoDiscover = false;
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
     services.foregroundReady();
 
     guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
@@ -278,7 +276,7 @@ describe('SessionServices', () => {
     autoDiscover = false;
     discoveries = 0;
     const connect = vi.spyOn(availability, 'connect');
-    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
     services.foregroundReady();
 
     const scout = { base: '/scout-a', install: 'https://plugins.example/a' };
@@ -339,7 +337,7 @@ describe('SessionServices', () => {
       return new Promise<'verified'>((resolve) => held.push(resolve));
     };
     const model = fakeModel();
-    const services = new SessionServices(model, content, async () => ({}));
+    const services = new SessionServices(model, content, async () => availableRoutes());
 
     guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
     services.configure(runtime());
@@ -424,13 +422,40 @@ describe('SessionServices', () => {
     expect(attempts).toBe(1);
   });
 
+  it('retries production-style resolved route failures before starting discovery', async () => {
+    vi.useFakeTimers();
+    autoDiscover = false;
+    discoveries = 0;
+    let requests = 0;
+    const fetchImpl = vi.fn(async () => {
+      requests++;
+      if (requests < 3) return new Response('{}', { status: 503 });
+      return Response.json({ addons: { atlas: [{ url: '/atlas' }] } });
+    }) as unknown as typeof fetch;
+    const services = new SessionServices(fakeModel(), content, () => fetchRoutes(fetchImpl));
+
+    services.configure(runtime());
+    await vi.runAllTicks();
+    expect(requests).toBe(1);
+    expect(discoveries).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(requests).toBe(2);
+    expect(discoveries).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(requests).toBe(3);
+    await vi.runAllTimersAsync();
+    expect(discoveries).toBe(1);
+    expect(services.routes).toEqual({ atlas: [{ url: '/atlas', access: false }] });
+    services.stop();
+  });
+
   it('retries an unchanged retained grant after production-style resolved fetch failure', async () => {
     vi.useFakeTimers();
     autoDiscover = false;
     guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
     let attempts = 0;
     refreshGrants = async () => (++attempts === 1 ? 'retained-unverified' : 'verified');
-    const services = new SessionServices(fakeModel(), content, async () => ({}));
+    const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
     services.configure(runtime());
     await vi.runAllTicks();
     expect(services.plugins).toEqual([]);
@@ -449,7 +474,7 @@ describe('SessionServices', () => {
     let fail = false;
     const services = new SessionServices(fakeModel(), content, async () => {
       if (fail) throw new Error('route discovery failed');
-      return {};
+      return availableRoutes();
     });
     guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
     services.configure(runtime());
@@ -509,7 +534,7 @@ describe('SessionServices', () => {
       }),
       onStatus: () => () => {},
     } as unknown as ContentServiceClientPort;
-    const services = new SessionServices(fakeModel(), heldContent, async () => ({}));
+    const services = new SessionServices(fakeModel(), heldContent, async () => availableRoutes());
 
     services.configure(runtime());
     await vi.waitFor(() => expect(heldContent.query).toHaveBeenCalledOnce());
@@ -534,7 +559,7 @@ describe('SessionServices', () => {
       ),
       onStatus: () => () => {},
     } as unknown as ContentServiceClientPort;
-    const services = new SessionServices(fakeModel(), heldContent, async () => ({}));
+    const services = new SessionServices(fakeModel(), heldContent, async () => availableRoutes());
 
     services.configure(runtime(['first']));
     await vi.waitFor(() => expect(acknowledgements.has('/atlas-1')).toBe(true));
@@ -550,14 +575,58 @@ describe('SessionServices', () => {
     services.stop();
   });
 
+  it('reapplies the retained Atlas after an obsolete pending configuration', async () => {
+    autoDiscover = false;
+    discoveries = 0;
+    const calls: Array<{
+      atlas: string | null;
+      acknowledge: () => void;
+    }> = [];
+    const heldContent = {
+      query: vi.fn(
+        (request: { kind: string; atlas: string | null }) =>
+          new Promise<{ kind: 'sources.configure' }>((resolve) =>
+            calls.push({
+              atlas: request.atlas,
+              acknowledge: () => resolve({ kind: 'sources.configure' }),
+            }),
+          ),
+      ),
+      onStatus: () => () => {},
+    } as unknown as ContentServiceClientPort;
+    const services = new SessionServices(fakeModel(), heldContent, async () => availableRoutes());
+
+    services.configure(runtime(['a']));
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(1));
+    discoveryPublishes[0]!.atlas({ base: '/atlas-a' });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    calls[0]!.acknowledge();
+    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-a'));
+
+    services.configure(runtime(['a', 'b']));
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
+    discoveryPublishes[1]!.atlas({ base: '/atlas-b' });
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+
+    services.configure(runtime(['a', 'b', 'c']));
+    await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(3));
+    discoveryPublishes[2]!.atlas({ base: '/atlas-a' });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls.map(({ atlas }) => atlas)).toEqual(['/atlas-a', '/atlas-b', '/atlas-a']);
+
+    calls[1]!.acknowledge();
+    calls[2]!.acknowledge();
+    await vi.waitFor(() => expect(services.atlas).toBe('/atlas-a'));
+    expect(services.atlasReady).toBe(true);
+    services.stop();
+  });
+
   it('reports discovered private remux through the semantic model command', async () => {
     discoveries = 0;
     reaches = 'https://den-remux.tail.test';
     const rememberPrivateRemux = vi.fn().mockResolvedValue(undefined);
-    const services = new SessionServices(
-      fakeModel({ rememberPrivateRemux }),
-      content,
-      async () => ({}),
+    const services = new SessionServices(fakeModel({ rememberPrivateRemux }), content, async () =>
+      availableRoutes(),
     );
     services.configure(runtime());
     await vi.waitFor(() => expect(rememberPrivateRemux).toHaveBeenCalledWith(reaches));
@@ -625,7 +694,7 @@ describe('SessionServices', () => {
     const services = new SessionServices(
       fakeModel({ retainedServices: vi.fn().mockRejectedValue(new Error('closed')) }),
       content,
-      async () => ({}),
+      async () => availableRoutes(),
     );
     services.configure(runtime());
     await vi.waitFor(() => expect(services.atlasReady).toBe(true));
