@@ -224,6 +224,36 @@ test('receipt catch-up publishes an existing drop-box but never creates one in t
   expect(existing.put).toHaveBeenCalledOnce();
 });
 
+test('managed playback creates a receipt drop-box without creating an assistant grant', async () => {
+  const shared = library();
+  const { authority, put } = device(shared, [seed('dropbox')]);
+  await expect(authority.ensureDropbox()).resolves.toEqual({
+    kid: fixed.keys.dropbox!.kid,
+    public: fixed.keys.dropbox!.public,
+  });
+  expect(shared.rows.get(DROPBOX_ROW)?.values).toBeDefined();
+  expect(shared.rows.get(GRANTS_ROW)).toBeUndefined();
+  expect(put).toHaveBeenCalledOnce();
+});
+
+test('malformed playback receipts are durably refused without changing movie or episode progress', async () => {
+  const shared = library();
+  const opened = device(shared, [seed('dropbox')]);
+  await opened.authority.ensureDropbox();
+  await expect(
+    opened.authority.applyPlaybackReceipts([
+      { seq: 1, sealed: 'not-a-receipt' },
+      { seq: 2, sealed: 'still-not-a-receipt' },
+    ]),
+  ).resolves.toEqual({ ack: 2, applied: 0 });
+  expect(opened.commands).toEqual([]);
+  expect(shared.rows.get('playback-receipts-applied')).toBeUndefined();
+  await expect(
+    opened.reopen().applyPlaybackReceipts([{ seq: 3, sealed: 'not-a-receipt' }]),
+  ).resolves.toEqual({ ack: 3, applied: 0 });
+  expect(opened.commands).toEqual([]);
+});
+
 test('an accepted request is the tap, at the request’s own time, recorded in the same batch, and refused again', async () => {
   const shared = await consented();
   const { authority, commands, records } = device(shared, []);

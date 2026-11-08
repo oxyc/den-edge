@@ -6,7 +6,7 @@ import { sourceRefreshFixture } from './source-refresh-fixture.mjs';
 const API = 'https://den-tv-api.example.invalid';
 const ENTRY = `${E2E_ORIGIN}/package/index.html`;
 
-async function packaged(page, edge) {
+async function packaged(page, edge, sourceFailures) {
   await page.addInitScript(() => {
     globalThis.__tvPolicyViolations = [];
     document.addEventListener('securitypolicyviolation', (event) => {
@@ -40,6 +40,18 @@ async function packaged(page, edge) {
       ),
   };
   await routeGuestEdge(fixturePage, edge, API);
+  if (sourceFailures)
+    await page.route('**/diagnostics/failure', async (route) => {
+      if (route.request().method() === 'POST') sourceFailures.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 204,
+        headers: {
+          'access-control-allow-origin': E2E_ORIGIN,
+          'access-control-allow-methods': 'POST, OPTIONS',
+          'access-control-allow-headers': 'content-type',
+        },
+      });
+    });
   await page.route(`${E2E_ORIGIN}/package/**`, (route) => route.continue());
 }
 
@@ -50,6 +62,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   const edge = newEdge();
   const localFailures = [];
   const leakedCredentials = [];
+  const sourceFailures = [];
   const observeCredentials = (page) =>
     page.on('request', (request) => {
       const headers = request.headers();
@@ -64,7 +77,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     if (response.url().startsWith(E2E_ORIGIN) && response.status() >= 400)
       localFailures.push(response.url());
   });
-  await packaged(host, edge);
+  await packaged(host, edge, sourceFailures);
   await host.goto(`${ENTRY}#/movie/1002`);
   if (process.env.DEN_TV_OLD_ENGINE_LIMITS === '1') {
     expect(await host.evaluate(() => globalThis.__denOldEngineLimits)).toEqual({
@@ -108,7 +121,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   try {
     const tv = await context.newPage();
     observeCredentials(tv);
-    await packaged(tv, edge);
+    await packaged(tv, edge, sourceFailures);
     await tv.goto(ENTRY);
     await tv.getByLabel('Link code, twelve characters').fill(code);
     await tv.getByLabel('This device’s name').fill('Samsung package');
@@ -141,6 +154,33 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     expect(edge.libraryRequests.length).toBeGreaterThan(0);
     expect(localFailures).toEqual([]);
     expect(leakedCredentials).toEqual([]);
+    await expect.poll(() => sourceFailures.length).toBeGreaterThan(0);
+    for (const report of sourceFailures) {
+      expect(report).toMatchObject({
+        operation: 'source_lookup',
+        kind: 'transport',
+        outcome: 'terminal',
+        route: 'content_service',
+        durationBucket: 'fast',
+        priorList: false,
+        attempt: 0,
+      });
+      const expectedKeys = [
+        'attempt',
+        'correlation',
+        'durationBucket',
+        'generation',
+        'kind',
+        'operation',
+        'outcome',
+        'platform',
+        'priorList',
+        'route',
+      ];
+      if ('release' in report) expectedKeys.push('release');
+      expect(Object.keys(report).sort()).toEqual(expectedKeys.sort());
+      expect(JSON.stringify(report)).not.toMatch(/Movie 100[23]|Samsung package|den\.links/i);
+    }
     expect(await host.evaluate(() => globalThis.__tvPolicyViolations)).toEqual([]);
     expect(await tv.evaluate(() => globalThis.__tvPolicyViolations)).toEqual([]);
   } finally {
@@ -161,6 +201,10 @@ test('packaged title refresh keeps the prior list when limited and warms only af
   await page.keyboard.press('Enter');
   const panel = active.locator('.source-panel');
   await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+  const late = panel.getByRole('status').filter({
+    hasText: 'Sources still answering when this early list arrived: 1. It may be short.',
+  });
+  await expect(late).toBeVisible();
   await expect(active.getByRole('button', { name: 'Sources, 1 available' })).toBeFocused();
   const plainBefore = requests.plain;
   const refresh = panel.getByRole('button', { name: 'Check for sources again', exact: true });
@@ -170,11 +214,13 @@ test('packaged title refresh keeps the prior list when limited and warms only af
     panel.getByRole('status').filter({ hasText: 'Sources were checked recently' }),
   ).toBeVisible();
   await expect(panel.getByText('Prior.Movie.1080p.mkv')).toBeVisible();
+  await expect(late).toBeVisible();
   expect(requests).toMatchObject({ fresh: 1, plain: plainBefore });
   const retry = panel.getByRole('button', { name: 'Try again', exact: true });
   await retry.focus();
   await page.keyboard.press('Enter');
   await expect(panel.getByText('Rebuilt.Movie.1080p.mkv')).toBeVisible();
+  await expect(late).toHaveCount(0);
   await expect.poll(() => requests.plain).toBe(plainBefore + 1);
   expect(requests.fresh).toBe(2);
 });

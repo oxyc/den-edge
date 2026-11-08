@@ -187,6 +187,8 @@ const HEARTH = `${E2E_ORIGIN}/den/hearthcfg/manifest.json`;
  * release. Every search for it is kept on `searches`, every airing request on `airing`. `behind` leaves S1E2
  * unwatched; `recent` has a film part watched an hour ago, so its Continue Watching entry is newer than the followed
  * series'; `answer` is atlas's airing answer for it.
+ * `sourceAnswers` controls successive fresh source requests. A planned answer can include a `wait` promise to keep
+ * the real request in flight while navigation or another airing tick changes ownership.
  */
 async function followedLibrary(
   page,
@@ -199,15 +201,17 @@ async function followedLibrary(
     searched = 1,
     dismissedAgo,
     others = {},
+    sourceAnswers = ['found'],
   } = {},
 ) {
   const searches = [];
+  let freshAnswer = 0;
   const airing = await routeSeries(page, answer, others);
   await page.route(`${E2E_ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${E2E_ORIGIN}/routes`, (route) =>
     route.fulfill({ json: { v: 1, addons: { den: [{ url: `${E2E_ORIGIN}/den` }] } } }),
   );
-  await page.route(`${E2E_ORIGIN}/den/**`, (route) => {
+  await page.route(`${E2E_ORIGIN}/den/**`, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/den/hearthcfg/manifest.json')
       return route.fulfill({
@@ -223,20 +227,36 @@ async function followedLibrary(
     if (stream && Number(stream[1]) === searched) {
       searches.push(url.search);
       const fresh = url.searchParams.get('fresh') === '1';
+      const planned = fresh
+        ? (sourceAnswers[Math.min(freshAnswer++, sourceAnswers.length - 1)] ?? 'found')
+        : 'empty';
+      const { kind, wait } = typeof planned === 'string' ? { kind: planned } : planned;
+      if (wait) await wait;
+      if (kind === 'failure')
+        return route.fulfill({ status: 503, json: { error: 'source_unavailable' } });
+      const found = kind === 'found' || kind === 'limited';
       return route.fulfill({
-        headers: { 'cache-control': 'private, max-age=300' },
+        headers: {
+          'cache-control': 'private, max-age=300',
+          ...(kind === 'limited' ? { 'x-den-fresh': 'limited' } : {}),
+        },
         json: {
-          streams: fresh
-            ? [
-                {
-                  title: 'Dexter.Resurrection.S02E01.1080p.WEB.mkv',
-                  url: `${E2E_ORIGIN}/den/p/ticket`,
-                  behaviorHints: { filename: 'Dexter.Resurrection.S02E01.1080p.WEB.mkv' },
-                  attributes: { cached: true, resolution: '1080p' },
-                },
-              ]
-            : [],
-          den: { v: 1, answerKind: fresh ? 'live' : 'empty', coverage: { sources: [] } },
+          streams:
+            fresh && found
+              ? [
+                  {
+                    title: 'Dexter.Resurrection.S02E01.1080p.WEB.mkv',
+                    url: `${E2E_ORIGIN}/den/p/ticket`,
+                    behaviorHints: { filename: 'Dexter.Resurrection.S02E01.1080p.WEB.mkv' },
+                    attributes: { cached: true, resolution: '1080p' },
+                  },
+                ]
+              : [],
+          den: {
+            v: 1,
+            answerKind: kind === 'unknown' ? 'unknown' : found ? 'live' : 'empty',
+            coverage: { sources: [] },
+          },
         },
       });
     }
@@ -337,6 +357,20 @@ async function followedLibrary(
   return { searches, airing };
 }
 
+const freshSearches = (searches) => searches.filter((search) => search === '?fresh=1');
+
+/** Leave the retained Home route and return without reloading its document or profile session. */
+async function revisitHome(page) {
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movies' } })),
+  );
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/movies`);
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/' } })),
+  );
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+}
+
 test('a caught-up series stays in Continue Watching while its next episode is due', async ({
   page,
 }) => {
@@ -353,7 +387,9 @@ test('a caught-up series stays in Continue Watching while its next episode is du
   await expect(card).not.toContainText('New');
   // Nothing of it is out to play: the card opens the series page.
   await expect(shelf.locator(`a[href="/tv/${ID}-dexter-resurrection"]`).first()).toBeVisible();
-  await expect(page.locator('.billboard')).not.toContainText('New episode');
+  await expect(page.locator('[data-route-page][data-active="true"] .billboard')).not.toContainText(
+    'New episode',
+  );
   // Coming up has it too: one row for episodes and premieres alike.
   const coming = page.getByRole('region', { name: 'Coming up' });
   await expect(
@@ -449,8 +485,135 @@ test('a followed series’ new episode leads the billboard and Continue Watching
   await expect(card).toContainText('New');
   await expect.poll(() => continueOrder(page)).toEqual([`tv:${ID}`, `movie:${FILM}`]);
   // Found once is enough: the episode is not searched for afresh again while Home stays open.
-  expect(searches.filter((search) => search === '?fresh=1')).toHaveLength(1);
+  expect(freshSearches(searches)).toHaveLength(1);
+  // The successful verdict belongs to this retained Home and survives leaving and returning to it.
+  await revisitHome(page);
+  await page.waitForTimeout(2_500);
+  expect(freshSearches(searches)).toHaveLength(1);
   expect(airing.some((asked) => asked.includes(String(ID)))).toBe(true);
+});
+
+for (const [answer, label] of [
+  ['failure', 'a failed source request'],
+  ['limited', 'a limited rebuild'],
+  ['unknown', 'an unknown source answer'],
+]) {
+  test(`${label} is retried on the next Home trigger, then succeeds`, async ({ page }) => {
+    await page.clock.setFixedTime(SATURDAY);
+    const { searches } = await followedLibrary(page, {
+      recent: true,
+      sourceAnswers: [answer, 'found'],
+    });
+    await page.goto(`${E2E_ORIGIN}/`);
+
+    await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
+    // Let the failed/limited/unknown reply cross the Library Worker before producing the next real trigger.
+    await page.waitForTimeout(250);
+    await revisitHome(page);
+
+    await expect(page.locator('.billboard .slide').first()).toContainText('New episode · S2E1', {
+      timeout: 30_000,
+    });
+    expect(freshSearches(searches)).toHaveLength(2);
+  });
+}
+
+test('leaving Home during the settle releases the attempt and returning searches immediately', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(SATURDAY);
+  const { searches } = await followedLibrary(page, { recent: true });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expect(
+    page
+      .getByRole('region', { name: 'Continue Watching' })
+      .locator(`a[href^="/tv/${ID}-"]`)
+      .first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movies' } })),
+  );
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/movies`);
+  await page.waitForTimeout(2_500);
+  expect(freshSearches(searches)).toHaveLength(0);
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/' } })),
+  );
+  await expect(page.locator('.billboard .slide').first()).toContainText('New episode · S2E1', {
+    timeout: 30_000,
+  });
+  expect(freshSearches(searches)).toHaveLength(1);
+});
+
+test('an authoritative empty answer holds the retry for 30 minutes, then allows one search', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(SATURDAY);
+  const { searches } = await followedLibrary(page, {
+    recent: true,
+    sourceAnswers: ['empty', 'found'],
+  });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
+  await page.waitForTimeout(250);
+
+  await revisitHome(page);
+  await page.waitForTimeout(2_500);
+  expect(freshSearches(searches)).toHaveLength(1);
+  await page.clock.setFixedTime(new Date(SATURDAY.getTime() + 30 * 60_000));
+  await revisitHome(page);
+
+  await expect(page.locator('.billboard .slide').first()).toContainText('New episode · S2E1', {
+    timeout: 30_000,
+  });
+  expect(freshSearches(searches)).toHaveLength(2);
+});
+
+test('overlapping airing effects join one in-flight source search', async ({ page }) => {
+  await page.clock.install({ time: SATURDAY });
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const { searches } = await followedLibrary(page, {
+    recent: true,
+    sourceAnswers: [{ kind: 'found', wait: held }],
+  });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
+
+  // Home's five-minute airing refresh reruns the production effect while its first source request is still held.
+  await page.clock.fastForward(5 * 60_000 + 1);
+  await page.waitForTimeout(250);
+  expect(freshSearches(searches)).toHaveLength(1);
+
+  release();
+  await expect(page.locator('.billboard .slide').first()).toContainText('New episode · S2E1', {
+    timeout: 30_000,
+  });
+  expect(freshSearches(searches)).toHaveLength(1);
+});
+
+test('a late source answer cannot publish after Home ownership changes', async ({ page }) => {
+  await page.clock.setFixedTime(SATURDAY);
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const { searches } = await followedLibrary(page, {
+    recent: true,
+    sourceAnswers: [{ kind: 'found', wait: held }, 'empty'],
+  });
+  await page.goto(`${E2E_ORIGIN}/`);
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(1);
+
+  await revisitHome(page);
+  release();
+  await expect.poll(() => freshSearches(searches), { timeout: 30_000 }).toHaveLength(2);
+  await page.waitForTimeout(500);
+  // The old owner found a source, but only the new owner's authoritative empty answer may publish.
+  await expect(page.locator('[data-route-page][data-active="true"] .billboard')).not.toContainText(
+    'New episode',
+  );
+  expect(freshSearches(searches)).toHaveLength(2);
 });
 
 /**

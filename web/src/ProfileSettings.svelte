@@ -3,6 +3,7 @@
   the Owner PIN, asked once per session and again after any profile switch.
 -->
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Button from './components/Button.svelte';
   import PinInput from './components/PinInput.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
@@ -32,12 +33,37 @@
   const locked = $derived(profiles?.settingsLocked ?? false);
   let pin = $state('');
   let denied = $state(false);
+  let checking = $state(false);
+  let verificationFailed = $state(false);
+  let unlockAttempt = 0;
+
+  onDestroy(() => {
+    unlockAttempt++;
+  });
 
   async function unlock() {
-    if (!profiles || !/^\d{4}$/.test(pin)) return;
+    if (!profiles || checking || !/^\d{4}$/.test(pin)) return;
+    const coordinator = profiles;
+    const attempt = ++unlockAttempt;
+    const active = session;
     const entered = pin;
     pin = '';
-    denied = !(await profiles.unlockSettings(entered));
+    denied = false;
+    verificationFailed = false;
+    checking = true;
+    const current = () => attempt === unlockAttempt && coordinator.session === active;
+    try {
+      const unlocked = await coordinator.unlockSettings(entered);
+      if (current()) denied = !unlocked;
+    } catch (error) {
+      console.warn('den: the Owner PIN could not be checked for Kid Settings', error);
+      if (current()) verificationFailed = true;
+    } finally {
+      if (current()) {
+        checking = false;
+        requestAnimationFrame(() => document.getElementById('settings-gate-pin')?.focus());
+      }
+    }
   }
 
   async function changePolicy(policy: {
@@ -87,16 +113,27 @@
         bind:value={pin}
         focusOnMount
         invalid={denied}
-        onvalue={() => (denied = false)}
+        engaged={!checking}
+        disabled={checking}
+        onvalue={() => {
+          denied = false;
+          verificationFailed = false;
+        }}
         oncomplete={() => void unlock()}
       />
       {#if denied}<p class="denied" role="alert">{i18n.text('profile.pinMismatch')}</p>{/if}
+      {#if verificationFailed}<p class="denied" role="alert">
+          {i18n.text('profile.pinCheckFailed')}
+        </p>{:else if checking}<p role="status">{i18n.text('profile.checkingOwnerPin')}</p>{/if}
       <div class="actions">
         <Button
           type="submit"
           variant="primary"
-          label={i18n.text('profile.openSettings')}
-          disabled={!/^\d{4}$/.test(pin)}
+          label={checking
+            ? i18n.text('profile.checkingOwnerPin')
+            : i18n.text('profile.openSettings')}
+          busy={checking}
+          disabled={checking || !/^\d{4}$/.test(pin)}
         />
       </div>
     </form>

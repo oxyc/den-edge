@@ -10,6 +10,7 @@ import { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
+import { libraryGenerationVault } from './libraryRetirementLease';
 import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
 import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
 import { retryAfterMs } from './retryAfter';
@@ -71,6 +72,7 @@ import { openKeptInWorker } from './libraryWorkerClient';
 import type { LibraryWire } from './libraryServiceProtocol';
 import { LibraryColumns } from '../vendor/den-core/startup.js';
 import { newestFromColumns } from './libraryColumns';
+import { coherentLibraryGeneration } from './libraryPage';
 
 interface Entry {
   seq: number;
@@ -135,6 +137,14 @@ const responsePage = (value: unknown): value is Page =>
   Number.isSafeInteger((value as Page).head) &&
   (value as Page).head >= 0 &&
   typeof (value as Page).more === 'boolean';
+
+const coherentResponsePage = (response: Response, value: unknown): Page | null => {
+  if (!responsePage(value)) return null;
+  const generation = coherentLibraryGeneration(response, value.generation);
+  if (generation === undefined) return null;
+  if (generation) value.generation = generation;
+  return value;
+};
 
 const responseBatch = (value: unknown): value is Batch => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -1234,8 +1244,8 @@ export class LibraryLog {
         headers: this.headers(),
       });
       if (!res.ok) return null;
-      if (generation && res.headers.get('x-den-generation') !== generation) return null;
-      const page = (await res.json()) as Page;
+      const page = coherentResponsePage(res, await res.json());
+      if (!page || (generation && page.generation && page.generation !== generation)) return null;
       if (page.head !== base) return null;
       rows.push(...page.entries.filter((entry) => entry.seq <= base));
       if (!page.more || page.entries.length === 0) return rows;
@@ -1386,9 +1396,11 @@ export class LibraryLog {
       if (res.status === 404) return 'absent';
       if (res.status === 410) return 'moved';
       if (!res.ok) return null;
-      const page = (await res.json()) as Page;
-      generation ??= page.generation ?? res.headers.get('x-den-generation');
-      if ((page.generation ?? generation) !== generation) return null;
+      const page = coherentResponsePage(res, await res.json());
+      if (!page) return null;
+      const pageGeneration = page.generation ?? null;
+      generation ??= pageGeneration;
+      if (pageGeneration !== generation) return null;
       entries.push(...page.entries);
       head = page.head;
       if (!page.more || page.entries.length === 0) break;
@@ -1469,8 +1481,8 @@ export class LibraryLog {
       );
       if (!response.ok) throw new Error('Profile library readback failed');
       const value = (await response.json()) as unknown;
-      if (!responsePage(value)) throw new Error('Profile library readback was malformed');
-      const page = value;
+      const page = coherentResponsePage(response, value);
+      if (!page) throw new Error('Profile library readback was malformed');
       rows.push(...page.entries);
       if (!page.more || page.entries.length === 0) return rows;
       since = page.entries.at(-1)!.seq;
@@ -1794,10 +1806,9 @@ export class LibraryLog {
       });
       if (standing.status === 404 || standing.status === 410) return true;
       if (!standing.ok) return false;
-      const page = (await standing.json()) as unknown;
-      if (!responsePage(page)) return false;
-      const generation = page.generation ?? standing.headers.get('x-den-generation');
-      if (!generation) return false;
+      const page = coherentResponsePage(standing, await standing.json());
+      if (!page?.generation) return false;
+      const generation = page.generation;
       const response = await this.send(`/lib/${keys.id}`, {
         method: 'DELETE',
         headers: {
@@ -1884,9 +1895,9 @@ export class LibraryLog {
       });
       if (standing.status === 404 || standing.status === 410) return true;
       if (!standing.ok) return false;
-      const page = (await standing.json()) as Page;
-      const generation = page.generation ?? standing.headers.get('x-den-generation');
-      if (generation) this.generation = generation;
+      const page = coherentResponsePage(standing, await standing.json());
+      if (!page?.generation) return false;
+      this.generation = page.generation;
       const response = await this.send(`/lib/${this.keys.id}`, {
         method: 'DELETE',
         headers: {
@@ -2039,9 +2050,11 @@ export class LibraryLog {
         },
       });
       if (!res.ok) return null;
-      const page = (await res.json()) as Page;
-      generation ??= page.generation ?? res.headers.get('x-den-generation');
-      if ((page.generation ?? generation) !== generation) return null;
+      const page = coherentResponsePage(res, await res.json());
+      if (!page) return null;
+      const pageGeneration = page.generation ?? null;
+      generation ??= pageGeneration;
+      if (pageGeneration !== generation) return null;
       entries.push(...page.entries);
       if (!page.more || page.entries.length === 0) return { entries, head: page.head, generation };
       since = page.entries.at(-1)!.seq;
@@ -2329,10 +2342,11 @@ export class LibraryLog {
         };
       }
       if (!res.ok) return null;
-      const page = (await res.json()) as Page;
+      const page = coherentResponsePage(res, await res.json());
+      if (!page) return null;
       return {
         head: page.head,
-        generation: page.generation ?? res.headers.get('x-den-generation'),
+        generation: page.generation ?? null,
       };
     } catch {
       return null;
@@ -2372,17 +2386,20 @@ export class LibraryLog {
   ): Promise<LibraryLog | null> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
+    const generationVault = vault ? await libraryGenerationVault(vault, keys.id) : null;
     const log = new LibraryLog(
       keys,
       fetchImpl,
       storage,
-      vault && { vault, key: await libraryLocalKey(raw) },
+      generationVault && { vault: generationVault, key: await libraryLocalKey(raw) },
       false,
-      vault,
+      generationVault,
       wire,
     );
     await log.initializeRuntime();
-    log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
+    log.factStore = generationVault
+      ? await LibraryFactStore.open(libraryKey, generationVault)
+      : null;
     // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
     // never skip valid rows.
     const policy = ensureSyncPolicy();
@@ -2463,12 +2480,8 @@ export class LibraryLog {
       if (res.status === 426 && log.upgradeRequired !== null)
         throw new LibraryUpdateRequiredError(log.upgradeRequired);
       if (!res.ok) return null;
-      let page: Page;
-      try {
-        page = (await res.json()) as Page;
-      } catch {
-        return null;
-      }
+      const page = coherentResponsePage(res, await res.json());
+      if (!page) return null;
       if (log.generation && page.generation && log.generation !== page.generation) {
         if (log.directoryCommitted) await log.adoptProfileDirectory();
         else if (!(await log.stageRecovery(page.generation))) return null;
@@ -2854,7 +2867,8 @@ export class LibraryLog {
             await this.registerMember();
             useLibraryCredential(this.keys);
           }
-          const page = (await res.json()) as Page;
+          const page = coherentResponsePage(res, await res.json());
+          if (!page) return null;
           if (
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
@@ -3219,18 +3233,19 @@ export class LibraryLog {
     if (!vault) return null;
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
+    const generationVault = await libraryGenerationVault(vault, keys.id);
     const log = new LibraryLog(
       keys,
       fetchImpl,
       typeof localStorage === 'undefined' ? undefined : localStorage,
-      { vault, key: await libraryLocalKey(raw) },
+      { vault: generationVault, key: await libraryLocalKey(raw) },
       false,
-      vault,
+      generationVault,
       wire,
     );
     await log.initializeRuntime();
     if (log.wireMin < WIRE || log.pending.size || log.readOnly) return null;
-    const store = await LibraryFactStore.open(libraryKey, vault);
+    const store = await LibraryFactStore.open(libraryKey, generationVault);
     const manifest = await store?.manifest();
     if (!store || !manifest?.complete || manifest.profileTopology || !manifest.newest) return null;
     const { stamp, reconsiderAt } = manifest.newest;

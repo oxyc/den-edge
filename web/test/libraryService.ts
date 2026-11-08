@@ -1,5 +1,6 @@
 import type { ClockStore } from '../src/lib/clockStore';
 import { ContentAuthority } from '../src/lib/contentAuthority';
+import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
 import {
   DownloadCoordinator,
   type DownloadCoordinatorEffects,
@@ -16,6 +17,7 @@ import type {
   LibraryObservation,
   LibraryQuery,
   LibrarySelection,
+  LibrarySelectionValue,
   LibraryServiceCommandResult,
   LibrarySessionStatus,
   LibraryTask,
@@ -28,6 +30,13 @@ import { cancelSource, prepareSource } from '../src/lib/titleSources';
 import type { Stamp } from '../src/lib/wire';
 import { fixtureContentService } from './contentService';
 
+interface FixtureSubscription {
+  selection: LibrarySelection;
+  listener: (snapshot: LibrarySelectionSnapshot) => void;
+  failed: boolean;
+  retained?: LibrarySelectionValue;
+}
+
 class FixtureService {
   readonly historyDetails = {
     attempts: 0,
@@ -36,11 +45,23 @@ class FixtureService {
     lastError: '',
     lastItems: [] as { id: number; seen: number }[],
   };
-  readonly #subscriptions = new Map<
-    number,
-    { selection: LibrarySelection; listener: (snapshot: LibrarySelectionSnapshot) => void }
-  >();
+  readonly #subscriptions = new Map<number, FixtureSubscription>();
+  readonly downloadsSelection = { attempts: 0 };
+  readonly historyImports = {
+    attempts: 0,
+    applications: 0,
+    replies: 0,
+    operationIds: [] as string[],
+  };
+  readonly recoveryTasks: LibraryTask['kind'][] = [];
+  readonly commandKinds: LibraryCommand['kind'][] = [];
+  readonly progressOperationIds: string[] = [];
+  readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
+  readonly #heldSelections = new Map<
+    LibrarySelection['kind'],
+    { started: () => void; gate: Promise<void> }
+  >();
   #nextSubscription = 0;
   #revision = 0;
   #ready = false;
@@ -54,6 +75,13 @@ class FixtureService {
     private readonly openFailureMessage = 'fixture library service did not start',
     private readonly failHistoryDetails = false,
     private readonly settingsGate?: Promise<void>,
+    private downloadsSelectionFailures = 0,
+    private readonly downloadsSelectionGate?: Promise<void>,
+    private loseHistoryImportReplyOnce = false,
+    private readonly historyImportReplyGate?: Promise<void>,
+    private loseRecoveryConfirmReplyOnce = false,
+    private rejectProgressCommands = 0,
+    private readonly progressReplyGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -88,11 +116,21 @@ class FixtureService {
     command: LibraryCommand,
     operationId: string = crypto.randomUUID(),
   ): Promise<LibraryServiceCommandResult> {
+    this.commandKinds.push(command.kind);
+    if (command.kind === 'progress.record') {
+      this.progressOperationIds.push(operationId);
+      if (command.playing === false && this.rejectProgressCommands > 0) {
+        this.rejectProgressCommands--;
+        throw new Error('fixture rejected progress command');
+      }
+    }
     const result = await this.authority.command(command, operationId);
     if (result.outcome === 'applied') {
       this.#revision++;
       await this.publish(result.affected);
     }
+    if (command.kind === 'progress.record' && command.playing === false)
+      await this.progressReplyGate;
     return {
       type: 'command-result',
       protocol: 1,
@@ -104,7 +142,7 @@ class FixtureService {
     };
   }
 
-  async query(query: LibraryQuery) {
+  async query(query: LibraryQuery, signal?: AbortSignal) {
     const historyDetails = query.kind === 'history.episodes';
     if (historyDetails) this.historyDetails.attempts++;
     try {
@@ -114,7 +152,8 @@ class FixtureService {
         this.refreshDownloadSources && query.kind === 'download.sources'
           ? { ...query, refresh: true as const }
           : query;
-      const result = await this.authority.query(requested);
+      // Production's Worker owns each source lookup by its request id and aborts it on cancel; so does this one.
+      const result = await this.authority.query(requested, signal);
       if (query.kind === 'download.refresh') await this.publish([{ kind: 'downloads' }]);
       if (historyDetails && result.kind === 'history.episodes') {
         this.historyDetails.successes++;
@@ -134,9 +173,31 @@ class FixtureService {
   }
 
   async task(task: LibraryTask, operationId: string = crypto.randomUUID()) {
-    const completed = await this.authority.task(task, operationId);
-    this.#revision++;
-    await this.publish(completed.affected);
+    const historyImport = task.kind === 'history.import';
+    const recovery = task.kind.startsWith('recovery.');
+    if (recovery) this.recoveryTasks.push(task.kind);
+    if (historyImport) {
+      this.historyImports.attempts++;
+      this.historyImports.operationIds.push(operationId);
+    }
+    let completed = this.#completedTasks.get(operationId);
+    if (!completed) {
+      completed = await this.authority.task(task, operationId);
+      this.#completedTasks.set(operationId, completed);
+      if (historyImport) this.historyImports.applications++;
+      this.#revision++;
+      await this.publish(completed.affected);
+    }
+    if (historyImport && this.loseHistoryImportReplyOnce) {
+      this.loseHistoryImportReplyOnce = false;
+      throw new Error('fixture lost the committed import reply');
+    }
+    if (task.kind === 'recovery.confirm' && this.loseRecoveryConfirmReplyOnce) {
+      this.loseRecoveryConfirmReplyOnce = false;
+      throw new Error('fixture lost the committed recovery confirmation reply');
+    }
+    if (historyImport) await this.historyImportReplyGate;
+    if (historyImport) this.historyImports.replies++;
     return { result: completed.result, version: this.version };
   }
 
@@ -154,8 +215,17 @@ class FixtureService {
     listener: (snapshot: LibrarySelectionSnapshot) => void,
   ) {
     const id = ++this.#nextSubscription;
-    this.#subscriptions.set(id, { selection, listener });
-    if (this.#ready) void this.#publishOne(selection, listener);
+    const downloads = selection.kind === 'downloads';
+    if (downloads) this.downloadsSelection.attempts++;
+    const failed = downloads && this.downloadsSelectionFailures > 0;
+    if (failed) this.downloadsSelectionFailures--;
+    const subscription: FixtureSubscription = {
+      selection,
+      listener,
+      failed,
+    };
+    this.#subscriptions.set(id, subscription);
+    if (this.#ready) void this.#publishOne(subscription);
     else listener({ selection, connection: 'connecting' });
     return () => this.#subscriptions.delete(id);
   }
@@ -170,8 +240,36 @@ class FixtureService {
     await Promise.all(
       [...this.#subscriptions.values()]
         .filter(({ selection }) => affected.some((scope) => matches(scope, selection)))
-        .map(({ selection, listener }) => this.#publishOne(selection, listener)),
+        .map((subscription) => this.#publishOne(subscription)),
     );
+  }
+
+  holdNextSelection(kind: LibrarySelection['kind']) {
+    let noteStarted = () => {};
+    const started = new Promise<void>((resolve) => (noteStarted = resolve));
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.#heldSelections.set(kind, { started: noteStarted, gate });
+    return { started, release };
+  }
+
+  activeSelections() {
+    const counts: Partial<Record<LibrarySelection['kind'], number>> = {};
+    for (const { selection } of this.#subscriptions.values())
+      counts[selection.kind] = (counts[selection.kind] ?? 0) + 1;
+    return counts;
+  }
+
+  failDownloadsSelection() {
+    this.failSelection('downloads');
+  }
+
+  failSelection(kind: LibrarySelection['kind']) {
+    for (const subscription of this.#subscriptions.values()) {
+      if (subscription.selection.kind !== kind) continue;
+      subscription.failed = true;
+      this.#emitSelectionFailure(subscription);
+    }
   }
 
   close() {
@@ -188,16 +286,38 @@ class FixtureService {
     void this.publish(event.affected);
   }
 
-  async #publishOne(
-    selection: LibrarySelection,
-    listener: (snapshot: LibrarySelectionSnapshot) => void,
-  ) {
+  async #publishOne(subscription: FixtureSubscription) {
+    const { selection, listener } = subscription;
     if (selection.kind === 'settings') await this.settingsGate;
+    if (selection.kind === 'downloads') await this.downloadsSelectionGate;
+    if (subscription.failed) return this.#emitSelectionFailure(subscription);
+    const value = await this.authority.select(selection);
+    const held = this.#heldSelections.get(selection.kind);
+    if (held) {
+      this.#heldSelections.delete(selection.kind);
+      held.started();
+      await held.gate;
+    }
+    subscription.retained = value;
     listener({
       selection,
       connection: 'ready',
-      value: await this.authority.select(selection),
+      value,
       version: this.version,
+    });
+  }
+
+  #emitSelectionFailure(subscription: FixtureSubscription) {
+    subscription.listener({
+      selection: subscription.selection,
+      connection: 'failed',
+      ...(subscription.retained ? { value: subscription.retained } : {}),
+      version: this.version,
+      error: {
+        code: 'unavailable',
+        message: `fixture ${subscription.selection.kind} selection failed`,
+        retryable: true,
+      },
     });
   }
 }
@@ -219,6 +339,8 @@ function matches(scope: LibrarySelectionScope, selection: LibrarySelection) {
 
 export interface FixtureLibraryServiceOptions {
   log: LibraryLog;
+  /** A focused fixture's production-shaped content port; ordinary fixtures keep the in-page authority below. */
+  content?: ContentServiceClientPort;
   device?: string;
   /** Enables the administrative queries Settings owns without exposing a production session/log escape hatch. */
   libraryKey?: string;
@@ -236,6 +358,20 @@ export interface FixtureLibraryServiceOptions {
   failHistoryDetails?: boolean;
   /** Page fixture only: let other root snapshots publish while policy Settings stays authoritative-but-held. */
   settingsGate?: Promise<void>;
+  /** Downloads page fixture only: fail this many fresh lazy-selection subscriptions until the page rebinds. */
+  downloadsSelectionFailures?: number;
+  /** Downloads page fixture only: hold its real lazy selection at the service protocol boundary. */
+  downloadsSelectionGate?: Promise<void>;
+  /** Settings fixture only: commit one history import, then reject before its semantic reply reaches the page. */
+  loseHistoryImportReplyOnce?: boolean;
+  /** Settings fixture only: hold a committed history import's semantic reply. */
+  historyImportReplyGate?: Promise<void>;
+  /** Settings fixture only: commit one recovery confirmation, then lose its semantic reply. */
+  loseRecoveryConfirmReplyOnce?: boolean;
+  /** Playback fixture only: reject this many progress commands before they reach durable authority. */
+  rejectProgressCommands?: number;
+  /** Playback fixture only: hold the semantic reply after progress is durably applied and published. */
+  progressReplyGate?: Promise<void>;
 }
 
 /**
@@ -244,6 +380,7 @@ export interface FixtureLibraryServiceOptions {
  */
 export function fixtureLibraryService({
   log,
+  content = fixtureContentService(),
   device = 'aaaaaaaaaaaaaaaa',
   libraryKey,
   effects = {},
@@ -255,6 +392,13 @@ export function fixtureLibraryService({
   openGate,
   failHistoryDetails,
   settingsGate,
+  downloadsSelectionFailures,
+  downloadsSelectionGate,
+  loseHistoryImportReplyOnce,
+  historyImportReplyGate,
+  loseRecoveryConfirmReplyOnce,
+  rejectProgressCommands,
+  progressReplyGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -322,6 +466,13 @@ export function fixtureLibraryService({
     openFailureMessage,
     failHistoryDetails,
     settingsGate,
+    downloadsSelectionFailures,
+    downloadsSelectionGate,
+    loseHistoryImportReplyOnce,
+    historyImportReplyGate,
+    loseRecoveryConfirmReplyOnce,
+    rejectProgressCommands,
+    progressReplyGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
@@ -330,17 +481,21 @@ export function fixtureLibraryService({
   });
   // RoutedLibrary owns this observation in production; fixtures render the model directly.
   void model.ready.catch(() => {});
-  const session = legacyProfileSession(
-    libraryKey ?? 'fixture',
-    false,
-    model,
-    fixtureContentService(),
-  );
+  const session = legacyProfileSession(libraryKey ?? 'fixture', false, model, content);
   return {
     model,
     session,
     coordinator,
     historyDetails: fixtureService.historyDetails,
+    downloadsSelection: fixtureService.downloadsSelection,
+    historyImports: fixtureService.historyImports,
+    recoveryTasks: fixtureService.recoveryTasks,
+    commandKinds: fixtureService.commandKinds,
+    progressOperationIds: fixtureService.progressOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
+    holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
+    activeSelections: () => fixtureService.activeSelections(),
+    failSelection: (kind: LibrarySelection['kind']) => fixtureService.failSelection(kind),
+    failDownloadsSelection: () => fixtureService.failDownloadsSelection(),
   };
 }

@@ -2356,6 +2356,42 @@ it('promotes when the remote generation changes at the same head', async () => {
   }
 });
 
+it('promotes without reconciling facts from contradictory generation evidence', async () => {
+  vi.useFakeTimers();
+  try {
+    const vault = new MemoryVault();
+    const value = await cached(vault);
+    const openFull = vi.fn(async () => fullAuthority());
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          generation: value.identity.generation,
+          head: value.identity.head,
+          entries: [],
+        }),
+        { status: 200, headers: { 'x-den-generation': 'contradictory-generation' } },
+      ),
+    );
+    const opened = await openFinishedLibraryViewAuthority(
+      request,
+      vault,
+      openFull,
+      content,
+      fetchImpl,
+    );
+    await opened!.authority.observe({
+      kind: 'lifecycle',
+      visible: true,
+      online: true,
+      playbackActive: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openFull).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('misses when the locally saved authority has advanced beyond the finished views', async () => {
   const vault = new MemoryVault();
   const value = await cached(vault);

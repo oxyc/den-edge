@@ -38,6 +38,8 @@ export const messages = {
     'Introduce el PIN del propietario para abrir los ajustes de este perfil.',
   'profile.ownerPin': 'PIN del propietario',
   'profile.pinMismatch': 'El PIN no coincide.',
+  'profile.checkingOwnerPin': 'Comprobando el PIN del propietario…',
+  'profile.pinCheckFailed': 'No se pudo comprobar el PIN del propietario. Inténtalo de nuevo.',
   'profile.openSettings': 'Abrir ajustes',
   'profile.visitor': 'Perfil de visitante',
   'profile.kid': 'Perfil infantil',
@@ -50,4 +52,9 @@ export const messages = {
   'common.play': 'Reproducir',
   'common.resume': 'Reanudar',
   'common.close': 'Cerrar',
+  'retirement.title': 'Hay que volver a intentar limpiar la biblioteca',
+  'retirement.detail':
+    'Has cerrado sesión. Den todavía debe eliminar los datos cifrados de la biblioteca guardados en este dispositivo. Puedes salir con seguridad; se volverá a intentar la próxima vez.',
+  'retirement.waiting': 'Otra pestaña de Den todavía está terminando el trabajo de esa biblioteca.',
+  'retirement.retry': 'Volver a intentar la limpieza',
 } as const satisfies MessageCatalog;

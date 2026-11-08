@@ -25,10 +25,18 @@ const TEST_CAST_PLAY_MS = 1_000;
  * loaded into it (an error), `silent` sees one and never plays what is loaded (no error either). Offered the choice
  * (`den-choose`), the viewer here picks the receiver at once: a Cast session starts with nothing loaded.
  */
-const castPage = (mode, discoveryDelay = 0) => `<!doctype html><script>
+const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html><script>
   window.loads = [];
+  window.messages = [];
+  window.handshakes = [];
   addEventListener('message', (event) => {
     const message = event.data || {};
+    if (message.type === 'den-handshake') {
+      window.handshakes.push(message.generation);
+      if (${ready}) parent.postMessage({ type: 'den-ready', generation: message.generation }, event.origin);
+      return;
+    }
+    window.messages.push(message.type);
     if (message.type === 'den-discover')
       setTimeout(() => parent.postMessage({ type: 'den-cast-availability', available: ${mode !== 'none'} }, event.origin), ${discoveryDelay});
     if (message.type === 'den-choose')
@@ -46,7 +54,7 @@ const castPage = (mode, discoveryDelay = 0) => `<!doctype html><script>
     else if (${mode === 'playing'})
       parent.postMessage({ type: 'den-cast', id: message.id, state: 'playing' }, event.origin);
   });
-  parent.postMessage({ type: 'den-ready' }, '*');
+  if (${ready}) parent.postMessage({ type: 'den-ready', generation: -1 }, '*');
 </script>`;
 
 /** Read the receiver stub without turning its normal replacement into a test failure. */
@@ -57,6 +65,22 @@ async function castLoads(page) {
     return await cast.evaluate(() => window.loads ?? []);
   } catch (error) {
     // The player deliberately replaces this frame as its Cast offer changes. Poll the replacement instead.
+    if (
+      cast.isDetached() ||
+      /Frame was detached|Execution context was destroyed/.test(String(error))
+    )
+      return [];
+    throw error;
+  }
+}
+
+async function castMessages(page) {
+  const cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+  if (!cast) return [];
+  try {
+    return await cast.evaluate(() => window.messages ?? []);
+  } catch (error) {
+    // Reloading the receiver deliberately destroys this document. Poll the replacement document instead.
     if (
       cast.isDetached() ||
       /Frame was detached|Execution context was destroyed/.test(String(error))
@@ -91,6 +115,10 @@ async function open(
     lanHttp = false,
     viewport = { width: 1280, height: 800 },
     castDiscoveryDelay = 0,
+    castReady = true,
+    directCastOrigin = false,
+    receiptBoundary = false,
+    receiptDelayMs = 0,
     configDelay = 0,
     discoveryMs = mode === 'none' ? TEST_CAST_DISCOVERY_MS : undefined,
   } = {},
@@ -105,24 +133,31 @@ async function open(
   });
   const page = await context.newPage();
   await guardNetwork(page);
-  const asked = { direct: [], managed: [], relay: [], ended: [] };
+  const asked = { direct: [], managed: [], relay: [], ended: [], order: [] };
+  await page.route(`${ORIGIN}/test/receipt-ready`, (r) => {
+    asked.order.push('receipt');
+    return r.fulfill({ status: 204 });
+  });
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
+  await page.route(/\/playback\/(?:outcome|cast)$/, (r) => r.fulfill({ status: 204 }));
   await page.route(`${ORIGIN}/config`, async (r) => {
     if (configDelay) await new Promise((resolve) => setTimeout(resolve, configDelay));
     return r.fulfill({ json: { castOrigin: CAST } });
   });
   await page.route(`${ORIGIN}/direct/session`, (r) => {
     asked.direct.push(r.request().postDataJSON());
+    const answer = lanHttp
+      ? lanSession(`d${asked.direct.length}`)
+      : session('direct', `d${asked.direct.length}`);
     return r.fulfill({
       status: 201,
-      json: lanHttp
-        ? lanSession(`d${asked.direct.length}`)
-        : session('direct', `d${asked.direct.length}`),
+      json: directCastOrigin ? { ...answer, castOrigin: CAST } : answer,
     });
   });
   await page.route(`${ORIGIN}/direct/releases`, (r) => r.fulfill({ json: { releases } }));
   await page.route(`${ORIGIN}/den/config/playback`, (r) => {
+    asked.order.push('playback');
     const request = r.request().postDataJSON();
     asked.managed.push(request);
     if (request.directFailed === true)
@@ -212,7 +247,7 @@ async function open(
   await page.route(`${ORIGIN}/remux/releases`, (r) => r.fulfill({ json: { releases: [] } }));
   await page.route(`${MEDIA}/**`, (r) => r.fulfill({ status: 204 }));
   await page.route(`${CAST}/**`, (r) =>
-    r.fulfill({ contentType: 'text/html', body: castPage(mode, castDiscoveryDelay) }),
+    r.fulfill({ contentType: 'text/html', body: castPage(mode, castDiscoveryDelay, castReady) }),
   );
   const query = new URLSearchParams({ castPlayMs: String(TEST_CAST_PLAY_MS) });
   // The discovery window only ends a look that found nothing. A cast page with a receiver answers at once, so only
@@ -226,9 +261,43 @@ async function open(
     query.set('remux', '/remux');
   }
   if (subtitleLanguage) query.set('subtitleLanguage', subtitleLanguage);
+  if (receiptBoundary) query.set('receiptBoundary', '1');
+  if (receiptDelayMs) query.set('receiptDelayMs', String(receiptDelayMs));
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };
 }
+
+test('the first managed playback intent establishes receipt authority before reaching Hearth', async () => {
+  const { browser, page, asked } = await open('playing', {
+    managed: true,
+    receiptBoundary: true,
+  });
+  try {
+    await playingPast(page, 1);
+    expect(asked.order.slice(0, 2)).toEqual(['receipt', 'playback']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a stalled receipt preparation is bounded, cancellable, and visibly degrades', async () => {
+  const { browser, page, asked } = await open('playing', {
+    managed: true,
+    receiptBoundary: true,
+    receiptDelayMs: 30_000,
+  });
+  try {
+    await playingPast(page, 1);
+    expect(asked.order).toEqual(['playback']);
+    await expect(
+      page.getByText(
+        'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.',
+      ),
+    ).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
 
 test('managed direct HLS refreshes TorBox once on Cast failure without switching sources', async () => {
   const { browser, page, asked } = await open('direct-fail', { managed: true });
@@ -466,6 +535,59 @@ test('a slow /config read does not spend the discovery window', async () => {
   } catch (error) {
     await savePageTrace(page);
     throw error;
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a Cast media document waits for its own ready message across initial load and reload', async () => {
+  const { browser, page } = await open('playing', { castReady: false, directCastOrigin: true });
+  try {
+    await expect(page.locator('.player iframe[title="Den Cast player"]')).toHaveCount(1);
+    await expect.poll(() => page.frames().some((frame) => frame.url().startsWith(CAST))).toBe(true);
+    await expect.poll(() => castMessages(page)).toEqual([]);
+    // A same-origin page message has the claimed target origin but the wrong source window and must authorize none.
+    await page.evaluate(() => window.postMessage({ type: 'den-ready' }, '*'));
+    await expect.poll(() => castMessages(page)).toEqual([]);
+    let cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+    expect(cast).toBeTruthy();
+    const firstGeneration = await cast.evaluate(() => window.handshakes.at(-1));
+    expect(typeof firstGeneration).toBe('string');
+    await cast.evaluate(() =>
+      parent.postMessage({ type: 'den-ready', generation: window.handshakes.at(-1) }, '*'),
+    );
+    await expect.poll(async () => (await castLoads(page)).length).toBe(1);
+
+    await cast.evaluate(() => location.reload());
+    await expect.poll(() => castMessages(page)).toEqual([]);
+    await page.evaluate(() => window.postMessage({ type: 'den-ready' }, '*'));
+    await expect.poll(() => castMessages(page)).toEqual([]);
+    cast = page.frames().find((frame) => frame.url().startsWith(CAST));
+    expect(cast).toBeTruthy();
+    await cast.evaluate(
+      (generation) => parent.postMessage({ type: 'den-ready', generation }, '*'),
+      firstGeneration,
+    );
+    await expect.poll(() => castMessages(page)).toEqual([]);
+    await cast.evaluate(() =>
+      parent.postMessage({ type: 'den-ready', generation: window.handshakes.at(-1) }, '*'),
+    );
+    await expect.poll(async () => (await castLoads(page)).length).toBe(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a Cast document that never completes its handshake times out visibly and can be retried', async () => {
+  const { browser, page, asked } = await open('silent', {
+    castReady: false,
+    directCastOrigin: true,
+  });
+  try {
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Try another release' })).toBeVisible();
+    await page.getByRole('button', { name: 'Try another release' }).click();
+    await expect.poll(() => asked.direct.length).toBeGreaterThanOrEqual(2);
   } finally {
     await browser.close();
   }

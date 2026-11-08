@@ -1,6 +1,6 @@
 // The TVs this browser is paired with (den-spec pairing v1), in localStorage.
 
-import { forgetLibrary } from './localVault';
+import { libraryRetirements, type LibraryRetirements } from './libraryRetirement.svelte';
 import { forgetHeroLeadPointers } from './heroLeadPointer';
 
 export interface Link {
@@ -299,7 +299,7 @@ export class Links {
   private goneLinks: Link[] = [];
   private goneShared: Shared[] = [];
 
-  constructor() {
+  constructor(private readonly retirements: LibraryRetirements = libraryRetirements) {
     if (typeof window === 'undefined') return;
     window.addEventListener('storage', (event) => {
       if (event.key === null || [STORAGE_KEY, SHARED_KEY, BROWSING_KEY].includes(event.key))
@@ -370,6 +370,58 @@ export class Links {
     this.moved = null;
     this.settle();
     this.saveLinks();
+  }
+
+  /**
+   * Reconcile only the exact credentials captured by a join that durably committed. This deliberately does not make
+   * the link current: a replacement presentation owns selection and navigation. A replacement record reusing the
+   * inbox credential wins and is never overwritten.
+   */
+  reconcileCommitted(
+    expected: Pick<Link, 'inboxKey' | 'name' | 'linkKey' | 'deviceId' | 'recovered' | 'linkedAt'>,
+    libraryKey: string,
+  ): Link | null {
+    this.reread();
+    const held = this.list.find((link) => link.inboxKey === expected.inboxKey);
+    if (held) {
+      return held.libraryKey === libraryKey &&
+        held.linkKey === expected.linkKey &&
+        held.name === expected.name &&
+        held.deviceId === expected.deviceId &&
+        held.recovered === expected.recovered &&
+        (expected.linkedAt === undefined || held.linkedAt === expected.linkedAt)
+        ? held
+        : null;
+    }
+    const committed: Link = {
+      inboxKey: expected.inboxKey,
+      name: expected.name,
+      linkedAt: expected.linkedAt ?? Date.now(),
+      libraryKey,
+      linkKey: expected.linkKey,
+      ...(expected.deviceId ? { deviceId: expected.deviceId } : {}),
+      ...(expected.recovered ? { recovered: true } : {}),
+    };
+    this.list = [...this.list, committed];
+    this.moved = null;
+    this.saveLinks();
+    return committed;
+  }
+
+  /** Capture recovery credentials before its durable join; keeping them happens only after that join commits. */
+  recoveryCandidate(libraryKey: string): Link {
+    this.reread();
+    const held = this.list.find((link) => link.libraryKey === libraryKey);
+    if (held) return held;
+    const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
+    return {
+      inboxKey: Array.from(random(24), (b) => b.toString(16).padStart(2, '0')).join(''),
+      name: 'a recovery code',
+      linkedAt: Date.now(),
+      libraryKey,
+      linkKey: btoa(String.fromCharCode(...random(32))),
+      recovered: true,
+    };
   }
 
   /**
@@ -468,9 +520,18 @@ export class Links {
     this.saveShared();
   }
 
-  remove(inboxKey: string): void {
+  async remove(inboxKey: string): Promise<void> {
     this.reread();
-    const gone = this.list.find((l) => l.inboxKey === inboxKey);
+    let gone = this.list.find((l) => l.inboxKey === inboxKey);
+    if (!gone) return;
+    const retiringKey = gone.libraryKey;
+    let retirement = null;
+    if (!this.list.some((link) => link.inboxKey !== inboxKey && link.libraryKey === retiringKey))
+      retirement = await this.retirements.prepare(retiringKey);
+    // Pairing or another tab may have changed the list while the receipt was being derived and committed.
+    this.reread();
+    gone = this.list.find((l) => l.inboxKey === inboxKey);
+    if (!gone) return this.retirements.start(retirement);
     this.list = this.list.filter((l) => l.inboxKey !== inboxKey);
     this.unsavedLinks = this.unsavedLinks.filter((l) => l.inboxKey !== inboxKey);
     this.settle();
@@ -478,9 +539,7 @@ export class Links {
     // What this browser kept of the library goes with the last link that reaches it.
     if (gone && !this.list.some((l) => l.libraryKey === gone.libraryKey)) {
       forgetHeroLeadPointers(gone.libraryKey);
-      void forgetLibrary(gone.libraryKey).catch((error: unknown) =>
-        console.warn('den: the kept library could not be dropped', error),
-      );
+      this.retirements.start(retirement);
     }
   }
 
@@ -489,12 +548,12 @@ export class Links {
    * browser is moving, or has moved, to a new key itself (`rekey`, `PendingReset`): the old library's `410` is then
    * its own reset.
    */
-  forgetMoved(link: Link): void {
+  async forgetMoved(link: Link): Promise<void> {
     this.reread();
     const kept = this.list.find((l) => l.inboxKey === link.inboxKey);
     if (kept && kept.libraryKey !== link.libraryKey) return;
     if (readPendingReset()?.from === link.libraryKey) return;
-    this.remove(link.inboxKey);
+    await this.remove(link.inboxKey);
     this.moved = link.name ?? 'Your Apple TV';
   }
 
@@ -503,7 +562,8 @@ export class Links {
    * pending. What this browser kept of it under `from` goes, and so do its records of the devices it gave `from` to:
    * the reset cut them off. The app reopens the library under the new key.
    */
-  rekey(from: string, to: string, keepOld = false): void {
+  async rekey(from: string, to: string, keepOld = false): Promise<void> {
+    const retirement = keepOld ? null : await this.retirements.prepare(from);
     this.reread();
     this.list = this.list.map((l) => (l.libraryKey === from ? { ...l, libraryKey: to } : l));
     this.shared = this.shared.filter((s) => s.libraryKey !== from);
@@ -512,15 +572,17 @@ export class Links {
     this.saveShared();
     forgetHeroLeadPointers(from);
     // A compound reset keeps the old library's kept state and the pending marker until its journal is erased.
-    if (!keepOld) this.releaseRekeyed(from);
+    if (!keepOld) {
+      writePendingReset(null);
+      this.retirements.start(retirement);
+    }
   }
 
   /** Drop what a reset from `from` left behind: the pending marker and the old library's kept state. */
-  releaseRekeyed(from: string): void {
+  async releaseRekeyed(from: string): Promise<void> {
+    const retirement = await this.retirements.prepare(from);
     writePendingReset(null);
-    void forgetLibrary(from).catch((error: unknown) =>
-      console.warn('den: the kept library could not be dropped', error),
-    );
+    this.retirements.start(retirement);
   }
 }
 

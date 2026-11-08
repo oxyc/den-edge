@@ -42,6 +42,7 @@ type Pending = {
   timer?: ReturnType<typeof setTimeout>;
   /** Restart the timeout: the service said it is still working on this request. */
   arm?: () => void;
+  stopAbort?: () => void;
 };
 
 type Subscription = {
@@ -130,14 +131,19 @@ export class LibraryServiceClient {
 
   async query(
     query: LibraryQuery,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     const requestId = this.#requestId();
-    const reply = await this.#request({
-      type: 'query',
-      protocol: LIBRARY_SERVICE_PROTOCOL,
-      requestId,
-      query,
-    });
+    const reply = await this.#request(
+      {
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        query,
+      },
+      undefined,
+      signal,
+    );
     if (reply.type !== 'query-result') throw this.#unexpected(reply, 'query-result');
     return { result: reply.result, version: reply.version };
   }
@@ -145,15 +151,20 @@ export class LibraryServiceClient {
   async task(
     task: LibraryTask,
     operationId: string = crypto.randomUUID(),
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     const requestId = this.#requestId();
-    const reply = await this.#request({
-      type: 'task',
-      protocol: LIBRARY_SERVICE_PROTOCOL,
-      requestId,
-      operationId,
-      task,
-    });
+    const reply = await this.#request(
+      {
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId,
+        operationId,
+        task,
+      },
+      undefined,
+      signal,
+    );
     if (reply.type !== 'task-result') throw this.#unexpected(reply, 'task-result');
     return { result: reply.result, version: reply.version };
   }
@@ -226,6 +237,7 @@ export class LibraryServiceClient {
     });
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
+      pending.stopAbort?.();
       pending.reject(error);
     }
     this.#pending.clear();
@@ -236,16 +248,42 @@ export class LibraryServiceClient {
   #request(
     message: LibraryServiceClientMessage,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<LibraryServiceServerMessage> {
     this.#assertOpen();
     return new Promise((resolve, reject) => {
       const pending: Pending = { request: message, resolve, reject };
+      if (signal?.aborted) {
+        reject(this.#cancelled());
+        return;
+      }
+      if (signal) {
+        const abort = () => {
+          if (this.#pending.get(message.requestId) !== pending) return;
+          this.#pending.delete(message.requestId);
+          clearTimeout(pending.timer);
+          pending.stopAbort?.();
+          try {
+            this.transport.send({
+              type: 'cancel',
+              protocol: LIBRARY_SERVICE_PROTOCOL,
+              requestId: message.requestId,
+            });
+          } catch {
+            // The owned request is already terminal locally; transport replacement owns its own recovery.
+          }
+          reject(this.#cancelled());
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        pending.stopAbort = () => signal.removeEventListener('abort', abort);
+      }
       if (timeoutMs !== undefined) {
         pending.arm = () => {
           clearTimeout(pending.timer);
           pending.timer = setTimeout(() => {
             if (this.#pending.get(message.requestId) !== pending) return;
             this.#pending.delete(message.requestId);
+            pending.stopAbort?.();
             reject(
               new LibraryServiceError({
                 code: 'unavailable',
@@ -263,6 +301,7 @@ export class LibraryServiceClient {
       } catch (error) {
         this.#pending.delete(message.requestId);
         clearTimeout(pending.timer);
+        pending.stopAbort?.();
         reject(error);
       }
     });
@@ -323,6 +362,7 @@ export class LibraryServiceClient {
       if (!pending) return;
       this.#pending.delete(message.requestId);
       clearTimeout(pending.timer);
+      pending.stopAbort?.();
       pending.reject(new LibraryServiceError(message.error));
       return;
     }
@@ -336,6 +376,7 @@ export class LibraryServiceClient {
     if (!replyMatches(pending.request, message, this.#instance)) {
       this.#pending.delete(message.requestId);
       clearTimeout(pending.timer);
+      pending.stopAbort?.();
       const failure: LibraryServiceFailure = {
         code: 'invalid-request',
         message: 'library service reply did not match its request',
@@ -347,6 +388,7 @@ export class LibraryServiceClient {
     }
     this.#pending.delete(message.requestId);
     clearTimeout(pending.timer);
+    pending.stopAbort?.();
     pending.resolve(message);
   }
 
@@ -354,6 +396,7 @@ export class LibraryServiceClient {
     const error = new LibraryServiceError(failure);
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
+      pending.stopAbort?.();
       pending.reject(error);
     }
     this.#pending.clear();
@@ -376,6 +419,14 @@ export class LibraryServiceClient {
         message: 'library service client is closed',
         retryable: false,
       });
+  }
+
+  #cancelled(): LibraryServiceError {
+    return new LibraryServiceError({
+      code: 'cancelled',
+      message: 'library service request was cancelled',
+      retryable: false,
+    });
   }
 
   #unexpected(message: LibraryServiceServerMessage, expected: string): LibraryServiceError {
@@ -428,6 +479,7 @@ function replyMatches(
   reply: LibraryServiceServerMessage,
   instance: string | undefined,
 ): boolean {
+  if (request.type === 'cancel') return false;
   if ('version' in reply && instance && reply.version.instance !== instance) return false;
   if (request.type === 'hello') return reply.type === 'ready';
   if (request.type === 'command')

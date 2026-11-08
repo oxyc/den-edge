@@ -70,7 +70,10 @@ const vtt =
   'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n00:00:00.000 --> 00:00:30.000\nFrom the file.\n';
 const srt = '1\n00:00:00,000 --> 00:00:30,000\nFrom OpenSubtitles.\n';
 
-async function mockHearth(page, { builtIn = false, beforePlayback, beforeSubtitle } = {}) {
+async function mockHearth(
+  page,
+  { builtIn = false, beforePlayback, beforeSubtitle, subtitleResponse } = {},
+) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -91,7 +94,9 @@ async function mockHearth(page, { builtIn = false, beforePlayback, beforeSubtitl
   );
   await page.route(`${ORIGIN}/den/config/subtitle/*.srt`, async (route) => {
     await beforeSubtitle?.();
-    return route.fulfill({ contentType: 'text/plain', body: srt });
+    return route.fulfill(
+      (await subtitleResponse?.(route)) ?? { contentType: 'text/plain', body: srt },
+    );
   });
   await page.route(`${ORIGIN}/den/config/cast-subtitle`, (route) => route.fulfill({ status: 503 }));
   const operations = [];
@@ -289,16 +294,157 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
   }
 });
 
+test('a failed lazy subtitle keeps the working choice and retries that exact track', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    let releaseFailure;
+    const failureGate = new Promise((resolve) => (releaseFailure = resolve));
+    let subtitleAttempts = 0;
+    await mockHearth(page, {
+      subtitleResponse: async () => {
+        subtitleAttempts += 1;
+        if (subtitleAttempts === 1) {
+          await failureGate;
+          return { status: 503, body: '' };
+        }
+        return { contentType: 'text/plain', body: srt };
+      },
+    });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
+    await playing(page);
+
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
+    await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toBeVisible();
+    expect(await page.evaluate(shown)).toBeNull();
+
+    releaseFailure();
+    const notice = page.getByText('Couldn’t load English subtitles. Current subtitles unchanged.');
+    await expect(notice).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toBeVisible();
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await expect
+      .poll(() => page.evaluate(shown), { timeout: 10_000 })
+      .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
+    await expect(page.getByRole('button', { name: 'Subtitles: English' })).toBeVisible();
+    await expect(notice).toHaveCount(0);
+    expect(subtitleAttempts).toBe(2);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a newer external subtitle wins while an older load is still pending', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    let releaseEnglish;
+    const englishGate = new Promise((resolve) => (releaseEnglish = resolve));
+    let englishReturned = false;
+    await mockHearth(page, {
+      subtitleResponse: async (route) => {
+        if (route.request().url().endsWith('/1.srt')) {
+          await englishGate;
+          englishReturned = true;
+        }
+        return { contentType: 'text/plain', body: srt };
+      },
+    });
+    await page.goto(
+      `${ORIGIN}/test/player.html?playback=managed&originalLanguage=en&shownSubtitles=en,sv`,
+    );
+    await playing(page);
+
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
+    await expect(page.getByRole('menuitemradio', { name: 'Swedish' })).toHaveCount(0);
+    const subtitles = page.getByRole('button', { name: 'Subtitles: Off' });
+    await expect(subtitles).toBeFocused();
+    await subtitles.click();
+    await page.getByRole('menuitemradio', { name: 'Swedish' }).click();
+    await expect
+      .poll(() => page.evaluate(shown), { timeout: 10_000 })
+      .toMatchObject({ language: 'sv', label: 'opensubtitles:1' });
+
+    releaseEnglish();
+    await expect.poll(() => englishReturned).toBe(true);
+    await expect(page.getByRole('button', { name: 'Subtitles: Swedish' })).toBeVisible();
+    await expect.poll(() => page.evaluate(shown)).toMatchObject({ language: 'sv' });
+    await expect(page.getByText(/Current subtitles unchanged/)).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an automatic external subtitle failure is visible and recoverable', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'sv-SE' });
+    const page = await context.newPage();
+    let subtitleAttempts = 0;
+    await mockHearth(page, {
+      subtitleResponse: async () => {
+        subtitleAttempts += 1;
+        return subtitleAttempts === 1
+          ? { status: 503, body: '' }
+          : { contentType: 'text/plain', body: srt };
+      },
+    });
+    await page.goto(
+      `${ORIGIN}/test/player.html?playback=managed&originalLanguage=he&interfaceLanguage=sv`,
+    );
+    await playing(page);
+
+    await expect(page.getByText(/Current subtitles unchanged/)).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Subtitles:/ })).toHaveAccessibleName(
+      'Subtitles: Off',
+    );
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await expect
+      .poll(() => page.evaluate(shown), { timeout: 10_000 })
+      .toMatchObject({ language: 'sv', label: 'opensubtitles:1' });
+    expect(subtitleAttempts).toBe(2);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('closing playback retires a pending external subtitle load', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (error) => pageErrors.push(error));
+    let releaseSubtitle;
+    const subtitleGate = new Promise((resolve) => (releaseSubtitle = resolve));
+    await mockHearth(page, { beforeSubtitle: () => subtitleGate });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&originalLanguage=en`);
+    await playing(page);
+
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await expect(page.getByRole('status')).toHaveText('Loading subtitles…');
+    await page.getByRole('button', { name: 'Close' }).click();
+    await expect(page.locator('.player')).toHaveCount(0);
+    releaseSubtitle();
+    await expect(page.locator('.player')).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars are offered', async () => {
   const browser = await launchChromium();
   try {
     const context = await browser.newContext({ locale: 'en-US' });
     const page = await context.newPage();
-    const subtitleLogs = [];
-    page.on('console', (message) => {
-      if (message.text().startsWith('[Den subtitles] '))
-        subtitleLogs.push({ text: message.text(), arguments: message.args().length });
-    });
     let releaseSubtitle;
     const subtitleGate = new Promise((resolve) => (releaseSubtitle = resolve));
     const operations = await mockHearth(page, {
@@ -319,11 +465,6 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
     await expect(page.getByText('Switching subtitles…')).toHaveCount(0);
     expect(operations).toHaveLength(2);
     expect(operations[1]).toMatchObject({ subtitleTrack: 0 });
-    expect(subtitleLogs.length).toBeGreaterThan(0);
-    for (const log of subtitleLogs) {
-      expect(log.arguments).toBe(1);
-      expect(() => JSON.parse(log.text.slice('[Den subtitles] '.length))).not.toThrow();
-    }
   } finally {
     await browser.close();
   }

@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import profileFixture from '../vendor/den-core/profiles-v1.json';
+import { LibraryModel } from './libraryModel.svelte';
 import { LibraryServiceError, type LibraryServiceOpenOptions } from './libraryServiceClient';
 import type { LibraryServiceClientPort } from './libraryServiceSupervisor';
 import { LibraryServiceSupervisor } from './libraryServiceSupervisor';
@@ -50,6 +51,7 @@ class FakeClient implements LibraryServiceClientPort {
     reject: (error: LibraryServiceError) => void;
   }> = [];
   openFailure?: LibraryServiceFailure;
+  openGate?: Promise<void>;
   subscriptionFailure?: { kind: LibrarySelection['kind']; failure: LibraryServiceFailure };
   instance = 'worker-1';
   subscriptionRevision = 1;
@@ -57,6 +59,7 @@ class FakeClient implements LibraryServiceClientPort {
   async open(options: LibraryServiceOpenOptions): Promise<LibraryVersion> {
     this.opened.push(options);
     this.events.push('open');
+    await this.openGate;
     if (this.openFailure) {
       this.fail(this.openFailure);
       throw new LibraryServiceError(this.openFailure);
@@ -293,6 +296,29 @@ it('replays an in-flight task with its original operation ID after a lost reply'
     version: second.version(1),
   });
   await expect(task).resolves.toMatchObject({ result: { outcome: 'disabled' } });
+  supervisor.close();
+});
+
+it('cancels a task while its replacement Worker open remains held', async () => {
+  const first = new FakeClient();
+  const second = new FakeClient();
+  second.instance = 'worker-2';
+  second.openGate = new Promise(() => {});
+  const queue = [first, second];
+  const supervisor = new LibraryServiceSupervisor(() => queue.shift()!);
+  await supervisor.open(openOptions);
+  const owned = new AbortController();
+  const task = supervisor.task({ kind: 'recovery.disable' }, 'disable-held-open', owned.signal);
+
+  await vi.waitFor(() => expect(first.tasks).toHaveLength(1));
+  first.fail(unavailable('reply lost'));
+  await vi.waitFor(() => expect(second.opened).toHaveLength(1));
+  owned.abort();
+
+  await expect(task).rejects.toMatchObject({
+    failure: { code: 'cancelled', retryable: false },
+  });
+  expect(second.tasks).toHaveLength(0);
   supervisor.close();
 });
 
@@ -872,6 +898,41 @@ it('isolates a lazy subscription failure without weakening required root readine
     failure: { message: 'root projection failed' },
   });
   required.close();
+});
+
+it('rebinds only a failed lazy selection while the ready service and roots stay open', async () => {
+  const client = new FakeClient();
+  client.subscriptionFailure = {
+    kind: 'connections',
+    failure: { code: 'unavailable', message: 'connections projection failed', retryable: true },
+  };
+  const createClient = vi.fn(() => client);
+  const supervisor = new LibraryServiceSupervisor(createClient, { maxAutomaticRestarts: 0 });
+  const model = new LibraryModel(supervisor, openOptions);
+  await model.ready;
+  const rootsBefore = client.events.filter((event) => event.startsWith('subscribe:'));
+  const connections = model.connections();
+  await vi.waitFor(() => expect(connections.snapshot.connection).toBe('failed'));
+  expect(model.connection).toBe('ready');
+
+  client.subscriptionFailure = undefined;
+  expect(connections.rebind()).toBe(true);
+  expect(connections.rebind()).toBe(false);
+  await vi.waitFor(() =>
+    expect(connections.snapshot).toMatchObject({
+      connection: 'ready',
+      value: { kind: 'connections', parentalPinConfigured: false },
+    }),
+  );
+
+  expect(createClient).toHaveBeenCalledOnce();
+  expect(client.events.filter((event) => event === 'open')).toHaveLength(1);
+  expect(client.events.filter((event) => event === 'subscribe:connections')).toHaveLength(2);
+  expect(client.events.filter((event) => event.startsWith('subscribe:')).slice(0, 5)).toEqual(
+    rootsBefore,
+  );
+  connections.release();
+  model.close();
 });
 
 it('stops after the bounded replacement attempt and retains the failed stale view', async () => {

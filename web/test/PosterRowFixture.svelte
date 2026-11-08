@@ -26,6 +26,7 @@
     title: 'Continuing title',
     posterUrl: 'https://images.metahub.space/poster/medium/tt50/img',
   };
+  let showContinuing = $state(true);
   /** Familjen Andersson: on the owner's Watchlist, and every stream list for it is empty. */
   const series: Title[] = [
     {
@@ -43,20 +44,26 @@
   onDestroy(() => services.close());
 
   onMount(() => {
-    if (!new URLSearchParams(location.search).has('availability')) return;
+    const fixtureWindow = window as typeof window & {
+      fixtureOpenSession?: () => void;
+      fixtureRemoveContinuing?: () => void;
+    };
+    fixtureWindow.fixtureRemoveContinuing = () => (showContinuing = false);
+    if (!new URLSearchParams(location.search).has('availability'))
+      return () => delete fixtureWindow.fixtureRemoveContinuing;
     const scout = { install: '/scout', base: '/scout' };
     // Bound: Availability calls it as `scout.fetch(…)`, and the browser's own fetch refuses any `this` but window.
     const fetchImpl: typeof fetch = (input, init) => fetch(input, init);
     availability.connect(scout, content, fetchImpl);
     // Another session opening, as a profile page does: its first configure runs before its discovery has found the
     // household's scout again, which then reconnects the same one.
-    const fixtureWindow = window as typeof window & { fixtureOpenSession?: () => void };
     fixtureWindow.fixtureOpenSession = () => {
       new SessionServices(null, content, async () => ({})).configure(undefined);
       availability.connect(scout, content, fetchImpl);
     };
     return () => {
       delete fixtureWindow.fixtureOpenSession;
+      delete fixtureWindow.fixtureRemoveContinuing;
       availability.connect(null, content);
     };
   });
@@ -69,7 +76,9 @@
     {/each}
   </PosterRow>
   <PosterRow heading="Continue Watching">
-    <PosterCard title={continuing} stillPath="/landscape.jpg" landscape />
+    {#if showContinuing}
+      <PosterCard title={continuing} stillPath="/landscape.jpg" landscape />
+    {/if}
   </PosterRow>
   <PosterRow heading="Series">
     {#each series as title (title.id)}

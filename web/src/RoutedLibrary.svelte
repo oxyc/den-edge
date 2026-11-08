@@ -46,7 +46,7 @@
   import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
-  import { householdAssistantFetch, libraryCredentialId } from './lib/relayFetch';
+  import { householdAssistantFetch } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
   import { thisDevice } from './lib/device.svelte';
@@ -94,7 +94,7 @@
     type HouseholdJoinPlan,
     type HouseholdPlan,
     type JoinAnswer,
-    type JoinLink,
+    type JoinLibrary,
   } from './lib/browserHousehold';
   import { setInterfaceLanguage } from './lib/i18n.svelte';
 
@@ -106,6 +106,7 @@
     watchedYear,
     titleSeason,
     onchange,
+    onprofilechange = () => {},
     onprofilecontrol = () => {},
     onprofilehint = () => {},
     onhouseholdadmin = () => {},
@@ -117,6 +118,8 @@
     watchedYear: string | undefined;
     titleSeason: TitleSeason | undefined;
     onchange: (route: Route) => void;
+    /** Retires route-derived presentation state owned by App when the exact active profile changes. */
+    onprofilechange?: () => void;
     onprofilecontrol?: (control: ProfileModeCoordinator | null) => void;
     /** The remembered Owner the bar draws until the profile coordinator takes over; null once it has. */
     onprofilehint?: (hint: ProfileHint | null) => void;
@@ -233,6 +236,10 @@
     untrack(() => open(libraryIdentity, !link && !ownHousehold && libraryIdentity !== null)),
   );
   let routedProfile = untrack(() => profileSessionKey(session.identity, session.policyKey));
+  const resetProfilePresentation = () => {
+    resetProfileNavigation();
+    onprofilechange();
+  };
   let profileCoordinator = $state.raw<ProfileModeCoordinator | null>(null);
   let profileDirectoryLease = $state.raw<LibraryModelLease<ProfileDirectoryView> | null>(null);
   let profileCapability = $state<ProfilesCapability | 'checking'>(
@@ -283,7 +290,9 @@
     const profileModel = session.model;
     if (!model) return;
     const name = thisDevice.name;
-    const libraryKey = session.identity.libraryKey;
+    // The play key belongs to the household library whose device list publishes it (inbox-v1 §5), not to the active
+    // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
+    const libraryKey = session.household.identity.libraryKey;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
@@ -323,7 +332,9 @@
       profileMarkerPresent(),
     ),
   );
-  $effect.pre(() => scopeRecentSearches(householdAdmin));
+  // The identity is required even for two memory-only profiles: Kid A -> Kid B and one Visitor visit -> the next
+  // must rotate the list although household authority remains false throughout.
+  $effect.pre(() => scopeRecentSearches(householdAdmin, session.identity.id));
   $effect.pre(() => onhouseholdadmin(householdAdmin));
   onDestroy(() => onhouseholdadmin(true));
 
@@ -334,7 +345,7 @@
   $effect.pre(() => {
     const next = profileSessionKey(session.identity, session.policyKey);
     if (next === routedProfile) return;
-    resetProfileNavigation();
+    resetProfilePresentation();
     routedProfile = next;
   });
   const profileActivityReady = $derived(
@@ -673,7 +684,7 @@
       const next = profileSessionKey(active.identity, active.policyKey);
       // The new session's Router is built from the address as it is when `session` changes, so a later switch
       // retires the address here, first, not in the pre-effect below (which runs after that Router is built).
-      if (profileControlPublished && next !== routedProfile) resetProfileNavigation();
+      if (profileControlPublished && next !== routedProfile) resetProfilePresentation();
       routedProfile = next;
       session = active;
     }
@@ -771,12 +782,12 @@
    * Bring what this browser keeps into the household `key` opens, before the browser switches to it: the library kept
    * only here, or this browser's own household (`joinOwnHousehold`). `link` is the TV paired with, opened from then on.
    */
-  async function joinLibrary(
-    key: string,
-    options: { pin?: string; link?: JoinLink } = {},
-  ): Promise<JoinAnswer> {
+  type JoinOptions = NonNullable<Parameters<JoinLibrary>[1]>;
+
+  async function joinLibrary(key: string, options: JoinOptions = {}): Promise<JoinAnswer> {
+    if (options?.presentation && !options.presentation.isCurrent()) return 'failed';
     if (!session.local && ownHousehold) return joinOwnHousehold(ownHousehold, key, options);
-    return (await joinLocalLibrary(key)) ? 'joined' : 'failed';
+    return (await joinLocalLibrary(key, options)) ? 'joined' : 'failed';
   }
   const joinsAsBoolean = async (key: string) => (await joinLibrary(key)) === 'joined';
 
@@ -788,16 +799,20 @@
   async function joinOwnHousehold(
     source: string,
     destination: string,
-    options: { pin?: string; link?: JoinLink },
+    options: JoinOptions,
   ): Promise<JoinAnswer> {
+    const current = () => !options.presentation || options.presentation.isCurrent();
+    if (!current()) return 'failed';
     if (source === destination) return 'failed';
     const kept = householdJoinPlan();
     const link = options.link ?? (kept?.destination === destination ? kept.link : undefined);
     const plan: HouseholdJoinPlan = { version: 1, source, destination, ...(link ? { link } : {}) };
+    if (!current()) return 'failed';
     if (!keepHouseholdJoin(plan)) return 'failed';
     let opened = open(destination, false);
     try {
       await opened.model!.ready;
+      if (!current()) return 'failed';
       const ask = () => opened.model!.joinHousehold(source, options.pin);
       const answer = await ask().catch(async (error: unknown) => {
         // Opened again from this browser's copy, a profile household is known to need wire 5 before den-edge is
@@ -807,23 +822,21 @@
         opened.close();
         opened = open(destination, false, 5);
         await opened.model!.ready;
+        if (!current()) return { outcome: 'unavailable' } as const;
         return ask();
       });
       // Refused before anything moved: this browser keeps its household.
       if (answer.outcome === 'refused-kids') settleHouseholdJoin(plan, false);
       if (answer.outcome !== 'joined')
         return answer.outcome === 'unavailable' ? 'failed' : answer.outcome;
-      carryActiveProfile(localStorage, answer.owner ?? null, answer.kids ?? {});
-      // The link first: should the page stop here, the next load opens the household joined and settles the plan.
+      if (current()) carryActiveProfile(localStorage, answer.owner ?? null, answer.kids ?? {});
+      // A committed move owns only its captured credentials. Selection and navigation remain with the still-current
+      // presentation; a newer record reusing the inbox key is left untouched.
       if (plan.link) {
-        links.add(plan.link.inboxKey, {
-          name: plan.link.name,
-          libraryKey: destination,
-          linkKey: plan.link.linkKey,
-          ...(plan.link.deviceId ? { deviceId: plan.link.deviceId } : {}),
-        });
-        links.makeCurrent(plan.link.inboxKey);
-      } else links.addRecovered(destination);
+        links.reconcileCommitted(plan.link, destination);
+      } else {
+        links.reconcileCommitted(links.recoveryCandidate(destination), destination);
+      }
       settleHouseholdJoin(plan, true);
       await retireMovedLibrary(source);
       return 'joined';
@@ -864,7 +877,9 @@
   });
 
   /** Merge a browser-local library into the newly paired one before either ownership pointer moves. */
-  async function joinLocalLibrary(key: string): Promise<boolean> {
+  async function joinLocalLibrary(key: string, options: JoinOptions = {}): Promise<boolean> {
+    const current = () => !options.presentation || options.presentation.isCurrent();
+    if (!current()) return false;
     let sourceKey = libraryIdentity;
     const source = session.model;
     if (!session.local || !source || !sourceKey) return false;
@@ -884,7 +899,15 @@
         // optimistically before its local command has finished; forgetting the source on the first pass could
         // otherwise publish an empty linked library while that command was still being kept.
         for (let pass = 0; pass < 3 && !settled; pass++) {
+          if (!current()) {
+            destination.close();
+            return false;
+          }
           await waitForKeptActions();
+          if (!current()) {
+            destination.close();
+            return false;
+          }
           const seen = keptActions;
           const { result } = await destination.model!.mergeLocalLibrary(sourceKey, undefined, {
             keep: true,
@@ -893,7 +916,7 @@
           if (
             result.kind !== 'local-library.merge' ||
             (result.outcome !== 'merged' && result.outcome !== 'absent') ||
-            !alive
+            (!options.presentation && !alive)
           ) {
             destination.close();
             return false;
@@ -906,9 +929,14 @@
         }
         settleLocalLibraryMerge(sourceKey);
         if (await dropLocalLibrary(sourceKey)) {
+          if (options.link) links.reconcileCommitted(options.link, key);
           // Cancel a queued convergence open before publishing the linked destination.
           convergence++;
           clearTimeout(convergenceRetry);
+          if (!current()) {
+            destination.close();
+            return true;
+          }
           // The same viewer goes on in the linked library: not a profile switch, so the page they are on stays open.
           routedProfile = profileSessionKey(destination.identity, destination.policyKey);
           libraryIdentity = key;
@@ -1161,7 +1189,7 @@
         destination.close();
         return 'unknown';
       }
-      links.rekey(pending.from, pending.to);
+      await links.rekey(pending.from, pending.to);
       pendingReset = null;
       libraryIdentity = pending.to;
       session = destination;
@@ -1172,7 +1200,7 @@
       return outcome;
     }
     publishReset(null);
-    if (outcome === 'foreign' && link) links.forgetMoved(link);
+    if (outcome === 'foreign' && link) await links.forgetMoved(link);
     return outcome;
   }
 
@@ -1237,9 +1265,9 @@
       return { session: destination, close: () => destination.close() };
     },
     link: () => links.list.find((l) => l.libraryKey === pendingReset?.to) ?? null,
-    install: (from, to) => links.rekey(from, to, true),
-    release: (from) => {
-      links.releaseRekeyed(from);
+    install: (from, to) => void links.rekey(from, to, true),
+    release: async (from) => {
+      await links.releaseRekeyed(from);
       pendingReset = null;
     },
     adopt: (destination, to) => {
@@ -1439,11 +1467,12 @@
     const household = assistantHousehold;
     if (!needed || !model) return;
     const stop = new AbortController();
-    void Promise.all([import('./lib/assistant'), household?.relayMembership() ?? null]).then(
+    const authority = household ?? model;
+    void Promise.all([import('./lib/assistant'), authority.relayMembership()]).then(
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
-        if (household && !membership) {
-          console.warn('den: the household is not a member on den-edge yet; its assistants wait');
+        if (!membership) {
+          console.warn('den: the library is not a member on den-edge yet; its assistants wait');
           return;
         }
         run(
@@ -1451,8 +1480,8 @@
           {
             model,
             household,
-            libraryId: membership?.libraryId ?? libraryCredentialId() ?? 'library',
-            ...(membership ? { fetchImpl: householdAssistantFetch(membership) } : {}),
+            libraryId: membership.libraryId,
+            fetchImpl: householdAssistantFetch(membership),
             lend: async () => {
               if (!household) return undefined;
               const connection = await household.assistantConnection();
@@ -1502,27 +1531,29 @@
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
   $effect(() => {
     const current = session;
-    return whileNeeded(session.foregrounded, ({ drainPlaybackReceiptsOnce }, work, signal) => {
-      void (async () => {
-        try {
-          const dropbox = await (work.household ?? work.model).ensurePlaybackReceipts();
-          if (!dropbox) return;
-        } catch (error) {
-          console.warn('den: playback receipt key could not be published', error);
-          return;
-        }
-        if (signal.aborted || current !== session) return;
-        await drainPlaybackReceiptsOnce(
-          {
-            libraryId: work.libraryId,
-            apply: async (messages) =>
-              work.model.applyPlaybackReceipts(messages, await work.lend()),
-            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
-          },
-          signal,
-        );
-      })();
-    });
+    return whileNeeded(
+      session.foregrounded,
+      ({ drainPlaybackReceiptsForCurrentAuthority }, work, signal) => {
+        void (async () => {
+          try {
+            await drainPlaybackReceiptsForCurrentAuthority(
+              {
+                libraryId: work.libraryId,
+                ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
+                lend: work.lend,
+                apply: (messages, connection) =>
+                  work.model.applyPlaybackReceipts(messages, connection),
+                current: () => current === session,
+                ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+              },
+              signal,
+            );
+          } catch (error) {
+            console.warn('den: playback receipts could not be applied', error);
+          }
+        })();
+      },
+    );
   });
 
   // An LG or Samsung TV also drains its own lane of the assistant's TV queue (den-spec assistant-v1 §16), so an
@@ -1605,7 +1636,7 @@
   });
   $effect(() => {
     const status = session.model?.status;
-    if (status?.kind === 'moved' && link) links.forgetMoved(link);
+    if (status?.kind === 'moved' && link) void links.forgetMoved(link);
   });
   $effect(() => {
     if (session.updateRequired) requestReleaseCheck();
@@ -1765,7 +1796,12 @@
           ondiscard={() => void discardLocalLegacyBackup()}
         />
       {:else}
-        <LibraryStatus toast={shown.toast} alert={shown.alert} undo={shown.undo} />
+        <LibraryStatus
+          toast={shown.toast}
+          presentation={shown.toastPresentation}
+          alert={shown.alert}
+          undo={shown.undo}
+        />
       {/if}
       <Router
         profile={profileSessionKey(shown.identity)}
@@ -1810,6 +1846,7 @@
                 <SettingsScreen.current
                   {link}
                   model={householdSettingsModel}
+                  activityModel={shown.model ?? householdSettingsModel}
                   preferences={session.preferences}
                   content={session.content}
                   local={session.local}

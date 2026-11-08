@@ -11,6 +11,39 @@ async function routePosterArt(page) {
   );
 }
 
+test('a late image failure after its poster card is removed does no reactive work', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosterArt(page);
+  await page.route('**/landscape.jpg', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+  const warnings = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning' && message.text().includes('derived_inert'))
+      warnings.push(message.text());
+  });
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
+
+  const row = page.getByRole('region', { name: 'Continue Watching' });
+  const image = await row.locator('img').elementHandle();
+  expect(image).not.toBeNull();
+  await page.evaluate(() => window.fixtureRemoveContinuing());
+  await expect(row.locator('.card')).toHaveCount(0);
+  await image.evaluate((element) => {
+    element.dispatchEvent(new Event('error'));
+    element.dispatchEvent(new Event('error'));
+  });
+
+  expect(warnings).toEqual([]);
+  await page.close();
+});
+
 test('Coming Soon captions stay on one line in a horizontal-only shelf', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1920, height: 800 } });
   await guardNetwork(page);

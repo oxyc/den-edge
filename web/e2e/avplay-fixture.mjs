@@ -6,6 +6,7 @@ export function installAvplayFixture() {
   let listener;
   let timer;
   let delaySeeks = false;
+  let nextPrepareError;
   let seekPending = false;
   const pendingSeeks = [];
   const calls = [];
@@ -54,12 +55,19 @@ export function installAvplayFixture() {
       pendingSeeks.length = 0;
       state = 'NONE';
     },
-    prepareAsync(success) {
+    prepareAsync(success, error) {
       requireIdle('prepareAsync');
       requireState('prepareAsync', ['IDLE', 'READY']);
       record('prepareAsync');
       state = 'READY';
       queueMicrotask(() => {
+        if (nextPrepareError) {
+          const reason = nextPrepareError;
+          nextPrepareError = undefined;
+          state = 'IDLE';
+          error?.(reason);
+          return;
+        }
         if (state === 'READY') {
           listener?.onbufferingstart();
           listener?.onbufferingprogress(25);
@@ -160,6 +168,9 @@ export function installAvplayFixture() {
     latest: () => listener,
     end: () => listener?.onstreamcompleted(),
     error: (message = 'PLAYER_ERROR_CONNECTION_FAILED') => listener?.onerror(message),
+    failNextPrepare: (message = 'PLAYER_ERROR_CONNECTION_FAILED') => {
+      nextPrepareError = message;
+    },
     delaySeeks: (delay = true) => {
       delaySeeks = delay;
     },

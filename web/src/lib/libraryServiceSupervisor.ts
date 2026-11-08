@@ -23,10 +23,14 @@ import { startupFailure, startupMark } from './startupTiming';
 export interface LibraryServiceClientPort {
   open(options: LibraryServiceOpenOptions): Promise<LibraryVersion>;
   command(command: LibraryCommand, operationId?: string): Promise<LibraryServiceCommandResult>;
-  query(query: LibraryQuery): Promise<{ result: LibraryQueryResult; version: LibraryVersion }>;
+  query(
+    query: LibraryQuery,
+    signal?: AbortSignal,
+  ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }>;
   task(
     task: LibraryTask,
     operationId?: string,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }>;
   observe(observation: LibraryObservation): Promise<LibraryVersion>;
   subscribe(
@@ -218,19 +222,31 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
 
   async query(
     query: LibraryQuery,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryQueryResult; version: LibraryVersion }> {
     // A read asked while the connection opens waits for it instead of being refused `not-ready`: Home names its first
     // shelves this early, and a refusal left them to a one-second retry. The connection settles on its own: its hello
     // has the startup deadline, a Worker failure fails it, and its restarts are bounded. A failed one is thrown below.
-    if (this.#connecting) await this.#connecting.catch(() => undefined);
-    return await this.#readyClient().query(query);
+    if (this.#connecting)
+      await this.#beforeAbort(
+        this.#connecting.catch(() => undefined),
+        signal,
+      );
+    if (signal?.aborted)
+      throw new LibraryServiceError({
+        code: 'cancelled',
+        message: 'library service request was cancelled',
+        retryable: false,
+      });
+    return await this.#readyClient().query(query, signal);
   }
 
   async task(
     task: LibraryTask,
     operationId: string = crypto.randomUUID(),
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
-    return this.#semantic((client) => client.task(task, operationId));
+    return this.#semantic((client) => client.task(task, operationId, signal), signal);
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryVersion> {
@@ -657,8 +673,12 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   }
 
   /** Replay only after this exact client was replaced; the durable operation ID makes a lost reply safe. */
-  async #semantic<T>(send: (client: LibraryServiceClientPort) => Promise<T>): Promise<T> {
+  async #semantic<T>(
+    send: (client: LibraryServiceClientPort) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     for (;;) {
+      if (signal?.aborted) throw this.#cancelled();
       const active = this.#active;
       const client = this.#readyClient();
       try {
@@ -675,9 +695,36 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
           throw error;
         const reconnecting = this.#connecting;
         if (!reconnecting) throw error;
-        await reconnecting;
+        await this.#beforeAbort(reconnecting, signal);
       }
     }
+  }
+
+  #beforeAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return work;
+    if (signal.aborted) return Promise.reject(this.#cancelled());
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(this.#cancelled());
+      signal.addEventListener('abort', aborted, { once: true });
+      void work.then(
+        (value) => {
+          signal.removeEventListener('abort', aborted);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', aborted);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  #cancelled(): LibraryServiceError {
+    return new LibraryServiceError({
+      code: 'cancelled',
+      message: 'library service request was cancelled',
+      retryable: false,
+    });
   }
 
   #assertNotClosed(): void {

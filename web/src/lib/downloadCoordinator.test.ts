@@ -216,6 +216,78 @@ describe('DownloadCoordinator', () => {
     expect(asked).toEqual([true, false]);
   });
 
+  it('uses den-core to retain an admitted viewer list across a failed retry', async () => {
+    const shared = testLog();
+    let attempt = 0;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () =>
+          attempt++ === 0
+            ? {
+                sources: [first],
+                imdb: 'resolved',
+                reply: {
+                  reply: 'answered',
+                  streams: 1,
+                  answer: { kind: 'live', missing: 0, late: 0 },
+                },
+              }
+            : {
+                sources: null,
+                imdb: 'resolved',
+                reply: { reply: 'errored' },
+                failure: 'unreachable',
+              },
+      },
+      { now: () => T0 },
+    );
+
+    await expect(queue.sourcesForTitle(title, false, false, true)).resolves.toMatchObject({
+      sources: [first],
+      outcome: { result: 'live', list: 'new', retryable: false },
+    });
+    await expect(queue.sourcesForTitle(title, true, true, true)).resolves.toMatchObject({
+      sources: [first],
+      outcome: { result: 'failed_retryable', list: 'retained', retryable: true },
+      failure: 'unreachable',
+    });
+  });
+
+  it('lets only den-core confirmed empty clear a viewer list and mark absence', async () => {
+    const shared = testLog();
+    let attempt = 0;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => ({
+          sources: attempt++ === 0 ? [first] : [],
+          imdb: 'resolved',
+          reply:
+            attempt === 1
+              ? { reply: 'answered', streams: 1, answer: { kind: 'live', missing: 0, late: 0 } }
+              : { reply: 'answered', streams: 0, answer: { kind: 'empty', missing: 0, late: 0 } },
+        }),
+      },
+      { now: () => T0 },
+    );
+
+    await queue.sourcesForTitle(title, false, false, true);
+    await expect(queue.sourcesForTitle(title, true, true, true)).resolves.toMatchObject({
+      sources: [],
+      outcome: {
+        result: 'confirmed_empty',
+        list: 'none',
+        may_mark_unavailable: true,
+        retryable: false,
+      },
+    });
+  });
+
   it('starts a download from the list the viewer was shown, without asking again', async () => {
     const shared = testLog();
     const asked: boolean[] = [];

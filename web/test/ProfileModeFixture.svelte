@@ -3,12 +3,19 @@
   import ProfileOwnerGate from '../src/components/ProfileOwnerGate.svelte';
   import ProfileSwitcher from '../src/components/ProfileSwitcher.svelte';
   import MobileProfileRow from '../src/components/MobileProfileRow.svelte';
+  import NavigationBar from '../src/components/NavigationBar.svelte';
   import ProfileSettings from '../src/ProfileSettings.svelte';
   import ContentSection from '../src/settings/ContentSection.svelte';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
-  import type { LibraryModel, LibraryModelLease } from '../src/lib/libraryModel.svelte';
+  import type {
+    LibraryModel,
+    LibraryModelLease,
+    LibraryModelSnapshot,
+  } from '../src/lib/libraryModel.svelte';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
-  import { legacyProfileIdentity } from '../src/lib/profileIdentity';
+  import { legacyProfileIdentity, profileId, profileSessionKey } from '../src/lib/profileIdentity';
+  import { scopeRecentSearches } from '../src/lib/recentSearches';
+  import { parseRoute } from '../src/lib/route';
   import {
     ProfileModeCoordinator,
     previewProfileDirectory,
@@ -23,6 +30,83 @@
 
   const params = new URLSearchParams(location.search);
   const configured = params.get('pin') !== 'none';
+  const connectionsMode = params.get('connections');
+  const connectionFailures = Number(
+    params.get('connectionFailures') ?? (connectionsMode === 'repeat' ? 1 : 0),
+  );
+  let pinChecks = 0;
+  let releaseHeldPin: ((matches: boolean) => void) | null = null;
+  if (params.has('orphan'))
+    localStorage.setItem(
+      'den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity',
+      JSON.stringify({ retained: true }),
+    );
+  let connectionSubscriptions = $state(1);
+  let connectionRetries = 0;
+  let connectionReleases = 0;
+  let connectionsSnapshot = $state.raw<LibraryModelSnapshot<ConnectionsView>>(
+    connectionsMode
+      ? {
+          connection: 'failed',
+          ...(connectionsMode === 'stale'
+            ? {
+                value: {
+                  kind: 'connections',
+                  parentalPinConfigured: false,
+                  parentalPinDelivery: 'synced',
+                } as ConnectionsView,
+              }
+            : {}),
+          error: {
+            code: 'unavailable',
+            message: 'fixture Connections selection failed',
+            retryable: true,
+          },
+        }
+      : {
+          connection: 'ready',
+          value: {
+            kind: 'connections',
+            parentalPinConfigured: configured,
+            parentalPinDelivery: 'synced',
+          } as ConnectionsView,
+        },
+  );
+  const connectionsLease: LibraryModelLease<ConnectionsView> = {
+    get snapshot() {
+      return connectionsSnapshot;
+    },
+    rebind() {
+      if (connectionsSnapshot.connection !== 'failed') return false;
+      connectionSubscriptions++;
+      const attempt = ++connectionRetries;
+      connectionsSnapshot = { connection: 'connecting' };
+      queueMicrotask(() => {
+        connectionsSnapshot =
+          attempt <= connectionFailures
+            ? {
+                connection: 'failed',
+                error: {
+                  code: 'unavailable',
+                  message: `fixture Connections selection failed ${attempt}`,
+                  retryable: true,
+                },
+              }
+            : {
+                connection: 'ready',
+                value: {
+                  kind: 'connections',
+                  parentalPinConfigured: configured,
+                  parentalPinDelivery: 'synced',
+                } as ConnectionsView,
+              };
+      });
+      return true;
+    },
+    release() {
+      connectionReleases++;
+    },
+  };
   let lockAttempts = 0;
   const visitorLock: VisitorActivityLock | undefined =
     params.has('rejectLock') || params.has('slowLock')
@@ -35,7 +119,6 @@
           },
         }
       : undefined;
-  const release = () => {};
   const model = {
     settings: {
       connection: 'ready',
@@ -63,19 +146,16 @@
         },
       },
     },
-    connections: () =>
-      ({
-        snapshot: {
-          connection: 'ready',
-          value: {
-            kind: 'connections',
-            parentalPinConfigured: configured,
-            parentalPinDelivery: 'synced',
-          },
-        },
-        release,
-      }) as unknown as LibraryModelLease<ConnectionsView>,
-    verifyParentalPin: async (pin: string) => pin === '1234',
+    connections: () => connectionsLease,
+    ready: Promise.resolve(),
+    verifyParentalPin: async (pin: string) => {
+      pinChecks++;
+      if (params.get('pinFailure') === 'once' && pinChecks === 1)
+        throw new Error('fixture household PIN query unavailable');
+      if (params.has('holdPin') && pinChecks === 1)
+        return new Promise<boolean>((resolve) => (releaseHeldPin = resolve));
+      return pin === '1234';
+    },
     close: () => {},
   } as unknown as LibraryModel;
   const household = new HouseholdSession(
@@ -105,6 +185,28 @@
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
   let checked = $state(false);
   let capability = $state<ProfilesCapability | 'checking'>('checking');
+  const previewDirectory = previewProfileDirectory();
+  const fixtureDirectory = params.has('twoKids')
+    ? {
+        ...previewDirectory,
+        profiles: [
+          ...previewDirectory.profiles,
+          {
+            ...previewDirectory.profiles[1]!,
+            id: profileId('00000000000000000000000000000003'),
+            name: 'Kids Two',
+          },
+        ],
+      }
+    : previewDirectory;
+  const realDirectory = {
+    ...fixtureDirectory,
+    profiles: fixtureDirectory.profiles.map((profile, index) => ({
+      ...profile,
+      libraryKey: `fixture-profile-${index + 1}`,
+      keyVersion: 1,
+    })),
+  };
 
   const fixture = {
     snapshot() {
@@ -124,6 +226,26 @@
           : false,
         householdExposesModel: profiles?.session ? 'model' in profiles.session.household : false,
         servicesExposeModel: profiles?.session ? 'model' in profiles.session.services : false,
+        parentalControls: profiles
+          ? {
+              kind:
+                profiles.parentalControls === null
+                  ? 'failed'
+                  : profiles.parentalControls === undefined
+                    ? 'loading'
+                    : 'ready',
+              ...(typeof profiles.parentalControls === 'boolean'
+                ? { configured: profiles.parentalControls }
+                : {}),
+              ...(profiles.parentalControls === null ? { error: connectionsSnapshot.error } : {}),
+            }
+          : null,
+        connectionSubscriptions,
+        connectionRetries,
+        connectionReleases,
+        pinChecks,
+        activeProfileId:
+          profiles?.session?.identity.kind === 'profile' ? profiles.session.identity.id : null,
         watchlist:
           (profiles?.session as VisitorProfileSession | undefined)?.profileActivity?.watchlist.map(
             ({ title }) => title,
@@ -167,6 +289,26 @@
         return error instanceof Error ? error.message : 'failed';
       }
     },
+    resolveHeldPin(matches: boolean) {
+      const resolve = releaseHeldPin;
+      releaseHeldPin = null;
+      resolve?.(matches);
+    },
+    replaceWithSecondKid() {
+      const secondKid = realDirectory.profiles.filter(({ role }) => role === 'kid')[1];
+      if (!secondKid?.id) throw new Error('fixture has no second Kid');
+      localStorage.setItem(
+        'den.profile.active.v1',
+        JSON.stringify({ version: 1, mode: 'persistent', profileId: secondKid.id }),
+      );
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'den.profile.active.v1',
+          storageArea: localStorage,
+        }),
+      );
+      return secondKid.id;
+    },
   };
 
   onMount(() => {
@@ -182,7 +324,12 @@
           localStorage,
           window,
           visitorLock,
-          answer === 'preview' ? previewProfileDirectory() : null,
+          params.has('realProfiles')
+            ? realDirectory
+            : answer === 'preview'
+              ? fixtureDirectory
+              : null,
+          params.has('realProfiles') ? () => ({ model, close: () => {} }) : null,
         );
       checked = true;
     });
@@ -198,6 +345,11 @@
   $effect(() => {
     if (profiles && !profiles.session) profiles.establishUnprotectedOwner();
   });
+  $effect(() => {
+    const active = profiles?.session;
+    if (active)
+      scopeRecentSearches(active.administersHousehold, profileSessionKey(active.identity));
+  });
 </script>
 
 <main>
@@ -209,6 +361,11 @@
       <p>The Owner library remains hidden. Reload Den to try again.</p>
     </section>
   {:else if profiles?.session}
+    {#if params.has('recentSearches')}
+      {#key profileSessionKey(profiles.session.identity)}
+        <NavigationBar route={parseRoute('/search')} />
+      {/key}
+    {/if}
     <ProfileSwitcher {profiles} hideOnMobile />
     <MobileProfileRow {profiles} />
     <p data-mode>

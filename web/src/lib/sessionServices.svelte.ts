@@ -5,19 +5,40 @@ import { availability } from './availability.svelte';
 import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
+import { sharedInstallOf } from './grants';
 import type { Immutable, LibraryModel } from './libraryModel.svelte';
 import type { RuntimeDiscoveryView } from './libraryServiceProtocol';
 import { ahead } from './privateAddresses';
 import { localNetworkRefused } from './remuxRoute';
-import { fetchRoutes, type Routes } from './routes';
+import { fetchRoutesForDiscovery, type Routes } from './routes';
 import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import type { GrantRefreshOutcome } from './grants.svelte';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
+type Grants = {
+  pluginUrls(): string[];
+  refresh(): Promise<GrantRefreshOutcome>;
+};
 
 const inputs = (library: boolean, plugins: readonly string[], remux: string | null) =>
   JSON.stringify([library, plugins, remux]);
+const GRANT_RETRY_MS = [5_000, 30_000] as const;
+const ROUTE_RETRY_MS = [1_000, 5_000] as const;
+
+/** A retained playback install is usable only while the current authority still lists its manifest. */
+function retainsScout(install: string, plugins: readonly string[]): boolean {
+  const shared = sharedInstallOf(install);
+  if (shared) return plugins.some((plugin) => sharedInstallOf(plugin)?.install === shared.install);
+  const manifest = `${install.replace(/\/+$/, '')}/manifest.json`;
+  try {
+    const expected = new URL(manifest, globalThis.location?.href).href;
+    return plugins.some((plugin) => new URL(plugin, globalThis.location?.href).href === expected);
+  } catch {
+    return false;
+  }
+}
 
 export class SessionServices {
   plugins = $state.raw<string[]>([]);
@@ -35,15 +56,25 @@ export class SessionServices {
   #for?: string;
   #stop?: () => void;
   #keep?: ReturnType<typeof setTimeout>;
-  #grants = false;
+  #grantsRefreshing = false;
+  #verifiedGrantsFor?: string;
+  #pendingConfigure?: [library: boolean, plugins: readonly string[], remux: string | null, string];
+  #grantRetry?: ReturnType<typeof setTimeout>;
+  #grantRetryAttempt = 0;
+  #grantRetryNeeded = false;
+  #requestedFor?: string;
+  #configureGeneration = 0;
+  #stopped = false;
   #foregroundReady = false;
   #atlasGeneration = 0;
+  #atlasAcknowledgedGeneration = 0;
   readonly #model: LibraryModel | null;
 
   constructor(
     model: LibraryModel | null,
     private readonly content: ContentServiceClientPort,
-    private readonly fetchRouteTable: () => Promise<Routes> = fetchRoutes,
+    private readonly fetchRouteTable: () => Promise<Routes | null> = fetchRoutesForDiscovery,
+    private readonly grants: Grants = guestGrants,
   ) {
     this.#model = model;
   }
@@ -53,13 +84,15 @@ export class SessionServices {
    * retained hint or stopped discovery run can finish later, but can never replace the current answer.
    */
   #configureAtlas(base: string | null, current: () => boolean): void {
-    if (this.atlasReady && this.atlas === base) {
+    if (
+      this.atlasReady &&
+      this.atlas === base &&
+      this.#atlasAcknowledgedGeneration === this.#atlasGeneration
+    ) {
       this.#settled();
       return;
     }
     const generation = ++this.#atlasGeneration;
-    this.atlas = null;
-    this.atlasReady = false;
     void this.content.query({ kind: 'sources.configure', atlas: base }).then(
       () => {
         if (!current() || generation !== this.#atlasGeneration) return;
@@ -67,6 +100,7 @@ export class SessionServices {
         // acknowledged, nor a ready flag paired with a stale address.
         this.atlas = base;
         this.atlasReady = true;
+        this.#atlasAcknowledgedGeneration = generation;
         this.#settled();
       },
       (error: unknown) => {
@@ -78,23 +112,138 @@ export class SessionServices {
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
   configure(runtime: Runtime | undefined): void {
-    this.#configure(
+    if (this.#stopped) return;
+    // This read must stay synchronous: it is the Svelte dependency that re-runs the caller's real `$effect` when a
+    // redeem, expiry, replacement, or A→B→A grant transition changes authority. Async refresh and discovery below
+    // are fenced separately.
+    const shared = this.grants.pluginUrls();
+    const grantsFor = JSON.stringify(shared);
+    const wanted: [boolean, readonly string[], string | null, string] = [
       this.#model !== null,
       runtime?.pluginManifestUrls ?? [],
       runtime?.privateRemuxUrl ?? null,
+      grantsFor,
+    ];
+    const requestedFor = JSON.stringify(wanted);
+    const visiblePlugins = [...wanted[1], ...shared];
+    if (this.#requestedFor !== undefined && requestedFor !== this.#requestedFor) {
+      this.#configureGeneration++;
+      clearTimeout(this.#grantRetry);
+      this.#grantRetry = undefined;
+      this.#grantRetryAttempt = 0;
+      this.#grantRetryNeeded = false;
+      // A changed hint or an additional install must fence the old probes, but it does not revoke a service the
+      // current authority still names. In particular, remembering the remux address discovered by this very run
+      // feeds it back through RuntimeDiscoveryView; withdrawing Scout here unmounts an active Player. A contraction
+      // is different: any published service could have come from the removed install, so withdraw it synchronously.
+      const contractsAuthority = this.plugins.some((plugin) => !visiblePlugins.includes(plugin));
+      this.#cancelDiscovery(contractsAuthority);
+    }
+    this.#requestedFor = requestedFor;
+    this.#pendingConfigure = wanted;
+    if (this.scout && !retainsScout(this.scout.install, visiblePlugins)) {
+      this.scout = null;
+      this.debrid = null;
+      if (this.#foregroundReady) availability.connect(null, this.content);
+    }
+    if (this.#grantsRefreshing) return;
+    if (this.#verifiedGrantsFor === grantsFor)
+      return this.#configure(wanted[0], wanted[1], wanted[2], shared);
+    this.#refreshGrants();
+  }
+
+  #refreshGrants(): void {
+    if (this.#stopped || this.#grantsRefreshing || !this.#pendingConfigure) return;
+    this.#grantsRefreshing = true;
+    const generation = this.#configureGeneration;
+    void this.grants.refresh().then(
+      (outcome) => {
+        this.#grantsRefreshing = false;
+        if (this.#stopped || !this.#pendingConfigure) return;
+        if (generation !== this.#configureGeneration) {
+          this.#refreshGrants();
+          return;
+        }
+        const [library, plugins, remux] = this.#pendingConfigure;
+        if (outcome === 'verified') {
+          clearTimeout(this.#grantRetry);
+          this.#grantRetry = undefined;
+          this.#grantRetryAttempt = 0;
+          this.#grantRetryNeeded = false;
+          const refreshed = this.grants.pluginUrls();
+          this.#verifiedGrantsFor = JSON.stringify(refreshed);
+          this.#configure(library, plugins, remux, refreshed);
+          return;
+        }
+        // Cached grants remain useful storage, but are not current authority until one refresh verifies them.
+        this.#configure(library, plugins, remux, []);
+        this.#scheduleGrantRetry();
+      },
+      () => {
+        this.#grantsRefreshing = false;
+        if (this.#stopped || !this.#pendingConfigure) return;
+        if (generation !== this.#configureGeneration) {
+          this.#refreshGrants();
+          return;
+        }
+        const [library, plugins, remux] = this.#pendingConfigure;
+        this.#configure(library, plugins, remux, []);
+        this.#scheduleGrantRetry();
+      },
     );
   }
 
-  #configure(library: boolean, libraryPlugins: readonly string[], remux: string | null): void {
-    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
-    if (!this.#grants) {
-      this.#grants = true;
-      void guestGrants.refresh();
+  /** Retry retained-but-unverified grants only while useful, with a finite outage budget. */
+  #scheduleGrantRetry(): void {
+    this.#grantRetryNeeded = true;
+    if (this.#stopped || !this.#foregroundReady || this.#grantRetry) return;
+    const delay = GRANT_RETRY_MS[this.#grantRetryAttempt++];
+    if (delay === undefined) {
+      this.#grantRetryNeeded = false;
+      return;
     }
-    const shared = guestGrants.pluginUrls();
+    this.#grantRetry = setTimeout(() => {
+      this.#grantRetry = undefined;
+      if (this.#stopped || !this.#grantRetryNeeded) return;
+      this.#refreshGrants();
+    }, delay);
+  }
+
+  /** Stop stale work; withdraw publications only when their authority was actually contracted. */
+  #cancelDiscovery(withdraw: boolean): void {
+    this.#stop?.();
+    this.#stop = undefined;
+    // Force the replacement run without making it another "first" run. This also handles A→B→A: although the
+    // final inputs equal the first run, that run was stopped and may never be reused.
+    this.#for = 'invalidated';
+    this.#atlasGeneration++;
+    clearTimeout(this.#keep);
+    this.#keep = undefined;
+    if (!withdraw) return;
+    this.scout = null;
+    this.debrid = null;
+    this.atlas = null;
+    this.atlasReady = false;
+    this.reel = null;
+    this.remux = null;
+    this.remuxAway = false;
+    this.remuxBlocked = false;
+    if (this.#foregroundReady) availability.connect(null, this.content);
+  }
+
+  #configure(
+    library: boolean,
+    libraryPlugins: readonly string[],
+    remux: string | null,
+    shared: readonly string[] = this.grants.pluginUrls(),
+  ): void {
+    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
     );
+    // A failed grant verification can contract authority even when configure() initially saw the same retained
+    // plugin list. Fail closed before starting the replacement run.
+    if (this.plugins.some((plugin) => !plugins.includes(plugin))) this.#cancelDiscovery(true);
     const wanted = inputs(library, plugins, remux);
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
@@ -103,21 +252,37 @@ export class SessionServices {
     this.#keep = undefined;
     this.#stop?.();
     if (JSON.stringify(this.plugins) !== JSON.stringify(plugins)) this.plugins = plugins;
+    if (this.scout && !retainsScout(this.scout.install, plugins)) {
+      this.scout = null;
+      this.debrid = null;
+      if (this.#foregroundReady) availability.connect(null, this.content);
+    }
     let current = true;
-    // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish.
+    let routeRetry: ReturnType<typeof setTimeout> | undefined;
+    let releaseRouteRetry: (() => void) | undefined;
+    // Invalidate acknowledgements owned by a prior discovery run before any of its promises can publish. Keep the
+    // acknowledged Atlas publication in place until this run has a replacement; additions and hint changes are not
+    // authority withdrawal and consumers can continue using the old configuration while probes run.
     this.#atlasGeneration++;
-    this.atlas = null;
-    this.atlasReady = false;
-    this.#stop = () => {
+    const stopRun = () => {
       current = false;
+      clearTimeout(routeRetry);
+      releaseRouteRetry?.();
+      releaseRouteRetry = undefined;
     };
+    this.#stop = stopRun;
 
     let live = false;
+    // A live atlas answer, as opposed to none: atlas unreachable says nothing about whether it is there, so the
+    // retained address stands until atlas itself answers, and what this browser kept of it is shown (`atlasKept`).
+    let liveAtlas = false;
     if (first && this.#model)
       void this.#model
         .retainedServices()
         .then((saved) => {
-          if (!current || live || !saved) return;
+          if (!current || !saved) return;
+          if (!liveAtlas) this.#configureAtlas(saved.atlas, () => current);
+          if (live) return;
           this.routes = Object.fromEntries(
             Object.entries(saved.routes).map(([name, entries]) => [
               name,
@@ -125,10 +290,10 @@ export class SessionServices {
             ]),
           );
           // A playback route is a live runtime capability, never a durable retained hint.
-          this.scout = saved.scout
-            ? { install: saved.scout.install, base: saved.scout.base }
-            : null;
-          this.#configureAtlas(saved.atlas, () => current);
+          this.scout =
+            saved.scout && retainsScout(saved.scout.install, plugins)
+              ? { install: saved.scout.install, base: saved.scout.base }
+              : null;
           this.reel = saved.reel;
           this.remux = saved.remux;
           if (this.#foregroundReady) availability.connect(this.scout, this.content);
@@ -138,7 +303,39 @@ export class SessionServices {
         });
 
     void (async () => {
-      const foundRoutes = await this.fetchRouteTable();
+      let foundRoutes: Routes | undefined;
+      for (let attempt = 0; attempt <= ROUTE_RETRY_MS.length; attempt++) {
+        try {
+          const candidate = await this.fetchRouteTable();
+          // Production distinguishes transport/non-2xx/parse failure (`null`) from an authoritative empty table.
+          // Empty remains useful: shared installs and same-origin Atlas/Reel fallbacks do not require route entries.
+          if (candidate !== null) {
+            foundRoutes = candidate;
+            break;
+          }
+          if (attempt === ROUTE_RETRY_MS.length) {
+            // Route ownership is exhausted, but shared installs and same-origin Atlas/Reel do not need the table.
+            // Continue once with the safe empty fallback instead of suppressing every independent service.
+            foundRoutes = {};
+            break;
+          }
+        } catch {
+          if (!current) return;
+          if (attempt === ROUTE_RETRY_MS.length) {
+            foundRoutes = {};
+            break;
+          }
+        }
+        if (!current) return;
+        await new Promise<void>((resolve) => {
+          releaseRouteRetry = resolve;
+          routeRetry = setTimeout(resolve, ROUTE_RETRY_MS[attempt]);
+        });
+        routeRetry = undefined;
+        releaseRouteRetry = undefined;
+        if (!current) return;
+      }
+      if (!foundRoutes) return;
       if (!current) return;
       await yieldTask();
       if (!current) return;
@@ -149,15 +346,17 @@ export class SessionServices {
         ...(library || shared.length > 0
           ? {
               scout: (found: Addon | null) => {
+                if (!current) return;
                 this.scout = found;
                 if (this.#foregroundReady) availability.connect(found, this.content);
                 if (found)
                   void readDebridState(found).then((state) => {
-                    if (current) this.debrid = state;
+                    if (current && this.scout === found) this.debrid = state;
                   });
                 this.#settled();
               },
               remux: (found: string | null) => {
+                if (!current) return;
                 this.remux = found;
                 this.remuxAway = found === null;
                 this.remuxBlocked = false;
@@ -174,15 +373,19 @@ export class SessionServices {
             }
           : {}),
         atlas: (found) => {
+          if (!current) return;
+          if (found === undefined) return;
+          liveAtlas = true;
           this.#configureAtlas(found?.base ?? null, () => current);
         },
         reel: (found) => {
+          if (!current) return;
           this.reel = found?.base ?? null;
           this.#settled();
         },
       });
       this.#stop = () => {
-        current = false;
+        stopRun();
         stop();
       };
     })().catch(() => {
@@ -193,13 +396,16 @@ export class SessionServices {
   foregroundReady(): void {
     if (this.#foregroundReady) return;
     this.#foregroundReady = true;
+    if (this.#grantRetryNeeded) this.#scheduleGrantRetry();
     availability.connect(this.scout, this.content);
   }
 
   stop(): void {
+    this.#stopped = true;
     this.#stop?.();
     this.#atlasGeneration++;
     clearTimeout(this.#keep);
+    clearTimeout(this.#grantRetry);
   }
 
   #settled(): void {

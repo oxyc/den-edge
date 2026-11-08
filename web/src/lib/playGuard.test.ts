@@ -117,6 +117,43 @@ describe('playGuard under a profile content policy', () => {
     ).resolves.toBe(BLOCKED_MESSAGE);
   });
 
+  it('does not admit work after cancellation and aborts an eligibility request already in flight', async () => {
+    const before = new AbortController();
+    before.abort();
+    const absent = eligibility(true);
+    await expect(
+      playGuard(
+        { type: 'movie', id: 3 },
+        { content: absent.content, restricted: true, signal: before.signal },
+      ),
+    ).resolves.toBe(BLOCKED_MESSAGE);
+    expect(absent.query).not.toHaveBeenCalled();
+
+    let asked!: AbortSignal;
+    const query = vi.fn(
+      (_request: unknown, signal?: AbortSignal) =>
+        new Promise<never>((_resolve, reject) => {
+          asked = signal!;
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('stopped', 'AbortError')),
+            {
+              once: true,
+            },
+          );
+        }),
+    );
+    const content = { query, onStatus: () => () => {} } as unknown as ContentServiceClientPort;
+    const during = new AbortController();
+    const guarded = playGuard(
+      { type: 'movie', id: 3 },
+      { content, restricted: true, signal: during.signal },
+    );
+    expect(asked).toBe(during.signal);
+    during.abort();
+    await expect(guarded).resolves.toBe(BLOCKED_MESSAGE);
+  });
+
   it('asks nothing for a profile with no policy', async () => {
     const { content, query } = eligibility(false);
     await expect(titleAllowed({ type: 'movie', id: 3 }, { content })).resolves.toBe(true);

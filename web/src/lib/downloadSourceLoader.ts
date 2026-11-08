@@ -2,6 +2,7 @@ import type { LibraryModel } from './libraryModel.svelte';
 import type {
   DownloadSourceAnswer,
   DownloadSourceFreshAnswer,
+  DownloadSourceOutcome,
   DownloadSourceOption,
   DownloadTitleDescriptor,
 } from './libraryServiceProtocol';
@@ -10,6 +11,8 @@ export type DownloadSourceLoad = {
   sources: DownloadSourceOption[] | null;
   answer?: DownloadSourceAnswer;
   fresh?: DownloadSourceFreshAnswer;
+  outcome?: DownloadSourceOutcome;
+  retryAfterMs?: number;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 };
 
@@ -18,9 +21,10 @@ export async function loadDownloadSources(
   model: LibraryModel,
   title: DownloadTitleDescriptor,
   refresh = false,
+  signal?: AbortSignal,
 ): Promise<DownloadSourceLoad | null> {
   try {
-    const { result } = await model.downloadSources(title, refresh, refresh, true);
+    const { result } = await model.downloadSources(title, refresh, refresh, true, signal);
     if (result.kind !== 'download.sources') return null;
     const { kind: _, ...loaded } = result;
     return loaded;

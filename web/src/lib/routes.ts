@@ -16,30 +16,43 @@ export type Routes = Record<string, Entry[]>;
  * the table changes only when the deployment does, and a later rediscovery still asks again.
  */
 const ROUTES_REUSE_MS = 30_000;
-let asked: { routes: Promise<Routes>; at: number } | undefined;
+let asked: { routes: Promise<Routes | null>; at: number } | undefined;
 
 /** den-edge's `/routes`; empty when it can't say. The page's callers within `ROUTES_REUSE_MS` share one answer. */
 export function fetchRoutes(fetchImpl?: typeof fetch): Promise<Routes> {
+  return fetchRoutesForDiscovery(fetchImpl).then((routes) => routes ?? {});
+}
+
+/**
+ * The discovery form distinguishes an authoritative empty table from an unreachable or malformed `/routes`.
+ * Shared installs and same-origin service fallbacks remain valid with `{}`, while only `null` is retried.
+ */
+export function fetchRoutesForDiscovery(fetchImpl?: typeof fetch): Promise<Routes | null> {
   if (fetchImpl) return readRoutes(fetchImpl);
   if (!asked || performance.now() - asked.at >= ROUTES_REUSE_MS) {
     const routes = readRoutes((input, init) => fetch(input, init));
     const current = { routes, at: performance.now() };
     asked = current;
-    // An empty table is den-edge not saying (or not reached): the next caller asks again.
+    // A failed request is not cached; an authoritative empty table is a valid deployment answer.
     void routes.then((table) => {
-      if (!Object.keys(table).length && asked === current) asked = undefined;
+      if (table === null && asked === current) asked = undefined;
     });
   }
   // Each caller its own copy: one keeping and editing its table never changes another's.
-  return asked.routes.then((routes) => structuredClone(routes));
+  return asked.routes.then((routes) => (routes === null ? null : structuredClone(routes)));
 }
 
-async function readRoutes(fetchImpl: typeof fetch): Promise<Routes> {
+async function readRoutes(fetchImpl: typeof fetch): Promise<Routes | null> {
   try {
     const res = await fetchImpl('/routes');
-    if (!res.ok) return {};
-    const addons = ((await res.json()) as { addons?: unknown }).addons;
-    if (!addons || typeof addons !== 'object') return {};
+    if (!res.ok) return null;
+    const body = (await res.json()) as unknown;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+    const addons = (body as { addons?: unknown }).addons;
+    // Older Edge fixtures and deployments without ROUTES answer `{}`; that is an authoritative empty table, not a
+    // transport failure. An explicitly malformed `addons` value remains a failed schema response.
+    if (addons === undefined) return {};
+    if (!addons || typeof addons !== 'object' || Array.isArray(addons)) return null;
     return Object.fromEntries(
       Object.entries(addons as Record<string, unknown>).map(([name, list]) => [
         name,
@@ -52,7 +65,7 @@ async function readRoutes(fetchImpl: typeof fetch): Promise<Routes> {
       ]),
     );
   } catch {
-    return {};
+    return null;
   }
 }
 

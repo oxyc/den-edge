@@ -63,8 +63,15 @@ const invalid = (message: string): ProtocolDecodeResult<never> => ({
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
-const exact = (value: Record<string, unknown>, keys: readonly string[]) =>
-  Object.keys(value).every((key) => keys.includes(key));
+// Delimited key sets avoid allocating an array or split result for every decoded object. A contained key must
+// precede the longer permitted name (for example, `fresh` before `refresh`) so indexOf reaches its delimited entry;
+// checking both boundaries still rejects unknown prefixes, suffixes, and additional fields.
+const exact = (value: Record<string, unknown>, keys: string) =>
+  Object.keys(value).every((key) => {
+    if (key.includes(',')) return false;
+    const at = keys.indexOf(key);
+    return at > 0 && keys[at - 1] === ',' && keys[at + key.length] === ',';
+  });
 const text = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 4_096;
 const finite = (value: unknown): value is number =>
@@ -93,7 +100,7 @@ const nullable = <T>(
 function titleRef(value: unknown): value is TitleRef {
   return (
     record(value) &&
-    exact(value, ['type', 'id']) &&
+    exact(value, ',type,id,') &&
     (value.type === 'movie' || value.type === 'tv') &&
     integer(value.id) &&
     value.id > 0
@@ -105,26 +112,10 @@ const titleIdentity = (title: { type: unknown; id: unknown }) => `${title.type}:
 export function isLibraryMetadataTitle(value: unknown): value is LibraryMetadataTitle {
   return (
     record(value) &&
-    exact(value, [
-      'type',
-      'id',
-      'title',
-      'posterPath',
-      'backdropPath',
-      'year',
-      'releaseDate',
-      'rating',
-      'ratingSource',
-      'votes',
-      'popularity',
-      'countries',
-      'people',
-      'collectionId',
-      'genreIds',
-      'originalLanguage',
-      'adult',
-      'imdbId',
-    ]) &&
+    exact(
+      value,
+      ',type,id,title,posterPath,backdropPath,year,releaseDate,rating,ratingSource,votes,popularity,countries,people,collectionId,genreIds,originalLanguage,adult,imdbId,',
+    ) &&
     titleRef({ type: value.type, id: value.id }) &&
     boundedText(value.title, 1_024) &&
     optional(value.posterPath, smallText) &&
@@ -161,14 +152,14 @@ export function isLibraryMetadataTitle(value: unknown): value is LibraryMetadata
 function libraryMetadataShape(value: unknown): value is LibraryMetadataShape {
   if (
     !record(value) ||
-    !exact(value, ['title', 'seasons', 'lastAired']) ||
+    !exact(value, ',title,seasons,lastAired,') ||
     !titleRef(value.title) ||
     value.title.type !== 'tv' ||
     !list(
       value.seasons,
       (candidate): candidate is { season: number; episodes: number } =>
         record(candidate) &&
-        exact(candidate, ['season', 'episodes']) &&
+        exact(candidate, ',season,episodes,') &&
         integer(candidate.season) &&
         integer(candidate.episodes),
       LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons,
@@ -178,7 +169,7 @@ function libraryMetadataShape(value: unknown): value is LibraryMetadataShape {
       value.lastAired,
       (candidate): candidate is { season: number; episode: number } =>
         record(candidate) &&
-        exact(candidate, ['season', 'episode']) &&
+        exact(candidate, ',season,episode,') &&
         positiveInteger(candidate.season) &&
         positiveInteger(candidate.episode),
     )
@@ -197,7 +188,7 @@ function episodeRef(value: unknown): value is TitleRef & {
 } {
   return (
     record(value) &&
-    exact(value, ['type', 'id', 'season', 'episode']) &&
+    exact(value, ',type,id,season,episode,') &&
     value.type === 'tv' &&
     integer(value.id) &&
     value.id > 0 &&
@@ -238,7 +229,7 @@ const serviceBase = (value: unknown): value is string =>
 function retainedBillboardScope(value: unknown): value is RetainedBillboardScope {
   return (
     record(value) &&
-    exact(value, ['kind', 'facet', 'fresh']) &&
+    exact(value, ',kind,facet,fresh,') &&
     (value.kind === 'shared' || value.kind === 'personal') &&
     (value.facet === null || value.facet === 'movie' || value.facet === 'tv') &&
     bool(value.fresh)
@@ -252,32 +243,10 @@ const positiveIntegerList = (value: unknown, max = 256): value is number[] =>
 function retainedBillboardTitle(value: unknown): value is RetainedBillboardTitle {
   if (
     !record(value) ||
-    !exact(value, [
-      'type',
-      'id',
-      'title',
-      'posterPath',
-      'posterUrl',
-      'backdropPath',
-      'year',
-      'releaseDate',
-      'rating',
-      'ratingSource',
-      'votes',
-      'popularity',
-      'countries',
-      'people',
-      'collectionId',
-      'genreIds',
-      'primaryGenreName',
-      'likely',
-      'originalLanguage',
-      'adult',
-      'imdbId',
-      'arrivesAt',
-      'services',
-      'why',
-    ]) ||
+    !exact(
+      value,
+      ',type,id,title,posterPath,posterUrl,backdropPath,year,releaseDate,rating,ratingSource,votes,popularity,countries,people,collectionId,genreIds,primaryGenreName,likely,originalLanguage,adult,imdbId,arrivesAt,services,why,',
+    ) ||
     !titleRef({ type: value.type, id: value.id }) ||
     !smallText(value.title) ||
     !optional(value.posterPath, smallText) ||
@@ -325,19 +294,10 @@ function retainedBillboardTitle(value: unknown): value is RetainedBillboardTitle
   if (value.why === undefined) return true;
   if (
     !record(value.why) ||
-    !exact(value.why, [
-      'score',
-      'fit',
-      'similar',
-      'profile',
-      'people',
-      'confidence',
-      'fresh',
-      'arrived',
-      'quality',
-      'buzz',
-      'reason',
-    ])
+    !exact(
+      value.why,
+      ',score,fit,similar,profile,people,confidence,fresh,arrived,quality,buzz,reason,',
+    )
   )
     return false;
   return (
@@ -360,8 +320,8 @@ function retainedBillboardTitle(value: unknown): value is RetainedBillboardTitle
 export function isRetainedBillboard(value: unknown): value is RetainedBillboard {
   return (
     record(value) &&
-    ((value.kind === 'shared' && exact(value, ['kind', 'titles'])) ||
-      (value.kind === 'personal' && exact(value, ['kind', 'at', 'titles']) && integer(value.at))) &&
+    ((value.kind === 'shared' && exact(value, ',kind,titles,')) ||
+      (value.kind === 'personal' && exact(value, ',kind,at,titles,') && integer(value.at))) &&
     list(value.titles, retainedBillboardTitle, LIBRARY_SERVICE_WIRE_LIMITS.retainedTitles)
   );
 }
@@ -369,14 +329,14 @@ export function isRetainedBillboard(value: unknown): value is RetainedBillboard 
 export function isRetainedServices(value: unknown): value is RetainedServices {
   if (
     !record(value) ||
-    !exact(value, ['routes', 'scout', 'atlas', 'reel', 'remux']) ||
+    !exact(value, ',routes,scout,atlas,reel,remux,') ||
     !record(value.routes) ||
     Object.keys(value.routes).length > LIBRARY_SERVICE_WIRE_LIMITS.routeServices
   )
     return false;
   const addon = (candidate: unknown): candidate is { install: string; base: string } =>
     record(candidate) &&
-    exact(candidate, ['install', 'base']) &&
+    exact(candidate, ',install,base,') &&
     webUrl(candidate.install) &&
     serviceBase(candidate.base);
   return (
@@ -387,7 +347,7 @@ export function isRetainedServices(value: unknown): value is RetainedServices {
           entries,
           (entry): entry is { url: string; access?: boolean } =>
             record(entry) &&
-            exact(entry, ['url', 'access']) &&
+            exact(entry, ',url,access,') &&
             webUrl(entry.url) &&
             optional(entry.access, bool),
           LIBRARY_SERVICE_WIRE_LIMITS.routeEntries,
@@ -403,15 +363,7 @@ export function isRetainedServices(value: unknown): value is RetainedServices {
 function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
   return (
     record(value) &&
-    exact(value, [
-      'target',
-      'name',
-      'imdbId',
-      'posterPath',
-      'stillPath',
-      'originalLanguage',
-      'airDate',
-    ]) &&
+    exact(value, ',target,name,imdbId,posterPath,stillPath,originalLanguage,airDate,') &&
     downloadTarget(value.target) &&
     boundedText(value.name, 1_024) &&
     optional(value.imdbId, (candidate): candidate is string => boundedText(candidate, 128)) &&
@@ -428,7 +380,7 @@ function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
 function downloadRelease(value: unknown): value is DownloadReleaseDescriptor {
   return (
     record(value) &&
-    exact(value, ['identity', 'label', 'sizeBytes', 'cached']) &&
+    exact(value, ',identity,label,sizeBytes,cached,') &&
     boundedText(value.identity, 4_096) &&
     boundedText(value.label, 4_096) &&
     optional(
@@ -467,7 +419,7 @@ const unique = <T>(values: readonly T[], key: (value: T) => string = String): bo
 function serviceRef(value: unknown): value is ServiceRef {
   return (
     record(value) &&
-    exact(value, ['id', 'country']) &&
+    exact(value, ',id,country,') &&
     integer(value.id) &&
     value.id > 0 &&
     countryCode(value.country)
@@ -480,7 +432,7 @@ function legacyClock(value: unknown): value is {
 } {
   return (
     record(value) &&
-    exact(value, ['device', 'last']) &&
+    exact(value, ',device,last,') &&
     optional(
       value.device,
       (candidate): candidate is string =>
@@ -507,7 +459,7 @@ function storedPreferenceValues(value: unknown): value is StoredPreferenceValues
       ([key, stamped]) =>
         boundedText(key, 256) &&
         record(stamped) &&
-        exact(stamped, ['value', 'at']) &&
+        exact(stamped, ',value,at,') &&
         configValue(stamped.value) &&
         acceptsProfilePreference(key, stamped.value) &&
         libraryStamp(stamped.at),
@@ -518,17 +470,17 @@ function storedPreferenceValues(value: unknown): value is StoredPreferenceValues
 function configValue(value: unknown): value is ConfigValue | null {
   if (value === null) return true;
   if (!record(value)) return false;
-  if (exact(value, ['bool'])) return bool(value.bool);
-  if (exact(value, ['int'])) return Number.isSafeInteger(value.int);
-  if (exact(value, ['string'])) return typeof value.string === 'string';
-  if (exact(value, ['ints']))
+  if (exact(value, ',bool,')) return bool(value.bool);
+  if (exact(value, ',int,')) return Number.isSafeInteger(value.int);
+  if (exact(value, ',string,')) return typeof value.string === 'string';
+  if (exact(value, ',ints,'))
     return list(
       value.ints,
       (candidate): candidate is number => Number.isSafeInteger(candidate),
       256,
     );
   return (
-    exact(value, ['strings']) &&
+    exact(value, ',strings,') &&
     list(value.strings, (candidate): candidate is string => typeof candidate === 'string', 256)
   );
 }
@@ -545,25 +497,10 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
   if (
     !record(value) ||
     !Object.values(value).some((candidate) => candidate !== undefined) ||
-    !exact(value, [
-      'interfaceLanguage',
-      'excludedGenres',
-      'excludedLanguages',
-      'hideAnime',
-      'hideWatched',
-      'minReleaseYear',
-      'audioLanguage',
-      'subtitlePreference',
-      'shownSubtitleLanguages',
-      'subtitlesPerLanguage',
-      'autoSkipSegments',
-      'autoplayTrailers',
-      'ratingSources',
-      'shownWarnings',
-      'watchRegion',
-      'services',
-      'maturityCeiling',
-    ])
+    !exact(
+      value,
+      ',interfaceLanguage,excludedGenres,excludedLanguages,hideAnime,hideWatched,minReleaseYear,audioLanguage,subtitlePreference,shownSubtitleLanguages,subtitlesPerLanguage,autoSkipSegments,autoplayTrailers,ratingSources,shownWarnings,watchRegion,services,maturityCeiling,',
+    )
   )
     return false;
 
@@ -603,9 +540,9 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
       value.subtitlePreference,
       (candidate): candidate is LibraryPreferencesPatch['subtitlePreference'] =>
         record(candidate) &&
-        ((exact(candidate, ['mode']) &&
+        ((exact(candidate, ',mode,') &&
           (candidate.mode === 'automatic' || candidate.mode === 'off')) ||
-          (exact(candidate, ['mode', 'language']) &&
+          (exact(candidate, ',mode,language,') &&
             candidate.mode === 'language' &&
             languageCode(candidate.language))),
     ) &&
@@ -618,8 +555,8 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
     optional(value.autoplayTrailers, bool) &&
     (sources === undefined ||
       (record(sources) &&
-        ((exact(sources, ['kind']) && sources.kind === 'default') ||
-          (exact(sources, ['kind', 'values']) &&
+        ((exact(sources, ',kind,') && sources.kind === 'default') ||
+          (exact(sources, ',kind,values,') &&
             sources.kind === 'values' &&
             list(sources.values, ratingSource, PROFILE_RATING_SOURCES.size) &&
             unique(sources.values))))) &&
@@ -636,8 +573,8 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
     ) &&
     (services === undefined ||
       (record(services) &&
-        ((exact(services, ['kind']) && services.kind === 'default') ||
-          (exact(services, ['kind', 'values']) &&
+        ((exact(services, ',kind,') && services.kind === 'default') ||
+          (exact(services, ',kind,values,') &&
             services.kind === 'values' &&
             list(services.values, serviceRef, PROFILE_SERVICE_LIMIT) &&
             unique(services.values, (service) => `${service.id}@${service.country}`))))) &&
@@ -653,26 +590,22 @@ function command(value: unknown): value is LibraryCommand {
   switch (value.kind) {
     case 'watchlist.add':
     case 'library.remove':
-      return exact(value, ['kind', 'title']) && titleRef(value.title);
+      return exact(value, ',kind,title,') && titleRef(value.title);
     case 'watched.set':
-      return (
-        exact(value, ['kind', 'title', 'watched']) && titleRef(value.title) && bool(value.watched)
-      );
+      return exact(value, ',kind,title,watched,') && titleRef(value.title) && bool(value.watched);
     case 'reaction.set':
       return (
-        exact(value, ['kind', 'title', 'reaction']) &&
+        exact(value, ',kind,title,reaction,') &&
         titleRef(value.title) &&
         nullable(value.reaction, reaction)
       );
     case 'episode-watched.set':
       return (
-        exact(value, ['kind', 'episode', 'watched']) &&
-        episodeRef(value.episode) &&
-        bool(value.watched)
+        exact(value, ',kind,episode,watched,') && episodeRef(value.episode) && bool(value.watched)
       );
     case 'season-watched.set': {
       if (
-        !exact(value, ['kind', 'title', 'season', 'episodes', 'watched']) ||
+        !exact(value, ',kind,title,season,episodes,watched,') ||
         !titleRef(value.title) ||
         value.title.type !== 'tv' ||
         !integer(value.season) ||
@@ -689,21 +622,11 @@ function command(value: unknown): value is LibraryCommand {
     }
     case 'continue-dismissed.set':
       return (
-        exact(value, ['kind', 'title', 'dismissed']) &&
-        titleRef(value.title) &&
-        bool(value.dismissed)
+        exact(value, ',kind,title,dismissed,') && titleRef(value.title) && bool(value.dismissed)
       );
     case 'progress.record':
       return (
-        exact(value, [
-          'kind',
-          'title',
-          'episode',
-          'fraction',
-          'seconds',
-          'playing',
-          'observedAt',
-        ]) &&
+        exact(value, ',kind,title,episode,fraction,seconds,playing,observedAt,') &&
         titleRef(value.title) &&
         optional(value.episode, episodeRef) &&
         (value.episode === undefined ||
@@ -717,47 +640,47 @@ function command(value: unknown): value is LibraryCommand {
         integer(value.observedAt)
       );
     case 'preferences.patch':
-      return exact(value, ['kind', 'patch']) && preferencesPatch(value.patch);
+      return exact(value, ',kind,patch,') && preferencesPatch(value.patch);
     case 'preferences.seed':
-      return exact(value, ['kind', 'household']) && storedPreferenceValues(value.household);
+      return exact(value, ',kind,household,') && storedPreferenceValues(value.household);
     case 'api-key.set':
       return (
-        exact(value, ['kind', 'service', 'value']) &&
+        exact(value, ',kind,service,value,') &&
         apiKeyService(value.service) &&
         nullable(value.value, (candidate): candidate is string => boundedText(candidate, 16_384))
       );
     case 'parental-pin.set':
-      return exact(value, ['kind', 'pin']) && nullable(value.pin, pin);
+      return exact(value, ',kind,pin,') && nullable(value.pin, pin);
     case 'remote-access.set':
       return (
-        exact(value, ['kind', 'credentials']) &&
+        exact(value, ',kind,credentials,') &&
         nullable(
           value.credentials,
           (candidate): candidate is { clientId: string; clientSecret: string } =>
             record(candidate) &&
-            exact(candidate, ['clientId', 'clientSecret']) &&
+            exact(candidate, ',clientId,clientSecret,') &&
             boundedText(candidate.clientId, 4_096) &&
             boundedText(candidate.clientSecret, 4_096),
         )
       );
     case 'plugin.install':
     case 'plugin.remove':
-      return exact(value, ['kind', 'manifestUrl']) && webUrl(value.manifestUrl);
+      return exact(value, ',kind,manifestUrl,') && webUrl(value.manifestUrl);
     case 'plugin-trust.set':
       return (
-        exact(value, ['kind', 'manifestUrl', 'publicKey']) &&
+        exact(value, ',kind,manifestUrl,publicKey,') &&
         webUrl(value.manifestUrl) &&
         nullable(value.publicKey, (candidate): candidate is string => boundedText(candidate, 256))
       );
     case 'server.patch':
       return (
-        exact(value, ['kind', 'server', 'value']) &&
+        exact(value, ',kind,server,value,') &&
         mediaServer(value.server) &&
         nullable(
           value.value,
           (candidate): candidate is { url: string; user?: string; credential?: string } =>
             record(candidate) &&
-            exact(candidate, ['url', 'user', 'credential']) &&
+            exact(candidate, ',url,user,credential,') &&
             webUrl(candidate.url) &&
             optional(candidate.user, (item): item is string => boundedText(item, 4_096)) &&
             optional(candidate.credential, (item): item is string => boundedText(item, 16_384)) &&
@@ -766,7 +689,7 @@ function command(value: unknown): value is LibraryCommand {
       );
     case 'device.heartbeat':
       return (
-        exact(value, ['kind', 'name', 'deviceKind', 'playKey', 'controlVersion']) &&
+        exact(value, ',kind,name,deviceKind,playKey,controlVersion,') &&
         boundedText(value.name, 256) &&
         optional(
           value.deviceKind,
@@ -782,35 +705,35 @@ function command(value: unknown): value is LibraryCommand {
         )
       );
     case 'device.played':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     case 'device.remove':
       return (
-        exact(value, ['kind', 'deviceId']) &&
+        exact(value, ',kind,deviceId,') &&
         typeof value.deviceId === 'string' &&
         /^[0-9a-z]{1,128}$/i.test(value.deviceId)
       );
     case 'simkl.connect':
-      return exact(value, ['kind', 'token']) && boundedText(value.token, 16_384);
+      return exact(value, ',kind,token,') && boundedText(value.token, 16_384);
     case 'simkl.disconnect':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     case 'simkl.removals.approve':
-      return exact(value, ['kind', 'approvalId']) && boundedText(value.approvalId, 256);
+      return exact(value, ',kind,approvalId,') && boundedText(value.approvalId, 256);
     case 'discovery.remux.remember':
-      return exact(value, ['kind', 'url']) && webUrl(value.url);
+      return exact(value, ',kind,url,') && webUrl(value.url);
     case 'retained.services.set':
-      return exact(value, ['kind', 'value']) && isRetainedServices(value.value);
+      return exact(value, ',kind,value,') && isRetainedServices(value.value);
     case 'retained.home-continue.set':
-      return exact(value, ['kind', 'present']) && bool(value.present);
+      return exact(value, ',kind,present,') && bool(value.present);
     case 'retained.billboard.set':
       return (
-        exact(value, ['kind', 'scope', 'value']) &&
+        exact(value, ',kind,scope,value,') &&
         retainedBillboardScope(value.scope) &&
         isRetainedBillboard(value.value) &&
         value.scope.kind === value.value.kind
       );
     case 'download.enqueue':
       return (
-        exact(value, ['kind', 'title', 'release', 'candidates']) &&
+        exact(value, ',kind,title,release,candidates,') &&
         downloadTitle(value.title) &&
         downloadRelease(value.release) &&
         optional(
@@ -819,12 +742,12 @@ function command(value: unknown): value is LibraryCommand {
         )
       );
     case 'download.want':
-      return exact(value, ['kind', 'title']) && downloadTitle(value.title);
+      return exact(value, ',kind,title,') && downloadTitle(value.title);
     case 'download.remove':
-      return exact(value, ['kind', 'target']) && downloadTarget(value.target);
+      return exact(value, ',kind,target,') && downloadTarget(value.target);
     case 'download.release.try':
       return (
-        exact(value, ['kind', 'target', 'identity']) &&
+        exact(value, ',kind,target,identity,') &&
         downloadTarget(value.target) &&
         boundedText(value.identity, 4_096)
       );
@@ -849,12 +772,12 @@ function selection(value: unknown): value is LibrarySelection {
     case 'runtime':
     case 'profiles':
     case 'downloads':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     case 'title':
-      return exact(value, ['kind', 'title']) && titleRef(value.title);
+      return exact(value, ',kind,title,') && titleRef(value.title);
     case 'presence': {
       if (
-        !exact(value, ['kind', 'titles']) ||
+        !exact(value, ',kind,titles,') ||
         !list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.presenceTitles)
       )
         return false;
@@ -867,13 +790,13 @@ function selection(value: unknown): value is LibrarySelection {
 
 function query(value: unknown): value is LibraryQuery {
   if (!record(value) || !text(value.kind)) return false;
-  if (value.kind === 'parental-pin.verify') return exact(value, ['kind', 'pin']) && pin(value.pin);
-  if (value.kind === 'relay.membership') return exact(value, ['kind']);
-  if (value.kind === 'key-reset.prepare') return exact(value, ['kind']);
-  if (value.kind === 'history.export') return exact(value, ['kind']);
+  if (value.kind === 'parental-pin.verify') return exact(value, ',kind,pin,') && pin(value.pin);
+  if (value.kind === 'relay.membership') return exact(value, ',kind,');
+  if (value.kind === 'key-reset.prepare') return exact(value, ',kind,');
+  if (value.kind === 'history.export') return exact(value, ',kind,');
   if (value.kind === 'history.page')
     return (
-      exact(value, ['kind', 'revision', 'filter', 'cursor', 'limit']) &&
+      exact(value, ',kind,revision,filter,cursor,limit,') &&
       text(value.revision) &&
       historyFilter(value.filter) &&
       optional(value.cursor, text) &&
@@ -884,25 +807,25 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'history.episodes')
     return (
-      exact(value, ['kind', 'revision', 'titles']) &&
+      exact(value, ',kind,revision,titles,') &&
       text(value.revision) &&
       list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.historyDetailTitles) &&
       value.titles.every((title) => title.type === 'tv') &&
       unique(value.titles, titleIdentity)
     );
-  if (value.kind === 'assistant.grants') return exact(value, ['kind']);
-  if (value.kind === 'assistant.connection') return exact(value, ['kind']);
-  if (value.kind === 'profile-create.status') return exact(value, ['kind']);
+  if (value.kind === 'assistant.grants') return exact(value, ',kind,');
+  if (value.kind === 'assistant.connection') return exact(value, ',kind,');
+  if (value.kind === 'profile-create.status') return exact(value, ',kind,');
   if (value.kind === 'recovery.seal')
     return (
-      exact(value, ['kind', 'locator', 'wrapKey', 'createdAt']) &&
+      exact(value, ',kind,locator,wrapKey,createdAt,') &&
       locator(value.locator) &&
       base64url32(value.wrapKey) &&
       integer(value.createdAt)
     );
   if (value.kind === 'pairing.handover')
     return (
-      exact(value, ['kind', 'handoverKey', 'host', 'linkKey', 'grantTicket']) &&
+      exact(value, ',kind,handoverKey,host,linkKey,grantTicket,') &&
       base64url32(value.handoverKey) &&
       boundedText(value.host, 256) &&
       optional(value.linkKey, base64url32) &&
@@ -913,34 +836,58 @@ function query(value: unknown): value is LibraryQuery {
       )
     );
   if (value.kind === 'download.refresh')
-    return exact(value, ['kind', 'target']) && optional(value.target, downloadTarget);
+    return exact(value, ',kind,target,') && optional(value.target, downloadTarget);
+  if (value.kind === 'source.wait')
+    return (
+      exact(value, ',kind,elapsedMs,attempt,onlineRestored,retryAfterMs,jitter,') &&
+      integer(value.elapsedMs) &&
+      value.elapsedMs >= 0 &&
+      value.elapsedMs <= 86_400_000 &&
+      integer(value.attempt) &&
+      value.attempt >= 0 &&
+      value.attempt <= 16 &&
+      optional(value.onlineRestored, bool) &&
+      optional(
+        value.retryAfterMs,
+        (candidate): candidate is number =>
+          integer(candidate) && candidate >= 0 && candidate <= 86_400_000,
+      ) &&
+      optional(
+        value.jitter,
+        (candidate): candidate is number =>
+          typeof candidate === 'number' &&
+          Number.isFinite(candidate) &&
+          candidate >= 0 &&
+          candidate <= 1,
+      )
+    );
   if (value.kind === 'download.sources')
     return (
-      exact(value, ['kind', 'title', 'refresh', 'fresh', 'early']) &&
+      exact(value, ',kind,title,fresh,refresh,early,') &&
       downloadTitle(value.title) &&
       optional(value.refresh, bool) &&
       optional(value.fresh, bool) &&
       optional(value.early, bool)
     );
   if (value.kind === 'download.artwork')
-    return exact(value, ['kind', 'target']) && downloadTarget(value.target);
+    return exact(value, ',kind,target,') && downloadTarget(value.target);
   if (
     value.kind === 'preferences.raw' ||
     value.kind === 'retained.services.get' ||
     value.kind === 'retained.home-continue.get'
   )
-    return exact(value, ['kind']);
+    return exact(value, ',kind,');
   if (value.kind === 'retained.billboard.get')
-    return exact(value, ['kind', 'scope']) && retainedBillboardScope(value.scope);
+    return exact(value, ',kind,scope,') && retainedBillboardScope(value.scope);
   if (value.kind === 'library.metadata')
     return (
-      exact(value, ['kind', 'titles']) &&
+      exact(value, ',kind,titles,') &&
       list(value.titles, titleRef, LIBRARY_SERVICE_WIRE_LIMITS.libraryMetadataTitles) &&
       unique(value.titles, titleIdentity)
     );
   return (
     value.kind === 'playback.prepare' &&
-    exact(value, ['kind', 'title', 'episode']) &&
+    exact(value, ',kind,title,episode,') &&
     titleRef(value.title) &&
     optional(value.episode, episodeRef) &&
     (value.episode === undefined ||
@@ -953,26 +900,26 @@ function task(value: unknown): value is LibraryTask {
   switch (value.kind) {
     case 'recovery.begin':
       return (
-        exact(value, ['kind', 'locator', 'sealed', 'createdAt']) &&
+        exact(value, ',kind,locator,sealed,createdAt,') &&
         locator(value.locator) &&
         boundedText(value.sealed, 4_096) &&
         integer(value.createdAt)
       );
     case 'recovery.confirm':
     case 'recovery.abandon':
-      return exact(value, ['kind', 'locator']) && locator(value.locator);
+      return exact(value, ',kind,locator,') && locator(value.locator);
     case 'recovery.disable':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     case 'history.import': {
       if (
-        !exact(value, ['kind', 'items']) ||
+        !exact(value, ',kind,items,') ||
         !list(
           value.items,
           (
             candidate,
           ): candidate is Extract<LibraryTask, { kind: 'history.import' }>['items'][number] =>
             record(candidate) &&
-            exact(candidate, ['title', 'watchedAt', 'episodes', 'complete']) &&
+            exact(candidate, ',title,watchedAt,episodes,complete,') &&
             titleRef(candidate.title) &&
             optional(candidate.watchedAt, integer) &&
             optional(
@@ -984,7 +931,7 @@ function task(value: unknown): value is LibraryTask {
                   episodes,
                   (episode): episode is { season: number; episode: number; watchedAt: number } =>
                     record(episode) &&
-                    exact(episode, ['season', 'episode', 'watchedAt']) &&
+                    exact(episode, ',season,episode,watchedAt,') &&
                     integer(episode.season) &&
                     integer(episode.episode) &&
                     episode.episode > 0 &&
@@ -1006,7 +953,7 @@ function task(value: unknown): value is LibraryTask {
     }
     case 'local-library.merge':
       return (
-        exact(value, ['kind', 'sourceLibraryKey', 'scope', 'keep', 'verify']) &&
+        exact(value, ',kind,sourceLibraryKey,scope,keep,verify,') &&
         libraryKey(value.sourceLibraryKey) &&
         optional(
           value.scope,
@@ -1017,15 +964,7 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'household.create':
       return (
-        exact(value, [
-          'kind',
-          'householdKey',
-          'attempt',
-          'ownerProfile',
-          'ownerKey',
-          'createdAt',
-          'ifKept',
-        ]) &&
+        exact(value, ',kind,householdKey,attempt,ownerProfile,ownerKey,createdAt,ifKept,') &&
         libraryKey(value.householdKey) &&
         hexId(value.attempt) &&
         hexId(value.ownerProfile) &&
@@ -1035,10 +974,10 @@ function task(value: unknown): value is LibraryTask {
         optional(value.ifKept, (ifKept): ifKept is true => ifKept === true)
       );
     case 'profile.create-default':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     case 'household.join':
       return (
-        exact(value, ['kind', 'sourceLibraryKey', 'pin']) &&
+        exact(value, ',kind,sourceLibraryKey,pin,') &&
         libraryKey(value.sourceLibraryKey) &&
         optional(value.pin, pin)
       );
@@ -1046,40 +985,54 @@ function task(value: unknown): value is LibraryTask {
     case 'key-reset.settle':
     case 'key-reset.adopt':
       return (
-        exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
+        exact(value, ',kind,destinationLibraryKey,') && libraryKey(value.destinationLibraryKey)
       );
     case 'assistant.consent':
       return (
-        exact(value, ['kind', 'client', 'write', 'read']) &&
+        exact(value, ',kind,client,write,read,') &&
         boundedText(value.client, 80) &&
         bool(value.write) &&
         bool(value.read)
       );
     case 'assistant.revoke':
-      return exact(value, ['kind', 'grant']) && hexId(value.grant);
+      return exact(value, ',kind,grant,') && hexId(value.grant);
     case 'assistant.publish':
-      return (
-        exact(value, ['kind', 'connection']) && optional(value.connection, assistantConnection)
-      );
+      return exact(value, ',kind,connection,') && optional(value.connection, assistantConnection);
     case 'assistant.renew':
       return (
-        exact(value, ['kind', 'grants']) &&
+        exact(value, ',kind,grants,') &&
         list(value.grants, hexId, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+      );
+    case 'assistant.receipts.ensure':
+      return exact(value, ',kind,');
+    case 'assistant.receipts.apply':
+      return (
+        exact(value, ',kind,messages,connection,') &&
+        optional(value.connection, assistantConnection) &&
+        list(
+          value.messages,
+          (message): message is { seq: number; sealed: string } =>
+            record(message) &&
+            exact(message, ',seq,sealed,') &&
+            integer(message.seq) &&
+            boundedText(message.sealed, PLAYBACK_RECEIPT_SEALED_MAX),
+          PLAYBACK_RECEIPT_DRAIN_MAX,
+        )
       );
     case 'assistant.apply':
       return (
-        exact(value, ['kind', 'messages', 'connection', 'tv']) &&
+        exact(value, ',kind,messages,connection,tv,') &&
         optional(value.connection, assistantConnection) &&
         optional(
           value.tv,
           (tv): tv is { awakeSince: number } =>
-            record(tv) && exact(tv, ['awakeSince']) && integer(tv.awakeSince),
+            record(tv) && exact(tv, ',awakeSince,') && integer(tv.awakeSince),
         ) &&
         list(
           value.messages,
           (message): message is { seq: number; sealed: string } =>
             record(message) &&
-            exact(message, ['seq', 'sealed']) &&
+            exact(message, ',seq,sealed,') &&
             integer(message.seq) &&
             boundedText(message.sealed, 4_096),
           ASSISTANT_DRAIN_MAX,
@@ -1087,7 +1040,7 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'profile.create':
       return (
-        exact(value, ['kind', 'name', 'maximumAge', 'pin']) &&
+        exact(value, ',kind,name,maximumAge,pin,') &&
         boundedScalarText(value.name, 64) &&
         integer(value.maximumAge) &&
         value.maximumAge >= 0 &&
@@ -1095,10 +1048,10 @@ function task(value: unknown): value is LibraryTask {
         pin(value.pin)
       );
     case 'profile.create.ack':
-      return exact(value, ['kind', 'receipt']) && boundedText(value.receipt, 256);
+      return exact(value, ',kind,receipt,') && boundedText(value.receipt, 256);
     case 'profile.policy.set':
       return (
-        exact(value, ['kind', 'profile', 'maximumAge', 'unknownRatings', 'pin']) &&
+        exact(value, ',kind,profile,maximumAge,unknownRatings,pin,') &&
         hexId(value.profile) &&
         (value.maximumAge === null ||
           (integer(value.maximumAge) && value.maximumAge >= 0 && value.maximumAge <= 18)) &&
@@ -1107,7 +1060,7 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'kid-title-approval.set':
       return (
-        exact(value, ['kind', 'profile', 'title', 'allow', 'pin']) &&
+        exact(value, ',kind,profile,title,allow,pin,') &&
         hexId(value.profile) &&
         titleRef(value.title) &&
         bool(value.allow) &&
@@ -1115,19 +1068,19 @@ function task(value: unknown): value is LibraryTask {
       );
     case 'profile-key-reset.start':
       return (
-        exact(value, ['kind', 'pin', 'destinationLibraryKey']) &&
+        exact(value, ',kind,pin,destinationLibraryKey,') &&
         pin(value.pin) &&
         libraryKey(value.destinationLibraryKey)
       );
     case 'profile-key-reset.resume':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     case 'profile-key-reset.confirm':
       return (
-        exact(value, ['kind', 'destinationLibraryKey']) && libraryKey(value.destinationLibraryKey)
+        exact(value, ',kind,destinationLibraryKey,') && libraryKey(value.destinationLibraryKey)
       );
     case 'profile-key-reset.recover':
       return (
-        exact(value, ['kind', 'pin', 'recoveryAttempt', 'successorKey']) &&
+        exact(value, ',kind,pin,recoveryAttempt,successorKey,') &&
         pin(value.pin) &&
         hexId(value.recoveryAttempt) &&
         nullable(value.successorKey, libraryKey)
@@ -1139,6 +1092,8 @@ function task(value: unknown): value is LibraryTask {
 
 /** den-edge's queue holds at most this many requests, so one drain hands out no more. */
 const ASSISTANT_DRAIN_MAX = 200;
+const PLAYBACK_RECEIPT_DRAIN_MAX = 100;
+const PLAYBACK_RECEIPT_SEALED_MAX = 2_539;
 const hexId = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
 
@@ -1146,16 +1101,7 @@ const hexId = (value: unknown): value is string =>
 function assistantGrant(value: unknown): value is AssistantGrantView {
   return (
     record(value) &&
-    exact(value, [
-      'grant',
-      'client',
-      'ops',
-      'cap',
-      'createdAt',
-      'expiresAt',
-      'revokedAt',
-      'state',
-    ]) &&
+    exact(value, ',grant,client,ops,cap,createdAt,expiresAt,revokedAt,state,') &&
     hexId(value.grant) &&
     (value.state === 'active' ||
       value.state === 'expired' ||
@@ -1176,10 +1122,10 @@ function assistantGrant(value: unknown): value is AssistantGrantView {
 function assistantApplied(value: unknown): value is AssistantApplied {
   if (!record(value) || !integer(value.seq)) return false;
   if (value.outcome === 'rejected')
-    return exact(value, ['seq', 'outcome', 'reason']) && boundedText(value.reason, 64);
+    return exact(value, ',seq,outcome,reason,') && boundedText(value.reason, 64);
   return (
     value.outcome === 'accepted' &&
-    exact(value, ['seq', 'outcome', 'op', 'title', 'season', 'episode', 'detail']) &&
+    exact(value, ',seq,outcome,op,title,season,episode,detail,') &&
     (value.op === 'watchlist_add' ||
       value.op === 'watchlist_remove' ||
       value.op === 'seen' ||
@@ -1198,14 +1144,14 @@ function observation(value: unknown): value is LibraryObservation {
   switch (value.kind) {
     case 'title-shape': {
       if (
-        !exact(value, ['kind', 'title', 'seasons', 'lastAired']) ||
+        !exact(value, ',kind,title,seasons,lastAired,') ||
         !titleRef(value.title) ||
         value.title.type !== 'tv' ||
         !list(
           value.seasons,
           (candidate): candidate is { season: number; episodes: number } =>
             record(candidate) &&
-            exact(candidate, ['season', 'episodes']) &&
+            exact(candidate, ',season,episodes,') &&
             integer(candidate.season) &&
             integer(candidate.episodes),
           LIBRARY_SERVICE_WIRE_LIMITS.shapeSeasons,
@@ -1215,7 +1161,7 @@ function observation(value: unknown): value is LibraryObservation {
           value.lastAired,
           (candidate): candidate is { season: number; episode: number } =>
             record(candidate) &&
-            exact(candidate, ['season', 'episode']) &&
+            exact(candidate, ',season,episode,') &&
             integer(candidate.season) &&
             candidate.season > 0 &&
             integer(candidate.episode) &&
@@ -1232,7 +1178,7 @@ function observation(value: unknown): value is LibraryObservation {
     }
     case 'airing':
       return (
-        exact(value, ['kind', 'today', 'series']) &&
+        exact(value, ',kind,today,series,') &&
         day(value.today) &&
         list(
           value.series,
@@ -1240,7 +1186,7 @@ function observation(value: unknown): value is LibraryObservation {
             candidate,
           ): candidate is Extract<LibraryObservation, { kind: 'airing' }>['series'][number] =>
             record(candidate) &&
-            exact(candidate, ['title', 'episodes', 'ended']) &&
+            exact(candidate, ',title,episodes,ended,') &&
             titleRef(candidate.title) &&
             candidate.title.type === 'tv' &&
             bool(candidate.ended) &&
@@ -1248,7 +1194,7 @@ function observation(value: unknown): value is LibraryObservation {
               candidate.episodes,
               (episode): episode is { season: number; episode: number; date: string } =>
                 record(episode) &&
-                exact(episode, ['season', 'episode', 'date']) &&
+                exact(episode, ',season,episode,date,') &&
                 integer(episode.season) &&
                 integer(episode.episode) &&
                 day(episode.date),
@@ -1260,14 +1206,14 @@ function observation(value: unknown): value is LibraryObservation {
       );
     case 'lifecycle':
       return (
-        exact(value, ['kind', 'visible', 'online', 'playbackActive', 'playerOpen']) &&
+        exact(value, ',kind,visible,online,playbackActive,playerOpen,') &&
         bool(value.visible) &&
         bool(value.online) &&
         bool(value.playbackActive) &&
         (value.playerOpen === undefined || bool(value.playerOpen))
       );
     case 'foreground-ready':
-      return exact(value, ['kind']);
+      return exact(value, ',kind,');
     default:
       return false;
   }
@@ -1276,7 +1222,7 @@ function observation(value: unknown): value is LibraryObservation {
 function version(value: unknown): value is LibraryVersion {
   return (
     record(value) &&
-    exact(value, ['instance', 'generation', 'revision']) &&
+    exact(value, ',instance,generation,revision,') &&
     text(value.instance) &&
     nullable(value.generation, text) &&
     integer(value.revision)
@@ -1288,7 +1234,7 @@ function progress(
 ): value is { fraction: number; seconds?: number; playing?: boolean; updatedAt?: number } {
   return (
     record(value) &&
-    exact(value, ['fraction', 'seconds', 'playing', 'updatedAt']) &&
+    exact(value, ',fraction,seconds,playing,updatedAt,') &&
     finite(value.fraction) &&
     value.fraction >= 0 &&
     value.fraction <= 1 &&
@@ -1301,20 +1247,10 @@ function progress(
 function continueItem(value: unknown): value is ContinueItem {
   return (
     record(value) &&
-    exact(value, [
-      'title',
-      'fraction',
-      'episode',
-      'upcoming',
-      'seconds',
-      'playing',
-      'updatedAt',
-      'liveEpisode',
-      'liveFraction',
-      'device',
-      'deviceId',
-      'here',
-    ]) &&
+    exact(
+      value,
+      ',title,fraction,episode,upcoming,seconds,playing,updatedAt,liveEpisode,liveFraction,device,deviceId,here,',
+    ) &&
     titleRef(value.title) &&
     optional(value.upcoming, day) &&
     (value.upcoming === undefined || value.episode !== undefined) &&
@@ -1326,7 +1262,7 @@ function continueItem(value: unknown): value is ContinueItem {
       value.episode,
       (candidate): candidate is { season: number; episode: number } =>
         record(candidate) &&
-        exact(candidate, ['season', 'episode']) &&
+        exact(candidate, ',season,episode,') &&
         integer(candidate.season) &&
         integer(candidate.episode) &&
         candidate.episode > 0,
@@ -1336,7 +1272,7 @@ function continueItem(value: unknown): value is ContinueItem {
       value.liveEpisode,
       (candidate): candidate is { season: number; episode: number } =>
         record(candidate) &&
-        exact(candidate, ['season', 'episode']) &&
+        exact(candidate, ',season,episode,') &&
         integer(candidate.season) &&
         integer(candidate.episode) &&
         candidate.episode > 0,
@@ -1362,13 +1298,13 @@ function historyItem(value: unknown): value is HistoryItem {
   if (!record(value) || !titleRef(value.title)) return false;
   const title = value.title;
   return (
-    exact(value, ['title', 'watchedAt', 'episode', 'episodes']) &&
+    exact(value, ',title,watchedAt,episode,episodes,') &&
     integer(value.watchedAt) &&
     optional(
       value.episode,
       (candidate): candidate is { season: number; episode: number } =>
         record(candidate) &&
-        exact(candidate, ['season', 'episode']) &&
+        exact(candidate, ',season,episode,') &&
         integer(candidate.season) &&
         integer(candidate.episode) &&
         candidate.episode > 0,
@@ -1379,12 +1315,10 @@ function historyItem(value: unknown): value is HistoryItem {
   );
 }
 
-const HISTORY_PAGE_KEYS = ['revision', 'filter', 'total', 'facets', 'items', 'nextCursor'] as const;
-
 function historyFilter(value: unknown): value is HistoryFilter {
   return (
     record(value) &&
-    exact(value, ['type', 'year']) &&
+    exact(value, ',type,year,') &&
     optional(
       value.type,
       (candidate): candidate is 'movie' | 'tv' => candidate === 'movie' || candidate === 'tv',
@@ -1401,12 +1335,12 @@ function historyPage(value: unknown): value is HistoryPage {
   if (!record(value)) return false;
   const facets = value.facets;
   return (
-    exact(value, [...HISTORY_PAGE_KEYS, 'kind']) &&
+    exact(value, ',kind,total,items,filter,facets,revision,nextCursor,') &&
     text(value.revision) &&
     historyFilter(value.filter) &&
     integer(value.total) &&
     record(facets) &&
-    exact(facets, ['all', 'movie', 'tv', 'years']) &&
+    exact(facets, ',all,movie,tv,years,') &&
     integer(facets.all) &&
     integer(facets.movie) &&
     integer(facets.tv) &&
@@ -1414,7 +1348,7 @@ function historyPage(value: unknown): value is HistoryPage {
       facets.years,
       (candidate): candidate is { year: string; all: number; movie: number; tv: number } =>
         record(candidate) &&
-        exact(candidate, ['year', 'all', 'movie', 'tv']) &&
+        exact(candidate, ',year,all,movie,tv,') &&
         typeof candidate.year === 'string' &&
         (candidate.year === 'unknown' || /^\d{4,6}$/.test(candidate.year)) &&
         integer(candidate.all) &&
@@ -1430,7 +1364,7 @@ function historyPage(value: unknown): value is HistoryPage {
 function download(value: unknown): value is DownloadViewItem {
   const release = (candidate: unknown): candidate is Omit<DownloadReleaseDescriptor, 'url'> =>
     record(candidate) &&
-    exact(candidate, ['identity', 'label', 'sizeBytes', 'cached']) &&
+    exact(candidate, ',identity,label,sizeBytes,cached,') &&
     boundedText(candidate.identity, 4_096) &&
     boundedText(candidate.label, 4_096) &&
     optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
@@ -1440,7 +1374,7 @@ function download(value: unknown): value is DownloadViewItem {
     candidate: unknown,
   ): candidate is NonNullable<DownloadViewItem['status']['fetch']> =>
     record(candidate) &&
-    exact(candidate, ['state', 'seeds', 'peers', 'service']) &&
+    exact(candidate, ',state,seeds,peers,service,') &&
     optional(
       candidate.state,
       (item): item is string =>
@@ -1455,24 +1389,10 @@ function download(value: unknown): value is DownloadViewItem {
     optional(candidate.service, (item): item is string => boundedText(item, 256));
   return (
     record(value) &&
-    exact(value, [
-      'content',
-      'title',
-      'name',
-      'imdbId',
-      'season',
-      'episode',
-      'posterPath',
-      'stillPath',
-      'queuedAt',
-      'queuedBy',
-      'release',
-      'alternate',
-      'status',
-      'tried',
-      'candidates',
-      'announced',
-    ]) &&
+    exact(
+      value,
+      ',content,title,name,imdbId,season,episode,posterPath,stillPath,queuedAt,queuedBy,release,alternate,status,tried,candidates,announced,',
+    ) &&
     text(value.content) &&
     titleRef(value.title) &&
     boundedText(value.name, 1_024) &&
@@ -1486,7 +1406,7 @@ function download(value: unknown): value is DownloadViewItem {
     integer(value.queuedAt) &&
     value.queuedAt >= 0 &&
     record(value.queuedBy) &&
-    exact(value.queuedBy, ['device', 'name', 'isSelf']) &&
+    exact(value.queuedBy, ',device,name,isSelf,') &&
     boundedText(value.queuedBy.device, 256) &&
     bool(value.queuedBy.isSelf) &&
     optional(value.queuedBy.name, (candidate): candidate is string =>
@@ -1495,18 +1415,10 @@ function download(value: unknown): value is DownloadViewItem {
     optional(value.release, release) &&
     optional(value.alternate, release) &&
     record(status) &&
-    exact(status, [
-      'state',
-      'phase',
-      'fraction',
-      'progressAt',
-      'etaSeconds',
-      'bytesPerSecond',
-      'fetch',
-      'service',
-      'until',
-      'stalled',
-    ]) &&
+    exact(
+      status,
+      ',state,phase,fraction,progressAt,etaSeconds,bytesPerSecond,fetch,service,until,stalled,',
+    ) &&
     (status.state === 'starting' ||
       status.state === 'fetching' ||
       status.state === 'not-started' ||
@@ -1557,27 +1469,10 @@ function download(value: unknown): value is DownloadViewItem {
 function preferencesView(value: unknown): boolean {
   if (
     !record(value) ||
-    !exact(value, [
-      'interfaceLanguage',
-      'excludedGenres',
-      'excludedLanguages',
-      'hideAnime',
-      'hideWatched',
-      'minReleaseYear',
-      'audioLanguage',
-      'subtitleLanguage',
-      'hasExplicitSubtitlePreference',
-      'shownSubtitleLanguages',
-      'subtitlesPerLanguage',
-      'autoSkipSegments',
-      'autoplayTrailers',
-      'ratingSources',
-      'shownWarnings',
-      'watchRegion',
-      'services',
-      'servicesConfigured',
-      'maturityCeiling',
-    ])
+    !exact(
+      value,
+      ',interfaceLanguage,excludedGenres,excludedLanguages,hideAnime,hideWatched,minReleaseYear,audioLanguage,subtitleLanguage,hasExplicitSubtitlePreference,shownSubtitleLanguages,subtitlesPerLanguage,autoSkipSegments,autoplayTrailers,ratingSources,shownWarnings,watchRegion,services,servicesConfigured,maturityCeiling,',
+    )
   )
     return false;
   const genres = value.excludedGenres;
@@ -1640,16 +1535,7 @@ const playKey = (value: unknown): value is string =>
 
 const libraryDevice = (candidate: unknown): candidate is ConnectionsView['devices'][number] =>
   record(candidate) &&
-  exact(candidate, [
-    'id',
-    'name',
-    'kind',
-    'lastSeenAt',
-    'libraryFormat',
-    'playKey',
-    'controlVersion',
-    'playedAt',
-  ]) &&
+  exact(candidate, ',id,name,kind,lastSeenAt,libraryFormat,playKey,controlVersion,playedAt,') &&
   boundedText(candidate.id, 128) &&
   boundedText(candidate.name, 256) &&
   (candidate.kind === 'tv' || candidate.kind === 'browser') &&
@@ -1665,24 +1551,17 @@ const libraryDevice = (candidate: unknown): candidate is ConnectionsView['device
 function connectionsView(value: unknown): value is ConnectionsView {
   if (
     !record(value) ||
-    !exact(value, [
-      'kind',
-      'apiKeys',
-      'parentalPinConfigured',
-      'parentalPinDelivery',
-      'remoteAccessConfigured',
-      'plugins',
-      'servers',
-      'devices',
-      'diagnostics',
-    ]) ||
+    !exact(
+      value,
+      ',kind,apiKeys,parentalPinConfigured,parentalPinDelivery,remoteAccessConfigured,plugins,servers,devices,diagnostics,',
+    ) ||
     value.kind !== 'connections' ||
     !record(value.apiKeys) ||
-    !exact(value.apiKeys, ['tmdb', 'omdb', 'content-warnings']) ||
+    !exact(value.apiKeys, ',tmdb,omdb,content-warnings,') ||
     !Object.values(value.apiKeys).every(
       (candidate) =>
         record(candidate) &&
-        exact(candidate, ['configured', 'masked']) &&
+        exact(candidate, ',configured,masked,') &&
         candidate.configured === true &&
         boundedText(candidate.masked, 32),
     ) ||
@@ -1702,14 +1581,14 @@ function connectionsView(value: unknown): value is ConnectionsView {
       plugins,
       (candidate): candidate is ConnectionsView['plugins'][number] =>
         record(candidate) &&
-        exact(candidate, ['manifestUrl', 'signingKey', 'pendingApprovalOn']) &&
+        exact(candidate, ',manifestUrl,signingKey,pendingApprovalOn,') &&
         webUrl(candidate.manifestUrl) &&
         optional(candidate.signingKey, (item): item is string => boundedText(item, 256)) &&
         list(
           candidate.pendingApprovalOn,
           (device): device is { id: string; name: string } =>
             record(device) &&
-            exact(device, ['id', 'name']) &&
+            exact(device, ',id,name,') &&
             boundedText(device.id, 128) &&
             boundedText(device.name, 256),
           512,
@@ -1722,7 +1601,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
       servers,
       (candidate): candidate is ConnectionsView['servers'][number] =>
         record(candidate) &&
-        exact(candidate, ['kind', 'url', 'user']) &&
+        exact(candidate, ',kind,url,user,') &&
         mediaServer(candidate.kind) &&
         webUrl(candidate.url) &&
         optional(candidate.user, (item): item is string => boundedText(item, 4_096)) &&
@@ -1733,7 +1612,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
     list(devices, libraryDevice, 512) &&
     unique(devices, (device) => device.id) &&
     record(diagnostics) &&
-    exact(diagnostics, ['libraryFormat', 'pendingChanges', 'selfDeviceId', 'profileTopology']) &&
+    exact(diagnostics, ',libraryFormat,pendingChanges,selfDeviceId,profileTopology,') &&
     optional(diagnostics.profileTopology, bool) &&
     integer(diagnostics.libraryFormat) &&
     integer(diagnostics.pendingChanges) &&
@@ -1744,7 +1623,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
 function devicesView(value: unknown): boolean {
   return (
     record(value) &&
-    exact(value, ['kind', 'devices']) &&
+    exact(value, ',kind,devices,') &&
     value.kind === 'devices' &&
     list(value.devices, libraryDevice, 512) &&
     unique(value.devices, (device) => device.id)
@@ -1754,7 +1633,7 @@ function devicesView(value: unknown): boolean {
 function simklView(value: unknown): value is SimklView {
   return (
     record(value) &&
-    exact(value, ['kind', 'connected', 'account', 'heldRemovals', 'approvalId']) &&
+    exact(value, ',kind,connected,account,heldRemovals,approvalId,') &&
     value.kind === 'simkl' &&
     bool(value.connected) &&
     optional(value.account, (candidate): candidate is string => boundedText(candidate, 256)) &&
@@ -1779,7 +1658,7 @@ function episodeProgress(value: unknown): value is {
 } {
   return (
     record(value) &&
-    exact(value, ['season', 'episode', 'watched', 'fraction', 'seconds', 'updatedAt']) &&
+    exact(value, ',season,episode,watched,fraction,seconds,updatedAt,') &&
     integer(value.season) &&
     integer(value.episode) &&
     value.episode > 0 &&
@@ -1800,7 +1679,7 @@ function recommendationFields(value: Record<string, unknown>): boolean {
       value.standings,
       (candidate): candidate is { title: TitleRef; standing: Standing } =>
         record(candidate) &&
-        exact(candidate, ['title', 'standing']) &&
+        exact(candidate, ',title,standing,') &&
         titleRef(candidate.title) &&
         standing(candidate.standing),
     ) &&
@@ -1808,13 +1687,13 @@ function recommendationFields(value: Record<string, unknown>): boolean {
       value.weighted,
       (candidate): candidate is { title: TitleRef; weight: number; updatedAt: number } =>
         record(candidate) &&
-        exact(candidate, ['title', 'weight', 'updatedAt']) &&
+        exact(candidate, ',title,weight,updatedAt,') &&
         titleRef(candidate.title) &&
         finite(candidate.weight) &&
         integer(candidate.updatedAt),
     ) &&
     record(value.seeds) &&
-    exact(value.seeds, ['watched', 'watchlisted']) &&
+    exact(value.seeds, ',watched,watchlisted,') &&
     list(value.seeds.watched, titleRef) &&
     list(value.seeds.watchlisted, titleRef)
   );
@@ -1824,21 +1703,20 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
     case 'watchlist':
-      return exact(value, ['kind', 'titles']) && list(value.titles, titleRef);
+      return exact(value, ',kind,titles,') && list(value.titles, titleRef);
     case 'recommendations':
       return (
-        exact(value, ['kind', 'owned', 'watched', 'standings', 'weighted', 'seeds']) &&
-        recommendationFields(value)
+        exact(value, ',kind,owned,watched,standings,weighted,seeds,') && recommendationFields(value)
       );
     case 'overview':
       return (
-        exact(value, ['kind', 'owned', 'watched', 'watchlist', 'standings', 'weighted', 'seeds']) &&
+        exact(value, ',kind,owned,watched,watchlist,standings,weighted,seeds,') &&
         list(value.watchlist, titleRef) &&
         recommendationFields(value)
       );
     case 'continue':
       return (
-        exact(value, ['kind', 'items', 'needsShapes', 'caughtUp', 'dismissed']) &&
+        exact(value, ',kind,items,needsShapes,caughtUp,dismissed,') &&
         list(value.items, continueItem) &&
         list(value.needsShapes, titleRef) &&
         value.needsShapes.every((title) => title.type === 'tv') &&
@@ -1848,19 +1726,12 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
         unique(value.needsShapes, titleIdentity)
       );
     case 'history':
-      return exact(value, ['kind', ...HISTORY_PAGE_KEYS]) && historyPage(value);
+      return (
+        exact(value, ',kind,total,items,filter,facets,revision,nextCursor,') && historyPage(value)
+      );
     case 'title':
       return (
-        exact(value, [
-          'kind',
-          'title',
-          'listed',
-          'watched',
-          'reaction',
-          'standing',
-          'progress',
-          'episodes',
-        ]) &&
+        exact(value, ',kind,title,listed,watched,reaction,standing,progress,episodes,') &&
         titleRef(value.title) &&
         bool(value.listed) &&
         bool(value.watched) &&
@@ -1872,7 +1743,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'presence':
       return (
-        exact(value, ['kind', 'items']) &&
+        exact(value, ',kind,items,') &&
         list(
           value.items,
           (
@@ -1883,7 +1754,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
             reaction: 'seen' | 'dislike' | 'like' | 'love' | null;
           } =>
             record(candidate) &&
-            exact(candidate, ['title', 'standing', 'reaction']) &&
+            exact(candidate, ',title,standing,reaction,') &&
             titleRef(candidate.title) &&
             nullable(candidate.standing, standing) &&
             nullable(candidate.reaction, reaction),
@@ -1893,10 +1764,10 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'settings':
       return (
-        exact(value, ['kind', 'preferences', 'assistant']) &&
+        exact(value, ',kind,preferences,assistant,') &&
         preferencesView(value.preferences) &&
         record(value.assistant) &&
-        exact(value.assistant, ['write', 'read']) &&
+        exact(value.assistant, ',write,read,') &&
         bool(value.assistant.write) &&
         bool(value.assistant.read)
       );
@@ -1910,7 +1781,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       return simklView(value);
     case 'recovery':
       return (
-        exact(value, ['kind', 'availability', 'live', 'broken', 'notices']) &&
+        exact(value, ',kind,availability,live,broken,notices,') &&
         (value.availability === 'ready' || value.availability === 'waits') &&
         nullable(
           value.live,
@@ -1925,7 +1796,7 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
             reposted: boolean;
           } =>
             record(candidate) &&
-            exact(candidate, ['createdAt', 'by', 'byName', 'opens', 'lastOpenedAt', 'reposted']) &&
+            exact(candidate, ',createdAt,by,byName,opens,lastOpenedAt,reposted,') &&
             integer(candidate.createdAt) &&
             boundedText(candidate.by, 128) &&
             boundedText(candidate.byName, 256) &&
@@ -1938,13 +1809,13 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'runtime':
       return (
-        exact(value, ['kind', 'pluginManifestUrls', 'privateRemuxUrl']) &&
+        exact(value, ',kind,pluginManifestUrls,privateRemuxUrl,') &&
         list(value.pluginManifestUrls, webUrl, 10_000) &&
         unique(value.pluginManifestUrls) &&
         nullable(value.privateRemuxUrl, webUrl)
       );
     case 'downloads':
-      return exact(value, ['kind', 'items']) && list(value.items, download);
+      return exact(value, ',kind,items,') && list(value.items, download);
     default:
       return false;
   }
@@ -1955,7 +1826,7 @@ function profileDirectoryView(
 ): value is Extract<LibrarySelectionValue, { kind: 'profiles' }> {
   if (
     !record(value) ||
-    !exact(value, ['kind', 'state', 'owner', 'profiles']) ||
+    !exact(value, ',kind,state,owner,profiles,') ||
     value.kind !== 'profiles' ||
     (value.state !== 'absent' &&
       value.state !== 'invalid' &&
@@ -1971,17 +1842,7 @@ function profileDirectoryView(
         profile,
       ): profile is Extract<LibrarySelectionValue, { kind: 'profiles' }>['profiles'][number] =>
         record(profile) &&
-        exact(profile, [
-          'id',
-          'role',
-          'name',
-          'avatar',
-          'libraryKey',
-          'keyVersion',
-          'policy',
-          'approvals',
-          'deleted',
-        ]) &&
+        exact(profile, ',id,role,name,avatar,libraryKey,keyVersion,policy,approvals,deleted,') &&
         typeof profile.id === 'string' &&
         /^[0-9a-f]{32}$/.test(profile.id) &&
         (profile.role === 'owner' || profile.role === 'kid' || profile.role === 'adult') &&
@@ -1995,7 +1856,7 @@ function profileDirectoryView(
         integer(profile.keyVersion) &&
         profile.keyVersion > 0 &&
         record(profile.policy) &&
-        exact(profile.policy, ['maximumAge', 'unknownRatings']) &&
+        exact(profile.policy, ',maximumAge,unknownRatings,') &&
         nullable(
           profile.policy.maximumAge,
           (age): age is number => integer(age) && age >= 0 && age <= 18,
@@ -2021,9 +1882,9 @@ function profileDirectoryView(
 function queryResult(value: unknown): value is LibraryQueryResult {
   if (!record(value) || !text(value.kind)) return false;
   if (value.kind === 'parental-pin.verify')
-    return exact(value, ['kind', 'matches']) && bool(value.matches);
+    return exact(value, ',kind,matches,') && bool(value.matches);
   if (value.kind === 'profile-create.status') {
-    if (!exact(value, ['kind', 'phase', 'profile', 'name', 'maximumAge', 'receipt'])) return false;
+    if (!exact(value, ',kind,phase,profile,name,maximumAge,receipt,')) return false;
     if (value.phase === 'idle')
       return (
         value.profile === undefined &&
@@ -2043,14 +1904,14 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   }
   if (value.kind === 'assistant.grants')
     return (
-      exact(value, ['kind', 'grants', 'reads', 'plays']) &&
+      exact(value, ',kind,grants,reads,plays,') &&
       list(value.grants, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
       list(value.reads, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
       list(value.plays, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
     );
   if (value.kind === 'library.metadata')
     return (
-      exact(value, ['kind', 'titles', 'shapes', 'retryable', 'retryAfterMs']) &&
+      exact(value, ',kind,titles,shapes,retryable,retryAfterMs,') &&
       list(
         value.titles,
         isLibraryMetadataTitle,
@@ -2064,29 +1925,29 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       optional(value.retryAfterMs, positiveInteger)
     );
   if (value.kind === 'relay.membership') {
-    return exact(value, ['kind', 'capability']) && relayMembership(value.capability);
+    return exact(value, ',kind,capability,') && relayMembership(value.capability);
   }
   if (value.kind === 'assistant.connection')
-    return exact(value, ['kind', 'connection']) && nullable(value.connection, assistantConnection);
+    return exact(value, ',kind,connection,') && nullable(value.connection, assistantConnection);
   if (value.kind === 'key-reset.prepare')
     return (
-      exact(value, ['kind', 'destinationLibraryKey', 'device']) &&
+      exact(value, ',kind,destinationLibraryKey,device,') &&
       libraryKey(value.destinationLibraryKey) &&
       typeof value.device === 'string' &&
       /^[0-9a-f]{16}$/.test(value.device)
     );
   if (value.kind === 'recovery.seal')
-    return exact(value, ['kind', 'sealed']) && boundedText(value.sealed, 4_096);
+    return exact(value, ',kind,sealed,') && boundedText(value.sealed, 4_096);
   if (value.kind === 'pairing.handover')
     return (
-      exact(value, ['kind', 'sealed', 'linkKey', 'inboxKey']) &&
+      exact(value, ',kind,sealed,linkKey,inboxKey,') &&
       boundedText(value.sealed, 4_096) &&
       base64url32(value.linkKey) &&
       boundedText(value.inboxKey, 256)
     );
   if (value.kind === 'history.export')
     return (
-      exact(value, ['kind', 'exportedAt', 'titles']) &&
+      exact(value, ',kind,exportedAt,titles,') &&
       boundedText(value.exportedAt, 64) &&
       list(
         value.titles,
@@ -2094,15 +1955,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           candidate,
         ): candidate is Extract<LibraryQueryResult, { kind: 'history.export' }>['titles'][number] =>
           record(candidate) &&
-          exact(candidate, [
-            'type',
-            'tmdbId',
-            'status',
-            'reaction',
-            'addedAt',
-            'plays',
-            'episodes',
-          ]) &&
+          exact(candidate, ',type,tmdbId,status,reaction,addedAt,plays,episodes,') &&
           (candidate.type === 'movie' || candidate.type === 'tv') &&
           integer(candidate.tmdbId) &&
           candidate.tmdbId > 0 &&
@@ -2140,7 +1993,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
                   }>;
                 } =>
                   record(episode) &&
-                  exact(episode, ['season', 'episode', 'plays']) &&
+                  exact(episode, ',season,episode,plays,') &&
                   integer(episode.season) &&
                   integer(episode.episode) &&
                   exportPlays(episode.plays),
@@ -2150,13 +2003,11 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     );
   if (value.kind === 'history.page')
     return (
-      exact(value, ['kind', 'restarted', 'page']) &&
-      bool(value.restarted) &&
-      historyPage(value.page)
+      exact(value, ',kind,restarted,page,') && bool(value.restarted) && historyPage(value.page)
     );
   if (value.kind === 'history.episodes') {
     if (
-      !exact(value, ['kind', 'revision', 'stale', 'items']) ||
+      !exact(value, ',kind,revision,stale,items,') ||
       !text(value.revision) ||
       !bool(value.stale) ||
       !list(
@@ -2168,14 +2019,14 @@ function queryResult(value: unknown): value is LibraryQueryResult {
           { kind: 'history.episodes' }
         >['items'][number] =>
           record(candidate) &&
-          exact(candidate, ['title', 'seen']) &&
+          exact(candidate, ',title,seen,') &&
           titleRef(candidate.title) &&
           candidate.title.type === 'tv' &&
           list(
             candidate.seen,
             (episode): episode is { season: number; episode: number } =>
               record(episode) &&
-              exact(episode, ['season', 'episode']) &&
+              exact(episode, ',season,episode,') &&
               integer(episode.season) &&
               integer(episode.episode) &&
               episode.episode > 0,
@@ -2193,22 +2044,23 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     );
   }
   if (value.kind === 'download.refresh')
-    return exact(value, ['kind', 'refreshed']) && bool(value.refreshed);
+    return exact(value, ',kind,refreshed,') && bool(value.refreshed);
+  if (value.kind === 'source.wait')
+    return (
+      exact(value, ',kind,phase,nextMs,retryInMs,') &&
+      (value.phase === 'loading' || value.phase === 'slow' || value.phase === 'deadline') &&
+      (value.nextMs === null ||
+        (integer(value.nextMs) && value.nextMs >= 0 && value.nextMs <= 86_400_000)) &&
+      (value.retryInMs === null ||
+        (integer(value.retryInMs) && value.retryInMs >= 0 && value.retryInMs <= 86_400_000))
+    );
   if (value.kind === 'download.sources') {
     const source = (candidate: unknown): candidate is Record<string, unknown> =>
       record(candidate) &&
-      exact(candidate, [
-        'identity',
-        'label',
-        'filename',
-        'sizeBytes',
-        'cached',
-        'seeders',
-        'packSizeBytes',
-        'badges',
-        'languages',
-        'probed',
-      ]) &&
+      exact(
+        candidate,
+        ',identity,label,filename,sizeBytes,cached,seeders,packSizeBytes,badges,languages,probed,',
+      ) &&
       boundedText(candidate.identity, 4_096) &&
       boundedText(candidate.label, 4_096) &&
       boundedText(candidate.filename, 4_096) &&
@@ -2221,7 +2073,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       bool(candidate.probed);
     const answer = (candidate: unknown): candidate is Record<string, unknown> =>
       record(candidate) &&
-      exact(candidate, ['kind', 'missing', 'outageBuiltAt']) &&
+      exact(candidate, ',kind,missing,late,outageBuiltAt,') &&
       (candidate.kind === 'live' ||
         candidate.kind === 'partial' ||
         candidate.kind === 'empty' ||
@@ -2229,41 +2081,79 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         candidate.kind === 'stale') &&
       integer(candidate.missing) &&
       candidate.missing >= 0 &&
+      optional(candidate.late, integer) &&
       optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
+    const outcome = (candidate: unknown): candidate is Record<string, unknown> => {
+      if (!record(candidate)) return false;
+      const caveat = (item: unknown): item is Record<string, unknown> =>
+        record(item) &&
+        exact(item, ',staleSince,missing,late,failedAddons,') &&
+        (item.staleSince === null || (integer(item.staleSince) && item.staleSince >= 0)) &&
+        integer(item.missing) &&
+        item.missing >= 0 &&
+        integer(item.late) &&
+        item.late >= 0 &&
+        integer(item.failedAddons) &&
+        item.failedAddons >= 0;
+      return (
+        exact(candidate, ',result,category,list,caveat,mayMarkUnavailable,retryable,') &&
+        [
+          'live',
+          'partial',
+          'stale_held',
+          'degraded',
+          'confirmed_empty',
+          'failed_retryable',
+          'no_imdb',
+        ].includes(candidate.result as string) &&
+        (candidate.category === null ||
+          candidate.category === 'debrid' ||
+          candidate.category === 'source_discovery') &&
+        (candidate.list === 'new' || candidate.list === 'retained' || candidate.list === 'none') &&
+        (candidate.caveat === null || caveat(candidate.caveat)) &&
+        bool(candidate.mayMarkUnavailable) &&
+        bool(candidate.retryable)
+      );
+    };
     return (
-      exact(value, ['kind', 'sources', 'answer', 'fresh', 'failure']) &&
+      exact(value, ',kind,sources,answer,fresh,outcome,retryAfterMs,failure,') &&
       (value.sources === null ||
         list(value.sources, source, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)) &&
       optional(value.answer, answer) &&
       optional(value.fresh, (item): item is string => item === 'rebuilt' || item === 'limited') &&
+      optional(value.outcome, outcome) &&
+      optional(
+        value.retryAfterMs,
+        (item): item is number => integer(item) && item >= 0 && item <= 60_000,
+      ) &&
       optional(
         value.failure,
         (item): item is string =>
           item === 'not-configured' || item === 'unmatched' || item === 'unreachable',
       ) &&
-      (value.failure === undefined || value.sources === null)
+      (value.failure === undefined || value.sources === null || value.outcome?.list === 'retained')
     );
   }
   if (value.kind === 'download.artwork')
     return (
-      exact(value, ['kind', 'stillPath']) &&
+      exact(value, ',kind,stillPath,') &&
       (value.stillPath === null || boundedText(value.stillPath, 2_048))
     );
   if (value.kind === 'preferences.raw')
-    return exact(value, ['kind', 'values']) && storedPreferenceValues(value.values);
+    return exact(value, ',kind,values,') && storedPreferenceValues(value.values);
   if (value.kind === 'retained.services')
-    return exact(value, ['kind', 'value']) && nullable(value.value, isRetainedServices);
+    return exact(value, ',kind,value,') && nullable(value.value, isRetainedServices);
   if (value.kind === 'retained.home-continue')
-    return exact(value, ['kind', 'present']) && nullable(value.present, bool);
+    return exact(value, ',kind,present,') && nullable(value.present, bool);
   if (value.kind === 'retained.billboard')
     return (
-      exact(value, ['kind', 'scope', 'value']) &&
+      exact(value, ',kind,scope,value,') &&
       retainedBillboardScope(value.scope) &&
       nullable(value.value, isRetainedBillboard) &&
       (value.value === null || value.scope.kind === value.value.kind)
     );
   return (
-    exact(value, ['kind', 'action', 'target', 'resume']) &&
+    exact(value, ',kind,action,target,resume,') &&
     value.kind === 'playback.prepare' &&
     (value.action === 'start' || value.action === 'resume' || value.action === 'next') &&
     ((titleRef(value.target) && value.target.type === 'movie') || episodeRef(value.target)) &&
@@ -2271,7 +2161,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       value.resume,
       (candidate): candidate is { fraction: number; seconds?: number } =>
         record(candidate) &&
-        exact(candidate, ['fraction', 'seconds']) &&
+        exact(candidate, ',fraction,seconds,') &&
         finite(candidate.fraction) &&
         candidate.fraction >= 0 &&
         candidate.fraction <= 1 &&
@@ -2288,7 +2178,7 @@ function relayMembership(
     value,
     (candidate): candidate is { libraryId: string; memberToken: string } =>
       record(candidate) &&
-      exact(candidate, ['libraryId', 'memberToken']) &&
+      exact(candidate, ',libraryId,memberToken,') &&
       typeof candidate.libraryId === 'string' &&
       /^[0-9a-f]{32}$/.test(candidate.libraryId) &&
       typeof candidate.memberToken === 'string' &&
@@ -2307,14 +2197,14 @@ const ASSISTANT_CONNECTION_ROWS = [
 function assistantConnection(value: unknown): value is AssistantConnection {
   return (
     record(value) &&
-    exact(value, ['member', 'rows', 'revoked']) &&
+    exact(value, ',member,rows,revoked,') &&
     value.member !== null &&
     relayMembership(value.member) &&
     list(
       value.rows,
       (row): row is AssistantConnection['rows'][number] =>
         record(row) &&
-        exact(row, ['kind', 'schema', 'name', 'values']) &&
+        exact(row, ',kind,schema,name,values,') &&
         row.kind === 'set' &&
         integer(row.schema) &&
         typeof row.name === 'string' &&
@@ -2358,7 +2248,7 @@ function exportPlays(value: unknown): value is Array<{
       source: 'den' | 'import';
     } =>
       record(play) &&
-      exact(play, ['watchedAt', 'rewatch', 'source']) &&
+      exact(play, ',watchedAt,rewatch,source,') &&
       nullable(play.watchedAt, (date): date is string => boundedText(date, 64)) &&
       bool(play.rewatch) &&
       (play.source === 'den' || play.source === 'import'),
@@ -2370,7 +2260,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
   switch (value.kind) {
     case 'recovery.begin':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ',kind,outcome,') &&
         (value.outcome === 'begun' ||
           value.outcome === 'full' ||
           value.outcome === 'taken' ||
@@ -2378,17 +2268,19 @@ function taskResult(value: unknown): value is LibraryTaskResult {
           value.outcome === 'failed')
       );
     case 'recovery.confirm':
-      return (
-        exact(value, ['kind', 'outcome']) &&
-        (value.outcome === 'confirmed' || value.outcome === 'lost' || value.outcome === 'failed')
-      );
     case 'recovery.abandon':
-      return exact(value, ['kind', 'outcome']) && value.outcome === 'abandoned';
+      return (
+        exact(value, ',kind,outcome,') &&
+        (value.outcome === 'confirmed' ||
+          value.outcome === 'lost' ||
+          value.outcome === 'failed' ||
+          (value.kind === 'recovery.abandon' && value.outcome === 'abandoned'))
+      );
     case 'recovery.disable':
-      return exact(value, ['kind', 'outcome']) && value.outcome === 'disabled';
+      return exact(value, ',kind,outcome,') && value.outcome === 'disabled';
     case 'history.import':
       return (
-        exact(value, ['kind', 'written', 'total', 'complete']) &&
+        exact(value, ',kind,written,total,complete,') &&
         integer(value.written) &&
         integer(value.total) &&
         value.written <= value.total &&
@@ -2396,7 +2288,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'local-library.merge':
       return (
-        exact(value, ['kind', 'outcome', 'retryAfterMs', 'held']) &&
+        exact(value, ',kind,outcome,retryAfterMs,held,') &&
         (value.outcome === 'merged' ||
           value.outcome === 'absent' ||
           value.outcome === 'unavailable' ||
@@ -2406,7 +2298,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'household.create':
       return (
-        exact(value, ['kind', 'outcome', 'retryAfterMs']) &&
+        exact(value, ',kind,outcome,retryAfterMs,') &&
         (value.outcome === 'created' ||
           value.outcome === 'refused' ||
           value.outcome === 'throttled' ||
@@ -2416,12 +2308,12 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'profile.create-default':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ',kind,outcome,') &&
         (value.outcome === 'created' || value.outcome === 'present')
       );
     case 'household.join':
       return (
-        exact(value, ['kind', 'outcome', 'owner', 'kids']) &&
+        exact(value, ',kind,outcome,owner,kids,') &&
         (value.outcome === 'joined'
           ? nullable(value.owner, hexId) &&
             record(value.kids) &&
@@ -2438,7 +2330,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
     case 'key-reset.settle':
     case 'key-reset.adopt':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ',kind,outcome,') &&
         (value.outcome === 'moved' ||
           value.outcome === 'adopted' ||
           value.outcome === 'undone' ||
@@ -2451,37 +2343,53 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       );
     case 'assistant.consent':
       return (
-        exact(value, ['kind', 'grant', 'key', 'readKey']) &&
+        exact(value, ',kind,grant,key,readKey,') &&
         hexId(value.grant) &&
         boundedText(value.key, 64) &&
         optional(value.readKey, (key): key is string => boundedText(key, 64))
       );
     case 'assistant.revoke':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ',kind,outcome,') &&
         (value.outcome === 'revoked' || value.outcome === 'absent')
       );
     case 'assistant.publish':
-      return exact(value, ['kind', 'published']) && integer(value.published);
+      return exact(value, ',kind,published,') && integer(value.published);
     case 'assistant.renew':
-      return exact(value, ['kind', 'renewed']) && integer(value.renewed);
+      return exact(value, ',kind,renewed,') && integer(value.renewed);
+    case 'assistant.receipts.ensure':
+      return (
+        exact(value, ',kind,dropbox,') &&
+        nullable(
+          value.dropbox,
+          (key): key is { kid: string; public: string } =>
+            record(key) &&
+            exact(key, ',kid,public,') &&
+            hexId(key.kid) &&
+            boundedText(key.public, 2_048),
+        )
+      );
+    case 'assistant.receipts.apply':
+      return (
+        exact(value, ',kind,ack,applied,') && nullable(value.ack, integer) && integer(value.applied)
+      );
     case 'assistant.apply':
       return (
-        exact(value, ['kind', 'results', 'ack', 'dropbox']) &&
+        exact(value, ',kind,results,ack,dropbox,') &&
         list(value.results, assistantApplied, ASSISTANT_DRAIN_MAX) &&
         nullable(value.ack, integer) &&
         nullable(
           value.dropbox,
           (key): key is { kid: string; public: string } =>
             record(key) &&
-            exact(key, ['kid', 'public']) &&
+            exact(key, ',kid,public,') &&
             hexId(key.kid) &&
             boundedText(key.public, 2_048),
         )
       );
     case 'profile.create':
       return (
-        exact(value, ['kind', 'outcome', 'profile', 'name', 'maximumAge', 'receipt']) &&
+        exact(value, ',kind,outcome,profile,name,maximumAge,receipt,') &&
         value.outcome === 'created' &&
         hexId(value.profile) &&
         boundedScalarText(value.name, 64) &&
@@ -2491,11 +2399,11 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         boundedText(value.receipt, 256)
       );
     case 'profile.create.ack':
-      return exact(value, ['kind', 'outcome']) && value.outcome === 'acknowledged';
+      return exact(value, ',kind,outcome,') && value.outcome === 'acknowledged';
     case 'profile.policy.set':
     case 'kid-title-approval.set':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ',kind,outcome,') &&
         (value.outcome === 'changed' || value.outcome === 'unchanged')
       );
     case 'profile-key-reset.start':
@@ -2503,7 +2411,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
     case 'profile-key-reset.confirm':
     case 'profile-key-reset.recover':
       return (
-        exact(value, ['kind', 'outcome']) &&
+        exact(value, ',kind,outcome,') &&
         (value.outcome === 'install' ||
           value.outcome === 'complete' ||
           value.outcome === 'aborted' ||
@@ -2521,7 +2429,7 @@ function taskResult(value: unknown): value is LibraryTaskResult {
 function failure(value: unknown): value is LibraryServiceFailure {
   return (
     record(value) &&
-    exact(value, ['code', 'message', 'retryable', 'expectedProtocol', 'requiredWire']) &&
+    exact(value, ',code,message,retryable,expectedProtocol,requiredWire,') &&
     (value.code === 'protocol-mismatch' ||
       value.code === 'invalid-request' ||
       value.code === 'not-ready' ||
@@ -2547,17 +2455,15 @@ function sessionStatus(value: unknown): value is LibrarySessionStatus {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
     case 'ready':
-      return exact(value, ['kind', 'version']) && version(value.version);
+      return exact(value, ',kind,version,') && version(value.version);
     case 'reconnecting':
-      return exact(value, ['kind', 'version']) && nullable(value.version, version);
+      return exact(value, ',kind,version,') && nullable(value.version, version);
     case 'read-only':
-      return (
-        exact(value, ['kind', 'version', 'reason']) && version(value.version) && text(value.reason)
-      );
+      return exact(value, ',kind,version,reason,') && version(value.version) && text(value.reason);
     case 'moved':
-      return exact(value, ['kind', 'successor']) && optional(value.successor, text);
+      return exact(value, ',kind,successor,') && optional(value.successor, text);
     case 'failed':
-      return exact(value, ['kind', 'error']) && failure(value.error);
+      return exact(value, ',kind,error,') && failure(value.error);
     default:
       return false;
   }
@@ -2585,18 +2491,12 @@ export function decodeLibraryServiceClientMessage(
   if (!text(input.type) || !text(input.requestId))
     return invalid('request type and requestId are required');
   switch (input.type) {
+    case 'cancel':
+      if (!exact(input, ',type,protocol,requestId,')) return invalid('cancel is invalid');
+      break;
     case 'hello':
       if (
-        !exact(input, [
-          'type',
-          'protocol',
-          'requestId',
-          'clientId',
-          'libraryKey',
-          'wire',
-          'mode',
-          'legacyClock',
-        ]) ||
+        !exact(input, ',type,protocol,requestId,clientId,libraryKey,wire,mode,legacyClock,') ||
         !text(input.clientId) ||
         !libraryKey(input.libraryKey) ||
         (input.wire !== 4 && input.wire !== 5) ||
@@ -2607,19 +2507,19 @@ export function decodeLibraryServiceClientMessage(
       break;
     case 'command':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'operationId', 'command']) ||
+        !exact(input, ',type,protocol,requestId,operationId,command,') ||
         !text(input.operationId) ||
         !command(input.command)
       )
         return invalid('command is invalid');
       break;
     case 'query':
-      if (!exact(input, ['type', 'protocol', 'requestId', 'query']) || !query(input.query))
+      if (!exact(input, ',type,protocol,requestId,query,') || !query(input.query))
         return invalid('query is invalid');
       break;
     case 'task':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'operationId', 'task']) ||
+        !exact(input, ',type,protocol,requestId,operationId,task,') ||
         !text(input.operationId) ||
         !task(input.task)
       )
@@ -2627,24 +2527,18 @@ export function decodeLibraryServiceClientMessage(
       break;
     case 'subscribe':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'subscriptionId', 'selection']) ||
+        !exact(input, ',type,protocol,requestId,subscriptionId,selection,') ||
         !text(input.subscriptionId) ||
         !selection(input.selection)
       )
         return invalid('subscription is invalid');
       break;
     case 'unsubscribe':
-      if (
-        !exact(input, ['type', 'protocol', 'requestId', 'subscriptionId']) ||
-        !text(input.subscriptionId)
-      )
+      if (!exact(input, ',type,protocol,requestId,subscriptionId,') || !text(input.subscriptionId))
         return invalid('subscriptionId is required');
       break;
     case 'observe':
-      if (
-        !exact(input, ['type', 'protocol', 'requestId', 'observation']) ||
-        !observation(input.observation)
-      )
+      if (!exact(input, ',type,protocol,requestId,observation,') || !observation(input.observation))
         return invalid('observation is invalid');
       break;
     default:
@@ -2663,7 +2557,7 @@ export function decodeLibraryServiceServerMessage(
   switch (input.type) {
     case 'ready':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'relayMembership', 'version']) ||
+        !exact(input, ',type,protocol,requestId,relayMembership,version,') ||
         !text(input.requestId) ||
         !relayMembership(input.relayMembership) ||
         !version(input.version)
@@ -2672,15 +2566,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'command-result':
       if (
-        !exact(input, [
-          'type',
-          'protocol',
-          'requestId',
-          'operationId',
-          'outcome',
-          'delivery',
-          'version',
-        ]) ||
+        !exact(input, ',type,protocol,requestId,operationId,outcome,delivery,version,') ||
         !text(input.requestId) ||
         !text(input.operationId) ||
         (input.outcome !== 'applied' && input.outcome !== 'unchanged') ||
@@ -2693,7 +2579,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'task-result':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'operationId', 'result', 'version']) ||
+        !exact(input, ',type,protocol,requestId,operationId,result,version,') ||
         !text(input.requestId) ||
         !text(input.operationId) ||
         !taskResult(input.result) ||
@@ -2703,7 +2589,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'query-result':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'result', 'version']) ||
+        !exact(input, ',type,protocol,requestId,result,version,') ||
         !text(input.requestId) ||
         !queryResult(input.result) ||
         !version(input.version)
@@ -2712,7 +2598,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'subscribed':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'subscriptionId', 'version']) ||
+        !exact(input, ',type,protocol,requestId,subscriptionId,version,') ||
         !text(input.requestId) ||
         !text(input.subscriptionId) ||
         !version(input.version)
@@ -2721,7 +2607,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'unsubscribed':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'subscriptionId']) ||
+        !exact(input, ',type,protocol,requestId,subscriptionId,') ||
         !text(input.requestId) ||
         !text(input.subscriptionId)
       )
@@ -2729,19 +2615,19 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'observed':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'version']) ||
+        !exact(input, ',type,protocol,requestId,version,') ||
         !text(input.requestId) ||
         !version(input.version)
       )
         return invalid('observed reply is invalid');
       break;
     case 'status':
-      if (!exact(input, ['type', 'protocol', 'status']) || !sessionStatus(input.status))
+      if (!exact(input, ',type,protocol,status,') || !sessionStatus(input.status))
         return invalid('session status is invalid');
       break;
     case 'opening':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'progress']) ||
+        !exact(input, ',type,protocol,requestId,progress,') ||
         !text(input.requestId) ||
         typeof input.progress !== 'number' ||
         !(input.progress >= 0 && input.progress <= 1)
@@ -2750,7 +2636,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'update':
       if (
-        !exact(input, ['type', 'protocol', 'subscriptionId', 'version', 'value']) ||
+        !exact(input, ',type,protocol,subscriptionId,version,value,') ||
         !text(input.subscriptionId) ||
         !version(input.version) ||
         !selectionValue(input.value)
@@ -2759,7 +2645,7 @@ export function decodeLibraryServiceServerMessage(
       break;
     case 'error':
       if (
-        !exact(input, ['type', 'protocol', 'requestId', 'subscriptionId', 'error']) ||
+        !exact(input, ',type,protocol,requestId,subscriptionId,error,') ||
         !optional(input.requestId, text) ||
         !optional(input.subscriptionId, text) ||
         !failure(input.error)

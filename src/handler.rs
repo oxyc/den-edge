@@ -186,6 +186,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("startup", resp.extensions().get::<StartupTag>().map(|s| s.0.as_str())),
             ("field", resp.extensions().get::<ReportField>().map(|s| s.0.as_str())),
             ("pageErr", resp.extensions().get::<PageErrorTag>().map(|s| s.0.as_str())),
+            ("failure", resp.extensions().get::<FailureTag>().map(|s| s.0.as_str())),
             ("load", resp.extensions().get::<LoadTag>().map(|s| s.0.as_str())),
             ("perf", resp.extensions().get::<PerformanceTag>().map(|s| s.0.as_str())),
             ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
@@ -443,6 +444,10 @@ pub struct StartupTag(pub String);
 #[derive(Clone)]
 pub struct PageErrorTag(pub String);
 
+/// A privacy-minimized client failure (`diagnostics.rs`), made only from closed enums and bounded identifiers.
+#[derive(Clone)]
+pub struct FailureTag(pub String);
+
 /// A browser's page-load timing (`diagnostics.rs`), carried on the response for the request log like `StartupTag`.
 #[derive(Clone)]
 pub struct LoadTag(pub String);
@@ -689,6 +694,9 @@ async fn dispatch(
     if path == "/playback/page-error" {
         return Box::pin(crate::diagnostics::handle_page_error(state, req)).await;
     }
+    if path == "/diagnostics/failure" {
+        return Box::pin(crate::diagnostics::handle_failure(state, req)).await;
+    }
     if path == "/playback/load" {
         return Box::pin(crate::diagnostics::handle_load(state, req)).await;
     }
@@ -881,6 +889,7 @@ impl Face {
             // from (home, the tailnet, away), not just this half.
             || path == "/playback/startup"
             || path == "/playback/page-error"
+            || path == "/diagnostics/failure"
             || path == "/playback/load"
             || path == "/performance/event"
             || path == "/playback/outcome"
@@ -1088,6 +1097,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/skipdb/") => "/skipdb",
         "/playback/startup" => "/playback/startup",
         "/playback/page-error" => "/playback/page-error",
+        "/diagnostics/failure" => "/diagnostics/failure",
         "/playback/load" => "/playback/load",
         "/performance/event" => "/performance/event",
         "/playback/outcome" => "/playback/outcome",
@@ -1178,6 +1188,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/tmdb/warm"
         | "/playback/startup"
         | "/playback/page-error"
+        | "/diagnostics/failure"
         | "/playback/load"
         | "/performance/event"
         | "/playback/outcome"
@@ -1205,6 +1216,7 @@ fn body_cap(route: &str) -> usize {
         "/reel/transport" | "/reel/activate" => crate::relay::REEL_TRANSPORT_BYTES,
         "/playback/startup"
         | "/playback/page-error"
+        | "/diagnostics/failure"
         | "/playback/load"
         | "/performance/event"
         | "/playback/outcome"
@@ -1255,7 +1267,8 @@ pub fn json_reply(status: StatusCode, body: &Value) -> Response {
 /// How long Cloudflare keeps `/config` and `/routes`, and hands out its copy past that. They are built partly from
 /// this process's environment (`ROUTES`, `SIMKL_CLIENT_ID`, the cast and MCP origins), which a restart changes with
 /// no image deployed and so with no purge. A copy kept until a purge someone forgot would strand a TV away from home
-/// on a moved address; a minute keeps it prompt with no purge at all.
+/// on a moved address; a minute keeps it prompt with no purge at all. The copy Cloudflare hands out while this origin
+/// is down (`STALE_IF_ERROR`) is the last kill-switch and table it gave: nothing newer exists until it answers again.
 const ENV_EDGE: (u64, u64) = (60, 600);
 
 /// `/config`, `/routes` and `/version`: asked again every time, and a 304 while unchanged. A client reads them on
@@ -1604,6 +1617,21 @@ pub mod tests {
         assert_eq!(
             log_line(&Method::POST, "/playback/cast", 204, 1, "ab12", &[("cast", "kind:airplay")]),
             "POST /playback/cast 204 1ms rid=ab12 cast=kind:airplay"
+        );
+    }
+
+    #[test]
+    fn a_client_failure_correlation_is_a_dedicated_request_log_field() {
+        assert_eq!(
+            log_line(
+                &Method::POST,
+                "/diagnostics/failure",
+                204,
+                1,
+                "ab12",
+                &[("failure", "operation:session,correlation:0123456789abcdef")],
+            ),
+            "POST /diagnostics/failure 204 1ms rid=ab12 failure=operation:session,correlation:0123456789abcdef"
         );
     }
 
@@ -2222,11 +2250,12 @@ pub mod tests {
     async fn config_routes_and_version_are_revalidated_every_time() {
         let mut h = split_harness();
         prepare_public_json(&mut h);
-        // What only a deploy changes is kept until it purges; what a restart's environment changes, a minute.
+        // What only a deploy changes is kept until it purges; what a restart's environment changes, a minute. Either
+        // is handed out for a week more while this origin cannot answer, so a client away from home still starts.
         for (path, edge) in [
-            ("/config", "max-age=60, stale-while-revalidate=600"),
-            ("/routes", "max-age=60, stale-while-revalidate=600"),
-            ("/version", "max-age=2592000, stale-while-revalidate=86400"),
+            ("/config", "max-age=60, stale-while-revalidate=600, stale-if-error=604800"),
+            ("/routes", "max-age=60, stale-while-revalidate=600, stale-if-error=604800"),
+            ("/version", "max-age=2592000, stale-while-revalidate=86400, stale-if-error=604800"),
         ] {
             let first = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
             assert_eq!(first.status(), StatusCode::OK, "{path}");

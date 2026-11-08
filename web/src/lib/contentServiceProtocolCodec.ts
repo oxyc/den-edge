@@ -689,6 +689,12 @@ function status(value: unknown): value is ContentServiceStatusValue {
       integer(value.retryAfterMs)
     );
   if (value.kind === 'grant-ended') return exact(value, ['kind', 'gid']) && grantId(value.gid);
+  if (value.kind === 'kept')
+    return (
+      exact(value, ['kind', 'provider', 'notice']) &&
+      provider(value.provider) &&
+      (value.notice === null || text(value.notice, 512))
+    );
   return (
     value.kind === 'unavailable' &&
     exact(value, ['kind', 'provider', 'error']) &&

@@ -269,15 +269,24 @@ describe('startSession', () => {
     const plain = { ...want, subtitleLanguages: [] };
     const failing = (status: number, error: string) =>
       startSession(plain, async () => answer(status, { error }));
-    expect(await failing(401, 'not_logged_in')).toEqual({ failure: 'login' });
-    expect(await failing(410, 'grant_expired')).toEqual({ failure: 'ended' });
-    expect(await failing(404, 'no_playable_release')).toEqual({ failure: 'none' });
-    expect(await failing(429, 'too_many_sessions')).toEqual({ failure: 'busy' });
-    expect(await failing(429, 'starting_already')).toEqual({ failure: 'starting' });
-    expect(await failing(503, 'transcode_unavailable')).toEqual({ failure: 'transcode' });
-    expect(await failing(404, 'no_copy')).toEqual({ failure: 'noCopy' });
-    expect(await failing(404, 'no_fitting_copy')).toEqual({ failure: 'noFit' });
-    expect(await failing(502, 'scout_unavailable')).toEqual({ failure: 'unreachable' });
+    expect(await failing(401, 'not_logged_in')).toEqual({ failure: 'login', httpStatus: 401 });
+    expect(await failing(410, 'grant_expired')).toEqual({ failure: 'ended', httpStatus: 410 });
+    expect(await failing(404, 'no_playable_release')).toEqual({ failure: 'none', httpStatus: 404 });
+    expect(await failing(429, 'too_many_sessions')).toEqual({ failure: 'busy', httpStatus: 429 });
+    expect(await failing(429, 'starting_already')).toEqual({
+      failure: 'starting',
+      httpStatus: 429,
+    });
+    expect(await failing(503, 'transcode_unavailable')).toEqual({
+      failure: 'transcode',
+      httpStatus: 503,
+    });
+    expect(await failing(404, 'no_copy')).toEqual({ failure: 'noCopy', httpStatus: 404 });
+    expect(await failing(404, 'no_fitting_copy')).toEqual({ failure: 'noFit', httpStatus: 404 });
+    expect(await failing(502, 'scout_unavailable')).toEqual({
+      failure: 'unreachable',
+      httpStatus: 502,
+    });
     expect(await startSession(plain, async () => Promise.reject(new TypeError('offline')))).toEqual(
       { failure: 'unreachable' },
     );
@@ -363,14 +372,26 @@ describe('startSession', () => {
       };
       const failing = (wanted: Want, status: number, error: string) =>
         startSession(wanted, async () => answer(status, { error }));
-      expect(await failing(guest, 404, 'not_found')).toEqual({ failure: 'ended' });
-      expect(await failing(guest, 404, 'no_playable_release')).toEqual({ failure: 'none' });
+      expect(await failing(guest, 404, 'not_found')).toEqual({ failure: 'ended', httpStatus: 404 });
+      expect(await failing(guest, 404, 'no_playable_release')).toEqual({
+        failure: 'none',
+        httpStatus: 404,
+      });
       // Up front, and final: a guest's session is never converted, so no retry loop waits for a free GPU.
-      expect(await failing(guest, 404, 'no_copy')).toEqual({ failure: 'noCopy' });
-      expect(await failing(guest, 503, 'public_media_unavailable')).toEqual({ failure: 'public' });
+      expect(await failing(guest, 404, 'no_copy')).toEqual({ failure: 'noCopy', httpStatus: 404 });
+      expect(await failing(guest, 503, 'public_media_unavailable')).toEqual({
+        failure: 'public',
+        httpStatus: 503,
+      });
       // The guest limits are known ones, and each says what to do instead.
-      expect(await failing(guest, 503, 'public_media_ipv6')).toEqual({ failure: 'ipv6' });
-      expect(await failing(guest, 503, 'public_media_cast')).toEqual({ failure: 'cast' });
+      expect(await failing(guest, 503, 'public_media_ipv6')).toEqual({
+        failure: 'ipv6',
+        httpStatus: 503,
+      });
+      expect(await failing(guest, 503, 'public_media_cast')).toEqual({
+        failure: 'cast',
+        httpStatus: 503,
+      });
       expect(guestLimits.ipv6).toBe(
         'Playing away from home needs an IPv4 connection for now. Try another network (a phone hotspot often works).',
       );
@@ -380,6 +401,7 @@ describe('startSession', () => {
       // A library's own 404 is still a title with no release.
       expect(await failing({ ...want, subtitleLanguages: [] }, 404, 'not_found')).toEqual({
         failure: 'none',
+        httpStatus: 404,
       });
     } finally {
       vi.unstubAllGlobals();
@@ -395,8 +417,12 @@ describe('startSession', () => {
         async () =>
           new Response(JSON.stringify({ error: 'too_many_sessions' }), { status: 429, headers }),
       );
-    expect(await busy({ 'retry-after': '90' })).toEqual({ failure: 'busy', retryMs: 90_000 });
-    expect(await busy()).toEqual({ failure: 'busy' });
+    expect(await busy({ 'retry-after': '90' })).toEqual({
+      failure: 'busy',
+      httpStatus: 429,
+      retryMs: 90_000,
+    });
+    expect(await busy()).toEqual({ failure: 'busy', httpStatus: 429 });
   });
 
   /** Past den-edge's cap on reported addresses is not "busy": waiting would meet the same cap again. */
@@ -479,7 +505,7 @@ describe('startSession', () => {
       { ipv4Hint: undefined, noHint: undefined },
       { ipv4Hint: undefined, noHint: true },
     ]);
-    expect(result).toEqual({ failure: 'ipv6' });
+    expect(result).toEqual({ failure: 'ipv6', httpStatus: 503 });
   });
 
   it('asks for the address at most once per start', async () => {
@@ -496,7 +522,7 @@ describe('startSession', () => {
     );
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(asked).toBe(2);
-    expect(result).toEqual({ failure: 'unreachable' });
+    expect(result).toEqual({ failure: 'unreachable', httpStatus: 428 });
   });
 });
 

@@ -19,12 +19,25 @@
   import { fixtureLibraryService } from './libraryService';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
+  import { links } from '../src/lib/links.svelte';
+  import type { JoinLibrary } from '../src/lib/browserHousehold';
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
   const fixtureClock = browserClock();
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
+  const fixtureQuery = new URLSearchParams(location.search);
+  const joinPresentationFixture = fixtureQuery.has('join-presentation');
+  const replacesAuthority =
+    fixtureQuery.has('authority-replacement') ||
+    fixtureQuery.has('recovery-authority-replacement') ||
+    joinPresentationFixture;
+  let releaseRecoveryWrite = () => {};
+  const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
+    ? new Promise<void>((resolve) => (releaseRecoveryWrite = resolve))
+    : undefined;
+  let recoveryWriteHeld = false;
   const row = (name: string, values: Record<string, ConfigValue>): SettingsRow => ({
     kind: 'set',
     schema: 2,
@@ -118,6 +131,21 @@
       return next;
     },
     writeAt: async (next: SettingsRow) => {
+      if (
+        recoveryWriteGate &&
+        next.name === 'recovery' &&
+        Object.values(next.values).some(({ value }) => {
+          if (!value || !('string' in value)) return false;
+          try {
+            return (JSON.parse(value.string) as { state?: unknown }).state === 'live';
+          } catch {
+            return false;
+          }
+        })
+      ) {
+        recoveryWriteHeld = true;
+        await recoveryWriteGate;
+      }
       put(next);
       return true;
     },
@@ -157,12 +185,213 @@
   }
 
   const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+  let releaseImportReply = () => {};
+  const historyImportReplyGate = fixtureQuery.has('hold-import-reply')
+    ? new Promise<void>((resolve) => (releaseImportReply = resolve))
+    : undefined;
   const library = fixtureLibraryService({
     log,
     device: fixtureClock.device,
     libraryKey: fixtureLibraryKey,
+    loseHistoryImportReplyOnce: fixtureQuery.has('lose-import-reply'),
+    historyImportReplyGate,
+    loseRecoveryConfirmReplyOnce: fixtureQuery.has('recovery-authority-replacement'),
   });
-  const { model, session } = library;
+  (globalThis as { fixtureHistoryImports?: typeof library.historyImports }).fixtureHistoryImports =
+    library.historyImports;
+  const primaryModel = library.model;
+  const { session } = library;
+  const replacementLibrary = replacesAuthority
+    ? fixtureLibraryService({
+        log,
+        device: fixtureClock.device,
+        libraryKey: fixtureLibraryKey,
+      })
+    : undefined;
+  let model = $state.raw<LibraryModel>(primaryModel);
+  let settingsMounted = $state(true);
+  const recoveryAuthorityControls = {
+    replace() {
+      if (replacementLibrary) model = replacementLibrary.model;
+    },
+    release() {
+      releaseRecoveryWrite();
+    },
+    held() {
+      return recoveryWriteHeld;
+    },
+    tasks() {
+      return {
+        primary: [...library.recoveryTasks],
+        replacement: [...(replacementLibrary?.recoveryTasks ?? [])],
+      };
+    },
+    async reread() {
+      await replacementLibrary?.publish([{ kind: 'recovery' }]);
+    },
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureRecoveryAuthority?: typeof recoveryAuthorityControls;
+    }
+  ).fixtureRecoveryAuthority = recoveryAuthorityControls;
+  let heldConnections: ReturnType<typeof library.holdNextSelection> | undefined;
+  let heldSimkl: ReturnType<typeof library.holdNextSelection> | undefined;
+  let heldAuthorityPublication: Promise<void> | undefined;
+  const authorityReplacementControls = {
+    failConnections() {
+      library.failSelection('connections');
+    },
+    async holdOldSelections() {
+      heldConnections = library.holdNextSelection('connections');
+      heldSimkl = library.holdNextSelection('simkl');
+      heldAuthorityPublication = library.publish([{ kind: 'connections' }, { kind: 'simkl' }]);
+      await Promise.all([heldConnections.started, heldSimkl.started]);
+    },
+    replace() {
+      if (!replacementLibrary) return;
+      put(
+        row('keys', {
+          tmdb: { string: 'K1' },
+          parentalPIN: { string: '5678' },
+          simkl: { string: 'replacement-simkl-token' },
+        }),
+      );
+      put(
+        row('plugins', {
+          'https://replacement.example/manifest.json': { bool: true },
+        }),
+      );
+      put(
+        row('devices', {
+          [`${fixtureClock.device}.name`]: { string: 'Test Browser' },
+          [`${fixtureClock.device}.kind`]: { string: 'browser' },
+          [`${fixtureClock.device}.seen`]: { int: 20000 },
+          'cccc000000000003.name': { string: 'Kitchen TV' },
+          'cccc000000000003.kind': { string: 'tv' },
+          'cccc000000000003.seen': { int: 15000 },
+        }),
+      );
+      model = replacementLibrary.model;
+    },
+    async releaseOldSelections() {
+      heldConnections?.release();
+      heldSimkl?.release();
+      await heldAuthorityPublication;
+    },
+    subscriptions() {
+      return {
+        primary: library.activeSelections(),
+        replacement: replacementLibrary?.activeSelections() ?? {},
+      };
+    },
+    commands() {
+      return {
+        primary: [...library.commandKinds],
+        replacement: [...(replacementLibrary?.commandKinds ?? [])],
+      };
+    },
+    unmount() {
+      settingsMounted = false;
+    },
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureSettingsAuthority?: typeof authorityReplacementControls;
+    }
+  ).fixtureSettingsAuthority = authorityReplacementControls;
+
+  type JoinGate = { promise: Promise<void>; release: () => void };
+  const gate = (): JoinGate => {
+    let release = () => {};
+    const promise = new Promise<void>((resolve) => (release = resolve));
+    return { promise, release };
+  };
+  const joinCalls: Array<{
+    key: string;
+    link: NonNullable<NonNullable<Parameters<JoinLibrary>[1]>['link']>;
+    before: JoinGate;
+    after: JoinGate;
+    stage: 'before' | 'after' | 'done' | 'abandoned';
+  }> = [];
+  const heldJoin: JoinLibrary = async (key, options = {}) => {
+    if (!options.link || !options.presentation) return 'failed';
+    const call: (typeof joinCalls)[number] = {
+      key,
+      link: options.link,
+      before: gate(),
+      after: gate(),
+      stage: 'before',
+    };
+    joinCalls.push(call);
+    await call.before.promise;
+    if (!options.presentation.isCurrent()) {
+      call.stage = 'abandoned';
+      return 'failed';
+    }
+    call.stage = 'after';
+    await call.after.promise;
+    // This is RoutedLibrary's post-commit rule: reconcile only the exact captured credentials even if the initiating
+    // presentation has since gone. Connections owns selection, notices and navigation and will fence all of those.
+    links.reconcileCommitted(call.link, key);
+    call.stage = 'done';
+    return 'joined';
+  };
+  const joinPresentationControls = {
+    calls: () =>
+      joinCalls.map(({ key, link, stage }) => ({
+        key,
+        link: structuredClone(link),
+        stage,
+      })),
+    release(index: number, boundary: 'before' | 'after') {
+      joinCalls[index]?.[boundary].release();
+    },
+    replace() {
+      authorityReplacementControls.replace();
+    },
+    unmount() {
+      authorityReplacementControls.unmount();
+    },
+    installReplacement(inboxKey: string) {
+      links.add(inboxKey, {
+        name: 'Replacement',
+        libraryKey: 'replacement-library',
+        linkKey: 'replacement-key',
+      });
+      links.makeCurrent(inboxKey);
+    },
+    links: () => structuredClone(links.list),
+    current: () => links.current?.inboxKey ?? null,
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureJoinPresentation?: typeof joinPresentationControls;
+    }
+  ).fixtureJoinPresentation = joinPresentationControls;
+  // A second activity identity over the same fixture authority is enough to exercise Settings' live prop handoff:
+  // it has its own retained import scope while the old model's in-flight semantic reply remains real.
+  const replacementActivityModel = {
+    get overview() {
+      return primaryModel.overview;
+    },
+    importHistory: primaryModel.importHistory.bind(primaryModel),
+    exportHistory: primaryModel.exportHistory.bind(primaryModel),
+  } as unknown as LibraryModel;
+  let activityModel = $state.raw<LibraryModel>(primaryModel);
+  (
+    globalThis as {
+      fixtureImportScope?: {
+        replace(): void;
+        restore(): void;
+        release(): void;
+      };
+    }
+  ).fixtureImportScope = {
+    replace: () => (activityModel = replacementActivityModel),
+    restore: () => (activityModel = primaryModel),
+    release: () => releaseImportReply(),
+  };
   const contentServices = createWorkerServiceSession();
   const contentModel = new LibraryModel(contentServices.library, {
     libraryKey: fixtureLibraryKey,
@@ -183,15 +412,24 @@
   );
   // `?switched`: this browser just moved the library to v4, as the real session says after `switchLibraryToV4`.
   if (new URLSearchParams(location.search).has('switched')) session.toast = 'Library updated to v4';
-  const link = {
+  const linked = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
     libraryKey: fixtureLibraryKey,
     linkKey: 'fixture',
   };
+  const link = joinPresentationFixture ? null : linked;
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  {#if contentReady}<Settings {link} {model} {content} onresetkey={async () => null} />{/if}
+  {#if contentReady && settingsMounted}<Settings
+      {link}
+      {model}
+      {activityModel}
+      {content}
+      local={joinPresentationFixture}
+      onjoin={joinPresentationFixture ? heldJoin : undefined}
+      onresetkey={async () => null}
+    />{/if}
 </main>

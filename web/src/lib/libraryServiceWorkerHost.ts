@@ -19,6 +19,7 @@ import {
 } from './contentServiceProtocolCodec';
 import { acceptSyncPolicy } from './syncLoader';
 import { SYNC_POLICY_OFFER } from './syncPolicyProtocol';
+import { holdLibraryRetirementLease } from './libraryRetirementLease';
 
 interface LibraryServiceDispatcher {
   dispatch(input: unknown): Promise<LibraryServiceServerMessage[]>;
@@ -78,6 +79,7 @@ function errorMessage(
 export class LibraryServiceWorkerHost {
   readonly #work = new Set<Promise<void>>();
   #closed = false;
+  #retirementLease?: Promise<() => void>;
   readonly #stopListening: Array<() => void>;
 
   constructor(
@@ -123,6 +125,10 @@ export class LibraryServiceWorkerHost {
         return;
       }
 
+      if (request.value.type === 'hello') {
+        this.#retirementLease ??= holdLibraryRetirementLease(request.value.libraryKey);
+        await this.#retirementLease;
+      }
       this.#publishLibrary(await this.dispatcher.dispatch(request.value), request.value.requestId);
     } catch (error) {
       this.#post([
@@ -200,6 +206,7 @@ export class LibraryServiceWorkerHost {
     const closingContent = this.content?.close();
     await Promise.allSettled([...this.#work]);
     await Promise.allSettled([this.dispatcher.close(), closingContent]);
+    (await this.#retirementLease?.catch(() => () => {}))?.();
   }
 
   #publishLibrary(output: LibraryServiceServerMessage[], requestId?: string): void {

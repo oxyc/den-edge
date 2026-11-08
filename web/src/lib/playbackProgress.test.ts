@@ -29,6 +29,29 @@ describe('persistablePlaybackFraction', () => {
 });
 
 describe('PlaybackProgressReporter', () => {
+  it('hands close and natural completion to the retained final writer exactly once', () => {
+    const write = vi.fn();
+    const writeFinal = vi.fn();
+    const progress = new PlaybackProgressReporter(write, 'movie', writeFinal);
+
+    progress.playing();
+    progress.report(31.2, 100);
+    // The equal periodic position might have failed, so close still creates a final receipt.
+    progress.final(31.8, 100);
+    progress.final(32, 100);
+
+    expect(write).toHaveBeenCalledWith(0.312, 31, true);
+    expect(writeFinal.mock.calls).toEqual([[0.318, 31, false]]);
+
+    progress.playing();
+    progress.complete(92.4);
+    progress.final(93, 100);
+    expect(writeFinal.mock.calls).toEqual([
+      [0.318, 31, false],
+      [1, 92, false],
+    ]);
+  });
+
   it('persists a natural end as 100% despite a short, already-reported media clock', () => {
     const write = vi.fn();
     const progress = new PlaybackProgressReporter(write);

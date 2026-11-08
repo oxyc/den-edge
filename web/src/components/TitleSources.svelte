@@ -8,10 +8,12 @@
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type {
     DownloadSourceAnswer,
+    DownloadSourceOutcome,
     DownloadSourceOption,
     DownloadTitleDescriptor,
     DownloadsView,
     DownloadViewItem,
+    SourceWaitAnswer,
   } from '../lib/libraryServiceProtocol';
   import { ageOf } from '../lib/titleSources';
   import { availability } from '../lib/availability.svelte';
@@ -19,6 +21,7 @@
   import { titleHref } from '../lib/route';
   import { activateLinkInPlace } from '../lib/linkActivation';
   import { i18n } from '../lib/i18n.svelte';
+  import { reportClientFailure, replaceClientFailureGeneration } from '../lib/diagnosticsReport';
   let {
     imdb,
     season,
@@ -65,6 +68,8 @@
   let sourceGeneration = 0;
   /** What scout said about the list: whether empty means none exist, and whether it is old or short. */
   let answer = $state<DownloadSourceAnswer | undefined>();
+  let outcome = $state<DownloadSourceOutcome | undefined>();
+  let waitPhase = $state<'loading' | 'slow' | 'deadline' | undefined>();
   let failure = $state<'not-configured' | 'unmatched' | 'unreachable' | undefined>();
   let fresh = $state<'rebuilt' | 'limited' | undefined>();
   let refreshing = $state(false);
@@ -155,6 +160,7 @@
     if (!rechecking) {
       sources = undefined;
       answer = undefined;
+      outcome = undefined;
       failure = undefined;
     }
     fresh = undefined;
@@ -162,27 +168,180 @@
     message = '';
     if (!service || !requested) return;
     const generation = ++sourceGeneration;
-    void loadDownloadSources(service, requested, rechecking).then((loaded) => {
+    replaceClientFailureGeneration('source_lookup', generation);
+    let controller: AbortController | undefined;
+    let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let requestGeneration = 0;
+    let attempt = 0;
+    let recoverable = false;
+    let waiting = false;
+    let started = 0;
+    const current = (request: number) =>
+      generation === sourceGeneration && request === requestGeneration;
+    const stop = (
+      request: number,
+      kind: 'timeout' | 'other',
+      durationBucket: 'fast' | 'deadline',
+    ) => {
+      if (!current(request)) return;
+      requestGeneration++;
+      controller?.abort();
+      controller = undefined;
+      waiting = false;
+      refreshing = false;
+      failure = 'unreachable';
+      recoverable = true;
+      reportClientFailure({
+        operation: 'source_lookup',
+        kind,
+        outcome: 'terminal',
+        route: 'content_service',
+        durationBucket,
+        priorList: Boolean(sources?.length),
+        generation,
+        attempt,
+      });
+    };
+    const recovery = async (facts: { onlineRestored?: boolean; retryAfterMs?: number }) => {
+      if (!recoverable || attempt > 0 || retryTimer) return;
+      let decision: SourceWaitAnswer;
+      try {
+        decision = await service.sourceWait({
+          elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+          attempt,
+          ...facts,
+        });
+      } catch {
+        // Authority replacement fences this local policy query. A current page keeps its visible manual Retry.
+        return;
+      }
+      if (generation !== sourceGeneration || !recoverable || attempt > 0) return;
+      if (decision.retryInMs === null) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        attempt = 1;
+        void run(true);
+      }, decision.retryInMs);
+    };
+    const advanceWait = async (request: number) => {
+      let decision: SourceWaitAnswer;
+      try {
+        decision = await service.sourceWait(
+          {
+            elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+            attempt,
+          },
+          controller?.signal,
+        );
+      } catch {
+        // This policy query shares the provider request's lifetime. Replacement/cancellation can reject it before
+        // the provider answer settles; that must not turn a healthy provider answer into an invented outage.
+        return;
+      }
+      if (!current(request) || !waiting) return;
+      waitPhase = decision.phase;
+      if (decision.nextMs !== null) {
+        waitTimer = setTimeout(() => void advanceWait(request), decision.nextMs);
+        return;
+      }
+      // The page owns the terminal deadline. Cancelling the query sends an exact request-id cancel to the library
+      // Worker, which in turn aborts the provider fetch. Keep any admitted rows while the viewer decides to Retry.
+      stop(request, 'timeout', 'deadline');
+    };
+    const run = async (automatic = false) => {
       if (generation !== sourceGeneration) return;
+      const request = ++requestGeneration;
+      controller?.abort();
+      controller = new AbortController();
+      if (waitTimer) clearTimeout(waitTimer);
+      waitTimer = undefined;
+      recoverable = false;
+      waiting = true;
+      waitPhase = 'loading';
+      refreshing = rechecking || automatic;
+      started = performance.now();
+      // Admit the owned provider request before asking for its wait schedule. Both use deferred den-core policy in
+      // the Worker; provider-first ordering prevents a wait-policy transport failure from starving source lookup.
+      const loading = loadDownloadSources(
+        service,
+        requested,
+        rechecking || automatic,
+        controller.signal,
+      );
+      // Yield one task so cancellation from the replaced identity and this provider query reach the Worker before
+      // the independent policy query. `elapsedMs` still lets den-core return the exact remaining schedule.
+      waitTimer = setTimeout(() => {
+        waitTimer = undefined;
+        void advanceWait(request);
+      }, 0);
+      const loaded = await loading;
+      if (!current(request)) return;
+      waiting = false;
+      if (waitTimer) clearTimeout(waitTimer);
+      waitTimer = undefined;
+      controller = undefined;
+      waitPhase = undefined;
       refreshing = false;
       fresh = loaded?.fresh;
       // A limited rebuild is the list already on screen. Keep its exact render state and say why the explicit check
       // produced no fresh verdict; the retry remains a native button for touch, keyboard and TV navigation.
       if (fresh === 'limited') return;
-      sources = loaded?.sources ?? null;
-      answer = loaded?.answer;
-      failure = loaded?.failure;
-      // An authoritative list heals the poster's fade, for the film or the series' episode shown here.
+      sources = loaded?.sources ?? (sources === undefined ? null : sources);
+      answer = loaded?.answer ?? answer;
+      outcome = loaded?.outcome;
+      failure =
+        loaded?.failure ??
+        (!loaded || (loaded.sources === null && !loaded.outcome) ? 'unreachable' : undefined);
+      recoverable =
+        loaded === null ||
+        (loaded?.sources === null && !loaded.outcome) ||
+        loaded?.outcome?.retryable === true ||
+        loaded?.failure === 'unreachable';
+      const elapsed = performance.now() - started;
+      if (recoverable)
+        reportClientFailure({
+          operation: 'source_lookup',
+          kind: 'transport',
+          outcome: attempt ? 'retry_exhausted' : 'terminal',
+          route: 'content_service',
+          durationBucket: elapsed >= 20_000 ? 'deadline' : elapsed >= 5_000 ? 'slow' : 'fast',
+          priorList: loaded?.outcome?.list === 'retained' || Boolean(sources?.length),
+          generation,
+          attempt,
+        });
+      else if (attempt)
+        reportClientFailure({
+          operation: 'source_lookup',
+          kind: 'transport',
+          outcome: 'recovered',
+          route: 'content_service',
+          durationBucket: elapsed >= 5_000 ? 'slow' : 'fast',
+          priorList: Boolean(sources?.length),
+          generation,
+          attempt,
+        });
+      if (loaded?.retryAfterMs !== undefined) void recovery({ retryAfterMs: loaded.retryAfterMs });
+      // An authoritative nonempty list heals the poster's fade. Unknown/degraded outcomes never fade it.
       const { target } = requested;
-      if (loaded?.sources?.length)
+      if (loaded?.sources?.length && loaded.outcome?.list !== 'retained')
         availability.confirm(
           target,
           target.type === 'tv' ? { season: target.season, episode: target.episode } : undefined,
           true,
         );
-    });
+    };
+    const online = () => void recovery({ onlineRestored: true });
+    window.addEventListener('online', online);
+    void run();
     return () => {
+      window.removeEventListener('online', online);
+      if (waitTimer) clearTimeout(waitTimer);
+      if (retryTimer) clearTimeout(retryTimer);
+      controller?.abort();
+      waiting = false;
       sourceGeneration++;
+      replaceClientFailureGeneration('source_lookup', sourceGeneration);
       refreshing = false;
     };
   });
@@ -235,6 +394,24 @@
         {/if}
       </div>
     {/if}
+    {#if waitPhase === 'slow'}<p class="note" role="status">
+        {i18n.phrase('Sources are taking longer than usual. You can keep using this page.')}
+      </p>{/if}
+    {#if waitPhase === 'deadline'}<p class="note" role="status">
+        {i18n.phrase(
+          sources?.length
+            ? 'Source discovery didn’t answer in time. Your previous results are still here.'
+            : 'Source discovery didn’t answer in time. Try again.',
+        )}
+      </p>
+      <Button
+        variant="secondary"
+        icon="retry"
+        label="Try again"
+        disabled={refreshing}
+        onclick={retrySources}
+      />
+    {/if}
     {#if fresh === 'limited'}<p class="note" role="status">
         {i18n.phrase(
           'Sources were checked recently, so these are the previous results. Try again shortly.',
@@ -248,37 +425,70 @@
         onclick={retrySources}
       />
     {/if}
+    {#if outcome?.list === 'retained' && waitPhase !== 'deadline'}<p class="note" role="status">
+        {i18n.phrase('The latest check failed, so these are your previous source results.')}
+      </p>{/if}
+    {#if outcome?.category === 'debrid'}<p class="note">
+        {i18n.phrase(
+          'The availability check is degraded, so some source details may be incomplete.',
+        )}
+      </p>{/if}
+    {#if !outcome?.caveat && !answer?.outageBuiltAt && answer?.late}<p class="note" role="status">
+        {i18n.format(
+          answer.late === 1 ? 'sources.late.one' : 'sources.late.other',
+          'Sources still answering when this early list arrived: {count}. It may be short.',
+          { count: answer.late },
+        )}
+      </p>{/if}
+    {#if !outcome?.caveat && !answer?.outageBuiltAt && answer?.kind === 'partial' && answer.missing > 0}<p
+        class="note"
+      >
+        {answer.missing === 1 ? 'One source' : `${answer.missing} sources`} didn’t answer, so this list
+        may be short.
+      </p>{/if}
     {#if failure === 'not-configured'}<p class="note">
         Add Den Scout in <a href="/settings">Settings</a> to browse sources.
       </p>
     {:else if failure === 'unmatched'}<p class="note">
         TMDB has no IMDb record for this title, so sources can’t be matched yet.
       </p>
-    {:else if sources === undefined}<Loading label="Loading sources" />
-    {:else if sources === null || (sources.length === 0 && answer?.kind === 'unknown')}<p
+    {:else if sources === undefined}{#if waitPhase !== 'deadline'}<Loading
+          label="Loading sources"
+        />{/if}
+    {:else if sources === null || (sources.length === 0 && (answer?.kind === 'unknown' || outcome?.retryable))}<p
         class="note"
       >
         {sources
           ? 'Your sources didn’t answer, so there may be releases this couldn’t see.'
           : 'Couldn’t reach the source service.'}
       </p>
-      {#if fresh !== 'limited'}<Button
+      {#if fresh !== 'limited' && waitPhase !== 'deadline'}<Button
           variant="secondary"
           icon="retry"
           label={refreshing ? 'Trying again…' : 'Try again'}
           disabled={refreshing}
           onclick={retrySources}
         />{/if}
-    {:else if sources.length === 0}<p class="note">
-        No sources found for this {season === undefined ? 'movie' : 'episode'}.
-      </p>
+    {:else if sources.length === 0}
+      {#if answer?.kind !== 'partial'}<p class="note">
+          No sources found for this {season === undefined ? 'movie' : 'episode'}.
+        </p>{/if}
     {:else}
-      {#if answer?.outageBuiltAt}<p class="note">
+      {#if outcome?.caveat?.late}<p class="note" role="status">
+          {i18n.format(
+            outcome.caveat.late === 1 ? 'sources.late.one' : 'sources.late.other',
+            'Sources still answering when this early list arrived: {count}. It may be short.',
+            { count: outcome.caveat.late },
+          )}
+        </p>{/if}
+      {#if outcome?.caveat?.missing}<p class="note">
+          {outcome.caveat.missing === 1 ? 'One source' : `${outcome.caveat.missing} sources`}
+          didn’t answer, so this list may be short.
+        </p>{/if}
+      {#if outcome?.caveat?.staleSince}<p class="note">
+          Your sources didn’t answer, so this is the list from {ageOf(outcome.caveat.staleSince)} ago.
+        </p>{:else if !outcome && answer?.outageBuiltAt}<p class="note">
           Your sources didn’t answer, so this is the list from {ageOf(answer.outageBuiltAt)} ago.
-        </p>
-      {:else if answer?.kind === 'partial' && answer.missing > 0}<p class="note">
-          {answer.missing === 1 ? 'One source' : `${answer.missing} sources`} didn’t answer, so this list
-          may be short.
         </p>{/if}
       <ul>
         {#each sources as source (source.identity)}

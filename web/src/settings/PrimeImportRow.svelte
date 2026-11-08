@@ -1,8 +1,8 @@
 <script lang="ts" module>
-  import { SvelteSet } from 'svelte/reactivity';
   import type { PrimeImportSource } from '../lib/primeImport';
   import type { PrimeImportPlan } from '../lib/primeImportPlan';
   import type { PlannedHistoryImport } from './historyImport';
+  import { scopedImportSessions } from './importSession.svelte';
 
   type State =
     | { step: 'idle' }
@@ -15,10 +15,12 @@
       }
     | { step: 'writing' }
     | { step: 'done'; written: number }
-    | { step: 'failed'; message: string };
-
-  let state = $state.raw<State>({ step: 'idle' });
-  const excluded = new SvelteSet<string>();
+    | {
+        step: 'failed';
+        message: string;
+        retry?: { writes: PlannedHistoryImport[]; operationId: string };
+      };
+  const sessionFor = scopedImportSessions<State>({ step: 'idle' });
 </script>
 
 <script lang="ts">
@@ -31,32 +33,40 @@
   import { viewingPreviewLines } from '../lib/viewingImport';
   import SettingRow from './SettingRow.svelte';
   import { historyImportItems } from './historyImport';
+  import { saveHistoryImport } from './importSession.svelte';
   import type { HistoryImportItem, TitleRef } from '../lib/libraryServiceProtocol';
 
   let {
     ready,
+    scope,
     content,
     watched,
     importHistory,
   }: {
     ready: boolean;
+    /** The active activity-library model; retained work is owned by this identity. */
+    scope: object;
     content: ContentServiceClientPort;
     watched: readonly TitleRef[];
     importHistory: (
       items: readonly HistoryImportItem[],
+      operationId: string,
     ) => Promise<{ written: number; total: number; complete: boolean }>;
   } = $props();
 
+  const session = $derived(sessionFor(scope));
+
   async function read(files: readonly File[]) {
     if (!ready) return;
-    excluded.clear();
+    const owned = session;
+    owned.excluded.clear();
     try {
       const source = parsePrimeFiles(
         await Promise.all(
           [...files].map(async (file) => ({ name: file.name, text: await file.text() })),
         ),
       );
-      state = { step: 'matching', done: 0, total: source.viewings.length };
+      owned.state = { step: 'matching', done: 0, total: source.viewings.length };
       const watchedKeys = new Set(watched.map((ref) => `${ref.type}:${ref.id}`));
       const seen = (ref: { type: string; id: number }) => watchedKeys.has(`${ref.type}:${ref.id}`);
       const lookups = contentImportLookups(content);
@@ -64,11 +74,11 @@
         source.viewings,
         lookups,
         (done, total) => {
-          if (state.step === 'matching') state = { ...state, done, total };
+          if (owned.state.step === 'matching') owned.state = { ...owned.state, done, total };
         },
         seen,
       );
-      state = {
+      owned.state = {
         step: 'preview',
         source,
         plan,
@@ -76,7 +86,7 @@
       };
     } catch (error) {
       console.warn('den: Prime Video import failed', error);
-      state = {
+      owned.state = {
         step: 'failed',
         message:
           error instanceof Error ? error.message : 'Couldn’t read that history. Please try again.',
@@ -84,22 +94,16 @@
     }
   }
 
-  async function write(writes: PlannedHistoryImport[]) {
-    state = { step: 'writing' };
-    const result = await importHistory(writes.map((entry) => entry.item));
-    state = result.complete
-      ? { step: 'done', written: result.written }
-      : {
-          step: 'failed',
-          message: i18n.format(
-            'import.savedPrime',
-            'Saved {written} of {total}. Importing both files again picks up where this stopped.',
-            {
-              written: result.written.toLocaleString(),
-              total: result.total.toLocaleString(),
-            },
-          ),
-        };
+  async function write(writes: PlannedHistoryImport[], operationId: string = crypto.randomUUID()) {
+    const owned = session;
+    owned.state = { step: 'writing' };
+    owned.state = await saveHistoryImport(importHistory, writes, operationId, (written, total) =>
+      i18n.format(
+        'import.savedPrime',
+        'Saved {written} of {total}. Importing both files again picks up where this stopped.',
+        { written: written.toLocaleString(), total: total.toLocaleString() },
+      ),
+    );
   }
 
   const plural = (count: number, one: string, many = `${one}s`) =>
@@ -117,7 +121,7 @@
     details are discarded. Amazon does not identify named profiles in this export, so it imports the account’s
     combined history.
   </p>
-  {#if state.step === 'idle' || state.step === 'failed' || state.step === 'done'}
+  {#if session.state.step === 'idle' || session.state.step === 'failed' || session.state.step === 'done'}
     <div class="form">
       <label class="quiet file">
         Choose both files…
@@ -135,23 +139,24 @@
       </label>
     </div>
   {/if}
-  {#if state.step === 'matching'}
+  {#if session.state.step === 'matching'}
     <p class="status" role="status">
-      Finding titles — {state.done.toLocaleString()} of {state.total.toLocaleString()}
+      Finding titles — {session.state.done.toLocaleString()} of {session.state.total.toLocaleString()}
     </p>
-  {:else if state.step === 'preview'}
-    {@const all = viewingPreviewLines(state.plan.marks)}
-    {@const chosen = state.writes.filter((entry) => !excluded.has(entry.key))}
+  {:else if session.state.step === 'preview'}
+    {@const all = viewingPreviewLines(session.state.plan.marks)}
+    {@const chosen = session.state.writes.filter((entry) => !session.excluded.has(entry.key))}
     {@const series = all.filter((line) => line.episodes > 0)}
     {@const sourceMisses =
-      state.source.diagnostics.unmatched.length + state.source.diagnostics.ambiguous.length}
-    {@const matchMisses = state.plan.unmatched.length + state.plan.ambiguous.length}
+      session.state.source.diagnostics.unmatched.length +
+      session.state.source.diagnostics.ambiguous.length}
+    {@const matchMisses = session.state.plan.unmatched.length + session.state.plan.ambiguous.length}
     <p class="summary">
       Found {plural(all.length - series.length, 'film')} and {plural(
         series.reduce((count, line) => count + line.episodes, 0),
         'episode',
       )} from {plural(series.length, 'series', 'series')}.
-      {#if state.plan.known}{plural(state.plan.known, 'line')} already seen were skipped.{/if}
+      {#if session.state.plan.known}{plural(session.state.plan.known, 'line')} already seen were skipped.{/if}
     </p>
     <details class="foot">
       <summary>Review what was found</summary>
@@ -161,10 +166,10 @@
             <label>
               <input
                 type="checkbox"
-                checked={!excluded.has(line.key)}
+                checked={!session.excluded.has(line.key)}
                 onchange={(event) => {
-                  if (event.currentTarget.checked) excluded.delete(line.key);
-                  else excluded.add(line.key);
+                  if (event.currentTarget.checked) session.excluded.delete(line.key);
+                  else session.excluded.add(line.key);
                 }}
               />
               <span
@@ -180,7 +185,7 @@
       <details class="foot">
         <summary>{plural(sourceMisses + matchMisses, 'line')} couldn’t be matched safely</summary>
         <ul class="unmatched">
-          {#each [...state.source.diagnostics.unmatched, ...state.source.diagnostics.ambiguous, ...state.plan.unmatched, ...state.plan.ambiguous] as title, at (`${title}:${at}`)}<li
+          {#each [...session.state.source.diagnostics.unmatched, ...session.state.source.diagnostics.ambiguous, ...session.state.plan.unmatched, ...session.state.plan.ambiguous] as title, at (`${title}:${at}`)}<li
             >
               {title}
             </li>{/each}
@@ -194,17 +199,29 @@
         disabled={!chosen.length}
         onclick={() => void write(chosen)}
       />
-      <Button variant="secondary" label="Cancel" onclick={() => (state = { step: 'idle' })} />
+      <Button
+        variant="secondary"
+        label="Cancel"
+        onclick={() => (session.state = { step: 'idle' })}
+      />
     </div>
-  {:else if state.step === 'writing'}
+  {:else if session.state.step === 'writing'}
     <p class="status" role="status">Saving…</p>
-  {:else if state.step === 'done'}
+  {:else if session.state.step === 'done'}
     <p class="status" role="status">
-      Saved {plural(state.written, 'change')}. Your Apple TV sends them to Simkl next time Den is
-      open on it.
+      Saved {plural(session.state.written, 'change')}. Your Apple TV sends them to Simkl next time
+      Den is open on it.
     </p>
-  {:else if state.step === 'failed'}
-    <p class="status bad" role="alert">{i18n.phrase(state.message)}</p>
+  {:else if session.state.step === 'failed'}
+    <p class="status bad" role="alert">{i18n.phrase(session.state.message)}</p>
+    {@const retry = session.state.retry}
+    {#if retry}
+      <Button
+        variant="secondary"
+        label="Try again"
+        onclick={() => void write(retry.writes, retry.operationId)}
+      />
+    {/if}
   {/if}
 </SettingRow>
 

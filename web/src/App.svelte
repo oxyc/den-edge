@@ -11,6 +11,7 @@
   import { consentRequestId } from './lib/oauth';
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
+  import { libraryRetirements } from './lib/libraryRetirement.svelte';
   import { phoneLanding } from './lib/phoneLanding.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
@@ -19,6 +20,7 @@
   import {
     ConnectDialogScreen,
     InviteDialogScreen,
+    LibraryRetirementNoticeScreen,
     LinkScreen,
     PhoneDialogScreen,
   } from './lib/screens.svelte';
@@ -35,6 +37,10 @@
     if (invited) void InviteDialogScreen.load();
   });
   if (consenting) void ConnectDialogScreen.load();
+  $effect(() => {
+    if (libraryRetirements.pending.some((receipt) => receipt.failure))
+      void LibraryRetirementNoticeScreen.load();
+  });
   $effect(() => {
     if (phoneLanding.request) void PhoneDialogScreen.load();
   });
@@ -150,6 +156,15 @@
   $effect(() => {
     if (route.page === 'title') titleSeason = seasonOf(route);
   });
+  function resetProfilePresentation() {
+    // Router's keyed pages are rebuilt by RoutedLibrary. These values live above it, including the shared search
+    // field, so retire them in the same transition before they can repaint the previous profile's presentation.
+    query = '';
+    explore = {};
+    people = {};
+    watchedYear = undefined;
+    titleSeason = undefined;
+  }
   // A title's, a person's and a service's page name themselves once they know what they are showing
   // (`tabName`); until then, and on every other page, the tab says what the address can.
   $effect(() => {
@@ -173,6 +188,7 @@
   {#if phoneLanding.request && PhoneDialogScreen.current}<PhoneDialogScreen.current />{/if}
   {#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
 {/if}
+{#if LibraryRetirementNoticeScreen.current}<LibraryRetirementNoticeScreen.current />{/if}
 
 <main>
   {#if links.current}
@@ -185,6 +201,7 @@
         {watchedYear}
         {titleSeason}
         onchange={(next) => (route = next)}
+        onprofilechange={resetProfilePresentation}
         onprofilecontrol={(control) => (profiles = control)}
         onprofilehint={(hint) => (profileHint = hint)}
         onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
@@ -201,6 +218,7 @@
       {watchedYear}
       {titleSeason}
       onchange={(next) => (route = next)}
+      onprofilechange={resetProfilePresentation}
       onprofilecontrol={(control) => (profiles = control)}
       onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
     />

@@ -42,6 +42,8 @@ import type {
   RuntimeDiscoveryView,
   SettingsView,
   SimklView,
+  SourceWaitAnswer,
+  SourceWaitRequest,
   TitleRef,
   TitleView,
   WatchlistView,
@@ -87,6 +89,12 @@ export interface LibraryModelSnapshot<View> {
  */
 export interface LibraryModelLease<View> {
   readonly snapshot: LibraryModelSnapshot<View>;
+  /**
+   * Replace a failed selector subscription without restarting its otherwise-ready library service. The replacement
+   * is shared by every lease for the same key and drops the failed selector's retained value until fresh authority
+   * publishes again. Returns false while a selection is already opening/ready or after this lease was released.
+   */
+  rebind(): boolean;
   release(): void;
 }
 
@@ -819,6 +827,13 @@ export class LibraryModel {
     });
   }
 
+  async sourceWait(request: SourceWaitRequest, signal?: AbortSignal): Promise<SourceWaitAnswer> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'source.wait', ...request }, signal);
+    if (result.kind !== 'source.wait') throw wrongQueryResult('source.wait');
+    return { phase: result.phase, nextMs: result.nextMs, retryInMs: result.retryInMs };
+  }
+
   async libraryMetadata(titles: readonly TitleRef[]): Promise<{
     titles: LibraryMetadataTitle[];
     shapes: LibraryMetadataShape[];
@@ -844,15 +859,24 @@ export class LibraryModel {
     };
   }
 
-  downloadSources(title: DownloadTitleDescriptor, refresh = false, fresh = false, early = false) {
+  downloadSources(
+    title: DownloadTitleDescriptor,
+    refresh = false,
+    fresh = false,
+    early = false,
+    signal?: AbortSignal,
+  ) {
     this.#assertOpen();
-    return this.service.query({
-      kind: 'download.sources',
-      title: wireDownloadTitle(title),
-      ...(refresh ? { refresh } : {}),
-      ...(fresh ? { fresh } : {}),
-      ...(early ? { early } : {}),
-    });
+    return this.service.query(
+      {
+        kind: 'download.sources',
+        title: wireDownloadTitle(title),
+        ...(refresh ? { refresh } : {}),
+        ...(fresh ? { fresh } : {}),
+        ...(early ? { early } : {}),
+      },
+      signal,
+    );
   }
 
   downloadArtwork(target: DownloadTarget) {
@@ -863,9 +887,10 @@ export class LibraryModel {
   task(
     task: LibraryTask,
     operationId?: string,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     this.#assertOpen();
-    return this.service.task(task, operationId);
+    return this.service.task(task, operationId, signal);
   }
 
   importHistory(items: readonly HistoryImportItem[], operationId?: string) {
@@ -1046,8 +1071,8 @@ export class LibraryModel {
     return result;
   }
 
-  async ensurePlaybackReceipts() {
-    const { result } = await this.task({ kind: 'assistant.receipts.ensure' });
+  async ensurePlaybackReceipts(signal?: AbortSignal) {
+    const { result } = await this.task({ kind: 'assistant.receipts.ensure' }, undefined, signal);
     if (result.kind !== 'assistant.receipts.ensure')
       throw wrongQueryResult('playback receipts ensure');
     return result.dropbox;
@@ -1200,13 +1225,14 @@ export class LibraryModel {
 
 class SharedSelection<View extends LeasedView> {
   #snapshot = $state.raw<LibraryModelSnapshot<View>>(connectingSnapshot());
-  readonly #stop: () => void;
+  #stop: () => void = () => {};
+  #binding = 0;
   #references = 0;
   #closed = false;
 
   constructor(
-    service: LibraryModelService,
-    selection:
+    readonly service: LibraryModelService,
+    readonly selection:
       | { kind: 'history' }
       | { kind: 'watchlist' }
       | { kind: 'downloads' }
@@ -1218,9 +1244,7 @@ class SharedSelection<View extends LeasedView> {
       | { kind: 'presence'; titles: TitleRef[] },
     readonly unused: () => void,
   ) {
-    this.#stop = service.subscribeSnapshot(selection, (snapshot) => {
-      if (!this.#closed) this.#snapshot = modelSnapshot<View>(snapshot);
-    });
+    this.#bind();
   }
 
   get snapshot(): LibraryModelSnapshot<View> {
@@ -1232,11 +1256,30 @@ class SharedSelection<View extends LeasedView> {
     return new SelectionLease(this, () => this.#release());
   }
 
+  rebind(): boolean {
+    if (this.#closed || this.#snapshot.connection !== 'failed') return false;
+    this.#bind();
+    return true;
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#binding++;
     this.#stop();
     this.#snapshot = closedSnapshot(this.#snapshot);
+  }
+
+  #bind(): void {
+    const binding = ++this.#binding;
+    this.#stop();
+    // A failed snapshot may retain the last replacement while its transport recovers. An explicit selector retry is
+    // a freshness boundary: no consumer may authorize from that old value while the new subscription is opening.
+    this.#snapshot = connectingSnapshot();
+    this.#stop = this.service.subscribeSnapshot(this.selection, (snapshot) => {
+      if (!this.#closed && binding === this.#binding)
+        this.#snapshot = modelSnapshot<View>(snapshot);
+    });
   }
 
   #release(): void {
@@ -1258,6 +1301,10 @@ class SelectionLease<View extends LeasedView> implements LibraryModelLease<View>
 
   get snapshot(): LibraryModelSnapshot<View> {
     return this.#released ?? this.source.snapshot;
+  }
+
+  rebind(): boolean {
+    return this.#released ? false : this.source.rebind();
   }
 
   release(): void {
