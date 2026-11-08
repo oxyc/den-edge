@@ -453,11 +453,13 @@ export class DownloadCoordinator {
                   : {}),
               })
             : undefined;
+        // `none` is a confirmed empty list only when the provider answered. A lookup that failed has no list at all;
+        // reporting `[]` beside the failure would state two contradictory facts, which the protocol refuses.
         const decidedSources =
           outcome?.list === 'retained'
             ? prior?.sources
             : outcome?.list === 'none'
-              ? imdb === 'resolved'
+              ? imdb === 'resolved' && !failure
                 ? []
                 : null
               : sources;
