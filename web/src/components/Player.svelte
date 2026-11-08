@@ -381,6 +381,10 @@
       'TorBox asked Den to wait before trying again. The home player could not prepare this release either, so Den is waiting as requested…',
     torbox_item_not_found:
       'TorBox no longer has this release, and the home player could not prepare it either. Try again.',
+    torbox_dolby_vision_unsupported:
+      'TorBox can’t stream this Dolby Vision release correctly, and the home player could not prepare it either. Try again or pick another release.',
+    torbox_receiver_unsupported:
+      'The Chromecast can’t play this release as TorBox streams it, and the home player could not prepare it either. Try another release.',
     torbox_refused:
       'TorBox refused to prepare this stream, and the home player could not prepare it either. Check your TorBox account, then try again.',
     torbox_playlist_unavailable:
@@ -516,6 +520,8 @@
   );
   /** A closed, non-secret Hearth reason. Never arbitrary provider text. */
   let managedCause = $state<PlaybackCause>();
+  /** Hearth's code and reason for the last refused mid-film change, for the notice that names it (`restart`). */
+  let replacementRefusal: { code?: string; cause?: PlaybackCause } | undefined;
   const sourceRecovery = $derived(
     !session &&
       !!playback &&
@@ -1341,6 +1347,10 @@
         });
       }
       if (replacing) {
+        replacementRefusal = {
+          code: 'code' in result && typeof result.code === 'string' ? result.code : undefined,
+          cause,
+        };
         // A failed external session is kept only long enough for `broke` to judge recovery; unlike an ordinary
         // Remux track/release change, it does not carry on. Keep the two log messages truthful and URL-free.
         if (delivery === 'direct') {
@@ -2883,6 +2893,9 @@
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
     const pending = showTransition('Starting Chromecast…');
+    // A TorBox stream playing here is asked for again as an ordinary managed start, not TorBox-or-nothing: Hearth
+    // leaves a release the receiver can't take as it is to Remux (`torbox_receiver_unsupported`), and a request that
+    // ruled Remux out was refused instead, so the Chromecast got nothing.
     restart(
       { filename: session.release.filename },
       () => {
@@ -2891,7 +2904,7 @@
         route = routeBeforeCast;
         castMode = false;
       },
-      undefined,
+      session.external ? 'ordinary' : undefined,
       pending,
     );
   }
@@ -4250,7 +4263,7 @@
   function restart(
     pick: { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined,
     undo?: () => void,
-    directOnly?: 'direct',
+    asked?: 'direct' | 'ordinary',
     pending?: number,
   ) {
     const current = session;
@@ -4258,7 +4271,7 @@
       clearTransition(pending);
       return;
     }
-    const delivery = directOnly ?? (current.external ? 'direct' : 'fallback');
+    const delivery = asked ?? (current.external ? 'direct' : 'fallback');
     const compatibleSubtitles = !current.external || !directWithoutDenSubtitles;
     report();
     carryPosition();
@@ -4274,7 +4287,7 @@
           if (typeof moved !== 'string' || session !== current) return;
           startAt = null;
           undo?.();
-          unchanged = unchangedNotice(moved, guestGrants.endedText());
+          unchanged = unchangedNotice(moved, guestGrants.endedText(), replacementRefusal);
         });
       return;
     }

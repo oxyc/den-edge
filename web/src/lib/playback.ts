@@ -35,11 +35,13 @@ export type PlaybackErrorCode =
 export type PlaybackCause =
   | 'managed_prepare_timeout'
   | 'torbox_authentication_failed'
+  | 'torbox_dolby_vision_unsupported'
   | 'torbox_item_not_found'
   | 'torbox_malformed_response'
   | 'torbox_managed_streaming_unavailable_for_plan'
   | 'torbox_playlist_unavailable'
   | 'torbox_rate_limited'
+  | 'torbox_receiver_unsupported'
   | 'torbox_refused'
   | 'torbox_unavailable'
   | 'torbox_unreachable'
@@ -302,11 +304,13 @@ function knownCause(cause: string | undefined): PlaybackCause | undefined {
   switch (cause) {
     case 'managed_prepare_timeout':
     case 'torbox_authentication_failed':
+    case 'torbox_dolby_vision_unsupported':
     case 'torbox_item_not_found':
     case 'torbox_malformed_response':
     case 'torbox_managed_streaming_unavailable_for_plan':
     case 'torbox_playlist_unavailable':
     case 'torbox_rate_limited':
+    case 'torbox_receiver_unsupported':
     case 'torbox_refused':
     case 'torbox_unavailable':
     case 'torbox_unreachable':
