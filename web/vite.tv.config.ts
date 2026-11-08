@@ -231,7 +231,6 @@ async function lowerTizen3Syntax(code: string, fileName: string, compact = false
           // Force every expression form that regenerator does not understand through this
           // structural pass. The final output still targets Chromium 47, not IE.
           targets: { ie: '11' },
-          bugfixes: true,
           modules: false,
           exclude: [
             '@babel/plugin-transform-async-generator-functions',
@@ -250,7 +249,7 @@ async function lowerTizen3Syntax(code: string, fileName: string, compact = false
     compact,
     minified: compact,
     inputSourceMap: compact ? undefined : (structuralResult?.map ?? undefined),
-    presets: [[presetEnv, { targets: { chrome: '47' }, bugfixes: true, modules: false }]],
+    presets: [[presetEnv, { targets: { chrome: '47' }, modules: false }]],
   });
   if (!result?.code) throw new Error(`Babel produced no Tizen 3 output for ${fileName}`);
   return { code: result.code, map: result.map ?? null };

@@ -43,8 +43,8 @@
     "audit": "node scripts/audit.mjs"
   },
   "devDependencies": {
-    "@babel/core": "7.29.7",
-    "@babel/preset-env": "7.29.7",
+    "@babel/core": "8.0.9",
+    "@babel/preset-env": "8.0.7",
     "@csstools/css-calc": "^3.4.3",
     "@csstools/postcss-global-data": "^4.0.0",
     "@eslint/js": "10.0.1",
