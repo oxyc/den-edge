@@ -246,6 +246,46 @@ test('desktop: clicking outside the menu closes it without activating the poster
   }
 });
 
+// The menu's close event is queued: a key handled before it lands may already have moved focus on, as Down from the TV
+// player's Subtitles opens its playback details. The menu returns focus to its trigger only when focus is still its
+// own (in the menu, on the trigger, or nowhere), never by taking back a move made since.
+test('a focus move made before the menu has finished closing is kept', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await openFixture(page);
+    const library = page.getByRole('region', { name: 'Library' });
+    const trigger = library.getByRole('button', { name: 'Actions for Movie 101' });
+    await trigger.click();
+    const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem').first()).toBeFocused();
+
+    const kept = await page.evaluate(async () => {
+      const open = document.querySelector('[role="menu"]');
+      const closed = new Promise((resolve) =>
+        open.addEventListener('toggle', () => setTimeout(resolve, 0), { once: true }),
+      );
+      open.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      document.querySelector('a[aria-label^="Series 701"], a[href*="701"]').focus();
+      await closed;
+      return document.activeElement?.getAttribute('href');
+    });
+    expect(kept).toContain('701');
+    await expect(menu).toBeHidden();
+
+    // A close with focus still in the menu returns it to the trigger, as before.
+    await trigger.click();
+    await expect(menu).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a pointerdown with no click cannot swallow a later gesture, and native auto-popover releases the prior body', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
