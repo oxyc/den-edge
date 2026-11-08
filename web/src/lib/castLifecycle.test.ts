@@ -35,7 +35,11 @@ describe('Cast idle lifecycle', () => {
   it('completes only a genuinely finished media session', () => {
     expect(castIdleAction('FINISHED', false)).toBe('finished');
     expect(castIdleAction('CANCELLED', false)).toBe('stopped');
-    expect(castIdleAction(undefined, false)).toBe('stopped');
+  });
+
+  it('takes IDLE with no reason for a receiver yet to report, never for a stop', () => {
+    expect(castIdleAction(undefined, false)).toBe('pending');
+    expect(castIdleAction(null, false)).toBe('pending');
   });
 
   it('retries an error and ignores the old media interrupted by our replacement load', () => {
