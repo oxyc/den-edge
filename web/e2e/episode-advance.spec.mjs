@@ -400,8 +400,9 @@ test('replaying a finished episode cancels its advance, and a later finish advan
     await page.waitForTimeout(10_500);
     expect(asked.playback.map(itemOf)).toEqual(['e1']);
     await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
+    // Still episode 1's address; the player keeps where it is in it (`t=`, `playerAddress.ts`).
     await expect(page).toHaveURL(
-      `${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=1&play=1`,
+      new RegExp(`/tv/${SERIES}-series-${SERIES}\\?season=1&episode=1&play=1(?:&t=\\d+)?$`),
     );
     // Progress seconds are stored as whole seconds; a replay just beyond the 2% floor may persist as exactly 1.
     await expect

@@ -108,9 +108,13 @@ function addresses(path: string, target: PlayerTarget): boolean {
   );
 }
 
+/** The app path on screen, as the Router reads it: a packaged TV's is in its fragment. */
+const appPath = () =>
+  __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search;
+
 /** The state this document's address holds for `target`'s player; nothing where it addresses another. */
 export function readPlayerAddress(target: PlayerTarget): PlayerAddress {
-  const path = currentAppPath();
+  const path = appPath();
   return addresses(path, target)
     ? parsePlayerAddress(new URL(path, 'https://den.invalid').search)
     : {};
@@ -121,7 +125,7 @@ export function readPlayerAddress(target: PlayerTarget): PlayerAddress {
  * while the address is still `target`'s player — after a close or an advance it belongs to someone else.
  */
 export function writePlayerAddress(target: PlayerTarget, state: PlayerAddress): void {
-  const path = currentAppPath();
+  const path = appPath();
   if (!addresses(path, target)) return;
   const next = withPlayerAddress(path, state);
   if (next === path) return;
