@@ -8,9 +8,13 @@ const FIXTURE = `${E2E_ORIGIN}/test/service-page.html`;
  * A service in one country, as TMDB and atlas describe it: Netflix carrying films, and atlas's "New on Netflix"
  * chart, whose first title TMDB has no backdrop for. `chart` decides when that chart answers.
  */
-async function serveNetflix(page, { chart = async () => {} } = {}) {
+async function serveNetflix(
+  page,
+  { chart = async () => {}, catalogs = true, failNewReleases = 0 } = {},
+) {
   const asked = [];
   const pageOwned = [];
+  let newReleaseRequests = 0;
   await page.addInitScript(() => {
     const pageFetch = window.fetch.bind(window);
     window.fetch = (input, init = {}) => {
@@ -41,7 +45,28 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
               : [],
         },
       });
-    if (path.startsWith('/discover/')) return route.fulfill({ json: { results: [] } });
+    if (path.startsWith('/discover/')) {
+      const newest = !url.searchParams.has('sort_by');
+      if (newest && ++newReleaseRequests <= failNewReleases)
+        return route.fulfill({ status: 503, json: { error: 'temporarily unavailable' } });
+      const id = newest ? 201 : url.searchParams.get('sort_by') === 'popularity.desc' ? 301 : 302;
+      return route.fulfill({
+        json: {
+          results: [
+            {
+              id,
+              title: `Film ${id}`,
+              overview: `About film ${id}.`,
+              backdrop_path: `/backdrop-${id}.jpg`,
+              poster_path: `/poster-${id}.jpg`,
+              release_date: '2026-01-01',
+              vote_count: 500,
+              vote_average: 8,
+            },
+          ],
+        },
+      });
+    }
     const id = Number(/^\/movie\/(\d+)$/.exec(path)?.[1]);
     if (id)
       return route.fulfill({
@@ -66,9 +91,9 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
     asked.push('/atlas/manifest.json');
     return route.fulfill({
       json: {
-        catalogs: [
-          { type: 'movie', id: 'jw-nfx-new', name: 'New on Netflix', denProviderIds: [8] },
-        ],
+        catalogs: catalogs
+          ? [{ type: 'movie', id: 'jw-nfx-new', name: 'New on Netflix', denProviderIds: [8] }]
+          : [],
       },
     });
   });
@@ -103,7 +128,7 @@ function requestCount(asked, pathname, params = {}) {
 
 function baseServiceRowCount(asked, sort, votes) {
   const expected = {
-    sort_by: sort,
+    ...(sort ? { sort_by: sort } : {}),
     include_adult: 'false',
     'vote_count.gte': votes,
     with_watch_providers: '8',
@@ -187,6 +212,53 @@ test('the service billboard shows a loading state, then its titles with their pi
     /backdrop-102\.jpg$/,
   );
   expect(pageOwned, 'TMDB provider requests must stay inside the content Worker').toEqual([]);
+});
+
+test('a failed service hero stays visible and retries only its own request', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  const { asked, pageOwned } = await serveNetflix(page, {
+    catalogs: false,
+    failNewReleases: 1,
+  });
+  await page.goto(`${FIXTURE}?page`);
+
+  const hero = page.locator('.hero');
+  await expect(hero.getByRole('heading', { name: 'Netflix' })).toBeVisible();
+  const failure = hero.getByRole('alert');
+  await expect(failure).toContainText('Featured titles couldn’t be loaded.');
+  const retry = failure.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Popular Movies' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Film 301', exact: true }).first()).toBeVisible();
+
+  const stableRows = {
+    manifest: 1,
+    movieDirectory: 1,
+    tvDirectory: 1,
+    chart: 0,
+    popular: 1,
+    acclaimed: 1,
+  };
+  await expect.poll(() => servicePageRequests(asked)).toEqual(stableRows);
+  const before = servicePageRequests(asked);
+  expect(baseServiceRowCount(asked, null, '50'), 'one failed initial hero request').toBe(1);
+
+  await retry.focus();
+  await expect(retry).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(failure).toHaveCount(0);
+  await expect(page.locator('.billboard .slide').first()).toHaveAttribute('aria-label', 'Film 201');
+  expect(baseServiceRowCount(asked, null, '50'), 'one explicit hero retry').toBe(2);
+  expect(servicePageRequests(asked), 'retry does not rebuild or fan out through rows').toEqual(
+    before,
+  );
+  expect(
+    pageOwned,
+    'browser and TV hosts keep provider requests inside the content Worker',
+  ).toEqual([]);
 });
 
 test('directional navigation treats the billboard heading as copy, not a duplicate stop', async ({
