@@ -535,6 +535,22 @@ describe('repeat searches', () => {
     expect(queried(w), 'the least recently asked was forgotten').toBe(44);
   });
 
+  it('keeps repeat-search answers inside the exact interface language', async () => {
+    const w = searching();
+    const ask = (interfaceLanguage: 'en' | 'es' | 'sv') =>
+      w.ask({ kind: 'search', query: 'heist', interfaceLanguage });
+
+    await ask('en');
+    await ask('es');
+    await ask('sv');
+    expect(queried(w)).toBe(3);
+
+    await ask('en');
+    await ask('es');
+    await ask('sv');
+    expect(queried(w), 'each language reuses only its own completed answer').toBe(3);
+  });
+
   it('keeps no answer of a search typed past, and none after the atlas changes', async () => {
     let release = () => {};
     const w = searching(new Promise((resolve) => (release = resolve)));

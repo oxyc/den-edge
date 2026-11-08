@@ -558,7 +558,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           (restricted ? batch.filter((hit) => hit.kind === 'title') : batch).map((hit) =>
             hit.kind === 'title' && awaitingPicture(hit.title) ? { ...hit, awaiting: true } : hit,
           );
-        const key = JSON.stringify([atlas, policyKey(policy), request.query]);
+        // Presentation language is part of the answer: TMDB localizes titles and people. A SharedWorker can
+        // serve tabs in different languages, and a single tab can change language while this authority stays
+        // alive, so never replay a completed search across that boundary.
+        const key = JSON.stringify([atlas, policyKey(policy), language, request.query]);
         const cached = this.#searches.get(key);
         if (cached) {
           this.#searches.delete(key);
