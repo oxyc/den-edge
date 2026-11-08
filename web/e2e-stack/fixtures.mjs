@@ -2,10 +2,12 @@
 
 /**
  * Google's Cast sender, with one receiver on the network (as `cast-one-tap.spec.mjs` stubs it). The receiver keeps
- * every LOAD on `window.loads` and plays it on, a quarter second at a time, as the real one reports.
+ * every LOAD on `window.loads` and every session end on `window.calls` (`stop` or `leave`), and plays a load on, a
+ * quarter second at a time, as the real one reports. With `refuse`, it refuses every LOAD.
  */
-export const castSdk = `
+export const castSdk = ({ refuse = false } = {}) => `
   window.loads = [];
+  window.calls = [];
   window.chrome = window.chrome || {};
   window.chrome.cast = {
     AutoJoinPolicy: { PAGE_SCOPED: 'page_scoped' },
@@ -43,7 +45,8 @@ export const castSdk = `
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     getCurrentSession() { return session; },
     getCastState() { return state; },
-    endCurrentSession() {
+    endCurrentSession(stop) {
+      window.calls.push(stop ? 'stop' : 'leave');
       session = null; loaded = false; player.isConnected = false;
       fire('sessionstatechanged', { sessionState: 'SESSION_ENDED' });
       setState('NOT_CONNECTED');
@@ -55,6 +58,7 @@ export const castSdk = `
         session = {
           loadMedia(request) {
             window.loads.push({ url: request.media.contentId, currentTime: request.currentTime });
+            if (${refuse}) return Promise.reject('load_failed');
             loaded = true;
             player.currentTime = request.currentTime || 0;
             player.isPaused = false;

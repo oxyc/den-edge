@@ -428,10 +428,11 @@ export async function startStack() {
   const dist = required('DEN_EDGE_DIST');
   const media = required('DEN_STACK_MEDIA');
   const work = mkdtempSync(join(tmpdir(), 'den-stack-'));
-  // The cast page names its parent at build time, as the image's names the public name.
+  // The cast page names its parent at build time, as the image's names the public name. It is built from the same web
+  // source as DEN_EDGE_DIST: this checkout's, or DEN_STACK_WEB's (an older checkout, to see a case fail before its fix).
   const castDist = join(work, 'cast');
   execFileSync('npx', ['vite', 'build', '--config', 'vite.cast.config.ts', '--outDir', castDist], {
-    cwd: WEB,
+    cwd: process.env.DEN_STACK_WEB ?? WEB,
     env: { ...process.env, VITE_DEN_PARENT_ORIGINS: EDGE },
     stdio: 'ignore',
   });

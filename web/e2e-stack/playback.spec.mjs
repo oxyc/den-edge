@@ -79,10 +79,10 @@ test.afterEach(async () => {
  * A browser of the household: desktop Chrome away from home (TorBox's CDN name resolves to its fake), or an iPhone's
  * WebKit. TMDB and the Cast sender are answered here; every other request goes to den-edge, the cast page or the public
  * media listener (this run's fronts) or TorBox's CDN, and one for anywhere else is refused. `seen` keeps what the page
- * did for the invariants (`clean`).
+ * did for the invariants (`clean`). `refuse`: the Cast receiver refuses every LOAD.
  */
 let deviceCount = 0;
-async function household({ iphone = false, clock = false } = {}) {
+async function household({ iphone = false, clock = false, refuse = false } = {}) {
   const browser = iphone
     ? await webkit.launch()
     : await chromium.launch({
@@ -182,7 +182,7 @@ async function household({ iphone = false, clock = false } = {}) {
         body: '<svg xmlns="http://www.w3.org/2000/svg"/>',
       });
     if (origin === 'https://www.gstatic.com')
-      return route.fulfill({ contentType: 'text/javascript', body: castSdk });
+      return route.fulfill({ contentType: 'text/javascript', body: castSdk({ refuse }) });
     // Each browser is a device of its own at an address of its own (den-edge trusts this run's loopback as its proxy),
     // as a household's are: per-address budgets are then each device's, not one shared by every flow in the file.
     if (origin === EDGE)
@@ -483,8 +483,96 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
       )
       .toBeLessThan(300);
     // One playback operation for the handoff, not a request → selected → replacement → request loop.
-    expect(playbacks(seen).length - before).toBeLessThanOrEqual(1);
-    await expect.poll(() => castWindow(page).evaluate(() => window.loads.length)).toBe(1);
+    await receiverPlayedFor(page, 3);
+    expect(playbacks(seen).length - before).toBe(1);
+    expect(await castWindow(page).evaluate(() => window.loads.length)).toBe(1);
+    clean(seen, { edgeFrom });
+  });
+});
+
+/** The receiver's own clock (the stub's, a quarter second at a time) `seconds` past where its first LOAD started. */
+async function receiverPlayedFor(page, seconds) {
+  await expect
+    .poll(
+      () =>
+        castWindow(page).evaluate(
+          () =>
+            window.cast.framework.RemotePlayer().currentTime - (window.loads[0]?.currentTime ?? 0),
+        ),
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(seconds);
+}
+
+/** What a playback operation asked, from its request body. */
+const asked = (request) => JSON.parse(request.body ?? '{}');
+
+// den-edge #1128 and #1131: a TorBox stream is cast as TorBox only (Den Remux only when the viewer picks it), and one
+// hand-off is one ask of Hearth and one LOAD on the receiver, which only Stop casting ends.
+test.describe('Cast of a TorBox stream', () => {
+  test('with its built-in subtitle on: exactly one ask for the receiver and one LOAD, never Remux', async () => {
+    stack.torbox.managed = true;
+    const edgeFrom = stack.edge.lines().length;
+    const publicFrom = stack.exchanges.length;
+    const { page, seen } = await household();
+    await play(page);
+    await playingPast(video(page), 2);
+    await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
+    // TorBox's English track, which TorBox burns into a stream of its own: a second ask, by index.
+    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
+    await page
+      .getByRole('menu', { name: /Subtitles/ })
+      .getByRole('menuitemradio', { name: /English/ })
+      .click();
+    await expect.poll(() => playbacks(seen).some((r) => asked(r).subtitleTrack === 0)).toBe(true);
+    await playingPast(video(page), 1);
+
+    const from = seen.requests.length;
+    const loaded = await castToReceiver(page);
+    expect(new URL(loaded.url).hostname).toBe(CDN_HOST);
+    await receiverPlayedFor(page, 3);
+    const cast = playbacks(seen, from).map(asked);
+    expect(cast.filter((r) => r.player === 'cast')).toHaveLength(1);
+    expect(cast.find((r) => r.player === 'cast')).toMatchObject({ subtitleTrack: 0 });
+    expect(cast.some((r) => r.directFailed)).toBe(false);
+    expect(await castWindow(page).evaluate(() => window.loads.length)).toBe(1);
+    expect(await castWindow(page).evaluate(() => window.calls)).toEqual([]);
+    // Nothing went through Den Remux: no Remux session's media crossed the public listener.
+    expect(stack.exchanges.slice(publicFrom).filter((r) => r.path.startsWith('/remux/s/'))).toEqual(
+      [],
+    );
+    clean(seen, { edgeFrom });
+  });
+
+  test('that the receiver refuses: one more TorBox try, the viewer told, playing here again, the session kept', async () => {
+    stack.torbox.managed = true;
+    const edgeFrom = stack.edge.lines().length;
+    const publicFrom = stack.exchanges.length;
+    const { page, seen } = await household({ refuse: true });
+    await play(page);
+    await playingPast(video(page), 2);
+    await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
+
+    const from = seen.requests.length;
+    const button = castFrame(page).locator('#cast');
+    await expect(button).toBeVisible({ timeout: 30_000 });
+    await button.click();
+    await expect(
+      page.getByText(
+        'The Chromecast couldn’t play this TorBox release, so it’s playing here again.',
+      ),
+    ).toBeVisible({ timeout: 30_000 });
+    await playingPast(video(page), 0);
+    const after = playbacks(seen, from).map(asked);
+    expect(after.filter((r) => r.player === 'cast')).toHaveLength(2);
+    expect(after.some((r) => r.directFailed)).toBe(false);
+    expect(await castWindow(page).evaluate(() => window.loads.length)).toBe(2);
+    expect(await castWindow(page).evaluate(() => window.calls)).toEqual([]);
+    await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
+    // No Den Remux session was made for it.
+    expect(stack.exchanges.slice(publicFrom).filter((r) => r.path.startsWith('/remux/s/'))).toEqual(
+      [],
+    );
     clean(seen, { edgeFrom });
   });
 });
