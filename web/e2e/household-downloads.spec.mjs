@@ -283,6 +283,49 @@ for (const [name, viewport] of [
   });
 }
 
+// A plugin that is briefly unavailable says when to ask again. The lookup's failure, with den-core's retryable outcome
+// and that wait, reaches Sources, which asks once more on its own and shows the list without a Retry press.
+test('Sources ask a briefly unavailable plugin again after its Retry-After', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const edge = newEdge({ profiles: true });
+    const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+    const page = await context.newPage();
+    await routeHousehold(page, edge, SCOUT);
+    const refused = [];
+    await page.route(
+      `${E2E_ORIGIN}${SCOUT.base}/stream/series/${encodeURIComponent(`${IMDB}:2:2`)}.json*`,
+      (route) => {
+        if (refused.length) return route.fallback();
+        refused.push(route.request().url());
+        return route.fulfill({
+          status: 503,
+          headers: { 'retry-after': '1' },
+          json: { error: 'busy' },
+        });
+      },
+    );
+    await splitHousehold(page, edge, SCOUT);
+
+    await page.goto(`${E2E_ORIGIN}/tv/${SERIES}`);
+    const active = page.locator('[data-active="true"]');
+    await active.getByRole('tab', { name: 'Season 2', exact: true }).click();
+    const row = active.locator('.episode').nth(1);
+    await row.getByRole('button', { name: 'Options for episode 2', exact: true }).click();
+    await row.getByRole('menuitem', { name: 'Sources', exact: true }).click();
+    const panel = active.locator('.source-panel');
+    await expect(panel.getByText('Sources for S2 · E2')).toBeVisible({ timeout: 30_000 });
+    await expect.poll(() => refused.length, { timeout: 30_000 }).toBe(1);
+    await expect(panel.locator('li').filter({ hasText: release(2) })).toBeVisible({
+      timeout: 30_000,
+    });
+  } finally {
+    await browser.close();
+  }
+});
+
 test('on a split household Owner lists the household’s Scout sources and queues on the household', async () => {
   await downloadsAnEpisode(SCOUT);
 });
