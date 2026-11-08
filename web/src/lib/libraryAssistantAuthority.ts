@@ -99,7 +99,7 @@ const EMPTY: AssistantRecords = {
   dropped: [],
 };
 
-const sameConfigValue = (left: ConfigValue | undefined, right: ConfigValue): boolean =>
+const sameConfigValue = (left: ConfigValue | null | undefined, right: ConfigValue): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
 /** A read record in these states has its projection dropped (§15); `newer` is left to a client that reads it. */

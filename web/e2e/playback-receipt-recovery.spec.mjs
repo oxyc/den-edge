@@ -1,16 +1,11 @@
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
-import { FIXTURE as SEED_FIXTURE, routeLibraryEdge } from './library-edge.mjs';
-
-const FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
+import { CODE, newEdge, routeGuestEdge } from './guest-edge.mjs';
 
 test('the production library exposes one bounded receipt retry and announces recovery', async ({
   page,
 }) => {
-  await routeLibraryEdge(page, {});
-  await page.route('**/capabilities/profiles', (route) =>
-    route.fulfill({ status: 404, json: { error: 'not_found' } }),
-  );
+  await routeGuestEdge(page, newEdge());
 
   const releases = [];
   let attempts = 0;
@@ -21,11 +16,15 @@ test('the production library exposes one bounded receipt retry and announces rec
     return route.fulfill({ json: { messages: [] } });
   });
 
-  await page.goto(`${SEED_FIXTURE}?seed`);
-  await page.getByRole('status').filter({ hasText: 'Worker library seeded' }).waitFor();
-  await page.goto(FIXTURE);
+  // Start a real member library through the shipped invite path. The production build deliberately carries only
+  // its seed entry beside the app, not source-only fixture pages.
+  await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
+  await page
+    .getByRole('dialog', { name: 'Accept this invite?' })
+    .getByRole('button', { name: 'Accept' })
+    .click();
 
-  await expect.poll(() => attempts).toBe(1);
+  await expect.poll(() => attempts, { timeout: 30_000 }).toBe(1);
   await expect(page.getByRole('status')).toContainText('Checking saved playback progress…');
   releases.shift()();
   await expect(page.getByRole('alert')).toContainText(
