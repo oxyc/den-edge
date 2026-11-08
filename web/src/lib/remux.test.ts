@@ -1407,6 +1407,26 @@ describe('endSession', () => {
       expect(fetchImpl).not.toHaveBeenCalled();
     });
 
+    // A beacon always carries credentials, which the public media listener's `Access-Control-Allow-Origin: *` refuses
+    // (Chrome, 2026-11-08: every such `/end` was blocked, and the session held its slot until idle).
+    it('ends a session on another origin with an uncredentialed keepalive POST, never a beacon', () => {
+      const calls: [string, RequestInit | undefined][] = [];
+      endSession(
+        { ...session, playlist: 'https://media.test:8449/remux/s/sid/sig/master.m3u8' },
+        async (input, init) => {
+          calls.push([String(input), init]);
+          return new Response(null, { status: 204 });
+        },
+      );
+      expect(sendBeacon).not.toHaveBeenCalled();
+      expect(calls).toEqual([
+        [
+          'https://media.test:8449/remux/s/sid/sig/end',
+          { method: 'POST', body: '', keepalive: true, credentials: 'omit' },
+        ],
+      ]);
+    });
+
     it('falls back to the keepalive DELETE where the beacon itself refuses', () => {
       sendBeacon.mockReturnValue(false);
       const calls: [string, RequestInit | undefined][] = [];

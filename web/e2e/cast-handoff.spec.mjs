@@ -180,7 +180,10 @@ async function open({
   await page.route(`${ORIGIN}/den/config/playback`, (r) => {
     const request = r.request().postDataJSON();
     asked.managed.push(request);
-    if (request.player === 'cast') return r.fulfill({ json: castAnswer });
+    if (request.player === 'cast')
+      return typeof castAnswer === 'function'
+        ? castAnswer(r, request)
+        : r.fulfill({ json: castAnswer });
     return r.fulfill({ json: initialAnswer });
   });
   await page.route(`${ORIGIN}/den/config/subtitles/**`, (r) => {
@@ -334,6 +337,61 @@ test('casting keeps TorBox playing until a Chromecast is chosen, then hands that
     // The receiver has it now: the page's own video is gone, and the player says where it plays.
     await expect(page.locator('.player video')).toHaveCount(0);
     await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+// Measured 2026-11-08: a TorBox stream cast as TorBox-or-nothing (`directOnly`) was refused, since Hearth leaves a
+// release the receiver can't take as it is to Remux, and the TV sat idle on "Default Media Receiver". Hearth answers
+// here as it does: refused for a TorBox-only ask, Remux (degraded, naming why) for an ordinary one.
+test('a TorBox stream the receiver can’t take as it is casts through Remux, not a refused TorBox-only ask', async () => {
+  const { browser, page, asked } = await open({
+    castAnswer: (r, request) =>
+      request.directOnly
+        ? r.fulfill({
+            status: 409,
+            json: { error: 'direct_unavailable', cause: 'torbox_receiver_unsupported' },
+          })
+        : r.fulfill({
+            json: { ...remuxAnswer, degraded: true, directFailure: 'torbox_receiver_unsupported' },
+          }),
+  });
+  try {
+    await playingPast(page, 2);
+    await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
+    await chooseReceiver(page, asked);
+
+    await expect.poll(() => asked.managed.length).toBe(2);
+    expect(asked.managed[1]).toMatchObject({ player: 'cast', filename: 'fixture.mkv' });
+    expect(asked.managed[1]).not.toHaveProperty('directOnly');
+    expect(asked.managed[1]).not.toHaveProperty('directFailed');
+    await expect.poll(() => castLoads(page)).toHaveLength(1);
+    const [load] = await castLoads(page);
+    expect(load.url).toContain(PATH);
+    // One ask for the receiver: nothing re-requested once it was answered.
+    await page.waitForTimeout(CAST_PLAY_MS * 2);
+    expect(asked.managed).toHaveLength(2);
+  } finally {
+    await browser.close();
+  }
+});
+
+// Reported 2026-11-08 on Den Remux with a subtitle on: the page asked Hearth again and again (cast, here, cast, …)
+// and the TV never played. A handoff is one ask for the receiver, and none after it.
+test('casting a Remux session with a subtitle on asks Hearth once for the receiver, and no more', async () => {
+  const { browser, page, asked } = await open({
+    initialAnswer: remuxAnswer,
+    castAnswer: remuxAnswer,
+    subtitle: true,
+  });
+  try {
+    await playingPast(page, 2);
+    await chooseReceiver(page, asked);
+    await expect.poll(() => castLoads(page)).toHaveLength(1);
+    await page.waitForTimeout(CAST_PLAY_MS * 2);
+    expect(asked.managed.map((request) => request.player)).toEqual(['hls.js', 'cast']);
+    expect(await castLoads(page)).toHaveLength(1);
   } finally {
     await browser.close();
   }

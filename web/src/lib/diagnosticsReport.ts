@@ -510,11 +510,13 @@ export type PlaybackRouteFailure =
 export type PlaybackRouteCause =
   | 'managed_prepare_timeout'
   | 'torbox_authentication_failed'
+  | 'torbox_dolby_vision_unsupported'
   | 'torbox_item_not_found'
   | 'torbox_malformed_response'
   | 'torbox_managed_streaming_unavailable_for_plan'
   | 'torbox_playlist_unavailable'
   | 'torbox_rate_limited'
+  | 'torbox_receiver_unsupported'
   | 'torbox_refused'
   | 'torbox_unavailable'
   | 'torbox_unreachable'

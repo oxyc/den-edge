@@ -125,8 +125,26 @@ export function nothingFits(failure: Failure): boolean {
  * session playing carries on: the refusal's own reason, so an unreachable or busy den-remux does not read as a release
  * that can't be played. `ended` is the guest's own line for access that ran out (`guestGrants.endedText()`).
  */
-export function unchangedNotice(failure: Failure, ended?: string | null): string {
+export function unchangedNotice(
+  failure: Failure,
+  ended?: string | null,
+  refused?: { code?: string; cause?: string },
+): string {
   const carriesOn = 'this carries on as it was.';
+  // Hearth's own reason for refusing a TorBox stream, where it gave one: "couldn't use that request" read as a fault
+  // in the page, when what refused was TorBox, or the receiver it was meant for.
+  switch (refused?.cause) {
+    case 'torbox_receiver_unsupported':
+      return `The Chromecast can’t play this release as TorBox streams it, so ${carriesOn}`;
+    case 'torbox_dolby_vision_unsupported':
+      return `TorBox can’t stream this Dolby Vision release correctly, so ${carriesOn}`;
+    case 'torbox_item_not_found':
+      return `TorBox no longer has this release, so ${carriesOn}`;
+  }
+  if (refused?.cause?.startsWith('torbox_'))
+    return `TorBox couldn’t prepare that change, so ${carriesOn}`;
+  if (refused?.code === 'direct_unavailable')
+    return `This Hearth has no TorBox to play that from, so ${carriesOn}`;
   switch (failure) {
     case 'unreachable':
       return `Couldn’t reach Den’s player for that, so ${carriesOn}`;

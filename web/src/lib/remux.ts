@@ -1133,13 +1133,19 @@ export function endSession(
   const base = session.control?.end ?? session.playlist.replace(/\/master\.m3u8$/, '');
   const body = evidence ? JSON.stringify(evidence) : '';
   const beaconBody = evidence ? new Blob([body], { type: 'application/json' }) : body;
-  if (globalThis.navigator?.sendBeacon?.(`${base}/end`, beaconBody)) return;
-  if (evidence) {
+  // A beacon is always sent with credentials, which a media listener answering `Access-Control-Allow-Origin: *`
+  // refuses: Chrome blocked every `/end` to the public media address, and those sessions held their slot until idle.
+  // The session's signed path is its whole authority, so another origin is sent no cookie: an uncredentialed
+  // keepalive POST, which a wildcard answer does allow and which outlives the page as a beacon does.
+  const crossOrigin = crossOriginUrl(base);
+  if (!crossOrigin && globalThis.navigator?.sendBeacon?.(`${base}/end`, beaconBody)) return;
+  if (evidence || crossOrigin) {
     void fetchImpl(`${base}/end`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      ...(evidence ? { headers: { 'content-type': 'application/json' } } : {}),
       body,
       keepalive: true,
+      ...(crossOrigin ? { credentials: 'omit' as const } : {}),
     }).catch(() => undefined);
     return;
   }
@@ -1219,8 +1225,20 @@ export function reportFailure(
   if (session.external || playedInCastPage(session)) return;
   const url = session.control?.report ?? session.playlist.replace(/\/master\.m3u8$/, '/report');
   const body = JSON.stringify({ code, message: message.slice(0, 200) });
-  if (globalThis.navigator?.sendBeacon?.(url, body)) return;
-  void fetchImpl(url, { method: 'POST', body, keepalive: true }).catch(() => undefined);
+  // Never a (credentialed) beacon to another origin: see `endSession`.
+  const crossOrigin = crossOriginUrl(url);
+  if (!crossOrigin && globalThis.navigator?.sendBeacon?.(url, body)) return;
+  void fetchImpl(url, {
+    method: 'POST',
+    body,
+    keepalive: true,
+    ...(crossOrigin ? { credentials: 'omit' as const } : {}),
+  }).catch(() => undefined);
+}
+
+/** Whether `url` is absolute and on another origin than this page. */
+function crossOriginUrl(url: string): boolean {
+  return /^https?:\/\//.test(url) && new URL(url).origin !== globalThis.location?.origin;
 }
 
 /**

@@ -1830,11 +1830,13 @@ closed_enum!(PlaybackRouteFailure {
 closed_enum!(PlaybackRouteCause {
     ManagedPrepareTimeout => "managed_prepare_timeout",
     TorboxAuthenticationFailed => "torbox_authentication_failed",
+    TorboxDolbyVisionUnsupported => "torbox_dolby_vision_unsupported",
     TorboxItemNotFound => "torbox_item_not_found",
     TorboxMalformedResponse => "torbox_malformed_response",
     TorboxManagedStreamingUnavailableForPlan => "torbox_managed_streaming_unavailable_for_plan",
     TorboxPlaylistUnavailable => "torbox_playlist_unavailable",
     TorboxRateLimited => "torbox_rate_limited",
+    TorboxReceiverUnsupported => "torbox_receiver_unsupported",
     TorboxRefused => "torbox_refused",
     TorboxUnavailable => "torbox_unavailable",
     TorboxUnreachable => "torbox_unreachable",

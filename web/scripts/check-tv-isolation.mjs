@@ -267,5 +267,9 @@ if (process.argv.includes('--capture')) {
   // Receipt recovery (#1104) and Tizen receipt recovery (#1083) were each sized against a main without the other and
   // without the outage gaps; merged together main measures 91,770 on a local production build, over both of their
   // ceilings. Allow the next 128-byte boundary past the merged measurement, retaining 134.
-  if (coreTotalDelta > 91904) throw new Error('Browser total JS/CSS budget exceeded');
+  // Casting a TorBox stream through Hearth's fallback adds 342 gzip bytes to the complete non-translation graph
+  // (91,770 -> 92,112) and 3 at startup on matched main/head builds, all in the lazy Player and remux chunks: Hearth's
+  // refusal reason named in the unchanged notice, two closed cause codes, and the uncredentialed cross-origin session
+  // end. No request, timer or listener is added. Allow the next 128-byte boundary past it, retaining 48.
+  if (coreTotalDelta > 92160) throw new Error('Browser total JS/CSS budget exceeded');
 }
