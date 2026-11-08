@@ -1388,6 +1388,43 @@ describe('library service server protocol', () => {
         },
       });
     expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    const outcome = {
+      result: 'failed_retryable',
+      category: 'source_discovery',
+      list: 'retained',
+      caveat: { staleSince: null, missing: 1, late: 0, failedAddons: 1 },
+      mayMarkUnavailable: false,
+      retryable: true,
+    };
+    const recovered = decodeLibraryServiceServerMessage({
+      type: 'query-result',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'download-sources-outcome',
+      version,
+      result: {
+        kind: 'download.sources',
+        sources: [],
+        outcome,
+        retryAfterMs: 30_000,
+        failure: 'unreachable',
+      },
+    });
+    expect(recovered).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'download-sources-outcome',
+        version,
+        result: {
+          kind: 'download.sources',
+          sources: [],
+          outcome: { ...outcome, mayMarkUnavailable: true },
+          retryAfterMs: 60_001,
+          failure: 'unreachable',
+        },
+      }),
+    ).toMatchObject({ ok: false });
     for (const late of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2']) {
       expect(
         decodeLibraryServiceServerMessage({
@@ -1442,6 +1479,35 @@ describe('library service server protocol', () => {
         },
       }),
     ).toMatchObject({ ok: true });
+  });
+
+  it('bounds canonical source wait questions and answers at the Worker boundary', () => {
+    const ask = (query: Record<string, unknown>) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'source-wait',
+        query: { kind: 'source.wait', elapsedMs: 5_000, attempt: 0, ...query },
+      });
+    expect(ask({ onlineRestored: true, retryAfterMs: 30_000, jitter: 0.25 })).toMatchObject({
+      ok: true,
+    });
+    expect(ask({ jitter: Number.NaN })).toMatchObject({ ok: false });
+    expect(ask({ attempt: 17 })).toMatchObject({ ok: false });
+    expect(ask({ elapsedMs: -1 })).toMatchObject({ ok: false });
+
+    const answer = (result: Record<string, unknown>) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'source-wait',
+        version,
+        result: { kind: 'source.wait', phase: 'slow', nextMs: 15_000, retryInMs: null, ...result },
+      });
+    expect(answer({})).toMatchObject({ ok: true });
+    expect(answer({ phase: 'waiting' })).toMatchObject({ ok: false });
+    expect(answer({ nextMs: -1 })).toMatchObject({ ok: false });
+    expect(answer({ retryInMs: Number.POSITIVE_INFINITY })).toMatchObject({ ok: false });
   });
 
   it('carries a wanted download: asked for without a release, and its waiting states', () => {

@@ -42,6 +42,8 @@ import type {
   RuntimeDiscoveryView,
   SettingsView,
   SimklView,
+  SourceWaitAnswer,
+  SourceWaitRequest,
   TitleRef,
   TitleView,
   WatchlistView,
@@ -825,6 +827,13 @@ export class LibraryModel {
     });
   }
 
+  async sourceWait(request: SourceWaitRequest, signal?: AbortSignal): Promise<SourceWaitAnswer> {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'source.wait', ...request }, signal);
+    if (result.kind !== 'source.wait') throw wrongQueryResult('source.wait');
+    return { phase: result.phase, nextMs: result.nextMs, retryInMs: result.retryInMs };
+  }
+
   async libraryMetadata(titles: readonly TitleRef[]): Promise<{
     titles: LibraryMetadataTitle[];
     shapes: LibraryMetadataShape[];
@@ -850,15 +859,24 @@ export class LibraryModel {
     };
   }
 
-  downloadSources(title: DownloadTitleDescriptor, refresh = false, fresh = false, early = false) {
+  downloadSources(
+    title: DownloadTitleDescriptor,
+    refresh = false,
+    fresh = false,
+    early = false,
+    signal?: AbortSignal,
+  ) {
     this.#assertOpen();
-    return this.service.query({
-      kind: 'download.sources',
-      title: wireDownloadTitle(title),
-      ...(refresh ? { refresh } : {}),
-      ...(fresh ? { fresh } : {}),
-      ...(early ? { early } : {}),
-    });
+    return this.service.query(
+      {
+        kind: 'download.sources',
+        title: wireDownloadTitle(title),
+        ...(refresh ? { refresh } : {}),
+        ...(fresh ? { fresh } : {}),
+        ...(early ? { early } : {}),
+      },
+      signal,
+    );
   }
 
   downloadArtwork(target: DownloadTarget) {

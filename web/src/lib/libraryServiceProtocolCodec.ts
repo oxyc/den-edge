@@ -837,6 +837,30 @@ function query(value: unknown): value is LibraryQuery {
     );
   if (value.kind === 'download.refresh')
     return exact(value, ',kind,target,') && optional(value.target, downloadTarget);
+  if (value.kind === 'source.wait')
+    return (
+      exact(value, ',kind,elapsedMs,attempt,onlineRestored,retryAfterMs,jitter,') &&
+      integer(value.elapsedMs) &&
+      value.elapsedMs >= 0 &&
+      value.elapsedMs <= 86_400_000 &&
+      integer(value.attempt) &&
+      value.attempt >= 0 &&
+      value.attempt <= 16 &&
+      optional(value.onlineRestored, bool) &&
+      optional(
+        value.retryAfterMs,
+        (candidate): candidate is number =>
+          integer(candidate) && candidate >= 0 && candidate <= 86_400_000,
+      ) &&
+      optional(
+        value.jitter,
+        (candidate): candidate is number =>
+          typeof candidate === 'number' &&
+          Number.isFinite(candidate) &&
+          candidate >= 0 &&
+          candidate <= 1,
+      )
+    );
   if (value.kind === 'download.sources')
     return (
       exact(value, ',kind,title,fresh,refresh,early,') &&
@@ -2003,6 +2027,15 @@ function queryResult(value: unknown): value is LibraryQueryResult {
   }
   if (value.kind === 'download.refresh')
     return exact(value, ',kind,refreshed,') && bool(value.refreshed);
+  if (value.kind === 'source.wait')
+    return (
+      exact(value, ',kind,phase,nextMs,retryInMs,') &&
+      (value.phase === 'loading' || value.phase === 'slow' || value.phase === 'deadline') &&
+      (value.nextMs === null ||
+        (integer(value.nextMs) && value.nextMs >= 0 && value.nextMs <= 86_400_000)) &&
+      (value.retryInMs === null ||
+        (integer(value.retryInMs) && value.retryInMs >= 0 && value.retryInMs <= 86_400_000))
+    );
   if (value.kind === 'download.sources') {
     const source = (candidate: unknown): candidate is Record<string, unknown> =>
       record(candidate) &&
@@ -2032,18 +2065,55 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       candidate.missing >= 0 &&
       optional(candidate.late, integer) &&
       optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
+    const outcome = (candidate: unknown): candidate is Record<string, unknown> => {
+      if (!record(candidate)) return false;
+      const caveat = (item: unknown): item is Record<string, unknown> =>
+        record(item) &&
+        exact(item, ',staleSince,missing,late,failedAddons,') &&
+        (item.staleSince === null || (integer(item.staleSince) && item.staleSince >= 0)) &&
+        integer(item.missing) &&
+        item.missing >= 0 &&
+        integer(item.late) &&
+        item.late >= 0 &&
+        integer(item.failedAddons) &&
+        item.failedAddons >= 0;
+      return (
+        exact(candidate, ',result,category,list,caveat,mayMarkUnavailable,retryable,') &&
+        [
+          'live',
+          'partial',
+          'stale_held',
+          'degraded',
+          'confirmed_empty',
+          'failed_retryable',
+          'no_imdb',
+        ].includes(candidate.result as string) &&
+        (candidate.category === null ||
+          candidate.category === 'debrid' ||
+          candidate.category === 'source_discovery') &&
+        (candidate.list === 'new' || candidate.list === 'retained' || candidate.list === 'none') &&
+        (candidate.caveat === null || caveat(candidate.caveat)) &&
+        bool(candidate.mayMarkUnavailable) &&
+        bool(candidate.retryable)
+      );
+    };
     return (
-      exact(value, ',kind,sources,answer,fresh,failure,') &&
+      exact(value, ',kind,sources,answer,fresh,outcome,retryAfterMs,failure,') &&
       (value.sources === null ||
         list(value.sources, source, LIBRARY_SERVICE_WIRE_LIMITS.downloadSources)) &&
       optional(value.answer, answer) &&
       optional(value.fresh, (item): item is string => item === 'rebuilt' || item === 'limited') &&
+      optional(value.outcome, outcome) &&
+      optional(
+        value.retryAfterMs,
+        (item): item is number => integer(item) && item >= 0 && item <= 60_000,
+      ) &&
       optional(
         value.failure,
         (item): item is string =>
           item === 'not-configured' || item === 'unmatched' || item === 'unreachable',
       ) &&
-      (value.failure === undefined || value.sources === null)
+      (value.failure === undefined || value.sources === null || value.outcome?.list === 'retained')
     );
   }
   if (value.kind === 'download.artwork')
@@ -2387,6 +2457,9 @@ export function decodeLibraryServiceClientMessage(
   if (!text(input.type) || !text(input.requestId))
     return invalid('request type and requestId are required');
   switch (input.type) {
+    case 'cancel':
+      if (!exact(input, ',type,protocol,requestId,')) return invalid('cancel is invalid');
+      break;
     case 'hello':
       if (
         !exact(input, ',type,protocol,requestId,clientId,libraryKey,wire,mode,legacyClock,') ||

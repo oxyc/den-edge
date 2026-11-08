@@ -850,6 +850,165 @@ test('an episode recheck cannot publish after its retained Detail loses and rega
   }
 });
 
+test('a held title lookup becomes truthful, reaches its deadline, and retries in place', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.clock.install();
+    await setup(page);
+    await page.unroute('**/scout/config/stream/**');
+    let releaseFirst;
+    const firstHeld = new Promise((resolve) => (releaseFirst = resolve));
+    let requests = 0;
+    let freshRequests = 0;
+    const listed = (name) => [
+      {
+        title: name,
+        url: 'http://scout.internal/p/ready',
+        behaviorHints: { filename: name },
+        attributes: { cached: true, resolution: '1080p' },
+      },
+    ];
+    await page.route('**/scout/config/stream/movie/**', async (route) => {
+      const request = ++requests;
+      if (new URL(route.request().url()).searchParams.get('fresh') === '1') freshRequests++;
+      if (request === 1) await firstHeld;
+      await route.fulfill({
+        headers: request > 1 ? { 'x-den-fresh': 'rebuilt' } : {},
+        json: {
+          streams: listed(request > 1 ? 'Recovered.Movie.1080p.mkv' : 'Obsolete.Movie.mkv'),
+          den: { answerKind: 'live', coverage: { sources: [] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const active = page.locator('[data-active="true"]');
+    await active
+      .locator('header.hero')
+      .getByRole('button', { name: 'Sources', exact: true })
+      .click();
+    const panel = active.locator('.source-panel');
+    await expect.poll(() => requests).toBe(1);
+
+    await page.clock.fastForward(5_001);
+    await expect(
+      panel.getByRole('status').filter({ hasText: 'taking longer than usual' }),
+    ).toBeVisible();
+    await page.clock.fastForward(15_000);
+    await expect(
+      panel.getByRole('status').filter({ hasText: 'didn’t answer in time' }),
+    ).toBeVisible();
+    expect(requests).toBe(1);
+
+    await panel.getByRole('button', { name: 'Try again', exact: true }).click();
+    await expect(panel.getByText('Recovered.Movie.1080p.mkv')).toBeVisible();
+    await expect.poll(() => requests).toBe(3);
+    expect(freshRequests).toBe(1);
+    expect(new URL(page.url()).pathname).toBe('/movie/42');
+    releaseFirst();
+    await expect(panel.getByText('Obsolete.Movie.mkv')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a source failure retries once when connectivity returns and does not storm', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    await page.unroute('**/scout/config/stream/**');
+    let requests = 0;
+    await page.route('**/scout/config/stream/movie/**', (route) => {
+      const request = ++requests;
+      if (request === 1) return route.abort('connectionfailed');
+      return route.fulfill({
+        headers: request === 2 ? { 'x-den-fresh': 'rebuilt' } : {},
+        json: {
+          streams: [
+            {
+              title: 'Online.Again.1080p.mkv',
+              url: 'http://scout.internal/p/ready',
+              behaviorHints: { filename: 'Online.Again.1080p.mkv' },
+              attributes: { cached: true, resolution: '1080p' },
+            },
+          ],
+          den: { answerKind: 'live', coverage: { sources: [] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const panel = page.locator('[data-active="true"] .source-panel');
+    await page
+      .locator('[data-active="true"] header.hero')
+      .getByRole('button', { name: 'Sources', exact: true })
+      .click();
+    await expect(panel.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
+    expect(requests).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect.poll(() => requests, { timeout: 4_000 }).toBeGreaterThan(1);
+    await expect(panel.getByText('Online.Again.1080p.mkv')).toBeVisible();
+    await expect.poll(() => requests).toBe(3);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(requests).toBe(3);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a failed source recheck retains the admitted list and its recovery in place', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    await page.unroute('**/scout/config/stream/**');
+    let requests = 0;
+    await page.route('**/scout/config/stream/movie/**', (route) => {
+      if (++requests > 1) return route.abort('connectionfailed');
+      return route.fulfill({
+        json: {
+          streams: [
+            {
+              title: 'Admitted.Movie.1080p.mkv',
+              url: 'http://scout.internal/p/ready',
+              behaviorHints: { filename: 'Admitted.Movie.1080p.mkv' },
+              attributes: { cached: true, resolution: '1080p' },
+            },
+          ],
+          den: { answerKind: 'live', coverage: { sources: [] } },
+        },
+      });
+    });
+    await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
+    const panel = page.locator('[data-active="true"] .source-panel');
+    await page
+      .locator('[data-active="true"] header.hero')
+      .getByRole('button', { name: 'Sources', exact: true })
+      .click();
+    await expect(panel.getByText('Admitted.Movie.1080p.mkv')).toBeVisible();
+    await panel.getByRole('button', { name: 'Check for sources again', exact: true }).click();
+    await expect(
+      panel.getByRole('status').filter({ hasText: 'previous source results' }),
+    ).toBeVisible();
+    await expect(panel.getByText('Admitted.Movie.1080p.mkv')).toBeVisible();
+    expect(requests).toBe(2);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a title refresh keeps its prior list when limited, exposes Retry, then admits and warms once', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

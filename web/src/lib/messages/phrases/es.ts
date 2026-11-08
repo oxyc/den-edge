@@ -1236,4 +1236,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Titles: 'Títulos',
   'Dark Comedy': 'Comedia negra',
   'Most Popular': 'Más populares',
+  'Sources are taking longer than usual. You can keep using this page.':
+    'Las fuentes están tardando más de lo habitual. Puedes seguir usando esta página.',
+  'Source discovery didn’t answer in time. Your previous results are still here.':
+    'La búsqueda de fuentes no respondió a tiempo. Tus resultados anteriores siguen aquí.',
+  'The latest check failed, so these are your previous source results.':
+    'La última comprobación falló, así que estos son tus resultados anteriores.',
+  'The availability check is degraded, so some source details may be incomplete.':
+    'La comprobación de disponibilidad está degradada, por lo que algunos datos pueden estar incompletos.',
 };

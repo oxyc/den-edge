@@ -220,14 +220,26 @@ export function pageError(kind: PageErrorKind, module: Module, error?: unknown):
   };
 }
 
-let failureReporting: Promise<typeof import('./failureReport')> | undefined;
+type FailureReporter = typeof import('./failureReport');
+let failureReporting: Promise<FailureReporter | undefined> | undefined;
+
+function loadFailureReporter(): Promise<FailureReporter | undefined> {
+  if (failureReporting) return failureReporting;
+  const loading = import('./failureReport').catch(() => {
+    // A navigation can cancel this lazy module fetch. It is fire-and-forget telemetry, so never surface that as an
+    // unhandled page failure; clearing the held promise lets a later report in the surviving document try again.
+    if (failureReporting === loading) failureReporting = undefined;
+    return undefined;
+  });
+  failureReporting = loading;
+  return loading;
+}
 
 /** Load the bounded queue only after the first report-worthy failure. Ordinary app startup keeps no extra task,
  * online listener or retry timer alive. */
 export function reportClientFailure(report: ClientFailure): void {
-  failureReporting ??= import('./failureReport');
-  void failureReporting.then(({ reportClientFailure }) =>
-    reportClientFailure({ ...report, release: report.release ?? currentRelease() }),
+  void loadFailureReporter().then((reporter) =>
+    reporter?.reportClientFailure({ ...report, release: report.release ?? currentRelease() }),
   );
 }
 
@@ -237,8 +249,8 @@ export function replaceClientFailureGeneration(
   generation: number,
 ): void {
   if (failureReporting)
-    void failureReporting.then(({ replaceFailureGeneration }) =>
-      replaceFailureGeneration(operation, generation),
+    void failureReporting.then((reporter) =>
+      reporter?.replaceFailureGeneration(operation, generation),
     );
 }
 

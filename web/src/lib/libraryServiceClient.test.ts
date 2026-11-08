@@ -361,6 +361,31 @@ it('correlates retained-value queries with their intentionally shorter result ki
   client.close();
 });
 
+it('cancels an owned query at the transport and ignores its obsolete reply', async () => {
+  const { client, transport } = await opened();
+  const controller = new AbortController();
+  const querying = client.query({ kind: 'relay.membership' }, controller.signal);
+  const request = transport.sent.at(-1)!;
+  if (request.type !== 'query') throw new Error('expected query');
+
+  controller.abort();
+
+  await expect(querying).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  expect(transport.sent.at(-1)).toEqual({
+    type: 'cancel',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+  });
+  transport.emit({
+    type: 'query-result',
+    protocol: LIBRARY_SERVICE_PROTOCOL,
+    requestId: request.requestId,
+    version: version(1),
+    result: { kind: 'relay.membership', capability: null },
+  });
+  client.close();
+});
+
 it('rejects a retained billboard reply for a different scope', async () => {
   const { client, transport } = await opened();
   const querying = client.query({

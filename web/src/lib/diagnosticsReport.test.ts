@@ -199,6 +199,23 @@ describe('sendPageError', () => {
   });
 });
 
+describe('failure reporter lazy load', () => {
+  it('does not surface a navigation-cancelled module import as an unhandled rejection', async () => {
+    vi.resetModules();
+    vi.doMock('./failureReport', () => {
+      throw new TypeError('Importing a module script failed.');
+    });
+    const { reportClientFailure } = await import('./diagnosticsReport');
+    reportClientFailure({
+      operation: 'source_lookup',
+      kind: 'transport',
+      outcome: 'terminal',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.doUnmock('./failureReport');
+  });
+});
+
 describe('identityOf', () => {
   const title = { id: 550, type: 'movie' as const };
 

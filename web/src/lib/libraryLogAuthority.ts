@@ -103,6 +103,7 @@ import type { ContentReader } from './contentAuthority';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
 import { profilesApplyPolicy } from './profilesCore';
 import { exclusive } from './exclusive';
+import { sourceWait } from './sourceDiscoveryPolicy';
 import { joinHousehold, joinHouseholdOf, type JoinState } from './householdJoin';
 import { validateStoredProfileDirectory } from './profileDirectory';
 import {
@@ -715,7 +716,7 @@ export class LibraryLogAuthority {
     }
   }
 
-  async query(query: LibraryQuery): Promise<LibraryQueryResult> {
+  async query(query: LibraryQuery, signal?: AbortSignal): Promise<LibraryQueryResult> {
     if (
       query.kind === 'profile-create.status' ||
       query.kind === 'key-reset.prepare' ||
@@ -805,6 +806,8 @@ export class LibraryLogAuthority {
           kind: 'download.refresh',
           refreshed: (await this.#options.refreshDownloads?.(query.target)) ?? false,
         };
+      case 'source.wait':
+        return { kind: 'source.wait', ...(await sourceWait(query)) };
       case 'download.sources': {
         await ensureDeferredSyncPolicy();
         const title = internalDownloadTitle(query.title);
@@ -813,6 +816,7 @@ export class LibraryLogAuthority {
           query.refresh,
           query.fresh,
           query.early,
+          signal,
         );
         const sources = Array.isArray(snapshot.sources)
           ? snapshot.sources
@@ -839,6 +843,26 @@ export class LibraryLogAuthority {
                 },
               }
             : {}),
+          ...(snapshot.outcome
+            ? {
+                outcome: {
+                  result: snapshot.outcome.result,
+                  category: snapshot.outcome.category,
+                  list: snapshot.outcome.list,
+                  caveat: snapshot.outcome.caveat
+                    ? {
+                        staleSince: snapshot.outcome.caveat.stale_since,
+                        missing: snapshot.outcome.caveat.missing,
+                        late: snapshot.outcome.caveat.late,
+                        failedAddons: snapshot.outcome.caveat.failed_addons,
+                      }
+                    : null,
+                  mayMarkUnavailable: snapshot.outcome.may_mark_unavailable,
+                  retryable: snapshot.outcome.retryable,
+                },
+              }
+            : {}),
+          ...(snapshot.retryAfterMs !== undefined ? { retryAfterMs: snapshot.retryAfterMs } : {}),
           ...(snapshot.failure ? { failure: snapshot.failure } : {}),
         };
       }

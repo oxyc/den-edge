@@ -1222,4 +1222,12 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Titles: 'Titlar',
   'Dark Comedy': 'Svart komedi',
   'Most Popular': 'Mest populära',
+  'Sources are taking longer than usual. You can keep using this page.':
+    'Källorna tar längre tid än vanligt. Du kan fortsätta använda den här sidan.',
+  'Source discovery didn’t answer in time. Your previous results are still here.':
+    'Källsökningen svarade inte i tid. Dina tidigare resultat finns kvar här.',
+  'The latest check failed, so these are your previous source results.':
+    'Den senaste kontrollen misslyckades, så detta är dina tidigare källresultat.',
+  'The availability check is degraded, so some source details may be incomplete.':
+    'Tillgänglighetskontrollen är begränsad, så vissa källuppgifter kan vara ofullständiga.',
 };

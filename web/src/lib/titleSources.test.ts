@@ -287,17 +287,51 @@ it('only an early ask carries the header', async () => {
 });
 it('hands the list and scout’s account of it back together', async () => {
   const network = (async () =>
-    Response.json({
-      streams: [raw],
-      den: { answerKind: 'partial', coverage: { sources: [] } },
-    })) as typeof fetch;
+    Response.json(
+      {
+        streams: [raw],
+        den: {
+          answerKind: 'partial',
+          degraded: 'stale_list',
+          generatedAt: '2026-09-22T12:00:00Z',
+          coverage: { sources: [{ outcome: 'late' }] },
+        },
+      },
+      { headers: { 'x-den-degraded': 'indexers', 'retry-after': '30' } },
+    )) as typeof fetch;
   const got = await fetchSourceList(addon, 'tt1', routes, undefined, undefined, undefined, network);
   expect(got.sources).toHaveLength(1);
   expect(got.answer?.kind).toBe('partial');
+  expect(got).toMatchObject({
+    retryAfterMs: 30_000,
+    reply: {
+      reply: 'answered',
+      streams: 1,
+      degraded: 'indexers',
+      answer: {
+        kind: 'partial',
+        missing: 0,
+        late: 1,
+        outage_built_at: Date.parse('2026-09-22T12:00:00Z'),
+      },
+    },
+  });
   const down = (async () => new Response('', { status: 502 })) as typeof fetch;
   expect(
     await fetchSourceList(addon, 'tt1', routes, undefined, undefined, undefined, down),
-  ).toEqual({ sources: null });
+  ).toEqual({ sources: null, reply: { reply: 'errored' } });
+});
+
+it('classifies an owned abort as timed out and does not expose response details', async () => {
+  const controller = new AbortController();
+  const network = (async (_input, init) => {
+    controller.abort();
+    if (init?.signal?.aborted) throw new DOMException('stopped', 'AbortError');
+    return Response.json({ streams: [] });
+  }) as typeof fetch;
+  await expect(
+    fetchSourceList(addon, 'tt1', routes, undefined, undefined, controller.signal, network),
+  ).resolves.toEqual({ sources: null, reply: { reply: 'timed_out' } });
 });
 it('says how long ago a held list was built', () => {
   const now = Date.parse('2026-09-22T12:00:00Z');

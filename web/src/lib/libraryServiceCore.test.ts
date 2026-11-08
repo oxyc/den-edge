@@ -207,6 +207,110 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('does not hold the command actor lane while deferred source wait policy loads', async () => {
+    let release!: () => void;
+    const policy = new Promise<void>((resolve) => (release = resolve));
+    const held = {
+      ...authority(),
+      async query(query: LibraryQuery) {
+        if (query.kind !== 'source.wait') throw new Error('unsupported query');
+        await policy;
+        return {
+          kind: 'source.wait' as const,
+          phase: 'loading' as const,
+          nextMs: 5_000,
+          retryInMs: null,
+        };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+
+    const wait = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'source-wait-1',
+      query: { kind: 'source.wait', elapsedMs: 0, attempt: 0 },
+    });
+    await Promise.resolve();
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-during-source-wait',
+        operationId: 'operation-during-source-wait',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+    release();
+    await expect(wait).resolves.toEqual([
+      expect.objectContaining({
+        type: 'query-result',
+        result: expect.objectContaining({ kind: 'source.wait', phase: 'loading' }),
+      }),
+    ]);
+  });
+
+  it('aborts detached source discovery without holding the command actor lane', async () => {
+    const aborted = vi.fn();
+    const held = {
+      ...authority(),
+      async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind !== 'download.sources') throw new Error('unsupported query');
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener(
+            'abort',
+            () => {
+              aborted();
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        return { kind: 'download.sources' as const, sources: null };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    const requestId = 'sources-1';
+    const sources = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      query: {
+        kind: 'download.sources',
+        title: { target: title, name: 'Title' },
+        early: true,
+      },
+    });
+    await Promise.resolve();
+    await expect(
+      core.dispatch({ type: 'cancel', protocol: LIBRARY_SERVICE_PROTOCOL, requestId }),
+    ).resolves.toEqual([]);
+    expect(aborted).toHaveBeenCalledOnce();
+
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-after-source-cancel',
+        operationId: 'operation-after-source-cancel',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+    await expect(sources).resolves.toEqual([
+      expect.objectContaining({
+        type: 'query-result',
+        requestId,
+        result: { kind: 'download.sources', sources: null },
+      }),
+    ]);
+  });
+
   it('does not hold the command actor lane while an assistant projection is built and sent', async () => {
     let release!: () => void;
     const building = new Promise<void>((resolve) => (release = resolve));

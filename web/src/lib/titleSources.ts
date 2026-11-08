@@ -126,6 +126,53 @@ export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAns
 /** Scout's answer to an explicit `?fresh=1`: independent of whether the returned list is live, partial or stale. */
 export type FreshAnswer = 'rebuilt' | 'limited';
 export const FRESH_ANSWER_HEADER = 'X-Den-Fresh';
+export const DEGRADED_ANSWER_HEADER = 'X-Den-Degraded';
+
+/** Bounded transport facts passed to den-core's `source_outcome`; no URL, title or response body crosses it. */
+export type SourceLookupReply =
+  | {
+      reply: 'answered';
+      streams: number;
+      answer?: {
+        kind: SourceAnswer['kind'];
+        missing: number;
+        late: number;
+        outage_built_at?: number;
+      };
+      degraded?: string;
+    }
+  | { reply: 'errored' }
+  | { reply: 'timed_out' };
+
+export interface SourceListResult {
+  sources: TitleSource[] | null;
+  answer?: SourceAnswer;
+  fresh?: FreshAnswer;
+  reply: SourceLookupReply;
+  retryAfterMs?: number;
+}
+
+/** den-core `source_outcome`; Edge carries this verdict without reinterpreting its rules. */
+export interface SourceOutcome {
+  result:
+    | 'live'
+    | 'partial'
+    | 'stale_held'
+    | 'degraded'
+    | 'confirmed_empty'
+    | 'failed_retryable'
+    | 'no_imdb';
+  category: 'debrid' | 'source_discovery' | null;
+  list: 'new' | 'retained' | 'none';
+  caveat: {
+    stale_since: number | null;
+    missing: number;
+    late: number;
+    failed_addons: number;
+  } | null;
+  may_mark_unavailable: boolean;
+  retryable: boolean;
+}
 
 /**
  * Scout's list for a title and what it says about it; `sources` is null when scout could not be reached.
@@ -148,7 +195,7 @@ export async function fetchSourceList(
   fetchImpl: typeof fetch = relayFetch,
   fresh = false,
   early = false,
-): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer; fresh?: FreshAnswer }> {
+): Promise<SourceListResult> {
   try {
     const id =
       season !== undefined && episode !== undefined ? `${imdb}:${season}:${episode}` : imdb;
@@ -156,8 +203,25 @@ export async function fetchSourceList(
     const init: RequestInit = fresh ? { signal, cache: 'no-store' } : { signal };
     if (early) init.headers = { [EARLY_ANSWER_HEADER]: '1' };
     const response = await fetchImpl(fresh ? `${url}?fresh=1` : url, init);
-    if (!response.ok) return { sources: null };
+    const retry = response.headers.has('retry-after') ? retryAfterMs(response, 60_000) : undefined;
+    if (!response.ok)
+      return {
+        sources: null,
+        reply: { reply: 'errored' },
+        ...(retry !== undefined ? { retryAfterMs: retry } : {}),
+      };
     const body: unknown = await response.json();
+    const sources = parseSources(body, addon, routes);
+    if (!sources)
+      return {
+        sources: null,
+        reply: { reply: 'errored' },
+        ...(retry !== undefined ? { retryAfterMs: retry } : {}),
+      };
+    const answer = parseAnswer(body);
+    const degradedHeader = response.headers.get(DEGRADED_ANSWER_HEADER);
+    const degraded =
+      degradedHeader && degradedHeader.length <= 64 ? degradedHeader.toLowerCase() : undefined;
     const freshAnswer = fresh ? response.headers.get(FRESH_ANSWER_HEADER) : null;
     const admission: FreshAnswer | undefined =
       freshAnswer === 'rebuilt' || freshAnswer === 'limited' ? freshAnswer : undefined;
@@ -165,17 +229,33 @@ export async function fetchSourceList(
     // browser cache that held a newer copy regress to it. Older Scouts send no admission header and keep the
     // established warm-after-fresh behaviour.
     if (fresh && admission !== 'limited')
-      void fetchImpl(url, { cache: 'reload' }).then(
+      void fetchImpl(url, { cache: 'reload', signal }).then(
         (plain) => plain.body?.cancel(),
         () => {},
       );
     return {
-      sources: parseSources(body, addon, routes),
-      answer: parseAnswer(body),
+      sources,
+      answer,
+      reply: {
+        reply: 'answered',
+        streams: sources.length,
+        ...(answer
+          ? {
+              answer: {
+                kind: answer.kind,
+                missing: answer.missing,
+                late: answer.late ?? 0,
+                ...(answer.outage ? { outage_built_at: answer.outage.builtAt } : {}),
+              },
+            }
+          : {}),
+        ...(degraded ? { degraded } : {}),
+      },
       ...(admission ? { fresh: admission } : {}),
+      ...(retry !== undefined ? { retryAfterMs: retry } : {}),
     };
   } catch {
-    return { sources: null };
+    return { sources: null, reply: { reply: signal?.aborted ? 'timed_out' : 'errored' } };
   }
 }
 

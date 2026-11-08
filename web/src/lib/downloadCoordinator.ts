@@ -25,6 +25,8 @@ import {
   type Preparation,
   type SourceAnswer,
   type FreshAnswer,
+  type SourceLookupReply,
+  type SourceOutcome,
   type TitleSource,
 } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped } from './wire';
@@ -69,10 +71,14 @@ export type DownloadResolve = (
   title: DownloadTitle,
   fresh?: boolean,
   early?: boolean,
+  signal?: AbortSignal,
 ) => Promise<{
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
   fresh?: FreshAnswer;
+  imdb?: 'resolved' | 'missing' | 'lookup_failed';
+  reply?: SourceLookupReply;
+  retryAfterMs?: number;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 }>;
 
@@ -80,6 +86,8 @@ export interface DownloadSourceSnapshot {
   sources: TitleSource[] | null;
   answer?: SourceAnswer;
   fresh?: FreshAnswer;
+  outcome?: SourceOutcome;
+  retryAfterMs?: number;
   failure?: 'not-configured' | 'unmatched' | 'unreachable';
 }
 
@@ -405,6 +413,7 @@ export class DownloadCoordinator {
     refresh = false,
     fresh = false,
     early = false,
+    signal?: AbortSignal,
   ): Promise<DownloadSourceSnapshot> {
     const key = sourceKey(contentKeyOf(title), early);
     const now = this.now();
@@ -414,7 +423,7 @@ export class DownloadCoordinator {
     // A fresh ask never joins a plain one already running: that one may be answered from the caches it skips.
     // Plain viewers join one another, but not a fresh action: a limited marker belongs only to that action, and
     // handing it to an uninitialized Sources panel would leave the panel with no concrete list to draw.
-    if (!fresh && pending?.plain) return pending.plain;
+    if (!fresh && pending?.plain && !signal) return pending.plain;
     if (!pending) {
       pending = { active: 0, publishedFreshGeneration: 0 };
       this.#sourcePending.set(key, pending);
@@ -422,16 +431,48 @@ export class DownloadCoordinator {
     const freshGeneration = fresh ? ++this.#sourceGeneration : 0;
     pending.active++;
     const run: Promise<DownloadSourceSnapshot> = this.effects
-      .resolve(title, fresh, early)
-      .then(({ sources, answer, fresh: admission, failure }) => {
-        const preferred = sources?.length ? this.pick(sources, title.originalLanguage) : undefined;
+      .resolve(title, fresh, early, signal)
+      .then(({ sources, answer, fresh: admission, imdb, reply, retryAfterMs, failure }) => {
+        const prior = early ? (this.#sourceCache.get(key) ?? cached)?.snapshot : undefined;
+        const outcome =
+          early && imdb
+            ? syncPolicy<SourceOutcome>({
+                op: 'source_outcome',
+                imdb,
+                ...(reply ? { replies: [reply] } : {}),
+                ...(prior?.sources?.length
+                  ? {
+                      prior: {
+                        count: prior.sources.length,
+                        caveat: prior.outcome?.caveat ?? null,
+                      },
+                    }
+                  : {}),
+              })
+            : undefined;
+        const decidedSources =
+          outcome?.list === 'retained'
+            ? prior?.sources
+            : outcome?.list === 'none'
+              ? imdb === 'resolved'
+                ? []
+                : null
+              : sources;
+        const preferred = decidedSources?.length
+          ? this.pick(decidedSources, title.originalLanguage)
+          : undefined;
         const ordered = preferred
-          ? [preferred, ...sources!.filter((source) => source.identity !== preferred.identity)]
-          : sources;
+          ? [
+              preferred,
+              ...decidedSources!.filter((source) => source.identity !== preferred.identity),
+            ]
+          : decidedSources;
         const snapshot: DownloadSourceSnapshot = {
           sources: ordered ?? null,
           ...(answer ? { answer } : {}),
           ...(admission ? { fresh: admission } : {}),
+          ...(outcome ? { outcome } : {}),
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
           ...(failure ? { failure } : {}),
         };
         // A refused rebuild is the prior plain list, not a replacement. Prefer the exact worker snapshot already
@@ -462,7 +503,7 @@ export class DownloadCoordinator {
           this.#sourceCache.delete(this.#sourceCache.keys().next().value!);
         return snapshot;
       });
-    if (!fresh) pending.plain = run;
+    if (!fresh && !signal) pending.plain = run;
     try {
       return await run;
     } finally {

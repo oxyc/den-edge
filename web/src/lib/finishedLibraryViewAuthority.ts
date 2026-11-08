@@ -492,7 +492,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       .catch((error: unknown) => console.warn('den: a narrow edit could not be taken in', error));
     return result;
   }
-  query: LibraryServiceAuthority['query'] = async (query) => {
+  query: LibraryServiceAuthority['query'] = async (query, signal) => {
     if (!this.#full && query.kind === 'history.episodes') {
       const current = await this.#historyPage({}, undefined, 1);
       if (current && current.revision !== query.revision)
@@ -560,7 +560,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       };
     }
     if (!this.#full && query.kind === 'library.metadata') return this.#metadata(query.titles);
-    return (await this.#promote(`query:${query.kind}`)).query(query);
+    return (await this.#promote(`query:${query.kind}`)).query(query, signal);
   };
 
   async #historyPage(filter: HistoryFilter, cursor?: HistoryCursor, limit?: number) {
