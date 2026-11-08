@@ -83,6 +83,11 @@
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
   import { sharedInstallOf } from './lib/grants';
+  import {
+    preparePlaybackReceiptCapability,
+    playbackReceiptsSupported,
+    type PlaybackReceiptPreparation,
+  } from './lib/playbackReceiptSupport';
   import { installsOf } from './lib/scout';
   import {
     billboardScope,
@@ -517,12 +522,18 @@
   // The household's device list, which names the TVs a play can go to (`householdTvs`).
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
-  async function preparePlaybackReceipts(signal: AbortSignal): Promise<boolean> {
+  async function preparePlaybackReceipts(signal: AbortSignal): Promise<PlaybackReceiptPreparation> {
     const authority = householdModel ?? model;
-    if (!authority) return false;
-    const assistant = await import('./lib/assistant');
-    if (signal.aborted) return false;
-    return assistant.preparePlaybackReceipts(authority, signal);
+    return preparePlaybackReceiptCapability({
+      supported: playbackReceiptsSupported,
+      authority,
+      signal,
+      prepare: async (current, currentSignal) => {
+        const assistant = await import('./lib/assistant');
+        if (currentSignal.aborted) return false;
+        return assistant.preparePlaybackReceipts(current, currentSignal);
+      },
+    });
   }
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
@@ -1508,6 +1519,11 @@
         }),
         true,
       );
+  }
+
+  function openPlaybackReceiptRecovery() {
+    closePlayer();
+    navigate('/settings');
   }
 
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
@@ -3295,6 +3311,7 @@
       onfinalprogress={(fraction, seconds, at) =>
         finalProgressed({ title: target.title, ...at }, fraction, seconds)}
       onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
+      onplaybackreceiptsettings={openPlaybackReceiptRecovery}
       onnext={after ? () => void advance(after) : undefined}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}

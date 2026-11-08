@@ -49,6 +49,7 @@
   let progress = $state<{ fraction: number; seconds: number; playing: boolean }>();
   let progressWrites = $state(0);
   let closeCount = $state(0);
+  let receiptSettingsCount = $state(0);
   let nextCount = $state(0);
   let reelUrl = $state<string>();
   onDestroy(() => services.close());
@@ -102,15 +103,17 @@
     {castPlayMs}
     onmanagedplayback={receiptBoundary
       ? async (signal) => {
+          if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__) return 'unsupported';
           if (receiptDelayMs)
             // Deliberately ignore cancellation: Player owns the complete callback deadline, including production's
             // lazy import and a Library Service reconnect that might not settle when the signal fires.
             await new Promise<void>((resolve) => setTimeout(resolve, receiptDelayMs));
           const response = await fetch('/test/receipt-ready', { method: 'POST', signal });
           if (!response.ok) throw new Error('receipt authority failed');
-          return true;
+          return 'ready';
         }
       : undefined}
+    onplaybackreceiptsettings={() => (receiptSettingsCount += 1)}
     onprogress={(fraction, seconds, _at, playing) => {
       progress = { fraction, seconds, playing };
       progressWrites += 1;
@@ -130,6 +133,7 @@
   <button type="button" onclick={() => (open = true)}>Open fixture player</button>
 {/if}
 <output data-testid="player-close-count" hidden>{closeCount}</output>
+<output data-testid="receipt-settings-count" hidden>{receiptSettingsCount}</output>
 <output data-testid="player-next-count" hidden>{nextCount}</output>
 <output data-testid="player-progress-writes" hidden>{progressWrites}</output>
 

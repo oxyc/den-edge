@@ -86,6 +86,36 @@ async function remoteKey(page, key, keyCode) {
   );
 }
 
+test('Tizen 3 skips unsupported receipt work and offers its focusable linking recovery', async ({
+  page,
+}) => {
+  test.skip(
+    process.env.DEN_TIZEN_VERSION !== '3.0',
+    'only the Tizen 3 package lacks managed-playback receipt crypto',
+  );
+  const receiptRequests = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/test/receipt-ready'))
+      receiptRequests.push(request.url());
+  });
+  await routePackagedPlayback(page);
+  await page.goto('/package/test/player.html?playback=managed&receiptBoundary=1');
+
+  await expect(
+    page.getByText(
+      'This TV can save progress while Den stays open, but it cannot recover managed playback after the page closes. Link a phone or computer in Settings › Connections to recover it later.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const recovery = page.getByRole('button', { name: 'Open Connections' });
+  await expect(recovery).toBeVisible();
+  await recovery.focus();
+  await expect(recovery).toBeFocused();
+  await recovery.press('Enter');
+  await expect(page.getByTestId('receipt-settings-count')).toHaveText('1');
+  expect(receiptRequests).toEqual([]);
+});
+
 test('packaged Tizen plays cross-origin HLS, resumes and ends only through the API origin', async ({
   page,
 }) => {

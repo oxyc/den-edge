@@ -146,6 +146,28 @@ async function installSourcePlugin(page, sourceRequests = []) {
   await expect(page.getByRole('heading', { name: 'Remote Series', level: 1 })).toBeVisible();
 }
 
+test('Tizen 3 preserves queued managed-playback receipts for a capable linked device', async ({
+  page,
+}) => {
+  test.skip(
+    process.env.DEN_TIZEN_VERSION !== '3.0',
+    'only the Tizen 3 build permanently excludes receipt crypto',
+  );
+  const receiptRequests = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/playback/receipts/'))
+      receiptRequests.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+
+  await setupSeries(page, { linked: true });
+  await expect(
+    page
+      .getByRole('region', { name: 'Watchlist', exact: true })
+      .getByRole('link', { name: /Remote Series/ }),
+  ).toBeVisible();
+  expect(receiptRequests).toEqual([]);
+});
+
 test('remote changes seasons from the focused season tab', async ({ page }) => {
   await setupSeries(page);
 

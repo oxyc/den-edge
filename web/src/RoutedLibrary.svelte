@@ -1550,9 +1550,9 @@
   // Managed playback can finish after this page is gone. Make its household drop-box available, then keep the
   // opaque completion lane drained into the ordinary progress path. Unlike assistant work this needs no grant.
   $effect(() => {
-    // Tizen 3's explicit unsupported/handoff product surface remains owned by #1059/#1083. Do not drain its queued
-    // ciphertext or offer the capable-build retry here; a linked capable device may still settle that work.
-    if (__DEN_TV_LEGACY_JS_CORE__) return;
+    // A permanently unsupported build must not lazy-load receipt crypto, ask for relay membership, drain, or ACK.
+    // Edge keeps the opaque receipts queued for a capable linked device; ordinary in-page progress is independent.
+    if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__) return;
     const current = session;
     const retry = playbackReceiptRetry;
     const heldStatus = untrack(() => playbackReceiptStatus);
