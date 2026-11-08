@@ -156,9 +156,14 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: .
-      - name: Build den-edge for the integration suites
+      # Two Vitest suites start Rust tests (`cargo test ...`) for the receipt bridge and the real recovery server.
+      # Built here, their binaries are only run inside the suites; left to them, the first one compiled the whole
+      # crate's test profile inside its 60 s test timeout, beside the other suite waiting on the same build lock.
+      - name: Build den-edge and its Rust tests for the integration suites
         working-directory: .
-        run: cargo build --locked --bin den-edge
+        run: |
+          cargo build --locked --bin den-edge
+          cargo test --locked --no-run
       - run: npm test
         env:
           DEN_EDGE_REQUIRED: "1"
