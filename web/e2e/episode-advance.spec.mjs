@@ -229,7 +229,9 @@ async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [
         : file.endsWith('.js')
           ? 'text/javascript'
           : 'text/css';
-      return r.fulfill({ contentType: type, body: await readFile(join(cast, file)) });
+      // A request still on its way when the test ends may find the build removed: refused, not thrown onward.
+      const body = await readFile(join(cast, file)).catch(() => undefined);
+      return body ? r.fulfill({ contentType: type, body }) : r.abort().catch(() => undefined);
     });
   }
   const query = new URLSearchParams({
@@ -517,12 +519,12 @@ test.describe('Den Cast', () => {
       await playFirstEpisode(page);
       await playingPast(page, 1);
       await revealPlayerControls(page);
-      await page.getByRole('button', { name: 'Cast to a TV' }).click();
-      const choose = page
+      // The cast page's own button, drawn in the bar once it found the receiver: one press opens Chrome's list.
+      const cast = page
         .frameLocator(`iframe[src^="${CAST}"]`)
-        .getByRole('button', { name: 'Choose your Chromecast' });
-      await expect(choose).toBeVisible({ timeout: 15_000 });
-      await choose.click();
+        .getByRole('button', { name: 'Cast to a TV' });
+      await expect(cast).toBeVisible({ timeout: 15_000 });
+      await cast.click();
       await expect.poll(() => castLoads(page)).toHaveLength(1);
       expect((await castLoads(page))[0]).toMatchObject({ url: streamOf('e1'), title: 'S1 · E1' });
       await castFrame(page).evaluate((frame) => (window.__castFrame = frame));
@@ -546,9 +548,7 @@ test.describe('Den Cast', () => {
         ),
       ).toBe(true);
       await expect(pageVideo(page)).toHaveCount(0);
-      await expect(
-        page.frameLocator(`iframe[src^="${CAST}"]`).getByText('Living Room TV'),
-      ).toBeVisible();
+      await expect(page.getByText('Casting to Living Room TV')).toBeVisible();
     } finally {
       await browser.close();
     }

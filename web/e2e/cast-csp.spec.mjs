@@ -1,6 +1,6 @@
-// The real built Cast page under the Content-Security-Policy den-edge serves it with (`src/cast.rs`). Google's Cast
-// launcher reveals itself by setting its own `style` attribute once a receiver is found; under `style-src 'self'`
-// Chrome refuses that style, the launcher stays `display: none` at 0×0, and there is no button to cast with.
+// The real built Cast page under the Content-Security-Policy den-edge serves it with (`src/cast.rs`), which admits no
+// inline style or script. The page's Cast button is its own, shown once the SDK has found a receiver, and coloured by
+// the player through the CSSOM: none of that may need an inline exception, or the button would never show.
 import { test, expect, chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -22,30 +22,19 @@ function servedPolicy() {
   return literal.replace(/\\\n\s*/g, '').replace('{PARENT_ORIGINS}', ORIGIN);
 }
 
-/**
- * Google's sender, as far as the launcher goes: the element notes the display it has when it is taken over, hides
- * itself through the CSSOM (which no policy stops) and, once the context reports a receiver, shows itself by rewriting
- * its `style` attribute with the display it noted, as the real one does. A launcher that was `hidden` when taken over
- * is therefore "shown" as `display: none`.
- */
+/** Google's sender, as far as discovery goes: a receiver is on the network once `setOptions` has started it. */
 const SDK = `
   window.chrome = window.chrome || {};
   window.chrome.cast = {
     AutoJoinPolicy: { PAGE_SCOPED: 'page_scoped' },
     media: { DEFAULT_MEDIA_RECEIVER_APP_ID: 'CC1AD845' },
   };
-  customElements.define('google-cast-launcher', class extends HTMLElement {
-    connectedCallback() { this.shown = getComputedStyle(this).display; this.style.display = 'none'; }
-  });
   const listeners = {};
   let state = 'NO_DEVICES_AVAILABLE';
   const context = {
     setOptions() {
       setTimeout(() => {
         state = 'NOT_CONNECTED';
-        const launcher = document.querySelector('google-cast-launcher');
-        launcher.setAttribute('style', 'display: ' + launcher.shown + ';');
-        window.launcherRevealed = true;
         (listeners.caststatechanged || []).forEach((fn) => fn({ castState: state }));
       }, 50);
     },
@@ -81,9 +70,9 @@ test.beforeAll(() => {
 });
 test.afterAll(() => rmSync(built, { recursive: true, force: true }));
 
-test('under the policy den-edge serves, the Cast launcher shows once a receiver is found', async () => {
-  // The SDK above runs `setOptions` before the page adds the launcher, so its reveal must find one by then.
+test('under the policy den-edge serves, the Cast button shows once a receiver is found', async () => {
   const policy = servedPolicy();
+  expect(policy).not.toContain('unsafe-inline');
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -101,29 +90,37 @@ test('under the policy den-edge serves, the Cast launcher shows once a receiver 
         : file.endsWith('.js')
           ? 'text/javascript'
           : 'text/css';
-      return r.fulfill({
-        contentType: type,
-        headers: { 'content-security-policy': policy },
-        body: await readFile(join(built, file)),
-      });
+      const body = await readFile(join(built, file)).catch(() => undefined);
+      if (!body) return r.abort().catch(() => undefined);
+      return r.fulfill({ contentType: type, headers: { 'content-security-policy': policy }, body });
     });
+    // The player as the cast page sees it: the handshake, then the Cast button's layout and colour.
     await page.route(`${ORIGIN}/cast-parent`, (r) =>
       r.fulfill({
         contentType: 'text/html',
-        body: `<!doctype html><iframe src="${CAST}/"></iframe>`,
+        body: `<!doctype html><script>
+          addEventListener('message', (e) => {
+            if (e.origin !== '${CAST}' || e.data.type !== 'den-ready') return;
+            e.source.postMessage({ type: 'den-discover' }, '${CAST}');
+            e.source.postMessage({ type: 'den-layout', layout: 'button', color: 'rgb(255, 0, 0)', iconSize: 22 }, '${CAST}');
+          });
+        </script><iframe src="${CAST}/" style="width:44px;height:44px" onload="this.contentWindow.postMessage({ type: 'den-handshake', generation: 'csp' }, '${CAST}')"></iframe>`,
       }),
     );
-    await page.goto(`${ORIGIN}/cast-parent`);
-    const cast = () => page.frames().find((frame) => frame.url().startsWith(CAST));
-    await expect.poll(() => cast()?.evaluate(() => window.launcherRevealed === true)).toBe(true);
-    const launcher = await cast().evaluate(() => {
-      const element = document.querySelector('google-cast-launcher');
-      const box = element.getBoundingClientRect();
-      return { display: getComputedStyle(element).display, width: box.width, height: box.height };
+    await context.addInitScript(() => {
+      window.violations = [];
+      addEventListener('securitypolicyviolation', (event) =>
+        window.violations.push(`${event.violatedDirective} ${event.blockedURI}`),
+      );
     });
-    expect(launcher.display).not.toBe('none');
-    expect(launcher.width).toBeGreaterThan(0);
-    expect(launcher.height).toBeGreaterThan(0);
+    await page.goto(`${ORIGIN}/cast-parent`);
+    const cast = page.frameLocator(`iframe[src^="${CAST}"]`).locator('#cast');
+    await expect(cast).toBeVisible();
+    await expect(cast).toHaveCSS('color', 'rgb(255, 0, 0)');
+    const box = await cast.boundingBox();
+    expect(box?.width).toBeGreaterThan(0);
+    const frame = page.frames().find((candidate) => candidate.url().startsWith(CAST));
+    expect(await frame.evaluate(() => window.violations)).toEqual([]);
   } finally {
     await browser.close();
   }

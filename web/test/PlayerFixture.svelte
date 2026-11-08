@@ -32,7 +32,6 @@
     : undefined;
   const shownSubtitleLanguages = query.get('shownSubtitles')?.split(',').filter(Boolean);
   const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
-  const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   const receiptBoundary = query.has('receiptBoundary');
   const receiptDelayMs = Number(query.get('receiptDelayMs')) || 0;
@@ -100,7 +99,6 @@
     subtitles={[]}
     resume={{ fraction: resumeSeconds ? resumeSeconds / 60 : 0, seconds: resumeSeconds }}
     next={hasNext ? 'S1 · E2' : undefined}
-    {castDiscoveryMs}
     {castPlayMs}
     onmanagedplayback={receiptBoundary
       ? async (signal) => {
