@@ -289,9 +289,13 @@
   function enterProxy(event: FocusEvent, index: number) {
     const slot = (event.currentTarget as HTMLElement).parentElement;
     focusedIndex = index;
-    void tick().then(() =>
-      slot?.querySelector<HTMLElement>('.card')?.focus({ preventScroll: true }),
-    );
+    void tick().then(() => {
+      // The proxy is gone by now, so focus is on body or already on its card. A remote press handled in between
+      // (a busy TV can land the next one first) has moved on: never take focus back from it.
+      const active = document.activeElement;
+      if (active && active !== document.body && !slot?.contains(active)) return;
+      slot?.querySelector<HTMLElement>('.card')?.focus({ preventScroll: true });
+    });
   }
 </script>
 
@@ -328,10 +332,13 @@
             onscreen={index >= onscreen.start && index < onscreen.end}
           />
         {:else}
+          <!-- The card's own TV identity: remote focus remembered on the placeholder is this row's card, not the
+               first card anywhere with the same address. -->
           <a
             class="proxy"
             href={titleHref(title)}
             aria-label={title.title}
+            data-tv-focus-key={__DEN_TV__ ? key(title) : undefined}
             onfocus={(event) => enterProxy(event, index)}
           ></a>
         {/if}
