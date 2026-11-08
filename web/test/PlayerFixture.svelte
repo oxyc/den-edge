@@ -35,6 +35,7 @@
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   const receiptBoundary = query.has('receiptBoundary');
+  const receiptDelayMs = Number(query.get('receiptDelayMs')) || 0;
   const resumeSeconds = Number(query.get('resume')) || undefined;
   const hasNext = query.has('next');
   const reel = query.has('reel');
@@ -102,9 +103,22 @@
     {castDiscoveryMs}
     {castPlayMs}
     onmanagedplayback={receiptBoundary
-      ? async () => {
-          const response = await fetch('/test/receipt-ready', { method: 'POST' });
+      ? async (signal) => {
+          if (receiptDelayMs)
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, receiptDelayMs);
+              signal.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(timer);
+                  reject(signal.reason);
+                },
+                { once: true },
+              );
+            });
+          const response = await fetch('/test/receipt-ready', { method: 'POST', signal });
           if (!response.ok) throw new Error('receipt authority failed');
+          return true;
         }
       : undefined}
     onprogress={(fraction, seconds, _at, playing) => {

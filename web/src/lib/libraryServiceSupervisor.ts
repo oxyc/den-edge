@@ -30,6 +30,7 @@ export interface LibraryServiceClientPort {
   task(
     task: LibraryTask,
     operationId?: string,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }>;
   observe(observation: LibraryObservation): Promise<LibraryVersion>;
   subscribe(
@@ -239,8 +240,9 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
   async task(
     task: LibraryTask,
     operationId: string = crypto.randomUUID(),
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
-    return this.#semantic((client) => client.task(task, operationId));
+    return this.#semantic((client) => client.task(task, operationId, signal));
   }
 
   async observe(observation: LibraryObservation): Promise<LibraryVersion> {

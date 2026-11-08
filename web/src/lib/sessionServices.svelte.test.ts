@@ -457,6 +457,7 @@ describe('SessionServices', () => {
     refreshGrants = async () => (++attempts === 1 ? 'retained-unverified' : 'verified');
     const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
     services.configure(runtime());
+    services.foregroundReady();
     await vi.runAllTicks();
     expect(services.plugins).toEqual([]);
     expect(attempts).toBe(1);
@@ -464,6 +465,33 @@ describe('SessionServices', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(attempts).toBe(2);
     expect(services.plugins).toEqual(guestPluginUrls);
+    services.stop();
+  });
+
+  it('bounds retained-grant outage retries and does not poll before foreground readiness', async () => {
+    vi.useFakeTimers();
+    autoDiscover = false;
+    guestPluginUrls = ['https://den.example/den/~aaaaaaaa/manifest.json'];
+    let attempts = 0;
+    refreshGrants = async () => {
+      attempts++;
+      return 'retained-unverified';
+    };
+    const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
+    services.configure(runtime());
+    await vi.runAllTicks();
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(attempts).toBe(1);
+
+    services.foregroundReady();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(attempts).toBe(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(attempts).toBe(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(attempts).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
     services.stop();
   });
 

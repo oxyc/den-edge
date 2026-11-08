@@ -513,18 +513,25 @@
   // The household's device list, which names the TVs a play can go to (`householdTvs`).
   // Every page can offer Play on TV (the poster menu), so it is held for the visit, not for one route.
   const householdModel = untrack(() => session.household.ownerSettingsModel());
-  let playbackReceiptsReady: Promise<unknown> | undefined;
-  function preparePlaybackReceipts(): Promise<unknown> {
+  let playbackReceiptsReady = false;
+  let playbackReceiptPreparation: Promise<boolean> | undefined;
+  function preparePlaybackReceipts(signal: AbortSignal): Promise<boolean> {
     const authority = householdModel ?? model;
-    if (!authority) return Promise.resolve();
-    if (!playbackReceiptsReady) {
-      const ready = authority.ensurePlaybackReceipts().catch((error: unknown) => {
-        if (playbackReceiptsReady === ready) playbackReceiptsReady = undefined;
-        throw error;
-      });
-      playbackReceiptsReady = ready;
+    if (!authority) return Promise.resolve(false);
+    if (playbackReceiptsReady) return Promise.resolve(true);
+    if (!playbackReceiptPreparation) {
+      const preparation = authority
+        .ensurePlaybackReceipts(signal)
+        .then((dropbox) => {
+          playbackReceiptsReady = dropbox !== null;
+          return playbackReceiptsReady;
+        })
+        .finally(() => {
+          if (playbackReceiptPreparation === preparation) playbackReceiptPreparation = undefined;
+        });
+      playbackReceiptPreparation = preparation;
     }
-    return playbackReceiptsReady;
+    return playbackReceiptPreparation;
   }
   $effect(() => {
     if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;

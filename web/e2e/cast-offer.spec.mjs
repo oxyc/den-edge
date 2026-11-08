@@ -118,6 +118,7 @@ async function open(
     castReady = true,
     directCastOrigin = false,
     receiptBoundary = false,
+    receiptDelayMs = 0,
     configDelay = 0,
     discoveryMs = mode === 'none' ? TEST_CAST_DISCOVERY_MS : undefined,
   } = {},
@@ -261,6 +262,7 @@ async function open(
   }
   if (subtitleLanguage) query.set('subtitleLanguage', subtitleLanguage);
   if (receiptBoundary) query.set('receiptBoundary', '1');
+  if (receiptDelayMs) query.set('receiptDelayMs', String(receiptDelayMs));
   await page.goto(`${ORIGIN}/test/player.html?${query}`);
   return { browser, page, asked };
 }
@@ -273,6 +275,25 @@ test('the first managed playback intent establishes receipt authority before rea
   try {
     await playingPast(page, 1);
     expect(asked.order.slice(0, 2)).toEqual(['receipt', 'playback']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a stalled receipt preparation is bounded, cancellable, and visibly degrades', async () => {
+  const { browser, page, asked } = await open('playing', {
+    managed: true,
+    receiptBoundary: true,
+    receiptDelayMs: 30_000,
+  });
+  try {
+    await playingPast(page, 1);
+    expect(asked.order).toEqual(['playback']);
+    await expect(
+      page.getByText(
+        'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.',
+      ),
+    ).toBeVisible();
   } finally {
     await browser.close();
   }

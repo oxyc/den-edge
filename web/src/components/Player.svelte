@@ -222,7 +222,7 @@
     /** The visit's terminal position, retained by the library until its exact command is durable. */
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
     /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
-    onmanagedplayback?: () => Promise<unknown>;
+    onmanagedplayback?: (signal: AbortSignal) => Promise<boolean>;
     onnext?: () => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
@@ -502,6 +502,7 @@
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  const RECEIPT_PREPARE_MS = 3_000;
   /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
   let startingSession: AbortController | undefined;
   let clientFailureGeneration = 0;
@@ -1158,12 +1159,20 @@
     const torboxTried =
       !!playback && !asked.directFailed && asked.replaces === undefined && !asked.exclude?.length;
     if (playback && onmanagedplayback) {
+      let receiptReady = false;
       try {
-        await onmanagedplayback();
+        receiptReady = await onmanagedplayback(
+          AbortSignal.any([attempt.signal, AbortSignal.timeout(RECEIPT_PREPARE_MS)]),
+        );
       } catch (error) {
-        console.warn('den: managed playback receipt authority could not be prepared', error);
+        if (!attempt.signal.aborted)
+          console.warn('den: managed playback receipt authority could not be prepared', error);
       }
       if (attempt.signal.aborted) return false;
+      if (!receiptReady)
+        unchanged = i18n.phrase(
+          'Playback can start, but background progress recovery is unavailable. Keep this page open to save where you stop.',
+        );
     }
     let result = playback
       ? await startPlayback(playback, asked, undefined, attempt.signal)

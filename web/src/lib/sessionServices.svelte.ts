@@ -24,7 +24,7 @@ type Grants = {
 
 const inputs = (library: boolean, plugins: readonly string[], remux: string | null) =>
   JSON.stringify([library, plugins, remux]);
-const GRANT_RETRY_MS = 5_000;
+const GRANT_RETRY_MS = [5_000, 30_000] as const;
 const ROUTE_RETRY_MS = [1_000, 5_000] as const;
 
 /** A retained playback install is usable only while the current authority still lists its manifest. */
@@ -60,6 +60,8 @@ export class SessionServices {
   #verifiedGrantsFor?: string;
   #pendingConfigure?: [library: boolean, plugins: readonly string[], remux: string | null, string];
   #grantRetry?: ReturnType<typeof setTimeout>;
+  #grantRetryAttempt = 0;
+  #grantRetryNeeded = false;
   #requestedFor?: string;
   #configureGeneration = 0;
   #stopped = false;
@@ -126,6 +128,10 @@ export class SessionServices {
     const visiblePlugins = [...wanted[1], ...shared];
     if (this.#requestedFor !== undefined && requestedFor !== this.#requestedFor) {
       this.#configureGeneration++;
+      clearTimeout(this.#grantRetry);
+      this.#grantRetry = undefined;
+      this.#grantRetryAttempt = 0;
+      this.#grantRetryNeeded = false;
       // A changed hint or an additional install must fence the old probes, but it does not revoke a service the
       // current authority still names. In particular, remembering the remux address discovered by this very run
       // feeds it back through RuntimeDiscoveryView; withdrawing Scout here unmounts an active Player. A contraction
@@ -162,6 +168,8 @@ export class SessionServices {
         if (outcome === 'verified') {
           clearTimeout(this.#grantRetry);
           this.#grantRetry = undefined;
+          this.#grantRetryAttempt = 0;
+          this.#grantRetryNeeded = false;
           const refreshed = this.grants.pluginUrls();
           this.#verifiedGrantsFor = JSON.stringify(refreshed);
           this.#configure(library, plugins, remux, refreshed);
@@ -169,11 +177,7 @@ export class SessionServices {
         }
         // Cached grants remain useful storage, but are not current authority until one refresh verifies them.
         this.#configure(library, plugins, remux, []);
-        clearTimeout(this.#grantRetry);
-        this.#grantRetry = setTimeout(() => {
-          this.#grantRetry = undefined;
-          this.#refreshGrants();
-        }, GRANT_RETRY_MS);
+        this.#scheduleGrantRetry();
       },
       () => {
         this.#grantsRefreshing = false;
@@ -184,13 +188,25 @@ export class SessionServices {
         }
         const [library, plugins, remux] = this.#pendingConfigure;
         this.#configure(library, plugins, remux, []);
-        clearTimeout(this.#grantRetry);
-        this.#grantRetry = setTimeout(() => {
-          this.#grantRetry = undefined;
-          this.#refreshGrants();
-        }, GRANT_RETRY_MS);
+        this.#scheduleGrantRetry();
       },
     );
+  }
+
+  /** Retry retained-but-unverified grants only while useful, with a finite outage budget. */
+  #scheduleGrantRetry(): void {
+    this.#grantRetryNeeded = true;
+    if (this.#stopped || !this.#foregroundReady || this.#grantRetry) return;
+    const delay = GRANT_RETRY_MS[this.#grantRetryAttempt++];
+    if (delay === undefined) {
+      this.#grantRetryNeeded = false;
+      return;
+    }
+    this.#grantRetry = setTimeout(() => {
+      this.#grantRetry = undefined;
+      if (this.#stopped || !this.#grantRetryNeeded) return;
+      this.#refreshGrants();
+    }, delay);
   }
 
   /** Stop stale work; withdraw publications only when their authority was actually contracted. */
@@ -371,6 +387,7 @@ export class SessionServices {
   foregroundReady(): void {
     if (this.#foregroundReady) return;
     this.#foregroundReady = true;
+    if (this.#grantRetryNeeded) this.#scheduleGrantRetry();
     availability.connect(this.scout, this.content);
   }
 

@@ -1892,6 +1892,8 @@ describe('LibraryLogAuthority', () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       expect(String(input)).toBe('/assistant/dropbox');
       expect(init?.method).toBe('PUT');
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(init?.signal?.aborted).toBe(false);
       published = (JSON.parse(String(init?.body)) as { pk: string }).pk;
       return new Response(null, { status: 204 });
     };

@@ -887,9 +887,10 @@ export class LibraryModel {
   task(
     task: LibraryTask,
     operationId?: string,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
     this.#assertOpen();
-    return this.service.task(task, operationId);
+    return this.service.task(task, operationId, signal);
   }
 
   importHistory(items: readonly HistoryImportItem[], operationId?: string) {
@@ -1070,8 +1071,8 @@ export class LibraryModel {
     return result;
   }
 
-  async ensurePlaybackReceipts() {
-    const { result } = await this.task({ kind: 'assistant.receipts.ensure' });
+  async ensurePlaybackReceipts(signal?: AbortSignal) {
+    const { result } = await this.task({ kind: 'assistant.receipts.ensure' }, undefined, signal);
     if (result.kind !== 'assistant.receipts.ensure')
       throw wrongQueryResult('playback receipts ensure');
     return result.dropbox;
