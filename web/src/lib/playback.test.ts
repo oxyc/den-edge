@@ -149,6 +149,40 @@ describe('startPlayback', () => {
     expect(init.cache).toBe('no-store');
   });
 
+  it('keeps a direct answer with a completion receipt external, with its subtitles and receipt end', async () => {
+    // Hearth's direct answer as it leaves `attach_receipt`: a `session` holding only the receipt's `endUrl`.
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({
+        url: 'https://flux-002.wnam.tb-cdn.io/opaque/index.m3u8',
+        subtitleResync: { supported: false, reason: 'managed_delivery' },
+        release,
+        torboxSubtitle: 4,
+        audioTrack: 0,
+        audioTracks: [{ language: 'eng', name: null, channels: 0, commentary: false }],
+        subtitles: [
+          {
+            value: 'torbox:4',
+            language: 'eng',
+            name: 'English SDH',
+            description: 'Built-in · SUBRIP',
+            source: 'built-in',
+            delivery: 'torbox',
+            torboxTrack: 4,
+          },
+        ],
+        session: { endUrl: '/den/_receipt/token' },
+      }),
+    );
+    const result = await startPlayback('/den/config/playback', want, fetchImpl);
+    if (!result || 'failure' in result) throw new Error('expected a session');
+    expect(result.external).toBe(true);
+    expect(result.subtitles).toEqual([
+      expect.objectContaining({ value: 'torbox:4', torboxTrack: 4 }),
+    ]);
+    expect(result.control?.end).toMatch(/\/den\/_receipt\/token$/);
+    expect(result.control?.report).toBeUndefined();
+  });
+
   it('normalizes the existing Remux fields and explicit controls', async () => {
     const result = await startPlayback('/den/config/playback', want, async () =>
       json({
