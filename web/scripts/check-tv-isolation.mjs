@@ -140,7 +140,12 @@ if (process.argv.includes('--capture')) {
   // and Owner continuation while E2E retains the injectable production path. Unsupported builds must keep the small
   // durable-ACK owner in Library because Player unmounts before that ACK or PIN transition finishes. Allow the next
   // 128-byte boundary above the retained delta, preserving 178 bytes of cross-machine gzip margin on this build.
-  if (initialDelta > Math.min(6784, Math.floor(baseline.initialGzip * 0.035)))
+  // The quiet update bar (top edge, held back while a player is open and drawn again when it closes, with a dismiss)
+  // adds 374 gzip bytes to startup and 403 to the complete non-translation graph on matched main/head builds
+  // (203,081 -> 203,455 and 92,153 -> 92,556). The renderer must stay in the always-loaded release recovery: it runs in
+  // an old tab after a deploy has removed that tab's lazy chunks. Raise the absolute/proportional startup caps and the
+  // total by the next 128-byte boundary, retaining 109 and 116 bytes.
+  if (initialDelta > Math.min(7168, Math.floor(baseline.initialGzip * 0.0365)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -271,5 +276,5 @@ if (process.argv.includes('--capture')) {
   // (91,770 -> 92,112) and 3 at startup on matched main/head builds, all in the lazy Player and remux chunks: Hearth's
   // refusal reason named in the unchanged notice, two closed cause codes, and the uncredentialed cross-origin session
   // end. No request, timer or listener is added. Allow the next 128-byte boundary past it, retaining 48.
-  if (coreTotalDelta > 92160) throw new Error('Browser total JS/CSS budget exceeded');
+  if (coreTotalDelta > 92672) throw new Error('Browser total JS/CSS budget exceeded');
 }

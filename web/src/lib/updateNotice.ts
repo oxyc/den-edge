@@ -19,7 +19,6 @@ export function showUpdateNotice(reloadPage: () => void): void {
   const notice = document.createElement('dialog');
   notice.id = ID;
   notice.setAttribute('role', 'status');
-  notice.setAttribute('aria-live', 'polite');
   notice.setAttribute('popover', 'manual');
   Object.assign(notice.style, {
     position: 'fixed',
@@ -27,8 +26,6 @@ export function showUpdateNotice(reloadPage: () => void): void {
     margin: '0',
     width: '100%',
     maxWidth: 'none',
-    height: 'auto',
-    boxSizing: 'border-box',
     border: '0',
     borderBottom: '1px solid var(--line)',
     padding:
