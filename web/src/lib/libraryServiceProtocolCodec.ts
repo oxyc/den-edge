@@ -1003,6 +1003,22 @@ function task(value: unknown): value is LibraryTask {
         exact(value, ',kind,grants,') &&
         list(value.grants, hexId, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
       );
+    case 'assistant.receipts.ensure':
+      return exact(value, ',kind,');
+    case 'assistant.receipts.apply':
+      return (
+        exact(value, ',kind,messages,connection,') &&
+        optional(value.connection, assistantConnection) &&
+        list(
+          value.messages,
+          (message): message is { seq: number; sealed: string } =>
+            record(message) &&
+            exact(message, ',seq,sealed,') &&
+            integer(message.seq) &&
+            boundedText(message.sealed, PLAYBACK_RECEIPT_SEALED_MAX),
+          PLAYBACK_RECEIPT_DRAIN_MAX,
+        )
+      );
     case 'assistant.apply':
       return (
         exact(value, ',kind,messages,connection,tv,') &&
@@ -1076,6 +1092,8 @@ function task(value: unknown): value is LibraryTask {
 
 /** den-edge's queue holds at most this many requests, so one drain hands out no more. */
 const ASSISTANT_DRAIN_MAX = 200;
+const PLAYBACK_RECEIPT_DRAIN_MAX = 100;
+const PLAYBACK_RECEIPT_SEALED_MAX = 2_539;
 const hexId = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
 
@@ -2339,6 +2357,22 @@ function taskResult(value: unknown): value is LibraryTaskResult {
       return exact(value, ',kind,published,') && integer(value.published);
     case 'assistant.renew':
       return exact(value, ',kind,renewed,') && integer(value.renewed);
+    case 'assistant.receipts.ensure':
+      return (
+        exact(value, ',kind,dropbox,') &&
+        nullable(
+          value.dropbox,
+          (key): key is { kid: string; public: string } =>
+            record(key) &&
+            exact(key, ',kid,public,') &&
+            hexId(key.kid) &&
+            boundedText(key.public, 2_048),
+        )
+      );
+    case 'assistant.receipts.apply':
+      return (
+        exact(value, ',kind,ack,applied,') && nullable(value.ack, integer) && integer(value.applied)
+      );
     case 'assistant.apply':
       return (
         exact(value, ',kind,results,ack,dropbox,') &&

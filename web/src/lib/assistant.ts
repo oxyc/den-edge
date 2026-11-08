@@ -35,6 +35,32 @@ export interface DropboxKey {
   public: string;
 }
 
+type PlaybackReceiptAuthority = {
+  ensurePlaybackReceipts(signal?: AbortSignal): Promise<DropboxKey | null>;
+};
+const preparedReceiptAuthorities = new WeakSet<PlaybackReceiptAuthority>();
+const receiptPreparations = new WeakMap<PlaybackReceiptAuthority, Promise<boolean>>();
+
+/** Lazily establish managed-playback completion recovery without adding assistant crypto to app startup. */
+export function preparePlaybackReceipts(
+  authority: PlaybackReceiptAuthority,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (preparedReceiptAuthorities.has(authority)) return Promise.resolve(true);
+  const pending = receiptPreparations.get(authority);
+  if (pending) return pending;
+  const preparation = authority
+    .ensurePlaybackReceipts(signal)
+    .then((dropbox) => {
+      if (!dropbox) return false;
+      preparedReceiptAuthorities.add(authority);
+      return true;
+    })
+    .finally(() => receiptPreparations.delete(authority));
+  receiptPreparations.set(authority, preparation);
+  return preparation;
+}
+
 /** What the library service made of a drain. */
 export interface ApplyOutcome {
   /** Per request, in the order handled: applied (with what it did), or refused with den-core's reason. */
@@ -149,6 +175,7 @@ export function drainPlaybackReceiptsOnce(
   loop: {
     libraryId: string;
     apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null }>;
+    canAck?: () => boolean;
     fetchImpl?: typeof fetch;
   },
   signal: AbortSignal,
@@ -181,6 +208,7 @@ export function drainPlaybackReceiptsOnce(
         });
       return;
     }
+    if (signal.aborted || (loop.canAck && !loop.canAck())) return;
     if (result.ack !== null) {
       const acknowledged = await ackQueue(result.ack, fetchImpl, undefined, 'playback/receipts');
       if (!acknowledged && !signal.aborted)
@@ -192,6 +220,36 @@ export function drainPlaybackReceiptsOnce(
         });
     }
   });
+}
+
+/** Drain one receipt batch only while the same foreground library/profile authority still owns every await. */
+export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
+  loop: {
+    libraryId: string;
+    ensure: () => Promise<DropboxKey | null>;
+    lend: () => Promise<Connection>;
+    apply: (messages: QueuedRequest[], connection: Connection) => Promise<{ ack: number | null }>;
+    current: () => boolean;
+    fetchImpl?: typeof fetch;
+  },
+  signal: AbortSignal,
+): Promise<void> {
+  await drainPlaybackReceiptsOnce(
+    {
+      libraryId: loop.libraryId,
+      apply: async (messages) => {
+        if (signal.aborted || !loop.current()) return { ack: null };
+        const dropbox = await loop.ensure();
+        if (!dropbox || signal.aborted || !loop.current()) return { ack: null };
+        const connection = await loop.lend();
+        if (signal.aborted || !loop.current()) return { ack: null };
+        return loop.apply(messages, connection);
+      },
+      canAck: () => !signal.aborted && loop.current(),
+      ...(loop.fetchImpl ? { fetchImpl: loop.fetchImpl } : {}),
+    },
+    signal,
+  );
 }
 
 /** How often the publisher asks the library service whether a projection is due (§15: it debounces and heartbeats). */

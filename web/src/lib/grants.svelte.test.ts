@@ -352,7 +352,9 @@ test('a refresh brings a renamed host and a moved end date, and leaves an unreac
     expiresAt: 1,
     addons: { scout: '/scout/~a1b2c3d4' },
   });
-  await grants.refresh(edge({ 'GET /grant/addons': () => new Response('{}', { status: 503 }) }));
+  await expect(
+    grants.refresh(edge({ 'GET /grant/addons': () => new Response('{}', { status: 503 }) })),
+  ).resolves.toBe('retained-unverified');
   expect(grants.list[0]).toMatchObject({ name: 'Sam T', ended: false });
 });
 
