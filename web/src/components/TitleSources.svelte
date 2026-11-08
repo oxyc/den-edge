@@ -175,6 +175,7 @@
     let requestGeneration = 0;
     let attempt = 0;
     let recoverable = false;
+    let waiting = false;
     let started = 0;
     const current = (request: number) =>
       generation === sourceGeneration && request === requestGeneration;
@@ -187,6 +188,7 @@
       requestGeneration++;
       controller?.abort();
       controller = undefined;
+      waiting = false;
       refreshing = false;
       failure = 'unreachable';
       recoverable = true;
@@ -237,7 +239,7 @@
         // the provider answer settles; that must not turn a healthy provider answer into an invented outage.
         return;
       }
-      if (!current(request)) return;
+      if (!current(request) || !waiting) return;
       waitPhase = decision.phase;
       if (decision.nextMs !== null) {
         waitTimer = setTimeout(() => void advanceWait(request), decision.nextMs);
@@ -255,6 +257,7 @@
       if (waitTimer) clearTimeout(waitTimer);
       waitTimer = undefined;
       recoverable = false;
+      waiting = true;
       waitPhase = 'loading';
       refreshing = rechecking || automatic;
       started = performance.now();
@@ -266,9 +269,15 @@
         rechecking || automatic,
         controller.signal,
       );
-      void advanceWait(request);
+      // Yield one task so cancellation from the replaced identity and this provider query reach the Worker before
+      // the independent policy query. `elapsedMs` still lets den-core return the exact remaining schedule.
+      waitTimer = setTimeout(() => {
+        waitTimer = undefined;
+        void advanceWait(request);
+      }, 0);
       const loaded = await loading;
       if (!current(request)) return;
+      waiting = false;
       if (waitTimer) clearTimeout(waitTimer);
       waitTimer = undefined;
       controller = undefined;
@@ -330,6 +339,7 @@
       if (waitTimer) clearTimeout(waitTimer);
       if (retryTimer) clearTimeout(retryTimer);
       controller?.abort();
+      waiting = false;
       sourceGeneration++;
       replaceClientFailureGeneration('source_lookup', sourceGeneration);
       refreshing = false;
