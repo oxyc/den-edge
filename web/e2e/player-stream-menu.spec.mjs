@@ -267,8 +267,15 @@ for (const [engine, browserType] of [
             await expect.poll(() => page.evaluate(() => window.airPlayPickerCalls ?? 0)).toBe(1);
           }
         } else {
-          await expect(video).toHaveAttribute('controls', '');
-          await expect(page.getByRole('navigation', { name: 'Playback controls' })).toHaveCount(0);
+          // A phone gets Den's transport too, and no native controls; a tap on the picture shows them if they hid.
+          await expect(video).not.toHaveAttribute('controls', '');
+          const player = page.locator('.player');
+          if (/web-controls-hidden/.test((await player.getAttribute('class')) ?? '')) {
+            const box = await video.boundingBox();
+            await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+          }
+          await expect(player).not.toHaveClass(/web-controls-hidden/);
+          await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
         }
 
         const picker = page.getByRole('button', { name: 'Stream: 4K · 11 GB' });

@@ -1,7 +1,7 @@
-// One transport at a time, and Den's own controls never over another control. A browser with a fine, hovering pointer
-// gets Den's transport and a video without native controls; a touch-only one gets the native controls with Den's bar
-// in its own row below the picture. A hybrid device (a touchscreen laptop whose browser calls the touch screen its
-// primary pointer) counts as having the fine pointer, and the choice follows the device when it changes mid-play.
+// One transport, Den's, in every browser, and Den's own controls never over another control. A fine, hovering pointer
+// clicks the picture to pause; a touch screen alone taps it to show or hide the controls, and gets 44px targets and a
+// timeline a finger can drag to the second. A hybrid device (a touchscreen laptop whose browser calls the touch screen
+// its primary pointer) changes how the transport behaves as its pointer changes, never which transport is drawn.
 // On the real player, in Chromium, Firefox and WebKit.
 import { test, expect, chromium, firefox, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
@@ -199,33 +199,101 @@ for (const [engine, browserType] of engines) {
     });
   }
 
-  // A touch-only phone: the native controls alone, Den's bar below the video's box rather than over its controls.
-  test(`a touch-only phone gets the native controls alone, nothing over them (${engine})`, async () => {
+  // A touch-only phone, upright and on its side: Den's transport and no native controls, nothing over anything, and
+  // every control a 44px target, also while the next episode counts down.
+  for (const viewport of [
+    { name: 'upright', width: 390, height: 844 },
+    { name: 'on its side', width: 844, height: 390 },
+  ]) {
+    test(`a touch-only phone ${viewport.name} gets Den's transport alone, nothing over it (${engine})`, async () => {
+      test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+      const browser = await launch(browserType);
+      try {
+        const page = await touchPage(browser, browserType, viewport);
+        const video = await openPlaying(page, '?next&resume=52');
+        expect(await page.evaluate((q) => matchMedia(q).matches, FINE_POINTER)).toBe(false);
+        await expect(video).not.toHaveAttribute('controls', '');
+        await showControls(page);
+        await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
+        expect(await overlaps(page)).toEqual([]);
+        expect(await smallTargets(page)).toEqual([]);
+        // The phone gets what the desktop gets: play from the beginning, and Den's own fullscreen.
+        await expect(page.getByRole('button', { name: 'Play from beginning' })).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Enter fullscreen' })).toBeVisible();
+
+        await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
+        expect(await overlaps(page)).toEqual([]);
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+
+  // A tap on the picture shows the controls, a second hides them, and neither pauses; untouched, they hide again.
+  test(`a tap shows or hides the controls and never pauses (${engine})`, async () => {
     test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
     const browser = await launch(browserType);
     try {
-      const context = await browser.newContext({
-        viewport: { width: 390, height: 844 },
-        hasTouch: true,
-        // Firefox has no mobile emulation; touch alone makes its pointer coarse.
-        isMobile: browserType !== firefox,
-      });
-      const page = await context.newPage();
-      const video = await openPlaying(page, '?next&resume=52');
-      expect(await page.evaluate((q) => matchMedia(q).matches, FINE_POINTER)).toBe(false);
-      await expect(video).toHaveAttribute('controls', '');
-      await expect(page.getByRole('navigation', { name: 'Playback controls' })).toHaveCount(0);
-      expect(await overlaps(page)).toEqual([]);
-      await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
-      expect(await overlaps(page)).toEqual([]);
+      const page = await touchPage(browser, browserType, { width: 390, height: 844 });
+      const video = await openPlaying(page);
+      const player = page.locator('.player');
+      // Left alone while it plays, the controls hide on their own.
+      await expect(player).toHaveClass(/web-controls-hidden/, { timeout: 10_000 });
+      await tapPicture(page);
+      await expect(player).not.toHaveClass(/web-controls-hidden/);
+      expect(await video.evaluate((v) => v.paused)).toBe(false);
+      await tapPicture(page);
+      await expect(player).toHaveClass(/web-controls-hidden/);
+      expect(await video.evaluate((v) => v.paused)).toBe(false);
+      // Touching the controls keeps them up; left alone again, they go.
+      await tapPicture(page);
+      await page.getByRole('button', { name: 'Pause', exact: true }).tap();
+      await expect.poll(() => video.evaluate((v) => v.paused)).toBe(true);
+      await page.getByRole('button', { name: 'Play', exact: true }).tap();
+      await expect(player).not.toHaveClass(/web-controls-hidden/);
+      await expect(player).toHaveClass(/web-controls-hidden/, { timeout: 10_000 });
     } finally {
       await browser.close();
     }
   });
 
-  // A touchscreen laptop: touch is the primary pointer, a trackpad is there too. Den's transport, and when the
-  // trackpad goes (tablet mode) the native controls take over — and back — without two at once.
-  test(`a hybrid device follows its pointer, one transport at a time (${engine})`, async () => {
+  // A finger drag moves the timeline to any second, not in ten-second steps, and seeks once, where it lets go.
+  test(`a finger drags the timeline to the second and seeks where it lets go (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const page = await touchPage(browser, browserType, { width: 390, height: 844 });
+      const video = await openPlaying(page);
+      await showControls(page);
+      const timeline = page.getByLabel('Playback position');
+      await expect(timeline).toHaveAttribute('step', 'any');
+      const before = await video.evaluate((v) => v.currentTime);
+      // What the engine's own range does under a dragging finger: pointerdown, inputs as it moves, change at the end.
+      await timeline.evaluate((input) => {
+        input.dispatchEvent(
+          new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }),
+        );
+        for (const value of ['20', '33.5']) {
+          input.value = value;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+      await expect(timeline).toHaveAttribute('aria-valuetext', /^0:33 /);
+      // Not sought while the finger is still down.
+      expect(await video.evaluate((v) => v.currentTime)).toBeLessThan(before + 2);
+      await timeline.evaluate((input) =>
+        input.dispatchEvent(new Event('change', { bubbles: true })),
+      );
+      await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThanOrEqual(33);
+      expect(await video.evaluate((v) => v.currentTime)).toBeLessThan(40);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  // A touchscreen laptop: touch is the primary pointer, a trackpad is there too. Den's transport throughout, as the
+  // trackpad goes (tablet mode) and comes back: never the native controls, never two at once.
+  test(`a hybrid device keeps Den's transport as its pointer changes (${engine})`, async () => {
     test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
     const browser = await launch(browserType);
     try {
@@ -241,15 +309,18 @@ for (const [engine, browserType] of engines) {
       await expect(transport).toBeVisible();
 
       await page.evaluate(() => window.__finePointer(false));
-      await expect(video).toHaveAttribute('controls', '');
-      await expect(transport).toHaveCount(0);
+      await expect(page.locator('.player')).toHaveClass(/web-touch-player/);
+      await expect(video).not.toHaveAttribute('controls', '');
+      await showControls(page);
+      await expect(transport).toBeVisible();
       expect(await overlaps(page)).toEqual([]);
       expect(await video.evaluate((v) => v.paused)).toBe(false);
 
       await page.evaluate(() => window.__finePointer(true));
+      await expect(page.locator('.player')).not.toHaveClass(/web-touch-player/);
       await expect(video).not.toHaveAttribute('controls', '');
+      await page.mouse.move(640, 300);
       await expect(transport).toBeVisible();
-      // Taking over mid-play, Den's transport shows where the element is, and that it is playing.
       await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible();
       await expect(page.getByLabel('Playback position')).not.toHaveAttribute(
         'aria-valuetext',
@@ -260,4 +331,93 @@ for (const [engine, browserType] of engines) {
       await browser.close();
     }
   });
+}
+
+// An iPhone has no element fullscreen: Den's fullscreen hands the video to Apple's player, and Den's bar is back as
+// that closes. WebKit here is a desktop build with element fullscreen, so the iPhone's answer is stood in for: no
+// `fullscreenEnabled`, and a `webkitEnterFullscreen` on the video that records the hand-over.
+test('an iPhone’s fullscreen is Apple’s player, and Den’s bar is back as it closes', async () => {
+  test.skip(!existsSync(webkit.executablePath()), 'WebKit is not installed here');
+  const browser = await webkit.launch();
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(Document.prototype, 'fullscreenEnabled', { get: () => false });
+      HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
+        window.appleFullscreen = (window.appleFullscreen ?? 0) + 1;
+      };
+    });
+    const page = await context.newPage();
+    const video = await openPlaying(page);
+    await showControls(page);
+    await page.getByRole('button', { name: 'Enter fullscreen' }).tap();
+    expect(await page.evaluate(() => window.appleFullscreen)).toBe(1);
+    expect(await page.evaluate(() => document.fullscreenElement)).toBeNull();
+    // Apple's player closes after the controls had gone behind it (a tap hides them here; waiting for them to hide on
+    // their own needs the fixture playing, which Linux WebKit does not always do): they are back, over the same video.
+    await tapPicture(page);
+    await expect(page.locator('.player')).toHaveClass(/web-controls-hidden/);
+    await video.evaluate((v) => v.dispatchEvent(new Event('webkitendfullscreen')));
+    await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+    await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
+    await expect(video).not.toHaveAttribute('controls', '');
+  } finally {
+    await browser.close();
+  }
+});
+
+/** A touch-only phone: mobile emulation where the engine has it (Firefox has none; touch alone makes it coarse). */
+async function touchPage(browser, browserType, viewport) {
+  const context = await browser.newContext({
+    viewport,
+    hasTouch: true,
+    isMobile: browserType !== firefox,
+  });
+  return context.newPage();
+}
+
+/** Tap the middle of the picture, as a finger does. */
+async function tapPicture(page) {
+  const box = await page.locator('.player video').boundingBox();
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+}
+
+/** The controls showing, by a tap on the picture if they had hidden. */
+async function showControls(page) {
+  const player = page.locator('.player');
+  if (/web-controls-hidden/.test((await player.getAttribute('class')) ?? ''))
+    await tapPicture(page);
+  await expect(player).not.toHaveClass(/web-controls-hidden/);
+}
+
+/**
+ * Every visible control of the transport and the bar smaller than a 44px target, by name and size. Den's shared
+ * `Button`s (AirPlay) take their 44px `den-button-icon` box from the app stylesheet, which this fixture does not load.
+ */
+async function smallTargets(page) {
+  return page.evaluate(() =>
+    [
+      ...document.querySelectorAll(
+        '.player .full-tv-transport :is(button, input), .player footer .controls :is(button, a, select)',
+      ),
+    ]
+      .filter(
+        (element) =>
+          element.getClientRects().length &&
+          getComputedStyle(element).visibility !== 'hidden' &&
+          !element.classList.contains('den-button'),
+      )
+      .map((element) => {
+        const r = element.getBoundingClientRect();
+        const name = element.getAttribute('aria-label') ?? element.textContent?.trim();
+        return { name, w: r.width, h: r.height };
+      })
+      // The timeline is as wide as the screen allows; it is its height a finger needs.
+      .filter((target) => target.h < 44 || (target.w < 44 && target.name !== 'Playback position'))
+      .map((target) => `${target.name} ${Math.round(target.w)}×${Math.round(target.h)}`),
+  );
 }
