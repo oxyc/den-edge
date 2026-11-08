@@ -131,11 +131,11 @@ if (process.argv.includes('--capture')) {
   // down) adds 176 gzip bytes to startup on matched main/head builds (202,447 -> 202,623): the discovery state, its
   // retry and the Library hook that runs it when den-edge answers again, which belong with discovery itself. The
   // message and Retry are a lazy component. Allow the next 128-byte boundary, retaining 45 bytes.
-  // Visible managed-playback receipt recovery originally added 692 gzip bytes to startup versus v0.271.203. Moving
-  // its presentation, localized copy and result controller into the existing assistant chunk removes 532 bytes;
-  // only the session/foreground/retry fence remains before that import. Splitting the fence would let replacement
-  // authority publish stale work. Allow the next 128-byte boundary, retaining 98 bytes on the matched build.
-  if (initialDelta > Math.min(6400, Math.floor(baseline.initialGzip * 0.033)))
+  // Visible managed-playback receipt recovery adds 243 gzip bytes to startup on matched current-main/head builds
+  // (202,635 -> 202,878). Its presentation, localized copy and result controller remain in the existing assistant
+  // chunk; only the session/foreground/retry fence stays before that import because splitting it would let replacement
+  // authority publish stale work. Allow the next 128-byte boundary, retaining 46 bytes on the matched build.
+  if (initialDelta > Math.min(6528, Math.floor(baseline.initialGzip * 0.034)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -252,10 +252,10 @@ if (process.argv.includes('--capture')) {
   // shared by People and the service page), the Worker telling the page den-edge answered after a failure with nothing
   // kept, and a row's pages kept on the device to its fifth. No request, timer or listener is added while the server
   // answers. Allow the next 128-byte boundary past it, retaining 117.
-  // Visible receipt recovery adds 1,129 gzip bytes to the non-translation graph versus v0.271.203 after consolidating
-  // its UI and controller into the existing assistant chunk and its copy into existing phrase catalogs (down from
-  // 1,321 bytes). The remaining growth is the typed failure/retirement result, cancelable ACK, durable shared/local
-  // readbacks and bounded status lifecycle; another lazy split cannot reduce complete-graph bytes. Allow 1.25 KiB,
-  // retaining 326 bytes on the matched build without changing the independent translation ceiling.
-  if (coreTotalDelta > 91520) throw new Error('Browser total JS/CSS budget exceeded');
+  // Visible receipt recovery adds 1,235 gzip bytes to the non-translation graph on matched current-main/head builds
+  // (88,754 -> 89,989). Its UI and controller remain in the existing assistant chunk and its copy in existing phrase
+  // catalogs. The remaining growth is the typed failure/retirement result, cancelable ACK, durable shared/local
+  // readbacks and bounded status lifecycle; another lazy split cannot reduce complete-graph bytes. The current-main
+  // ceiling already retains 251 bytes on the matched head, so no complete-graph allowance is added here.
+  if (coreTotalDelta > 90240) throw new Error('Browser total JS/CSS budget exceeded');
 }
