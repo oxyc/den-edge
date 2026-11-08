@@ -2989,6 +2989,7 @@
     {query}
     {explore}
     content={session.content}
+    interfaceLanguage={i18n.language}
     {atlas}
     {prefs}
     shown={browseShown}
