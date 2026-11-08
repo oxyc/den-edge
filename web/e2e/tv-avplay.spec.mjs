@@ -449,9 +449,13 @@ test('Samsung error reports retain the error enum without signed media details',
       ),
   );
   // The bridge and shared player can observe the same terminal callback before teardown has detached both paths.
-  // This contract is the report's sanitized contents, not transport-level deduplication.
-  await expect.poll(() => routed.reports.length).toBeGreaterThan(0);
-  for (const report of routed.reports)
+  // This contract is the report's sanitized contents, not transport-level deduplication. The session's playback
+  // stats follow its error report once it is let go: wait for that last report, so every one of them is checked.
+  const stats = (report) => report.message?.startsWith('playback stats');
+  await expect
+    .poll(() => routed.reports.map((report) => (stats(report) ? report.message : 'error')))
+    .toEqual(expect.arrayContaining(['error', 'playback stats (end)']));
+  for (const report of routed.reports.filter((report) => !stats(report)))
     expect(report).toMatchObject({ code: 4, message: 'PLAYER_ERROR_NOT_SUPPORTED_FILE' });
   expect(JSON.stringify(routed.reports)).not.toContain('private-capability');
   await expect(page.getByText('This browser couldn’t play this release.')).toBeVisible();
