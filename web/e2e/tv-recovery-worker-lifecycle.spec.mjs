@@ -24,10 +24,13 @@ test('modern TV recovery leaves and retries without overlapping its production W
   const code = 'GEB2-LP9U-C63W-Q95U-NSLT-XMFL';
   await page.getByText('Open with a recovery code', { exact: true }).click();
   await page.getByRole('textbox', { name: 'Recovery code' }).fill(code);
+  // Held, so the screen is left while its derivation is certainly running.
+  await page.evaluate(() => globalThis.recoveryWorkers.hold());
   await page.getByRole('button', { name: 'Open with code' }).click();
   await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(1);
   await page.getByRole('button', { name: 'Look around instead' }).click();
   await expect.poll(() => page.evaluate(() => globalThis.recoveryWorkers.active)).toBe(0);
+  await page.evaluate(() => globalThis.recoveryWorkers.release());
   expect(opens).toBe(0);
 
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
