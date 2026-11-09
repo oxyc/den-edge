@@ -150,6 +150,10 @@
             page: 'title',
             type: params.get('type') === 'tv' ? 'tv' : 'movie',
             id: Number(params.get('id')),
+            ...(params.has('direct-play') ? { play: true as const } : {}),
+            ...(params.has('episode')
+              ? { season: Number(params.get('season')), episode: Number(params.get('episode')) }
+              : {}),
           }
         : { page: 'library' },
   );
@@ -267,6 +271,25 @@
             : []),
           ...(params.has('series-continue')
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
+            : []),
+          // A newer, coordinate-overlapping Continue entry for another series must never supply the open title's
+          // target. The current-series variant proves that a real authoritative Continue remains playable even when
+          // the title's first-air date is in the future.
+          ...(params.has('other-series-continue')
+            ? [
+                {
+                  ...blankEpisode({ type: 'tv', id: 2002 }, 1, 1),
+                  progress: { value: 0.4, at: [10_000, 0, 'test'], viewing: 1 },
+                } satisfies EpisodeRow,
+              ]
+            : []),
+          ...(params.has('current-series-continue')
+            ? [
+                {
+                  ...blankEpisode({ type: 'tv', id: 2007 }, 1, 1),
+                  progress: { value: 0.4, at: [9_000, 0, 'test'], viewing: 1 },
+                } satisfies EpisodeRow,
+              ]
             : []),
           ...(withDownload ? [downloadRow] : []),
           ...homeDownloadRows,
