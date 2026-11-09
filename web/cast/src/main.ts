@@ -253,8 +253,21 @@ function hearReceiverEvents(session: CastSession | null | undefined): void {
       return;
     }
     if (message?.type !== 'den-receiver-event') return;
-    const { type: _type, ...event } = message;
+    const { type: _type, ...event } = message as { type: unknown } & Record<string, unknown>;
     console.info(`[Den receiver] ${JSON.stringify(event)}`);
+    // The receiver's player gave up on what it was playing. The sender's own media session can report that idle
+    // with no reason (`castIdleAction` waits on it as 'pending'), which left the player at "Starting Chromecast…"
+    // and the TV on Den's idle screen.
+    if (
+      event.event === 'state' &&
+      event.state === 'IDLE' &&
+      event.idleReason === 'ERROR' &&
+      castStarted &&
+      !replacingCast
+    ) {
+      castStarted = false;
+      fail('Chromecast could not continue playback');
+    }
   });
 }
 

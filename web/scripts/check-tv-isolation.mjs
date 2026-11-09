@@ -295,5 +295,8 @@ if (process.argv.includes('--capture')) {
   // goes through the existing content service (the path Detail and the TV player read seasons through) 30 s before an
   // episode ends, and timers run only while the viewer acts (a click's double-click hold, the seek ripple).
   // Allow the 128-byte boundary past it that keeps cross-machine gzip variance, retaining 182.
-  if (coreTotalDelta > 99584) throw new Error('Browser total JS/CSS budget exceeded');
+  // Casting the release a receiver can play when Hearth refuses the one playing here (one more ask, no release named)
+  // brings the complete non-translation graph to 99,636 in CI, all in the lazy Player chunk; no request is added
+  // unless Hearth refuses with `torbox_receiver_unsupported`. Allow the next 128-byte boundary past it, retaining 76.
+  if (coreTotalDelta > 99712) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -54,7 +54,9 @@ const web = fileURLToPath(new URL('..', import.meta.url));
  * loaded title on, a quarter second at a time, as the real one reports it. `interrupt`: a LOAD after the first is
  * answered as a receiver does, after the media it replaces reported once more and then went IDLE `INTERRUPTED`.
  * `refuse`: the receiver refuses every LOAD. `report`: Den's receiver on the custom namespace — `answer` says what its
- * TV plays (RECEIVER_PLAYABLE), `silent` never answers; unset, the session has no message channel, as before. The
+ * TV plays (RECEIVER_PLAYABLE), `silent` never answers, `fails` answers and then, a second into each LOAD, has its
+ * player give up: the media session goes idle with no reason, as a Chromecast's did, and the receiver says IDLE
+ * with ERROR; unset, the session has no message channel, as before. The
  * application id the page launched is kept in `window.appId`, every message it sent in `window.sent`.
  */
 const sdk = ({
@@ -155,6 +157,12 @@ const sdk = ({
             loaded = true;
             player.currentTime = request.currentTime || 0;
             player.isPaused = false;
+            if (${JSON.stringify(report ?? null)} === 'fails')
+              setTimeout(() => {
+                player.playerState = 'IDLE';
+                changes.forEach((fn) => fn());
+                this.receiverSays({ type: 'den-receiver-event', event: 'state', state: 'IDLE', idleReason: 'ERROR' });
+              }, 1000);
             return Promise.resolve();
           },
           getMediaSession() {
@@ -166,10 +174,12 @@ const sdk = ({
           const heard = {};
           window.sent = [];
           session.addMessageListener = (ns, fn) => { (heard[ns] = heard[ns] || []).push(fn); };
+          session.receiverSays = (message) =>
+            (heard['urn:x-cast:fi.oxy.den'] || []).forEach((fn) => fn('urn:x-cast:fi.oxy.den', JSON.stringify(message)));
           session.removeMessageListener = (ns, fn) => { heard[ns] = (heard[ns] || []).filter((f) => f !== fn); };
           session.sendMessage = (ns, message) => {
             window.sent.push({ ns, message });
-            if (${JSON.stringify(report)} === 'answer' && message.type === 'den-capabilities')
+            if (['answer', 'fails'].includes(${JSON.stringify(report)}) && message.type === 'den-capabilities')
               setTimeout(() => (heard[ns] || []).forEach((fn) => fn(ns, JSON.stringify({
                 type: 'den-capabilities',
                 playable: ${JSON.stringify(RECEIVER_PLAYABLE)},
@@ -587,6 +597,30 @@ test('a TorBox stream the receiver won’t load is retried once as TorBox, named
     expect(await receiver(page, 'calls')).not.toEqual(
       expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
     );
+    await playingPast(page, 0);
+  } finally {
+    await browser.close();
+  }
+});
+
+// The Chromecast's player took the LOAD, played a second and gave up, and its media session went idle with no reason.
+// The cast page waited on that reason, so the player sat at "Starting Chromecast…" and the TV on Den's idle screen
+// (2026-11-09). Den's receiver says IDLE with ERROR itself, and the player hears it.
+test('a LOAD Den’s receiver gives up on is said, and plays here again', async () => {
+  const { browser, page } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { report: 'fails' },
+    freshUrls: true,
+  });
+  try {
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect(
+      page.getByText(
+        'The Chromecast couldn’t play this TorBox release, so it’s playing here again.',
+      ),
+    ).toBeVisible({ timeout: 20_000 });
     await playingPast(page, 0);
   } finally {
     await browser.close();

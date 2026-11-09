@@ -2993,8 +2993,9 @@
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
     const pending = showTransition('Starting Chromecast…');
-    // A TorBox stream is cast as TorBox only: Remux is not a usable path to a Chromecast for remote households, so a
-    // receiver Hearth says can't take this release (`torbox_receiver_unsupported`) is refused and named, not remuxed.
+    // A TorBox stream is cast as TorBox only: Remux is not a usable path to a Chromecast for remote households. A
+    // receiver Hearth says can't take this release (`torbox_receiver_unsupported`: say HEVC, which no Cast receiver
+    // plays from TorBox's MPEG-TS) is asked once more for the best release it can play; only then is it named.
     restart(
       sameStream(session),
       () => {
@@ -3005,6 +3006,7 @@
       },
       undefined,
       pending,
+      true,
     );
   }
 
@@ -4422,6 +4424,9 @@
     undo?: () => void,
     asked?: 'direct' | 'ordinary',
     pending?: number,
+    /** A receiver that can't take the release asked for (`torbox_receiver_unsupported`) is asked once more with no
+     * release named, so Hearth picks the best one it can play. */
+    otherRelease = false,
   ) {
     const current = session;
     if (!current) {
@@ -4433,19 +4438,27 @@
     report();
     carryPosition();
     if (played) {
-      void begin(pick, { transcode: 'never' }, current, delivery, null, compatibleSubtitles)
-        .catch((error: unknown): Failure => {
-          console.warn('A requested player change got no answer; this stream carries on.', error);
-          return 'unreachable';
-        })
-        .then((moved) => {
-          if (moved !== true) clearTransition(pending);
-          // False is a player closed, or a session replaced, meanwhile: nothing to say.
-          if (typeof moved !== 'string' || session !== current) return;
-          startAt = null;
-          undo?.();
-          unchanged = unchangedNotice(moved, guestGrants.endedText(), replacementRefusal);
-        });
+      const move = (
+        asking: { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined,
+        retry: boolean,
+      ) =>
+        void begin(asking, { transcode: 'never' }, current, delivery, null, compatibleSubtitles)
+          .catch((error: unknown): Failure => {
+            console.warn('A requested player change got no answer; this stream carries on.', error);
+            return 'unreachable';
+          })
+          .then((moved) => {
+            // False is a player closed, or a session replaced, meanwhile: nothing to say.
+            if (typeof moved === 'string' && session === current && retry)
+              if (replacementRefusal?.cause === 'torbox_receiver_unsupported')
+                return move(undefined, false);
+            if (moved !== true) clearTransition(pending);
+            if (typeof moved !== 'string' || session !== current) return;
+            startAt = null;
+            undo?.();
+            unchanged = unchangedNotice(moved, guestGrants.endedText(), replacementRefusal);
+          });
+      move(pick, otherRelease && pick !== undefined);
       return;
     }
     void begin(pick, {}, undefined, delivery, null, compatibleSubtitles)
