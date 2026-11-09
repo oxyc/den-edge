@@ -31,7 +31,14 @@
     personalRows,
     type RowDef,
   } from './lib/catalog';
-  import { householdQueue, sendToTV, tvListening, type PlayRequest } from './lib/inbox';
+  import {
+    householdAssistantLane,
+    householdQueue,
+    sendToTV,
+    tvListening,
+    tvWakeable,
+    type PlayRequest,
+  } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
@@ -344,6 +351,12 @@
   const playLifetime = new AbortController();
   const playSignal = playLifetime.signal;
   onDestroy(() => playLifetime.abort());
+  const transportLifetime = new AbortController();
+  let transportAttempt: AbortController | undefined;
+  onDestroy(() => {
+    transportLifetime.abort();
+    transportAttempt?.abort();
+  });
   const playStopped = (signal?: AbortSignal) => playSignal.aborted || signal?.aborted === true;
   $effect(() => {
     const receipt = finalProgressRecovery;
@@ -1392,10 +1405,16 @@
       : undefined,
   );
 
+  type TransportOutcome = 'sent' | 'waking' | false;
+
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
+    transportAttempt?.abort();
+    const attempt = new AbortController();
+    transportAttempt = attempt;
     const live = pageLive;
     const opening = page;
+    const authority = session;
     const intended = live?.deviceId
       ? tvs.find((candidate) => candidate.id === live.deviceId && candidate.controls)
       : undefined;
@@ -1410,12 +1429,36 @@
         return { tv, queue, listening: await tvListening(queue) };
       }),
     );
-    const selected = listeningTransportTv(probed);
+    let selected = listeningTransportTv(probed);
+    let waking = false;
+    if (
+      !selected &&
+      probed.length > 0 &&
+      probed.every(({ listening }) => listening === false) &&
+      session.household.identity.libraryKey
+    ) {
+      const lane = await householdAssistantLane(intended.play);
+      waking = await tvWakeable(session.household.identity.libraryKey, lane);
+      if (waking) selected = intended;
+    }
+    if (
+      attempt.signal.aborted ||
+      transportLifetime.signal.aborted ||
+      !active ||
+      session !== authority ||
+      page?.type !== opening.type ||
+      page.id !== opening.id ||
+      pageLive?.deviceId !== live.deviceId ||
+      pageLive?.episode?.season !== live.episode?.season ||
+      pageLive?.episode?.episode !== live.episode?.episode ||
+      !tvs.some((tv) => tv.id === intended.id && tv.play === intended.play && tv.controls)
+    )
+      return false;
     const receiver = selected && probed.find(({ tv }) => tv === selected);
     if (!receiver) return false;
-    if (selected.id !== intended.id)
-      session.notify(`Controlling ${selected.name}, where Den is open`);
-    const sent = await sendToTV(receiver.queue, {
+    if (receiver.tv.id !== intended.id)
+      session.notify(`Controlling ${receiver.tv.name}, where Den is open`);
+    const command = {
       type: 'transport',
       action,
       tmdbId: opening.id,
@@ -1423,9 +1466,52 @@
       season: live.episode?.season,
       episode: live.episode?.episode,
       ...(action === 'skip' ? { offsetSeconds } : {}),
-    });
+    };
+    const sent = await sendToTV(receiver.queue, command);
     if (!sent) return false;
-    return true;
+    if (!waking) return 'sent' satisfies TransportOutcome;
+
+    // The queued append wakes only the exact writer. Its first drain can happen before the player is ready, so mirror
+    // native mobile: wait in this page's lifetime and append one fresh retry only after that exact queue is listening.
+    void (async () => {
+      const deadline = Date.now() + 25_000;
+      while (
+        !attempt.signal.aborted &&
+        !transportLifetime.signal.aborted &&
+        Date.now() < deadline
+      ) {
+        await abortableDelay(2_000, attempt.signal, transportLifetime.signal).catch(
+          () => undefined,
+        );
+        if (
+          attempt.signal.aborted ||
+          transportLifetime.signal.aborted ||
+          !active ||
+          session !== authority ||
+          page?.type !== opening.type ||
+          page.id !== opening.id ||
+          pageLive?.deviceId !== live.deviceId ||
+          pageLive?.episode?.season !== live.episode?.season ||
+          pageLive?.episode?.episode !== live.episode?.episode ||
+          !tvs.some((tv) => tv.id === intended.id && tv.play === intended.play && tv.controls)
+        )
+          return;
+        if (!(await tvListening(receiver.queue))) continue;
+        if (attempt.signal.aborted || transportLifetime.signal.aborted) return;
+        if (await sendToTV(receiver.queue, command))
+          session.notify(`Den opened on ${intended.name}. Sent the command again.`);
+        else
+          session.notify(`Couldn’t reach ${intended.name} after it woke.`, {
+            undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
+          });
+        return;
+      }
+      if (!attempt.signal.aborted && !transportLifetime.signal.aborted)
+        session.notify(`Couldn’t confirm ${intended.name} woke. Open Den and try again.`, {
+          undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
+        });
+    })();
+    return 'waking' satisfies TransportOutcome;
   }
 
   /**

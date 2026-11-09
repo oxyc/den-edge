@@ -23,6 +23,9 @@ const TV_PUSH_MS = 27_000;
 const HOUSEHOLD_TV_QUEUE = Buffer.from(
   hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'inbox', 24),
 ).toString('hex');
+const HOUSEHOLD_TV_LANE = Buffer.from(
+  hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'assistant-tv', 16),
+).toString('hex');
 
 /**
  * One den-edge for both browsers: what one writes, the other pulls. `pulls` lists when each page asked, and
@@ -414,6 +417,56 @@ test('a series’ page says which device plays which episode, and keeps controls
     const pausedSamples = await watch(clock, 3_000);
     expect(new Set(pausedSamples).size, 'the paused clock stayed frozen').toBe(1);
     expect(await boxes(), 'nothing moved when playback paused').toEqual(withLive);
+  } finally {
+    await close();
+  }
+});
+
+test('a sleeping exact TV is visibly woken and retried without inventing paused playback', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { edge, play, close } = await openWithDevice(browser, page);
+  try {
+    await page.locator('.card', { hasText: 'Series 1003' }).click();
+    const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
+    const controls = page.getByLabel('Controls for Apple TV');
+    const label = controls.locator('strong');
+    await expect(label).toHaveText('Playing on Apple TV', { timeout: 40_000 });
+
+    let listening = false;
+    let member;
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 200, json: { listening } }),
+    );
+    await page.route(`${E2E_ORIGIN}/wake/targets`, (route) => {
+      member = route.request().headers()['x-den-library-member'];
+      return route.fulfill({
+        status: 200,
+        json: { targets: [{ tv: HOUSEHOLD_TV_LANE, wakeable: true }] },
+      });
+    });
+    await page.route(`${E2E_ORIGIN}/inbox/append`, (route) => {
+      edge.controls.push({
+        header: route.request().headers()['x-den-link'],
+        body: route.request().postDataJSON(),
+      });
+      if (edge.controls.length === 1) listening = true;
+      return route.fulfill({ status: 200, json: { queued: true } });
+    });
+
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
+    expect(member).toMatch(/^[0-9a-f]{32}:[0-9a-f]{64}$/);
+    await expect.poll(() => edge.controls.length).toBe(2);
+    expect(edge.controls.map(({ header }) => header)).toEqual([
+      HOUSEHOLD_TV_QUEUE,
+      HOUSEHOLD_TV_QUEUE,
+    ]);
+    await expect(page.getByRole('status')).toContainText('Den opened on Apple TV');
+    await expect(label).toHaveText('Playing on Apple TV');
+    playing.pause();
   } finally {
     await close();
   }
