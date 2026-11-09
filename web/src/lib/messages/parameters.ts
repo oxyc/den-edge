@@ -14,6 +14,8 @@ export const PARAMETER_FALLBACKS = {
   'actions.openDetailsFor': 'Open details for {value}',
   'actions.switchProfileCurrent': 'Switch profile, current {value}',
   'actions.use': 'Use {value}',
+  'profile.ownerPinNeeded': 'Needed to switch from {value} back to the Owner',
+  'profile.ageAndUnratedHidden': '{age} and under · unrated hidden',
   'actions.browse': 'Browse {value}',
   'actions.playTitle': 'Play {value}',
   'actions.removeContinueWatching': 'Remove {value} from Continue Watching',

@@ -64,6 +64,18 @@
     dialog?.close();
   });
 
+  function choiceDescription(choice: ProfileChoice): string {
+    if (choice.role === 'kid')
+      return profiles.preview
+        ? i18n.phrase('Profile preview · content filtering is not active yet')
+        : i18n.format('profile.ageAndUnratedHidden', '{age} and under · unrated hidden', {
+            age: choice.policy?.maximumAge ?? 12,
+          });
+    return choice.role === 'visitor'
+      ? i18n.phrase('Stays on this browser · activity erased when you switch profiles')
+      : i18n.phrase('Your library and household settings');
+  }
+
   function focusPinAfterPaint() {
     requestAnimationFrame(() =>
       dialog?.querySelector<HTMLInputElement>('#owner-pin')?.focus({ preventScroll: true }),
@@ -321,9 +333,9 @@
       if (pending && /^\d{4}$/.test(pin)) void (settingPin ? setPin(pin) : switchTo(pending));
     }}
   >
-    {#if !addingKid}<h2 id="profile-switcher-title">Who’s watching?</h2>{/if}
+    {#if !addingKid}<h2 id="profile-switcher-title">{i18n.phrase('Who’s watching?')}</h2>{/if}
     {#if failed}<p class="denied" role="alert">
-        The profile switch couldn’t be completed. Try again.
+        {i18n.phrase('The profile switch couldn’t be completed. Try again.')}
       </p>{/if}
     {#if addingKid && AddKidProfileForm}
       <AddKidProfileForm
@@ -336,24 +348,34 @@
       <p role="status">{i18n.text('profile.loadingKidControls')}</p>
     {:else if pending}
       <button class="back" type="button" disabled={switching} onclick={backToProfiles}
-        >← Profiles</button
+        >{i18n.phrase('← Profiles')}</button
       >
       <div class="pending-profile">
         <ProfileAvatar choice={pending} />
         {#if settingPin}
           <div>
-            <strong>{firstPin === null ? 'Set an Owner PIN' : 'Enter the PIN again'}</strong>
-            <span>Needed to switch from {pending.name} back to the Owner</span>
+            <strong
+              >{i18n.phrase(firstPin === null ? 'Set an Owner PIN' : 'Enter the PIN again')}</strong
+            >
+            <span
+              >{i18n.format(
+                'profile.ownerPinNeeded',
+                'Needed to switch from {value} back to the Owner',
+                { value: pending.name },
+              )}</span
+            >
           </div>
         {:else}
-          <div><strong>{pending.name}</strong><span>Owner approval required</span></div>
+          <div>
+            <strong>{pending.name}</strong><span>{i18n.phrase('Owner approval required')}</span>
+          </div>
         {/if}
       </div>
       {#if settingPin}
         {#key firstPin === null}
           <PinInput
             id="owner-pin"
-            label={firstPin === null ? 'New Owner PIN' : 'Confirm Owner PIN'}
+            label={i18n.phrase(firstPin === null ? 'New Owner PIN' : 'Confirm Owner PIN')}
             bind:value={pin}
             autocomplete="new-password"
             invalid={mismatch}
@@ -363,21 +385,25 @@
           />
         {/key}
         {#if mismatch}<p class="denied" role="alert">
-            Those PINs didn’t match. Choose one again.
+            {i18n.phrase('Those PINs didn’t match. Choose one again.')}
           </p>{/if}
       {:else if pinConfigured === undefined}
-        <p role="status">Checking parental controls…</p>
+        <p role="status">{i18n.phrase('Checking parental controls…')}</p>
       {:else if pinConfigured}
         <PinInput
           id="owner-pin"
-          label="Owner PIN"
+          label={i18n.phrase('Owner PIN')}
           bind:value={pin}
           invalid={denied}
           onvalue={() => (denied = false)}
           oncomplete={() => pending && void switchTo(pending)}
         />
-        {#if profiles.preview}<p class="preview-pin">Preview PIN: <strong>1234</strong></p>{/if}
-        {#if denied}<p class="denied" role="alert">That PIN didn’t match.</p>{/if}
+        {#if profiles.preview}<p class="preview-pin">
+            {i18n.phrase('Preview PIN:')} <strong>1234</strong>
+          </p>{/if}
+        {#if denied}<p class="denied" role="alert">
+            {i18n.phrase('That PIN didn’t match.')}
+          </p>{/if}
       {/if}
       <div class="actions">
         {#if settingPin}
@@ -386,7 +412,11 @@
             type="button"
             disabled={switching || !/^\d{4}$/.test(pin)}
             onclick={() => void setPin(pin)}
-            >{switching ? 'Saving…' : firstPin === null ? 'Continue' : pendingLabel}</button
+            >{switching
+              ? i18n.phrase('Saving…')
+              : firstPin === null
+                ? i18n.phrase('Continue')
+                : pendingLabel}</button
           >
         {:else}
           <button
@@ -396,14 +426,18 @@
               switching ||
               (pinConfigured === true && !/^\d{4}$/.test(pin))}
             onclick={() => void switchTo(pending!)}
-            >{switching ? 'Switching…' : pendingLabel}</button
+            >{switching ? i18n.phrase('Switching…') : pendingLabel}</button
           >
         {/if}
-        <button type="button" disabled={switching} onclick={() => dialog?.close()}>Cancel</button>
+        <button type="button" disabled={switching} onclick={() => dialog?.close()}
+          >{i18n.phrase('Cancel')}</button
+        >
       </div>
     {:else}
-      <p class="intro">Choose once. Den opens here next time until you switch again.</p>
-      <div class="profiles" aria-label="Profiles" data-spatial-list="vertical">
+      <p class="intro">
+        {i18n.phrase('Choose once. Den opens here next time until you switch again.')}
+      </p>
+      <div class="profiles" aria-label={i18n.phrase('Profiles')} data-spatial-list="vertical">
         {#each profiles.choices as choice (choice.role === 'visitor' ? 'visitor' : choice.id)}
           <div data-spatial-item>
             <button
@@ -419,17 +453,10 @@
               <ProfileAvatar {choice} />
               <span class="choice-copy">
                 <strong>{choice.name}</strong>
-                <small>
-                  {choice.role === 'kid'
-                    ? profiles.preview
-                      ? 'Profile preview · content filtering is not active yet'
-                      : `${choice.policy?.maximumAge ?? 12} and under · unrated hidden`
-                    : choice.role === 'visitor'
-                      ? 'Stays on this browser · activity erased when you switch profiles'
-                      : 'Your library and household settings'}
-                </small>
+                <small>{choiceDescription(choice)}</small>
               </span>
-              {#if choiceKey(choice) === choiceKey(active)}<span class="current-label">Current</span
+              {#if choiceKey(choice) === choiceKey(active)}<span class="current-label"
+                  >{i18n.phrase('Current')}</span
                 >{/if}
             </button>
           </div>

@@ -15,6 +15,8 @@ export const parameters = {
   'actions.openDetailsFor': 'Öppna information om {value}',
   'actions.switchProfileCurrent': 'Byt profil, aktuell: {value}',
   'actions.use': 'Använd {value}',
+  'profile.ownerPinNeeded': 'Behövs för att byta från {value} tillbaka till ägaren',
+  'profile.ageAndUnratedHidden': '{age} år och yngre · orankade titlar dolda',
   'actions.browse': 'Bläddra bland {value}',
   'actions.playTitle': 'Spela {value}',
   'actions.removeContinueWatching': 'Ta bort {value} från Fortsätt titta',
