@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+import { forgetReused } from '../lib/reuse';
 import {
   beginServiceDirectoryLoad,
   canonicalProviderName,
   completeServiceDirectoryLoad,
+  contentServices,
+  contentServicesResult,
   countriesFrom,
   failServiceDirectoryLoad,
   matches,
@@ -12,6 +16,8 @@ import {
 } from './services';
 
 describe('service directory', () => {
+  beforeEach(forgetReused);
+
   it('folds tier and channel variants onto one service', () => {
     expect(canonicalProviderName('Netflix Standard with Ads')).toBe('netflix');
     expect(canonicalProviderName('Max Amazon Channel')).toBe('max');
@@ -104,5 +110,47 @@ describe('service directory', () => {
       completeServiceDirectoryLoad(retry, 1, { services: [], complete: true }),
       'request 1 cannot erase the newer request 2 state',
     ).toBe(retry);
+  });
+
+  it('shares only authoritative directories from the same profile-owned content port', async () => {
+    const answer = {
+      kind: 'service.directory' as const,
+      services: servicesFrom(
+        [{ provider_id: 8, provider_name: 'Netflix', display_priority: 1 }],
+        'movie',
+        'FI',
+      ),
+      complete: true,
+    };
+    const port = (complete = true) => {
+      const query = vi.fn(async () => ({ ...answer, complete }));
+      return {
+        query,
+        onStatus: () => () => {},
+      } as unknown as ContentServiceClientPort & { query: typeof query };
+    };
+    const first = port();
+
+    await Promise.all([contentServicesResult(first, 'FI'), contentServices(first, 'FI')]);
+    expect(first.query, 'the mounted page and its primer join one request').toHaveBeenCalledTimes(
+      1,
+    );
+
+    const replacement = port();
+    await contentServicesResult(replacement, 'FI');
+    expect(
+      replacement.query,
+      'a replacement profile/household port owns a fresh answer',
+    ).toHaveBeenCalledTimes(1);
+
+    const partial = port(false);
+    await contentServicesResult(partial, 'FI');
+    await contentServicesResult(partial, 'FI');
+    expect(partial.query, 'a useful partial answer remains shared').toHaveBeenCalledTimes(1);
+    await contentServicesResult(partial, 'FI', true);
+    expect(
+      partial.query,
+      'an explicit Retry replaces the shared partial answer',
+    ).toHaveBeenCalledTimes(2);
   });
 });

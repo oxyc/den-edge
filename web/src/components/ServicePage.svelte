@@ -11,7 +11,11 @@
   import { servicePage } from '../lib/services';
   import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
-  import { contentServices, matches, type Service } from '../settings/services';
+  import {
+    contentServicesResult,
+    matches,
+    type ServiceDirectoryResult,
+  } from '../settings/services';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
@@ -62,17 +66,34 @@
     active?: boolean;
   } = $props();
 
-  let directory = $state<Service[] | null>(null);
+  let directory = $state<ServiceDirectoryResult | null>(null);
   let unreachable = $state(false);
+  let directoryRetry = $state(0);
+  const nextDirectoryRequest = { refresh: false };
+
+  function retryDirectory() {
+    nextDirectoryRequest.refresh = true;
+    directoryRetry++;
+  }
 
   $effect(() => {
+    const source = content;
     const wanted = country;
+    const wantedId = id;
+    void directoryRetry;
+    const refresh = nextDirectoryRequest.refresh;
+    nextDirectoryRequest.refresh = false;
     let current = true;
     directory = null;
     unreachable = false;
-    void contentServices(content, wanted).then(
-      (services) => {
-        if (current) directory = services;
+    void contentServicesResult(source, wanted, refresh).then(
+      (result) => {
+        if (!current) return;
+        directory = result;
+        // One useful provider half is source-supported and may render. Only a complete directory can prove that a
+        // provider is absent; an incomplete result that does not name this route remains a retryable failure.
+        unreachable =
+          !result.complete && !result.services.some((entry) => matches(entry, wantedId));
       },
       () => {
         if (current) unreachable = true;
@@ -84,7 +105,7 @@
   });
 
   /** A pick can name a variant TMDB has since demoted, so the directory is searched by fold, not by id. */
-  const service = $derived(directory?.find((entry) => matches(entry, id)) ?? null);
+  const service = $derived(directory?.services.find((entry) => matches(entry, id)) ?? null);
   /** The rows wait on atlas discovery, which couldn't reach Den's server. */
   const waiting = $derived(!atlasReady && atlasUnreachable);
   /** Which of a service's catalogue is shown; null is all of it. Offered only where the service carries both. */
@@ -208,8 +229,11 @@
     <Browse {rows} {shown} {build} />
   {/if}
 {:else if unreachable}
-  <p class="note">Couldn’t reach the service directory. Check your connection and try again.</p>
-{:else if directory}
+  <ServerUnreachable
+    onretry={retryDirectory}
+    message="Couldn’t reach the service directory. Check your connection and try again."
+  />
+{:else if directory?.complete}
   <p class="note">This service isn’t listed in {country}.</p>
 {:else}
   <div data-route-loading><Loading label="Loading this service" page /></div>

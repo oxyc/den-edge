@@ -31,6 +31,25 @@ describe('reuse', () => {
     expect(asked).toBe(1);
   });
 
+  it('replaces a held generation without letting its late answer erase the replacement', async () => {
+    let releaseOld!: (value: string) => void;
+    let releaseNew!: (value: string) => void;
+    const old = reuse('q', () => new Promise<string>((resolve) => (releaseOld = resolve)), {
+      now: 0,
+    });
+    const replacement = reuse('q', () => new Promise<string>((resolve) => (releaseNew = resolve)), {
+      now: 1,
+      replace: true,
+    });
+    const joined = reuse('q', async () => 'wrong', { now: 2 });
+
+    releaseOld('old');
+    expect(await old).toBe('old');
+    releaseNew('new');
+    expect(await Promise.all([replacement, joined])).toEqual(['new', 'new']);
+    expect(await reuse('q', async () => 'wrong', { now: 3 })).toBe('new');
+  });
+
   it('does not keep a failure: the next caller asks again', async () => {
     let asked = 0;
     const failing = async () => {

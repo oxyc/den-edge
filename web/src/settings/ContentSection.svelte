@@ -160,7 +160,7 @@
     if (current?.status === 'loading') return;
     const request = ++serviceRequest;
     directories.set(code, beginServiceDirectoryLoad(current, request));
-    void contentServicesResult(content, code).then(
+    void contentServicesResult(content, code, retry).then(
       (found) => {
         const latest = directories.get(code);
         if (latest) directories.set(code, completeServiceDirectoryLoad(latest, request, found));

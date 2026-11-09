@@ -8,7 +8,7 @@ const FIXTURE = `${E2E_ORIGIN}/test/service-page.html`;
  * A service in one country, as TMDB and atlas describe it: Netflix carrying films, and atlas's "New on Netflix"
  * chart, whose first title TMDB has no backdrop for. `chart` decides when that chart answers.
  */
-async function serveNetflix(page, { chart = async () => {} } = {}) {
+async function serveNetflix(page, { chart = async () => {}, directory } = {}) {
   const asked = [];
   const pageOwned = [];
   await page.addInitScript(() => {
@@ -19,13 +19,18 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
       return pageFetch(input, { ...init, headers });
     };
   });
-  await routeTmdb(page, (route) => {
+  await routeTmdb(page, async (route) => {
     const url = new URL(route.request().url());
     asked.push(`${url.pathname}${url.search}`);
     if (route.request().headers()['x-den-test-fetch-realm'])
       pageOwned.push(`${url.pathname}${url.search}`);
     const path = url.pathname.replace(/^\/(tmdb\/)?3\//, '/');
-    if (path.startsWith('/watch/providers/'))
+    if (path.startsWith('/watch/providers/')) {
+      if (
+        directory &&
+        (await directory(route, { path, region: url.searchParams.get('watch_region') }))
+      )
+        return;
       return route.fulfill({
         json: {
           results:
@@ -41,6 +46,7 @@ async function serveNetflix(page, { chart = async () => {} } = {}) {
               : [],
         },
       });
+    }
     if (path.startsWith('/discover/')) return route.fulfill({ json: { results: [] } });
     const id = Number(/^\/movie\/(\d+)$/.exec(path)?.[1]);
     if (id)
@@ -160,6 +166,109 @@ const COMPLETE_FIRST_SCREEN = {
   film102: 1,
   film103: 1,
 };
+
+test('a failed service directory retries in place and resumes the same page', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  let unavailable = true;
+  const { asked } = await serveNetflix(page, {
+    directory: async (route) => {
+      if (!unavailable) return false;
+      await route.fulfill({ status: 503, json: {} });
+      return true;
+    },
+  });
+  await page.goto(`${FIXTURE}?page`);
+
+  const failure = page.getByRole('alert');
+  await expect(failure).toContainText(
+    'Couldn’t reach the service directory. Check your connection and try again.',
+  );
+  const retry = failure.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  expect(servicePageRequests(asked)).toMatchObject({ movieDirectory: 1, tvDirectory: 1 });
+
+  unavailable = false;
+  await retry.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Netflix' })).toBeVisible();
+  await expect
+    .poll(() => servicePageRequests(asked))
+    .toMatchObject({
+      movieDirectory: 2,
+      tvDirectory: 2,
+    });
+  await expect(page).toHaveURL(`${FIXTURE}?page`);
+});
+
+test('only a complete directory presents a service as absent', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  let tvUnavailable = false;
+  const { asked } = await serveNetflix(page, {
+    directory: async (route, { path }) => {
+      if (tvUnavailable && path === '/watch/providers/tv')
+        await route.fulfill({ status: 503, json: {} });
+      else await route.fulfill({ json: { results: [] } });
+      return true;
+    },
+  });
+
+  await page.goto(`${FIXTURE}?page`);
+  await expect(page.getByText('This service isn’t listed in US.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+
+  // The production Worker keeps provider directories in IndexedDB across reloads. Clear that authority explicitly
+  // so the next page really observes the new partial answer rather than repainting the first complete directory.
+  await page.evaluate(() => window.clearProviderCache());
+  tvUnavailable = true;
+  await page.reload();
+  await expect(page.getByRole('alert')).toContainText('Couldn’t reach the service directory.');
+  await expect(page.getByText('This service isn’t listed in US.')).toHaveCount(0);
+  await expect
+    .poll(() => servicePageRequests(asked))
+    .toMatchObject({ movieDirectory: 2, tvDirectory: 2 });
+});
+
+test('a held directory answer cannot replace a newer service route', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  let releaseUS;
+  const heldUS = new Promise((resolve) => (releaseUS = resolve));
+  const { asked } = await serveNetflix(page, {
+    directory: async (route, { path, region }) => {
+      if (region === 'US') await heldUS;
+      const movie = path === '/watch/providers/movie';
+      await route.fulfill({
+        json: {
+          results:
+            movie && region === 'CA'
+              ? [{ provider_id: 9, provider_name: 'Crave', display_priority: 1 }]
+              : movie
+                ? [{ provider_id: 8, provider_name: 'Netflix', display_priority: 1 }]
+                : [],
+        },
+      });
+      return true;
+    },
+  });
+  await page.goto(`${FIXTURE}?page`);
+  await expect
+    .poll(() => ({
+      movie: requestCount(asked, '/tmdb/3/watch/providers/movie', { watch_region: 'US' }),
+      tv: requestCount(asked, '/tmdb/3/watch/providers/tv', { watch_region: 'US' }),
+    }))
+    .toEqual({ movie: 1, tv: 1 });
+
+  await page.evaluate(() => window.showService(9, 'CA'));
+  await expect(page.getByRole('heading', { name: 'Crave' })).toBeVisible();
+  releaseUS();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.getByRole('heading', { name: 'Crave' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Netflix' })).toHaveCount(0);
+});
 
 test('the service billboard shows a loading state, then its titles with their picture', async ({
   browser,

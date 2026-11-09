@@ -2,13 +2,17 @@
      atlas: an answer, not a load that never ends. It also clears by itself once den-edge answers again
      (`SessionServices.retry`). -->
 <script lang="ts">
+  import { i18n } from '../lib/i18n.svelte';
   import Button from './Button.svelte';
 
-  let { onretry }: { onretry: () => void } = $props();
+  let {
+    onretry,
+    message = 'Den’s server can’t be reached right now.',
+  }: { onretry: () => void; message?: string } = $props();
 </script>
 
 <div class="unreachable" role="alert">
-  <p class="note">Den’s server can’t be reached right now.</p>
+  <p class="note">{i18n.phrase(message)}</p>
   <Button variant="secondary" label="Try again" onclick={onretry} />
 </div>
 

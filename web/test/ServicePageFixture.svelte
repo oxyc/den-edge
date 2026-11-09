@@ -21,8 +21,21 @@
   onDestroy(() => services.close());
   // Settings re-read as the library refreshes: the same languages, in a new Set.
   let languages = $state(new Set<string>());
+  let serviceId = $state(8);
+  let country = $state('US');
   (window as unknown as { reread: () => Promise<void> }).reread = async () => {
     languages = new Set(languages);
+    await tick();
+  };
+  (window as unknown as { clearProviderCache: () => Promise<void> }).clearProviderCache =
+    async () => {
+      await content.query({ kind: 'provider-cache.clear', service: 'tmdb' });
+    };
+  (
+    window as unknown as { showService: (id: number, country: string) => Promise<void> }
+  ).showService = async (id, nextCountry) => {
+    serviceId = id;
+    country = nextCountry;
     await tick();
   };
   const netflix = {
@@ -39,8 +52,8 @@
 <main style="padding:var(--bar-space) var(--gutter)">
   {#if page}
     <ServicePage
-      id={8}
-      country="US"
+      id={serviceId}
+      {country}
       {content}
       atlas="/atlas"
       excludedLanguages={languages}

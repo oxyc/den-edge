@@ -20,17 +20,21 @@ function sweep(now: number): void {
 
 /**
  * `make()`'s promise, shared by every caller asking under `key` within `REUSE_MS`. A failure is not kept: the next
- * caller asks again rather than being handed the same refusal for five minutes. Nor is an answer `keep` turns down —
- * one that is usable now but partial — though callers already waiting on it still share it.
+ * caller asks again rather than being handed the same refusal for five minutes. Nor is an answer `keep` turns down.
+ * `replace` starts a new shared generation even while the prior answer is live, for an explicit user-owned refresh.
  */
 export function reuse<T>(
   key: string,
   make: () => Promise<T>,
-  { now = Date.now(), keep }: { now?: number; keep?: (value: T) => boolean } = {},
+  {
+    now = Date.now(),
+    keep,
+    replace = false,
+  }: { now?: number; keep?: (value: T) => boolean; replace?: boolean } = {},
 ): Promise<T> {
   sweep(now);
   const kept = held.get(key);
-  if (kept && now - kept.at < REUSE_MS) return kept.value as Promise<T>;
+  if (!replace && kept && now - kept.at < REUSE_MS) return kept.value as Promise<T>;
   const value = make();
   held.delete(key);
   held.set(key, { at: now, value });
