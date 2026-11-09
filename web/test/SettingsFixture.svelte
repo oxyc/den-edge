@@ -4,6 +4,7 @@
   // the TV's hide rules, an addon, and two devices. Everything is in memory, so the page has something to show
   // without a paired TV or a den-edge behind it, and a save lands where the page reads it back from.
   import Settings from '../src/Settings.svelte';
+  import Router from '../src/Router.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import { browserClock } from '../src/lib/clock';
   import type { LibraryLog } from '../src/lib/log';
@@ -18,6 +19,12 @@
   import { fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
+  import type {
+    ContentPolicy,
+    ContentRequest,
+    ContentResultFor,
+  } from '../src/lib/contentServiceProtocol';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import { links } from '../src/lib/links.svelte';
   import type { JoinLibrary } from '../src/lib/browserHousehold';
@@ -28,6 +35,8 @@
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const fixtureQuery = new URLSearchParams(location.search);
+  const heldKeyValidation = fixtureQuery.has('key-save-authority');
+  if (heldKeyValidation) history.replaceState(null, '', `/settings${location.search}`);
   const joinPresentationFixture = fixtureQuery.has('join-presentation');
   const replacesAuthority =
     fixtureQuery.has('authority-replacement') ||
@@ -397,7 +406,94 @@
     libraryKey: fixtureLibraryKey,
     mode: 'local',
   });
-  const content = contentServices.content;
+  type HeldKeyCheck = {
+    service: 'tmdb' | 'omdb' | 'content-warnings';
+    candidate: string;
+    runtime: string;
+    settled: boolean;
+    settle: (outcome: 'accepted' | 'refused' | 'unavailable') => void;
+  };
+  const heldKeyChecks: HeldKeyCheck[] = [];
+  const contentFor = (runtime: string): ContentServiceClientPort => ({
+    query<Request extends ContentRequest>(
+      request: Request,
+      signal?: AbortSignal,
+      policy?: ContentPolicy,
+      onProgress?: (partial: ContentResultFor<Request>) => void,
+    ): Promise<ContentResultFor<Request>> {
+      if (
+        heldKeyValidation &&
+        request.kind === 'provider-key.check' &&
+        typeof request.candidate === 'string'
+      )
+        return new Promise((resolve) => {
+          const call: HeldKeyCheck = {
+            service: request.service,
+            candidate: request.candidate!,
+            runtime,
+            settled: false,
+            settle(outcome) {
+              if (call.settled) return;
+              call.settled = true;
+              resolve({
+                kind: 'provider-key.check',
+                service: request.service,
+                outcome,
+              } as ContentResultFor<Request>);
+            },
+          };
+          heldKeyChecks.push(call);
+        });
+      return contentServices.content.query(request, signal, policy, onProgress);
+    },
+    onStatus: (listener) => contentServices.content.onStatus(listener),
+  });
+  let content = $state.raw<ContentServiceClientPort>(contentFor('owner-a'));
+  let contentRuntime = 0;
+  const keySaveAuthorityControls = {
+    calls: () =>
+      heldKeyChecks.map(({ service, candidate, runtime, settled }) => ({
+        service,
+        candidate,
+        runtime,
+        settled,
+      })),
+    settle(index: number, outcome: 'accepted' | 'refused' | 'unavailable') {
+      heldKeyChecks[index]?.settle(outcome);
+    },
+    replaceOwner() {
+      authorityReplacementControls.replace();
+      content = contentFor(`owner-replacement-${++contentRuntime}`);
+    },
+    replaceRuntime() {
+      content = contentFor(`owner-runtime-${++contentRuntime}`);
+    },
+    leave(role: 'kid' | 'visitor') {
+      document.dispatchEvent(
+        new CustomEvent('den:navigate', { detail: { path: `/?departed-as=${role}` } }),
+      );
+    },
+    reopen() {
+      document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/settings' } }));
+    },
+    reopenReplacement() {
+      authorityReplacementControls.replace();
+      content = contentFor(`owner-reopened-${++contentRuntime}`);
+      settingsMounted = true;
+    },
+    rejectNextSave(replacement = false) {
+      (replacement ? replacementLibrary : library)?.rejectNextApiKeyCommand();
+    },
+    commands: () => ({
+      primary: structuredClone(library.apiKeyCommands),
+      replacement: structuredClone(replacementLibrary?.apiKeyCommands ?? []),
+    }),
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureKeySaveAuthority?: typeof keySaveAuthorityControls;
+    }
+  ).fixtureKeySaveAuthority = keySaveAuthorityControls;
   let contentReady = $state(false);
   void contentModel.ready
     .then(() => contentModel.setApiKey('tmdb', 'K1', 'settings-fixture-key'))
@@ -423,7 +519,24 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  {#if contentReady && settingsMounted}<Settings
+  {#if heldKeyValidation}
+    <Router onchange={() => {}}>
+      {#snippet children(route, _active, routePresentation)}
+        {#if route.page === 'settings'}
+          {#if contentReady}<Settings
+              {link}
+              {model}
+              {activityModel}
+              {content}
+              {routePresentation}
+              onresetkey={async () => null}
+            />{/if}
+        {:else}
+          <h1>Home</h1>
+        {/if}
+      {/snippet}
+    </Router>
+  {:else if contentReady && settingsMounted}<Settings
       {link}
       {model}
       {activityModel}

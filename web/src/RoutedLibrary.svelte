@@ -1873,7 +1873,7 @@
           onchange(route);
         }}
       >
-        {#snippet children(route, active)}
+        {#snippet children(route, active, routePresentation)}
           {#if route.page === 'settings'}
             {#if profileCoordinator}<MobileProfileRow profiles={profileCoordinator} />{/if}
             {#if settingsRoute === 'personal'}
@@ -1908,6 +1908,7 @@
                   activityModel={shown.model ?? householdSettingsModel}
                   preferences={shown.preferences}
                   content={session.content}
+                  {routePresentation}
                   local={session.local}
                   oninterfacelanguage={(language) => {
                     session.presentIn(language);
