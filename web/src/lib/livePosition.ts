@@ -12,8 +12,9 @@
  * A position written longer ago than this is no longer playing: the device stopped or went away. The window holds
  * two 30 s producer intervals, native's 5 s delivery debounce and one 5 s consumer pull, plus a 5 s boundary margin.
  * Thus one lost delivery does not stop the clock. Producer traffic is unchanged; the cost is that an ungraceful stop
- * can appear live for up to 30 s longer than the old 45 s window. A delivered explicit pause/stop still applies at
- * once.
+ * can appear live for up to 30 s longer than the old 45 s window. During that bounded stale tail a visible remote
+ * play can retain at most six 5 s pull opportunities and 120 four-Hz clock callbacks; ordinary visible maintenance
+ * would otherwise use its 25 s held read/30 s schedule. A delivered explicit pause/stop still applies at once.
  */
 export const LIVE_MS = 75_000;
 /**
