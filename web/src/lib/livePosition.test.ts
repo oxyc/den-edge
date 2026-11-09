@@ -4,6 +4,7 @@ import {
   LIVE_MS,
   livePosition,
   MAX_ACTIVITY_CLOCK_SKEW_MS,
+  recent,
   REMOTE_RESUME_MS,
   resumable,
   sight,
@@ -35,9 +36,19 @@ describe('livePosition', () => {
     ).toBeUndefined();
   });
 
-  // The TV's log reaches den-edge about every 30 s, so the newest write a page sees can be that old already.
-  it('keeps counting through the ~30 s between pushes', () => {
-    expect(livePosition({ seconds: 1390, at }, at + 38_000)).toBe(1428);
+  it('stays visible until the replacement for one lost 30 s delivery can be pulled', () => {
+    // First eligible save at `at`; the 30 s save is lost. The 60 s save reaches den-edge after native's 5 s
+    // debounce, and a Web/TV consumer observes it on the next 5 s pull.
+    const replacementWritten = at + 60_000;
+    const replacementObserved = at + 70_000;
+    expect(recent({ at }, replacementObserved)).toBe(true);
+    expect(livePosition({ seconds: 1390, at }, replacementObserved)).toBe(1460);
+    expect(livePosition({ seconds: 1450, at: replacementWritten }, replacementObserved)).toBe(1460);
+  });
+
+  it('keeps a bounded delayed delivery visible without extending an abandoned play forever', () => {
+    expect(livePosition({ seconds: 1390, at }, at + LIVE_MS)).toBe(1465);
+    expect(livePosition({ seconds: 1390, at }, at + LIVE_MS + 1)).toBeUndefined();
   });
 
   it('is not playing at a write that left the position where it was', () => {
