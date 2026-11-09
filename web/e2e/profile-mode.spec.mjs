@@ -955,54 +955,118 @@ test('profile control moves from the desktop header to the mobile Settings row',
   await expect(dialog).toBeHidden();
 });
 
-test('profile row and dialog follow the interface language without losing keyboard focus', async ({
+test('mounted profile controls localize every role and preserve PIN, retry, reopen, and focus behavior', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await open(page, 'preview', '?pin=1234');
+  await open(page, true, '?pin=none&realProfiles&rejectLock');
 
   const row = page.locator('.mobile-profile-row');
   await expect(row).toBeVisible();
   await expect(row).toHaveAttribute('aria-label', 'Switch profile, current Owner');
   await expect(row.getByText('Switch profile', { exact: true })).toBeVisible();
-
-  await page.evaluate(async () => {
-    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
-    await setInterfaceLanguage('es');
-  });
-  await expect(page.locator('html')).toHaveAttribute('lang', 'es');
-  await expect(row).toHaveAttribute('aria-label', 'Cambiar perfil, actual: Owner');
-  await expect(row.getByText('Cambiar perfil', { exact: true })).toBeVisible();
-
   await row.focus();
   await row.press('Enter');
-  const dialog = page.getByRole('dialog', { name: '¿Quién está mirando?' });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Perfiles');
-  await expect(
-    dialog.getByText('Su biblioteca y entorno doméstico', { exact: true }),
-  ).toBeVisible();
-  const kid = dialog.getByRole('button', { name: 'Usar Kids' });
-  await kid.focus();
 
-  await page.evaluate(async () => {
-    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
-    await setInterfaceLanguage('sv');
-  });
-  await expect(page.locator('html')).toHaveAttribute('lang', 'sv');
-  await expect(dialog).toHaveAccessibleName('Vem tittar?');
-  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Profiler');
-  await expect(dialog.getByRole('button', { name: 'Använd Kids' })).toBeFocused();
+  let dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Profiles');
+  await expect(dialog.getByRole('button', { name: 'Use Owner' })).toContainText('Current');
   await expect(
-    dialog.getByText('Förhandsgranskning av profil · innehållsfiltrering är inte aktiv än', {
+    dialog.getByText('Your library and household settings', { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByText('12 and under · unrated hidden', { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByText('Stays on this browser · activity erased when you switch profiles', {
       exact: true,
     }),
   ).toBeVisible();
 
   await dialog.press('Escape');
   await expect(row).toBeFocused();
+  await row.press('Enter');
+  await dialog.getByRole('button', { name: 'Use Kids' }).click();
+  await expect(dialog.getByText('Set an Owner PIN', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('New Owner PIN')).toBeFocused();
+  await page.getByLabel('New Owner PIN').fill('1234');
+  await expect(dialog.getByText('Enter the PIN again', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Confirm Owner PIN')).toBeFocused();
+  await page.getByLabel('Confirm Owner PIN').fill('0000');
+  await expect(dialog.getByRole('alert')).toHaveText('Those PINs didn’t match. Choose one again.');
+  await expect(page.getByLabel('New Owner PIN')).toBeFocused();
+  await page.getByLabel('New Owner PIN').fill('1234');
+  await page.getByLabel('Confirm Owner PIN').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+
+  await page.evaluate(async () => {
+    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
+    await setInterfaceLanguage('es');
+  });
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es');
+  await expect(row).toHaveAttribute('aria-label', 'Cambiar perfil, actual: Kids');
+  await expect(row.getByText('Cambiar perfil', { exact: true })).toBeVisible();
+  await row.focus();
+  await row.press('Enter');
+  dialog = page.getByRole('dialog', { name: '¿Quién está mirando?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Perfiles');
+  await expect(dialog.getByRole('button', { name: 'Usar Kids' })).toContainText('Actual');
+  await expect(
+    dialog.getByText('12 años o menos · títulos sin clasificar ocultos', { exact: true }),
+  ).toBeVisible();
+  await dialog.press('Escape');
+  await expect(row).toBeFocused();
+  await row.press('Enter');
+  await dialog.getByRole('button', { name: 'Usar Visitor' }).click();
+  await expect(dialog.getByText('Se requiere la aprobación del propietario')).toBeVisible();
+  await expect(page.getByLabel('PIN de propietario')).toBeFocused();
+  await page.getByLabel('PIN de propietario').fill('0000');
+  await expect(dialog.getByRole('alert')).toHaveText('Ese PIN no coincide.');
+  await expect(page.getByLabel('PIN de propietario')).toBeFocused();
+  await page.getByLabel('PIN de propietario').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  await expect(row).toHaveAttribute('aria-label', 'Cambiar perfil, actual: Visitor');
+
+  await page.evaluate(async () => {
+    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
+    await setInterfaceLanguage('sv');
+  });
+  await expect(page.locator('html')).toHaveAttribute('lang', 'sv');
+  await expect(row).toHaveAttribute('aria-label', 'Byt profil, aktuell: Visitor');
+  await row.focus();
+  await row.press('Enter');
+  dialog = page.getByRole('dialog', { name: 'Vem tittar?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Profiler');
+  await expect(
+    dialog.getByText('Blir kvar i den här webbläsaren · aktivitet raderas när du byter profil', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await dialog.press('Escape');
+  await expect(row).toBeFocused();
+  await row.press('Enter');
+  await dialog.getByRole('button', { name: 'Använd Owner' }).click();
+  await expect(dialog.getByText('Ägarens godkännande krävs')).toBeVisible();
+  await expect(page.getByLabel('Ägarens PIN-kod')).toBeFocused();
+  await page.getByLabel('Ägarens PIN-kod').fill('0000');
+  await expect(dialog.getByRole('alert')).toHaveText('PIN-koden stämde inte.');
+  await expect(page.getByLabel('Ägarens PIN-kod')).toBeFocused();
+  await page.getByLabel('Ägarens PIN-kod').fill('1234');
+  await expect(dialog.getByRole('alert')).toHaveText(
+    'Profilbytet kunde inte slutföras. Försök igen.',
+  );
+  await expect(page.locator('[data-mode]')).toHaveText('Visitor active');
+  await expect(page.getByLabel('Ägarens PIN-kod')).toBeFocused();
+  await page.getByLabel('Ägarens PIN-kod').fill('1234');
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
   await expect(row).toHaveAttribute('aria-label', 'Byt profil, aktuell: Owner');
-  await expect(row.getByText('Byt profil', { exact: true })).toBeVisible();
+
+  await row.click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Använd Owner' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
 });
 
 test('TV remote follows profile row order when modal geometry cannot distinguish rows', async ({
