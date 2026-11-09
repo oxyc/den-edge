@@ -47,6 +47,7 @@
 
   const params = new URLSearchParams(location.search);
   const playBoundary = params.has('play-boundary');
+  const playBoundaryOwner = playBoundary && params.has('owner');
   const receiptUnsupported = params.has('receipt-unsupported');
   let profileHandoff = $state('');
   const populated = params.has('populated');
@@ -608,14 +609,22 @@
             )
           : playBoundary
             ? activeProfileSession(
-                persistentProfileIdentity('22222222222222222222222222222222', 'fixture-kid-a'),
+                persistentProfileIdentity(
+                  '22222222222222222222222222222222',
+                  playBoundaryOwner ? 'fixture-owner' : 'fixture-kid-a',
+                ),
                 library.session.household,
                 library.session.model!,
                 null,
-                { maximumAge: 12, unknownRatings: 'block' },
-                false,
-                true,
-                [{ type: 'movie', id: 1001 }],
+                playBoundaryOwner ? null : { maximumAge: 12, unknownRatings: 'block' },
+                playBoundaryOwner,
+                !playBoundaryOwner,
+                playBoundaryOwner
+                  ? []
+                  : [
+                      { type: 'movie', id: 1001 },
+                      { type: 'tv', id: 2007 },
+                    ],
               )
             : library.session,
   );
@@ -724,7 +733,7 @@
             replace: (profile: 'same' | 'other' | 'owner') => void;
             hold: () => void;
             release: () => void;
-            stats: () => { asked: number; waiting: number; cancelled: number };
+            stats: () => { asked: number; waiting: number; cancelled: number; sources: number };
           };
         }
       ).denTestPlayBoundary = {
@@ -754,6 +763,7 @@
           asked: boundaryContent!.asked,
           waiting: boundaryContent!.waiting.size,
           cancelled: boundaryContent!.cancelled,
+          sources: library.queryKinds.filter((kind) => kind === 'download.sources').length,
         }),
       };
   }
