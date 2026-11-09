@@ -5676,7 +5676,10 @@
         <b>{title.title}</b>
         {#if season !== undefined}<span>S{season} · E{episode}</span>{/if}
       </div>
-      <span class="web-output">
+      <span
+        class="web-output"
+        class:web-output-empty={!(session && airPlayCapable) && !castSlotShown}
+      >
         {#if session && airPlayCapable}
           <button
             class="web-glyph output-action"
@@ -7409,6 +7412,12 @@
     justify-content: flex-end;
     min-width: 44px;
     min-height: 44px;
+  }
+
+  /* Empty, the box only holds the place. Away from home the cast page is the picture and draws its own Cast button in
+     its corner, under this box, which took that press whenever the controls showed. */
+  .web-top > .web-output-empty {
+    pointer-events: none;
   }
 
   /* Every control is a bare glyph on a 44px target; only Play is filled. Pressed, a faint circle behind it. */
