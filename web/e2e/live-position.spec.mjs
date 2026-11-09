@@ -1,8 +1,8 @@
 // A title playing on another device shows where it is on this page, ticking, for as long as it plays — and stops
 // after it does. Two browsers share one in-memory den-edge: this page runs the production RoutedLibrary and Worker
 // (so the lifecycle it reports and the refresh cadence it gets are the real ones), and a second browser is the other
-// device, writing the position every three seconds as the Apple TV's player does. Real time, not a fake clock: the
-// cadence lives in the Worker, which a page clock does not reach.
+// device, writing its first eligible position immediately and then every 30 seconds. Real time, not a fake clock:
+// the save, debounce and pull cadences live outside the page clock.
 import { hkdfSync } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
@@ -14,12 +14,11 @@ import { routeTmdb } from './network.mjs';
 test.describe.configure({ mode: 'parallel' });
 
 const FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
-const WRITE_EVERY_MS = 3_000;
-const BETWEEN_PUSHES_MS = 32_000;
+const WRITE_EVERY_MS = 30_000;
+const DELIVERY_DEBOUNCE_MS = 5_000;
+const ONE_LOST_DELIVERY_MS = 72_000;
 const SHORT_PLAYING_MS = 12_000;
-const EXPIRE_LIVE_MS = 46_000;
-/** A held read of den-edge (25 s) and the sync after it: how often the Apple TV's log reaches den-edge. */
-const TV_PUSH_MS = 27_000;
+const EXPIRE_LIVE_MS = 76_000;
 const HOUSEHOLD_TV_QUEUE = Buffer.from(
   hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'inbox', 24),
 ).toString('hex');
@@ -28,13 +27,11 @@ const HOUSEHOLD_TV_QUEUE = Buffer.from(
  * One den-edge for both browsers: what one writes, the other pulls. `pulls` lists when each page asked, and
  * `arrivals` how old the device's newest write was each time this page's pull carried it.
  *
- * `pushEveryMs` makes the device push as the Apple TV does: it writes its position every three seconds into its
- * own log, but its log reaches den-edge only when its sync runs. den-edge's request log, with a TV playing, showed
- * its `POST /lib/:id/batch` in bursts about 30 s apart. In den (the tvOS app) that is the reconciliation poll — a
- * 25 s held read of `/changes`, then a sync (`RootView.startReconciliationPoll`, `HeldPoll.wait`) — and a debounced
- * sync that each 3 s progress write pushes back, up to its 60 s cap (`LibraryLogSync.scheduleSync`).
+ * `loseOnePeriodicDelivery` holds the device's writes before den-edge: the first eligible save is delivered at once,
+ * the 30 s save is lost, and the 60 s replacement waits for the native five-second delivery debounce. The page then
+ * observes it through its production five-second active-playback pull.
  */
-function sharedEdge({ pushEveryMs = 0 } = {}) {
+function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
   const generation = 'live-position';
   /** Every row den-edge holds, by key. */
   const rows = new Map();
@@ -50,7 +47,10 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
   let deviceWrote = 0;
   let pushedWrite = 0;
   let pulledWrite = 0;
+  const deviceWrites = [];
+  let deliveryArmed = false;
   const waiters = new Set();
+  const deliveryTimers = new Set();
   const wake = () => {
     for (const resolve of waiters) resolve();
     waiters.clear();
@@ -61,7 +61,13 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
     pushedWrite = deviceWrote;
     wake();
   };
-  const pushing = pushEveryMs ? setInterval(push, pushEveryMs) : undefined;
+  const after = (delay, work) => {
+    const timer = setTimeout(() => {
+      deliveryTimers.delete(timer);
+      work();
+    }, delay);
+    deliveryTimers.add(timer);
+  };
   const route = async (page, name) => {
     await routeLibraryEdge(page);
     // This fixture needs a reachable player route as well as the paired TV: the regression below checks that the
@@ -155,7 +161,7 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
       if (url.pathname.endsWith('/batch') && request.method() === 'POST') {
         const applied = [];
         const conflicts = [];
-        const held = name === 'device' && pushEveryMs;
+        const held = name === 'device' && loseOnePeriodicDelivery && deliveryArmed;
         for (const write of request.postDataJSON().writes) {
           const current = unpushed.get(write.k) ?? rows.get(write.k);
           if ((current?.seq ?? 0) !== write.base) {
@@ -168,7 +174,11 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
         }
         if (name === 'device') {
           deviceWrote = Date.now();
+          deviceWrites.push(deviceWrote);
           if (!held) pushedWrite = deviceWrote;
+          else if (deviceWrites.length === 1) push();
+          // The second save stays private to the device: its replacement supersedes it before the next delivery.
+          else if (deviceWrites.length > 2) after(DELIVERY_DEBOUNCE_MS, push);
         }
         if (!held) wake();
         return route.fulfill({ headers, json: { applied, conflicts } });
@@ -182,8 +192,14 @@ function sharedEdge({ pushEveryMs = 0 } = {}) {
     waits,
     arrivals,
     controls,
+    deviceWrites,
+    armLostDelivery: () => {
+      deliveryArmed = true;
+      deviceWrites.length = 0;
+    },
     close: () => {
-      clearInterval(pushing);
+      for (const timer of deliveryTimers) clearTimeout(timer);
+      deliveryTimers.clear();
       wake();
     },
   };
@@ -210,26 +226,31 @@ async function openWithDevice(browser, page, options) {
   await edge.route(device, 'device');
   await device.goto(`${FIXTURE}?writer`);
   await device.getByRole('status').filter({ hasText: 'Writer ready' }).waitFor({ timeout: 15_000 });
+  edge.armLostDelivery();
 
   let timer;
   let pausedAt;
   // The write in flight, which `close` waits for: closing the device's context under it would reject it.
   let writing = Promise.resolve();
   /**
-   * Writes `title`'s position every three seconds, counting on from `from`, until `stop()`. After `pause()` the
-   * writes go on at the position it paused at, as the TV's do while its player is paused.
+   * Writes `title`'s first eligible position immediately and then every 30 seconds, counting on from `from`, until
+   * `stop()`. `pause()` writes the explicit transition immediately, as production does.
    */
   const play = (title, from, episode) => {
     const started = Date.now();
-    const write = () =>
+    const write = (playing = true) =>
       (writing = device.evaluate(
-        ([title, seconds, episode]) => window.fixturePlay(title, seconds, episode),
-        [title, pausedAt ?? from + Math.floor((Date.now() - started) / 1000), episode],
+        ([title, seconds, episode, playing]) =>
+          window.fixturePlay(title, seconds, episode, playing),
+        [title, pausedAt ?? from + Math.floor((Date.now() - started) / 1000), episode, playing],
       ));
     void write();
     timer = setInterval(() => void write(), WRITE_EVERY_MS);
     return {
-      pause: () => (pausedAt = from + Math.floor((Date.now() - started) / 1000)),
+      pause: () => {
+        pausedAt = from + Math.floor((Date.now() - started) / 1000);
+        void write(false);
+      },
     };
   };
   const stop = () => clearInterval(timer);
@@ -290,7 +311,7 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
 }) => {
   test.setTimeout(240_000);
   const { edge, play, stop, close } = await openWithDevice(browser, page, {
-    pushEveryMs: TV_PUSH_MS,
+    loseOnePeriodicDelivery: true,
   });
   try {
     const clock = homeClock(page);
@@ -308,10 +329,30 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     // Fractional poster sizing can put the nominal 18px inset on either side of a half-pixel rounding boundary.
     expect(bottomInset).toBeGreaterThanOrEqual(17);
     expect(bottomInset).toBeLessThanOrEqual(19);
-    // Long enough to span the TV's next real 27-second push and several of this page's 5-second pulls.
-    await expectTicking(clock, edge, BETWEEN_PUSHES_MS);
+    // Span the lost 30 s delivery and the 60 s replacement's five-second delivery debounce plus a consumer pull.
+    // Waiting for the first pull before this watch means the next ordinary 90 s periodic save also lands in it.
+    await expectTicking(clock, edge, ONE_LOST_DELIVERY_MS);
+    expect(
+      edge.deviceWrites,
+      'first, lost periodic, replacement, and following periodic saves',
+    ).toHaveLength(4);
+    for (const gap of gaps(edge.deviceWrites)) {
+      expect(
+        gap,
+        'writer saves stayed on the 30 s cadence rather than duplicating',
+      ).toBeGreaterThanOrEqual(WRITE_EVERY_MS - 500);
+    }
+    expect(
+      edge.arrivals,
+      'the first, replacement, and following periodic deliveries reached den-edge',
+    ).toHaveLength(3);
+    expect(
+      edge.arrivals[1],
+      'replacement delivery included the five-second debounce',
+    ).toBeGreaterThanOrEqual(DELIVERY_DEBOUNCE_MS - 500);
 
-    // Stopped on the TV: no more writes. The clock runs on until the last one is LIVE_MS (45 s) old.
+    // An abandoned player has no explicit transition. The last write still retires after the bounded 75 s window;
+    // the helper's focused boundary test proves that exactly 75 s remains inclusive and the next millisecond is not.
     stop();
     await page.clock.fastForward(EXPIRE_LIVE_MS);
     await expect(clock).toBeHidden();
@@ -340,8 +381,8 @@ test('a series’ page says which device plays which episode, and keeps controls
       await block.boundingBox(),
       await actions.boundingBox(),
     ];
-    // The seeded resume point was written as the page opened, so its own clock may still be running out.
-    await expect(clock).toBeHidden({ timeout: 60_000 });
+    // The seeded resume point can still be within the inclusive 75 s live window when the production Worker opens.
+    await expect(clock).toBeHidden({ timeout: 90_000 });
     await expect(label).toHaveText('Continue Watching');
     const continueIcon = await block.locator('.lead-icon').boundingBox();
     const projectedResume = await resume.getAttribute('href');
@@ -432,7 +473,7 @@ test('a title paused on another device stops its clock at the next write that di
     // Two live pulls are enough to prove that fresh writes keep the clock moving before the pause check.
     await expectTicking(clock, edge, SHORT_PLAYING_MS);
 
-    // Paused on the device: it goes on writing every three seconds, at one position.
+    // Paused on the device: the transition is written immediately with explicit producer state.
     playing.pause();
     const paused = Date.now();
     await expect(clock).toBeHidden({ timeout: 20_000 });
