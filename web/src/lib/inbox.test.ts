@@ -12,7 +12,7 @@ import {
   tvWakeable,
 } from './inbox';
 import { linkKeys } from './pair';
-import { fromHex, toBase64url } from './wire';
+import { deriveKeys, fromHex, toBase64url } from './wire';
 
 // den-spec, checked out at the repository root; the TV opens the same messages.
 const vectors = JSON.parse(
@@ -165,7 +165,8 @@ describe('authorizing an exact sleeping TV wake', () => {
     expect(await tvWakeable(libraryKey, lane, fetchImpl)).toBe(true);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe('/wake/targets');
-    expect(requests[0]?.member).toMatch(/^[0-9a-f]{32}:[0-9a-f]{64}$/);
+    const keys = await deriveKeys(new Uint8Array(32).fill(7));
+    expect(requests[0]?.member).toBe(`${keys.id}:${keys.member}`);
   });
 
   it('fails closed for an old backend, malformed view, another lane, or invalid household key', async () => {

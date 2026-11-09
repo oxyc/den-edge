@@ -152,7 +152,7 @@
     ontransport?: (
       action: 'play' | 'pause' | 'skip',
       offsetSeconds?: number,
-    ) => Promise<'sent' | 'waking' | false>;
+    ) => Promise<'sent' | 'waking' | 'unconfirmed' | false>;
     /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
@@ -329,6 +329,10 @@
     }
     if (sent === 'waking') {
       notify?.(`Waking ${live?.device ?? 'your TV'}…`);
+      return;
+    }
+    if (sent === 'unconfirmed') {
+      notify?.(`Sent to ${live?.device ?? 'your TV'}, but playback is unconfirmed.`);
       return;
     }
     if (action === 'play') optimisticPlaying = true;

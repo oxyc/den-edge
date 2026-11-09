@@ -5,7 +5,7 @@
 import { hex, hkdf } from './crypto';
 import { cleanLabel } from './edge';
 import type { Link } from './links.svelte';
-import { deriveKeys, fromBase64url, toBase64url } from './wire';
+import { fromBase64url, toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
 
@@ -348,12 +348,20 @@ export async function tvWakeable(
     return false;
   }
   try {
-    const keys = await deriveKeys(raw);
+    // Keep this foreground-only wake check on inbox's compact crypto graph. `deriveKeys` also derives the
+    // library token, encryption and MAC keys and imports two CryptoKeys that this read never uses.
+    const [id, member] = await Promise.all([
+      hkdf(raw, 'den/library/salt/v1', 'den/library/id/v1', 16),
+      hkdf(raw, 'den/library/v2', 'member', 32),
+    ]);
+    const proof = `${hex(id)}:${hex(member)}`;
+    id.fill(0);
+    member.fill(0);
     const res = await fetchImpl('/wake/targets', {
       signal: AbortSignal.timeout(REQUEST_MS),
       headers: {
         accept: 'application/json',
-        'x-den-library-member': `${keys.id}:${keys.member}`,
+        'x-den-library-member': proof,
       },
     });
     if (!res.ok) return false;

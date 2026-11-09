@@ -1405,7 +1405,7 @@
       : undefined,
   );
 
-  type TransportOutcome = 'sent' | 'waking' | false;
+  type TransportOutcome = 'sent' | 'waking' | 'unconfirmed' | false;
 
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
@@ -1415,10 +1415,31 @@
     const live = pageLive;
     const opening = page;
     const authority = session;
+    const libraryKey = authority.household.identity.libraryKey;
     const intended = live?.deviceId
       ? tvs.find((candidate) => candidate.id === live.deviceId && candidate.controls)
       : undefined;
     if (!intended || !live || !opening || (action !== 'play' && !live.active)) return false;
+    const pageType = opening.type;
+    const pageId = opening.id;
+    const writerId = live.deviceId;
+    const season = live.episode?.season;
+    const episode = live.episode?.episode;
+    const targetId = intended.id;
+    const targetName = intended.name;
+    const writerPlay = intended.play;
+    const current = () =>
+      !attempt.signal.aborted &&
+      !transportLifetime.signal.aborted &&
+      active &&
+      session === authority &&
+      session.household.identity.libraryKey === libraryKey &&
+      page?.type === pageType &&
+      page.id === pageId &&
+      pageLive?.deviceId === writerId &&
+      pageLive?.episode?.season === season &&
+      pageLive?.episode?.episode === episode &&
+      tvs.some((tv) => tv.id === targetId && tv.play === writerPlay && tv.controls);
     // The latest position can briefly name a TV whose Den app was replaced by another HDMI/input app, while a
     // second Den TV continues the same title off-screen. Prefer the exact writer when it is listening; otherwise
     // route to the one awake command-capable receiver. The title/episode guard at that receiver remains decisive.
@@ -1429,46 +1450,38 @@
         return { tv, queue, listening: await tvListening(queue) };
       }),
     );
+    if (!current()) return false;
     let selected = listeningTransportTv(probed);
     let waking = false;
     if (
       !selected &&
       probed.length > 0 &&
       probed.every(({ listening }) => listening === false) &&
-      session.household.identity.libraryKey
+      libraryKey
     ) {
       const lane = await householdAssistantLane(intended.play);
-      waking = await tvWakeable(session.household.identity.libraryKey, lane);
+      if (!current()) return false;
+      waking = await tvWakeable(libraryKey, lane);
       if (waking) selected = intended;
     }
-    if (
-      attempt.signal.aborted ||
-      transportLifetime.signal.aborted ||
-      !active ||
-      session !== authority ||
-      page?.type !== opening.type ||
-      page.id !== opening.id ||
-      pageLive?.deviceId !== live.deviceId ||
-      pageLive?.episode?.season !== live.episode?.season ||
-      pageLive?.episode?.episode !== live.episode?.episode ||
-      !tvs.some((tv) => tv.id === intended.id && tv.play === intended.play && tv.controls)
-    )
-      return false;
+    if (!current()) return false;
     const receiver = selected && probed.find(({ tv }) => tv === selected);
     if (!receiver) return false;
-    if (receiver.tv.id !== intended.id)
-      session.notify(`Controlling ${receiver.tv.name}, where Den is open`);
+    if (receiver.tv.id !== targetId)
+      authority.notify(`Controlling ${receiver.tv.name}, where Den is open`);
     const command = {
       type: 'transport',
       action,
-      tmdbId: opening.id,
-      mediaType: opening.type,
-      season: live.episode?.season,
-      episode: live.episode?.episode,
+      tmdbId: pageId,
+      mediaType: pageType,
+      season,
+      episode,
       ...(action === 'skip' ? { offsetSeconds } : {}),
     };
     const sent = await sendToTV(receiver.queue, command);
+    if (!current()) return false;
     if (!sent) return false;
+    if (receiver.listening === null) return 'unconfirmed' satisfies TransportOutcome;
     if (!waking) return 'sent' satisfies TransportOutcome;
 
     // The queued append wakes only the exact writer. Its first drain can happen before the player is ready, so mirror
@@ -1480,34 +1493,29 @@
         !transportLifetime.signal.aborted &&
         Date.now() < deadline
       ) {
-        await abortableDelay(2_000, attempt.signal, transportLifetime.signal).catch(
-          () => undefined,
-        );
-        if (
-          attempt.signal.aborted ||
-          transportLifetime.signal.aborted ||
-          !active ||
-          session !== authority ||
-          page?.type !== opening.type ||
-          page.id !== opening.id ||
-          pageLive?.deviceId !== live.deviceId ||
-          pageLive?.episode?.season !== live.episode?.season ||
-          pageLive?.episode?.episode !== live.episode?.episode ||
-          !tvs.some((tv) => tv.id === intended.id && tv.play === intended.play && tv.controls)
-        )
-          return;
-        if (!(await tvListening(receiver.queue))) continue;
-        if (attempt.signal.aborted || transportLifetime.signal.aborted) return;
-        if (await sendToTV(receiver.queue, command))
-          session.notify(`Den opened on ${intended.name}. Sent the command again.`);
+        await abortableDelay(
+          Math.min(2_000, Math.max(0, deadline - Date.now())),
+          attempt.signal,
+          transportLifetime.signal,
+        ).catch(() => undefined);
+        if (!current()) return;
+        const listening = await tvListening(receiver.queue);
+        // The request above can outlive a route, profile, exact writer/play key or newer command. Revalidate all of
+        // them before the sole retry, not only the AbortControllers.
+        if (!current()) return;
+        if (Date.now() >= deadline) break;
+        if (!listening) continue;
+        const resent = await sendToTV(receiver.queue, command);
+        if (!current()) return;
+        if (resent) authority.notify(`Den opened on ${targetName}. Sent the command again.`);
         else
-          session.notify(`Couldn’t reach ${intended.name} after it woke.`, {
+          authority.notify(`Couldn’t reach ${targetName} after it woke.`, {
             undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
           });
         return;
       }
-      if (!attempt.signal.aborted && !transportLifetime.signal.aborted)
-        session.notify(`Couldn’t confirm ${intended.name} woke. Open Den and try again.`, {
+      if (current())
+        authority.notify(`Couldn’t confirm ${targetName} woke. Open Den and try again.`, {
           undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
         });
     })();
