@@ -159,6 +159,10 @@ const sdk = ({
             player.isPaused = false;
             if (${JSON.stringify(report ?? null)} === 'fails')
               setTimeout(() => {
+                this.receiverSays({
+                  type: 'den-receiver-event', event: 'error', detailedErrorCode: 104, reason: null,
+                  error: { message: null, code: null, shakaErrorCode: 3014 },
+                });
                 player.playerState = 'IDLE';
                 changes.forEach((fn) => fn());
                 this.receiverSays({ type: 'den-receiver-event', event: 'state', state: 'IDLE', idleReason: 'ERROR' });
@@ -183,7 +187,7 @@ const sdk = ({
               setTimeout(() => (heard[ns] || []).forEach((fn) => fn(ns, JSON.stringify({
                 type: 'den-capabilities',
                 playable: ${JSON.stringify(RECEIVER_PLAYABLE)},
-                details: { maxHeight: 2160 },
+                details: { maxHeight: 2160, firmware: '1.56.500000', deviceType: 'AndroidTV' },
               }))), 200);
             return Promise.resolve();
           };
@@ -273,7 +277,7 @@ async function open(
   });
   const page = await context.newPage();
   await guardNetwork(page);
-  const asked = { managed: [], failures: [], castFrames: 0 };
+  const asked = { managed: [], failures: [], castFrames: 0, castReports: [] };
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: { castOrigin: CAST } }));
@@ -309,7 +313,10 @@ async function open(
   );
   for (const route of ['direct', 'remux'])
     await page.route(`${ORIGIN}/${route}/releases`, (r) => r.fulfill({ json: { releases: [] } }));
-  await page.route(/\/playback\/(?:outcome|cast)$/, (r) => r.fulfill({ status: 204 }));
+  await page.route(/\/playback\/(?:outcome|cast)$/, (r) => {
+    if (r.request().url().endsWith('/cast')) asked.castReports.push(r.request().postDataJSON());
+    return r.fulfill({ status: 204 });
+  });
   await page.route(`${ORIGIN}/diagnostics/failure`, (r) => {
     asked.failures.push(r.request().postDataJSON());
     return r.fulfill({ status: 204 });
@@ -607,7 +614,7 @@ test('a TorBox stream the receiver won’t load is retried once as TorBox, named
 // The cast page waited on that reason, so the player sat at "Starting Chromecast…" and the TV on Den's idle screen
 // (2026-11-09). Den's receiver says IDLE with ERROR itself, and the player hears it.
 test('a LOAD Den’s receiver gives up on is said, and plays here again', async () => {
-  const { browser, page } = await open(chromium, {
+  const { browser, page, asked } = await open(chromium, {
     appId: DEN_APP,
     sdkOptions: { report: 'fails' },
     freshUrls: true,
@@ -622,6 +629,20 @@ test('a LOAD Den’s receiver gives up on is said, and plays here again', async 
       ),
     ).toBeVisible({ timeout: 20_000 });
     await playingPast(page, 0);
+    // Closed, the visit's cast report says which receiver it was, what its TV plays, and how its player failed.
+    await reveal(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+    await expect.poll(() => asked.castReports).toHaveLength(1);
+    expect(asked.castReports[0]).toMatchObject({
+      kind: 'chromecast',
+      rxH264: RECEIVER_PLAYABLE.h264,
+      rxHdr: RECEIVER_PLAYABLE.hdr,
+      rxMaxHeight: 2160,
+      rxFirmware: '1.56.500000',
+      rxDevice: 'AndroidTV',
+      rxError: 104,
+      rxShaka: 3014,
+    });
   } finally {
     await browser.close();
   }

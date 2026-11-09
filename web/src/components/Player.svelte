@@ -21,7 +21,12 @@
     returnsFromCast,
     type CastState,
   } from '../lib/castOffer';
-  import { castReceiverOptIn, playableOf } from '../lib/castReceiver';
+  import {
+    castReceiverFields,
+    castReceiverOptIn,
+    playableOf,
+    receiverInfoOf,
+  } from '../lib/castReceiver';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
   import { retryWithoutHint } from '../lib/ipv4';
@@ -852,6 +857,9 @@
   let castFailReason: CastFailReason | undefined;
   let castSessionStartedAt: number | undefined;
   let castSessionSecs = 0;
+  /** Which receiver this visit cast to, as Den's receiver describes itself, and its player's last error codes. */
+  let castReceiverInfo: { maxHeight?: number; firmware?: string; deviceType?: string } | undefined;
+  let castReceiverError: { code?: number; shaka?: number } | undefined;
   /** What the playing session's media is really arriving at. */
   let meter = new DeliveryMeter();
   /** Set once no other copy fitted the link: this one plays on, and delivery is not weighed again. */
@@ -2612,7 +2620,9 @@
     device?: unknown;
     profile?: unknown;
     playable?: unknown;
+    receiverInfo?: unknown;
     code?: unknown;
+    shaka?: unknown;
     focused?: unknown;
     visible?: unknown;
     hover?: unknown;
@@ -2651,11 +2661,18 @@
         // What Den's receiver said its TV plays, else the receiver model the viewer keeps, else its default.
         castReport =
           message.profile === 'receiver' ? (playableOf(message.playable) ?? undefined) : undefined;
+        castReceiverInfo = castReport ? receiverInfoOf(message.receiverInfo) : undefined;
         if (castReport) castProfile = 'receiver';
         else if (typeof message.profile === 'string' && CAST_PROFILES.includes(message.profile))
           castProfile = message.profile;
         // Chosen while this page plays: playback moves to the receiver from the second the video is at.
         if (session && !session.castOrigin) moveToCast();
+        return true;
+      case 'den-receiver-error':
+        castReceiverError = {
+          ...(Number.isInteger(message.code) ? { code: message.code as number } : {}),
+          ...(Number.isInteger(message.shaka) ? { shaka: message.shaka as number } : {}),
+        };
         return true;
       case 'den-cast-menu':
         openCastMenu();
@@ -4728,6 +4745,7 @@
         failed: castFailed,
         failReason: castFailReason,
         sessionSecs: castSessionSecs > 0 ? Math.round(castSessionSecs) : undefined,
+        ...castReceiverFields(castReport, castReceiverInfo, castReceiverError),
         ...identity,
       });
     }
@@ -4775,6 +4793,7 @@
     castFailed = false;
     castFailReason = undefined;
     castSessionSecs = 0;
+    castReceiverError = undefined;
     casting = false;
     segments = [];
     active = null;

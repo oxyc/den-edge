@@ -8,6 +8,7 @@ import { parseRoute, type Route } from './route';
 import { apiUrl } from './runtimeUrl';
 import { currentClientPlatform } from './clientPlatform';
 import type { ClientFailure, FailureOperation } from './failureReport';
+import type { CastReceiverFields } from './castReceiver';
 
 // ---- The release this page is running (den-edge's `x-den-release` on the shell, `web.rs`'s `release()`) ----
 
@@ -565,7 +566,7 @@ export type CastFailReason =
   | 'invalid_media'
   | 'other';
 
-export interface CastReport extends IdentityFields {
+export interface CastReport extends IdentityFields, CastReceiverFields {
   kind: CastKind;
   reached: CastStage;
   failed?: boolean;

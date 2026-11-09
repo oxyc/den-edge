@@ -61,6 +61,17 @@ export async function receiverReport(canDisplayType: CanDisplayType): Promise<Re
       eac3: probe.supports('audio/mp4; codecs="ec-3"'),
       av1: can.av1,
       vp9: can.vp9,
+      ...receiverDevice(navigator.userAgent),
     },
   };
+}
+
+/**
+ * Which Chromecast this is, as far as its user agent says: the Cast firmware (`CrKey/1.56.500000`) and, on the
+ * Android-based ones, the device type (`DeviceType/AndroidTV`). Nothing else of the user agent leaves the TV.
+ */
+export function receiverDevice(userAgent: string): { firmware?: string; deviceType?: string } {
+  const firmware = /CrKey\/([\d.]{1,20})/.exec(userAgent)?.[1];
+  const deviceType = /DeviceType\/([A-Za-z]{1,24})/.exec(userAgent)?.[1];
+  return { ...(firmware ? { firmware } : {}), ...(deviceType ? { deviceType } : {}) };
 }

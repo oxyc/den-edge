@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { castReceiverFields, receiverInfoOf } from './castReceiver';
 import {
   chunkOf,
   currentRelease,
@@ -361,5 +362,58 @@ describe('sendPlaybackRoute', () => {
       body: JSON.stringify({ ...report, platform: 'web' }),
       keepalive: true,
     });
+  });
+});
+
+describe('the cast report’s receiver fields', () => {
+  const tv = {
+    h264: 51,
+    h264High10: 51,
+    hevcMain: 153,
+    hevcMain10: 150,
+    hevcHighTier: 0,
+    hdr: true,
+    eac3: true,
+    aacMultichannel: false,
+    dolbyVision: { p5: true, p8: false },
+    av1: 0,
+    av1Main10: 0,
+    av1Hdr: false,
+    flac: true,
+    aac71: false,
+    vp9: false,
+    vp9Profile2: false,
+  };
+
+  it('say what Den’s receiver plays, which Chromecast it is, and how its player last failed', () => {
+    const info = receiverInfoOf({
+      maxHeight: 2160,
+      firmware: '1.56.500000',
+      deviceType: 'AndroidTV',
+    });
+    expect(castReceiverFields(tv, info, { code: 104, shaka: 3014 })).toEqual({
+      rxH264: 51,
+      rxHevc: 153,
+      rxHdr: true,
+      rxDv: 'p5',
+      rxEac3: true,
+      rxMaxHeight: 2160,
+      rxFirmware: '1.56.500000',
+      rxDevice: 'AndroidTV',
+      rxError: 104,
+      rxShaka: 3014,
+    });
+  });
+
+  it('are empty for Google’s receiver, which reports nothing', () => {
+    expect(castReceiverFields(undefined, undefined, undefined)).toEqual({});
+  });
+
+  it('keep only well-formed receiver details, never free text', () => {
+    expect(
+      receiverInfoOf({ maxHeight: 99_999, firmware: '1.56; x', deviceType: 'Mozilla/5.0 (Linux)' }),
+    ).toBeUndefined();
+    expect(receiverInfoOf({ maxHeight: 1080, firmware: 'n/a' })).toEqual({ maxHeight: 1080 });
+    expect(receiverInfoOf('AndroidTV')).toBeUndefined();
   });
 });

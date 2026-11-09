@@ -196,10 +196,21 @@ const receiverApp = /^[0-9A-F]{8}$/.test(configuredApp ?? '')
     : undefined;
 /** What the connected Den receiver said its TV plays; asked with in place of `profile` while it is known. */
 let receiverPlayable: Playable | undefined;
+/**
+ * The same report's `details` (the largest picture, the Cast firmware, the device type), passed on as they came for
+ * den-edge's cast report: the player keeps only the well-formed fields (`receiverInfoOf`).
+ */
+let receiverDevice: unknown;
 
 /** The profile the player asks with: the receiver's own report, or the Chromecast model chosen. */
-function asking(): { profile: string; playable?: Playable } {
-  return receiverPlayable ? { profile: 'receiver', playable: receiverPlayable } : { profile };
+function asking(): { profile: string; playable?: Playable; receiverInfo?: unknown } {
+  return receiverPlayable
+    ? {
+        profile: 'receiver',
+        playable: receiverPlayable,
+        ...(receiverDevice ? { receiverInfo: receiverDevice } : {}),
+      }
+    : { profile };
 }
 
 /**
@@ -208,6 +219,7 @@ function asking(): { profile: string; playable?: Playable } {
  */
 async function learnReceiver(session: CastSession | null | undefined): Promise<void> {
   receiverPlayable = undefined;
+  receiverDevice = undefined;
   if (!receiverApp || !session?.addMessageListener || !session.sendMessage) return;
   const { addMessageListener, sendMessage } = session;
   receiverPlayable = await new Promise<Playable | undefined>((resolve) => {
@@ -225,6 +237,7 @@ async function learnReceiver(session: CastSession | null | undefined): Promise<v
       }
       if (message?.type !== 'den-capabilities') return;
       const can = playableOf(message.playable) ?? undefined;
+      receiverDevice = can ? message.details : undefined;
       console.info(
         `[Den cast] ${JSON.stringify({ event: 'receiver-capabilities', playable: can ?? null, details: message.details ?? null })}`,
       );
@@ -255,6 +268,14 @@ function hearReceiverEvents(session: CastSession | null | undefined): void {
     if (message?.type !== 'den-receiver-event') return;
     const { type: _type, ...event } = message as { type: unknown } & Record<string, unknown>;
     console.info(`[Den receiver] ${JSON.stringify(event)}`);
+    // The codes of the receiver's player error, for den-edge's cast report: numbers only.
+    if (event.event === 'error') {
+      const shaka = (event.error as { shakaErrorCode?: unknown } | null)?.shakaErrorCode;
+      tell('den-receiver-error', {
+        ...(Number.isInteger(event.detailedErrorCode) ? { code: event.detailedErrorCode } : {}),
+        ...(Number.isInteger(shaka) ? { shaka } : {}),
+      });
+    }
     // The receiver's player gave up on what it was playing. The sender's own media session can report that idle
     // with no reason (`castIdleAction` waits on it as 'pending'), which left the player at "Starting Chromecast…"
     // and the TV on Den's idle screen.
