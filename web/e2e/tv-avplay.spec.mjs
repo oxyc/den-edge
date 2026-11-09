@@ -190,7 +190,7 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
       body: 'WEBVTT\n\n00:00:00.000 --> 00:01:00.000\nExternal <b>caption</b>\n',
     }),
   );
-  await page.goto(`${ORIGIN}/test/player.html`);
+  await page.goto(`${ORIGIN}/test/player.html?languageControls`);
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
   // Stop the fixture's accelerated AVPlay clock before injecting exact caption times below. While playing it
   // advances one simulated second every 40ms, which can replace 250ms with a later time before the assertion.
@@ -215,13 +215,24 @@ test('Samsung displays external WebVTT captions at the AVPlay clock and clears t
   await page.getByRole('button', { name: /^Subtitles:/ }).click();
   await page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
   await expect(page.getByRole('group', { name: 'Subtitle timing' })).toContainText('+0.0s');
+  await page.getByTestId('interface-language-es').evaluate((control) => control.click());
+  await expect(page.getByRole('group', { name: 'Sincronización de subtítulos' })).toContainText(
+    'Izquierda o derecha para ajustar · Seleccionar para terminar',
+  );
   expect(await remoteKey(page, 'ArrowRight', 39)).toBe(true);
-  await expect(page.getByRole('group', { name: 'Subtitle timing' })).toContainText('+0.5s');
+  await expect(page.getByRole('group', { name: 'Sincronización de subtítulos' })).toContainText(
+    '+0,5s',
+  );
+  await page.getByTestId('interface-language-sv').evaluate((control) => control.click());
+  await expect(page.getByRole('group', { name: 'Undertextsynkronisering' })).toContainText(
+    'Vänster eller höger för att justera · Välj för att avsluta',
+  );
   // Use AVPlay's clock callback rather than the hidden HTML video's clock: Samsung owns playback timing.
   await page.evaluate(() => window.__avplayFixture.latest().oncurrentplaytime(250));
   await expect(captions).toBeHidden();
   expect(await remoteKey(page, 'Enter', 13)).toBe(true);
-  await expect(page.getByRole('group', { name: 'Subtitle timing' })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Undertextsynkronisering' })).toHaveCount(0);
+  await page.getByTestId('interface-language-en').evaluate((control) => control.click());
   await chooseSubtitle(page, 'Off');
   await expect(captions).toBeHidden();
 });

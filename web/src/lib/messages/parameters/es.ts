@@ -50,8 +50,10 @@ export const parameters = {
   'player.subtitles': 'Subtítulos: {subtitles}',
   'player.subtitleLoadFailed':
     'No se pudieron cargar los subtítulos {subtitle}. Tus subtítulos actuales no han cambiado.',
-  'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset}s)',
-  'player.resetSubtitleTiming': 'Restablecer sincronización de subtítulos ({offset}s)',
+  'player.subtitleOffsetCompact': '{sign}{offset}s',
+  'player.subtitleOffsetSpoken': '{sign}{offset} segundos',
+  'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset})',
+  'player.resetSubtitleTiming': 'Restablecer sincronización de subtítulos ({offset})',
   'player.next': 'Siguiente: {title}',
   'player.playingFrom': 'Reproduciendo desde {source}',
   'player.playingThroughReason': 'Reproduciendo mediante Den Remux. {reason}.',

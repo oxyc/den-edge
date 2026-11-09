@@ -47,6 +47,12 @@ export const ENGLISH_MESSAGES = {
   'common.play': 'Play',
   'common.resume': 'Resume',
   'common.close': 'Close',
+  'player.subtitleTiming': 'Subtitle timing',
+  'player.subtitleEarlier': 'Earlier',
+  'player.subtitleLater': 'Later',
+  'player.subtitleReset': 'Reset',
+  'player.subtitleDone': 'Done',
+  'player.subtitleTimingInstructions': 'Left or right to adjust · Select to finish',
   'retirement.title': 'Library cleanup needs another try',
   'retirement.detail':
     'You’re signed out. Den still needs to remove encrypted library data kept on this device. You can leave safely; it will try again next time.',
