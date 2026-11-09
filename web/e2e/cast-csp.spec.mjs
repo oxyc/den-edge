@@ -59,13 +59,13 @@ const RECEIVER_SDK = `
       if (hevc) return Number(hevc[1]) <= 153;
       return codec.startsWith('dvh1.08');
     },
-    getPlayerManager() { return { addEventListener(_type, fn) { window.__mediaStatus = fn; } }; },
+    getPlayerManager() { return { addEventListener(type, fn) { (window.__player = window.__player || {})[type] = fn; } }; },
     start(options) { window.started = options; },
   };
   window.__fromSender = (data) => custom['urn:x-cast:fi.oxy.den']({ senderId: 'phone', data });
   window.cast = { framework: {
     CastReceiverContext: { getInstance: () => context },
-    events: { EventType: { MEDIA_STATUS: 'mediastatus' } },
+    events: { EventType: { MEDIA_STATUS: 'mediastatus', ERROR: 'error', BUFFERING: 'buffering', REQUEST_LOAD: 'load' } },
     system: { MessageType: { JSON: 'JSON' } },
   } };
 `;
@@ -250,10 +250,46 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
     expect(await page.evaluate(() => window.toSender.length)).toBe(1);
 
     // Playing, Google's player is the picture; idle again, Den's screen returns.
-    await page.evaluate(() => window.__mediaStatus({ mediaStatus: { playerState: 'PLAYING' } }));
+    await page.evaluate(() =>
+      window.__player.mediastatus({ mediaStatus: { playerState: 'PLAYING' } }),
+    );
     await expect(page.locator('.brand')).toBeHidden();
-    await page.evaluate(() => window.__mediaStatus({ mediaStatus: { playerState: 'IDLE' } }));
+    await page.evaluate(() =>
+      window.__player.mediastatus({ mediaStatus: { playerState: 'IDLE', idleReason: 'ERROR' } }),
+    );
     await expect(page.locator('.brand')).toBeVisible();
+
+    // What the TV's player does reaches every sender: the TV's own console is out of reach.
+    await page.evaluate(() => {
+      window.__player.load({
+        requestData: { media: { contentType: 'application/x-mpegurl', hlsSegmentFormat: 'fmp4' } },
+      });
+      window.__player.buffering({ isBuffering: true });
+      window.__player.error({ detailedErrorCode: 311, error: { shakaErrorCode: 1001 } });
+    });
+    const reports = (await page.evaluate(() => window.toSender))
+      .slice(1)
+      .map((sent) => sent.message);
+    expect(reports).toEqual([
+      { type: 'den-receiver-event', event: 'state', state: 'PLAYING', idleReason: null },
+      { type: 'den-receiver-event', event: 'state', state: 'IDLE', idleReason: 'ERROR' },
+      {
+        type: 'den-receiver-event',
+        event: 'load',
+        contentType: 'application/x-mpegurl',
+        hlsSegmentFormat: 'fmp4',
+        hlsVideoSegmentFormat: null,
+        streamType: null,
+      },
+      { type: 'den-receiver-event', event: 'buffering', buffering: true },
+      {
+        type: 'den-receiver-event',
+        event: 'error',
+        detailedErrorCode: 311,
+        reason: null,
+        error: { message: null, code: null, shakaErrorCode: 1001 },
+      },
+    ]);
     expect(await page.evaluate(() => window.violations)).toEqual([]);
   } finally {
     await browser.close();

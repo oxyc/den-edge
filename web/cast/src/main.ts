@@ -238,6 +238,26 @@ async function learnReceiver(session: CastSession | null | undefined): Promise<v
     sendMessage.call(session, RECEIVER_NAMESPACE, { type: 'den-capabilities' }).catch(() => done());
   });
 }
+
+/**
+ * Print what Den's receiver says its player did (`den-receiver-event`: a LOAD's format, state changes, buffering,
+ * errors, blocked requests) in this console, the only one a viewer can share: the TV's own is out of reach.
+ */
+function hearReceiverEvents(session: CastSession | null | undefined): void {
+  if (!receiverApp || !session?.addMessageListener) return;
+  session.addMessageListener(RECEIVER_NAMESPACE, (_namespace: string, raw: string) => {
+    let message: { type?: unknown } | null;
+    try {
+      message = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      return;
+    }
+    if (message?.type !== 'den-receiver-event') return;
+    const { type: _type, ...event } = message;
+    console.info(`[Den receiver] ${JSON.stringify(event)}`);
+  });
+}
+
 type InterfaceLanguage = 'en' | 'es' | 'sv';
 let interfaceLanguage: InterfaceLanguage = 'en';
 const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
@@ -967,6 +987,7 @@ function initializeCast(): boolean {
   castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
     const state = (event as { sessionState?: string }).sessionState;
     if (state === 'SESSION_STARTED') {
+      hearReceiverEvents(castContext?.getCurrentSession());
       // Den's receiver says what its TV plays before the player asks Hearth for anything: one ask, one LOAD.
       void learnReceiver(castContext?.getCurrentSession()).then(() => {
         if (!castContext?.getCurrentSession()) return;
