@@ -47,7 +47,7 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
   let deviceWrote = 0;
   let pushedWrite = 0;
   let pulledWrite = 0;
-  let deviceWrites = 0;
+  const deviceWrites = [];
   let deliveryArmed = false;
   const waiters = new Set();
   const deliveryTimers = new Set();
@@ -174,11 +174,11 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
         }
         if (name === 'device') {
           deviceWrote = Date.now();
-          deviceWrites++;
+          deviceWrites.push(deviceWrote);
           if (!held) pushedWrite = deviceWrote;
-          else if (deviceWrites === 1) push();
+          else if (deviceWrites.length === 1) push();
           // The second save stays private to the device: its replacement supersedes it before the next delivery.
-          else if (deviceWrites > 2) after(DELIVERY_DEBOUNCE_MS, push);
+          else if (deviceWrites.length > 2) after(DELIVERY_DEBOUNCE_MS, push);
         }
         if (!held) wake();
         return route.fulfill({ headers, json: { applied, conflicts } });
@@ -192,10 +192,10 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
     waits,
     arrivals,
     controls,
-    deviceWrites: () => deviceWrites,
+    deviceWrites,
     armLostDelivery: () => {
       deliveryArmed = true;
-      deviceWrites = 0;
+      deviceWrites.length = 0;
     },
     close: () => {
       for (const timer of deliveryTimers) clearTimeout(timer);
@@ -330,13 +330,22 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     expect(bottomInset).toBeGreaterThanOrEqual(17);
     expect(bottomInset).toBeLessThanOrEqual(19);
     // Span the lost 30 s delivery and the 60 s replacement's five-second delivery debounce plus a consumer pull.
-    // The first eligible save, meanwhile, was delivered immediately: all three writes cross the production model.
+    // Waiting for the first pull before this watch means the next ordinary 90 s periodic save also lands in it.
     await expectTicking(clock, edge, ONE_LOST_DELIVERY_MS);
-    expect(edge.deviceWrites(), 'first save, lost periodic save, and replacement save').toBe(3);
+    expect(
+      edge.deviceWrites,
+      'first, lost periodic, replacement, and following periodic saves',
+    ).toHaveLength(4);
+    for (const gap of gaps(edge.deviceWrites)) {
+      expect(
+        gap,
+        'writer saves stayed on the 30 s cadence rather than duplicating',
+      ).toBeGreaterThanOrEqual(WRITE_EVERY_MS - 500);
+    }
     expect(
       edge.arrivals,
-      'only the first and replacement deliveries reached den-edge',
-    ).toHaveLength(2);
+      'the first, replacement, and following periodic deliveries reached den-edge',
+    ).toHaveLength(3);
     expect(
       edge.arrivals[1],
       'replacement delivery included the five-second debounce',
