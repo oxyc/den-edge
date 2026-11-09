@@ -252,6 +252,28 @@ test('a session the cast page plays reports its stats and is ended when the play
   }
 });
 
+// Away from home the cast page is the picture and draws its own Cast button in its top-right corner (`style.css`,
+// 0.5rem in, 44px). The top bar's empty output box lay over that corner and took the press whenever the controls
+// showed, so the button worked only once they had hidden again (den-edge#1148: the stack test's press went nowhere).
+test('with the controls showing, the cast page’s own Cast button in the corner takes the press', async () => {
+  const { browser, page } = await open();
+  try {
+    await playingPast(page, 1);
+    await revealPlayerControls(page);
+    await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+    const hit = await page.evaluate(() => {
+      const frame = document.querySelector('iframe[title="Den Cast player"]');
+      const box = frame.getBoundingClientRect();
+      const inset = parseFloat(getComputedStyle(document.documentElement).fontSize) * 0.5;
+      const target = document.elementFromPoint(box.right - inset - 22, box.top + inset + 22);
+      return target === frame ? 'frame' : `${target?.tagName}.${target?.className}`;
+    });
+    expect(hit).toBe('frame');
+  } finally {
+    await browser.close();
+  }
+});
+
 // Den Hearth's answer reaches the cast page as one load whose every URL it accepts: the speed URL on the playlist's
 // own origin, not this page's. Before, it was resolved against this page, the cast page refused the load as an
 // invalid media URL without fetching anything, and the player took that for the decoder refusing the release:
