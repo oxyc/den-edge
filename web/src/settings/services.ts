@@ -196,9 +196,34 @@ export async function contentCountries(content: ContentServiceClientPort): Promi
 export async function contentServicesResult(
   content: ContentServiceClientPort,
   country: string,
+  refresh = false,
 ): Promise<ServiceDirectoryResult> {
-  const result = await content.query({ kind: 'service.directory', region: country });
-  return { services: result.services, complete: result.complete };
+  const source = contentServicesSource(content);
+  return reuse(
+    `content-services:${source}:${country}`,
+    async () => {
+      const result = await content.query({ kind: 'service.directory', region: country });
+      return { services: result.services, complete: result.complete };
+    },
+    // A partial directory remains useful to Home and to a page whose provider it names. An explicit Retry replaces
+    // it under the same key, so every later consumer joins the improved answer instead of adopting stale absence.
+    { replace: refresh },
+  );
+}
+
+let nextContentServicesSource = 0;
+const contentServicesSources = new WeakMap<ContentServiceClientPort, number>();
+
+/**
+ * One cache namespace per profile-owned port. Home, hover priming and the mounted page still join one public
+ * directory request, while a replacement profile/household/policy port can never adopt its predecessor's answer.
+ */
+function contentServicesSource(content: ContentServiceClientPort): number {
+  const existing = contentServicesSources.get(content);
+  if (existing !== undefined) return existing;
+  const source = ++nextContentServicesSource;
+  contentServicesSources.set(content, source);
+  return source;
 }
 
 /** Shared because Home, hover priming and the mounted service page ask the same public directory. */
@@ -206,8 +231,5 @@ export function contentServices(
   content: ContentServiceClientPort,
   country: string,
 ): Promise<Service[]> {
-  return reuse(
-    `content-services:${country}`,
-    async () => (await contentServicesResult(content, country)).services,
-  );
+  return contentServicesResult(content, country).then((result) => result.services);
 }
