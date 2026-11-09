@@ -19,7 +19,6 @@
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
-  import Button from './Button.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
   import ServerUnreachable from './ServerUnreachable.svelte';
@@ -230,10 +229,10 @@
     <Browse {rows} {shown} {build} />
   {/if}
 {:else if unreachable}
-  <div class="directory-failure" role="alert">
-    <p class="note">Couldn’t reach the service directory. Check your connection and try again.</p>
-    <Button variant="secondary" label="Try again" onclick={retryDirectory} />
-  </div>
+  <ServerUnreachable
+    onretry={retryDirectory}
+    message="Couldn’t reach the service directory. Check your connection and try again."
+  />
 {:else if directory?.complete}
   <p class="note">This service isn’t listed in {country}.</p>
 {:else}
