@@ -18,6 +18,12 @@
   import { fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
+  import type { ContentServiceClientPort } from '../src/lib/contentServiceClient';
+  import type {
+    ContentPolicy,
+    ContentRequest,
+    ContentResultFor,
+  } from '../src/lib/contentServiceProtocol';
   import { LibraryModel } from '../src/lib/libraryModel.svelte';
   import { links } from '../src/lib/links.svelte';
   import type { JoinLibrary } from '../src/lib/browserHousehold';
@@ -397,7 +403,91 @@
     libraryKey: fixtureLibraryKey,
     mode: 'local',
   });
-  const content = contentServices.content;
+  type HeldKeyCheck = {
+    service: 'tmdb' | 'omdb' | 'content-warnings';
+    candidate: string;
+    runtime: string;
+    settled: boolean;
+    settle: (outcome: 'accepted' | 'refused' | 'unavailable') => void;
+  };
+  const heldKeyChecks: HeldKeyCheck[] = [];
+  const heldKeyValidation = fixtureQuery.has('key-save-authority');
+  const contentFor = (runtime: string): ContentServiceClientPort => ({
+    query<Request extends ContentRequest>(
+      request: Request,
+      signal?: AbortSignal,
+      policy?: ContentPolicy,
+      onProgress?: (partial: ContentResultFor<Request>) => void,
+    ): Promise<ContentResultFor<Request>> {
+      if (
+        heldKeyValidation &&
+        request.kind === 'provider-key.check' &&
+        typeof request.candidate === 'string'
+      )
+        return new Promise((resolve) => {
+          const call: HeldKeyCheck = {
+            service: request.service,
+            candidate: request.candidate!,
+            runtime,
+            settled: false,
+            settle(outcome) {
+              if (call.settled) return;
+              call.settled = true;
+              resolve({
+                kind: 'provider-key.check',
+                service: request.service,
+                outcome,
+              } as ContentResultFor<Request>);
+            },
+          };
+          heldKeyChecks.push(call);
+        });
+      return contentServices.content.query(request, signal, policy, onProgress);
+    },
+    onStatus: (listener) => contentServices.content.onStatus(listener),
+  });
+  let content = $state.raw<ContentServiceClientPort>(contentFor('owner-a'));
+  let contentRuntime = 0;
+  const keySaveAuthorityControls = {
+    calls: () =>
+      heldKeyChecks.map(({ service, candidate, runtime, settled }) => ({
+        service,
+        candidate,
+        runtime,
+        settled,
+      })),
+    settle(index: number, outcome: 'accepted' | 'refused' | 'unavailable') {
+      heldKeyChecks[index]?.settle(outcome);
+    },
+    replaceOwner() {
+      authorityReplacementControls.replace();
+      content = contentFor(`owner-replacement-${++contentRuntime}`);
+    },
+    replaceRuntime() {
+      content = contentFor(`owner-runtime-${++contentRuntime}`);
+    },
+    leave(role: 'kid' | 'visitor') {
+      content = contentFor(role);
+      settingsMounted = false;
+    },
+    reopenReplacement() {
+      authorityReplacementControls.replace();
+      content = contentFor(`owner-reopened-${++contentRuntime}`);
+      settingsMounted = true;
+    },
+    rejectNextSave(replacement = false) {
+      (replacement ? replacementLibrary : library)?.rejectNextApiKeyCommand();
+    },
+    commands: () => ({
+      primary: structuredClone(library.apiKeyCommands),
+      replacement: structuredClone(replacementLibrary?.apiKeyCommands ?? []),
+    }),
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureKeySaveAuthority?: typeof keySaveAuthorityControls;
+    }
+  ).fixtureKeySaveAuthority = keySaveAuthorityControls;
   let contentReady = $state(false);
   void contentModel.ready
     .then(() => contentModel.setApiKey('tmdb', 'K1', 'settings-fixture-key'))

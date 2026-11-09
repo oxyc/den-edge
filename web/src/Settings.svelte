@@ -129,6 +129,32 @@
   let retrying = $state(false);
   let failure = $state<string | null>(null);
   let saving = $state(false);
+  type CommandPresentation = {
+    model: LibraryModel;
+    content: ContentServiceClientPort;
+  };
+  const keySaveAuthority = $derived.by((): CommandPresentation => ({
+    model: authority.model,
+    content,
+  }));
+  let commandPresentation = $state.raw(untrack(() => keySaveAuthority));
+  let commandPresentationGeneration = 0;
+  // A retained route may replace either the library/profile model or its content runtime. Retire the old command
+  // presentation immediately: its already-started durable write may reconcile, but its completion cannot publish
+  // failure/success, clear a replacement field or recover focus into the replacement presentation.
+  $effect(() => {
+    const replacement = keySaveAuthority;
+    if (
+      commandPresentation.model === replacement.model &&
+      commandPresentation.content === replacement.content
+    )
+      return;
+    commandPresentationGeneration++;
+    commandPresentation = replacement;
+    saving = false;
+    failure = null;
+  });
+  onDestroy(() => commandPresentationGeneration++);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
   let routes = $state.raw<Routes>({});
   /** Whether /routes has answered (or failed): until then an install on another of the deployment's names is unplaced. */
@@ -159,7 +185,15 @@
   const disabled = $derived(!ready || saving);
   const libraryFormat = $derived(connections?.diagnostics.libraryFormat ?? null);
   const profileTopology = $derived(connections?.diagnostics.profileTopology ?? false);
-  async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
+  async function run(
+    action: () => Promise<unknown>,
+    quiet = false,
+    expectedPresentation: CommandPresentation = commandPresentation,
+  ): Promise<boolean> {
+    if (expectedPresentation !== commandPresentation) return false;
+    const generation = commandPresentationGeneration;
+    const isCurrent = () =>
+      expectedPresentation === commandPresentation && generation === commandPresentationGeneration;
     const restoreFocus =
       document.activeElement instanceof HTMLElement &&
       (__DEN_TV__ || keyboardInput() || document.activeElement.matches(':focus-visible'))
@@ -186,8 +220,9 @@
     }
     try {
       await action();
-      return true;
+      return isCurrent();
     } catch (error) {
+      if (!isCurrent()) return false;
       console.warn('den: settings command failed', error);
       if (!quiet) failure = 'Couldn’t save that. Check your connection and try again.';
       return false;
@@ -195,9 +230,10 @@
       // Commit the enabled controls and any preference publication in this task. If this waits for `tick`, a TV
       // remote can observe the newly enabled surface, move to its next control, and then have the continuation below
       // steal focus back to the setting that just saved.
-      flushSync(() => {
-        if (!quiet) saving = false;
-      });
+      if (isCurrent())
+        flushSync(() => {
+          if (!quiet) saving = false;
+        });
       // Saving temporarily disables the settings surface. Some engines move focus to the document when the active
       // native control becomes disabled, which strands the next keyboard/remote press. Return keyboard users to that
       // same connected control once the save settles, without reopening a phone keyboard after a pointer save.
@@ -207,6 +243,7 @@
         // TV Settings is intentionally inert during a save; a remote press cannot make a reliable move until it
         // settles, so always return to its semantic origin. Pointer/keyboard web users may deliberately move on.
         if (
+          isCurrent() &&
           (__DEN_TV__ || !movedOn) &&
           restoreFocus.isConnected &&
           !restoreFocus.matches(':disabled')
@@ -419,9 +456,11 @@
           pinRemovable={!profileTopology}
         />
       {/if}
-      {#key authority.model}<ConnectionsSection
+      {#key keySaveAuthority}
+        {@const keyAuthority = keySaveAuthority}
+        <ConnectionsSection
           {link}
-          {content}
+          content={keyAuthority.content}
           {onjoin}
           onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
             ? onresetkey
@@ -441,7 +480,8 @@
           devices={structuredClone(connections!.devices)}
           {selfId}
           {disabled}
-          setApiKey={(service, value) => run(() => authority.model.setApiKey(service, value))}
+          setApiKey={(service, value) =>
+            run(() => keyAuthority.model.setApiKey(service, value), false, keyAuthority)}
           installPlugin={(url) => run(() => authority.model.installPlugin(url))}
           removePlugin={(url) => run(() => authority.model.removePlugin(url))}
           setPluginTrust={(url, key) => run(() => authority.model.setPluginTrust(url, key))}
