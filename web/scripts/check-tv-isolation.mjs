@@ -295,5 +295,10 @@ if (process.argv.includes('--capture')) {
   // goes through the existing content service (the path Detail and the TV player read seasons through) 30 s before an
   // episode ends, and timers run only while the viewer acts (a click's double-click hold, the seek ripple).
   // Allow the 128-byte boundary past it that keeps cross-machine gzip variance, retaining 182.
-  if (coreTotalDelta > 99584) throw new Error('Browser total JS/CSS budget exceeded');
+  // Profile-locale subtitle timing adds 372 gzip bytes to the complete non-translation graph on matched main/head
+  // builds (99,514 -> 99,886), 58 of them at startup (203,684 -> 203,742). The remaining code is in the lazy Player:
+  // six controls/instructions, one compact and one spoken offset template, and one current-locale NumberFormat reused
+  // by the menu, visible HUD and live value. Spanish/Swedish add 228 bytes to their independently bounded lazy
+  // catalogs. It adds no request, timer, cue-tick or media work; allow the next 128-byte boundary, retaining 82.
+  if (coreTotalDelta > 99968) throw new Error('Browser total JS/CSS budget exceeded');
 }
