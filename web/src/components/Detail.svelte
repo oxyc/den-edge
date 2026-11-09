@@ -149,7 +149,10 @@
     tvs?: readonly HouseholdTv[];
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     /** Controls the command-capable household TV that authored `live`; absent for another or older device. */
-    ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => Promise<boolean>;
+    ontransport?: (
+      action: 'play' | 'pause' | 'skip',
+      offsetSeconds?: number,
+    ) => Promise<'sent' | 'waking' | 'unconfirmed' | false>;
     /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
@@ -318,7 +321,18 @@
     const sent = await ontransport(action, offsetSeconds);
     transportBusy = false;
     if (!sent) {
-      notify?.('Couldn’t reach your TV. Check that Den is open.');
+      notify?.('Couldn’t reach your TV. Check that Den is open.', {
+        label: 'Try again',
+        run: () => void transport(action, offsetSeconds),
+      });
+      return;
+    }
+    if (sent === 'waking') {
+      notify?.(`Waking ${live?.device ?? 'your TV'}…`);
+      return;
+    }
+    if (sent === 'unconfirmed') {
+      notify?.(`Sent to ${live?.device ?? 'your TV'}, but playback is unconfirmed.`);
       return;
     }
     if (action === 'play') optimisticPlaying = true;

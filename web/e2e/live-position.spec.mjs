@@ -23,6 +23,9 @@ const TV_PUSH_MS = 27_000;
 const HOUSEHOLD_TV_QUEUE = Buffer.from(
   hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'inbox', 24),
 ).toString('hex');
+const HOUSEHOLD_TV_LANE = Buffer.from(
+  hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'assistant-tv', 16),
+).toString('hex');
 
 /**
  * One den-edge for both browsers: what one writes, the other pulls. `pulls` lists when each page asked, and
@@ -242,6 +245,26 @@ async function openWithDevice(browser, page, options) {
   return { edge, play, stop, close };
 }
 
+/** Opens the real series Detail route with an exact command-capable TV writing its current episode. */
+async function openRemoteSeries(browser, page) {
+  const opened = await openWithDevice(browser, page);
+  await page.locator('.card', { hasText: 'Series 1003' }).click();
+  opened.play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
+  const controls = page.getByLabel('Controls for Apple TV');
+  const label = controls.locator('strong');
+  await expect(label).toHaveText('Playing on Apple TV', { timeout: 40_000 });
+  return { ...opened, controls, label };
+}
+
+async function routeWakeable(page) {
+  await page.route(`${E2E_ORIGIN}/wake/targets`, (route) =>
+    route.fulfill({
+      status: 200,
+      json: { targets: [{ tv: HOUSEHOLD_TV_LANE, wakeable: true }] },
+    }),
+  );
+}
+
 /** Samples `clock` every 250 ms for `ms`: each sample is its text, or null while it is not shown. */
 async function watch(clock, ms) {
   const samples = [];
@@ -415,6 +438,228 @@ test('a series’ page says which device plays which episode, and keeps controls
     expect(new Set(pausedSamples).size, 'the paused clock stayed frozen').toBe(1);
     expect(await boxes(), 'nothing moved when playback paused').toEqual(withLive);
   } finally {
+    await close();
+  }
+});
+
+test('a sleeping exact TV is visibly woken and retried without inventing paused playback', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { edge, play, close } = await openWithDevice(browser, page);
+  try {
+    await page.locator('.card', { hasText: 'Series 1003' }).click();
+    const playing = play({ type: 'tv', id: 1003 }, 600, { season: 1, episode: 3 });
+    const controls = page.getByLabel('Controls for Apple TV');
+    const label = controls.locator('strong');
+    await expect(label).toHaveText('Playing on Apple TV', { timeout: 40_000 });
+
+    let listening = false;
+    let member;
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 200, json: { listening } }),
+    );
+    await page.route(`${E2E_ORIGIN}/wake/targets`, (route) => {
+      member = route.request().headers()['x-den-library-member'];
+      return route.fulfill({
+        status: 200,
+        json: { targets: [{ tv: HOUSEHOLD_TV_LANE, wakeable: true }] },
+      });
+    });
+    await page.route(`${E2E_ORIGIN}/inbox/append`, (route) => {
+      edge.controls.push({
+        header: route.request().headers()['x-den-link'],
+        body: route.request().postDataJSON(),
+      });
+      if (edge.controls.length === 1) listening = true;
+      return route.fulfill({ status: 200, json: { queued: true } });
+    });
+
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
+    expect(member).toMatch(/^[0-9a-f]{32}:[0-9a-f]{64}$/);
+    await expect.poll(() => edge.controls.length).toBe(2);
+    expect(edge.controls.map(({ header }) => header)).toEqual([
+      HOUSEHOLD_TV_QUEUE,
+      HOUSEHOLD_TV_QUEUE,
+    ]);
+    await expect(page.getByRole('status')).toContainText('Den opened on Apple TV');
+    await expect(label).toHaveText('Playing on Apple TV');
+    playing.pause();
+  } finally {
+    await close();
+  }
+});
+
+test('old Edge keeps an exact append visibly unconfirmed instead of inventing playback', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { edge, controls, label, close } = await openRemoteSeries(browser, page);
+  try {
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 404, json: { error: 'not_found' } }),
+    );
+    const before = edge.controls.length;
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect.poll(() => edge.controls.length).toBe(before + 1);
+    await expect(page.getByRole('status')).toContainText(
+      'Sent to Apple TV, but playback is unconfirmed.',
+    );
+    await expect(label).toHaveText('Playing on Apple TV');
+  } finally {
+    await close();
+  }
+});
+
+test('a wake append failure is retryable and never changes durable playback truth', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { controls, label, close } = await openRemoteSeries(browser, page);
+  let appends = 0;
+  try {
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 200, json: { listening: false } }),
+    );
+    await routeWakeable(page);
+    await page.route(`${E2E_ORIGIN}/inbox/append`, (route) => {
+      appends++;
+      return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+    });
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Couldn’t reach your TV');
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    expect(appends).toBe(1);
+    await expect(label).toHaveText('Playing on Apple TV');
+  } finally {
+    await close();
+  }
+});
+
+test('a failed sole wake retry stays bounded and exposes a fresh retry', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { edge, controls, label, close } = await openRemoteSeries(browser, page);
+  let listening = false;
+  try {
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 200, json: { listening } }),
+    );
+    await routeWakeable(page);
+    await page.route(`${E2E_ORIGIN}/inbox/append`, (route) => {
+      edge.controls.push({
+        header: route.request().headers()['x-den-link'],
+        body: route.request().postDataJSON(),
+      });
+      if (edge.controls.length === 1) {
+        listening = true;
+        return route.fulfill({ status: 200, json: { queued: true } });
+      }
+      return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+    });
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
+    await expect(page.getByRole('status')).toContainText('Couldn’t reach Apple TV after it woke.');
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    expect(edge.controls).toHaveLength(2);
+    await page.waitForTimeout(3_000);
+    expect(edge.controls, 'the failed retry is never repeated in the background').toHaveLength(2);
+    await expect(label).toHaveText('Playing on Apple TV');
+  } finally {
+    await close();
+  }
+});
+
+test('a waking timeout queues once and remains explicitly retryable', async ({ browser, page }) => {
+  test.setTimeout(120_000);
+  const { edge, controls, label, close } = await openRemoteSeries(browser, page);
+  try {
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, (route) =>
+      route.fulfill({ status: 200, json: { listening: false } }),
+    );
+    await routeWakeable(page);
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
+    await expect(page.getByRole('status')).toContainText('Couldn’t confirm Apple TV woke.', {
+      timeout: 45_000,
+    });
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    expect(edge.controls, 'timeout never adds an unproved retry').toHaveLength(1);
+    await expect(label).toHaveText('Playing on Apple TV');
+  } finally {
+    await close();
+  }
+});
+
+test('a newer command retires a held waking retry before it can append or notify', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { edge, controls, close } = await openRemoteSeries(browser, page);
+  let listeningCalls = 0;
+  let releaseOldRetry;
+  try {
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, async (route) => {
+      listeningCalls++;
+      if (listeningCalls === 1) return route.fulfill({ status: 200, json: { listening: false } });
+      if (listeningCalls === 2) {
+        const listening = await new Promise((resolve) => (releaseOldRetry = resolve));
+        return route.fulfill({ status: 200, json: { listening } });
+      }
+      return route.fulfill({ status: 200, json: { listening: true } });
+    });
+    await routeWakeable(page);
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
+    await expect.poll(() => Boolean(releaseOldRetry), { timeout: 10_000 }).toBe(true);
+
+    await controls.getByRole('button', { name: 'Skip back 10 seconds' }).click();
+    await expect.poll(() => edge.controls.length).toBe(2);
+    releaseOldRetry(true);
+    await page.waitForTimeout(500);
+    expect(edge.controls, 'the superseded waking attempt never appends its retry').toHaveLength(2);
+    await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
+  } finally {
+    releaseOldRetry?.(false);
+    await close();
+  }
+});
+
+test('a replacement title route retires a held waking retry before publication', async ({
+  browser,
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { edge, controls, close } = await openRemoteSeries(browser, page);
+  let listeningCalls = 0;
+  let releaseOldRetry;
+  try {
+    await page.route(`${E2E_ORIGIN}/inbox/listening`, async (route) => {
+      listeningCalls++;
+      if (listeningCalls === 1) return route.fulfill({ status: 200, json: { listening: false } });
+      const listening = await new Promise((resolve) => (releaseOldRetry = resolve));
+      return route.fulfill({ status: 200, json: { listening } });
+    });
+    await routeWakeable(page);
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
+    await expect.poll(() => Boolean(releaseOldRetry), { timeout: 10_000 }).toBe(true);
+
+    await page.goBack();
+    await expect(page.getByRole('heading', { name: 'Continue Watching' })).toBeVisible();
+    releaseOldRetry(true);
+    await page.waitForTimeout(500);
+    expect(edge.controls, 'the title-replaced attempt never appends its retry').toHaveLength(1);
+    await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
+  } finally {
+    releaseOldRetry?.(false);
     await close();
   }
 });

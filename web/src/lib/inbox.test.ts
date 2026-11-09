@@ -2,15 +2,17 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   drainTv,
+  householdAssistantLane,
   householdQueue,
   receiveDeviceIdentity,
   sealMessage,
   sendToTV,
   stillQueued,
   tvListening,
+  tvWakeable,
 } from './inbox';
 import { linkKeys } from './pair';
-import { fromHex, toBase64url } from './wire';
+import { deriveKeys, fromHex, toBase64url } from './wire';
 
 // den-spec, checked out at the repository root; the TV opens the same messages.
 const vectors = JSON.parse(
@@ -137,6 +139,49 @@ describe('choosing an awake TV', () => {
       throw new TypeError('offline');
     }) as typeof fetch;
     expect(await tvListening(link, down)).toBeNull();
+  });
+});
+
+describe('authorizing an exact sleeping TV wake', () => {
+  const libraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+
+  it('derives the exact lane and accepts only a member-authenticated wakeable match', async () => {
+    const playKey = toBase64url(fromHex(vectors.linkKey));
+    const lane = await householdAssistantLane(playKey);
+    const requests: { url: string; member: string | null }[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      requests.push({ url, member: new Headers(init?.headers).get('x-den-library-member') });
+      return new Response(
+        JSON.stringify({
+          targets: [
+            { tv: '0'.repeat(32), wakeable: true },
+            { tv: lane, wakeable: true },
+          ],
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    expect(await tvWakeable(libraryKey, lane, fetchImpl)).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe('/wake/targets');
+    const keys = await deriveKeys(new Uint8Array(32).fill(7));
+    expect(requests[0]?.member).toBe(`${keys.id}:${keys.member}`);
+  });
+
+  it('fails closed for an old backend, malformed view, another lane, or invalid household key', async () => {
+    const lane = '1'.repeat(32);
+    const old = (async () => new Response('{}', { status: 404 })) as typeof fetch;
+    const malformed = (async () =>
+      new Response('{"targets":"all"}', { status: 200 })) as typeof fetch;
+    const other = (async () =>
+      new Response('{"targets":[{"tv":"22222222222222222222222222222222","wakeable":true}]}', {
+        status: 200,
+      })) as typeof fetch;
+    expect(await tvWakeable(libraryKey, lane, old)).toBe(false);
+    expect(await tvWakeable(libraryKey, lane, malformed)).toBe(false);
+    expect(await tvWakeable(libraryKey, lane, other)).toBe(false);
+    expect(await tvWakeable('not-a-key', lane, other)).toBe(false);
   });
 });
 
