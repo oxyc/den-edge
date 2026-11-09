@@ -27,6 +27,10 @@
     languages = new Set(languages);
     await tick();
   };
+  (window as unknown as { clearProviderCache: () => Promise<void> }).clearProviderCache =
+    async () => {
+      await content.query({ kind: 'provider-cache.clear', service: 'tmdb' });
+    };
   (
     window as unknown as { showService: (id: number, country: string) => Promise<void> }
   ).showService = async (id, nextCountry) => {

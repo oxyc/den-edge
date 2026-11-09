@@ -207,7 +207,7 @@ test('only a complete directory presents a service as absent', async ({ browser 
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
   let tvUnavailable = false;
-  await serveNetflix(page, {
+  const { asked } = await serveNetflix(page, {
     directory: async (route, { path }) => {
       if (tvUnavailable && path === '/watch/providers/tv')
         await route.fulfill({ status: 503, json: {} });
@@ -220,10 +220,16 @@ test('only a complete directory presents a service as absent', async ({ browser 
   await expect(page.getByText('This service isn’t listed in US.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
 
+  // The production Worker keeps provider directories in IndexedDB across reloads. Clear that authority explicitly
+  // so the next page really observes the new partial answer rather than repainting the first complete directory.
+  await page.evaluate(() => window.clearProviderCache());
   tvUnavailable = true;
   await page.reload();
   await expect(page.getByRole('alert')).toContainText('Couldn’t reach the service directory.');
   await expect(page.getByText('This service isn’t listed in US.')).toHaveCount(0);
+  await expect
+    .poll(() => servicePageRequests(asked))
+    .toMatchObject({ movieDirectory: 2, tvDirectory: 2 });
 });
 
 test('a held directory answer cannot replace a newer service route', async ({ browser }) => {

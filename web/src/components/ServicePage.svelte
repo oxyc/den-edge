@@ -346,15 +346,4 @@
   .note {
     color: var(--muted);
   }
-
-  .directory-failure {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px 16px;
-  }
-
-  .directory-failure .note {
-    margin: 0;
-  }
 </style>
