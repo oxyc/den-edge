@@ -15,6 +15,8 @@ export const parameters = {
   'actions.openDetailsFor': 'Abrir detalles de {value}',
   'actions.switchProfileCurrent': 'Cambiar perfil, actual: {value}',
   'actions.use': 'Usar {value}',
+  'profile.ownerPinNeeded': 'Necesario para cambiar de {value} al perfil de propietario',
+  'profile.ageAndUnratedHidden': '{age} años o menos · títulos sin clasificar ocultos',
   'actions.browse': 'Explorar {value}',
   'actions.playTitle': 'Reproducir {value}',
   'actions.removeContinueWatching': 'Quitar {value} de Seguir viendo',

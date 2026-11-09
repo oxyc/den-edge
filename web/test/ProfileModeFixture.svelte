@@ -29,7 +29,8 @@
   } from '../src/lib/visitorProfileSession.svelte';
 
   const params = new URLSearchParams(location.search);
-  const configured = params.get('pin') !== 'none';
+  let ownerPin = params.get('pin') === 'none' ? null : '1234';
+  const configured = ownerPin !== null;
   const connectionsMode = params.get('connections');
   const connectionFailures = Number(
     params.get('connectionFailures') ?? (connectionsMode === 'repeat' ? 1 : 0),
@@ -154,7 +155,19 @@
         throw new Error('fixture household PIN query unavailable');
       if (params.has('holdPin') && pinChecks === 1)
         return new Promise<boolean>((resolve) => (releaseHeldPin = resolve));
-      return pin === '1234';
+      return pin === ownerPin;
+    },
+    setParentalPin: async (pin: string) => {
+      ownerPin = pin;
+      connectionsSnapshot = {
+        connection: 'ready',
+        value: {
+          kind: 'connections',
+          parentalPinConfigured: true,
+          parentalPinDelivery: 'synced',
+        } as ConnectionsView,
+      };
+      return { delivery: 'synced' };
     },
     close: () => {},
   } as unknown as LibraryModel;
