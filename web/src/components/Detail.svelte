@@ -256,14 +256,16 @@
       return;
     }
     const d = detail;
-    if (!active || !d || !onplayhere) return;
     // A title-only series request must use the same authoritative target as the mounted Play and Sources
     // controls. In particular, do not turn seriesPresentation's premiere-gated absence back into Library's
     // compatibility S1E1 fallback. An explicitly addressed episode remains independently playable.
     if (
-      d.title.type === 'tv' &&
-      (playRequest.season === undefined || playRequest.episode === undefined) &&
-      !playbackTarget
+      !active ||
+      !d ||
+      !onplayhere ||
+      (d.title.type === 'tv' &&
+        (playRequest.season == null || playRequest.episode == null) &&
+        !playbackTarget)
     )
       return;
     const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
@@ -300,7 +302,7 @@
   // first play's request carry it, rather than start a session only to measure and start another. Given up on when
   // the page stops being the active one — which pressing Play does.
   $effect(() => {
-    if (!active || !onplayhere || !remux || (ref.type === 'tv' && !playbackTarget)) return;
+    if (!active || !onplayhere || !remux || !playbackTarget) return;
     return premeasureLink(remux);
   });
   let sourcesPanel = $state<TitleSources>();
@@ -662,10 +664,12 @@
   // A fresh position from another device is more specific than Continue Watching's projected target. The latter
   // may already name the next episode while the device is still writing the episode on screen; every Resume and
   // Sources action must agree with the live status row until that session stops.
-  const playbackTarget = $derived(live?.episode ?? target);
+  // Movies need no episode coordinate, so an empty target keeps their actions on the same truthy gate as a series'
+  // authoritative coordinate without another reactive value or repeated type branches in every action.
+  const playbackTarget = $derived<{ season?: number; episode?: number } | undefined>(
+    ref.type === 'movie' ? {} : (live?.episode ?? target),
+  );
   const sourceCoord = $derived(sourceTarget ?? target);
-  /** A series title action exists only when presentation supplied an authoritative episode coordinate. */
-  const titlePlayable = $derived(ref.type !== 'tv' || !!playbackTarget);
   /**
    * The episodes of the season Sources is for, to switch between there: named where that season is the one on screen,
    * numbered from the series' episode count otherwise.
@@ -1125,7 +1129,7 @@
             {seenOverride}
             seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
-            onplay={!__DEN_TV__ && onplay && titlePlayable
+            onplay={!__DEN_TV__ && onplay && playbackTarget
               ? (tv) => onplay(tv, d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
             {tvs}
@@ -1138,10 +1142,10 @@
                   tv: live.deviceId,
                 }
               : undefined}
-            onplayhere={onplayhere && titlePlayable
+            onplayhere={onplayhere && playbackTarget
               ? () => onplayhere(d.title, playbackTarget?.season, playbackTarget?.episode)
               : undefined}
-            playHref={titlePlayable
+            playHref={playbackTarget
               ? titleHref({
                   ...d.title,
                   season: playbackTarget?.season,
@@ -1149,9 +1153,9 @@
                   play: true,
                 })
               : undefined}
-            onsources={!guestScout && !restricted && titlePlayable
+            onsources={!guestScout && !restricted && playbackTarget
               ? () => {
-                  sourceTarget = playbackTarget;
+                  sourceTarget = live?.episode ?? target;
                   void sourcesPanel?.show();
                 }
               : undefined}
@@ -1201,13 +1205,13 @@
           {ratings?.awards ?? ''}
         </p>{/if}
     </div>
-    {#if !guestScout}
+    {#if !guestScout && (ref.type === 'movie' || sourceCoord)}
       <div class="title-sources" hidden={restricted}>
         <TitleSources
           model={model ?? undefined}
           allowed={entitled}
           bind:this={sourcesPanel}
-          imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
+          imdb={d.imdbId}
           {active}
           season={ref.type === 'tv' ? sourceCoord?.season : undefined}
           episode={sourceCoord?.episode}

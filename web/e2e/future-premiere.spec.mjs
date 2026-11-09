@@ -58,20 +58,26 @@ async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
   return sourceRequests;
 }
 
-test('a future series without current Continue performs zero production player or source requests', async ({
-  page,
-}) => {
-  const sourceRequests = await open(page, {
-    query: '&other-series-continue&direct-play',
-  });
-  const hero = page.locator('header.hero');
+for (const profile of ['Kid', 'Owner'])
+  test(`a future series without current Continue performs zero production player or source requests as ${profile}`, async ({
+    page,
+  }) => {
+    const sourceRequests = await open(page, {
+      query: `&other-series-continue&direct-play${profile === 'Owner' ? '&owner' : ''}`,
+    });
+    const hero = page.locator('header.hero');
 
-  await expect(hero.getByRole('link', { name: /^(Play|Resume)$/ })).toHaveCount(0);
-  await expect(hero.getByRole('button', { name: 'Sources', exact: true })).toHaveCount(0);
-  await page.waitForTimeout(100);
-  expect(await page.evaluate(() => window.denTestPlayBoundary.stats())).toMatchObject({ asked: 0 });
-  expect(sourceRequests).toEqual([]);
-});
+    await expect(hero.getByRole('link', { name: /^(Play|Resume)$/ })).toHaveCount(0);
+    await expect(hero.getByRole('button', { name: 'Sources', exact: true })).toHaveCount(0);
+    await page.waitForTimeout(100);
+    // Kid Detail admission owns one eligibility request before it renders; a playback attempt would add another.
+    // Owner has no numeric content policy and therefore establishes the stronger absolute-zero boundary.
+    expect(await page.evaluate(() => window.denTestPlayBoundary.stats())).toMatchObject({
+      asked: profile === 'Owner' ? 0 : 1,
+      sources: 0,
+    });
+    expect(sourceRequests).toEqual([]);
+  });
 
 test('a real current-series Continue still crosses the future-title playback boundary', async ({
   page,
@@ -79,7 +85,7 @@ test('a real current-series Continue still crosses the future-title playback bou
   await open(page, { query: '&current-series-continue&direct-play' });
   await expect
     .poll(() => page.evaluate(() => window.denTestPlayBoundary.stats().asked))
-    .toBeGreaterThan(0);
+    .toBeGreaterThan(1);
 });
 
 test('an explicitly addressed future-series episode still crosses the playback boundary', async ({
@@ -88,7 +94,7 @@ test('an explicitly addressed future-series episode still crosses the playback b
   await open(page, { query: '&episode&season=1&direct-play' });
   await expect
     .poll(() => page.evaluate(() => window.denTestPlayBoundary.stats().asked))
-    .toBeGreaterThan(0);
+    .toBeGreaterThan(1);
 });
 
 for (const [label, firstAir] of [

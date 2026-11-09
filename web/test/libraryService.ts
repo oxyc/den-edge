@@ -55,6 +55,7 @@ class FixtureService {
   };
   readonly recoveryTasks: LibraryTask['kind'][] = [];
   readonly commandKinds: LibraryCommand['kind'][] = [];
+  readonly queryKinds: LibraryQuery['kind'][] = [];
   readonly progressOperationIds: string[] = [];
   readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
@@ -143,6 +144,7 @@ class FixtureService {
   }
 
   async query(query: LibraryQuery, signal?: AbortSignal) {
+    this.queryKinds.push(query.kind);
     const historyDetails = query.kind === 'history.episodes';
     if (historyDetails) this.historyDetails.attempts++;
     try {
@@ -491,6 +493,7 @@ export function fixtureLibraryService({
     historyImports: fixtureService.historyImports,
     recoveryTasks: fixtureService.recoveryTasks,
     commandKinds: fixtureService.commandKinds,
+    queryKinds: fixtureService.queryKinds,
     progressOperationIds: fixtureService.progressOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
     holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
