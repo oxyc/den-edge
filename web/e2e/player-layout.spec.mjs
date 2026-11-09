@@ -1,5 +1,6 @@
 // The browser player laid out as Apple's own ("A · Cinema"): close and title at the top with the one output slot at its
-// right end, the transport over the middle of the picture on a touch screen, the timeline, then one dock row. A mouse
+// right end, the transport over the middle of the picture on a touch screen (under the timeline, off the picture, on an
+// upright phone), the timeline, then one dock row. A mouse
 // gets the transport in the dock instead, hover reveal with the cursor hidden when idle, click to pause and double-click
 // for fullscreen. Settings live behind ⋯, a bottom sheet on a phone and a popover elsewhere, each row with its value.
 // On the real player, at phone, tablet and desktop sizes, in Chromium, Firefox and WebKit.
@@ -307,10 +308,15 @@ for (const [engine, browserType] of engines) {
           'Enter fullscreen',
           'More playback options',
         ]);
-        // A touch screen's transport is over the picture, not in the dock.
+        // A touch screen's transport is over the picture, not in the dock; on an upright phone it is a row under the
+        // timeline.
         const centre = page.locator('.web-centre');
+        const remote = page.locator('.web-remote');
         if (pointerDock) await expect(centre).toBeHidden();
-        else await expect(centre.getByRole('button', { name: /^(Play|Pause)$/ })).toBeVisible();
+        else if (phoneGeometry) {
+          await expect(centre).toBeHidden();
+          await expect(remote.getByRole('button', { name: /^(Play|Pause)$/ })).toBeVisible();
+        } else await expect(centre.getByRole('button', { name: /^(Play|Pause)$/ })).toBeVisible();
         // The labels show where there is room for them.
         const labelled = await page
           .locator('.web-dock .web-label')
@@ -328,6 +334,65 @@ for (const [engine, browserType] of engines) {
         expect(close.x).toBeLessThan(viewport.width / 4);
         expect(output.x + output.width).toBeGreaterThan(viewport.width - 64);
         expect(output.width).toBeGreaterThanOrEqual(44);
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+
+  // An upright phone keeps the picture clear: −10 · play · +10 sit in the black band under it, between the timeline and
+  // the dock, and nothing to press but the top bar meets the picture, paused or playing.
+  for (const viewport of PHONES.slice(0, 3)) {
+    test(`an upright phone's transport is under the picture (${engine}, ${viewport.name})`, async () => {
+      test.skip(browserType === firefox, 'Firefox has no touch emulation for a phone');
+      installed();
+      const browser = await launch(browserType);
+      try {
+        const page = await newPage(browser, browserType, viewport, true);
+        const video = await openPlaying(page);
+        await video.evaluate((v) => v.pause());
+        await showControls(page, true);
+        const picture = await pictureBox(page);
+        const pressable = await page.evaluate(() =>
+          [...document.querySelectorAll('.player .web-transport :is(button, a, input, .cast-slot)')]
+            .filter((element) => element.getClientRects().length > 0)
+            .map((element) => {
+              const r = element.getBoundingClientRect();
+              return {
+                name: element.getAttribute('aria-label'),
+                top: r.top,
+                bottom: r.bottom,
+                left: r.left,
+                right: r.right,
+              };
+            }),
+        );
+        const onPicture = pressable
+          .filter(
+            (c) =>
+              c.left < picture.right &&
+              picture.left < c.right &&
+              c.top < picture.bottom &&
+              picture.top < c.bottom,
+          )
+          .map((c) => c.name);
+        expect(onPicture).toEqual([]);
+        // Play, the one filled control, below the picture between the timeline and the dock.
+        const play = await page.getByRole('button', { name: 'Play', exact: true }).boundingBox();
+        const timeline = await page.getByLabel('Playback position').boundingBox();
+        const more = await page
+          .getByRole('button', { name: 'More playback options' })
+          .boundingBox();
+        expect(play.y).toBeGreaterThanOrEqual(picture.bottom);
+        expect(play.y).toBeGreaterThanOrEqual(timeline.y + timeline.height - 1);
+        expect(play.y + play.height).toBeLessThanOrEqual(more.y + 1);
+        expect(play.y + play.height).toBeLessThanOrEqual(viewport.height);
+        for (const name of ['Rewind 10 seconds', 'Forward 10 seconds']) {
+          const skip = await page.getByRole('button', { name }).boundingBox();
+          expect(Math.abs(skip.y + skip.height / 2 - (play.y + play.height / 2))).toBeLessThan(3);
+        }
+        expect(await overlaps(page)).toEqual([]);
+        expect(await smallTargets(page)).toEqual([]);
       } finally {
         await browser.close();
       }
@@ -610,13 +675,18 @@ for (const [engine, browserType] of engines) {
         const percent = (name) =>
           track.evaluate((el, n) => parseFloat(el.style.getPropertyValue(n)) || 0, name);
         await expect.poll(() => percent('--tv-buffered')).toBeGreaterThan(0);
-        const bufferedEnd = await video.evaluate((v) => {
-          for (let n = 0; n < v.buffered.length; n++)
-            if (v.buffered.start(n) <= v.currentTime + 0.5 && v.currentTime <= v.buffered.end(n))
-              return (v.buffered.end(n) / v.duration) * 100;
-          return 0;
-        });
-        expect(Math.abs((await percent('--tv-buffered')) - bufferedEnd)).toBeLessThan(2);
+        const bufferedEnd = () =>
+          video.evaluate((v) => {
+            for (let n = 0; n < v.buffered.length; n++)
+              if (v.buffered.start(n) <= v.currentTime + 0.5 && v.currentTime <= v.buffered.end(n))
+                return (v.buffered.end(n) / v.duration) * 100;
+            return 0;
+          });
+        // Paused, hls.js still fetches ahead: a segment can land between the two reads, before the media's
+        // `progress` event redraws the fill, so they are compared until the fill has caught up.
+        await expect
+          .poll(async () => Math.abs((await percent('--tv-buffered')) - (await bufferedEnd())))
+          .toBeLessThan(2);
         expect(await percent('--tv-buffered')).toBeGreaterThan(await percent('--tv-progress'));
       } finally {
         await browser.close();
