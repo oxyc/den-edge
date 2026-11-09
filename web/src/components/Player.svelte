@@ -10,7 +10,7 @@
   import { airingStore } from '../lib/airing.svelte';
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
-  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+  import { SvelteSet } from 'svelte/reactivity';
   import { WATCHED } from '../lib/actions';
   import {
     canOfferCast,
@@ -3737,7 +3737,8 @@
     retimeSubtitles();
   }
 
-  const subtitleOffsetFormatters = new SvelteMap<InterfaceLanguage, Intl.NumberFormat>();
+  let subtitleOffsetFormatterLanguage: InterfaceLanguage | undefined;
+  let subtitleOffsetFormatter: Intl.NumberFormat | undefined;
 
   /** Profile-locale output for both the compact HUD and its spoken live value. */
   function formattedSubtitleOffset(
@@ -3745,13 +3746,14 @@
     unitDisplay: 'compact' | 'spoken' = 'compact',
   ): string {
     const language = i18n.language;
-    let formatter = subtitleOffsetFormatters.get(language);
-    if (!formatter) {
+    let formatter = subtitleOffsetFormatter;
+    if (!formatter || subtitleOffsetFormatterLanguage !== language) {
       formatter = new Intl.NumberFormat(interfaceLocale(language), {
         minimumFractionDigits: 1,
         maximumFractionDigits: 1,
       });
-      subtitleOffsetFormatters.set(language, formatter);
+      subtitleOffsetFormatter = formatter;
+      subtitleOffsetFormatterLanguage = language;
     }
     const id =
       unitDisplay === 'spoken' ? 'player.subtitleOffsetSpoken' : 'player.subtitleOffsetCompact';

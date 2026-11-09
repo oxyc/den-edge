@@ -30,16 +30,16 @@
     playbackQuery === 'managed' ? '/den/config/playback' : (playbackQuery ?? undefined);
   const subtitleLanguage = query.get('subtitleLanguage') ?? undefined;
   const requestedInterfaceLanguage = query.get('interfaceLanguage');
-  let interfaceLanguage = $state(
-    isInterfaceLanguage(requestedInterfaceLanguage) ? requestedInterfaceLanguage : 'en',
-  );
-  $effect(() => {
-    void setInterfaceLanguage(interfaceLanguage);
-  });
+  const initialInterfaceLanguage = isInterfaceLanguage(requestedInterfaceLanguage)
+    ? requestedInterfaceLanguage
+    : 'en';
+  let interfaceLanguage = $state(initialInterfaceLanguage);
 
   function replaceInterfaceLanguage(language: 'en' | 'es' | 'sv') {
     interfaceLanguage = language;
+    void setInterfaceLanguage(language);
   }
+  replaceInterfaceLanguage(initialInterfaceLanguage);
   const shownSubtitleLanguages = query.get('shownSubtitles')?.split(',').filter(Boolean);
   const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;

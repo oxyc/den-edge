@@ -329,7 +329,8 @@ test('subtitle timing follows live profile language through dismissal and player
     await expect(timing.locator('strong')).toHaveText('+0.5s');
     await expect(timing.locator('strong')).toHaveAccessibleName('+0.5 seconds');
 
-    // A superseded first-load Spanish catalog must not publish after the immediately selected English profile.
+    // A first-load import cannot settle until this JavaScript task yields. The direct fixture setters therefore
+    // start a real Spanish request and supersede it with English before that held catalog can publish.
     await page.locator('body').evaluate(() => {
       document.querySelector('[data-testid="interface-language-es"]')?.click();
       document.querySelector('[data-testid="interface-language-en"]')?.click();
