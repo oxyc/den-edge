@@ -675,13 +675,18 @@ for (const [engine, browserType] of engines) {
         const percent = (name) =>
           track.evaluate((el, n) => parseFloat(el.style.getPropertyValue(n)) || 0, name);
         await expect.poll(() => percent('--tv-buffered')).toBeGreaterThan(0);
-        const bufferedEnd = await video.evaluate((v) => {
-          for (let n = 0; n < v.buffered.length; n++)
-            if (v.buffered.start(n) <= v.currentTime + 0.5 && v.currentTime <= v.buffered.end(n))
-              return (v.buffered.end(n) / v.duration) * 100;
-          return 0;
-        });
-        expect(Math.abs((await percent('--tv-buffered')) - bufferedEnd)).toBeLessThan(2);
+        const bufferedEnd = () =>
+          video.evaluate((v) => {
+            for (let n = 0; n < v.buffered.length; n++)
+              if (v.buffered.start(n) <= v.currentTime + 0.5 && v.currentTime <= v.buffered.end(n))
+                return (v.buffered.end(n) / v.duration) * 100;
+            return 0;
+          });
+        // Paused, hls.js still fetches ahead: a segment can land between the two reads, before the media's
+        // `progress` event redraws the fill, so they are compared until the fill has caught up.
+        await expect
+          .poll(async () => Math.abs((await percent('--tv-buffered')) - (await bufferedEnd())))
+          .toBeLessThan(2);
         expect(await percent('--tv-buffered')).toBeGreaterThan(await percent('--tv-progress'));
       } finally {
         await browser.close();

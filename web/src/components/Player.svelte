@@ -5370,8 +5370,9 @@
     if (!webTransport || castView || failure || video?.paused) return false;
     if (playerMenuOpen() || tvSubtitleTimingOpen || castFocus || timelineHeld || upNext !== null)
       return false;
-    // The pointer over the top bar or the dock, or keyboard focus among the controls, holds them up.
-    if (webTop?.matches(':hover') || webBar?.matches(':hover')) return false;
+    // A mouse over the top bar or the dock, or keyboard focus among the controls, holds them up. A touch screen leaves
+    // `:hover` on whatever was tapped last, so there a tap on a control must not hold them up for good.
+    if (desktopTransport && (webTop?.matches(':hover') || webBar?.matches(':hover'))) return false;
     const focused = document.activeElement;
     return !(
       focused instanceof HTMLElement &&
