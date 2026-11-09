@@ -9,6 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { test, expect, webkit, devices } from '@playwright/test';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage, optionsButton, optionsMenu } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const SEGMENT_SECS = 2;
@@ -255,10 +256,9 @@ test('early TorBox delivery switching stays on TorBox with its subtitle constrai
   try {
     const asked = await fakeManagedTorBox(page);
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }).click();
-    await expect(page.getByRole('button', { name: 'Playing from TorBox' })).toBeVisible();
+    await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
 
     await expect.poll(() => asked.length, { timeout: 90_000 }).toBe(3);
     expect(asked[2]).toMatchObject({
@@ -267,7 +267,7 @@ test('early TorBox delivery switching stays on TorBox with its subtitle constrai
       exclude: [A.filename],
     });
     expect(asked[2]).not.toHaveProperty('directFailed');
-    await expect(page.getByRole('button', { name: 'Playing from TorBox' })).toBeVisible();
+    await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
   } finally {
     await browser.close();
   }
@@ -284,11 +284,14 @@ test('a release the viewer picked is never switched away from, and the pick outl
     await page.goto(`${ORIGIN}/test/player.html`);
     await playsTo(page, 1);
 
-    await page.getByRole('button', { name: /^Stream: / }).click();
+    await openOptionsPage(page, 'Stream');
     await expect(page.getByRole('menuitemradio')).toHaveCount(3);
     await page.getByRole('menuitemradio').filter({ hasText: B.filename }).click();
     await expect.poll(() => remux.served.at(-1)).toBe(B.filename);
-    await expect(page.locator('.release')).toContainText(B.label);
+    // The release playing is named in the options' header.
+    await optionsButton(page).click();
+    await expect(optionsMenu(page).locator('.options-release')).toContainText(B.label);
+    await page.keyboard.press('Escape');
 
     // It stalls, and stalls again, early in its playing — where an automatic pick would be moved: nothing is asked
     // for on its own, and the viewer is told and offered another.

@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { routeBigTmdb } from './big-library.mjs';
 import { guardNetwork } from './network.mjs';
+import { optionsButton, optionsMenu } from './player-options.mjs';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 
 const SERIES = 2002;
@@ -302,7 +303,7 @@ async function playFirstEpisode(page, { next = true } = {}) {
   await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
   await expect(page).toHaveURL(`${ORIGIN}/tv/${SERIES}-series-${SERIES}?season=1&episode=1&play=1`);
   if (!next) return;
-  await expect(player(page).getByRole('link', { name: 'Next: S1 · E2' })).toHaveAttribute(
+  await expect(player(page).getByRole('link', { name: 'Next episode: S1 · E2' })).toHaveAttribute(
     'href',
     `/tv/${SERIES}-series-${SERIES}?season=1&episode=2&play=1`,
   );
@@ -393,7 +394,8 @@ test('replaying a finished episode cancels its advance, and a later finish advan
     await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
     await expect.poll(() => pageVideo(page).evaluate((video) => video.ended)).toBe(true);
     await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible();
-    await page.getByRole('button', { name: 'Play from beginning' }).click();
+    await optionsButton(page).click();
+    await optionsMenu(page).getByRole('menuitem', { name: 'Play from beginning' }).click();
     await playingPast(page, 1);
 
     // Wait beyond the complete ten-second countdown. Episode 1 remains active and its replay progress is durable.

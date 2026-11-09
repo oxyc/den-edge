@@ -1,12 +1,13 @@
-// The stamp saying how a stream is delivered ("TorBox", "Den Remux") is a menu button: it says how it plays now and
-// offers the switch to the other path, and only choosing that switch restarts the stream. On the real player, at a
-// phone's width with touch (the bottom sheet) and a desktop's (the popover), in Chromium and WebKit.
+// How a stream is delivered ("TorBox", "Den Remux") is named in the options' header and on their Source row, whose page
+// says how it plays now and offers the switch to the other path; only choosing that switch restarts the stream. On the
+// real player, at a phone's width with touch (the bottom sheet) and a desktop's (the popover), in Chromium and WebKit.
 import { test, expect, chromium, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage, optionsButton, optionsMenu } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const CDN = 'https://flux-002.wnam.tb-cdn.io/opaque';
@@ -86,8 +87,8 @@ test('delivery changes explain the wait immediately and until the replacement pa
       .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
       .toBeGreaterThan(2);
 
-    const torbox = page.getByRole('button', { name: 'Playing from TorBox' });
-    await torbox.click();
+    const source = page.getByTestId('playback-source');
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Switch to Den Remux' }).click();
     await expect.poll(() => playback.length).toBe(2);
     await expect(page.getByRole('status')).toHaveText('Switching to Den Remux…');
@@ -96,8 +97,7 @@ test('delivery changes explain the wait immediately and until the replacement pa
       .poll(() => video.evaluate((element) => element.currentTime))
       .toBeGreaterThan(stillPlayingAt);
     releases.shift()();
-    const remux = page.getByRole('button', { name: 'Playing from Den Remux' });
-    await expect(remux).toBeVisible({ timeout: 30_000 });
+    await expect(source).toHaveText('Den Remux', { timeout: 30_000 });
     await expect(page.getByText('Switching to Den Remux…')).toHaveCount(0);
 
     // A source replacement cannot rely on the element's one-shot autoplay attribute. This models the browser state
@@ -106,12 +106,12 @@ test('delivery changes explain the wait immediately and until the replacement pa
       element.autoplay = false;
       element.removeAttribute('autoplay');
     });
-    await remux.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Switch to TorBox' }).click();
     await expect.poll(() => playback.length).toBe(3);
     await expect(page.getByRole('status')).toHaveText('Switching to TorBox…');
     releases.shift()();
-    await expect(torbox).toBeVisible({ timeout: 30_000 });
+    await expect(source).toHaveText('TorBox', { timeout: 30_000 });
     await expect(page.getByText('Switching to TorBox…')).toHaveCount(0);
     const resumedAt = await video.evaluate((element) => element.currentTime);
     await expect
@@ -132,7 +132,7 @@ for (const [engine, browserType] of [
   ['WebKit', webkit],
 ]) {
   for (const [layout, options] of layouts) {
-    test(`the delivery stamp opens a menu, and only its switch restarts (${engine}, ${layout})`, async () => {
+    test(`the Source page names the path, and only its switch restarts (${engine}, ${layout})`, async () => {
       test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
       const browser = await browserType.launch(
         browserType === chromium ? { args: ['--autoplay-policy=no-user-gesture-required'] } : {},
@@ -148,23 +148,25 @@ for (const [engine, browserType] of [
         await expect
           .poll(() => video.evaluate((v) => v.currentTime), { timeout: 30_000 })
           .toBeGreaterThan(2);
-        const stamp = page.getByRole('button', { name: 'Playing from TorBox' });
-        await expect(stamp).toHaveText('TorBox');
-        await expect(stamp).toHaveAttribute('aria-haspopup', 'menu');
-        await expect(stamp).toHaveAttribute('aria-expanded', 'false');
+        const more = optionsButton(page);
+        await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
+        await expect(more).toHaveAttribute('aria-haspopup', 'menu');
+        await expect(more).toHaveAttribute('aria-expanded', 'false');
 
-        // A press opens the menu and changes nothing about what plays.
+        // A press opens the options, then the Source page, and changes nothing about what plays.
         await showControls(page, layout);
-        await stamp.click();
-        const menu = page.getByRole('menu', { name: 'Playing from TorBox' });
+        await more.click();
+        const menu = optionsMenu(page);
         await expect(menu).toBeVisible();
-        await expect(stamp).toHaveAttribute('aria-expanded', 'true');
+        await expect(more).toHaveAttribute('aria-expanded', 'true');
+        await expect(menu.locator('.options-chip')).toHaveText('TorBox');
+        await menu.getByRole('menuitem', { name: 'Source, TorBox' }).click();
         await expect(menu).toContainText('Playing directly from TorBox');
         const toRemux = menu.getByRole('menuitem', { name: 'Switch to Den Remux' });
         await expect(toRemux).toContainText(
           'For audio or subtitles this browser can’t play, or a stream that stalls',
         );
-        await expect(menu.getByRole('menuitem')).toHaveCount(1);
+        await expect(menu.getByRole('menuitem', { name: /^Switch to/ })).toHaveCount(1);
         await page.screenshot({
           path: test.info().outputPath(`delivery-menu-${engine}-${layout}.png`),
         });
@@ -177,11 +179,11 @@ for (const [engine, browserType] of [
           await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
         } else await page.keyboard.press('Escape');
         await expect(menu).toBeHidden();
-        await expect(stamp).toHaveAttribute('aria-expanded', 'false');
+        await expect(more).toHaveAttribute('aria-expanded', 'false');
         await expect(page.locator('.player')).toBeVisible();
         await page.waitForTimeout(500);
         expect(playback).toHaveLength(1);
-        await expect(stamp).toHaveText('TorBox');
+        await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
 
         // Choosing the switch restarts it through Den Remux, from where it was (a position past the first five
         // seconds, which is carried; the very start is not).
@@ -190,17 +192,17 @@ for (const [engine, browserType] of [
           .toBeGreaterThan(7);
         const at = await video.evaluate((v) => v.currentTime);
         await showControls(page, layout);
-        await stamp.click();
+        await openOptionsPage(page, 'Source');
         await toRemux.click();
-        const remuxStamp = page.getByRole('button', { name: 'Playing from Den Remux' });
-        await expect(remuxStamp).toHaveText('Den Remux', { timeout: 30_000 });
+        await expect(page.getByTestId('playback-source')).toHaveText('Den Remux', {
+          timeout: 30_000,
+        });
         expect(playback).toHaveLength(2);
         expect(playback[1]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
         expect(playback[1].startAt).toBeGreaterThan(at - 1);
 
         await showControls(page, layout);
-        await remuxStamp.click();
-        const back = page.getByRole('menu', { name: 'Playing from Den Remux' });
+        const back = await openOptionsPage(page, 'Source');
         await expect(back).toContainText('Playing through Den Remux');
         await expect(back.getByRole('menuitem', { name: 'Switch to TorBox' })).toContainText(
           'Straight from the source, no conversion',
@@ -222,6 +224,7 @@ async function showControls(page, layout) {
   if (!box) throw new Error('player has no video');
   if (layout === 'desktop') await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   else if (/web-controls-hidden/.test((await player.getAttribute('class')) ?? ''))
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    // Between the toast lane at the top and the transport at the picture's centre.
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height * 0.38);
   await expect(player).not.toHaveClass(/web-controls-hidden/);
 }

@@ -5,6 +5,7 @@ import { test, expect, chromium, webkit } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { openOptionsPage, optionsButton } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const release = { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 };
@@ -86,7 +87,8 @@ test('checking a browser key replaces the login prompt with immediate progress',
     });
 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await expect(page.getByRole('button', { name: 'Choose playback source' })).toHaveCount(0);
+    // No source to choose: the options (where Source would be) are not offered.
+    await expect(optionsButton(page)).toHaveCount(0);
     await page.getByLabel('Browser key').fill('not-the-key');
     await page.getByRole('button', { name: 'Let this browser in' }).click();
     await expect(page.getByRole('status')).toHaveText('Checking key…');
@@ -158,8 +160,7 @@ test('a direct startup failure refreshes TorBox only, then offers both paths exp
     expect(logs.join('\n')).toContain('"to":"torbox"');
     expect(logs.join('\n')).not.toContain('playing session carries on');
     await expect(page.getByTestId('playback-source')).toHaveText('Source');
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await expect(
       page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }),
     ).toBeVisible();

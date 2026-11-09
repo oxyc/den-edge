@@ -16,6 +16,7 @@
 import { test, expect, chromium, webkit, devices } from '@playwright/test';
 import { writeFileSync } from 'node:fs';
 import { castSdk, tmdb } from './fixtures.mjs';
+import { showsSubtitles, subtitleChoice, subtitlesButton } from '../e2e/player-options.mjs';
 import { CDN_HOST, EDGE, startStack } from './stack.mjs';
 
 const MOVIE = 1002;
@@ -348,10 +349,12 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
     await playingPast(video(page), 2);
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
     expect(playbacks(seen)).toHaveLength(1);
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    const menu = page.getByRole('menu', { name: /Subtitles/ });
-    await expect(menu.getByRole('menuitemradio', { name: /English/ })).toBeVisible();
-    await expect(menu.getByRole('menuitemradio', { name: /Suomi/ })).toBeVisible();
+    // The dock's Audio & subtitles button: its page lists TorBox's subtitles under Subtitles.
+    await showsSubtitles(page, 'Off');
+    await revealControls(page);
+    await subtitlesButton(page).click();
+    await expect(subtitleChoice(page, /English/)).toBeVisible();
+    await expect(subtitleChoice(page, /Suomi/)).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(castFrame(page).locator('#cast')).toBeVisible({ timeout: 30_000 });
 
@@ -527,11 +530,10 @@ test.describe('Cast of a TorBox stream', () => {
     await playingPast(video(page), 2);
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
     // TorBox's English track, which TorBox burns into a stream of its own: a second ask, by index.
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page
-      .getByRole('menu', { name: /Subtitles/ })
-      .getByRole('menuitemradio', { name: /English/ })
-      .click();
+    await showsSubtitles(page, 'Off');
+    await revealControls(page);
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, /English/).click();
     await expect.poll(() => playbacks(seen).some((r) => asked(r).subtitleTrack === 0)).toBe(true);
     await playingPast(video(page), 1);
 

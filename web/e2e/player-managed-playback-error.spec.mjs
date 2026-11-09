@@ -5,6 +5,13 @@ import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import {
+  openOptionsPage,
+  optionsButton,
+  showsSubtitles,
+  subtitleChoice,
+  subtitlesButton,
+} from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const CHROME_MAC =
@@ -253,10 +260,9 @@ test('a no-release failure keeps source recovery available and can explicitly st
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
 
     await expect(page.getByRole('alert')).toContainText('No release');
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await expect(source).toBeVisible();
     await expect(page.getByTestId('playback-source')).toHaveText('Source');
-    await source.click();
+    const options = await openOptionsPage(page, 'Source');
+    await expect(options).toContainText('Choose playback source');
     await page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }).click();
 
     await expect.poll(() => requests.length).toBe(2);
@@ -266,12 +272,11 @@ test('a no-release failure keeps source recovery available and can explicitly st
     });
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
 
-    const subtitles = page.getByRole('button', { name: 'Subtitles: Off' });
-    await expect(subtitles).toBeVisible();
-    await subtitles.click();
-    const menu = page.getByRole('menu', { name: 'Subtitles: Off' });
+    await showsSubtitles(page, 'Off');
+    await subtitlesButton(page).click();
+    const menu = page.getByRole('menu', { name: /^Audio and subtitles/ });
     await expect(menu).toContainText('Den subtitles were not requested for this direct stream.');
-    await expect(menu.getByRole('menuitemradio', { name: 'English' })).toBeVisible();
+    await expect(subtitleChoice(page, 'English')).toBeVisible();
 
     const logs = consoleLines.join('\n');
     expect(logs).toContain('"event":"viewer_selection"');
@@ -331,8 +336,7 @@ test('a no-release failure can explicitly retry Den Remux', async () => {
       });
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try Den Remux' }).click();
     await expect.poll(() => requests.length).toBe(2);
     expect(requests[1].postDataJSON()).toMatchObject({ directFailed: true });
@@ -350,17 +354,16 @@ test('repeated explicit-source failures keep recovery available and restore Den 
   });
   try {
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }).click();
     await expect.poll(() => requests.length).toBe(2);
     expect(requests[1]).toMatchObject({ directOnly: true, subtitleLanguages: [] });
-    await expect(source).toBeVisible();
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try Den Remux' }).click();
     await expect.poll(() => requests.length).toBe(3);
     expect(requests[2]).toMatchObject({ directFailed: true, subtitleLanguages: ['en'] });
-    await expect(source).toBeVisible();
+    await expect(page.getByTestId('playback-source')).toHaveText('Source');
+    await expect(optionsButton(page)).toBeVisible();
   } finally {
     await browser.close();
   }
@@ -403,15 +406,14 @@ test('a retryable explicit TorBox attempt keeps Den subtitles disabled through t
       });
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }).click();
     await expect.poll(() => requests.length).toBe(2);
     await expect.poll(() => requests.length, { timeout: 5_000 }).toBe(3);
     expect(requests[1]).toMatchObject({ directOnly: true, subtitleLanguages: [] });
     expect(requests[2]).toMatchObject({ directOnly: true, subtitleLanguages: [] });
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
-    await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toBeVisible();
+    await showsSubtitles(page, 'Off');
   } finally {
     await browser.close();
   }
@@ -434,8 +436,7 @@ test('an excluded-list Den retry remains pinned to Den Remux', async () => {
       );
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try Den Remux' }).click();
     await expect.poll(() => requests.length).toBe(3);
     expect(requests[1]).toMatchObject({
@@ -472,8 +473,7 @@ test('a forced TorBox media refresh keeps Den subtitles disabled', async () => {
       });
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }).click();
     await expect.poll(() => requests.length, { timeout: 15_000 }).toBe(3);
     expect(requests[1]).toMatchObject({ directOnly: true, subtitleLanguages: [] });
@@ -505,9 +505,8 @@ test('a normal direct session with no tracks does not expose an empty subtitle m
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
-    await expect(page.getByRole('button', { name: 'Subtitles: Off' })).toHaveCount(0);
-    const source = page.getByRole('button', { name: 'Playing from TorBox' });
-    await source.click();
+    await expect(subtitlesButton(page)).toHaveCount(0);
+    await openOptionsPage(page, 'Source');
     await expect(page.getByRole('menu')).toContainText('Playing directly from TorBox');
     await expect(page.getByRole('menu')).not.toContainText('Den subtitles were not requested');
   } finally {
@@ -550,8 +549,7 @@ test('a TorBox plan without streaming support explains the required configuratio
       'Your TorBox plan doesn’t support streaming links. Update the TorBox plan or remove TorBox from this Den Hearth install.',
     );
     await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
-    const source = page.getByRole('button', { name: 'Choose playback source' });
-    await source.click();
+    await openOptionsPage(page, 'Source');
     await expect(
       page.getByRole('menuitem', { name: 'Try TorBox without Den subtitles' }),
     ).toHaveAttribute('aria-disabled', 'true');

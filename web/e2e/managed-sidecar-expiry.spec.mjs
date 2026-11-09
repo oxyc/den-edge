@@ -6,6 +6,7 @@ import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { showsSubtitles, subtitleChoice, subtitlesButton } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const token = 'e'.repeat(43);
@@ -114,21 +115,23 @@ test('managed sidecars survive cached re-selection and visibly replan to the fal
     );
     // The fixture's English preference exercises the production auto-pick before expiry.
     await expect.poll(() => sidecarRequests).toEqual([`/den/_sidecar/${token}/1.vtt`]);
-    await expect(page.getByRole('button', { name: 'Subtitles: English' })).toBeVisible();
+    await showsSubtitles(page, 'English');
     await expect(page.locator('video track')).toHaveAttribute('src', /^blob:/);
 
-    await page.getByRole('button', { name: 'Subtitles: English' }).click();
-    await page.getByRole('menuitemradio', { name: 'Off' }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'Off').click();
     expired = true;
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'English', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Subtitles: English' })).toBeVisible();
+    await showsSubtitles(page, 'Off');
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English', { exact: true }).click();
+    await showsSubtitles(page, 'English');
     expect(sidecarRequests).toEqual([`/den/_sidecar/${token}/1.vtt`]);
 
-    await page.getByRole('button', { name: 'Subtitles: English' }).click();
-    await page.getByRole('menuitemradio', { name: 'Off' }).click();
-    await page.getByRole('button', { name: 'Subtitles: Off' }).click();
-    await page.getByRole('menuitemradio', { name: 'Swedish', exact: true }).click();
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'Off').click();
+    await showsSubtitles(page, 'Off');
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'Swedish', { exact: true }).click();
     await expect.poll(() => operations.length).toBe(2);
     await expect(page.getByRole('status')).toHaveText('Switching subtitles…');
     expect(sidecarRequests).toEqual([
@@ -138,7 +141,7 @@ test('managed sidecars survive cached re-selection and visibly replan to the fal
     expect(operations[1]).toMatchObject({ directOnly: true, subtitleTrack: 2 });
 
     releaseFallback();
-    await expect(page.getByRole('button', { name: 'Subtitles: Swedish' })).toBeVisible();
+    await showsSubtitles(page, 'Swedish');
     await expect(page.getByText('Switching subtitles…', { exact: true })).toHaveCount(0);
   } finally {
     await browser.close();
