@@ -33,9 +33,15 @@ function receiverPolicy() {
 /**
  * Google's receiver framework, as far as Den's receiver uses it: a context whose `canDisplayType` answers as a 4K
  * Chromecast on an HDR10 TV with Dolby Vision 8 and Dolby Digital passthrough. What the page sends a sender is kept in
- * `window.toSender`; `window.__fromSender(data)` is a sender's message on Den's namespace.
+ * `window.toSender`; `window.__fromSender(data)` is a sender's message on Den's namespace. Like the real framework, it
+ * loads Shaka Player from ajax.googleapis.com and opens the Cast device's IPC socket on localhost:8008.
  */
 const RECEIVER_SDK = `
+  const shaka = document.createElement('script');
+  shaka.src = 'https://ajax.googleapis.com/ajax/libs/shaka-player/4.15.56/shaka-player.compiled.js';
+  shaka.onload = () => { window.shakaLoaded = true; };
+  document.head.append(shaka);
+  try { new WebSocket('ws://localhost:8008/v2/ipc'); } catch {}
   window.toSender = [];
   const custom = {};
   const context = {
@@ -182,6 +188,9 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
       framework.push(new URL(r.request().url()).pathname);
       return r.fulfill({ contentType: 'text/javascript', body: RECEIVER_SDK });
     });
+    await context.route('https://ajax.googleapis.com/**', (r) =>
+      r.fulfill({ contentType: 'text/javascript', body: '' }),
+    );
     await context.route(`${CAST}/**`, async (r) => {
       const file = new URL(r.request().url()).pathname.slice(1);
       const type = file.endsWith('.html')
@@ -203,6 +212,8 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
     expect(framework).toEqual(['/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js']);
     await expect(page.locator('.brand')).toBeVisible();
     await expect(page.locator('.brand')).toHaveText('Den');
+    // Without its player library the framework takes every LOAD and plays none of them.
+    await expect.poll(() => page.evaluate(() => window.shakaLoaded)).toBe(true);
     await expect
       .poll(() => page.evaluate(() => window.started?.customNamespaces))
       .toEqual({ 'urn:x-cast:fi.oxy.den': 'JSON' });

@@ -91,10 +91,13 @@ pub fn app_id(value: &str) -> Option<String> {
 /// `CAST_APP_ID` when one is set, left empty for Google's Default Media Receiver.
 const APP_ID_SLOT: &[u8] = br#"name="den-cast-app" content="""#;
 
-/// Den's Cast receiver page's policy (`receiver.html`).
-const RECEIVER_CSP: &str = "default-src 'self'; script-src 'self' https://www.gstatic.com; \
+/// Den's Cast receiver page's policy (`receiver.html`). Google's receiver framework loads Shaka Player, its HLS and DASH
+/// player, from ajax.googleapis.com, and reaches the Cast device over `ws://localhost:8008`: blocking either leaves the
+/// TV on Den's idle screen with every LOAD unplayed.
+const RECEIVER_CSP: &str = "default-src 'self'; script-src 'self' https://www.gstatic.com https://ajax.googleapis.com; \
      style-src 'self' 'unsafe-inline' https://www.gstatic.com https://fonts.googleapis.com; font-src 'self' https: data:; \
-     img-src 'self' https: http: data: blob:; media-src https: http: blob: data:; connect-src 'self' https: http: wss:; \
+     img-src 'self' https: http: data: blob:; media-src https: http: blob: data:; \
+     connect-src 'self' https: http: wss: ws://localhost:8008; \
      worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Whether `host`, a request's normalized host (`handler::request_host`), is `CAST_ORIGIN`'s.
@@ -384,7 +387,9 @@ mod tests {
         let resp = h.send("GET", "/receiver.html", None, &[("host", "cast.example")]).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()[header::CONTENT_SECURITY_POLICY], super::RECEIVER_CSP);
-        assert!(super::RECEIVER_CSP.contains("script-src 'self' https://www.gstatic.com;"));
+        assert!(super::RECEIVER_CSP
+            .contains("script-src 'self' https://www.gstatic.com https://ajax.googleapis.com;"));
+        assert!(super::RECEIVER_CSP.contains(" ws://localhost:8008;"));
         assert!(super::RECEIVER_CSP.contains("media-src https: http: blob: data:;"));
         assert!(super::RECEIVER_CSP.ends_with("frame-ancestors 'none'"));
         assert_eq!(body_text(resp).await, "<title>Den</title>");
