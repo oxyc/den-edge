@@ -33,11 +33,12 @@
   let interfaceLanguage = $state(
     isInterfaceLanguage(requestedInterfaceLanguage) ? requestedInterfaceLanguage : 'en',
   );
-  void setInterfaceLanguage(interfaceLanguage);
+  $effect(() => {
+    void setInterfaceLanguage(interfaceLanguage);
+  });
 
   function replaceInterfaceLanguage(language: 'en' | 'es' | 'sv') {
     interfaceLanguage = language;
-    void setInterfaceLanguage(language);
   }
   const shownSubtitleLanguages = query.get('shownSubtitles')?.split(',').filter(Boolean);
   const maxSubtitlesPerLanguage = Number(query.get('subtitlesPerLanguage')) || undefined;
