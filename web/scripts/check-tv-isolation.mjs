@@ -298,5 +298,8 @@ if (process.argv.includes('--capture')) {
   // Casting the release a receiver can play when Hearth refuses the one playing here (one more ask, no release named)
   // brings the complete non-translation graph to 99,636 in CI, all in the lazy Player chunk; no request is added
   // unless Hearth refuses with `torbox_receiver_unsupported`. Allow the next 128-byte boundary past it, retaining 76.
-  if (coreTotalDelta > 99712) throw new Error('Browser total JS/CSS budget exceeded');
+  // Den's Cast receiver in the cast report (what its TV plays, its firmware and device type, its player's error
+  // codes) brings the graph to 100,030 on a local build, in the lazy Player and castReceiver chunks only; it adds no
+  // request. Allow the next 128-byte boundary past it, retaining 66.
+  if (coreTotalDelta > 100096) throw new Error('Browser total JS/CSS budget exceeded');
 }

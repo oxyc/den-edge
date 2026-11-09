@@ -2298,9 +2298,115 @@ struct CastReport {
     failed: bool,
     fail_reason: Option<CastFailReason>,
     session_secs: Option<u32>,
+    /// What Den's Cast receiver said of itself and its TV, and its player's last error codes; none of it for Google's
+    /// receiver, which says nothing.
+    #[serde(flatten)]
+    receiver: CastReceiver,
     /// What was being cast (`LOG_IDENTITY`).
     #[serde(flatten)]
     identity: Identity,
+}
+
+/// Dolby Vision profiles the receiver's TV decodes.
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CastDv {
+    P5,
+    P8,
+    P5p8,
+    None,
+}
+
+impl CastDv {
+    fn as_str(&self) -> &'static str {
+        match self {
+            CastDv::P5 => "p5",
+            CastDv::P8 => "p8",
+            CastDv::P5p8 => "p5p8",
+            CastDv::None => "none",
+        }
+    }
+}
+
+/// Numbers, flags and the two tokens a Chromecast's user agent names (`CrKey/<firmware>`, `DeviceType/<type>`),
+/// each checked here: anything else is a 400, never a line in the log.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CastReceiver {
+    rx_h264: Option<u16>,
+    rx_hevc: Option<u16>,
+    rx_hdr: Option<bool>,
+    rx_dv: Option<CastDv>,
+    rx_eac3: Option<bool>,
+    rx_max_height: Option<u16>,
+    #[serde(default, deserialize_with = "firmware")]
+    rx_firmware: Option<String>,
+    #[serde(default, deserialize_with = "device_type")]
+    rx_device: Option<String>,
+    /// The Cast framework's `DetailedErrorCode`.
+    rx_error: Option<u32>,
+    /// Shaka Player's error code, when Shaka was the receiver's player.
+    rx_shaka: Option<u32>,
+}
+
+fn token<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    max: usize,
+    allowed: fn(char) -> bool,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(v) if v.is_empty() || v.len() > max || !v.chars().all(allowed) => {
+            Err(serde::de::Error::custom("not a receiver token"))
+        }
+        v => Ok(v),
+    }
+}
+
+fn firmware<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    token(d, 20, |c| c.is_ascii_digit() || c == '.')
+}
+
+fn device_type<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    token(d, 24, |c| c.is_ascii_alphabetic())
+}
+
+impl CastReceiver {
+    fn parts(&self) -> Vec<String> {
+        let flag = |b: bool| if b { "1" } else { "0" };
+        let mut parts = Vec::new();
+        if let Some(v) = self.rx_h264 {
+            parts.push(format!("rxH264:{v}"));
+        }
+        if let Some(v) = self.rx_hevc {
+            parts.push(format!("rxHevc:{v}"));
+        }
+        if let Some(v) = self.rx_hdr {
+            parts.push(format!("rxHdr:{}", flag(v)));
+        }
+        if let Some(v) = &self.rx_dv {
+            parts.push(format!("rxDv:{}", v.as_str()));
+        }
+        if let Some(v) = self.rx_eac3 {
+            parts.push(format!("rxEac3:{}", flag(v)));
+        }
+        if let Some(v) = self.rx_max_height {
+            parts.push(format!("rxMaxHeight:{v}"));
+        }
+        if let Some(v) = &self.rx_firmware {
+            parts.push(format!("rxFirmware:{v}"));
+        }
+        if let Some(v) = &self.rx_device {
+            parts.push(format!("rxDevice:{v}"));
+        }
+        if let Some(v) = self.rx_error {
+            parts.push(format!("rxError:{v}"));
+        }
+        if let Some(v) = self.rx_shaka {
+            parts.push(format!("rxShaka:{v}"));
+        }
+        parts
+    }
 }
 
 impl CastReport {
@@ -2319,6 +2425,7 @@ impl CastReport {
         if let Some(s) = self.session_secs {
             parts.push(format!("sessionSecs:{}", s.min(MAX_SECS)));
         }
+        parts.extend(self.receiver.parts());
         parts.extend(self.identity.parts(log_identity));
         parts.join(",")
     }
@@ -3120,6 +3227,36 @@ mod tests {
             report.tag(true),
             "kind:airplay,reached:attempted,failed:1,failReason:lan_unreachable,sessionSecs:42"
         );
+    }
+
+    #[test]
+    fn a_cast_names_what_den_receiver_said_of_itself_and_how_its_player_failed() {
+        let report: CastReport = serde_json::from_value(serde_json::json!({
+            "kind": "chromecast", "reached": "started", "failed": true, "failReason": "media_error",
+            "rxH264": 51, "rxHevc": 153, "rxHdr": true, "rxDv": "p5", "rxEac3": true, "rxMaxHeight": 2160,
+            "rxFirmware": "1.56.500000", "rxDevice": "AndroidTV", "rxError": 104, "rxShaka": 3014,
+        }))
+        .unwrap();
+        assert_eq!(
+            report.tag(false),
+            "kind:chromecast,reached:started,failed:1,failReason:media_error,rxH264:51,rxHevc:153,rxHdr:1,\
+             rxDv:p5,rxEac3:1,rxMaxHeight:2160,rxFirmware:1.56.500000,rxDevice:AndroidTV,rxError:104,rxShaka:3014"
+        );
+    }
+
+    #[test]
+    fn a_receiver_token_that_is_not_one_is_refused() {
+        for (field, value) in [
+            ("rxFirmware", "1.56; drop"),
+            ("rxFirmware", ""),
+            ("rxDevice", "Android TV"),
+            ("rxDevice", "Mozilla/5.0"),
+            ("rxDv", "p7"),
+        ] {
+            let mut body = serde_json::json!({ "kind": "chromecast", "reached": "started" });
+            body[field] = serde_json::json!(value);
+            assert!(serde_json::from_value::<CastReport>(body).is_err(), "{field}={value:?} must be refused");
+        }
     }
 
     #[test]

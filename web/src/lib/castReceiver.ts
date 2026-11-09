@@ -3,6 +3,67 @@
 
 import type { Playable } from './playable';
 
+/**
+ * What Den's Cast receiver said of itself and its TV, and its player's last error codes, for den-edge's cast report:
+ * numbers, flags and the two tokens its user agent names (`CrKey/<firmware>`, `DeviceType/<type>`), never the user
+ * agent itself. Absent for Google's receiver, which says nothing.
+ */
+export interface CastReceiverFields {
+  rxH264?: number;
+  rxHevc?: number;
+  rxHdr?: boolean;
+  rxDv?: 'p5' | 'p8' | 'p5p8' | 'none';
+  rxEac3?: boolean;
+  rxMaxHeight?: number;
+  rxFirmware?: string;
+  rxDevice?: string;
+  rxError?: number;
+  rxShaka?: number;
+}
+
+/** The receiver's own description, as the cast page passes it on (`receiverInfo`), kept only where well formed. */
+export function receiverInfoOf(
+  value: unknown,
+): { maxHeight?: number; firmware?: string; deviceType?: string } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { maxHeight, firmware, deviceType } = value as Record<string, unknown>;
+  const info = {
+    ...(Number.isInteger(maxHeight) && (maxHeight as number) > 0 && (maxHeight as number) <= 8640
+      ? { maxHeight: maxHeight as number }
+      : {}),
+    ...(typeof firmware === 'string' && /^[\d.]{1,20}$/.test(firmware) ? { firmware } : {}),
+    ...(typeof deviceType === 'string' && /^[A-Za-z]{1,24}$/.test(deviceType)
+      ? { deviceType }
+      : {}),
+  };
+  return Object.keys(info).length ? info : undefined;
+}
+
+/** The cast report's receiver fields: what Den's receiver said it plays and is, and how its player last failed. */
+export function castReceiverFields(
+  playable: Playable | undefined,
+  info: { maxHeight?: number; firmware?: string; deviceType?: string } | undefined,
+  error: { code?: number; shaka?: number } | undefined,
+): CastReceiverFields {
+  const dv = playable?.dolbyVision;
+  return {
+    ...(playable
+      ? {
+          rxH264: playable.h264,
+          rxHevc: Math.max(playable.hevcMain, playable.hevcMain10),
+          rxHdr: playable.hdr,
+          rxDv: dv?.p5 && dv.p8 ? 'p5p8' : dv?.p5 ? 'p5' : dv?.p8 ? 'p8' : 'none',
+          rxEac3: playable.eac3,
+        }
+      : {}),
+    ...(info?.maxHeight ? { rxMaxHeight: info.maxHeight } : {}),
+    ...(info?.firmware ? { rxFirmware: info.firmware } : {}),
+    ...(info?.deviceType ? { rxDevice: info.deviceType } : {}),
+    ...(error?.code !== undefined ? { rxError: error.code } : {}),
+    ...(error?.shaka !== undefined ? { rxShaka: error.shaka } : {}),
+  };
+}
+
 /** The application id Google's Cast console issued for Den's receiver, launched where `CAST_APP_ID` names none. */
 export const DEN_RECEIVER_APP_ID = '5718B443';
 
