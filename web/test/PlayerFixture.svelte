@@ -146,7 +146,7 @@
   <button type="button" onclick={() => (open = true)}>Open fixture player</button>
 {/if}
 {#if languageControls}
-  {#each ['en', 'es', 'sv'] as language}
+  {#each ['en', 'es', 'sv'] as language (language)}
     <button
       type="button"
       data-testid={`interface-language-${language}`}

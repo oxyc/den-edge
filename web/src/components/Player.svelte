@@ -10,7 +10,7 @@
   import { airingStore } from '../lib/airing.svelte';
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
-  import { SvelteSet } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { WATCHED } from '../lib/actions';
   import {
     canOfferCast,
@@ -3737,7 +3737,7 @@
     retimeSubtitles();
   }
 
-  const subtitleOffsetFormatters = new Map<InterfaceLanguage, Intl.NumberFormat>();
+  const subtitleOffsetFormatters = new SvelteMap<InterfaceLanguage, Intl.NumberFormat>();
 
   /** Profile-locale output for both the compact HUD and its spoken live value. */
   function formattedSubtitleOffset(
