@@ -303,6 +303,93 @@ test('hls.js shows a subtitle picked on a TorBox stream as the page’s own trac
   }
 });
 
+test('subtitle timing follows live profile language through dismissal and player replacement', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    let releaseSubtitle;
+    const subtitleGate = new Promise((resolve) => (releaseSubtitle = resolve));
+    await mockHearth(page, { beforeSubtitle: () => subtitleGate });
+    await page.goto(
+      `${ORIGIN}/test/player.html?startClosed&languageControls&playback=managed&originalLanguage=en&interfaceLanguage=en`,
+    );
+    await page.getByRole('button', { name: 'Open fixture player' }).click();
+    await playing(page);
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English').click();
+    releaseSubtitle();
+    await expect.poll(() => page.evaluate(shown)).toMatchObject({ language: 'en' });
+
+    let options = await openOptionsPage(page, 'Subtitle timing');
+    await options.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.0s)' }).click();
+    let timing = page.getByRole('group', { name: 'Subtitle timing' });
+    await expect(timing.getByRole('button', { name: 'Earlier' })).toBeFocused();
+    await timing.getByRole('button', { name: 'Later' }).click();
+    await expect(timing.locator('strong')).toHaveText('+0.5s');
+    await expect(timing.locator('strong')).toHaveAccessibleName('+0.5 seconds');
+
+    // A superseded first-load Spanish catalog must not publish after the immediately selected English profile.
+    await page.locator('body').evaluate(() => {
+      document.querySelector('[data-testid="interface-language-es"]')?.click();
+      document.querySelector('[data-testid="interface-language-en"]')?.click();
+    });
+    timing = page.getByRole('group', { name: 'Subtitle timing' });
+    await expect(timing.getByRole('button', { name: 'Earlier' })).toBeVisible();
+    await expect(timing.locator('strong')).toHaveText('+0.5s');
+
+    await page.getByTestId('interface-language-es').evaluate((control) => control.click());
+    timing = page.getByRole('group', { name: 'Sincronización de subtítulos' });
+    await expect(timing.getByRole('button', { name: 'Anterior' })).toBeVisible();
+    await expect(timing.getByRole('button', { name: 'Más tarde' })).toBeVisible();
+    await expect(timing.getByRole('button', { name: 'Reiniciar' })).toBeEnabled();
+    await expect(timing.getByRole('button', { name: 'Listo' })).toBeVisible();
+    await expect(timing.locator('strong')).toHaveText('+0,5s');
+    await expect(timing.locator('strong')).toHaveAccessibleName('+0,5 segundos');
+
+    await page.getByTestId('interface-language-sv').evaluate((control) => control.click());
+    timing = page.getByRole('group', { name: 'Undertextsynkronisering' });
+    await expect(timing.getByRole('button', { name: 'Tidigare' })).toBeVisible();
+    await expect(timing.getByRole('button', { name: 'Senare' })).toBeVisible();
+    await expect(timing.locator('strong')).toHaveText('+0,5s');
+    await expect(timing.locator('strong')).toHaveAccessibleName('+0,5 sekunder');
+    await timing.getByRole('button', { name: 'Klart' }).click();
+    await expect(timing).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'More playback options' })).toBeFocused();
+
+    options = await openOptionsPage(page, 'Undertextsynkronisering');
+    await expect(
+      options.getByRole('menuitem', {
+        name: 'Justera undertextsynkronisering (+0,5s)',
+      }),
+    ).toBeVisible();
+    await options
+      .getByRole('menuitem', { name: 'Justera undertextsynkronisering (+0,5s)' })
+      .click();
+    timing = page.getByRole('group', { name: 'Undertextsynkronisering' });
+    await timing.getByRole('button', { name: 'Återställ' }).click();
+    await expect(timing.locator('strong')).toHaveText('+0,0s');
+
+    // Escape dismisses only the editor; a second Escape replaces the whole mounted player route.
+    await page.keyboard.press('Escape');
+    await expect(timing).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.player')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Open fixture player' }).click();
+    await playing(page);
+    await expect(page.getByRole('group', { name: 'Undertextsynkronisering' })).toHaveCount(0);
+    await expect.poll(() => page.evaluate(shown)).toMatchObject({ language: 'sv' });
+    options = await openOptionsPage(page, 'Undertextsynkronisering');
+    await expect(
+      options.getByRole('menuitem', {
+        name: 'Justera undertextsynkronisering (+0,0s)',
+      }),
+    ).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a failed lazy subtitle keeps the working choice and retries that exact track', async () => {
   const browser = await launchChromium();
   try {
