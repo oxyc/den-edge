@@ -1,22 +1,21 @@
 // Whether a title is playing somewhere right now, and where. A playing device writes its position and the log carries
 // when each was written, so a position written recently is one still moving: it is shown counting on from there.
 //
-// The Apple TV writes every three seconds into its own log, but that log reaches den-edge only when the TV syncs:
-// each 3 s write pushes a 5 s sync debounce back, so while a title plays the debounce never ends and the TV pushes at
-// its cap, 15 s (den's `LibraryLogSync.maxWait`). With a 60 s cap the TV's `doc.episodes` row reached den-edge about
-// once a minute, longer than LIVE_MS, and the clock and TV controls showed after each push and vanished before the
-// next. So the newest position any reader can see is up to ~15 s old, plus a pull.
+// Native Apple and shared Web/TV players persist the first eligible position immediately and then every 30 s.
+// Native periodic writes ordinarily wait for a 5 s delivery debounce; shared consumers can then take one 5 s pull
+// to observe them. A position can therefore need 70 s to be replaced when one scheduled periodic delivery is lost.
 //
-// The TV's 3 s write runs whether or not the player is paused (den's `PlayerView` loop calls `persistProgress`
-// unconditionally — read from its code, not observed): a paused title keeps getting fresh writes at one position.
-// So a write is only playing if its position moved since the previous write seen of the same title.
+// Producers now carry explicit playing state. Legacy rows without it are only playing if their position moved since
+// the previous write seen of the same title.
 
 /**
- * A position written longer ago than this is no longer playing: the device stopped or went away. Three times the
- * 15 s between the TV's pushes, so one push arriving late (or a pull just missing it) does not stop the clock.
- * The cost is that a stop on the TV shows here up to this long after its last write.
+ * A position written longer ago than this is no longer playing: the device stopped or went away. The window holds
+ * two 30 s producer intervals, native's 5 s delivery debounce and one 5 s consumer pull, plus a 5 s boundary margin.
+ * Thus one lost delivery does not stop the clock. Producer traffic is unchanged; the cost is that an ungraceful stop
+ * can appear live for up to 30 s longer than the old 45 s window. A delivered explicit pause/stop still applies at
+ * once.
  */
-export const LIVE_MS = 45_000;
+export const LIVE_MS = 75_000;
 /**
  * An exact unfinished position remains eligible for a guarded Resume command for ten minutes. This is deliberately
  * longer than `LIVE_MS`: it never makes the clock advance, and the listening probe plus the TV's exact-title guard
