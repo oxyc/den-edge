@@ -6287,8 +6287,9 @@
 <!-- A browser's controls, as Apple's own player has them: −10 · play · +10 over the middle of the picture on a touch
      screen, the timeline, then one dock row — Audio & subtitles and Next at its left; Mute, PiP, Fullscreen and ⋯ at its
      right. With a mouse the transport moves into the dock's left end beside the volume and the time. Skip and the
-     up-next card float above the timeline and stay while the rest hides. Both transports are drawn and CSS shows the
-     one for the window's size (`.web-centre`, `.web-dock-transport`); which pointer it is decides behaviour alone. -->
+     up-next card float above the timeline and stay while the rest hides. On an upright phone the transport is a row
+     under the timeline instead, off the picture. Every transport is drawn and CSS shows the one for the window's size
+     (`.web-centre`, `.web-remote`, `.web-dock-transport`); which pointer it is decides behaviour alone. -->
 {#snippet webControls()}
   {@const transport = !!session && (!session.castOrigin || castView)}
   <nav class="web-transport" aria-label="Playback controls">
@@ -6424,10 +6425,9 @@
             >
           {/if}
         </div>
-        {#if castView}
-          <!-- Casting, this page is the receiver's remote: the transport sits under the timeline, not on a picture. -->
-          <div class="web-remote">{@render webTransportButtons()}</div>
-        {/if}
+        <!-- Under the timeline, not on a picture: casting, where this page is the receiver's remote, and on an upright
+             phone, where the black band below the picture has the room. -->
+        <div class="web-remote">{@render webTransportButtons()}</div>
       {/if}
       <div class="web-dock">
         <div class="web-dock-group">
@@ -8075,7 +8075,7 @@
     --web-remote: 72px;
   }
 
-  .web-touch-player .web-remote {
+  .web-touch-player.web-casting .web-remote {
     display: flex;
   }
 
@@ -8307,15 +8307,21 @@
     }
   }
 
-  /* A phone held upright, or a window as narrow: the transport over the picture, glyphs only, the times under the
-     timeline. */
+  /* A phone held upright, or a window as narrow: the transport in the black band under the picture, between the
+     timeline and the dock, so nothing to press covers the picture; glyphs only, the times under the timeline. Its
+     scrim stays in that band too. */
   @media (width < 33rem) {
     .web-custom-player {
       --web-bar: 104px;
+      --web-remote: 72px;
     }
 
     .web-custom-player .web-centre {
-      display: flex;
+      display: none;
+    }
+
+    .web-bar {
+      padding-top: 24px;
     }
 
     .web-centre-glyph,
@@ -8333,10 +8339,6 @@
 
     .web-remote {
       display: flex;
-    }
-
-    .web-custom-player.web-casting {
-      --web-remote: 72px;
     }
 
     .web-custom-player :global(.web-labelled) {
