@@ -955,6 +955,56 @@ test('profile control moves from the desktop header to the mobile Settings row',
   await expect(dialog).toBeHidden();
 });
 
+test('profile row and dialog follow the interface language without losing keyboard focus', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page, 'preview', '?pin=1234');
+
+  const row = page.locator('.mobile-profile-row');
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute('aria-label', 'Switch profile, current Owner');
+  await expect(row.getByText('Switch profile', { exact: true })).toBeVisible();
+
+  await page.evaluate(async () => {
+    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
+    await setInterfaceLanguage('es');
+  });
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es');
+  await expect(row).toHaveAttribute('aria-label', 'Cambiar perfil, actual: Owner');
+  await expect(row.getByText('Cambiar perfil', { exact: true })).toBeVisible();
+
+  await row.focus();
+  await row.press('Enter');
+  const dialog = page.getByRole('dialog', { name: '¿Quién está mirando?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Perfiles');
+  await expect(
+    dialog.getByText('Su biblioteca y entorno doméstico', { exact: true }),
+  ).toBeVisible();
+  const kid = dialog.getByRole('button', { name: 'Usar Kids' });
+  await kid.focus();
+
+  await page.evaluate(async () => {
+    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
+    await setInterfaceLanguage('sv');
+  });
+  await expect(page.locator('html')).toHaveAttribute('lang', 'sv');
+  await expect(dialog).toHaveAccessibleName('Vem tittar?');
+  await expect(dialog.locator('.profiles')).toHaveAttribute('aria-label', 'Profiler');
+  await expect(dialog.getByRole('button', { name: 'Använd Kids' })).toBeFocused();
+  await expect(
+    dialog.getByText('Förhandsgranskning av profil · innehållsfiltrering är inte aktiv än', {
+      exact: true,
+    }),
+  ).toBeVisible();
+
+  await dialog.press('Escape');
+  await expect(row).toBeFocused();
+  await expect(row).toHaveAttribute('aria-label', 'Byt profil, aktuell: Owner');
+  await expect(row.getByText('Byt profil', { exact: true })).toBeVisible();
+});
+
 test('TV remote follows profile row order when modal geometry cannot distinguish rows', async ({
   page,
 }) => {

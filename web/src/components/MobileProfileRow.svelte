@@ -15,10 +15,17 @@
     value: active?.name ?? i18n.phrase('profile'),
   })}
   onclick={(event) =>
-    openProfileSwitcher({ trigger: event.currentTarget, restoreFocus: event.detail === 0 })}
+    openProfileSwitcher({
+      trigger: event.currentTarget,
+      restoreFocus: event.detail === 0,
+    })}
 >
   <ProfileAvatar choice={active} />
-  <span><strong>{active?.name ?? 'Profile'}</strong><small>Switch profile</small></span>
+  <span
+    ><strong>{active?.name ?? i18n.phrase('Profile')}</strong><small
+      >{i18n.phrase('Switch profile')}</small
+    ></span
+  >
   <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg>
 </button>
 

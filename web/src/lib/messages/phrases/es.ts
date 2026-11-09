@@ -170,6 +170,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Chromecast with Google TV (4K)': 'Chromecast con Google TV (4K)',
   'Chromecast with Google TV (HD)': 'Chromecast con Google TV (HD)',
   'Connecting to the Chromecast…': 'Conectando con el Chromecast…',
+  'Confirm Owner PIN': 'Confirmar PIN de propietario',
   'Couldn’t connect to the Chromecast. Press Cast to try again.':
     'No se pudo conectar con el Chromecast. Pulsa Transmitir para volver a intentarlo.',
   'Den Cast player': 'Reproductor de transmisión de Den',
@@ -640,6 +641,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Netflix:': 'ZXQMARCA13ZXQ:',
   'New invite': 'Nueva invitación',
   'New link': 'Nuevo enlace',
+  'New Owner PIN': 'Nuevo PIN de propietario',
   'New name for': 'Nuevo nombre para',
   'New Releases': 'Nuevos lanzamientos',
   News: 'Noticias',
@@ -783,6 +785,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Prejudice: 'Prejuicio',
   'Preview PIN:': 'PIN de vista previa:',
   'Prime Video viewing history': 'Historial de visualización de Prime Video',
+  profile: 'perfil',
   Profile: 'Perfil',
   'Profile libraries need to rotate together. Key reset will be available after Den finishes that update.':
     'Las bibliotecas de perfiles deben rotar juntas. El restablecimiento de clave estará disponible después de que Den finalice esa actualización.',
