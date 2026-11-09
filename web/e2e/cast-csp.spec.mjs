@@ -217,8 +217,6 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
     await expect
       .poll(() => page.evaluate(() => window.started?.customNamespaces))
       .toEqual({ 'urn:x-cast:fi.oxy.den': 'JSON' });
-    // HLS goes to MPL, which reads TorBox's MPEG-TS segments as they are.
-    expect(await page.evaluate(() => window.started.useShakaForHls)).toBe(false);
 
     await page.evaluate(() => window.__fromSender({ type: 'den-capabilities' }));
     await expect.poll(() => page.evaluate(() => window.toSender.length)).toBe(1);

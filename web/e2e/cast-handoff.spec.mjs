@@ -387,6 +387,38 @@ test('a receiver that has not yet reported on an accepted load keeps its Cast se
   }
 });
 
+// A release the receiver can't take is asked for once more with none named, and Hearth's pick is cast instead
+// (2026-11-09: a 4K HEVC release, which no Cast receiver plays from TorBox's MPEG-TS).
+test('a release the receiver can’t take is replaced by one it can, picked by Hearth', async () => {
+  const { browser, page, asked } = await open({
+    castAnswer: (r, request) =>
+      request.filename
+        ? r.fulfill({
+            status: 409,
+            json: { error: 'direct_unavailable', cause: 'torbox_receiver_unsupported' },
+          })
+        : r.fulfill({
+            json: {
+              url: `${TORBOX}&h264`,
+              release: { label: 'Fixture 1080p', filename: 'fixture-1080p.mkv', size: 1 },
+            },
+          }),
+  });
+  try {
+    await playingPast(page, 2);
+    await chooseReceiver(page, asked);
+    await expect.poll(() => castLoads(page)).toHaveLength(1);
+    expect(asked.managed.slice(1)).toMatchObject([
+      { player: 'cast', filename: 'fixture.mkv' },
+      { player: 'cast' },
+    ]);
+    expect(asked.managed[2].filename).toBeUndefined();
+    expect((await castLoads(page))[0].url).toContain('&h264');
+  } finally {
+    await browser.close();
+  }
+});
+
 // A TorBox stream is cast as TorBox only: Den Remux is used only when the viewer picks it, since it is not a usable
 // path to a Chromecast for remote households. Hearth's refusal is named, and nothing is remuxed in its place.
 test('a TorBox stream the receiver can’t take is refused and named, never cast through Remux', async () => {
@@ -406,15 +438,18 @@ test('a TorBox stream the receiver can’t take is refused and named, never cast
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
     await chooseReceiver(page, asked);
 
-    await expect.poll(() => asked.managed.length).toBe(2);
+    // The release playing, then the best one the receiver can take: neither, here.
+    await expect.poll(() => asked.managed.length).toBe(3);
     expect(asked.managed[1]).toMatchObject({ player: 'cast', filename: 'fixture.mkv' });
     expect(asked.managed[1]).toHaveProperty('directOnly');
+    expect(asked.managed[2]).toMatchObject({ player: 'cast' });
+    expect(asked.managed[2].filename).toBeUndefined();
     await expect(
       page.getByText('The Chromecast can’t play this release as TorBox streams it'),
     ).toBeVisible();
     await page.waitForTimeout(CAST_PLAY_MS * 2);
     expect(await castLoads(page)).toHaveLength(0);
-    expect(asked.managed).toHaveLength(2);
+    expect(asked.managed).toHaveLength(3);
   } finally {
     await browser.close();
   }

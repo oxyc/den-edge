@@ -117,11 +117,5 @@ addEventListener('securitypolicyviolation', (event) =>
   tellSenders('blocked', { directive: event.violatedDirective, url: event.blockedURI }),
 );
 
-context.start({
-  customNamespaces: { [RECEIVER_NAMESPACE]: framework.system.MessageType.JSON },
-  // HLS plays in Google's MPL, which reads MPEG-TS segments as they are. Shaka, the framework's default for HLS,
-  // transmuxes them to MP4 in script, and a TorBox 4K HDR HEVC stream failed there after a second of picture
-  // (Shaka 3014, MEDIA_SOURCE_OPERATION_FAILED).
-  useShakaForHls: false,
-});
+context.start({ customNamespaces: { [RECEIVER_NAMESPACE]: framework.system.MessageType.JSON } });
 void learn().then((answer) => console.info(`[Den receiver] ${JSON.stringify(answer)}`));
