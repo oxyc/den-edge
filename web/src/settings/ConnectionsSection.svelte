@@ -88,6 +88,7 @@
     onadoptheld,
     viewerOnly = false,
     presentationOwner,
+    keyPresentation,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -143,6 +144,8 @@
     /** Old-engine viewer tier: expose only pairing and linked-device controls. */
     viewerOnly?: boolean;
     presentationOwner: LibraryJoinPresentationOwner;
+    /** Exact retained Settings route presentation. Null while the RoutePage is hidden. */
+    keyPresentation: object | null;
   } = $props();
 
   const apiService = (name: KeyService['name']): LibraryApiKeyService =>
@@ -188,6 +191,7 @@
     generation: number;
     before: KeyCheck | 'checking' | undefined;
     save: typeof setApiKey;
+    presentation: object | null;
   };
   const keyGenerations = new SvelteMap<KeyService['name'], number>();
   const keyAttempts = new SvelteMap<KeyService['name'], KeyAttempt>();
@@ -207,11 +211,20 @@
   };
   const currentKeyAttempt = (attempt: KeyAttempt) =>
     keyPresentationMounted &&
+    attempt.presentation !== null &&
+    attempt.presentation === keyPresentation &&
     keyAttempts.get(attempt.service) === attempt &&
     keyGenerations.get(attempt.service) === attempt.generation &&
     drafts[attempt.service]?.trim() === attempt.credential;
   onDestroy(() => {
     keyPresentationMounted = false;
+    for (const service of KEY_SERVICES) retireKeyAttempt(service.name);
+  });
+  let observedKeyPresentation = untrack(() => keyPresentation);
+  $effect(() => {
+    const replacement = keyPresentation;
+    if (replacement === observedKeyPresentation) return;
+    observedKeyPresentation = replacement;
     for (const service of KEY_SERVICES) retireKeyAttempt(service.name);
   });
   let checkedOnOpen = false;
@@ -238,6 +251,7 @@
       generation,
       before,
       save: setApiKey,
+      presentation: keyPresentation,
     };
     keyAttempts.set(service.name, attempt);
     checks.set(service.name, 'checking');

@@ -4,6 +4,7 @@
   // the TV's hide rules, an addon, and two devices. Everything is in memory, so the page has something to show
   // without a paired TV or a den-edge behind it, and a save lands where the page reads it back from.
   import Settings from '../src/Settings.svelte';
+  import Router from '../src/Router.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import { browserClock } from '../src/lib/clock';
   import type { LibraryLog } from '../src/lib/log';
@@ -34,6 +35,8 @@
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const fixtureQuery = new URLSearchParams(location.search);
+  const heldKeyValidation = fixtureQuery.has('key-save-authority');
+  if (heldKeyValidation) history.replaceState(null, '', `/settings${location.search}`);
   const joinPresentationFixture = fixtureQuery.has('join-presentation');
   const replacesAuthority =
     fixtureQuery.has('authority-replacement') ||
@@ -411,7 +414,6 @@
     settle: (outcome: 'accepted' | 'refused' | 'unavailable') => void;
   };
   const heldKeyChecks: HeldKeyCheck[] = [];
-  const heldKeyValidation = fixtureQuery.has('key-save-authority');
   const contentFor = (runtime: string): ContentServiceClientPort => ({
     query<Request extends ContentRequest>(
       request: Request,
@@ -467,8 +469,12 @@
       content = contentFor(`owner-runtime-${++contentRuntime}`);
     },
     leave(role: 'kid' | 'visitor') {
-      content = contentFor(role);
-      settingsMounted = false;
+      document.dispatchEvent(
+        new CustomEvent('den:navigate', { detail: { path: `/?departed-as=${role}` } }),
+      );
+    },
+    reopen() {
+      document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/settings' } }));
     },
     reopenReplacement() {
       authorityReplacementControls.replace();
@@ -513,7 +519,24 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   <LibraryStatus toast={session.toast} alert={session.alert} />
-  {#if contentReady && settingsMounted}<Settings
+  {#if heldKeyValidation}
+    <Router onchange={() => {}}>
+      {#snippet children(route, _active, routePresentation)}
+        {#if route.page === 'settings'}
+          {#if contentReady}<Settings
+              {link}
+              {model}
+              {activityModel}
+              {content}
+              {routePresentation}
+              onresetkey={async () => null}
+            />{/if}
+        {:else}
+          <h1>Home</h1>
+        {/if}
+      {/snippet}
+    </Router>
+  {:else if contentReady && settingsMounted}<Settings
       {link}
       {model}
       {activityModel}

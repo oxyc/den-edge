@@ -467,7 +467,9 @@ async function resetKeyAuthorityFixture(page) {
 }
 
 async function keyRow(page, label) {
-  const button = page.getByRole('button', { name: new RegExp(label) });
+  const button = page.getByRole('button', {
+    name: new RegExp(`^${label} (?:Connected|Not connected)`),
+  });
   if ((await button.getAttribute('aria-expanded')) !== 'true') await button.click();
   return page.getByRole('region', { name: label });
 }
@@ -489,16 +491,27 @@ for (const { label, service } of KEY_ROWS) {
   }) => {
     await openKeyAuthorityFixture(page);
 
-    // Owner → Kid and Owner → Visitor both leave administrative Settings. A validator that ignores cancellation
-    // can still answer, but cannot write through the departed presentation.
+    // The production Router retains Settings when Owner → Kid and Owner → Visitor leave its RoutePage. A
+    // validator that ignores cancellation can answer after the same mounted page reopens, but cannot write or
+    // publish through either the departed or reopened presentation. The reopened presentation can retry at once.
     for (const role of ['kid', 'visitor']) {
       await resetKeyAuthorityFixture(page);
       await beginKeySave(page, label, `${service}-${role}`);
       await page.evaluate((nextRole) => globalThis.fixtureKeySaveAuthority.leave(nextRole), role);
       await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Home', level: 1 })).toBeVisible();
+      await page.evaluate(() => globalThis.fixtureKeySaveAuthority.reopen());
+      await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
       await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'accepted'));
       expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
         primary: [],
+        replacement: [],
+      });
+      await beginKeySave(page, label, `${service}-${role}-retry`);
+      await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
+      await expect((await keyRow(page, label)).getByRole('status')).toContainText('Saved');
+      expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+        primary: [{ kind: 'api-key.set', service, value: `${service}-${role}-retry` }],
         replacement: [],
       });
     }
@@ -556,14 +569,28 @@ for (const { label, service } of KEY_ROWS) {
     const refused = await beginKeySave(page, label, `${service}-retry`);
     await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'refused'));
     await expect(refused.getByRole('status')).toContainText('didn’t accept this key');
-    await page.getByRole('button', { name: new RegExp(label) }).click();
-    await page.getByRole('button', { name: new RegExp(label) }).click();
+    const rowButton = page.getByRole('button', {
+      name: new RegExp(`^${label} (?:Connected|Not connected)`),
+    });
+    await rowButton.click();
+    await rowButton.click();
     await refused.getByRole('button', { name: 'Save & validate' }).click();
     await expect
       .poll(() => page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length))
       .toBe(2);
     await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
     await expect(refused.getByRole('status')).toContainText('Saved');
+    const callsBeforeReadback = await page.evaluate(
+      () => globalThis.fixtureKeySaveAuthority.calls().length,
+    );
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.leave('kid'));
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.reopen());
+    await expect(
+      page.getByRole('button', { name: new RegExp(`^${label} Connected`) }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length)).toBe(
+      callsBeforeReadback,
+    );
 
     // A durable-save refusal never invents success or clears the draft. Keyboard focus returns to the same Save
     // control, and a second attempt remains available without remounting the route.

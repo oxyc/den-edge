@@ -55,6 +55,7 @@
     onadoptheld,
     oninterfacelanguage,
     preferences = null,
+    routePresentation = undefined,
   }: {
     link: Link | null;
     model: LibraryModel;
@@ -74,7 +75,15 @@
     heldReset?: boolean;
     onadoptheld?: () => Promise<void>;
     oninterfacelanguage?: (language: InterfaceLanguage) => void;
+    /** Exact Router/RoutePage presentation: null while this retained Settings page is hidden. Fixtures which render
+     * Settings directly omit it and receive one stable mounted presentation. */
+    routePresentation?: object | null;
   } = $props();
+
+  const directPresentation = {};
+  const currentRoutePresentation = $derived(
+    routePresentation === undefined ? directPresentation : routePresentation,
+  );
 
   type SettingsAuthority = {
     model: LibraryModel;
@@ -132,21 +141,28 @@
   type CommandPresentation = {
     model: LibraryModel;
     content: ContentServiceClientPort;
+    route: object | null;
   };
-  const keySaveAuthority = $derived.by((): CommandPresentation => ({
+  type KeySaveAuthority = Omit<CommandPresentation, 'route'>;
+  const keySaveAuthority = $derived.by((): KeySaveAuthority => ({
     model: authority.model,
     content,
   }));
-  let commandPresentation = $state.raw(untrack(() => keySaveAuthority));
+  const keySaveCommandPresentation = $derived.by((): CommandPresentation => ({
+    ...keySaveAuthority,
+    route: currentRoutePresentation,
+  }));
+  let commandPresentation = $state.raw(untrack(() => keySaveCommandPresentation));
   let commandPresentationGeneration = 0;
   // A retained route may replace either the library/profile model or its content runtime. Retire the old command
   // presentation immediately: its already-started durable write may reconcile, but its completion cannot publish
   // failure/success, clear a replacement field or recover focus into the replacement presentation.
   $effect(() => {
-    const replacement = keySaveAuthority;
+    const replacement = keySaveCommandPresentation;
     if (
       commandPresentation.model === replacement.model &&
-      commandPresentation.content === replacement.content
+      commandPresentation.content === replacement.content &&
+      commandPresentation.route === replacement.route
     )
       return;
     commandPresentationGeneration++;
@@ -193,7 +209,11 @@
     if (expectedPresentation !== commandPresentation) return false;
     const generation = commandPresentationGeneration;
     const isCurrent = () =>
-      expectedPresentation === commandPresentation && generation === commandPresentationGeneration;
+      expectedPresentation.model === commandPresentation.model &&
+      expectedPresentation.content === commandPresentation.content &&
+      expectedPresentation.route === currentRoutePresentation &&
+      expectedPresentation.route === commandPresentation.route &&
+      generation === commandPresentationGeneration;
     const restoreFocus =
       document.activeElement instanceof HTMLElement &&
       (__DEN_TV__ || keyboardInput() || document.activeElement.matches(':focus-visible'))
@@ -458,9 +478,11 @@
       {/if}
       {#key keySaveAuthority}
         {@const keyAuthority = keySaveAuthority}
+        {@const keyCommandPresentation = keySaveCommandPresentation}
         <ConnectionsSection
           {link}
           content={keyAuthority.content}
+          keyPresentation={currentRoutePresentation}
           {onjoin}
           onresetkey={link && libraryFormat !== null && libraryFormat >= 4 && !profileTopology
             ? onresetkey
@@ -481,7 +503,7 @@
           {selfId}
           {disabled}
           setApiKey={(service, value) =>
-            run(() => keyAuthority.model.setApiKey(service, value), false, keyAuthority)}
+            run(() => keyAuthority.model.setApiKey(service, value), false, keyCommandPresentation)}
           installPlugin={(url) => run(() => authority.model.installPlugin(url))}
           removePlugin={(url) => run(() => authority.model.removePlugin(url))}
           setPluginTrust={(url, key) => run(() => authority.model.setPluginTrust(url, key))}
