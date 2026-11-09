@@ -26,7 +26,7 @@
   import { hlsConfig } from '../lib/hlsConfig';
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
-  import type { InterfaceLanguage } from '../lib/interfaceLanguage';
+  import { interfaceLocale, type InterfaceLanguage } from '../lib/interfaceLanguage';
   import type { Episode as EpisodeDetail } from '../lib/detail';
   import { PLAYBACK_PROGRESS_SAVE_MS, PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -3737,6 +3737,31 @@
     retimeSubtitles();
   }
 
+  const subtitleOffsetFormatters = new Map<InterfaceLanguage, Intl.NumberFormat>();
+
+  /** Profile-locale output for both the compact HUD and its spoken live value. */
+  function formattedSubtitleOffset(
+    offset = subtitleTimingOffset,
+    unitDisplay: 'compact' | 'spoken' = 'compact',
+  ): string {
+    const language = i18n.language;
+    let formatter = subtitleOffsetFormatters.get(language);
+    if (!formatter) {
+      formatter = new Intl.NumberFormat(interfaceLocale(language), {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      });
+      subtitleOffsetFormatters.set(language, formatter);
+    }
+    const id =
+      unitDisplay === 'spoken' ? 'player.subtitleOffsetSpoken' : 'player.subtitleOffsetCompact';
+    const english = unitDisplay === 'spoken' ? '{sign}{offset} seconds' : '{sign}{offset}s';
+    return i18n.format(id, english, {
+      sign: offset >= 0 ? '+' : '',
+      offset: formatter.format(offset),
+    });
+  }
+
   async function openSubtitleTiming() {
     tvSubtitleTimingOpen = true;
     if (!webTransport) return;
@@ -5077,18 +5102,18 @@
   }
 
   function subtitleTimingItems(): MenuItem[] {
-    const offset = `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)}`;
+    const offset = formattedSubtitleOffset();
     return [
       {
         kind: 'item',
-        label: i18n.format('player.adjustSubtitleTiming', 'Adjust subtitle timing ({offset}s)', {
+        label: i18n.format('player.adjustSubtitleTiming', 'Adjust subtitle timing ({offset})', {
           offset,
         }),
         onselect: openSubtitleTiming,
       },
       {
         kind: 'item',
-        label: i18n.format('player.resetSubtitleTiming', 'Reset subtitle timing ({offset}s)', {
+        label: i18n.format('player.resetSubtitleTiming', 'Reset subtitle timing ({offset})', {
           offset,
         }),
         disabled: subtitleOffset === 0,
@@ -5163,11 +5188,9 @@
         items: sourceItems,
       });
     if (current && subtitleChoice !== null)
-      page(
-        'Subtitle timing',
-        `${subtitleTimingOffset >= 0 ? '+' : ''}${subtitleTimingOffset.toFixed(1)} s`,
-        { items: subtitleTimingItems },
-      );
+      page(i18n.text('player.subtitleTiming'), formattedSubtitleOffset(), {
+        items: subtitleTimingItems,
+      });
     if (current)
       items.push({ kind: 'item', label: 'Play from beginning', onselect: playFromBeginning });
     if (desktopTransport)
@@ -6016,29 +6039,32 @@
           <section
             bind:this={subtitleTimingPanel}
             class="tv-subtitle-timing"
-            aria-label="Subtitle timing"
+            aria-label={i18n.text('player.subtitleTiming')}
             role="group"
           >
             {#if webTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
-                >Earlier</button
-              >{:else}<span>‹ Earlier</span>{/if}
-            <strong aria-live="polite"
-              >{subtitleTimingOffset >= 0 ? '+' : ''}{subtitleTimingOffset.toFixed(1)}s</strong
+                >{i18n.text('player.subtitleEarlier')}</button
+              >{:else}<span>‹ {i18n.text('player.subtitleEarlier')}</span>{/if}
+            <strong aria-live="polite" aria-label={formattedSubtitleOffset(undefined, 'spoken')}
+              >{formattedSubtitleOffset()}</strong
             >
             {#if webTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}
-                >Later</button
-              >{:else}<span>Later ›</span>{/if}
+                >{i18n.text('player.subtitleLater')}</button
+              >{:else}<span>{i18n.text('player.subtitleLater')} ›</span>{/if}
             {#if webTransport}
               <div class="web-timing-actions">
                 <button
                   type="button"
                   disabled={subtitleOffset === 0}
-                  onclick={() => adjustSubtitleOffset(-subtitleOffset)}>Reset</button
+                  onclick={() => adjustSubtitleOffset(-subtitleOffset)}
+                  >{i18n.text('player.subtitleReset')}</button
                 >
-                <button type="button" onclick={() => void closeSubtitleTiming()}>Done</button>
+                <button type="button" onclick={() => void closeSubtitleTiming()}
+                  >{i18n.text('player.subtitleDone')}</button
+                >
               </div>
             {:else}
-              <small>Left or right to adjust · Select to finish</small>
+              <small>{i18n.text('player.subtitleTimingInstructions')}</small>
             {/if}
           </section>
         {/if}

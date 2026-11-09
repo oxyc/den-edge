@@ -51,6 +51,12 @@ export const messages = {
   'common.play': 'Spela',
   'common.resume': 'Fortsätt',
   'common.close': 'Stäng',
+  'player.subtitleTiming': 'Undertextsynkronisering',
+  'player.subtitleEarlier': 'Tidigare',
+  'player.subtitleLater': 'Senare',
+  'player.subtitleReset': 'Återställ',
+  'player.subtitleDone': 'Klart',
+  'player.subtitleTimingInstructions': 'Vänster eller höger för att justera · Välj för att avsluta',
   'retirement.title': 'Biblioteksrensningen måste försökas igen',
   'retirement.detail':
     'Du är utloggad. Den måste fortfarande ta bort krypterade biblioteksdata som sparats på den här enheten. Du kan lämna säkert; ett nytt försök görs nästa gång.',

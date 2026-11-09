@@ -49,8 +49,10 @@ export const parameters = {
   'player.subtitles': 'Undertexter: {subtitles}',
   'player.subtitleLoadFailed':
     'Det gick inte att läsa in undertexterna {subtitle}. Dina nuvarande undertexter är oförändrade.',
-  'player.adjustSubtitleTiming': 'Justera undertextsynkronisering ({offset}s)',
-  'player.resetSubtitleTiming': 'Återställ undertextsynkronisering ({offset}s)',
+  'player.subtitleOffsetCompact': '{sign}{offset}s',
+  'player.subtitleOffsetSpoken': '{sign}{offset} sekunder',
+  'player.adjustSubtitleTiming': 'Justera undertextsynkronisering ({offset})',
+  'player.resetSubtitleTiming': 'Återställ undertextsynkronisering ({offset})',
   'player.next': 'Nästa: {title}',
   'player.playingFrom': 'Spelas från {source}',
   'player.playingThroughReason': 'Spelas via Den Remux. {reason}.',
