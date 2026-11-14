@@ -13,7 +13,9 @@
     onchange,
     profile = '',
   }: {
-    children: Snippet<[Route, boolean]>;
+    /** The third argument is the exact visible presentation. It is null while a retained page is hidden and a new
+     * identity every time that page is presented again. */
+    children: Snippet<[Route, boolean, object | null]>;
     onchange: (route: Route) => void;
     /** The active profile's session key. Entries stamped with another one are never traversed back into. */
     profile?: string;
@@ -23,6 +25,7 @@
     __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
   );
   let current = $state.raw(navigation.current);
+  let presentation = $state.raw<object>({});
   let pages = $state.raw([...navigation.pages.values()]);
   let revision = 0;
   let restoring = false;
@@ -351,6 +354,7 @@
         const outgoing = cover ?? captured;
         entering = animate ? visitKey : null;
         current = navigation.visit(path, visitKey);
+        presentation = {};
         // Selecting a detail is a new visit; history traversal restores the saved position.
         // Top-level tabs still retain their browsing position when selected explicitly.
         if (push && (current.route.page === 'title' || current.route.page === 'person')) {
@@ -461,7 +465,11 @@
     <!-- One page's error stays that page's: without a boundary it reached the root and took every page down,
          including one kept out of sight. -->
     <svelte:boundary onerror={(error) => console.error('den: a page failed', error)}>
-      {@render children(page.route, current.key === page.key)}
+      {@render children(
+        page.route,
+        current.key === page.key,
+        current.key === page.key ? presentation : null,
+      )}
       {#snippet failed(_, reset)}
         <div class="failed" role="alert">
           <p>Something went wrong on this page.</p>

@@ -446,6 +446,174 @@ test('saving a provider key validates it in the content Worker before storing it
   expect(checks).toEqual([{ key: 'candidate-omdb', pageOwned: false }]);
 });
 
+const KEY_ROWS = [
+  { label: 'TMDB key', service: 'tmdb' },
+  { label: 'OMDb key', service: 'omdb' },
+  { label: 'Content warnings', service: 'content-warnings' },
+];
+
+async function openKeyAuthorityFixture(page) {
+  await guardNetwork(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { images: {}, results: [] } }));
+}
+
+async function resetKeyAuthorityFixture(page) {
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?authority-replacement&key-save-authority`);
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+}
+
+async function keyRow(page, label) {
+  const button = page.getByRole('button', {
+    name: new RegExp(`^${label} (?:Connected|Not connected)`),
+  });
+  if ((await button.getAttribute('aria-expanded')) !== 'true') await button.click();
+  return page.getByRole('region', { name: label });
+}
+
+async function beginKeySave(page, label, candidate) {
+  const row = await keyRow(page, label);
+  const before = await page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length);
+  await row.getByLabel(`${label} API key`).fill(candidate);
+  await row.getByRole('button', { name: 'Save & validate' }).click();
+  await expect
+    .poll(() => page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length))
+    .toBeGreaterThan(before);
+  return row;
+}
+
+for (const { label, service } of KEY_ROWS) {
+  test(`${label} validation/save completion belongs to its exact mounted authority and field generation`, async ({
+    page,
+  }) => {
+    await openKeyAuthorityFixture(page);
+
+    // The production Router retains Settings when Owner → Kid and Owner → Visitor leave its RoutePage. A
+    // validator that ignores cancellation can answer after the same mounted page reopens, but cannot write or
+    // publish through either the departed or reopened presentation. The reopened presentation can retry at once.
+    for (const role of ['kid', 'visitor']) {
+      await resetKeyAuthorityFixture(page);
+      await beginKeySave(page, label, `${service}-${role}`);
+      await page.evaluate((nextRole) => globalThis.fixtureKeySaveAuthority.leave(nextRole), role);
+      await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Home', level: 1 })).toBeVisible();
+      await page.evaluate(() => globalThis.fixtureKeySaveAuthority.reopen());
+      await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+      await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'accepted'));
+      expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+        primary: [],
+        replacement: [],
+      });
+      await beginKeySave(page, label, `${service}-${role}-retry`);
+      await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
+      await expect((await keyRow(page, label)).getByRole('status')).toContainText('Saved');
+      expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+        primary: [{ kind: 'api-key.set', service, value: `${service}-${role}-retry` }],
+        replacement: [],
+      });
+    }
+
+    // A mounted same-Owner model/runtime replacement retires the old completion and is immediately retryable.
+    await resetKeyAuthorityFixture(page);
+    await beginKeySave(page, label, `${service}-old-owner`);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.replaceOwner());
+    await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'accepted'));
+    expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+      primary: [],
+      replacement: [],
+    });
+    await beginKeySave(page, label, `${service}-replacement`);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
+    await expect((await keyRow(page, label)).getByRole('status')).toContainText('Saved');
+    expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+      primary: [],
+      replacement: [{ kind: 'api-key.set', service, value: `${service}-replacement` }],
+    });
+
+    // Replacing only the profile content runtime is an authority change too, even with the same control model.
+    await resetKeyAuthorityFixture(page);
+    await beginKeySave(page, label, `${service}-old-runtime`);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.replaceRuntime());
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'accepted'));
+    expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+      primary: [],
+      replacement: [],
+    });
+
+    // Editing A to B retires A, lets B start at once, and reverse completion can save only B. Re-delivering either
+    // completion is a no-op, and A cannot clear B's field or replace B's visible status.
+    await resetKeyAuthorityFixture(page);
+    const row = await beginKeySave(page, label, `${service}-a`);
+    await row.getByLabel(`${label} API key`).fill(`${service}-b`);
+    await row.getByRole('button', { name: 'Save & validate' }).click();
+    await expect
+      .poll(() => page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length))
+      .toBe(2);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
+    await expect(row.getByRole('status')).toContainText('Saved');
+    await page.evaluate(() => {
+      globalThis.fixtureKeySaveAuthority.settle(0, 'accepted');
+      globalThis.fixtureKeySaveAuthority.settle(1, 'accepted');
+    });
+    expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.commands())).toEqual({
+      primary: [{ kind: 'api-key.set', service, value: `${service}-b` }],
+      replacement: [],
+    });
+
+    // Provider refusal remains in the localized, accessible status; reopening and retrying uses the same draft.
+    await resetKeyAuthorityFixture(page);
+    const refused = await beginKeySave(page, label, `${service}-retry`);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'refused'));
+    await expect(refused.getByRole('status')).toContainText('didn’t accept this key');
+    const rowButton = page.getByRole('button', {
+      name: new RegExp(`^${label} (?:Connected|Not connected)`),
+    });
+    await rowButton.click();
+    await rowButton.click();
+    await refused.getByRole('button', { name: 'Save & validate' }).click();
+    await expect
+      .poll(() => page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length))
+      .toBe(2);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
+    await expect(refused.getByRole('status')).toContainText('Saved');
+    const callsBeforeReadback = await page.evaluate(
+      () => globalThis.fixtureKeySaveAuthority.calls().length,
+    );
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.leave('kid'));
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.reopen());
+    await expect(
+      page.getByRole('button', { name: new RegExp(`^${label} Connected`) }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length)).toBe(
+      callsBeforeReadback,
+    );
+
+    // A durable-save refusal never invents success or clears the draft. Keyboard focus returns to the same Save
+    // control, and a second attempt remains available without remounting the route.
+    await resetKeyAuthorityFixture(page);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.rejectNextSave());
+    const retry = await keyRow(page, label);
+    await retry.getByLabel(`${label} API key`).fill(`${service}-persist-retry`);
+    const save = retry.getByRole('button', { name: 'Save & validate' });
+    await save.focus();
+    await save.press('Enter');
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(0, 'accepted'));
+    await expect(page.getByRole('alert')).toContainText('Couldn’t save that');
+    await expect(retry.getByLabel(`${label} API key`)).toHaveValue(`${service}-persist-retry`);
+    await expect(save).toBeFocused();
+    await save.press('Enter');
+    await expect
+      .poll(() => page.evaluate(() => globalThis.fixtureKeySaveAuthority.calls().length))
+      .toBe(2);
+    await page.evaluate(() => globalThis.fixtureKeySaveAuthority.settle(1, 'accepted'));
+    await expect(retry.getByRole('status')).toContainText('Saved');
+  });
+}
+
 test('a profile household shows Owner PIN management instead of the legacy maturity ceiling', async ({
   page,
 }) => {

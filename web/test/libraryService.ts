@@ -55,6 +55,7 @@ class FixtureService {
   };
   readonly recoveryTasks: LibraryTask['kind'][] = [];
   readonly commandKinds: LibraryCommand['kind'][] = [];
+  readonly apiKeyCommands: Extract<LibraryCommand, { kind: 'api-key.set' }>[] = [];
   readonly progressOperationIds: string[] = [];
   readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
@@ -117,6 +118,13 @@ class FixtureService {
     operationId: string = crypto.randomUUID(),
   ): Promise<LibraryServiceCommandResult> {
     this.commandKinds.push(command.kind);
+    if (command.kind === 'api-key.set') {
+      this.apiKeyCommands.push(structuredClone(command));
+      if (this.rejectApiKeyCommands > 0) {
+        this.rejectApiKeyCommands--;
+        throw new Error('fixture rejected API-key command');
+      }
+    }
     if (command.kind === 'progress.record') {
       this.progressOperationIds.push(operationId);
       if (command.playing === false && this.rejectProgressCommands > 0) {
@@ -140,6 +148,12 @@ class FixtureService {
       delivery: result.delivery,
       version: this.version,
     };
+  }
+
+  rejectApiKeyCommands = 0;
+
+  rejectNextApiKeyCommand() {
+    this.rejectApiKeyCommands++;
   }
 
   async query(query: LibraryQuery, signal?: AbortSignal) {
@@ -491,11 +505,13 @@ export function fixtureLibraryService({
     historyImports: fixtureService.historyImports,
     recoveryTasks: fixtureService.recoveryTasks,
     commandKinds: fixtureService.commandKinds,
+    apiKeyCommands: fixtureService.apiKeyCommands,
     progressOperationIds: fixtureService.progressOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
     holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
     activeSelections: () => fixtureService.activeSelections(),
     failSelection: (kind: LibrarySelection['kind']) => fixtureService.failSelection(kind),
     failDownloadsSelection: () => fixtureService.failDownloadsSelection(),
+    rejectNextApiKeyCommand: () => fixtureService.rejectNextApiKeyCommand(),
   };
 }

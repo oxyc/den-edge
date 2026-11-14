@@ -4,7 +4,7 @@
      server on its own network — says where to do it. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import ActionMenu from '../components/ActionMenu.svelte';
   import Button from '../components/Button.svelte';
@@ -88,6 +88,7 @@
     onadoptheld,
     viewerOnly = false,
     presentationOwner,
+    keyPresentation,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -143,6 +144,8 @@
     /** Old-engine viewer tier: expose only pairing and linked-device controls. */
     viewerOnly?: boolean;
     presentationOwner: LibraryJoinPresentationOwner;
+    /** Exact retained Settings route presentation. Null while the RoutePage is hidden. */
+    keyPresentation: object | null;
   } = $props();
 
   const apiService = (name: KeyService['name']): LibraryApiKeyService =>
@@ -181,6 +184,49 @@
     omdb: 'Saved — ratings are enabled.',
     doesthedogdie: 'Saved — content warnings are enabled.',
   };
+  type KeyAttempt = {
+    service: KeyService['name'];
+    provider: LibraryApiKeyService;
+    credential: string;
+    generation: number;
+    before: KeyCheck | 'checking' | undefined;
+    save: typeof setApiKey;
+    presentation: object | null;
+  };
+  const keyGenerations = new SvelteMap<KeyService['name'], number>();
+  const keyAttempts = new SvelteMap<KeyService['name'], KeyAttempt>();
+  let keyPresentationMounted = true;
+  const restoreCheck = (attempt: KeyAttempt) => {
+    if (attempt.before) checks.set(attempt.service, attempt.before);
+    else checks.delete(attempt.service);
+  };
+  const retireKeyAttempt = (name: KeyService['name']) => {
+    keyGenerations.set(name, (keyGenerations.get(name) ?? 0) + 1);
+    const attempt = keyAttempts.get(name);
+    if (!attempt) return;
+    keyAttempts.delete(name);
+    restoreCheck(attempt);
+    const { [name]: _removed, ...remaining } = notes;
+    notes = remaining;
+  };
+  const currentKeyAttempt = (attempt: KeyAttempt) =>
+    keyPresentationMounted &&
+    attempt.presentation !== null &&
+    attempt.presentation === keyPresentation &&
+    keyAttempts.get(attempt.service) === attempt &&
+    keyGenerations.get(attempt.service) === attempt.generation &&
+    drafts[attempt.service]?.trim() === attempt.credential;
+  onDestroy(() => {
+    keyPresentationMounted = false;
+    for (const service of KEY_SERVICES) retireKeyAttempt(service.name);
+  });
+  let observedKeyPresentation = untrack(() => keyPresentation);
+  $effect(() => {
+    const replacement = keyPresentation;
+    if (replacement === observedKeyPresentation) return;
+    observedKeyPresentation = replacement;
+    for (const service of KEY_SERVICES) retireKeyAttempt(service.name);
+  });
   let checkedOnOpen = false;
   $effect(() => {
     if (checkedOnOpen || disabled) return;
@@ -196,15 +242,28 @@
     const key = drafts[service.name]?.trim() ?? '';
     if (!key) return;
     const before = checks.get(service.name);
+    const generation = (keyGenerations.get(service.name) ?? 0) + 1;
+    keyGenerations.set(service.name, generation);
+    const attempt: KeyAttempt = {
+      service: service.name,
+      provider: apiService(service.name),
+      credential: key,
+      generation,
+      before,
+      save: setApiKey,
+      presentation: keyPresentation,
+    };
+    keyAttempts.set(service.name, attempt);
     checks.set(service.name, 'checking');
     notes = {
       ...notes,
       [service.name]: { text: `Checking with ${serviceName[service.name]}…`, bad: false },
     };
     const result = await checkKey(service, key);
+    if (!currentKeyAttempt(attempt)) return;
     if (result !== 'accepted') {
-      if (before) checks.set(service.name, before);
-      else checks.delete(service.name);
+      keyAttempts.delete(service.name);
+      restoreCheck(attempt);
       notes = {
         ...notes,
         [service.name]: {
@@ -217,19 +276,23 @@
       };
       return;
     }
-    if (!(await setApiKey(apiService(service.name), key))) {
-      if (before) checks.set(service.name, before);
-      else checks.delete(service.name);
+    if (!(await attempt.save(attempt.provider, attempt.credential))) {
+      if (!currentKeyAttempt(attempt)) return;
+      keyAttempts.delete(service.name);
+      restoreCheck(attempt);
       const { [service.name]: _removed, ...remaining } = notes;
       notes = remaining;
       return;
     }
+    if (!currentKeyAttempt(attempt)) return;
+    keyAttempts.delete(service.name);
     drafts = { ...drafts, [service.name]: '' };
     checks.set(service.name, 'accepted');
     notes = { ...notes, [service.name]: { text: savedNote[service.name], bad: false } };
   }
 
   async function removeKey(service: KeyService) {
+    retireKeyAttempt(service.name);
     if (!(await setApiKey(apiService(service.name), null))) return;
     checks.delete(service.name);
     const { [service.name]: _removed, ...remaining } = notes;
@@ -1072,11 +1135,13 @@
             placeholder={saved ? 'Saved — type to replace' : service.placeholder}
             aria-label="{service.label} API key"
             value={drafts[service.name]}
-            oninput={(event) =>
-              (drafts = {
+            oninput={(event) => {
+              retireKeyAttempt(service.name);
+              drafts = {
                 ...drafts,
                 [service.name]: (event.currentTarget as HTMLInputElement).value,
-              })}
+              };
+            }}
           />
           <Button
             type="submit"
