@@ -303,6 +303,7 @@
           // the title's first-air date is in the future.
           ...(params.has('other-series-continue')
             ? [
+                blankTitle({ type: 'tv', id: 2002 }, 10_000),
                 {
                   ...blankEpisode({ type: 'tv', id: 2002 }, 1, 1),
                   progress: { value: 0.4, at: [10_000, 0, 'test'], viewing: 1 },
@@ -311,6 +312,7 @@
             : []),
           ...(params.has('current-series-continue')
             ? [
+                blankTitle({ type: 'tv', id: 2007 }, 9_000),
                 {
                   ...blankEpisode({ type: 'tv', id: 2007 }, 1, 1),
                   progress: { value: 0.4, at: [9_000, 0, 'test'], viewing: 1 },
