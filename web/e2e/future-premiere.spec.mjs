@@ -82,19 +82,15 @@ for (const profile of ['Kid', 'Owner'])
 test('a real current-series Continue still crosses the future-title playback boundary', async ({
   page,
 }) => {
-  await open(page, { query: '&current-series-continue&direct-play' });
-  await expect
-    .poll(() => page.evaluate(() => window.denTestPlayBoundary.stats().asked))
-    .toBeGreaterThan(1);
+  const sourceRequests = await open(page, { query: '&current-series-continue&direct-play' });
+  await expect.poll(() => sourceRequests.some((url) => url.endsWith('/playback'))).toBe(true);
 });
 
 test('an explicitly addressed future-series episode still crosses the playback boundary', async ({
   page,
 }) => {
-  await open(page, { query: '&episode&season=1&direct-play' });
-  await expect
-    .poll(() => page.evaluate(() => window.denTestPlayBoundary.stats().asked))
-    .toBeGreaterThan(1);
+  const sourceRequests = await open(page, { query: '&episode&season=1&direct-play' });
+  await expect.poll(() => sourceRequests.some((url) => url.endsWith('/playback'))).toBe(true);
 });
 
 for (const [label, firstAir] of [
