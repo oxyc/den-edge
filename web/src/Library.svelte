@@ -1557,8 +1557,8 @@
               device: targetName,
             }),
           );
-        else
-          authority.notify(
+        else {
+          const dismiss = authority.notify(
             i18n.format('playback.wakeRetryFailed', 'Couldn’t reach {device} after it woke.', {
               device: targetName,
             }),
@@ -1567,10 +1567,12 @@
               undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
             },
           );
+          transportAttempt = { controller: attempt, current, dismiss };
+        }
         return;
       }
-      if (current())
-        authority.notify(
+      if (current()) {
+        const dismiss = authority.notify(
           i18n.format(
             'playback.wakeUnconfirmed',
             'Couldn’t confirm {device} woke. Open Den and try again.',
@@ -1581,6 +1583,8 @@
             undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
           },
         );
+        transportAttempt = { controller: attempt, current, dismiss };
+      }
     })();
     return 'waking' satisfies TransportOutcome;
   }
