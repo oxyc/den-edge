@@ -89,6 +89,20 @@ what it is assumed to mean. If the cause is inferred rather than observed, say s
 This checkout is shared with other agent sessions. Commit with an explicit pathspec, never `-a`, and check that
 everything the committed code imports is committed too.
 
+## Bundle budget records
+
+- Kid direct-read authority (#1221) was measured on the current-main merge build before and after consolidating its
+  internal admission result from three repeated strings to `boolean | null`: startup moved 203,815 → 203,804 gzip
+  bytes (baseline delta 7,419 → 7,408) and the complete non-translation graph moved 101,388 → 101,377 bytes.
+  Extracting the repeated refused/unavailable wire mapping grew the complete graph by 33 bytes, and reversing its
+  sentinel ternary grew it by 53, so both were removed. `ContentAuthority` already lives in the separately built
+  shared Worker; the isolation gate totals every JS/CSS chunk, so moving Atlas admission behind a new dynamic import
+  cannot reduce the complete graph and would add a request before a P0 authorization decision. Moving it into an
+  existing page lazy chunk is unsafe because Browser, LG/webOS, Samsung/Tizen and reduced-Tizen all ask the Worker,
+  while compiling it out for a target would remove the same Kid veto. The ceiling therefore advances to the next
+  128-byte boundary, 101,504, retaining 127 bytes on the matched build; the independent startup ceiling is unchanged
+  and retains 15 bytes.
+
 ## Testing
 
 - Do not add a regression test mechanically for every change. Trivial styling changes, copy edits, and straightforward substitutions of an existing shared component usually need the relevant static checks, not a new test.

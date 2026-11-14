@@ -317,5 +317,7 @@ if (process.argv.includes('--capture')) {
   // it supersedes) and the host's "own settings" mark and revoke warning bring the graph to 101,232 in CI, in the
   // grants module and the lazy Sharing settings; one leave request is added, only on a redeem that supersedes a grant.
   // Allow the next 128-byte boundary past it, retaining 144.
-  if (coreTotalDelta > 101376) throw new Error('Browser total JS/CSS budget exceeded');
+  // The Kid direct-read authority measurement and rejected consolidation/lazy alternatives are recorded in AGENTS.md.
+  // After the safe admission-sentinel consolidation, allow the next 128-byte boundary, retaining 127 on this build.
+  if (coreTotalDelta > 101504) throw new Error('Browser total JS/CSS budget exceeded');
 }

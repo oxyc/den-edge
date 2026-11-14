@@ -304,7 +304,8 @@ const ATLAS_UNAVAILABLE: Extract<OptionalContent<never>, { state: 'unavailable' 
   reason: 'network',
 };
 
-type ContentAdmission = 'allowed' | 'refused' | 'unavailable';
+/** True admits, false refuses, and null preserves a retryable provider failure. */
+type ContentAdmission = boolean | null;
 
 const optionalReason = (
   reason: ContentUnavailableReason,
@@ -452,8 +453,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
           for (let ref = request.titles[next++]; ref; ref = request.titles[next++]) {
             // A policy veto is final for this request; unavailable policy evidence remains retryable.
             const admission = await this.#allowed(ref, policy, signal);
-            if (admission !== 'allowed') {
-              if (admission === 'unavailable') retryable.push(ref);
+            if (!admission) {
+              if (admission === null) retryable.push(ref);
               continue;
             }
             const result = await this.#wait(this.title(ref, language), signal);
@@ -483,8 +484,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         const ask = async () => {
           for (let at = next++; at < request.titles.length; at = next++) {
             const admission = await this.#allowed(request.titles[at]!, policy, signal);
-            if (admission === 'unavailable') throw this.#atlasPolicyUnavailable();
-            answers[at] = admission === 'allowed';
+            if (admission === null) throw this.#atlasPolicyUnavailable();
+            answers[at] = admission;
           }
         };
         await Promise.all(Array.from({ length: Math.min(6, request.titles.length) }, ask));
@@ -495,10 +496,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'title.detail': {
         const admission = await this.#allowed(request.title, policy, signal);
-        if (admission !== 'allowed')
+        if (!admission)
           return {
             kind: 'title.detail',
-            detail: admission === 'refused' ? REFUSED : ATLAS_UNAVAILABLE,
+            detail: admission === false ? REFUSED : ATLAS_UNAVAILABLE,
           };
         const detail = optional(
           await this.#wait(this.detail(request.title, request.region, language), signal),
@@ -515,10 +516,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'title.hero': {
         const admission = await this.#allowed(request.title, policy, signal);
-        if (admission !== 'allowed')
+        if (!admission)
           return {
             kind: 'title.hero',
-            hero: admission === 'refused' ? REFUSED : ATLAS_UNAVAILABLE,
+            hero: admission === false ? REFUSED : ATLAS_UNAVAILABLE,
           };
         const detail = optional(
           await this.#wait(this.detail(request.title, request.region, language), signal),
@@ -532,17 +533,17 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'prefetch.detail': {
         const admission = await this.#allowed(request.title, policy, signal);
-        if (admission === 'unavailable') throw this.#atlasPolicyUnavailable();
-        if (admission === 'allowed')
+        if (admission === null) throw this.#atlasPolicyUnavailable();
+        if (admission)
           await this.#wait(this.detail(request.title, request.region, language), signal);
         return { kind: 'prefetch.detail' };
       }
       case 'title.external-id': {
         const admission = await this.#allowed(request.title, policy, signal);
-        if (admission !== 'allowed')
+        if (!admission)
           return {
             kind: 'title.external-id',
-            imdbId: admission === 'refused' ? REFUSED : ATLAS_UNAVAILABLE,
+            imdbId: admission === false ? REFUSED : ATLAS_UNAVAILABLE,
           };
         const result = await this.#wait(this.identifiers(request.title), signal);
         return {
@@ -557,10 +558,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'season': {
         const admission = await this.#allowed(request.title, policy, signal);
-        if (admission !== 'allowed')
+        if (!admission)
           return {
             kind: 'season',
-            episodes: admission === 'refused' ? REFUSED : ATLAS_UNAVAILABLE,
+            episodes: admission === false ? REFUSED : ATLAS_UNAVAILABLE,
           };
         return {
           kind: 'season',
@@ -572,8 +573,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       }
       case 'title.extras': {
         const admission = await this.#allowed(request.title, policy, signal);
-        if (admission !== 'allowed') {
-          const unavailable = admission === 'refused' ? REFUSED : ATLAS_UNAVAILABLE;
+        if (!admission) {
+          const unavailable = admission === false ? REFUSED : ATLAS_UNAVAILABLE;
           return {
             kind: 'title.extras',
             extras: {
@@ -807,10 +808,10 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     policy: ContentPolicy | undefined,
     signal: AbortSignal,
   ): Promise<ContentAdmission> {
-    if (!isRestricted(policy)) return 'allowed';
-    if (!validRef(ref)) return 'refused';
+    if (!isRestricted(policy)) return true;
+    if (!validRef(ref)) return false;
     if (policy?.approvals?.some((title) => title.type === ref.type && title.id === ref.id))
-      return 'allowed';
+      return true;
     const atlas = this.credentials.atlas?.()?.replace(/\/$/, '');
     const atlasGeneration = this.credentials.atlasGeneration?.() ?? 0;
     // A Kid's audience veto cannot be inferred from age fallback. Age-only policies retain their established
@@ -843,9 +844,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       // its provider ignored cancellation and completed into the shared reuse cache.
       if ((this.credentials.atlasGeneration?.() ?? 0) !== atlasGeneration)
         throw new DOMException('Aborted', 'AbortError');
-      return (answer.eligible ?? (await ageAllowed(policy, answer.minimumAge)))
-        ? 'allowed'
-        : 'refused';
+      return (answer.eligible ?? (await ageAllowed(policy, answer.minimumAge))) ? true : false;
     } catch (error) {
       if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
       console.warn('den: atlas could not establish a title policy', error);
@@ -854,8 +853,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
   }
 
   async #unknownAdmission(policy: ContentPolicy | undefined): Promise<ContentAdmission> {
-    if (policy?.kidAudience) return 'unavailable';
-    return (await ageAllowed(policy, null)) ? 'allowed' : 'refused';
+    if (policy?.kidAudience) return null;
+    return ageAllowed(policy, null);
   }
 
   #atlasPolicyUnavailable(): ContentServiceFault {
