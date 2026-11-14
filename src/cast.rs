@@ -74,10 +74,10 @@ impl Subtitles {
     }
 }
 
-/// Who may frame the page, space-separated (read trimmed: an empty `DEN_PARENT_ORIGINS_EXTRA` leaves a trailing
-/// space). The page is built with the same list (`VITE_DEN_PARENT_ORIGINS`) and answers only their messages.
+/// Who may frame the page, space-separated, trimmed: an empty `DEN_PARENT_ORIGINS_EXTRA` leaves a trailing space. The
+/// page is built with the same list (`VITE_DEN_PARENT_ORIGINS`) and answers only their messages.
 const PARENT_ORIGINS: &str = match option_env!("DEN_PARENT_ORIGINS") {
-    Some(value) => value,
+    Some(value) => value.trim_ascii(),
     None => "https://d.oxy.fi http://localhost:5173",
 };
 
@@ -223,8 +223,7 @@ async fn response(path: PathBuf, immutable: bool, app: Option<&str>) -> Response
     let csp = format!(
         "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; \
          img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
-         base-uri 'none'; form-action 'none'; frame-ancestors {}",
-        PARENT_ORIGINS.trim()
+         base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
     );
     // The receiver runs on the Chromecast, top-level and framed by nothing. Google's receiver framework comes from
     // gstatic and draws its player with inline styles, and the receiver fetches what the sender's LOAD names: the
@@ -268,8 +267,7 @@ mod tests {
         format!(
             "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; \
              img-src 'self' https: data:; media-src https: blob:; connect-src https:; object-src 'none'; \
-             base-uri 'none'; form-action 'none'; frame-ancestors {}",
-            PARENT_ORIGINS.trim()
+             base-uri 'none'; form-action 'none'; frame-ancestors {PARENT_ORIGINS}"
         )
     }
 
