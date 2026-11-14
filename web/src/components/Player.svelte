@@ -119,6 +119,12 @@
   import { startPlayback, type PlaybackCause, type PlaybackWant } from '../lib/playback';
   import { directRecovery } from '../lib/playbackRecovery';
   import { checkSubtitleResync, resyncSubtitle } from '../lib/subtitleResync';
+  import {
+    hasSubtitleResyncNotice,
+    scheduleNoticeExpiry,
+    subtitleResyncNoticeText,
+    type SubtitleResyncNotice,
+  } from '../lib/subtitleResyncNotice';
   import type { MenuItem } from '../lib/titleActions';
   import {
     activeAt,
@@ -1032,37 +1038,35 @@
   /** The resume notice stays longer: it carries Start over. */
   const RESUME_NOTICE_MS = 6_000;
   /** Clear a notice NOTICE_MS after `shown` says it is up; a new text starts the time over. */
-  function fades(shown: () => unknown, clear: () => void, ms = NOTICE_MS) {
+  function fades(shown: () => boolean, clear: () => void, ms = NOTICE_MS) {
     $effect(() => {
-      if (!shown()) return;
-      const timer = setTimeout(clear, ms);
-      return () => clearTimeout(timer);
+      return scheduleNoticeExpiry(shown(), clear, ms);
     });
   }
   fades(
-    () => volumeNotice,
+    () => volumeNotice !== null,
     () => (volumeNotice = null),
   );
   fades(
-    () => resumedAt,
+    () => resumedAt !== null,
     () => (resumedAt = null),
     RESUME_NOTICE_MS,
   );
   fades(
-    () => swapped,
+    () => swapped !== null,
     () => (swapped = null),
   );
   // Only once the switch has landed: "trying another release…" stays until it says where it went.
   fades(
-    () => !switching && autoSwitch,
+    () => !switching && autoSwitch !== null,
     () => (autoSwitch = null),
   );
   fades(
-    () => struggling,
+    () => struggling !== null,
     () => (struggling = null),
   );
   fades(
-    () => unchanged,
+    () => unchanged !== null,
     () => (unchanged = null),
   );
   // A terminal result replaces progress feedback. In particular, a direct URL can be accepted and then fail before
@@ -3773,13 +3777,13 @@
   const subtitleTimingOffset = $derived(subtitleOffset + subtitleResyncOffset);
   let subtitleResyncReady = $state(false);
   let subtitleResyncBusy = $state(false);
-  let subtitleResyncNotice = $state<false | number | null>(null);
+  let subtitleResyncNotice = $state<SubtitleResyncNotice>(null);
   let subtitleResyncRequest: AbortController | undefined;
   let subtitleSelectionGeneration = 0;
   let subtitleLoadFailure = $state.raw<NonNullable<Session['subtitles']>[number] | null>(null);
   const alignedUrls = new SvelteSet<string>();
   fades(
-    () => subtitleResyncNotice,
+    () => hasSubtitleResyncNotice(subtitleResyncNotice),
     () => (subtitleResyncNotice = null),
   );
 
@@ -5178,12 +5182,13 @@
     const list: Notice[] = [];
     if (transitionNotice)
       list.push({ text: i18n.phrase(transitionNotice), quiet: true, busy: true });
-    if (subtitleResyncNotice !== null)
+    if (hasSubtitleResyncNotice(subtitleResyncNotice))
       list.push({
-        text:
-          subtitleResyncNotice === false
-            ? i18n.phrase('Subtitles could not be re-synced. Your current timing is unchanged.')
-            : `${i18n.phrase('Subtitles re-synced')} · ${formattedSubtitleOffset(subtitleResyncNotice)}`,
+        text: subtitleResyncNoticeText(
+          subtitleResyncNotice,
+          (english) => i18n.phrase(english),
+          (offset) => formattedSubtitleOffset(offset),
+        ),
         quiet: true,
       });
     const failed = subtitleLoadFailure;
