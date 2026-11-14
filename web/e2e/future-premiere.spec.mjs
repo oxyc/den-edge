@@ -25,10 +25,14 @@ const series = (id, firstAir) => ({
 async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
-  const sourceRequests = [];
+  const boundaryRequests = [];
   await page.route('**/den/fixture/**', (route) => {
-    sourceRequests.push(route.request().url());
+    boundaryRequests.push(route.request().url());
     return route.fulfill({ status: 503, json: { error: 'unexpected_source_request' } });
+  });
+  await page.route('**/remux/releases', (route) => {
+    boundaryRequests.push(route.request().url());
+    return route.fulfill({ status: 503, json: { error: 'fixture_source_unavailable' } });
   });
   await routeTmdb(page, (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -55,14 +59,14 @@ async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
     `${E2E_ORIGIN}/test/library.html?play-boundary&address&populated&page=title&type=tv&id=2007${query}`,
   );
   await expect(page.getByRole('heading', { name: 'Future Series', level: 1 })).toBeVisible();
-  return sourceRequests;
+  return boundaryRequests;
 }
 
 for (const profile of ['Kid', 'Owner'])
   test(`a future series without current Continue performs zero production player or source requests as ${profile}`, async ({
     page,
   }) => {
-    const sourceRequests = await open(page, {
+    const boundaryRequests = await open(page, {
       query: `&other-series-continue&direct-play${profile === 'Owner' ? '&owner' : ''}`,
     });
     const hero = page.locator('header.hero');
@@ -76,21 +80,25 @@ for (const profile of ['Kid', 'Owner'])
       asked: profile === 'Owner' ? 0 : 1,
       sources: 0,
     });
-    expect(sourceRequests).toEqual([]);
+    expect(boundaryRequests).toEqual([]);
   });
 
 test('a real current-series Continue still crosses the future-title playback boundary', async ({
   page,
 }) => {
-  const sourceRequests = await open(page, { query: '&current-series-continue&direct-play' });
-  await expect.poll(() => sourceRequests.some((url) => url.endsWith('/playback'))).toBe(true);
+  const boundaryRequests = await open(page, { query: '&current-series-continue&direct-play' });
+  await expect
+    .poll(() => boundaryRequests.some((url) => url.endsWith('/remux/releases')))
+    .toBe(true);
 });
 
 test('an explicitly addressed future-series episode still crosses the playback boundary', async ({
   page,
 }) => {
-  const sourceRequests = await open(page, { query: '&episode&season=1&direct-play' });
-  await expect.poll(() => sourceRequests.some((url) => url.endsWith('/playback'))).toBe(true);
+  const boundaryRequests = await open(page, { query: '&episode&season=1&direct-play' });
+  await expect
+    .poll(() => boundaryRequests.some((url) => url.endsWith('/remux/releases')))
+    .toBe(true);
 });
 
 for (const [label, firstAir] of [
