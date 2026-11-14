@@ -10,6 +10,7 @@ import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import {
   openOptionsPage,
+  optionsButton,
   showsSubtitles,
   subtitleChoice,
   subtitlesButton,
@@ -353,7 +354,7 @@ test('subtitle timing follows live profile language through dismissal and player
     await expect(timing.getByRole('status', { name: '+0,5 sekunder' })).toHaveText('+0,5s');
     await timing.getByRole('button', { name: 'Klart' }).click();
     await expect(timing).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'More playback options' })).toBeFocused();
+    await expect(optionsButton(page)).toBeFocused();
 
     options = await openOptionsPage(page, 'Undertextsynkronisering');
     await expect(

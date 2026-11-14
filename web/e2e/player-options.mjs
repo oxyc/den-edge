@@ -3,8 +3,11 @@
 // button, which opens straight to that page.
 import { expect } from '@playwright/test';
 
-export const optionsButton = (page) => page.getByRole('button', { name: 'More playback options' });
-export const optionsMenu = (page) => page.getByRole('menu', { name: 'More playback options' });
+const OPTIONS_NAME =
+  /^(?:More playback options|Más opciones de reproducción|Fler uppspelningsalternativ)$/;
+
+export const optionsButton = (page) => page.getByRole('button', { name: OPTIONS_NAME });
+export const optionsMenu = (page) => page.getByRole('menu', { name: OPTIONS_NAME });
 
 /**
  * The controls brought back as a viewer does once they have hidden while playing: a mouse moving over the picture, a
