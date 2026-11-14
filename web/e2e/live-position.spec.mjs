@@ -1,8 +1,8 @@
 // A title playing on another device shows where it is on this page, ticking, for as long as it plays — and stops
 // after it does. Two browsers share one in-memory den-edge: this page runs the production RoutedLibrary and Worker
 // (so the lifecycle it reports and the refresh cadence it gets are the real ones), and a second browser is the other
-// device, writing its first eligible position immediately and then every 30 seconds. Real time, not a fake clock:
-// the save, debounce and pull cadences live outside the page clock.
+// device, writing its first eligible position immediately and then every 30 seconds. The general scenarios use real
+// time; the lost-delivery boundary scenario controls the producer/viewer phase while leaving delivery and pulls real.
 import { hkdfSync } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
@@ -16,9 +16,9 @@ test.describe.configure({ mode: 'parallel' });
 const FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
 const WRITE_EVERY_MS = 30_000;
 const DELIVERY_DEBOUNCE_MS = 5_000;
-const ONE_LOST_DELIVERY_MS = 72_000;
+const LOST_DELIVERY_OBSERVED_MS = 70_000;
+const LIVE_MS = 75_000;
 const SHORT_PLAYING_MS = 12_000;
-const EXPIRE_LIVE_MS = 76_000;
 const HOUSEHOLD_TV_QUEUE = Buffer.from(
   hkdfSync('sha256', Buffer.alloc(32, 9), 'den/link/v1', 'inbox', 24),
 ).toString('hex');
@@ -206,7 +206,8 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
 }
 
 /** This page on the paired library, seeded once, and the other device beside it. */
-async function openWithDevice(browser, page, options) {
+async function openWithDevice(browser, page, options = {}) {
+  const { controlledWriter = false } = options;
   const edge = sharedEdge(options);
   await edge.route(page, 'page');
   // Keep wall time for the Worker's real pull cadence, but let expiry advance without sleeping for LIVE_MS.
@@ -221,8 +222,14 @@ async function openWithDevice(browser, page, options) {
     timeout: 20_000,
   });
 
+  // A controlled writer fixes the logical producer/viewer timeline while the Worker's pull and the delivery
+  // debounce remain on wall time. Slow startup and locator work can then never change which periodic save occurs.
+  // Keep the first pause ahead of the already-running page clock; ten seconds is still ordinary accepted skew.
+  const timeline = Date.now() + 10_000;
+  if (controlledWriter) await page.clock.pauseAt(new Date(timeline));
   const context = await browser.newContext();
   const device = await context.newPage();
+  if (controlledWriter) await device.clock.install({ time: new Date(timeline) });
   await edge.route(device, 'device');
   await device.goto(`${FIXTURE}?writer`);
   await device.getByRole('status').filter({ hasText: 'Writer ready' }).waitFor({ timeout: 15_000 });
@@ -238,15 +245,20 @@ async function openWithDevice(browser, page, options) {
    */
   const play = (title, from, episode) => {
     const started = Date.now();
-    const write = (playing = true) =>
-      (writing = device.evaluate(
+    const write = async (playing = true, elapsed = Date.now() - started) => {
+      if (controlledWriter) await device.clock.setSystemTime(new Date(timeline + elapsed));
+      return (writing = device.evaluate(
         ([title, seconds, episode, playing]) =>
           window.fixturePlay(title, seconds, episode, playing),
-        [title, pausedAt ?? from + Math.floor((Date.now() - started) / 1000), episode, playing],
+        [title, pausedAt ?? from + Math.floor(elapsed / 1000), episode, playing],
       ));
-    void write();
-    timer = setInterval(() => void write(), WRITE_EVERY_MS);
+    };
+    if (!controlledWriter) {
+      void write();
+      timer = setInterval(() => void write(), WRITE_EVERY_MS);
+    }
     return {
+      writeAt: controlledWriter ? (elapsed) => write(true, elapsed) : undefined,
       pause: () => {
         pausedAt = from + Math.floor((Date.now() - started) / 1000);
         void write(false);
@@ -260,7 +272,7 @@ async function openWithDevice(browser, page, options) {
     edge.close();
     await context.close();
   };
-  return { edge, play, stop, close };
+  return { edge, play, stop, close, timeline };
 }
 
 /** Samples `clock` every 250 ms for `ms`: each sample is its text, or null while it is not shown. */
@@ -272,6 +284,26 @@ async function watch(clock, ms) {
     await new Promise((done) => setTimeout(done, 250));
   }
   return samples;
+}
+
+/** Samples until an intended route event occurs, with one bounded deadline around its production timers. */
+async function watchUntil(clock, complete, timeout) {
+  const samples = [];
+  const until = Date.now() + timeout;
+  while (!complete() && Date.now() < until) {
+    samples.push((await clock.isVisible()) ? await clock.textContent() : null);
+    await new Promise((done) => setTimeout(done, 250));
+  }
+  expect(complete(), 'the intended delivery arrived within its debounce and pull budget').toBe(
+    true,
+  );
+  return samples;
+}
+
+/** Moves the paused viewer clock and lets its production foreground listener publish that exact time. */
+async function setViewerTime(page, time) {
+  await page.clock.setSystemTime(new Date(time));
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
 }
 
 /** Each gap between `times` and the next, in ms. */
@@ -310,12 +342,14 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
   page,
 }) => {
   test.setTimeout(240_000);
-  const { edge, play, stop, close } = await openWithDevice(browser, page, {
+  const { edge, play, stop, close, timeline } = await openWithDevice(browser, page, {
     loseOnePeriodicDelivery: true,
+    controlledWriter: true,
   });
   try {
     const clock = homeClock(page);
-    play(PLAYED, 600);
+    const playing = play(PLAYED, 600);
+    await playing.writeAt(0);
     await expect(clock).toBeVisible({ timeout: 70_000 });
     await expect(clock).toHaveText(/^1\d:\d\d$/);
     // In the art's lower-right corner, where the card's play glyph is, above its progress bar.
@@ -329,32 +363,36 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     // Fractional poster sizing can put the nominal 18px inset on either side of a half-pixel rounding boundary.
     expect(bottomInset).toBeGreaterThanOrEqual(17);
     expect(bottomInset).toBeLessThanOrEqual(19);
-    // Span the lost 30 s delivery and the 60 s replacement's five-second delivery debounce plus a consumer pull.
-    // Waiting for the first pull before this watch means the next ordinary 90 s periodic save also lands in it.
-    await expectTicking(clock, edge, ONE_LOST_DELIVERY_MS);
+    // Advance the logical producer phases explicitly: first save, lost 30 s periodic, then the 60 s replacement.
+    // Hold the viewer at 70 s before releasing that replacement, so neither startup nor locator time can move the
+    // assertion past the old row's accepted retention budget.
+    await playing.writeAt(WRITE_EVERY_MS);
+    await setViewerTime(page, timeline + LOST_DELIVERY_OBSERVED_MS);
+    await expect(clock).toHaveText('11:10');
+    await playing.writeAt(2 * WRITE_EVERY_MS);
+    const samples = await watchUntil(clock, () => edge.arrivals.length === 2, 15_000);
     expect(
-      edge.deviceWrites,
-      'first, lost periodic, replacement, and following periodic saves',
-    ).toHaveLength(4);
-    for (const gap of gaps(edge.deviceWrites)) {
-      expect(
-        gap,
-        'writer saves stayed on the 30 s cadence rather than duplicating',
-      ).toBeGreaterThanOrEqual(WRITE_EVERY_MS - 500);
-    }
+      samples.filter((text) => text === null),
+      'the live clock never retired',
+    ).toEqual([]);
+    expect(edge.deviceWrites, 'only the intended first, lost, and replacement saves').toHaveLength(
+      3,
+    );
     expect(
       edge.arrivals,
-      'the first, replacement, and following periodic deliveries reached den-edge',
-    ).toHaveLength(3);
+      'only the first and replacement deliveries reached den-edge',
+    ).toHaveLength(2);
     expect(
       edge.arrivals[1],
       'replacement delivery included the five-second debounce',
     ).toBeGreaterThanOrEqual(DELIVERY_DEBOUNCE_MS - 500);
 
-    // An abandoned player has no explicit transition. The last write still retires after the bounded 75 s window;
-    // the helper's focused boundary test proves that exactly 75 s remains inclusive and the next millisecond is not.
+    // An abandoned player has no explicit transition. Exercise the production projection at its exact inclusive
+    // boundary from the replacement's 60 s timestamp, then at the first stale millisecond.
     stop();
-    await page.clock.fastForward(EXPIRE_LIVE_MS);
+    await setViewerTime(page, timeline + 2 * WRITE_EVERY_MS + LIVE_MS);
+    await expect(clock).toHaveText('12:15');
+    await setViewerTime(page, timeline + 2 * WRITE_EVERY_MS + LIVE_MS + 1);
     await expect(clock).toBeHidden();
   } finally {
     await close();
