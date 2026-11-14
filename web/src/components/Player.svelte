@@ -6388,7 +6388,7 @@
             {#if webTransport}<button type="button" onclick={() => adjustSubtitleOffset(-0.5)}
                 >{i18n.text('player.subtitleEarlier')}</button
               >{:else}<span>‹ {i18n.text('player.subtitleEarlier')}</span>{/if}
-            <strong aria-live="polite" aria-label={formattedSubtitleOffset(undefined, 'spoken')}
+            <strong role="status" aria-label={formattedSubtitleOffset(undefined, 'spoken')}
               >{formattedSubtitleOffset()}</strong
             >
             {#if webTransport}<button type="button" onclick={() => adjustSubtitleOffset(0.5)}

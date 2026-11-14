@@ -326,8 +326,7 @@ test('subtitle timing follows live profile language through dismissal and player
     let timing = page.getByRole('group', { name: 'Subtitle timing' });
     await expect(timing.getByRole('button', { name: 'Earlier' })).toBeFocused();
     await timing.getByRole('button', { name: 'Later' }).click();
-    await expect(timing.locator('strong')).toHaveText('+0.5s');
-    await expect(timing.locator('strong')).toHaveAccessibleName('+0.5 seconds');
+    await expect(timing.getByRole('status', { name: '+0.5 seconds' })).toHaveText('+0.5s');
 
     // A first-load import cannot settle until this JavaScript task yields. The direct fixture setters therefore
     // start a real Spanish request and supersede it with English before that held catalog can publish.
@@ -345,15 +344,13 @@ test('subtitle timing follows live profile language through dismissal and player
     await expect(timing.getByRole('button', { name: 'Más tarde' })).toBeVisible();
     await expect(timing.getByRole('button', { name: 'Reiniciar' })).toBeEnabled();
     await expect(timing.getByRole('button', { name: 'Listo' })).toBeVisible();
-    await expect(timing.locator('strong')).toHaveText('+0,5s');
-    await expect(timing.locator('strong')).toHaveAccessibleName('+0,5 segundos');
+    await expect(timing.getByRole('status', { name: '+0,5 segundos' })).toHaveText('+0,5s');
 
     await page.getByTestId('interface-language-sv').evaluate((control) => control.click());
     timing = page.getByRole('group', { name: 'Undertextsynkronisering' });
     await expect(timing.getByRole('button', { name: 'Tidigare' })).toBeVisible();
     await expect(timing.getByRole('button', { name: 'Senare' })).toBeVisible();
-    await expect(timing.locator('strong')).toHaveText('+0,5s');
-    await expect(timing.locator('strong')).toHaveAccessibleName('+0,5 sekunder');
+    await expect(timing.getByRole('status', { name: '+0,5 sekunder' })).toHaveText('+0,5s');
     await timing.getByRole('button', { name: 'Klart' }).click();
     await expect(timing).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'More playback options' })).toBeFocused();

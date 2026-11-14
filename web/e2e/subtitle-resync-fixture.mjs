@@ -128,7 +128,7 @@ async function fixture(
   const menu =
     platform === 'browser'
       ? page.locator('button.web-audio-subtitles')
-      : page.getByRole('button', { name: /^Subtitles:/ });
+      : page.getByRole('button', { name: /^(?:Subtitles|Subtítulos|Undertexter):/ });
   // The saved language preference must resolve to the concrete first candidate without a manual menu pick.
   if (platform === 'browser')
     await expect(menu).toHaveAttribute('aria-label', /subtitles English 1$/);
