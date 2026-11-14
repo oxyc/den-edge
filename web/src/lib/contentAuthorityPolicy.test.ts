@@ -376,16 +376,18 @@ describe('a title only a non-atlas source names', () => {
     const owner = (await world().ask({ kind: 'titles', titles: all })) as { titles: unknown[] };
     expect(owner.titles).toHaveLength(6);
 
-    // Ages already read are kept for a few minutes; an outage after that is a refusal, not a pass.
+    // Ages already read are kept for a few minutes; an outage after that remains retryable, not a pass or veto.
     forgetReused();
     const down = world(undefined, { atlasDown: true });
     await expect(down.ask({ kind: 'titles', titles: all }, KID)).resolves.toMatchObject({
       titles: [],
-      retryable: [],
+      retryable: all,
     });
     const unconfigured = world(undefined, { atlas: false });
-    await expect(unconfigured.ask({ kind: 'titles', titles: all }, KID)).resolves.toMatchObject({
+    await expect(unconfigured.ask({ kind: 'titles', titles: all }, KID)).resolves.toEqual({
+      kind: 'titles',
       titles: [],
+      retryable: all,
     });
   });
 
@@ -445,20 +447,38 @@ describe('every direct boundary asks the same check', () => {
     });
   });
 
-  it('fails closed for a title the store cannot age, and never refuses the unrestricted household', async () => {
+  it('distinguishes unknown title policy from a retryable provider failure and keeps the Owner fast path', async () => {
     const unknown = world();
     await expect(unknown.ask(direct(4)[0]!, KID)).resolves.toMatchObject({
       detail: { reason: 'refused' },
     });
     const down = world(undefined, { atlasDown: true });
     await expect(down.ask(direct(1)[0]!, KID)).resolves.toMatchObject({
-      detail: { reason: 'refused' },
+      detail: { state: 'unavailable', provider: 'atlas', reason: 'network' },
     });
     const none = world(undefined, { atlas: false });
     await expect(none.ask(direct(1)[0]!, KID)).resolves.toMatchObject({
-      detail: { reason: 'refused' },
+      detail: { state: 'unavailable', provider: 'atlas', reason: 'network' },
     });
     await expect(none.ask(direct(1)[0]!)).resolves.toMatchObject({ detail: { state: 'ready' } });
+  });
+
+  it('keeps an Atlas outage typed and retryable across every direct boundary', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const w = world(undefined, { atlasDown: true });
+    const results = await Promise.all([0, 1, 3, 4, 5].map((at) => w.ask(direct(1)[at]!, KID)));
+    expect(results).toMatchObject([
+      { detail: { state: 'unavailable', provider: 'atlas', reason: 'network' } },
+      { hero: { state: 'unavailable', provider: 'atlas', reason: 'network' } },
+      { imdbId: { state: 'unavailable', provider: 'atlas', reason: 'network' } },
+      { extras: { ratings: { state: 'unavailable', provider: 'atlas', reason: 'network' } } },
+      { episodes: { state: 'unavailable', provider: 'atlas', reason: 'network' } },
+    ]);
+    await expect(w.ask(direct(1)[2]!, KID)).rejects.toMatchObject({
+      failure: { code: 'unavailable', retryable: true, provider: 'atlas' },
+    });
+    expect(w.tmdb).toEqual([]);
+    warn.mockRestore();
   });
 
   it('takes atlas’ eligibility over the age alone: its made-for admission and its warning veto', async () => {
@@ -513,6 +533,10 @@ describe('every direct boundary asks the same check', () => {
     await expect(malformed.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
       detail: { state: 'ready' },
     });
+    const none = world(undefined, { atlas: false });
+    await expect(none.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'unavailable', provider: 'atlas', reason: 'network' },
+    });
 
     forgetReused();
     let down = true;
@@ -521,7 +545,7 @@ describe('every direct boundary asks the same check', () => {
       eligible: { 'movie:1': false },
     });
     await expect(recovering.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
-      detail: { state: 'ready' },
+      detail: { state: 'unavailable', provider: 'atlas', reason: 'network' },
     });
     down = false;
     await expect(recovering.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
@@ -532,22 +556,30 @@ describe('every direct boundary asks the same check', () => {
     warn.mockRestore();
   });
 
-  it('aborts a replaced unbounded-Kid read even when Atlas ignores cancellation', async () => {
+  it('keeps an ignored-cancellation answer out of a same-URL A→B→A generation', async () => {
     const credentials = new WorkerContentCredentials();
-    credentials.configureAtlas('/atlas-old');
+    credentials.configureAtlas('/atlas-a');
     let releaseOld!: () => void;
     const oldGate = new Promise<void>((resolve) => (releaseOld = resolve));
     let oldStarted!: () => void;
     const sawOld = new Promise<void>((resolve) => (oldStarted = resolve));
+    let oldCompleted!: () => void;
+    const sawOldComplete = new Promise<void>((resolve) => (oldCompleted = resolve));
+    let atlasACalls = 0;
     const authority = new ContentAuthority(credentials, {
       providerFetch: async (input) => {
         const url = String(input);
-        if (url.startsWith('/atlas-old/')) {
-          oldStarted();
-          await oldGate;
-          return json({ minimumAge: 7, eligible: true });
+        if (url.startsWith('/atlas-a/')) {
+          atlasACalls++;
+          if (atlasACalls === 1) {
+            oldStarted();
+            await oldGate;
+            oldCompleted();
+            return json({ minimumAge: 7, eligible: true });
+          }
+          return json({ minimumAge: 7, eligible: false });
         }
-        if (url.startsWith('/atlas-new/')) return json({ minimumAge: 7, eligible: false });
+        if (url.startsWith('/atlas-b/')) return json({ minimumAge: 7, eligible: false });
         return json({ entries: [] });
       },
       tmdbFetch: async () => json({}),
@@ -565,13 +597,22 @@ describe('every direct boundary asks the same check', () => {
     ).resolves.toEqual({ kind: 'title.eligibility', allowed: refs('movie:1') });
 
     await authority.query(
-      { kind: 'sources.configure', atlas: '/atlas-new' },
+      { kind: 'sources.configure', atlas: '/atlas-b' },
       new AbortController().signal,
     );
     await expect(
       authority.query(direct(1)[0]!, new AbortController().signal, UNBOUNDED_KID),
     ).resolves.toMatchObject({ detail: { reason: 'refused' } });
+    await authority.query(
+      { kind: 'sources.configure', atlas: '/atlas-a' },
+      new AbortController().signal,
+    );
     releaseOld();
+    await sawOldComplete;
+    await expect(
+      authority.query(direct(1)[0]!, new AbortController().signal, UNBOUNDED_KID),
+    ).resolves.toMatchObject({ detail: { reason: 'refused' } });
+    expect(atlasACalls).toBe(2);
   });
 
   it('admits only the title explicitly approved for this Kid before the age and atlas gates', async () => {
@@ -584,14 +625,15 @@ describe('every direct boundary asks the same check', () => {
     expect(w.atlas[0]).toContain('/movie/1.json');
   });
 
-  it('treats missing evidence as an unknown maturity, which the policy’s unknownRatings decides', async () => {
+  it('keeps provider failure retryable instead of turning it into an eligibility answer', async () => {
     forgetReused();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const down = world(undefined, { atlasDown: true });
     const ask = (policy: ContentPolicy) =>
       down.ask({ kind: 'title.eligibility', titles: refs('movie:1') }, policy);
-    await expect(ask(KID)).resolves.toMatchObject({ allowed: [] });
-    // An Owner with a migrated ceiling stays fail-open for what it cannot age (den#234).
+    await expect(ask(KID)).rejects.toMatchObject({
+      failure: { code: 'unavailable', retryable: true, provider: 'atlas' },
+    });
     await expect(ask(CEILING)).resolves.toMatchObject({ allowed: refs('movie:1') });
     const none = world(undefined, { atlas: false });
     await expect(
