@@ -27,11 +27,14 @@ async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   const boundaryRequests = [];
   await page.route('**/den/fixture/**', (route) => {
-    boundaryRequests.push(route.request().url());
+    boundaryRequests.push({ url: route.request().url() });
     return route.fulfill({ status: 503, json: { error: 'unexpected_source_request' } });
   });
   await page.route('**/remux/releases', (route) => {
-    boundaryRequests.push(route.request().url());
+    boundaryRequests.push({
+      url: route.request().url(),
+      body: route.request().postDataJSON(),
+    });
     return route.fulfill({ status: 503, json: { error: 'fixture_source_unavailable' } });
   });
   await routeTmdb(page, (route) => {
@@ -88,17 +91,17 @@ test('a real current-series Continue still crosses the future-title playback bou
 }) => {
   const boundaryRequests = await open(page, { query: '&current-series-continue&direct-play' });
   await expect
-    .poll(() => boundaryRequests.some((url) => url.endsWith('/remux/releases')))
-    .toBe(true);
+    .poll(() => boundaryRequests.find(({ url }) => url.endsWith('/remux/releases'))?.body)
+    .toMatchObject({ season: 1, episode: 1 });
 });
 
 test('an explicitly addressed future-series episode still crosses the playback boundary', async ({
   page,
 }) => {
-  const boundaryRequests = await open(page, { query: '&episode&season=1&direct-play' });
+  const boundaryRequests = await open(page, { query: '&episode=1&season=1&direct-play' });
   await expect
-    .poll(() => boundaryRequests.some((url) => url.endsWith('/remux/releases')))
-    .toBe(true);
+    .poll(() => boundaryRequests.find(({ url }) => url.endsWith('/remux/releases'))?.body)
+    .toMatchObject({ season: 1, episode: 1 });
 });
 
 for (const [label, firstAir] of [
