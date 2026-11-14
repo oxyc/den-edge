@@ -353,17 +353,22 @@
   onDestroy(() => playLifetime.abort());
   const transportLifetime = new AbortController();
   let transportAttempt = $state.raw<
-    { controller: AbortController; current: () => boolean } | undefined
+    { controller: AbortController; current: () => boolean; dismiss?: () => void } | undefined
   >();
   onDestroy(() => {
     transportLifetime.abort();
+    transportAttempt?.dismiss?.();
     transportAttempt?.controller.abort();
   });
-  // Replacements are reactive, while an append already handed to fetch is not. Abort that request at the same
-  // boundary that makes its captured authority stale, rather than merely hiding its eventual completion.
+  // Replacements are reactive, while an append already handed to fetch may already have crossed den-edge's commit
+  // boundary. Abort promptly to stop avoidable client work; `current` remains the authority fence that suppresses
+  // stale completion feedback and any later retry. Cancellation does not claim to retract a committed append.
   $effect(() => {
     const attempt = transportAttempt;
-    if (attempt && !attempt.current()) attempt.controller.abort();
+    if (attempt && !attempt.current()) {
+      attempt.dismiss?.();
+      attempt.controller.abort();
+    }
   });
   const playStopped = (signal?: AbortSignal) => playSignal.aborted || signal?.aborted === true;
   $effect(() => {
@@ -1413,10 +1418,11 @@
       : undefined,
   );
 
-  type TransportOutcome = 'sent' | 'waking' | 'unconfirmed' | false;
+  type TransportOutcome = 'sent' | 'waking' | 'unconfirmed' | 'recovering' | false;
 
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
+    transportAttempt?.dismiss?.();
     transportAttempt?.controller.abort();
     const attempt = new AbortController();
     const live = pageLive;
@@ -1449,6 +1455,21 @@
       pageLive?.episode?.episode === episode &&
       tvs.some((tv) => tv.id === targetId && tv.play === writerPlay && tv.controls);
     transportAttempt = { controller: attempt, current };
+    const recover = (): TransportOutcome => {
+      const dismiss = authority.notify(
+        i18n.format(
+          'playback.couldntReachTv',
+          'Couldn’t reach your TV. Check that Den is open.',
+          {},
+        ),
+        {
+          holdMs: Infinity,
+          undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
+        },
+      );
+      transportAttempt = { controller: attempt, current, dismiss };
+      return 'recovering';
+    };
     // The latest position can briefly name a TV whose Den app was replaced by another HDMI/input app, while a
     // second Den TV continues the same title off-screen. Prefer the exact writer when it is listening; otherwise
     // route to the one awake command-capable receiver. The title/episode guard at that receiver remains decisive.
@@ -1475,9 +1496,13 @@
     }
     if (!current()) return false;
     const receiver = selected && probed.find(({ tv }) => tv === selected);
-    if (!receiver) return false;
+    if (!receiver) return recover();
     if (receiver.tv.id !== targetId)
-      authority.notify(`Controlling ${receiver.tv.name}, where Den is open`);
+      authority.notify(
+        i18n.format('playback.controlling', 'Controlling {device}, where Den is open', {
+          device: receiver.tv.name,
+        }),
+      );
     const command = {
       type: 'transport',
       action,
@@ -1489,9 +1514,19 @@
     };
     const sent = await sendToTV(receiver.queue, command, fetch, attempt.signal);
     if (!current()) return false;
-    if (!sent) return false;
+    if (!sent) return recover();
     if (receiver.listening === null) return 'unconfirmed' satisfies TransportOutcome;
     if (!waking) return 'sent' satisfies TransportOutcome;
+
+    const dismiss = authority.notify(
+      i18n.format('playback.waking', 'Waking {device}…', { device: targetName }),
+      { holdMs: Infinity },
+    );
+    transportAttempt = { controller: attempt, current, dismiss };
+    if (!current()) {
+      dismiss();
+      return false;
+    }
 
     // The queued append wakes only the exact writer. Its first drain can happen before the player is ready, so mirror
     // native mobile: wait in this page's lifetime and append one fresh retry only after that exact queue is listening.
@@ -1516,17 +1551,36 @@
         if (!listening) continue;
         const resent = await sendToTV(receiver.queue, command, fetch, attempt.signal);
         if (!current()) return;
-        if (resent) authority.notify(`Den opened on ${targetName}. Sent the command again.`);
+        if (resent)
+          authority.notify(
+            i18n.format('playback.wakeResent', 'Den opened on {device}. Sent the command again.', {
+              device: targetName,
+            }),
+          );
         else
-          authority.notify(`Couldn’t reach ${targetName} after it woke.`, {
-            undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
-          });
+          authority.notify(
+            i18n.format('playback.wakeRetryFailed', 'Couldn’t reach {device} after it woke.', {
+              device: targetName,
+            }),
+            {
+              holdMs: Infinity,
+              undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
+            },
+          );
         return;
       }
       if (current())
-        authority.notify(`Couldn’t confirm ${targetName} woke. Open Den and try again.`, {
-          undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
-        });
+        authority.notify(
+          i18n.format(
+            'playback.wakeUnconfirmed',
+            'Couldn’t confirm {device} woke. Open Den and try again.',
+            { device: targetName },
+          ),
+          {
+            holdMs: Infinity,
+            undo: { label: 'Try again', run: () => void transport(action, offsetSeconds) },
+          },
+        );
     })();
     return 'waking' satisfies TransportOutcome;
   }
@@ -1660,7 +1714,9 @@
   // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
   // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
   // the page toast, the one `ProfileSession.notify` already shows for other library news.
-  setToastContext((message, undo) => session.notify(message, { undo }));
+  setToastContext((message, undo, persistent) =>
+    session.notify(message, { undo, ...(persistent ? { holdMs: Infinity } : {}) }),
+  );
   setContentServiceContext(untrack(() => session.content));
   function menuToast(
     ok: boolean | undefined,

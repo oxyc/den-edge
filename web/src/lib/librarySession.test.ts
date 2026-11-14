@@ -162,6 +162,19 @@ describe('ProfileSession presentation state', () => {
     expect(session.undo).toBeNull();
   });
 
+  it('lets async work dismiss only the presentation it owns', () => {
+    const session = legacyProfileSession(null, false, null, content());
+    const dismissWaking = session.notify('Waking TV…', { holdMs: Infinity });
+    expect(session.toast).toBe('Waking TV…');
+    dismissWaking();
+    expect(session.toast).toBeNull();
+
+    const dismissOld = session.notify('Waking TV…', { holdMs: Infinity });
+    session.notify('A newer command failed', { holdMs: Infinity });
+    dismissOld();
+    expect(session.toast).toBe('A newer command failed');
+  });
+
   it('distinguishes a wire-fenced library from generic open failures', () => {
     const updateRequired = legacyProfileSession(
       'newer-library',

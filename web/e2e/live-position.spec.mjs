@@ -265,7 +265,10 @@ async function routeWakeable(page) {
   );
 }
 
-/** Hold the sole post-wake append at the browser boundary; only a non-aborted request can enter `edge.controls`. */
+/**
+ * Hold the sole post-wake append response after recording its relay-side publication. Aborting fetch cannot retract
+ * an append that crossed den-edge's commit boundary; the caller can only suppress stale feedback and further work.
+ */
 async function holdWakeRetry(page, edge) {
   let listeningCalls = 0;
   let releaseRetry;
@@ -283,20 +286,32 @@ async function holdWakeRetry(page, edge) {
       header: route.request().headers()['x-den-link'],
       body: route.request().postDataJSON(),
     };
+    edge.controls.push(entry);
     if (appendCalls !== 2) {
-      edge.controls.push(entry);
       return route.fulfill({ status: 200, json: { queued: true } });
     }
     retryArrived();
     await released;
     try {
       await route.fulfill({ status: 200, json: { queued: true } });
-      edge.controls.push(entry);
     } catch {
-      // Supersession aborts the real fetch, so Playwright correctly refuses to publish this held response.
+      // Supersession aborted the browser's fetch, after the relay had already accepted the append above.
     }
   });
   return { arrived, release: () => releaseRetry(), calls: () => appendCalls };
+}
+
+/** A distinct household device that can validly remove the writer's live device entry. */
+async function openDeviceRemover(browser, edge) {
+  const context = await browser.newContext();
+  const remover = await context.newPage();
+  await edge.route(remover, 'remover');
+  await remover.goto(`${FIXTURE}?remover`);
+  await remover
+    .getByRole('status')
+    .filter({ hasText: 'Remover ready' })
+    .waitFor({ timeout: 15_000 });
+  return { remover, close: () => context.close() };
 }
 
 /** Samples `clock` every 250 ms for `ms`: each sample is its text, or null while it is not shown. */
@@ -565,9 +580,15 @@ test('a wake append failure is retryable and never changes durable playback trut
       return route.fulfill({ status: 503, json: { error: 'unavailable' } });
     });
     await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
-    await expect(page.getByRole('status')).toContainText('Couldn’t reach your TV');
-    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    const recovery = page.getByRole('status').filter({ hasText: 'Couldn’t reach your TV' });
+    await expect(recovery).toBeVisible();
+    await expect(recovery.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     expect(appends).toBe(1);
+    await page.waitForTimeout(7_000);
+    await expect(
+      recovery.getByRole('button', { name: 'Try again', exact: true }),
+      'transport recovery remains available past the ordinary six-second toast lifetime',
+    ).toBeVisible();
     await expect(label).toHaveText('Playing on Apple TV');
   } finally {
     await close();
@@ -599,8 +620,11 @@ test('a failed sole wake retry stays bounded and exposes a fresh retry', async (
     });
     await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
     await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
-    await expect(page.getByRole('status')).toContainText('Couldn’t reach Apple TV after it woke.');
-    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    const recovery = page
+      .getByRole('status')
+      .filter({ hasText: 'Couldn’t reach Apple TV after it woke.' });
+    await expect(recovery).toBeVisible();
+    await expect(recovery.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     expect(edge.controls).toHaveLength(2);
     await page.waitForTimeout(3_000);
     expect(edge.controls, 'the failed retry is never repeated in the background').toHaveLength(2);
@@ -620,10 +644,11 @@ test('a waking timeout queues once and remains explicitly retryable', async ({ b
     await routeWakeable(page);
     await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
     await expect(page.getByRole('status')).toContainText('Waking Apple TV…');
-    await expect(page.getByRole('status')).toContainText('Couldn’t confirm Apple TV woke.', {
-      timeout: 45_000,
-    });
-    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    const recovery = page
+      .getByRole('status')
+      .filter({ hasText: 'Couldn’t confirm Apple TV woke.' });
+    await expect(recovery).toBeVisible({ timeout: 45_000 });
+    await expect(recovery.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     expect(edge.controls, 'timeout never adds an unproved retry').toHaveLength(1);
     await expect(label).toHaveText('Playing on Apple TV');
   } finally {
@@ -631,7 +656,7 @@ test('a waking timeout queues once and remains explicitly retryable', async ({ b
   }
 });
 
-test('a newer command aborts a held waking retry before it can append or notify', async ({
+test('a newer command suppresses a held waking retry completion and further work', async ({
   browser,
   page,
 }) => {
@@ -645,14 +670,15 @@ test('a newer command aborts a held waking retry before it can append or notify'
     await held.arrived;
 
     await controls.getByRole('button', { name: 'Skip back 10 seconds' }).click();
-    await expect.poll(() => edge.controls.length).toBe(2);
+    await expect.poll(() => edge.controls.length).toBe(3);
+    await expect(page.getByRole('status')).not.toContainText('Waking Apple TV');
     held.release();
     await page.waitForTimeout(500);
     expect(
       held.calls(),
       'one held retry and one newer command reached the transport boundary',
     ).toBe(3);
-    expect(edge.controls, 'the superseded waking attempt never appends its retry').toHaveLength(2);
+    expect(edge.controls, 'the committed obsolete retry is not repeated').toHaveLength(3);
     await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
   } finally {
     held?.release();
@@ -660,7 +686,7 @@ test('a newer command aborts a held waking retry before it can append or notify'
   }
 });
 
-test('a same-id library mount replacement aborts a held waking retry', async ({
+test('a same-id library mount replacement suppresses a held waking retry completion', async ({
   browser,
   page,
 }) => {
@@ -676,7 +702,7 @@ test('a same-id library mount replacement aborts a held waking retry', async ({
     await expect(page.getByRole('heading', { name: 'Series 1003', level: 1 })).toBeVisible();
     held.release();
     await page.waitForTimeout(500);
-    expect(edge.controls, 'the replaced library cannot publish its held retry').toHaveLength(1);
+    expect(edge.controls, 'the committed obsolete retry is not repeated').toHaveLength(2);
     await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
   } finally {
     held?.release();
@@ -684,7 +710,10 @@ test('a same-id library mount replacement aborts a held waking retry', async ({
   }
 });
 
-test('a same-id rotated play key aborts its held waking retry', async ({ browser, page }) => {
+test('a same-id rotated play key suppresses its held waking retry completion', async ({
+  browser,
+  page,
+}) => {
   test.setTimeout(120_000);
   const { edge, device, controls, close } = await openRemoteSeries(browser, page);
   let held;
@@ -701,14 +730,15 @@ test('a same-id rotated play key aborts its held waking retry', async ({ browser
         timeout: 20_000,
       })
       .toBeGreaterThan(pullsBeforeRotation);
+    await expect(page.getByRole('status')).not.toContainText('Waking Apple TV');
     held.release();
     await page.waitForTimeout(500);
     expect(held.calls(), 'the obsolete retry reached the browser boundary exactly once').toBe(2);
-    expect(edge.controls, 'the obsolete play key cannot publish its held retry').toHaveLength(1);
-    expect(
-      Object.keys(edge.controls[0].body),
-      'the accepted command keeps its payload sealed',
-    ).toEqual(['sealed']);
+    expect(edge.controls, 'the committed obsolete retry is not repeated').toHaveLength(2);
+    for (const control of edge.controls)
+      expect(Object.keys(control.body), 'every accepted command keeps its payload sealed').toEqual([
+        'sealed',
+      ]);
     await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
   } finally {
     held?.release();
@@ -716,7 +746,7 @@ test('a same-id rotated play key aborts its held waking retry', async ({ browser
   }
 });
 
-test('a replacement title route aborts a held waking retry before publication', async ({
+test('a replacement title route suppresses a held waking retry completion', async ({
   browser,
   page,
 }) => {
@@ -731,9 +761,10 @@ test('a replacement title route aborts a held waking retry before publication', 
 
     await page.goBack();
     await expect(page.getByRole('heading', { name: 'Continue Watching' })).toBeVisible();
+    await expect(page.getByRole('status')).not.toContainText('Waking Apple TV');
     held.release();
     await page.waitForTimeout(500);
-    expect(edge.controls, 'the title-replaced attempt never appends its retry').toHaveLength(1);
+    expect(edge.controls, 'the committed obsolete retry is not repeated').toHaveLength(2);
     await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
   } finally {
     held?.release();
@@ -741,23 +772,30 @@ test('a replacement title route aborts a held waking retry before publication', 
   }
 });
 
-test('removing the exact target aborts its held waking retry', async ({ browser, page }) => {
+test('removing the exact target suppresses its held waking retry completion', async ({
+  browser,
+  page,
+}) => {
   test.setTimeout(120_000);
-  const { edge, device, controls, close } = await openRemoteSeries(browser, page);
+  const { edge, controls, close } = await openRemoteSeries(browser, page);
   let held;
+  let remover;
   try {
     held = await holdWakeRetry(page, edge);
     await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
     await held.arrived;
 
-    await device.evaluate(() => window.fixtureRemoveDevice());
+    remover = await openDeviceRemover(browser, edge);
+    await remover.remover.evaluate(() => window.fixtureRemoveDevice());
     await expect(controls).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.getByRole('status')).not.toContainText('Waking Apple TV');
     held.release();
     await page.waitForTimeout(500);
-    expect(edge.controls, 'a removed target cannot receive its held retry').toHaveLength(1);
+    expect(edge.controls, 'the committed obsolete retry is not repeated').toHaveLength(2);
     await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
   } finally {
     held?.release();
+    await remover?.close();
     await close();
   }
 });

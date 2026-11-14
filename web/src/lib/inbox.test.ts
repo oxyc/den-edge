@@ -76,7 +76,7 @@ describe('sending to a TV', () => {
     expect(await sendToTV(link, play, down)).toBe(false);
   });
 
-  it('cancels an append that loses its caller authority while fetch is held', async () => {
+  it('stops waiting on a held fetch when its caller authority is cancelled', async () => {
     let entered: (() => void) | undefined;
     const started = new Promise<void>((resolve) => (entered = resolve));
     const held = (async (_: string, init?: RequestInit) => {
