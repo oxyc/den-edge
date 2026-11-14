@@ -269,12 +269,18 @@
     const d = detail;
     // A title-only series request must use the same authoritative target as the mounted Play and Sources
     // controls. In particular, do not turn seriesPresentation's premiere-gated absence back into Library's
-    // compatibility S1E1 fallback. An explicitly addressed episode remains independently playable.
+    // compatibility S1E1 fallback. Hand that target through too; an explicitly addressed episode remains
+    // independently playable even when the title has not premiered.
     if (!active || !d || !onplayhere || (!playbackTarget && playRequest.episode == null)) return;
     const requestKey = JSON.stringify(playRequest);
     if (handledPlayRequest === requestKey) return;
     handledPlayRequest = requestKey;
-    onplayhere(d.title, playRequest.season, playRequest.episode, playRequest.filename);
+    onplayhere(
+      d.title,
+      playRequest.season ?? playbackTarget?.season,
+      playRequest.episode ?? playbackTarget?.episode,
+      playRequest.filename,
+    );
   });
 
   $effect(() => {
