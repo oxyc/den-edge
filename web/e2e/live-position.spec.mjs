@@ -684,6 +684,38 @@ test('a same-id library mount replacement aborts a held waking retry', async ({
   }
 });
 
+test('a same-id rotated play key aborts its held waking retry', async ({ browser, page }) => {
+  test.setTimeout(120_000);
+  const { edge, device, controls, close } = await openRemoteSeries(browser, page);
+  let held;
+  try {
+    held = await holdWakeRetry(page, edge);
+    await controls.getByRole('link', { name: 'Playing on Apple TV' }).click();
+    await held.arrived;
+
+    const pullsBeforeRotation = edge.pulls.get('page').length;
+    await device.evaluate(() => window.fixtureRotateDevice());
+    await expect
+      .poll(() => edge.pulls.get('page').length, {
+        message: 'the page applied the same-id device replacement and resumed its production pull',
+        timeout: 20_000,
+      })
+      .toBeGreaterThan(pullsBeforeRotation);
+    held.release();
+    await page.waitForTimeout(500);
+    expect(held.calls(), 'the obsolete retry reached the browser boundary exactly once').toBe(2);
+    expect(edge.controls, 'the obsolete play key cannot publish its held retry').toHaveLength(1);
+    expect(
+      Object.keys(edge.controls[0].body),
+      'the accepted command keeps its payload sealed',
+    ).toEqual(['sealed']);
+    await expect(page.getByRole('status')).not.toContainText('Den opened on Apple TV');
+  } finally {
+    held?.release();
+    await close();
+  }
+});
+
 test('a replacement title route aborts a held waking retry before publication', async ({
   browser,
   page,
