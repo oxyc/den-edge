@@ -36,6 +36,12 @@ export interface Sighting {
   moving: boolean;
 }
 
+const within = (at: number | undefined, now: number, limit: number) => {
+  if (at === undefined) return false;
+  const age = now - at;
+  return age >= -MAX_ACTIVITY_CLOCK_SKEW_MS && age <= limit;
+};
+
 /**
  * Folds a title's latest write into what was seen of it before. The first write seen counts as moving: there is
  * nothing yet to compare it with, and a title paused on the device shows ticking only until its next push.
@@ -55,18 +61,12 @@ export function sight(
 
 /** Whether a write is recent enough that its device may still be playing (or paused with the player open). */
 export function recent(entry: { at?: number }, now: number): boolean {
-  return (
-    entry.at !== undefined &&
-    now - entry.at >= -MAX_ACTIVITY_CLOCK_SKEW_MS &&
-    now - entry.at <= LIVE_MS
-  );
+  return within(entry.at, now, LIVE_MS);
 }
 
 /** Whether an exact position can still offer guarded Resume without claiming that it is live. */
 export function resumable(entry: { at?: number }, now: number): boolean {
-  if (entry.at === undefined) return false;
-  const age = now - entry.at;
-  return age >= -MAX_ACTIVITY_CLOCK_SKEW_MS && age <= REMOTE_RESUME_MS;
+  return within(entry.at, now, REMOTE_RESUME_MS);
 }
 
 /** Where a title is now, in seconds, if its last position is recent enough to be playing; else undefined. */
@@ -74,7 +74,7 @@ export function livePosition(
   entry: { seconds?: number; at?: number; moving?: boolean },
   now: number,
 ): number | undefined {
-  if (entry.seconds === undefined || entry.moving === false || !recent(entry, now))
+  if (entry.seconds === undefined || entry.moving === false || !within(entry.at, now, LIVE_MS))
     return undefined;
   // A clock a little ahead of this one reads as a write from the future: count from its own time.
   return entry.seconds + Math.max(0, now - entry.at!) / 1000;

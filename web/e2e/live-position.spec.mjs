@@ -236,9 +236,13 @@ async function openWithDevice(browser, page, options = {}) {
   if (controlledWriter) await page.clock.pauseAt(new Date(timeline));
   const context = await browser.newContext();
   const device = await context.newPage();
-  // Keep startup's device heartbeat one producer phase behind the playback epoch. If both occupied `timeline`, the
-  // HLC would stamp the first playback row one millisecond later, making the exact 70 s projection read 11:09.
-  if (controlledWriter) await device.clock.install({ time: new Date(timeline - WRITE_EVERY_MS) });
+  if (controlledWriter) {
+    await device.clock.install();
+    // Keep startup's device heartbeat one producer phase behind the playback epoch, and stop its clock there. An
+    // installed clock otherwise advances with wall time after each `setSystemTime`, so the production write can land
+    // milliseconds after its controlled timestamp and make the exact 70 s projection read 11:09 instead of 11:10.
+    await device.clock.pauseAt(new Date(timeline - WRITE_EVERY_MS));
+  }
   await edge.route(device, 'device');
   await device.goto(`${FIXTURE}?writer`);
   await device.getByRole('status').filter({ hasText: 'Writer ready' }).waitFor({ timeout: 15_000 });
