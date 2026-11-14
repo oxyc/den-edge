@@ -76,6 +76,22 @@ describe('sending to a TV', () => {
     expect(await sendToTV(link, play, down)).toBe(false);
   });
 
+  it('cancels an append that loses its caller authority while fetch is held', async () => {
+    let entered: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    const held = (async (_: string, init?: RequestInit) => {
+      entered?.();
+      return new Promise<Response>((_resolve, reject) =>
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true }),
+      );
+    }) as typeof fetch;
+    const authority = new AbortController();
+    const sending = sendToTV(link, play, held, authority.signal);
+    await started;
+    authority.abort();
+    await expect(sending).resolves.toBe(false);
+  });
+
   it("uses a TV's published play key exactly as a link key (inbox-v1 §5)", async () => {
     const key = fromHex(vectors.linkKey);
     expect(await householdQueue(toBase64url(key))).toEqual({

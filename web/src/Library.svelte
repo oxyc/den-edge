@@ -352,10 +352,18 @@
   const playSignal = playLifetime.signal;
   onDestroy(() => playLifetime.abort());
   const transportLifetime = new AbortController();
-  let transportAttempt: AbortController | undefined;
+  let transportAttempt = $state.raw<
+    { controller: AbortController; current: () => boolean } | undefined
+  >();
   onDestroy(() => {
     transportLifetime.abort();
-    transportAttempt?.abort();
+    transportAttempt?.controller.abort();
+  });
+  // Replacements are reactive, while an append already handed to fetch is not. Abort that request at the same
+  // boundary that makes its captured authority stale, rather than merely hiding its eventual completion.
+  $effect(() => {
+    const attempt = transportAttempt;
+    if (attempt && !attempt.current()) attempt.controller.abort();
   });
   const playStopped = (signal?: AbortSignal) => playSignal.aborted || signal?.aborted === true;
   $effect(() => {
@@ -1409,9 +1417,8 @@
 
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
-    transportAttempt?.abort();
+    transportAttempt?.controller.abort();
     const attempt = new AbortController();
-    transportAttempt = attempt;
     const live = pageLive;
     const opening = page;
     const authority = session;
@@ -1431,6 +1438,7 @@
     const current = () =>
       !attempt.signal.aborted &&
       !transportLifetime.signal.aborted &&
+      transportAttempt?.controller === attempt &&
       active &&
       session === authority &&
       session.household.identity.libraryKey === libraryKey &&
@@ -1440,6 +1448,7 @@
       pageLive?.episode?.season === season &&
       pageLive?.episode?.episode === episode &&
       tvs.some((tv) => tv.id === targetId && tv.play === writerPlay && tv.controls);
+    transportAttempt = { controller: attempt, current };
     // The latest position can briefly name a TV whose Den app was replaced by another HDMI/input app, while a
     // second Den TV continues the same title off-screen. Prefer the exact writer when it is listening; otherwise
     // route to the one awake command-capable receiver. The title/episode guard at that receiver remains decisive.
@@ -1478,7 +1487,7 @@
       episode,
       ...(action === 'skip' ? { offsetSeconds } : {}),
     };
-    const sent = await sendToTV(receiver.queue, command);
+    const sent = await sendToTV(receiver.queue, command, fetch, attempt.signal);
     if (!current()) return false;
     if (!sent) return false;
     if (receiver.listening === null) return 'unconfirmed' satisfies TransportOutcome;
@@ -1505,7 +1514,7 @@
         if (!current()) return;
         if (Date.now() >= deadline) break;
         if (!listening) continue;
-        const resent = await sendToTV(receiver.queue, command);
+        const resent = await sendToTV(receiver.queue, command, fetch, attempt.signal);
         if (!current()) return;
         if (resent) authority.notify(`Den opened on ${targetName}. Sent the command again.`);
         else

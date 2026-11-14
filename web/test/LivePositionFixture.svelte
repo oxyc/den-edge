@@ -30,8 +30,22 @@
   };
   let route = $state(parseRoute(location.pathname + location.search));
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
+  let libraryMount = $state(0);
   const writer = params.has('writer');
   let ready = $state(false);
+  const fixtureWindow = window as unknown as {
+    fixturePlay?: (
+      title: { type: 'movie' | 'tv'; id: number },
+      seconds: number,
+      episode?: { season: number; episode: number },
+    ) => Promise<unknown>;
+    fixtureReplaceLibrary?: () => void;
+    fixtureRotateDevice?: () => Promise<unknown>;
+    fixtureRemoveDevice?: () => Promise<unknown>;
+  };
+  // A same-id session replacement in production remounts this subtree through RoutedLibrary's keyed session. This
+  // seam exercises that real destruction boundary without making transport races depend on profile setup dialogs.
+  fixtureWindow.fixtureReplaceLibrary = () => libraryMount++;
 
   if (writer) {
     const services = createWorkerServiceSession();
@@ -53,15 +67,7 @@
       )
       .then(() => (ready = true));
     let written = 0;
-    (
-      window as unknown as {
-        fixturePlay: (
-          title: { type: 'movie' | 'tv'; id: number },
-          seconds: number,
-          episode?: { season: number; episode: number },
-        ) => Promise<unknown>;
-      }
-    ).fixturePlay = (title, seconds, episode) =>
+    fixtureWindow.fixturePlay = (title, seconds, episode) =>
       model.recordProgress(
         {
           title,
@@ -74,6 +80,18 @@
         },
         `fixture-play-${++written}`,
       );
+    // The same TV id may publish a replacement household command key after reset/re-pair. The old key stops being
+    // authority immediately, including while a retry append to it is already in flight.
+    fixtureWindow.fixtureRotateDevice = () =>
+      model.heartbeatDevice(
+        'Apple TV',
+        'fixture-device-rotated',
+        'tv',
+        toBase64url(new Uint8Array(32).fill(10)),
+        1,
+      );
+    fixtureWindow.fixtureRemoveDevice = () =>
+      model.removeDevice('aaaaaaaaaaaaaaaa', 'fixture-device-removed');
   }
 </script>
 
@@ -83,14 +101,16 @@
   <!-- `?nav`: the app's own bar, fed the profile control the way App does, for the profile switcher. -->
   {#if params.has('nav')}<NavigationBar {route} query="" {profiles} />{/if}
   <main style="padding:var(--bar-space) var(--gutter)">
-    <RoutedLibrary
-      link={params.has('local') ? null : link}
-      query=""
-      explore={{}}
-      people={{}}
-      watchedYear={undefined}
-      onchange={(next) => (route = next)}
-      onprofilecontrol={(control) => (profiles = control)}
-    />
+    {#key libraryMount}
+      <RoutedLibrary
+        link={params.has('local') ? null : link}
+        query=""
+        explore={{}}
+        people={{}}
+        watchedYear={undefined}
+        onchange={(next) => (route = next)}
+        onprofilecontrol={(control) => (profiles = control)}
+      />
+    {/key}
   </main>
 {/if}

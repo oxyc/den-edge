@@ -224,10 +224,13 @@ export async function sendToTV(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   message: object,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<string | false> {
   try {
+    if (signal?.aborted) return false;
     const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
-    return appendSealed(link.inboxKey, enc, message, fetchImpl);
+    if (signal?.aborted) return false;
+    return appendSealed(link.inboxKey, enc, message, fetchImpl, signal);
   } catch {
     return false;
   }
@@ -267,11 +270,15 @@ async function appendSealed(
   enc: Bytes,
   message: object,
   fetchImpl: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<string | false> {
+  if (signal?.aborted) return false;
   const sealed = await sealMessage(enc, message);
+  if (signal?.aborted) return false;
   try {
+    const deadline = AbortSignal.timeout(REQUEST_MS);
     const res = await fetchImpl('/inbox/append', {
-      signal: AbortSignal.timeout(REQUEST_MS),
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-den-link': inbox },
       body: JSON.stringify({ sealed }),
