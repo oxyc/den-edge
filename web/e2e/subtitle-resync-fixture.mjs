@@ -9,7 +9,11 @@ const BASE = `/remux/s/${'a'.repeat(22)}/${'b'.repeat(22)}`;
 const ORIGINAL = `${ORIGIN}/fixture-original.vtt`;
 const VTT = (start, text) => `WEBVTT\n\n00:00:${start}.000 --> 00:00:59.000\n${text}\n`;
 
-async function fixture(page, platform, { fail = false, held = false, hashMatch = false } = {}) {
+async function fixture(
+  page,
+  platform,
+  { fail = false, held = false, heldRestart = false, hashMatch = false } = {},
+) {
   const samsung = platform === 'tizen';
   if (samsung) await installAvplayInitScript(page);
   await guardNetwork(page);
@@ -20,11 +24,16 @@ async function fixture(page, platform, { fail = false, held = false, hashMatch =
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
   const release = { label: 'Subtitle fixture', filename: 'fixture.mkv', size: 1 };
   let starts = 0;
+  let releaseRestart;
+  const restartGate = new Promise((resolve) => {
+    releaseRestart = resolve;
+  });
   await page.route(`${ORIGIN}/remux/releases`, (route) =>
     route.fulfill({ json: { releases: [release] } }),
   );
-  await page.route(`${ORIGIN}/remux/session`, (route) => {
+  await page.route(`${ORIGIN}/remux/session`, async (route) => {
     starts++;
+    if (heldRestart && starts > 1) await restartGate;
     return route.fulfill({
       status: 201,
       json: {
@@ -97,7 +106,9 @@ async function fixture(page, platform, { fail = false, held = false, hashMatch =
       )
       .catch(() => {});
   });
-  await page.goto(`${ORIGIN}/test/player.html?remux=/remux&subtitleLanguage=en`);
+  await page.goto(
+    `${ORIGIN}/test/player.html?remux=/remux&subtitleLanguage=en&languageControls&interfaceLanguage=en`,
+  );
   if (platform === 'browser')
     await page.addStyleTag({ path: fileURLToPath(new URL('../src/app.css', import.meta.url)) });
   const video = page.locator('.player video');
@@ -128,6 +139,7 @@ async function fixture(page, platform, { fail = false, held = false, hashMatch =
     starts: () => starts,
     requested: () => requested,
     releaseAlignment,
+    releaseRestart,
     samsung,
   };
 }
@@ -142,7 +154,7 @@ async function openTiming(page, menu, platform) {
 /** Where Re-sync audio & video is: a browser's Audio & subtitles page, a TV's Audio track picker. */
 async function openAudio(page, menu, platform) {
   if (platform === 'browser') return menu.click();
-  await page.getByRole('button', { name: /^Audio track:/ }).click();
+  await page.locator('.audio-pick button').click();
 }
 
 async function manualOffset(page, menu, platform) {
@@ -229,12 +241,73 @@ export function subtitleResyncJourneys(platform = 'browser') {
         exact: true,
       }),
     ).toBeVisible();
+    await page.getByTestId('interface-language-es').evaluate((control) => control.click());
+    await expect(
+      page.getByText(
+        'No se pudieron resincronizar los subtítulos. La sincronización actual no ha cambiado.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await page.getByTestId('interface-language-sv').evaluate((control) => control.click());
+    await expect(
+      page.getByText(
+        'Det gick inte att synkronisera om undertexterna. Din nuvarande synkronisering är oförändrad.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await page.getByTestId('interface-language-en').evaluate((control) => control.click());
     await expect(page.locator('track[label="candidate:1"]')).toHaveAttribute('src', ORIGINAL);
     await openTiming(page, f.menu, platform);
     await expect(
       page.getByRole('menuitem', { name: 'Adjust subtitle timing (+0.5s)', exact: true }),
     ).toBeVisible();
     expect(f.starts()).toBe(1);
+  });
+
+  test('re-sync copy and offsets follow live profile language through dismissal and replacement', async ({
+    page,
+  }) => {
+    const f = await fixture(page, platform, { held: true, heldRestart: true });
+    await f.menu.click();
+    await page.getByRole('menuitem', { name: 'Re-sync with audio', exact: true }).click();
+    await expect(page.getByText('Re-syncing subtitles with audio…', { exact: true })).toBeVisible();
+
+    await page.getByTestId('interface-language-es').evaluate((control) => control.click());
+    await expect(
+      page.getByText('Resincronizando los subtítulos con el audio…', { exact: true }),
+    ).toBeVisible();
+    f.releaseAlignment();
+    await expect(
+      page.getByText('Subtítulos resincronizados · -10,0s', { exact: true }),
+    ).toBeVisible();
+
+    await page.getByTestId('interface-language-sv').evaluate((control) => control.click());
+    await expect(
+      page.getByText('Undertexter har synkroniserats om · −10,0s', { exact: true }),
+    ).toBeVisible();
+    await f.menu.click();
+    await expect(
+      page.getByRole('menuitem', { name: 'Synkronisera om med ljudet', exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+    await f.menu.click();
+    await expect(
+      page.getByRole('menuitem', { name: 'Synkronisera om med ljudet', exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await openAudio(page, f.menu, platform);
+    await page
+      .getByRole('menuitem', { name: 'Synkronisera om ljud och bild', exact: true })
+      .click();
+    await expect.poll(f.starts).toBe(2);
+    await expect(page.getByText('Synkroniserar om ljud och bild…', { exact: true })).toBeVisible();
+    await page.getByTestId('interface-language-en').evaluate((control) => control.click());
+    await expect(page.getByText('Re-syncing audio & video…', { exact: true })).toBeVisible();
+    f.releaseRestart();
+    await expect(
+      page.getByText('Undertexter har synkroniserats om · −10,0s', { exact: true }),
+    ).toHaveCount(0);
   });
 
   test('changing the chosen candidate discards a late alignment', async ({ page }) => {

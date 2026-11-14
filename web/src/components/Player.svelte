@@ -3773,7 +3773,7 @@
   const subtitleTimingOffset = $derived(subtitleOffset + subtitleResyncOffset);
   let subtitleResyncReady = $state(false);
   let subtitleResyncBusy = $state(false);
-  let subtitleResyncNotice = $state<string | null>(null);
+  let subtitleResyncNotice = $state<false | number | null>(null);
   let subtitleResyncRequest: AbortController | undefined;
   let subtitleSelectionGeneration = 0;
   let subtitleLoadFailure = $state.raw<NonNullable<Session['subtitles']>[number] | null>(null);
@@ -3873,7 +3873,7 @@
       await renderTick();
       applySubtitles();
       if (previous && alignedUrls.delete(previous.url)) URL.revokeObjectURL(previous.url);
-      subtitleResyncNotice = `Subtitles re-synced · ${result.offset >= 0 ? '+' : ''}${result.offset.toFixed(1)}s`;
+      subtitleResyncNotice = result.offset;
     } catch {
       if (
         !controller.signal.aborted &&
@@ -3881,8 +3881,7 @@
         subtitleChoice === choice &&
         generation === subtitleSelectionGeneration
       )
-        subtitleResyncNotice =
-          'Subtitles could not be re-synced. Your current timing is unchanged.';
+        subtitleResyncNotice = false;
     } finally {
       clearTransition(pending);
       if (subtitleResyncRequest === controller) {
@@ -5177,8 +5176,16 @@
   /** What playback says as it goes, in the order the TV's stack shows it. */
   const notices = $derived.by(() => {
     const list: Notice[] = [];
-    if (transitionNotice) list.push({ text: transitionNotice, quiet: true, busy: true });
-    if (subtitleResyncNotice) list.push({ text: subtitleResyncNotice, quiet: true });
+    if (transitionNotice)
+      list.push({ text: i18n.phrase(transitionNotice), quiet: true, busy: true });
+    if (subtitleResyncNotice !== null)
+      list.push({
+        text:
+          subtitleResyncNotice === false
+            ? i18n.phrase('Subtitles could not be re-synced. Your current timing is unchanged.')
+            : `${i18n.phrase('Subtitles re-synced')} · ${formattedSubtitleOffset(subtitleResyncNotice)}`,
+        quiet: true,
+      });
     const failed = subtitleLoadFailure;
     if (failed)
       list.push({
