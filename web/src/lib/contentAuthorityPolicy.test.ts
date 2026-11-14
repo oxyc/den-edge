@@ -12,6 +12,12 @@ const KID: ContentPolicy = {
 const KID_QUERY = 'maximumAge=12&unknownRatings=block&kidAudience=child-or-teen';
 const LITTLE: ContentPolicy = { maximumAge: 7, unknownRatings: 'block', kidAudience: 'child' };
 const CEILING: ContentPolicy = { maximumAge: 13, unknownRatings: 'allow' };
+const UNBOUNDED_KID: ContentPolicy = {
+  maximumAge: null,
+  unknownRatings: 'allow',
+  kidAudience: 'child-or-teen',
+};
+const UNBOUNDED_KID_QUERY = 'unknownRatings=allow&kidAudience=child-or-teen';
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
@@ -38,7 +44,11 @@ interface World {
 /** An atlas that answers `/index/title` from AGES and every other route with `routes`, and a TMDB that records. */
 function world(
   routes: (url: string, init?: RequestInit) => Response | undefined = () => undefined,
-  options: { atlas?: boolean; atlasDown?: boolean; eligible?: Record<string, boolean> } = {},
+  options: {
+    atlas?: boolean;
+    atlasDown?: boolean | (() => boolean);
+    eligible?: Record<string, unknown>;
+  } = {},
 ): World {
   const credentials = new WorkerContentCredentials();
   if (options.atlas !== false) credentials.configureAtlas('/atlas');
@@ -48,7 +58,8 @@ function world(
       const url = String(input);
       if (url.startsWith('/metadata/')) return json({ entries: [] });
       seen.atlas.push(init?.body ? `${url} ${String(init.body)}` : url);
-      if (options.atlasDown) return json({ error: 'down' }, 503);
+      if (typeof options.atlasDown === 'function' ? options.atlasDown() : options.atlasDown)
+        return json({ error: 'down' }, 503);
       const title = /^\/atlas\/index\/title\/(movie|series)\/(\d+)\.json/.exec(url);
       if (title) {
         const key = `${title[1] === 'series' ? 'tv' : 'movie'}:${title[2]}`;
@@ -461,6 +472,106 @@ describe('every direct boundary asks the same check', () => {
       `/atlas/index/title/movie/4.json?${KID_QUERY}`,
       `/atlas/index/title/movie/1.json?${KID_QUERY}`,
     ]);
+  });
+
+  it('asks Atlas for an unbounded Kid and keeps its veto independent of the numeric age rule', async () => {
+    const w = world(undefined, {
+      eligible: { 'movie:1': false, 'movie:2': true, 'movie:4': true },
+    });
+    await expect(w.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'unavailable', provider: 'atlas', reason: 'refused' },
+    });
+    await expect(w.ask(direct(2)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'ready' },
+    });
+    await expect(w.ask(direct(4)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'ready' },
+    });
+    expect(w.atlas.filter((url) => url.includes('/index/title/'))).toEqual([
+      `/atlas/index/title/movie/1.json?${UNBOUNDED_KID_QUERY}`,
+      `/atlas/index/title/movie/2.json?${UNBOUNDED_KID_QUERY}`,
+      `/atlas/index/title/movie/4.json?${UNBOUNDED_KID_QUERY}`,
+    ]);
+  });
+
+  it('keeps an exact approval ahead of the unbounded Kid veto', async () => {
+    const w = world(undefined, { eligible: { 'movie:1': false } });
+    await expect(
+      w.ask(direct(1)[0]!, { ...UNBOUNDED_KID, approvals: refs('movie:1') }),
+    ).resolves.toMatchObject({ detail: { state: 'ready' } });
+    expect(w.atlas.filter((url) => url.includes('/index/title/'))).toEqual([]);
+  });
+
+  it('preserves old and malformed Atlas fallback, retries an outage, and applies its recovered veto', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const old = world();
+    await expect(old.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'ready' },
+    });
+    forgetReused();
+    const malformed = world(undefined, { eligible: { 'movie:1': 'false' } });
+    await expect(malformed.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'ready' },
+    });
+
+    forgetReused();
+    let down = true;
+    const recovering = world(undefined, {
+      atlasDown: () => down,
+      eligible: { 'movie:1': false },
+    });
+    await expect(recovering.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'ready' },
+    });
+    down = false;
+    await expect(recovering.ask(direct(1)[0]!, UNBOUNDED_KID)).resolves.toMatchObject({
+      detail: { state: 'unavailable', provider: 'atlas', reason: 'refused' },
+    });
+    expect(recovering.atlas.filter((url) => url.includes('/index/title/'))).toHaveLength(2);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('aborts a replaced unbounded-Kid read even when Atlas ignores cancellation', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas('/atlas-old');
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => (releaseOld = resolve));
+    let oldStarted!: () => void;
+    const sawOld = new Promise<void>((resolve) => (oldStarted = resolve));
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: async (input) => {
+        const url = String(input);
+        if (url.startsWith('/atlas-old/')) {
+          oldStarted();
+          await oldGate;
+          return json({ minimumAge: 7, eligible: true });
+        }
+        if (url.startsWith('/atlas-new/')) return json({ minimumAge: 7, eligible: false });
+        return json({ entries: [] });
+      },
+      tmdbFetch: async () => json({}),
+    });
+    const replaced = new AbortController();
+    const stale = authority.query(direct(1)[0]!, replaced.signal, UNBOUNDED_KID);
+    await sawOld;
+    replaced.abort();
+    await expect(stale).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      authority.query(
+        { kind: 'title.eligibility', titles: refs('movie:1') },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ kind: 'title.eligibility', allowed: refs('movie:1') });
+
+    await authority.query(
+      { kind: 'sources.configure', atlas: '/atlas-new' },
+      new AbortController().signal,
+    );
+    await expect(
+      authority.query(direct(1)[0]!, new AbortController().signal, UNBOUNDED_KID),
+    ).resolves.toMatchObject({ detail: { reason: 'refused' } });
+    releaseOld();
   });
 
   it('admits only the title explicitly approved for this Kid before the age and atlas gates', async () => {

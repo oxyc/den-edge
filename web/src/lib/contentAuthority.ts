@@ -15,7 +15,6 @@ import {
   ageAllowed,
   atlasPolicyIdentity,
   failsClosed,
-  isAgeRestricted,
   isRestricted,
   policedAtlasFetch,
   policyKey,
@@ -758,7 +757,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     policy: ContentPolicy | undefined,
     signal: AbortSignal,
   ): Promise<boolean> {
-    if (!isAgeRestricted(policy)) return true;
+    if (!isRestricted(policy)) return true;
     if (!validRef(ref)) return false;
     if (policy?.approvals?.some((title) => title.type === ref.type && title.id === ref.id))
       return true;
