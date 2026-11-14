@@ -378,6 +378,57 @@ test('leaving tells den-edge, forgets the grant and its secret; an unreachable d
   expect(spy).not.toHaveBeenCalled();
 });
 
+test('a new invite from the same host proves the held grant, and the browser leaves the old one', async () => {
+  const NEXT = 'e5f6a7b8';
+  const grants = new GuestGrants();
+  await grants.redeem(CODE, edge({ 'POST /grant/redeem': redeemed }));
+  const oldSecret = grants.list[0]!.secret;
+  const fetchImpl = edge({
+    'POST /grant/redeem': () =>
+      new Response(
+        JSON.stringify({
+          gid: NEXT,
+          name: 'Sam',
+          addons: ['atlas', 'den'],
+          overrides: ['den'],
+          expiresAt: null,
+          supersedes: [GID],
+        }),
+      ),
+    'DELETE /grant/a1b2c3d4': () => new Response(null, { status: 204 }),
+  });
+  await grants.redeem(`${NEXT}.BBBBBBBBBBBBBBBBBBBBBB`, fetchImpl);
+  const sent = JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body)) as { held: string[] };
+  expect(sent.held).toEqual([`${GID}:${oldSecret}`]);
+  expect(new Headers(fetchImpl.mock.calls[1]![1]?.headers).get('x-den-grant')).toBe(
+    `${GID}:${oldSecret}`,
+  );
+  expect(grants.list).toMatchObject([{ gid: NEXT, overrides: ['den'] }]);
+  forgetGrant(NEXT);
+});
+
+test('a new invite from another host leaves the held grant alone', async () => {
+  const NEXT = 'e5f6a7b8';
+  const grants = new GuestGrants();
+  await grants.redeem(CODE, edge({ 'POST /grant/redeem': redeemed }));
+  const fetchImpl = edge({
+    'POST /grant/redeem': () =>
+      new Response(
+        JSON.stringify({
+          gid: NEXT,
+          name: 'Kim',
+          addons: ['atlas'],
+          expiresAt: null,
+          supersedes: [],
+        }),
+      ),
+  });
+  await grants.redeem(`${NEXT}.BBBBBBBBBBBBBBBBBBBBBB`, fetchImpl);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  expect(grants.list.map((g) => g.gid)).toEqual([GID, NEXT]);
+  forgetGrant(NEXT);
+});
+
 test('works for the visit where browser storage is refused', async () => {
   vi.stubGlobal('localStorage', {
     getItem: () => {

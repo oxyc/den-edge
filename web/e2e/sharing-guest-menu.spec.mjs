@@ -25,9 +25,9 @@ const grant = (over = {}) => ({
   ...over,
 });
 
-async function open(page) {
+async function open(page, over = {}) {
   const calls = [];
-  let current = grant();
+  let current = grant(over);
   await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [current] } }));
   await page.route('**/lib/*/grants/*', (route) => {
     const request = route.request();
@@ -206,6 +206,27 @@ for (const width of [320, 390, 1280]) {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
+  });
+}
+
+for (const ownSettings of [true, false]) {
+  test(`revoking a guest ${ownSettings ? 'with' : 'without'} their own settings says whether they are deleted`, async ({
+    page,
+  }) => {
+    await open(page, ownSettings ? { ownSettings } : {});
+    const row = page.locator('li.guest-line');
+    const deleted = 'Their own TorBox settings on this access are deleted too.';
+    await page.getByRole('button', { name: 'More actions for Alex' }).click();
+    await page.getByRole('menuitem', { name: 'Revoke access…' }).click();
+    const question = page.getByRole('group', { name: 'Revoke Alex’s access?' });
+    await expect(question).toContainText('anything they’re watching ends.');
+    if (ownSettings) {
+      await expect(row).toContainText('Uses their own TorBox settings');
+      await expect(question).toContainText(deleted);
+    } else {
+      await expect(row).not.toContainText('own TorBox settings');
+      await expect(question).not.toContainText(deleted);
+    }
   });
 }
 

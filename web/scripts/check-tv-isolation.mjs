@@ -313,5 +313,9 @@ if (process.argv.includes('--capture')) {
   // exists only while an active, playing AirPlay target has a TorBox session and is cleared on progress, pause,
   // disconnect, replacement and teardown. A separate lazy boundary would add a request during the handoff while the
   // synchronous WebKit event and live video element are required. Allow 256 bytes, retaining 211 on this build.
-  if (coreTotalDelta > 100864) throw new Error('Browser total JS/CSS budget exceeded');
+  // A re-invited guest keeping their own Hearth settings (the held credentials sent with a redeem, leaving the grants
+  // it supersedes) and the host's "own settings" mark and revoke warning bring the graph to 101,232 in CI, in the
+  // grants module and the lazy Sharing settings; one leave request is added, only on a redeem that supersedes a grant.
+  // Allow the next 128-byte boundary past it, retaining 144.
+  if (coreTotalDelta > 101376) throw new Error('Browser total JS/CSS budget exceeded');
 }

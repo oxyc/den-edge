@@ -40,6 +40,8 @@ export interface Grant {
   hoursThisMonth: number;
   /** `hashInstalls` of what den-edge escrows for it (its addons and their installs); absent from an older den-edge. */
   escrow?: string;
+  /** The guest set their own Hearth settings (their own TorBox, say) on it: revoking it deletes them. */
+  ownSettings?: boolean;
 }
 
 /** What creating or changing a grant sends. `installs` are single base64url config segments, never URLs. */
@@ -261,6 +263,7 @@ function readGrant(raw: unknown): Grant | null {
     playsThisMonth: number(g.playsThisMonth) ?? 0,
     hoursThisMonth: number(g.hoursThisMonth) ?? 0,
     ...(typeof g.escrow === 'string' ? { escrow: g.escrow } : {}),
+    ...(g.ownSettings === true ? { ownSettings: true } : {}),
   };
 }
 
@@ -429,18 +432,25 @@ export type Redeemed = {
   /** Personal service configs layered over the shared grant; empty for older den-edge responses. */
   overrides: GuestAddon[];
   expiresAt: number | null;
+  /** The held grants of the same host this one replaces; empty for a ticket and for older den-edge responses. */
+  supersedes: string[];
 };
 
-/** Redeem an invite code with a device secret; den-edge stores its hash and starts the access clock. */
+/**
+ * Redeem an invite code with a device secret; den-edge stores its hash and starts the access clock. `held` is the
+ * `<gid>:<secret>` of each grant this browser already holds: den-edge moves the guest's own settings over from one
+ * of the same host, and names those grants in `supersedes`.
+ */
 export async function redeem(
   code: string,
   secret: string,
   fetchImpl: typeof fetch = fetch,
+  held: readonly string[] = [],
 ): Promise<Reply<Redeemed>> {
   const reply = await ask(fetchImpl, '/grant/redeem', {
     method: 'POST',
     headers: JSON_HEADERS,
-    body: JSON.stringify({ code, secretHash: await secretHash(secret) }),
+    body: JSON.stringify({ code, secretHash: await secretHash(secret), held }),
   });
   return readRedeemed(reply);
 }
@@ -460,6 +470,9 @@ function readRedeemed(reply: Reply<unknown>): Reply<Redeemed> {
         ? body.overrides.filter((a): a is GuestAddon => GUEST_ADDONS.includes(a as GuestAddon))
         : [],
       expiresAt: typeof body.expiresAt === 'number' ? body.expiresAt : null,
+      supersedes: Array.isArray(body.supersedes)
+        ? body.supersedes.filter((gid): gid is string => typeof gid === 'string')
+        : [],
     },
   };
 }

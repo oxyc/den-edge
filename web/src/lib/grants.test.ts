@@ -399,9 +399,10 @@ test('redeeming sends the code and the hash of the secret, never the secret', as
     addons: ['scout', 'den', 'bogus'],
     overrides: ['den', 'bogus'],
     expiresAt: 5,
+    supersedes: ['e5f6a7b8', 7],
   });
   const secret = newSecret();
-  const reply = await redeem(CODE, secret, spy);
+  const reply = await redeem(CODE, secret, spy, ['e5f6a7b8:held-secret']);
   expect(reply).toEqual({
     ok: true,
     value: {
@@ -410,13 +411,16 @@ test('redeeming sends the code and the hash of the secret, never the secret', as
       addons: ['scout', 'den'],
       overrides: ['den'],
       expiresAt: 5,
+      supersedes: ['e5f6a7b8'],
     },
   });
   const [url, init] = spy.mock.calls[0]!;
   expect(url).toBe('/grant/redeem');
+  // The held grants' credentials prove this browser holds them; the new device's own secret is never sent.
   expect(JSON.parse(String(init?.body))).toEqual({
     code: CODE,
     secretHash: await secretHash(secret),
+    held: ['e5f6a7b8:held-secret'],
   });
   expect(String(init?.body)).not.toContain(secret);
 });
@@ -631,6 +635,7 @@ test('spending a ticket sends a hash of the new device’s own secret; a full gr
       addons: ['scout'],
       overrides: [],
       expiresAt: null,
+      supersedes: [],
     },
   });
   const [url, init] = ok.mock.calls[0]!;

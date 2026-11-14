@@ -597,7 +597,9 @@
                     {grant.deviceCount === 1 ? 'device' : 'devices'} · unlimited{:else}{grant.deviceCount}
                     of {deviceLimit(grant)}
                     {deviceLimit(grant) === 1 ? 'device' : 'devices'}{/if}</small
-                >{#if usage(grant)}<small>{usage(grant)}</small>{/if}</span
+                >{#if usage(grant)}<small>{usage(grant)}</small>{/if}{#if grant.ownSettings}<small
+                    >Uses their own TorBox settings</small
+                  >{/if}</span
               >
               {#if grant.status !== 'revoked'}
                 <!-- Every control for a guest sits behind one ⋯ at every width, so the row stays the name and
@@ -627,7 +629,9 @@
                   }
                   question="Revoke {grant.name}’s access?"
                   label="Revoke"
-                  detail="They stop being able to browse or play right away, and anything they’re watching ends."
+                  detail={grant.ownSettings
+                    ? 'They stop being able to browse or play right away, and anything they’re watching ends. Their own TorBox settings on this access are deleted too.'
+                    : 'They stop being able to browse or play right away, and anything they’re watching ends.'}
                   onclose={() => menus[grant.gid]?.focus()}
                   onconfirm={() => void revoke(grant)}
                 />

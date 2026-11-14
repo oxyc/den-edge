@@ -1060,6 +1060,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Estos cambian la forma en que un Apple TV dibuja y reproduce, por lo que cada televisor mantiene el suyo: Configuración › Avanzada en el televisor.',
   'They stop being able to browse or play right away, and anything they’re watching ends.':
     'Dejan de poder navegar o jugar de inmediato y todo lo que están viendo termina.',
+  'They stop being able to browse or play right away, and anything they’re watching ends. Their own TorBox settings on this access are deleted too.':
+    'Dejan de poder navegar o reproducir de inmediato y todo lo que están viendo termina. Sus propios ajustes de TorBox en este acceso también se eliminan.',
   This: 'esto',
   'This browser': 'este navegador',
   'This browser already had a library of its own, so it keeps that one.':
@@ -1150,6 +1152,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Use the home player for compatible audio and subtitles':
     'Utilice el reproductor doméstico para audio y subtítulos compatibles',
   'Use the new key': 'Usa la nueva clave',
+  'Uses their own TorBox settings': 'Usa sus propios ajustes de TorBox',
   'Using shared settings': 'Usando configuraciones compartidas',
   'Using your settings': 'Usando tu configuración',
   v: 'v',

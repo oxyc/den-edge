@@ -202,7 +202,13 @@ export class GuestGrants {
     this.pending.set(code, secret);
     // Kept before it is sent: the answer can be lost, and the page reloaded, after den-edge has taken it.
     keepSecret(code, secret);
-    const reply = await redeem(code, secret, fetchImpl);
+    // Newest first: den-edge carries the guest's own settings over from the first held grant of this host that has
+    // them.
+    const held = this.list
+      .filter((g) => !g.ended && g.secret && !code.startsWith(`${g.gid}.`))
+      .reverse()
+      .map((g) => `${g.gid}:${g.secret}`);
+    const reply = await redeem(code, secret, fetchImpl, held);
     if (!reply.ok) {
       if (reply.status === 404) {
         this.pending.delete(code);
@@ -213,7 +219,7 @@ export class GuestGrants {
     }
     this.pending.delete(code);
     keepSecret(code, null);
-    const { gid, name, addons, overrides, expiresAt } = reply.value;
+    const { gid, name, addons, overrides, expiresAt, supersedes } = reply.value;
     const grant: GuestGrant = {
       gid,
       name,
@@ -225,6 +231,10 @@ export class GuestGrants {
     };
     this.set([...this.list.filter((g) => g.gid !== gid), grant]);
     if (this.invite === code) this.invite = null;
+    // One grant per host: the one this replaces would otherwise linger on the host's list as a second guest, and
+    // whatever it still held would go when the host revoked it. One den-edge can't reach now stays held, to leave
+    // from Settings.
+    for (const old of supersedes) if (old !== gid) await this.leave(old, fetchImpl);
     return grant;
   }
 

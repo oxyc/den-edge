@@ -386,6 +386,8 @@ fn grant_json(state: &AppState, r: &Record, now: u64) -> Value {
         "playsThisMonth": plays_this_month,
         "hoursThisMonth": seconds_this_month / 3600,
         "escrow": escrow(r),
+        // The guest's own Hearth settings (their own debrid account, say): revoking the grant deletes them.
+        "ownSettings": r.den_install.is_some(),
     })
 }
 
@@ -952,7 +954,15 @@ async fn new_code(state: &AppState, host: &str, gid: &str, claim: String, req: R
 }
 
 /// End a grant: it stops answering, its escrow and device secrets are dropped, and its remux sessions are killed.
-async fn end_grant(state: &AppState, record: &mut Record, now: u64) -> io::Result<()> {
+/// `reason` is what the log line says ended it. The guest's own install goes with it, so the line says whether
+/// there was one: a guest who later finds their own settings gone can be traced to this.
+async fn end_grant(state: &AppState, record: &mut Record, now: u64, reason: &str) -> io::Result<()> {
+    eprintln!(
+        "grants: ended {} ({reason}); own install: {}; devices: {}",
+        record.gid,
+        if record.den_install.is_some() { "yes" } else { "no" },
+        record.devices.len()
+    );
     let ended = *record.revoked_at.get_or_insert(now);
     if record.remux_kill_for != Some(ended) {
         record.remux_kill_for = Some(ended);
@@ -973,7 +983,7 @@ async fn revoke(state: &AppState, host: &str, gid: &str, claim: String) -> Respo
             Ok(_) => return not_found(),
             Err(e) => return internal("grant read", e),
         };
-        if let Err(e) = end_grant(state, &mut record, now).await {
+        if let Err(e) = end_grant(state, &mut record, now, "revoked by host").await {
             return internal("grant write", e);
         }
         no_content()
@@ -1223,6 +1233,13 @@ async fn redeem(state: &AppState, req: Request) -> Response {
     if code.len() > 64 {
         return invalid_code();
     }
+    // The `x-den-grant` credentials of the grants this browser already holds: what proves the new grant goes to the
+    // same guest as an older one of the same host.
+    let presented: Vec<&str> = body
+        .get("held")
+        .and_then(Value::as_array)
+        .map(|held| held.iter().filter_map(Value::as_str).take(MAX_HELD).collect())
+        .unwrap_or_default();
     let now = state.now();
     let _lock = state.grants.lock.lock().await;
     // A store that fails is answered as one, like every other write: a guest told a good code is wrong gives up on
@@ -1255,6 +1272,21 @@ async fn redeem(state: &AppState, req: Request) -> Response {
             return internal("grant write", e);
         }
     }
+    let held = match held_from_host(state, &presented, &record, now).await {
+        Ok(held) => held,
+        Err(e) => return internal("grant read", e),
+    };
+    // A re-invited guest keeps the settings they made on the grant this one replaces: the browser leaves the old
+    // grant next, and ending it drops its install.
+    if record.den_install.is_none() {
+        if let Some(from) = held.iter().find(|r| r.den_install.is_some()) {
+            record.den_install = from.den_install.clone();
+            if let Err(e) = save(state, &record).await {
+                return internal("grant write", e);
+            }
+            eprintln!("grants: {} own install carried over from {}", record.gid, from.gid);
+        }
+    }
     let mut addons = record.addons.clone();
     let inherited_hearth = shares_install(&record.addons, &record.installs, "den")
         || shares_install(&record.addons, &record.installs, "scout");
@@ -1272,8 +1304,40 @@ async fn redeem(state: &AppState, req: Request) -> Response {
             "addons": addons,
             "expiresAt": end(&record),
             "overrides": if record.den_install.is_some() { vec!["den"] } else { vec![] },
+            // The held grants this one replaces, for the browser to leave.
+            "supersedes": held.iter().map(|r| r.gid.as_str()).collect::<Vec<_>>(),
         }),
     )
+}
+
+/// How many held grants a redeem looks at: a browser holds one per host it was invited by.
+const MAX_HELD: usize = 16;
+
+/// The live, redeemed grants of `record`'s host, other than `record`, whose `<gid>:<secret>` the redeeming browser
+/// presented. A credential that does not prove a device of a live grant counts for nothing, the same as a missing
+/// one. Read directly, not through `authenticate`, so the old grant is not marked as just used.
+async fn held_from_host(
+    state: &AppState,
+    presented: &[&str],
+    record: &Record,
+    now: u64,
+) -> io::Result<Vec<Record>> {
+    let mut held: Vec<Record> = Vec::new();
+    for (gid, secret) in presented.iter().filter_map(|c| parse_header(c)) {
+        if gid == record.gid || held.iter().any(|r| r.gid == gid) {
+            continue;
+        }
+        let Some(old) = load(state, gid).await? else { continue };
+        let want = sha(secret.as_bytes());
+        let matched = old
+            .devices
+            .iter()
+            .fold(false, |found, d| constant_time_eq(d.as_bytes(), want.as_bytes()) | found);
+        if matched && old.host == record.host && old.redeemed_at.is_some() && is_live(&old, now) {
+            held.push(old);
+        }
+    }
+    Ok(held)
 }
 
 async fn addons(state: &AppState, req: Request) -> Response {
@@ -1349,6 +1413,14 @@ pub(crate) async fn den_install(state: &AppState, req: Request, claim: Option<St
         Ok(_) => return not_found(),
         Err(e) => return internal("grant read", e),
     };
+    // The segment itself is the guest's sealed credentials and never logged: only what happened to it.
+    let had = record.den_install.is_some();
+    let action = match (&replacement, had) {
+        (Some(_), false) => "set",
+        (Some(_), true) => "replaced",
+        (None, _) => "cleared",
+    };
+    eprintln!("grants: {} own install {action}; had one: {}", record.gid, if had { "yes" } else { "no" });
     if record.den_install != replacement {
         record.den_install = replacement;
         if let Err(e) = save(state, &record).await {
@@ -1592,7 +1664,7 @@ async fn leave(state: &AppState, req: Request, gid: &str) -> Response {
             Ok(None) => return not_found(),
             Err(e) => return internal("grant read", e),
         };
-        if let Err(e) = end_grant(state, &mut record, now).await {
+        if let Err(e) = end_grant(state, &mut record, now, "left by guest").await {
             return internal("grant write", e);
         }
     }
@@ -1612,7 +1684,7 @@ pub async fn revoke_host(state: &AppState, host: &str) -> io::Result<Vec<String>
         if record.host != host || record.revoked_at.is_some() {
             continue;
         }
-        end_grant(state, &mut record, now).await?;
+        end_grant(state, &mut record, now, "host library removed").await?;
         revoked.push(entry.gid.clone());
     }
     Ok(revoked)
@@ -2389,6 +2461,87 @@ mod tests {
         assert_eq!(listed["overrides"], json!([]));
     }
 
+    /// A harness with Hearth playback on, and a redeemed grant whose guest set their own install.
+    async fn holding_own_install() -> (Harness, String, String) {
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().den_playback_enabled = true;
+        let (gid, credential) = redeemed(&h, json!({})).await;
+        let put = h
+            .send(
+                "PUT",
+                "/grant/den-install",
+                Some(json!({ "install": PERSONAL_HEARTH }).to_string()),
+                &[(HEADER, credential.as_str()), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::NO_CONTENT);
+        (h, gid, credential)
+    }
+
+    async fn redeem_holding(h: &Harness, code: &str, held: &[&str]) -> Value {
+        let hash = b64url(&Sha256::digest(SECRET2.as_bytes()));
+        let (status, body) = h
+            .call("POST", "/grant/redeem", Some(json!({ "code": code, "secretHash": hash, "held": held })))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    /// The incident this guards: a guest re-invited by the same host set their own settings on the old grant, the
+    /// host revoked that one later, and the settings went with it.
+    #[tokio::test]
+    async fn a_reinvited_guest_keeps_their_own_install_on_the_new_grant() {
+        let (h, old, credential) = holding_own_install().await;
+        assert_eq!(host_call(&h, "GET", "", None).await.1["grants"][0]["ownSettings"], true);
+        let (gid, code) = invited(&h, json!({})).await;
+        let redeemed = redeem_holding(&h, &code, &[&credential]).await;
+        assert_eq!(redeemed["overrides"], json!(["den"]));
+        assert_eq!(redeemed["supersedes"], json!([old]));
+        assert_eq!(
+            load(&h.state, &gid).await.unwrap().unwrap().den_install.as_deref(),
+            Some(PERSONAL_HEARTH)
+        );
+
+        // Ending the old grant, however it ends, leaves the new one's copy alone.
+        let (status, _) = host_call(&h, "DELETE", &format!("/{old}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(load(&h.state, &old).await.unwrap().unwrap().den_install.is_none());
+        assert_eq!(
+            load(&h.state, &gid).await.unwrap().unwrap().den_install.as_deref(),
+            Some(PERSONAL_HEARTH)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_own_install_is_not_carried_over_without_a_live_grant_of_the_same_host() {
+        // Another host's grant.
+        let (h, old, credential) = holding_own_install().await;
+        let mut record = load(&h.state, &old).await.unwrap().unwrap();
+        record.host = "fedcba9876543210fedcba9876543210".into();
+        save(&h.state, &record).await.unwrap();
+        let (gid, code) = invited(&h, json!({})).await;
+        let redeemed = redeem_holding(&h, &code, &[&credential]).await;
+        assert_eq!((&redeemed["overrides"], &redeemed["supersedes"]), (&json!([]), &json!([])));
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
+
+        // A secret that is not the old grant's.
+        let (h, old, _) = holding_own_install().await;
+        let (gid, code) = invited(&h, json!({})).await;
+        let redeemed = redeem_holding(&h, &code, &[&format!("{old}:{SECRET2}")]).await;
+        assert_eq!((&redeemed["overrides"], &redeemed["supersedes"]), (&json!([]), &json!([])));
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
+
+        // An old grant that has ended proves nothing, even with an install still in its record.
+        let (h, old, credential) = holding_own_install().await;
+        let mut record = load(&h.state, &old).await.unwrap().unwrap();
+        record.revoked_at = Some(h.state.now());
+        save(&h.state, &record).await.unwrap();
+        let (gid, code) = invited(&h, json!({})).await;
+        let redeemed = redeem_holding(&h, &code, &[&credential]).await;
+        assert_eq!((&redeemed["overrides"], &redeemed["supersedes"]), (&json!([]), &json!([])));
+        assert!(load(&h.state, &gid).await.unwrap().unwrap().den_install.is_none());
+    }
+
     #[tokio::test]
     async fn the_guest_den_install_surface_is_absent_by_default() {
         let h = harness().await;
@@ -2830,6 +2983,7 @@ mod tests {
                 "addons": ["scout", "atlas"],
                 "overrides": [],
                 "expiresAt": 1_001_000 + 7 * DAY_MS,
+                "supersedes": [],
             })
         );
 
