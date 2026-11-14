@@ -8,6 +8,7 @@ import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { FIXTURE as SEED_FIXTURE, routeLibraryEdge } from './library-edge.mjs';
 import { routeTmdb } from './network.mjs';
+import { waitForMaterializedPoster } from '../scripts/controlled-clock-fixture';
 
 // These real-time scenarios each own their browser contexts and in-memory edge state.
 // Let Playwright run them concurrently instead of making one shard wait for all three.
@@ -228,6 +229,9 @@ async function openWithDevice(browser, page, options = {}) {
   await expect(page.getByRole('heading', { name: 'Continue Watching' })).toBeVisible({
     timeout: 20_000,
   });
+  // The heading arrives before WindowedPosterRow's observer and animation-frame materialization. A controlled clock
+  // must not pause those frames while the visible title is still only its light navigation proxy.
+  await waitForMaterializedPoster(page, 'Movie 1002');
 
   // A controlled writer fixes the logical producer/viewer timeline while the Worker's pull and the delivery
   // debounce remain on wall time. Slow startup and locator work can then never change which periodic save occurs.
