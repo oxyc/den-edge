@@ -237,7 +237,9 @@ async function openWithDevice(browser, page, options = {}) {
   const context = await browser.newContext();
   const device = await context.newPage();
   if (controlledWriter) {
-    await device.clock.install();
+    // Give `pauseAt` one full producer phase to advance from: Playwright cannot pause by moving an installed clock
+    // backward, and this target is intentionally 30 s before `timeline`.
+    await device.clock.install({ time: new Date(timeline - 2 * WRITE_EVERY_MS) });
     // Keep startup's device heartbeat one producer phase behind the playback epoch, and stop its clock there. An
     // installed clock otherwise advances with wall time after each `setSystemTime`, so the production write can land
     // milliseconds after its controlled timestamp and make the exact 70 s projection read 11:09 instead of 11:10.
