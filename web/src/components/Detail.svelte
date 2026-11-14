@@ -788,8 +788,10 @@
   const series = $derived(
     airedDetail ? seriesPresentation(airedDetail, episodes, row, continued) : null,
   );
-  const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
-  const target = $derived(ref.type === 'tv' ? series?.target : undefined);
+  // seriesPresentation has no episode coordinates for movies, and seriesSeenOverride returns undefined when its
+  // episode total is zero. Reuse those contracts instead of carrying duplicate media-type branches in Detail.
+  const seenOverride = $derived(seriesSeenOverride(series));
+  const target = $derived(series?.target);
   // A fresh position from another device is more specific than Continue Watching's projected target. The latter
   // may already name the next episode while the device is still writing the episode on screen; every Resume and
   // Sources action must agree with the live status row until that session stops.
