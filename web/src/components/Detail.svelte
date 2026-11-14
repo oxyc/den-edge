@@ -271,7 +271,7 @@
     // controls. In particular, do not turn seriesPresentation's premiere-gated absence back into Library's
     // compatibility S1E1 fallback. An explicitly addressed episode remains independently playable.
     if (!active || !d || !onplayhere || (!playbackTarget && playRequest.episode == null)) return;
-    const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
+    const requestKey = JSON.stringify(playRequest);
     if (handledPlayRequest === requestKey) return;
     handledPlayRequest = requestKey;
     onplayhere(d.title, playRequest.season, playRequest.episode, playRequest.filename);
