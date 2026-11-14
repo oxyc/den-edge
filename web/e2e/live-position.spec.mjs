@@ -195,7 +195,14 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
     deviceWrites,
     armLostDelivery: () => {
       deliveryArmed = true;
+      // `Writer ready` means its device heartbeat batch has finished, but the page may not have pulled that batch
+      // yet. Start every delivery assertion at the playback boundary so that late observation of the startup batch
+      // cannot stand in for either the first playback save or its 60 s replacement.
+      deviceWrote = 0;
+      pushedWrite = 0;
+      pulledWrite = 0;
       deviceWrites.length = 0;
+      arrivals.length = 0;
     },
     close: () => {
       for (const timer of deliveryTimers) clearTimeout(timer);
