@@ -55,9 +55,11 @@ export function sight(
 
 /** Whether a write is recent enough that its device may still be playing (or paused with the player open). */
 export function recent(entry: { at?: number }, now: number): boolean {
-  if (entry.at === undefined) return false;
-  const age = now - entry.at;
-  return age >= -MAX_ACTIVITY_CLOCK_SKEW_MS && age <= LIVE_MS;
+  return (
+    entry.at !== undefined &&
+    now - entry.at >= -MAX_ACTIVITY_CLOCK_SKEW_MS &&
+    now - entry.at <= LIVE_MS
+  );
 }
 
 /** Whether an exact position can still offer guarded Resume without claiming that it is live. */
@@ -72,12 +74,10 @@ export function livePosition(
   entry: { seconds?: number; at?: number; moving?: boolean },
   now: number,
 ): number | undefined {
-  if (entry.seconds === undefined || entry.at === undefined || entry.moving === false)
+  if (entry.seconds === undefined || entry.moving === false || !recent(entry, now))
     return undefined;
   // A clock a little ahead of this one reads as a write from the future: count from its own time.
-  const rawAge = now - entry.at;
-  if (rawAge < -MAX_ACTIVITY_CLOCK_SKEW_MS || rawAge > LIVE_MS) return undefined;
-  return entry.seconds + Math.max(0, rawAge) / 1000;
+  return entry.seconds + Math.max(0, now - entry.at!) / 1000;
 }
 
 /** A position as the player shows it: 4:05, 1:02:09. */

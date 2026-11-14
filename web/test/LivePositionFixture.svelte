@@ -60,10 +60,11 @@
           seconds: number,
           episode?: { season: number; episode: number },
           playing?: boolean,
-        ) => Promise<unknown>;
+        ) => Promise<{ source: 'fixture-play'; observedAt: number }>;
       }
-    ).fixturePlay = (title, seconds, episode, playing = true) =>
-      model.recordProgress(
+    ).fixturePlay = async (title, seconds, episode, playing = true) => {
+      const observedAt = Date.now();
+      await model.recordProgress(
         {
           title,
           ...(episode ? { episode: { ...title, type: 'tv', ...episode } } : {}),
@@ -72,10 +73,12 @@
           fraction: 0.4 + written * 1e-6,
           seconds,
           playing,
-          observedAt: Date.now(),
+          observedAt,
         },
         `fixture-play-${++written}`,
       );
+      return { source: 'fixture-play', observedAt };
+    };
   }
 </script>
 

@@ -229,7 +229,9 @@ async function openWithDevice(browser, page, options = {}) {
   if (controlledWriter) await page.clock.pauseAt(new Date(timeline));
   const context = await browser.newContext();
   const device = await context.newPage();
-  if (controlledWriter) await device.clock.install({ time: new Date(timeline) });
+  // Keep startup's device heartbeat one producer phase behind the playback epoch. If both occupied `timeline`, the
+  // HLC would stamp the first playback row one millisecond later, making the exact 70 s projection read 11:09.
+  if (controlledWriter) await device.clock.install({ time: new Date(timeline - WRITE_EVERY_MS) });
   await edge.route(device, 'device');
   await device.goto(`${FIXTURE}?writer`);
   await device.getByRole('status').filter({ hasText: 'Writer ready' }).waitFor({ timeout: 15_000 });
@@ -237,6 +239,7 @@ async function openWithDevice(browser, page, options = {}) {
 
   let timer;
   let pausedAt;
+  const writerEvents = [];
   // The write in flight, which `close` waits for: closing the device's context under it would reject it.
   let writing = Promise.resolve();
   /**
@@ -247,11 +250,14 @@ async function openWithDevice(browser, page, options = {}) {
     const started = Date.now();
     const write = async (playing = true, elapsed = Date.now() - started) => {
       if (controlledWriter) await device.clock.setSystemTime(new Date(timeline + elapsed));
-      return (writing = device.evaluate(
+      writing = device.evaluate(
         ([title, seconds, episode, playing]) =>
           window.fixturePlay(title, seconds, episode, playing),
         [title, pausedAt ?? from + Math.floor(elapsed / 1000), episode, playing],
-      ));
+      );
+      const event = await writing;
+      writerEvents.push(event);
+      return event;
     };
     if (!controlledWriter) {
       void write();
@@ -272,7 +278,7 @@ async function openWithDevice(browser, page, options = {}) {
     edge.close();
     await context.close();
   };
-  return { edge, play, stop, close, timeline };
+  return { edge, play, stop, close, timeline, writerEvents };
 }
 
 /** Samples `clock` every 250 ms for `ms`: each sample is its text, or null while it is not shown. */
@@ -342,7 +348,7 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
   page,
 }) => {
   test.setTimeout(240_000);
-  const { edge, play, stop, close, timeline } = await openWithDevice(browser, page, {
+  const { edge, play, stop, close, timeline, writerEvents } = await openWithDevice(browser, page, {
     loseOnePeriodicDelivery: true,
     controlledWriter: true,
   });
@@ -370,6 +376,12 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     await setViewerTime(page, timeline + LOST_DELIVERY_OBSERVED_MS);
     await expect(clock).toHaveText('11:10');
     await playing.writeAt(2 * WRITE_EVERY_MS);
+    expect(writerEvents, 'the controlled phases came only from explicit playback saves').toEqual(
+      [0, WRITE_EVERY_MS, 2 * WRITE_EVERY_MS].map((elapsed) => ({
+        source: 'fixture-play',
+        observedAt: timeline + elapsed,
+      })),
+    );
     const samples = await watchUntil(clock, () => edge.arrivals.length === 2, 15_000);
     expect(
       samples.filter((text) => text === null),
