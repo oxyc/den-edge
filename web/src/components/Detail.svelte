@@ -270,15 +270,7 @@
     // A title-only series request must use the same authoritative target as the mounted Play and Sources
     // controls. In particular, do not turn seriesPresentation's premiere-gated absence back into Library's
     // compatibility S1E1 fallback. An explicitly addressed episode remains independently playable.
-    if (
-      !active ||
-      !d ||
-      !onplayhere ||
-      (d.title.type === 'tv' &&
-        (playRequest.season == null || playRequest.episode == null) &&
-        !playbackTarget)
-    )
-      return;
+    if (!active || !d || !onplayhere || (!playbackTarget && playRequest.episode == null)) return;
     const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
     if (handledPlayRequest === requestKey) return;
     handledPlayRequest = requestKey;
@@ -804,7 +796,7 @@
   // Movies need no episode coordinate, so an empty target keeps their actions on the same truthy gate as a series'
   // authoritative coordinate without another reactive value or repeated type branches in every action.
   const playbackTarget = $derived<{ season?: number; episode?: number } | undefined>(
-    ref.type === 'movie' ? {} : (live?.episode ?? target),
+    ref.type === 'tv' ? (live?.episode ?? target) : {},
   );
   const sourceCoord = $derived(sourceTarget ?? target);
   /**
@@ -1277,7 +1269,7 @@
             seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
             onplay={!__DEN_TV__ && onplay && playbackTarget
-              ? (tv) => onplay(tv, d.title, playbackTarget?.season, playbackTarget?.episode)
+              ? (tv) => onplay(tv, d.title, playbackTarget.season, playbackTarget.episode)
               : undefined}
             {tvs}
             primaryPlay={live && !transportPlaying && ontransport
@@ -1290,13 +1282,13 @@
                 }
               : undefined}
             onplayhere={onplayhere && playbackTarget
-              ? () => onplayhere(d.title, playbackTarget?.season, playbackTarget?.episode)
+              ? () => onplayhere(d.title, playbackTarget.season, playbackTarget.episode)
               : undefined}
             playHref={playbackTarget
               ? titleHref({
                   ...d.title,
-                  season: playbackTarget?.season,
-                  episode: playbackTarget?.episode,
+                  season: playbackTarget.season,
+                  episode: playbackTarget.episode,
                   play: true,
                 })
               : undefined}
@@ -1394,7 +1386,7 @@
         {i18n.phrase('Title details loaded.')}
       </p>
     {/if}
-    {#if !guestScout && (ref.type === 'movie' || sourceCoord)}
+    {#if !guestScout && playbackTarget}
       <div class="title-sources" hidden={restricted}>
         <TitleSources
           model={model ?? undefined}
