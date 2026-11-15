@@ -117,12 +117,13 @@ everything the committed code imports is committed too.
   they own the existing Browser writer before a dialog may open. The TV-only handoff was removed from shared
   `TitleActions` and placed in the already lazy Detail chunk; moving the Browser authority there would duplicate or
   delay the writer, while another Detail split would add a request to the sole recovery handoff. Locale copy remains
-  independently lazy. WebOS startup moves 241,819 → 242,190 and its non-translation graph 960,558 → 961,411
-  (+853); supported Tizen startup moves 242,510 → 242,895 and its non-translation graph 1,281,143 → 1,281,982
-  (+839). Reduced Tizen 3 compiles every approval writer out and retains only the exact-title handoff: startup moves
-  193,726 → 193,723 (-3), the complete non-translation graph 2,355,957 → 2,356,634 (+677), and the raw JS/CSS
-  graph 8,350,960 → 8,354,027 (+3,067). No dependency, polling, timer, healthy-path request or background work is
-  added; one existing mutation runs only after explicit Owner PIN submission and reads back through its existing
+  independently lazy. Reusing the canonical title route and the existing build-owned Web origin keeps the TV
+  handoff out of a second route/origin helper. WebOS startup moves 241,819 → 242,147 and its non-translation graph
+  960,558 → 961,329 (+771); supported Tizen startup moves 242,510 → 242,786 and its non-translation graph
+  1,281,143 → 1,281,741 (+598). Reduced Tizen 3 compiles every approval writer out and retains only the exact-title
+  handoff: startup moves 193,726 → 193,727 (+1), the complete non-translation graph 2,355,957 → 2,356,655 (+698),
+  and the raw JS/CSS graph 8,350,960 → 8,354,015 (+3,055). No dependency, polling, timer, healthy-path request or
+  background work is added; one existing mutation runs only after explicit Owner PIN submission and reads back through its existing
   durable profile directory. The startup ceiling advances to the smallest 128-byte boundary, 9,984 over baseline,
   retaining 42 bytes. Exact clean main itself measures a 118,899-byte non-translation delta, 3,827 above the prior
   115,072 ceiling; #1282 owns that pre-existing reproducibility defect. Its separate clean-main calibration is

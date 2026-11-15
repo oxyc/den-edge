@@ -17,6 +17,10 @@ const movie = {
 
 test('the exact-title Kid handoff uses the configured household Web origin', async ({ page }) => {
   await guardNetwork(page);
+  // This spec runs the production TV package, whose same-origin modules live under `/assets/` rather than the
+  // browser fixture server's `/src/`. Keep the network guard for every API/external request while admitting the
+  // package's own hashed modules.
+  await page.route(`${E2E_ORIGIN}/assets/**`, (route) => route.continue());
   await routeTmdb(page, (route) => route.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (route) => route.abort());
   await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions&kid-handoff`);
