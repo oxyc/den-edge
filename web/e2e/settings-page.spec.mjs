@@ -112,6 +112,7 @@ for (const width of [320, 390, 820, 1280]) {
       const sections = await page.getByRole('heading', { level: 2 }).allTextContents();
       expect(sections.slice(0, 3)).toEqual(['Playback', 'Content', 'Connections']);
       expect(sections.slice(-2)).toEqual(['Advanced', 'About']);
+      await expect(page.locator('#playback-source-policy select')).toHaveValue('remember');
       await expectViewportWidth();
 
       // The seeded library, said the way the TV's rows say it.

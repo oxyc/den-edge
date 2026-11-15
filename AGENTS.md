@@ -265,6 +265,11 @@ everything the committed code imports is committed too.
   its existing ceiling, and translations remain under their fixed 51,200-byte ceiling by 2,193 bytes. The complete
   graph ceiling advances from 111,232 to 113,664, the smallest 128-byte boundary containing the matched build,
   retaining 40 bytes.
+- Making “Remember my choice” the playback-source default was measured on matched current-main/head production
+  builds: startup shrinks 206,041 → 206,030 gzip bytes (-11), and the complete non-translation graph shrinks
+  839,414 → 839,364 (-50); translation catalogs remain 49,007 bytes. The change only reverses existing default
+  branches and persists both explicit policy choices compatibly. It adds no dependency, request, timer, listener,
+  background work or bundle-budget allowance.
 
 ## Testing
 

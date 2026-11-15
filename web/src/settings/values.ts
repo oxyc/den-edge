@@ -118,7 +118,7 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
     subtitlesPerLanguage: int('den.maxSubtitlesPerLanguage') ?? 3,
     autoSkipSegments: bool('den.autoSkipSegments') ?? false,
     autoplayTrailers: bool('den.autoplayTrailers') ?? true,
-    playbackSourcePolicy: sourcePolicy === 'remember' ? 'remember' : 'best',
+    playbackSourcePolicy: sourcePolicy === 'best' ? 'best' : 'remember',
     preferredPlaybackSource:
       preferredSource === 'torbox' || preferredSource === 'den-remux' ? preferredSource : undefined,
     // Unset is every source; an explicit empty list is every source turned off.
@@ -407,7 +407,7 @@ export const change = {
   autoSkipSegments: (on: boolean): PrefChanges => ({ 'den.autoSkipSegments': { bool: on } }),
   autoplayTrailers: (on: boolean): PrefChanges => ({ 'den.autoplayTrailers': { bool: on } }),
   playbackSourcePolicy: (policy: 'best' | 'remember'): PrefChanges => ({
-    'den.playbackSourcePolicy': policy === 'remember' ? { string: 'remember' } : null,
+    'den.playbackSourcePolicy': { string: policy },
   }),
   preferredPlaybackSource: (source: 'torbox' | 'den-remux' | undefined): PrefChanges => ({
     'den.preferredPlaybackSource': source ? { string: source } : null,

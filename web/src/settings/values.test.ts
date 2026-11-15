@@ -44,7 +44,7 @@ describe('synced prefs', () => {
       subtitlesPerLanguage: 3,
       autoSkipSegments: false,
       autoplayTrailers: true,
-      playbackSourcePolicy: 'best',
+      playbackSourcePolicy: 'remember',
       preferredPlaybackSource: undefined,
       ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
       shownWarnings: [],
@@ -68,7 +68,7 @@ describe('synced prefs', () => {
     });
   });
 
-  it('keeps source recovery automatic by default and validates a remembered source', () => {
+  it('remembers the selected source by default and preserves an explicit Best policy', () => {
     expect(
       readSyncedPrefs(
         row({
@@ -84,11 +84,16 @@ describe('synced prefs', () => {
           'den.preferredPlaybackSource': { value: { string: 'other' }, at },
         }),
       ),
-    ).toMatchObject({ playbackSourcePolicy: 'best', preferredPlaybackSource: undefined });
+    ).toMatchObject({ playbackSourcePolicy: 'remember', preferredPlaybackSource: undefined });
+    expect(
+      readSyncedPrefs(row({ 'den.playbackSourcePolicy': { value: { string: 'best' }, at } })),
+    ).toMatchObject({ playbackSourcePolicy: 'best' });
     expect(change.playbackSourcePolicy('remember')).toEqual({
       'den.playbackSourcePolicy': { string: 'remember' },
     });
-    expect(change.playbackSourcePolicy('best')).toEqual({ 'den.playbackSourcePolicy': null });
+    expect(change.playbackSourcePolicy('best')).toEqual({
+      'den.playbackSourcePolicy': { string: 'best' },
+    });
     expect(change.preferredPlaybackSource('den-remux')).toEqual({
       'den.preferredPlaybackSource': { string: 'den-remux' },
     });

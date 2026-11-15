@@ -120,6 +120,22 @@ describe('preview profile preferences', () => {
       playbackSourcePolicy: 'remember',
       preferredPlaybackSource: 'torbox',
     });
+
+    await second.patch({ playbackSourcePolicy: 'best' });
+    const third = new PreviewProfilePreferences(session.identity, session.policy!, storage, null);
+    expect(third.value?.playbackSourcePolicy).toBe('best');
+  });
+
+  it('defaults a new preview profile to remembering its last source', () => {
+    const session = kid();
+    const preferences = new PreviewProfilePreferences(
+      session.identity,
+      session.policy!,
+      new MemoryStorage(),
+      null,
+    );
+
+    expect(preferences.value?.playbackSourcePolicy).toBe('remember');
   });
 
   it('keeps Visitor preferences for the visit and purges them when the visit ends', async () => {

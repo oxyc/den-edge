@@ -98,7 +98,7 @@
     {#snippet control()}
       <Select
         labelledby="playback-source-policy-label"
-        value={prefs.playbackSourcePolicy ?? 'best'}
+        value={prefs.playbackSourcePolicy ?? 'remember'}
         options={[
           { value: 'best', label: i18n.text('settings.playbackSourceBest') },
           { value: 'remember', label: i18n.text('settings.playbackSourceRemember') },

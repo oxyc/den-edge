@@ -50,7 +50,7 @@ const personalDefaults = (): PersonalPreferences => ({
   subtitlesPerLanguage: 3,
   autoSkipSegments: false,
   autoplayTrailers: true,
-  playbackSourcePolicy: 'best',
+  playbackSourcePolicy: 'remember',
   preferredPlaybackSource: undefined,
   ratingSources: RATING_SOURCES.map((source) => source.id) as PersonalPreferences['ratingSources'],
   shownWarnings: [],
@@ -135,7 +135,7 @@ const readPersonal = (value: unknown): PersonalPreferences => {
         ? stored.autoplayTrailers
         : defaults.autoplayTrailers,
     playbackSourcePolicy:
-      stored.playbackSourcePolicy === 'remember' ? 'remember' : defaults.playbackSourcePolicy,
+      stored.playbackSourcePolicy === 'best' ? 'best' : defaults.playbackSourcePolicy,
     preferredPlaybackSource:
       stored.preferredPlaybackSource === 'torbox' || stored.preferredPlaybackSource === 'den-remux'
         ? stored.preferredPlaybackSource

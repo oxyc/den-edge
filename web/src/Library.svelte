@@ -1942,7 +1942,7 @@
       shownSubtitleLanguages: value?.shownSubtitleLanguages ?? [],
       maxSubtitlesPerLanguage: value?.subtitlesPerLanguage ?? 3,
       autoSkipSegments: value?.autoSkipSegments ?? false,
-      playbackSourcePolicy: value?.playbackSourcePolicy ?? 'best',
+      playbackSourcePolicy: value?.playbackSourcePolicy ?? 'remember',
       preferredPlaybackSource: value?.preferredPlaybackSource,
     };
   });
