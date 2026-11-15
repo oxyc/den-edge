@@ -496,9 +496,9 @@ test('an automatic external subtitle failure is visible and recoverable', async 
     );
     await playing(page);
 
-    await expect(page.getByText(/Current subtitles unchanged/)).toBeVisible();
-    await showsSubtitles(page, 'Off');
-    await page.getByRole('button', { name: 'Try again' }).click();
+    await expect(page.getByText(/Dina nuvarande undertexter är oförändrade/)).toBeVisible();
+    await expect(subtitlesButton(page)).toHaveAccessibleName(/undertexter Av$/);
+    await page.getByRole('button', { name: 'Försök igen' }).click();
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
       .toMatchObject({ language: 'sv', label: 'opensubtitles:1' });

@@ -541,7 +541,7 @@ test.describe('Worker-owned detail metadata boundary', () => {
     expectWorkerOwned(requests);
   });
 
-  test('a TMDB 404 is stable and optional provider outages do not fail the next detail', async ({
+  test('a TMDB 404 is stable and optional provider outages do not hide the next detail', async ({
     page,
   }) => {
     await seed(page);
@@ -582,7 +582,7 @@ test.describe('Worker-owned detail metadata boundary', () => {
     );
     await expect(page.getByRole('heading', { level: 1, name: 'Series 308728' })).toBeVisible();
     await expect(page.getByLabel('TMDB rating 7.5')).toBeVisible();
-    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByRole('alert')).toContainText('Some title details couldn’t be loaded.');
     expect(missingAttempts).toBe(1);
     expectWorkerOwned(requests);
   });
