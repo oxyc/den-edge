@@ -88,6 +88,8 @@ and the rest is small JSON it validates and bounds.
 
 See [Architecture](ARCHITECTURE.md) for the current request and storage flows and
 [Performance](PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
+See [Platform capabilities](docs/platform-capabilities.md) for the supported administration surfaces, deliberate
+legacy-TV exclusions, and the browser handoffs used when a client does not implement an operation locally.
 See [TV installation](docs/tv-install.md) to install release builds on Android/Google TV, LG webOS, or Samsung
 Tizen TVs. Android and LG load Den's hosted TV UI, so ordinary UI updates do not require reinstalling their small
 launcher packages.
