@@ -314,7 +314,25 @@ export default defineConfig({
     // The production build the time budgets run against (`playwright.budgets.config.ts`) also carries the page that
     // seeds their household with the app's own code (`test/seed-library.html`). Never in a release build.
     ...(process.env.DEN_E2E_SEED === '1'
-      ? { rolldownOptions: { input: { index: 'index.html', seed: 'test/seed-library.html' } } }
+      ? {
+          // Rolldown may retain the nested library Worker's generated URL while dropping its asset from a
+          // multi-entry build. An explicit, stable test-only entry keeps the production-path Worker executable.
+          rolldownOptions: {
+            input: {
+              index: 'index.html',
+              seed: 'test/seed-library.html',
+              assistantProjectionWorker: 'src/lib/assistantProjectionWorker.ts',
+            },
+            output: {
+              entryFileNames: (chunk) =>
+                chunk.name === 'assistantProjectionWorker'
+                  ? 'assets/assistantProjectionWorker.js'
+                  : chunk.name === 'shell'
+                    ? 'shell.js'
+                    : 'assets/[name]-[hash].js',
+            },
+          },
+        }
       : {}),
   },
   test: {

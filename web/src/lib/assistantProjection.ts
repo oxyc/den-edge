@@ -21,7 +21,11 @@ export async function buildProjection(request: string): Promise<string> {
   }
   let worker: Worker;
   try {
-    const { projectionWorker } = await import('./assistantProjectionWorkerClient');
+    // Vite/Rolldown currently drops a Worker asset referenced from a nested Worker in its routed, multi-entry E2E
+    // graph. That graph therefore names its explicit test entry; releases retain the independently cached asset.
+    const { projectionWorker } = import.meta.env.DEN_E2E
+      ? await import('./assistantProjectionWorkerE2EClient')
+      : await import('./assistantProjectionWorkerClient');
     worker = projectionWorker();
   } catch (error) {
     console.warn('den: no Worker could be started for the assistant projection', error);

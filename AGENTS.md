@@ -266,12 +266,14 @@ everything the committed code imports is committed too.
   graph ceiling advances from 111,232 to 113,664, the smallest 128-byte boundary containing the matched build,
   retaining 40 bytes.
 - Making “Remember my choice” the playback-source default was measured on matched current-main/head production
-  builds after rebasing onto `7fff9db5`: startup moves 206,062 → 206,070 gzip bytes (+8), and the complete
-  non-translation graph moves 840,831 → 840,837 (+6); translation catalogs remain 49,661 bytes. Player owns the
+  builds after rebasing onto `7fff9db5`: startup moves 206,062 → 206,058 gzip bytes (-4), and the complete
+  non-translation graph moves 840,831 → 840,841 (+10); translation catalogs remain 49,661 bytes. Player owns the
   single Library fallback, removing a duplicate default expression; Settings retains its defensive fallback because
   the cross-version protocol field is optional. The change only reverses existing default branches and persists both
-  explicit policy choices compatibly. It adds no dependency, request, timer, listener, background work or
-  bundle-budget allowance; the existing startup and complete-graph ceilings retain 54 and 25 bytes respectively.
+  explicit policy choices compatibly. The final CI repair verifies that the release graph contains its separately
+  cached assistant projection Worker and gives only the routed multi-entry E2E build an explicit test entry; that
+  entry and client do not ship. It adds no dependency, production request, timer, listener, background work or
+  bundle-budget allowance; the existing startup and complete-graph ceilings retain 66 and 21 bytes respectively.
 
 ## Testing
 
