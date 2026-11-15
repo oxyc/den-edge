@@ -3,7 +3,7 @@
      included; a guest sees their own. Disconnecting ends a connection at its next call; one allowed to change the
      library also has its grant revoked in the library, which every device enforces (den-spec wire/assistant-v1.md). -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
   import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
@@ -64,6 +64,12 @@
     } finally {
       if (generation === grantsGeneration) grantsLoading = false;
     }
+  }
+
+  async function retryGrants() {
+    await loadGrants();
+    await tick();
+    if (!grantsProblem) document.querySelector<HTMLElement>('#assistants .heading button')?.focus();
   }
   $effect(() => {
     const available = grantsAvailable;
@@ -151,6 +157,12 @@
           ? 'Link this browser to your library, or accept an invite, to see its assistants.'
           : 'Couldn’t reach Den. Try again in a moment.';
     }
+  }
+
+  async function retryConnections() {
+    await load();
+    await tick();
+    if (!problem) document.querySelector<HTMLElement>('#assistant-connections > .row')?.focus();
   }
   $effect(() => {
     const source = connectionFetch;
@@ -297,7 +309,7 @@
           icon="retry"
           label={connectionLoading ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
           disabled={connectionLoading}
-          onclick={() => void load()}
+          onclick={() => void retryConnections()}
         />
       {/if}
     </SettingRow>
@@ -346,7 +358,7 @@
         icon="retry"
         label={grantsLoading ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
         disabled={grantsLoading}
-        onclick={() => void loadGrants()}
+        onclick={() => void retryGrants()}
       />
     </SettingRow>
   {/if}

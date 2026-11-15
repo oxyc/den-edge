@@ -180,6 +180,7 @@ test('a failed connection list stays unavailable until Retry returns an authorit
     await expect(panel.getByRole('alert')).toHaveCount(0);
     await expect(row).toContainText('2 connected');
     await expect(panel.getByRole('listitem')).toHaveCount(2);
+    await expect(row).toBeFocused();
     expect(asked).toEqual(['GET /oauth/connections', 'GET /oauth/connections']);
   } finally {
     await browser.close();
@@ -224,6 +225,7 @@ test('a failed durable permission read never invents empty and Retry restores th
       query: '?assistant-grants-fail-once',
     });
     const section = page.getByRole('region', { name: /Assistants/ });
+    await page.getByRole('button', { name: /Assistant library permissions/ }).click();
     await expect(section.getByRole('alert')).toContainText(
       'Assistant library permissions couldn’t be read',
     );
@@ -235,6 +237,7 @@ test('a failed durable permission read never invents empty and Retry restores th
     await expect(
       page.getByRole('button', { name: /Allowed to change your library/ }),
     ).toContainText('1 allowed');
+    await expect(page.getByRole('button', { name: 'Expand all in Assistants' })).toBeFocused();
   } finally {
     await browser.close();
   }
@@ -256,6 +259,7 @@ test('a failed refresh retains the last durable permission rows until authoritat
       .getByRole('group', { name: 'Stop Claude changing your library?' })
       .getByRole('button', { name: 'Revoke' })
       .click();
+    await page.getByRole('button', { name: /Assistant library permissions/ }).click();
     await expect(section.getByRole('alert')).toContainText(
       'Assistant library permissions couldn’t be read',
     );
@@ -294,7 +298,7 @@ test('a held old permission answer cannot republish after household authority re
     ).toContainText('1 allowed');
     await page.evaluate(() => globalThis.fixtureAssistantRecovery.release());
     const replacement = page.getByRole('button', { name: /Allowed to change your library/ });
-    await replacement.click();
+    await expect(replacement).toHaveAttribute('aria-expanded', 'true');
     const list = page
       .getByRole('region', { name: 'Allowed to change your library' })
       .getByRole('listitem');

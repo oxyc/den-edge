@@ -421,6 +421,7 @@ export class LibraryLogAuthority {
         return clock.device;
       },
       settings: (name) => this.#log.settings(name),
+      acknowledgedSettings: (name) => this.#log.acknowledgedSettings(name),
       refresh: async () => void (await this.#log.refresh()),
       command: async (command, operationId, stamp) => {
         this.#asOf = stamp;

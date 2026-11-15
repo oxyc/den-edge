@@ -216,7 +216,7 @@ async function linkingContexts(
   const steps = [];
   const stepsAtApproval = [];
   let approvalRefused = false;
-  let cleanupWrites = 0;
+  let rollbackKey = null;
   const relay = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -248,7 +248,12 @@ async function linkingContexts(
       stepsAtApproval.push(...steps, 'approve');
       steps.push('approve');
       if (!member) return json(403, { error: 'not_a_member' });
-      if (approve && refuseApproval) {
+      if (!approvalRefused && refuseApproval) {
+        rollbackKey = steps
+          .slice(steps.lastIndexOf('dropbox') + 1)
+          .filter((step) => step.startsWith('batch:') && step !== 'batch:0')
+          .at(1)
+          ?.slice('batch:'.length);
         approvalRefused = true;
         return json(503, { error: 'unreachable' });
       }
@@ -268,9 +273,13 @@ async function linkingContexts(
         json: { error: 'not_found' },
       });
     if (/^\/lib\/[0-9a-f]+\/batch$/.test(url.pathname) && request.method() === 'POST') {
-      if (approvalRefused && failRollbackOnce && body.writes.length > 0 && ++cleanupWrites === 2) {
-        failRollbackOnce = false;
-        return route.abort('connectionfailed');
+      if (
+        approvalRefused &&
+        failRollbackOnce &&
+        rollbackKey &&
+        body.writes.some(({ k }) => k === rollbackKey)
+      ) {
+        return json(503, { error: 'unreachable' });
       }
       const applied = [];
       for (const w of body.writes) {
@@ -323,7 +332,14 @@ async function linkingContexts(
   await host.route('**/*', relay);
   await joiner.route('**/*', relay);
   await pumpPairingPolls([host, joiner]);
-  return { host, joiner, sent, steps, stepsAtApproval };
+  return {
+    host,
+    joiner,
+    sent,
+    steps,
+    stepsAtApproval,
+    permitRollback: () => (failRollbackOnce = false),
+  };
 }
 
 /** `pair.ts`: each side asks the relay for the other's message once a second. */
@@ -384,8 +400,8 @@ test('a browser links to a library from the consent page and then allows the sam
     await expect(dialog).toContainText('It calls itself “Claude”');
     await expect(page).toHaveURL(`${ORIGIN}/connect?request=${ID}`);
     await dialog.getByRole('button', { name: 'Allow' }).click();
+    await expect.poll(() => sent).toEqual([{ path: `/oauth/request/${ID}/approve`, member: true }]);
     await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
-    expect(sent).toEqual([{ path: `/oauth/request/${ID}/approve`, member: true }]);
   } finally {
     await browser.close();
   }
@@ -454,7 +470,7 @@ test('failed approval keeps partial durable rollback visible until cleanup Retry
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
   try {
-    const { host, joiner, sent } = await linkingContexts(browser, {
+    const { host, joiner, sent, permitRollback } = await linkingContexts(browser, {
       write: true,
       refuseApproval: true,
       failRollbackOnce: true,
@@ -475,10 +491,12 @@ test('failed approval keeps partial durable rollback visible until cleanup Retry
     await expect(dialog.getByRole('button', { name: 'Allow' })).toBeDisabled();
     const retry = dialog.getByRole('button', { name: 'Retry cleanup' });
     await expect(retry).toBeVisible();
+    permitRollback();
     await retry.click();
     await expect(retry).toHaveCount(0);
     await expect(dialog.getByRole('alert')).toContainText('Couldn’t reach Den');
     await expect(dialog.getByRole('button', { name: 'Allow' })).toBeEnabled();
+    await expect(dialog.getByRole('button', { name: 'Allow' })).toBeFocused();
     expect(sent.filter(({ path }) => path.endsWith('/approve'))).toHaveLength(1);
   } finally {
     await browser.close();

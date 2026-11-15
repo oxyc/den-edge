@@ -289,7 +289,7 @@
       if (fixtureQuery.has('assistant-authority-replacement'))
         put(
           row('assistant-grants', {
-            aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: {
+            d7047d7faa4c6f77e1919c132bb6bd9f: {
               string: JSON.stringify({
                 cap: 100,
                 client: 'Replacement assistant',

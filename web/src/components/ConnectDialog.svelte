@@ -6,7 +6,7 @@
      A member may also let it change the library, and read the watchlist and history (den-spec
      wire/assistant-v1.md, §15): each its own checkbox, unticked unless they tick it. -->
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { assistantLibrary } from '../lib/assistantLibrary.svelte';
   import type { AssistantLibraryAuthority } from '../lib/assistantLibrary.svelte';
   import { guestGrants } from '../lib/grants.svelte';
@@ -35,12 +35,15 @@
   let expired = $state(false);
   let operation = 0;
   let requestGeneration = 0;
+  let activeAuthorityModel: AssistantLibraryAuthority['model'] | null = null;
+  let awaitingInitialAuthority = false;
   type PendingCleanup = {
     authority: AssistantLibraryAuthority;
     grant: string;
     approvalProblem: string;
   };
   let pendingCleanup = $state.raw<PendingCleanup | null>(null);
+  let allowButton = $state<HTMLButtonElement>();
 
   /** A browser that could say yes: linked to a library, or holding a live invite. */
   const eligible = $derived(!!links.current || guestGrants.list.some((grant) => !grant.ended));
@@ -90,12 +93,18 @@
   // a captured old model may still finish its private cleanup, but never writes into the replacement dialog.
   $effect(() => {
     const authority = assistantLibrary.authority;
+    if ((authority?.model ?? null) === activeAuthorityModel) return;
+    if (awaitingInitialAuthority && activeAuthorityModel === null && authority?.model) {
+      activeAuthorityModel = authority.model;
+      return;
+    }
+    activeAuthorityModel = authority?.model ?? null;
     const cleanup = untrack(() => pendingCleanup);
     ++operation;
     working = false;
     allowWrite = false;
     allowRead = false;
-    if (cleanup?.authority !== authority) pendingCleanup = null;
+    if (cleanup?.authority.model !== authority?.model) pendingCleanup = null;
   });
 
   function startLinking() {
@@ -118,8 +127,23 @@
     return owns(ticket, requestId, authority) && canProve();
   }
 
+  /** Linking can publish its member model just after the link itself becomes visible. Wait for that first exact
+   * authority before fencing consent to it; later model replacement is still retired by `owns`. */
+  async function initialAuthorityReady(
+    requestId: string,
+  ): Promise<AssistantLibraryAuthority | null> {
+    for (let waited = 0; waited < 10_000 && id === requestId; waited += 100) {
+      const authority = assistantLibrary.authority;
+      if (authority && canProve()) return authority;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return null;
+  }
+
   const owns = (ticket: number, requestId: string, authority: AssistantLibraryAuthority | null) =>
-    ticket === operation && id === requestId && assistantLibrary.authority === authority;
+    ticket === operation &&
+    id === requestId &&
+    assistantLibrary.authority?.model === authority?.model;
 
   async function cleanGrant(cleanup: PendingCleanup): Promise<boolean> {
     try {
@@ -151,6 +175,8 @@
     if (cleaned) {
       pendingCleanup = null;
       problem = cleanup.approvalProblem;
+      await tick();
+      if (owns(ticket, requestId, cleanup.authority)) allowButton?.focus();
     } else {
       problem = 'The connection failed and its library permission may remain. Retry cleanup.';
     }
@@ -159,10 +185,20 @@
   async function reply(allow: boolean) {
     const requestId = id;
     if (!requestId || working || pendingCleanup) return;
-    const authority = assistantLibrary.authority;
+    let authority = assistantLibrary.authority;
     const ticket = ++operation;
     working = true;
     problem = null;
+    if (allow && !authority && links.current) {
+      awaitingInitialAuthority = true;
+      authority = await initialAuthorityReady(requestId);
+      awaitingInitialAuthority = false;
+      if (!authority || id !== requestId || !working) {
+        working = false;
+        problem = failures.not_a_member!;
+        return;
+      }
+    }
     if (allow && !(await proofReady(ticket, requestId, authority))) {
       if (!owns(ticket, requestId, authority)) return;
       working = false;
@@ -217,7 +253,6 @@
     // Not approved: the grant and read record written for it must never be usable.
     const approvalProblem = failures[result.error] ?? 'That didn’t work. Try again in a moment.';
     if (authority && model && grant) {
-      approval = undefined;
       const cleanup = { authority, grant, approvalProblem };
       if (!(await cleanGrant(cleanup))) {
         if (!owns(ticket, requestId, authority)) return;
@@ -348,6 +383,7 @@
   {:else}
     <div class="actions">
       <Button
+        bind:element={allowButton}
         variant="primary"
         label={working ? 'Connecting…' : 'Allow'}
         busy={working}

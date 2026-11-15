@@ -1358,7 +1358,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Det gick inte att koppla från. Försök igen om en stund.',
   'Link this browser to your library, or accept an invite, to see its assistants.':
     'Länka webbläsaren till biblioteket eller acceptera en inbjudan för att se dess assistenter.',
-  'That didn’t work. Try again in a moment.': 'Det fungerade inte. Försök igen om en stund.',
   'Retry cleanup': 'Försök rensa igen',
   'Manage assistants in a supported browser': 'Hantera assistenter i en webbläsare som stöds',
   'Assistant connections are not available on this TV':

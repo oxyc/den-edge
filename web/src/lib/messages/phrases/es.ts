@@ -1375,7 +1375,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudo desconectar. Inténtalo de nuevo en unos instantes.',
   'Link this browser to your library, or accept an invite, to see its assistants.':
     'Vincula este navegador a tu biblioteca o acepta una invitación para ver sus asistentes.',
-  'That didn’t work. Try again in a moment.': 'No funcionó. Inténtalo de nuevo en unos instantes.',
   'Retry cleanup': 'Reintentar limpieza',
   'Manage assistants in a supported browser': 'Administrar asistentes en un navegador compatible',
   'Assistant connections are not available on this TV':

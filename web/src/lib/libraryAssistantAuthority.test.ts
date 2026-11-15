@@ -79,6 +79,7 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     libraryId: fixed.library,
     device: DEVICE,
     settings: (name) => shared.rows.get(name),
+    acknowledgedSettings: (name) => shared.rows.get(name),
     refresh: async () => {},
     command: async (command, operationId, stamp) => {
       commands.push({ command, operationId, stamp });
@@ -426,8 +427,8 @@ test('durable revocation readback is not fooled by this device’s local refusal
   let fail = true;
   const { authority } = device(shared, [], {
     patch: async (name, changes) => {
-      shared.patch(name, changes);
       if (fail && ++patches === 2) throw new Error('offline between durable rows');
+      shared.patch(name, changes);
       return [];
     },
   });
