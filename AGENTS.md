@@ -145,6 +145,21 @@ everything the committed code imports is committed too.
   No production branch can be removed without losing a reviewed failure, refusal, stale-authority or retry outcome.
   The complete-graph ceiling therefore advances from 103,680 to 104,320, the next 128-byte boundary, retaining 49
   bytes on the matched build; the independent startup and translation ceilings remain unchanged.
+- Subtitle-timing profile localization (#1167) was measured on matched production builds at base `c78408e9` and
+  the rebased repair: startup moved 203,870 → 203,915 gzip bytes (+45), while the complete graph moved 876,745
+  → 877,552 and its independently accounted translation catalogs moved 46,684 → 47,059, leaving the
+  non-translation graph 830,061 → 830,493 (+432). The existing lazy Player chunk accounts for +202 bytes, the
+  existing shared i18n runtime for +104, and the Spanish and Swedish lazy catalogs for +185 and +186 respectively;
+  remaining minification changes account for the balance. The repair adds no dependency, request, polling,
+  persistence, cue-tick, decoder or media-reload work. One formatter is retained only for the current profile
+  language and replaced on language change; result expiry remains one bounded existing timer. Timing copy and
+  locale-number formatting must be available synchronously inside the already lazy Player surface, while Spanish
+  and Swedish copy already lives in their lazy catalogs. Another dynamic import would add a request while the HUD
+  is open and cannot reduce the complete-graph total; moving the code eager would spend startup bytes. No reviewed
+  localization, accessible-live-value, stale-language or falsey-result branch can be removed without losing the
+  contract. The complete-graph ceiling therefore advances from 104,320 to 104,704, the smallest 128-byte boundary
+  that contains the matched build, retaining 1 byte; the independent startup and translation ceilings remain
+  unchanged.
 
 ## Testing
 

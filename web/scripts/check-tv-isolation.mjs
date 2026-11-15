@@ -342,6 +342,8 @@ if (process.argv.includes('--capture')) {
   // Household-sharing escrow recovery adds 760 gzip bytes to the complete non-translation graph and 69 at startup
   // on matched current-main/head builds. Its authority fencing, durable readback and Retry stay in the existing lazy
   // Settings and grants chunks; another split would add a request on the failure path without reducing this total.
-  // Allow the next 128-byte boundary past the combined graph, retaining 49 bytes on the matched build.
-  if (coreTotalDelta > 104320) throw new Error('Browser total JS/CSS budget exceeded');
+  // Subtitle-timing profile localization then adds 432 bytes on matched c78408e9/head builds. Its synchronous HUD
+  // copy and number formatting stay in the existing lazy Player, while non-English copy is already catalog-lazy;
+  // another split adds a request without reducing this graph. Allow the smallest 128-byte boundary, retaining 1 byte.
+  if (coreTotalDelta > 104704) throw new Error('Browser total JS/CSS budget exceeded');
 }
