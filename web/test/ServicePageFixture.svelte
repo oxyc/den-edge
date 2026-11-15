@@ -8,11 +8,13 @@
   import { createWorkerServiceSession } from '../src/lib/libraryServiceFactory';
   import { onDestroy, onMount } from 'svelte';
   import { installKeyboardNavigation } from '../src/lib/keyboardNavigation';
+  import { i18n } from '../src/lib/i18n.svelte';
+  import { LocalizedContent } from '../src/lib/localizedContent';
   import '../src/app.css';
 
-  const page = new URLSearchParams(location.search).has('page');
+  let page = $state(new URLSearchParams(location.search).has('page'));
   const services = createWorkerServiceSession();
-  const content = services.content;
+  const content = new LocalizedContent(services.content, () => i18n.language);
   setContentServiceContext(content);
   // Production resolves this through SessionServices before service pages ask Atlas questions. Keep the standalone
   // fixture on that same semantic configuration boundary instead of relying on a Worker-private default URL.
@@ -25,6 +27,10 @@
   let country = $state('US');
   (window as unknown as { reread: () => Promise<void> }).reread = async () => {
     languages = new Set(languages);
+    await tick();
+  };
+  (window as unknown as { showPage: () => Promise<void> }).showPage = async () => {
+    page = true;
     await tick();
   };
   (window as unknown as { clearProviderCache: () => Promise<void> }).clearProviderCache =
@@ -62,7 +68,10 @@
   {:else}
     <ServicesRow
       services={[{ pick: { id: 8, country: 'US' }, service: netflix }]}
-      onintent={(service, country) => primeServicePage(content, service, country, '/atlas')}
+      onintent={(service, country) =>
+        primeServicePage(content, service, country, '/atlas', {
+          interfaceLanguage: i18n.language,
+        })}
     />
   {/if}
 </main>

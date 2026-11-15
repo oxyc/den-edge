@@ -3,8 +3,10 @@
   import ContentWarnings from './ContentWarnings.svelte';
   import type { Warning } from '../lib/contentWarnings';
   import type { TitleDetail } from '../lib/detail';
+  import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import { titleFacts, type Ratings } from '../lib/detailPresentation';
   import { searchHref, serviceHref } from '../lib/route';
+  import { contentServicesResult, routedTitleProviders, type Service } from '../settings/services';
   let {
     detail: d,
     ratings = null,
@@ -13,6 +15,7 @@
     warnings = undefined,
     region = 'US',
     status = undefined,
+    content,
   }: {
     detail: TitleDetail;
     /** A series' run, from TVmaze's status (`seriesStatusBadge`). */
@@ -22,6 +25,7 @@
     pending?: boolean;
     warnings?: Warning[];
     region?: string;
+    content: ContentServiceClientPort;
   } = $props();
   const imdb = $derived(enabled.includes('imdb') ? ratings?.imdb : undefined);
   const tmdb = $derived(
@@ -38,6 +42,33 @@
   const compact = (n: number) =>
     new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
   const facts = $derived(titleFacts(d));
+  let providerDirectory = $state.raw<Service[] | undefined>();
+  $effect(() => {
+    const [source, country, language, providers] = [
+      content,
+      region.toUpperCase(),
+      i18n.language,
+      d.providers,
+    ];
+    if (__DEN_TV__ || !providers.length) {
+      providerDirectory = undefined;
+      return;
+    }
+    let current = true;
+    providerDirectory = undefined;
+    void contentServicesResult(source, country, false, language).then(
+      ({ services }) => {
+        if (current) providerDirectory = services;
+      },
+      () => {
+        if (current) providerDirectory = [];
+      },
+    );
+    return () => {
+      current = false;
+    };
+  });
+  const displayedProviders = $derived(routedTitleProviders(d.providers, providerDirectory));
   const factHref = (fact: string, index: number) => {
     if (index === 0 && d.title.year && /^\d{4}/.test(fact))
       return searchHref('', { chips: [`decade-${Math.floor(d.title.year / 10) * 10}`] });
@@ -105,14 +136,14 @@
       >{status === 'Ended' ? 'Ended' : 'Returning'}</span
     >{/if}
   {#if !__DEN_TV__}<ContentWarnings {warnings} />{/if}
-  {#if d.providers.length}
+  {#if displayedProviders.length}
     <span
       class="providers"
       aria-label={i18n.format('streaming.on', 'Streaming on {providers}', {
-        providers: d.providers.map((p) => p.name).join(', '),
+        providers: displayedProviders.map((p) => p.name).join(', '),
       })}
     >
-      {#each d.providers as provider (provider.id)}
+      {#each displayedProviders as provider (provider.id)}
         {#if __DEN_TV__}<span class="provider" title={provider.name}
             >{#if provider.logoPath}<img
                 src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
@@ -120,10 +151,10 @@
                 width="26"
                 height="26"
               />{:else}{provider.name}{/if}</span
-          >{:else}<a
+          >{:else if provider.routeID !== undefined}<a
             class="provider"
             data-spatial-skip
-            href={serviceHref(provider.id, region, provider.name)}
+            href={serviceHref(provider.routeID, region, provider.name)}
             aria-label={i18n.format('actions.browse', 'Browse {value}', {
               value: provider.name,
             })}
@@ -134,6 +165,13 @@
                 width="26"
                 height="26"
               />{:else}{provider.name}{/if}</a
+          >{:else}<span class="provider" role="img" aria-label={provider.name} title={provider.name}
+            >{#if provider.logoPath}<img
+                src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
+                alt=""
+                width="26"
+                height="26"
+              />{:else}{provider.name}{/if}</span
           >{/if}
       {/each}{#if __DEN_TV__}<span class="attribution">JustWatch</span>{:else}<a
           class="attribution"

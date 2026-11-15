@@ -11,6 +11,7 @@ import {
   failServiceDirectoryLoad,
   matches,
   mergeServices,
+  routedTitleProviders,
   serviceLabel,
   servicesFrom,
 } from './services';
@@ -23,6 +24,49 @@ describe('service directory', () => {
     expect(canonicalProviderName('Max Amazon Channel')).toBe('max');
     expect(canonicalProviderName('Paramount+ with Showtime')).toBe('paramount+');
     expect(canonicalProviderName('Disney Plus')).toBe('disney plus');
+  });
+
+  it('routes title variants through one canonical service and keeps unmatched providers truthful', () => {
+    const directory = [
+      {
+        id: 8,
+        name: 'Netflix',
+        logoPath: '/netflix.png',
+        priority: 1,
+        movies: true,
+        series: true,
+        variants: [1796, 1797],
+      },
+    ];
+    expect(
+      routedTitleProviders(
+        [
+          { id: 1796, name: 'Netflix Standard with Ads', logoPath: '/ads.png' },
+          { id: 8, name: 'Netflix', logoPath: '/old.png' },
+          { id: 531, name: 'Unlisted', logoPath: '/unlisted.png' },
+        ],
+        directory,
+      ),
+    ).toEqual([
+      { id: 8, name: 'Netflix', logoPath: '/netflix.png', routeID: 8 },
+      { id: 531, name: 'Unlisted', logoPath: '/unlisted.png' },
+    ]);
+    expect(routedTitleProviders([{ id: 1796, name: 'Netflix with Ads' }], undefined)).toEqual([
+      { id: 1796, name: 'Netflix with Ads' },
+    ]);
+    expect(
+      routedTitleProviders(
+        [
+          { id: 8, name: 'Netflix' },
+          { id: 1797, name: 'Netflix Extra' },
+          { id: 1796, name: 'Netflix with Ads' },
+        ],
+        directory,
+      ),
+    ).toEqual([{ id: 8, name: 'Netflix', logoPath: '/netflix.png', routeID: 8 }]);
+    expect(routedTitleProviders([{ id: 1796, name: 'Netflix with Ads' }], [])).toEqual([
+      { id: 1796, name: 'Netflix with Ads' },
+    ]);
   });
 
   it("orders by the country's own prominence and keeps the variants a pick may name", () => {
@@ -151,6 +195,15 @@ describe('service directory', () => {
     expect(
       partial.query,
       'an explicit Retry replaces the shared partial answer',
+    ).toHaveBeenCalledTimes(2);
+
+    const localized = port();
+    await contentServicesResult(localized, 'FI', false, 'sv');
+    await contentServicesResult(localized, 'FI', false, 'es');
+    await contentServicesResult(localized, 'FI', false, 'sv');
+    expect(
+      localized.query,
+      'one port keeps separate reusable answers for each active interface language',
     ).toHaveBeenCalledTimes(2);
   });
 });

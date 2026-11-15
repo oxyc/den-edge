@@ -345,5 +345,11 @@ if (process.argv.includes('--capture')) {
   // Subtitle-timing profile localization then adds 432 bytes on matched c78408e9/head builds. Its synchronous HUD
   // copy and number formatting stay in the existing lazy Player, while non-English copy is already catalog-lazy;
   // another split adds a request without reducing this graph. Allow the smallest 128-byte boundary, retaining 1 byte.
-  if (coreTotalDelta > 104704) throw new Error('Browser total JS/CSS budget exceeded');
+  // Canonical provider-variant routing and locale-owned Home/hover reuse add 480 bytes on matched current-main/head
+  // builds. Detail/services/Settings remain in their existing lazy graph; Home's 80-byte locale-generation fence
+  // stays beside the top-level provider-row readiness it owns, because moving it into lazy HomeCatalogue would
+  // duplicate or delay the same authority used by radar rows/captions. Another split adds a request before a badge
+  // becomes usable. Allow the smallest 128-byte boundary containing the reviewed graph, retaining 70 bytes;
+  // translation catalogs remain unchanged.
+  if (coreTotalDelta > 105216) throw new Error('Browser total JS/CSS budget exceeded');
 }

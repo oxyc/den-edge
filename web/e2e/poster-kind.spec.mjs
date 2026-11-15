@@ -2,7 +2,7 @@ import { chromium, expect, test, webkit } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork } from './network.mjs';
 
-async function installTmdbFixture(context, atlas) {
+async function installTmdbFixture(context, atlas, providerHold) {
   const page = await context.newPage();
   await page.goto(`${E2E_ORIGIN}/worker-network-fixture.html`);
   await page.evaluate(async () => {
@@ -12,15 +12,16 @@ async function installTmdbFixture(context, atlas) {
   await page.reload();
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await page.evaluate(
-    (enabled) =>
+    ({ enabled, providerHold }) =>
       new Promise((resolve) => {
         const channel = new MessageChannel();
         channel.port1.onmessage = resolve;
-        navigator.serviceWorker.controller.postMessage({ type: 'configure', atlas: enabled }, [
-          channel.port2,
-        ]);
+        navigator.serviceWorker.controller.postMessage(
+          { type: 'configure', atlas: enabled, providerHold },
+          [channel.port2],
+        );
       }),
-    atlas,
+    { enabled: atlas, providerHold },
   );
   const requests = () =>
     page.evaluate(
@@ -31,7 +32,18 @@ async function installTmdbFixture(context, atlas) {
           navigator.serviceWorker.controller.postMessage('network-requests', [channel.port2]);
         }),
     );
-  return { page, requests };
+  const releaseProviderHold = () =>
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const channel = new MessageChannel();
+          channel.port1.onmessage = resolve;
+          navigator.serviceWorker.controller.postMessage({ type: 'release-provider-hold' }, [
+            channel.port2,
+          ]);
+        }),
+    );
+  return { page, requests, releaseProviderHold };
 }
 
 /**
@@ -41,7 +53,10 @@ async function installTmdbFixture(context, atlas) {
  * With `atlas`, atlas is there too, and its "New on Netflix" charts lead New Releases with what just landed on
  * Netflix: Series 2005 (held, so its layout is known), a series the library does not hold, and a film.
  */
-async function openHome(browser, { atlas = false, workerMode = 'shared' } = {}) {
+async function openHome(
+  browser,
+  { atlas = false, workerMode = 'shared', language, providerHold } = {},
+) {
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
     reducedMotion: 'reduce',
@@ -56,12 +71,59 @@ async function openHome(browser, { atlas = false, workerMode = 'shared' } = {}) 
   // The catch-all is registered first. The fixture Service Worker then owns TMDB at the browser-context origin, so
   // page, Worker and SharedWorker requests all receive the same finite pager before the app page exists.
   await guardNetwork(context);
-  const { page, requests: tmdbRequests } = await installTmdbFixture(context, atlas);
+  const {
+    page,
+    requests: tmdbRequests,
+    releaseProviderHold,
+  } = await installTmdbFixture(context, atlas, providerHold);
   await page.goto(
-    `${E2E_ORIGIN}/test/library.html?populated&series-kinds${atlas ? '&services' : ''}`,
+    `${E2E_ORIGIN}/test/library.html?populated&series-kinds${atlas ? '&services' : ''}${language ? `&language=${language}` : ''}`,
   );
-  return { page, tmdbRequests };
+  return { page, tmdbRequests, releaseProviderHold };
 }
+
+test('Home retires a held provider directory when the interface language changes', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { page, tmdbRequests, releaseProviderHold } = await openHome(browser, {
+      atlas: true,
+      language: 'sv',
+      providerHold: 'sv-SE',
+    });
+    await page.waitForFunction(() => document.documentElement.lang === 'sv');
+    const services = page.locator('.services-row');
+    await services.evaluate((node) => node.scrollIntoView({ block: 'center' }));
+    const countDirectories = async (language) => {
+      const { requests } = await tmdbRequests();
+      return requests.filter((request) => {
+        const url = new URL(request, E2E_ORIGIN);
+        return (
+          /\/watch\/providers\/(?:movie|tv)$/.test(url.pathname) &&
+          url.searchParams.get('language') === language
+        );
+      }).length;
+    };
+    await expect.poll(() => countDirectories('sv-SE')).toBe(2);
+
+    await page.evaluate(async () => {
+      const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
+      await setInterfaceLanguage('es');
+    });
+    await expect(services.getByRole('link', { name: 'Netflix Spanish' })).toBeVisible();
+    await expect.poll(() => countDirectories('es-ES')).toBe(2);
+
+    await releaseProviderHold();
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    await expect(services.getByRole('link', { name: 'Netflix Spanish' })).toBeVisible();
+    await expect(services.getByRole('link', { name: 'Netflix Swedish' })).toHaveCount(0);
+    expect(await countDirectories('sv-SE')).toBe(2);
+    expect(await countDirectories('es-ES')).toBe(2);
+  } finally {
+    await browser.close();
+  }
+});
 
 for (const [name, slug, engine, workerMode] of [
   ['Chromium SharedWorker', 'chromium-shared', chromium, 'shared'],

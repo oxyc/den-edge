@@ -39,7 +39,13 @@ const series = {
     results: {
       FI: {
         link: 'https://www.themoviedb.org/tv/9/watch',
-        flatrate: [{ provider_id: 8, provider_name: 'Netflix', logo_path: '/netflix.jpg' }],
+        flatrate: [
+          {
+            provider_id: 1796,
+            provider_name: 'Netflix Standard with Ads',
+            logo_path: '/netflix-ads.jpg',
+          },
+        ],
       },
     },
   },
@@ -90,9 +96,32 @@ const film = (id, name, year) => ({
   release_date: `${year}-01-01`,
   poster_path: '/poster.jpg',
 });
+const providerDirectory = (r, id = 8) =>
+  r.fulfill({
+    json: {
+      results: [
+        {
+          provider_id: id,
+          provider_name: 'Netflix',
+          logo_path: '/netflix.jpg',
+          display_priority: 1,
+        },
+        {
+          provider_id: 1796,
+          provider_name: 'Netflix Standard with Ads',
+          logo_path: '/netflix-ads.jpg',
+          display_priority: 9,
+        },
+      ],
+    },
+  });
 async function setup(
   page,
-  { seasonGate = Promise.resolve(), ratingsGate = Promise.resolve() } = {},
+  {
+    seasonGate = Promise.resolve(),
+    ratingsGate = Promise.resolve(),
+    answerProviderDirectory = providerDirectory,
+  } = {},
 ) {
   await guardNetwork(page);
   const requests = [];
@@ -197,6 +226,8 @@ async function setup(
   await routeTmdb(page, async (r) => {
     const path = new URL(r.request().url()).pathname;
     requests.push(path);
+    if (path.endsWith('/watch/providers/movie') || path.endsWith('/watch/providers/tv'))
+      return answerProviderDirectory(r);
     if (path.includes('/season/')) {
       const n = Number(path.split('/').at(-1));
       if (n === 2) await seasonGate;
@@ -513,6 +544,63 @@ test('phone promotes Sources only when it replaces unavailable playback', async 
     active.locator('header.hero').getByRole('button', { name: 'Sources', exact: true }),
   ).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test('provider routing retires an old locale answer and keeps failure badges named', async ({
+  page,
+}) => {
+  let releaseSwedish;
+  const swedishGate = new Promise((resolve) => (releaseSwedish = resolve));
+  let sawSwedish;
+  const swedishStarted = new Promise((resolve) => (sawSwedish = resolve));
+  let releaseSpanish;
+  const spanishGate = new Promise((resolve) => (releaseSpanish = resolve));
+  let sawSpanish;
+  const spanishStarted = new Promise((resolve) => (sawSpanish = resolve));
+  const languages = [];
+  let failDirectory = false;
+  await setup(page, {
+    answerProviderDirectory: async (route) => {
+      const language = new URL(route.request().url()).searchParams.get('language') ?? 'en';
+      languages.push(language);
+      if (failDirectory) return route.fulfill({ status: 503, body: 'directory unavailable' });
+      if (language === 'sv-SE') {
+        sawSwedish();
+        await swedishGate;
+        return providerDirectory(route, 8);
+      }
+      if (language === 'es-ES') {
+        sawSpanish();
+        await spanishGate;
+        return providerDirectory(route, 9);
+      }
+      return route.fulfill({ status: 503, body: 'directory unavailable' });
+    },
+  });
+  await page.addInitScript(() => history.replaceState(null, '', '/tv/9?language=sv'));
+  await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?language=sv`);
+  await swedishStarted;
+  await page.evaluate(async () => {
+    const { setInterfaceLanguage } = await import('/src/lib/i18n.svelte.ts');
+    await setInterfaceLanguage('es');
+  });
+  const active = page.locator('[data-active="true"]');
+  releaseSwedish();
+  await spanishStarted;
+  await expect(active.locator('a.provider[href="/service/8-fi-netflix"]')).toHaveCount(0);
+  releaseSpanish();
+  await expect(active.locator('a.provider[href="/service/9-fi-netflix"]')).toBeVisible();
+  await expect(active.locator('a.provider[href="/service/8-fi-netflix"]')).toHaveCount(0);
+  expect(languages.filter((language) => language === 'sv-SE')).toHaveLength(2);
+  expect(languages.filter((language) => language === 'es-ES')).toHaveLength(2);
+
+  failDirectory = true;
+  await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?language=sv`);
+  await expect(
+    active.getByRole('img', { name: 'Netflix Standard with Ads', exact: true }),
+  ).toBeVisible();
+  await expect(active.locator('a.provider')).toHaveCount(0);
+  await expect(active.locator('a.attribution')).toBeVisible();
 });
 
 test('season requests cannot overwrite a newer selection and retained detail and person filters survive history', async () => {

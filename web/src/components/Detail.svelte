@@ -1046,6 +1046,7 @@
             <h1>{d.title.title}</h1>
             <TitleMetadata
               detail={d}
+              {content}
               {ratings}
               enabled={ratingSources}
               pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}

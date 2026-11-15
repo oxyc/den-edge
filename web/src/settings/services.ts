@@ -4,6 +4,7 @@
 
 import { reuse } from '../lib/reuse';
 import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+import type { InterfaceLanguage } from '../lib/interfaceLanguage';
 
 export interface Country {
   code: string;
@@ -19,6 +20,17 @@ export interface Service {
   series: boolean;
   /** The ids folded into this one, so a pick saved under a variant still matches. */
   variants: number[];
+}
+
+export interface TitleProvider {
+  id: number;
+  name: string;
+  logoPath?: string;
+}
+
+export interface RoutedTitleProvider extends TitleProvider {
+  /** Present only when the current region directory proves this badge's canonical service route. */
+  routeID?: number;
 }
 
 /** A country directory may still have one useful half when TMDB's movie or TV request fails. */
@@ -160,6 +172,33 @@ export function mergeServices(...lists: Service[][]): Service[] {
 export const matches = (service: Service, id: number) =>
   service.id === id || service.variants.includes(id);
 
+/**
+ * Title availability is a list of raw provider ids, while a service page is about the canonical directory entry.
+ * Keep unmatched providers visible but non-routable; a partial/failed directory must not invent a catalogue.
+ */
+export function routedTitleProviders(
+  providers: readonly TitleProvider[],
+  directory: readonly Service[] | undefined,
+): RoutedTitleProvider[] {
+  const seen = new Set<string>();
+  return providers.flatMap((provider) => {
+    const service = directory?.find((candidate) => matches(candidate, provider.id));
+    const key = service ? `service:${service.id}` : `provider:${provider.id}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return service
+      ? [
+          {
+            id: service.id,
+            name: service.name,
+            logoPath: service.logoPath ?? provider.logoPath,
+            routeID: service.id,
+          },
+        ]
+      : [provider];
+  });
+}
+
 /** As the country screen names a service that carries only one kind. */
 export function serviceLabel(service: Service): string {
   if (service.movies && !service.series) return `${service.name} (movies only)`;
@@ -197,12 +236,20 @@ export async function contentServicesResult(
   content: ContentServiceClientPort,
   country: string,
   refresh = false,
+  language: InterfaceLanguage = 'en',
 ): Promise<ServiceDirectoryResult> {
   const source = contentServicesSource(content);
   return reuse(
-    `content-services:${source}:${country}`,
+    `content-services:${source}:${country}:${language}`,
     async () => {
-      const result = await content.query({ kind: 'service.directory', region: country });
+      // Home owns the profile session's raw content port, while Detail/ServicePage may already wrap it in
+      // LocalizedContent. Carry the selected language at this shared boundary so both consumers ask the same
+      // localized directory and join the same reuse generation.
+      const result = await content.query(
+        language === 'en'
+          ? { kind: 'service.directory', region: country }
+          : { kind: 'service.directory', region: country, interfaceLanguage: language },
+      );
       return { services: result.services, complete: result.complete };
     },
     // A partial directory remains useful to Home and to a page whose provider it names. An explicit Retry replaces
@@ -230,6 +277,7 @@ function contentServicesSource(content: ContentServiceClientPort): number {
 export function contentServices(
   content: ContentServiceClientPort,
   country: string,
+  language: InterfaceLanguage = 'en',
 ): Promise<Service[]> {
-  return contentServicesResult(content, country).then((result) => result.services);
+  return contentServicesResult(content, country, false, language).then((result) => result.services);
 }

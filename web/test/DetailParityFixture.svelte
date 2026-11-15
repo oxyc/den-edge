@@ -12,17 +12,20 @@
   import { setToastContext } from '../src/lib/toast';
   import { fixtureLibraryService } from './libraryService';
   import { fixtureContentServiceContext } from './contentService';
+  import { i18n } from '../src/lib/i18n.svelte';
+  import { LocalizedContent } from '../src/lib/localizedContent';
   import { installKeyboardNavigation } from '../src/lib/keyboardNavigation';
 
   onMount(installKeyboardNavigation);
 
   const scout = { install: 'http://scout.internal/config', base: '/scout/config' };
   const routes = { scout: [{ url: 'http://scout.internal' }] };
-  const content = fixtureContentServiceContext({
+  const rawContent = fixtureContentServiceContext({
     tmdb: 'fixture-key',
     omdb: 'fixture-omdb',
     atlas: '/atlas',
   });
+  const content = new LocalizedContent(rawContent, () => i18n.language);
   // A download is a service command over a library held in memory; the component never sees its rows.
   const library = fixtureLibraryService({
     log: testLog().log,

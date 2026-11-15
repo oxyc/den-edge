@@ -5,6 +5,7 @@
      ends up exactly as deep as the service is rather than promising a catalogue it doesn't have. -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
@@ -80,13 +81,14 @@
     const source = content;
     const wanted = country;
     const wantedId = id;
+    const language = i18n.language;
     void directoryRetry;
     const refresh = nextDirectoryRequest.refresh;
     nextDirectoryRequest.refresh = false;
     let current = true;
     directory = null;
     unreachable = false;
-    void contentServicesResult(source, wanted, refresh).then(
+    void contentServicesResult(source, wanted, refresh, language).then(
       (result) => {
         if (!current) return;
         directory = result;

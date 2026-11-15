@@ -1975,6 +1975,7 @@
       minYear: prefs.minReleaseYear,
       excludedLanguages: prefs.excludedLanguages,
       shown: browseShown,
+      interfaceLanguage: i18n.language,
     });
   }
   /**
@@ -2175,37 +2176,53 @@
       current = false;
     };
   });
-  /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
+  /** Which locale/countries have been asked for; a directory is one request per locale/country, not one per pick. */
   const askedFor: Record<string, true> = {};
   let directories = $state.raw<Record<string, Service[]>>({});
-  /** Countries whose directory is on its way: the Services row holds its room until they answer. */
-  let naming = $state(0);
+  const directoryKey = (language: string, country: string) => `${language}:${country}`;
+  /** Locale-owned directory requests: an old language cannot keep the replacement Services row pending. */
+  let namingByLanguage = $state.raw<Record<string, number>>({});
+  const naming = $derived(namingByLanguage[i18n.language] ?? 0);
   $effect(() => {
     const directory = directoryServices;
+    const language = i18n.language;
     if (!serviceDirectoriesAdmitted || !directory) return;
     for (const { country } of servicePicks) {
-      if (askedFor[country]) continue;
-      askedFor[country] = true;
-      naming++;
+      const key = directoryKey(language, country);
+      if (askedFor[key]) continue;
+      askedFor[key] = true;
+      namingByLanguage = {
+        ...namingByLanguage,
+        [language]: (namingByLanguage[language] ?? 0) + 1,
+      };
       void directory
-        .contentServices(session.content, country)
+        .contentServices(session.content, country, language)
         .then(
           (listed) => {
-            directories = { ...directories, [country]: listed };
+            directories = { ...directories, [key]: listed };
           },
           () => {
             // One request per country per visit includes failures. Leaving it admitted lets `naming` settle to the
             // reserved unavailable row; a later visit gets a fresh page and asks again.
           },
         )
-        .finally(() => naming--);
+        .finally(() => {
+          namingByLanguage = {
+            ...namingByLanguage,
+            [language]: Math.max(0, (namingByLanguage[language] ?? 1) - 1),
+          };
+        });
     }
   });
   /** The picks their country's directory can account for, named and ordered by it. */
   const services = $derived(
     [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
       (country) =>
-        homeServices?.resolvePicks(servicePicks, directories[country] ?? [], country) ?? [],
+        homeServices?.resolvePicks(
+          servicePicks,
+          directories[directoryKey(i18n.language, country)] ?? [],
+          country,
+        ) ?? [],
     ),
   );
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
@@ -2225,7 +2242,7 @@
         serviceDirectoriesAdmitted &&
         !!directoryServices &&
         naming === 0 &&
-        servicePicks.every(({ country }) => askedFor[country])),
+        servicePicks.every(({ country }) => askedFor[directoryKey(i18n.language, country)])),
   );
   /**
    * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service

@@ -344,6 +344,46 @@ test('resting on a service tile starts loading its page before the press', async
   expect(firstScreenRequests(asked)).toEqual(COMPLETE_FIRST_SCREEN);
 });
 
+test('a localized hover prime and mounted page join one directory request', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  const { asked, pageOwned } = await serveNetflix(page);
+  await page.goto(`${FIXTURE}?language=sv`);
+
+  const tile = page.getByRole('link', { name: 'Netflix' });
+  await expect(tile).toBeVisible();
+  await tile.hover();
+  await expect
+    .poll(() => ({
+      movie: requestCount(asked, '/tmdb/3/watch/providers/movie', {
+        watch_region: 'US',
+        language: 'sv-SE',
+      }),
+      tv: requestCount(asked, '/tmdb/3/watch/providers/tv', {
+        watch_region: 'US',
+        language: 'sv-SE',
+      }),
+    }))
+    .toEqual({ movie: 1, tv: 1 });
+
+  await page.evaluate(() => window.showPage());
+  await expect(page.getByRole('heading', { name: 'Netflix' })).toBeVisible();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  expect(
+    requestCount(asked, '/tmdb/3/watch/providers/movie', {
+      watch_region: 'US',
+      language: 'sv-SE',
+    }),
+  ).toBe(1);
+  expect(
+    requestCount(asked, '/tmdb/3/watch/providers/tv', {
+      watch_region: 'US',
+      language: 'sv-SE',
+    }),
+  ).toBe(1);
+  expect(pageOwned, 'provider directories must stay inside the content Worker').toEqual([]);
+});
+
 test('settings re-read with nothing changed leave the page as it is', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);

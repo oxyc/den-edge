@@ -91,6 +91,25 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Canonical provider-variant routing (#1271) was measured on matched production builds at base `320867eb` and the
+  final repair: ordinary browser startup moved 203,925 → 204,013 gzip bytes (+88), while the complete graph moved
+  877,726 → 878,206 (+480); translation catalogs are unchanged at 47,270, so the complete non-translation graph
+  moves 104,666 → 105,146. The existing lazy Detail chunk accounts for +164 bytes, its existing services chunks for
+  +155 net, the lazy Settings navigation for +39, and the eager Library/app shell for +80, with minification changes
+  elsewhere accounting for the remainder. Browser Detail, Home and hover priming reuse the profile-owned,
+  region-and-language-keyed service-directory cache to collapse raw provider variants onto one canonical route;
+  it adds no per-badge request, polling, timer, listener, dependency, persisted state or private diagnostic. A
+  directory miss/failure leaves the truthful raw badge non-routable and retains the existing external JustWatch
+  handoff. LG/webOS and supported Samsung/Tizen compile the same noninteractive badge presentation and do not ask
+  the directory. The normalization and request must stay in the existing lazy Detail/services boundary: moving
+  them eager would spend more startup bytes, while another dynamic import would add a request before the badge can
+  become usable and cannot reduce the complete graph. Home's small eager locale-generation fence must remain beside
+  the existing top-level provider-row readiness state: moving it into lazy HomeCatalogue would duplicate or delay
+  the same directory authority needed by radar rows and their captions. No correctness branch can be removed
+  without restoring an invented variant route, stale-language publication, duplicate request or duplicate badge.
+  The complete-graph ceiling therefore advances from 104,704 to 105,216, the smallest 128-byte boundary that
+  contains the matched build, retaining 70 bytes; the independent startup and translation ceilings remain
+  unchanged.
 - Native guest-administration handoff (#536) was measured on matched production builds at base `5f7d4ac6` and the
   repair. The ordinary browser startup graph moved 203,915 → 203,925 gzip bytes (+10), while its complete graph
   moved 877,552 → 877,726 (+174); independently lazy translation catalogs account for +211, so the complete

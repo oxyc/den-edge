@@ -4,6 +4,8 @@ const layouts = { 2004: [12], 2005: [8, 10, 6, 9] };
 const requests = [];
 const unexpected = [];
 let atlasEnabled = false;
+let heldProviderLanguage = null;
+let heldProviderAnswers = [];
 const jsonResponse = (json, status = 200) =>
   new Response(JSON.stringify(json), {
     status,
@@ -16,7 +18,16 @@ self.addEventListener('message', (event) => {
   if (event.data === 'network-requests') event.ports[0].postMessage({ requests, unexpected });
   if (event.data?.type === 'configure') {
     atlasEnabled = event.data.atlas;
+    heldProviderLanguage = event.data.providerHold ?? null;
+    heldProviderAnswers = [];
     event.ports[0].postMessage('configured');
+  }
+  if (event.data?.type === 'release-provider-hold') {
+    heldProviderLanguage = null;
+    const answers = heldProviderAnswers;
+    heldProviderAnswers = [];
+    for (const answer of answers) answer();
+    event.ports[0]?.postMessage('released');
   }
 });
 self.addEventListener('fetch', (event) => {
@@ -111,11 +122,30 @@ self.addEventListener('fetch', (event) => {
   const path = url.pathname;
   let json;
   if (path.includes('/watch/providers/')) {
+    const language = url.searchParams.get('language');
     json = {
       results: [
-        { provider_id: 8, provider_name: 'Netflix', logo_path: '/n.jpg', display_priority: 1 },
+        {
+          provider_id: 8,
+          provider_name:
+            language === 'sv-SE'
+              ? 'Netflix Swedish'
+              : language === 'es-ES'
+                ? 'Netflix Spanish'
+                : 'Netflix',
+          logo_path: '/n.jpg',
+          display_priority: 1,
+        },
       ],
     };
+    if (heldProviderLanguage !== null && language === heldProviderLanguage) {
+      event.respondWith(
+        new Promise((resolve) => {
+          heldProviderAnswers.push(() => resolve(jsonResponse(json)));
+        }),
+      );
+      return;
+    }
   } else {
     const match = path.match(/\/(movie|tv)\/(\d+)$/);
     if (!match) {
@@ -162,7 +192,5 @@ self.addEventListener('fetch', (event) => {
       };
     }
   }
-  event.respondWith(
-    new Response(JSON.stringify(json), { headers: { 'content-type': 'application/json' } }),
-  );
+  event.respondWith(jsonResponse(json));
 });

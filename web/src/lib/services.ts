@@ -20,6 +20,7 @@ import type { ContentAtlasCatalog } from './contentServiceProtocol';
 import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { reuse } from './reuse';
+import type { InterfaceLanguage } from './interfaceLanguage';
 import { contentServices, matches, type Service } from '../settings/services';
 export { GUEST_PICKS } from './servicePicks';
 
@@ -555,6 +556,8 @@ export interface ServicePageOptions {
   excludedLanguages?: Set<string>;
   /** What the viewer has hidden; the hero leaves it out before looking anything up for it. */
   shown?: (title: Title) => boolean;
+  /** Owns localized directory priming; the mounted page must join this exact language generation. */
+  interfaceLanguage?: InterfaceLanguage;
 }
 
 /**
@@ -609,9 +612,10 @@ export function primeServicePage(
   atlas: string | null,
   options: ServicePageOptions = {},
 ): void {
-  const key = `prime:${service.id}:${country}:${atlas ?? ''}:${options.minYear ?? ''}`;
+  const language = options.interfaceLanguage ?? 'en';
+  const key = `prime:${service.id}:${country}:${language}:${atlas ?? ''}:${options.minYear ?? ''}`;
   void reuse(key, async () => {
-    void contentServices(content, country).catch(() => undefined);
+    void contentServices(content, country, language).catch(() => undefined);
     const page = servicePage(content, service, country, atlas, options);
     await Promise.all([
       page.hero,

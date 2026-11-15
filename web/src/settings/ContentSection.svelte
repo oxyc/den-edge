@@ -153,31 +153,34 @@
   const shownCountry = $derived(servicesCountry ?? region);
   let serviceFilter = $state('');
   const directories = new SvelteMap<string, ServiceDirectoryLoad>();
+  const directoryKey = (code: string, language = i18n.language) => `${language}:${code}`;
   let serviceRequest = 0;
-  function loadServices(code: string, retry = false) {
-    const current = directories.get(code);
+  function loadServices(code: string, retry = false, language = i18n.language) {
+    const key = directoryKey(code, language);
+    const current = directories.get(key);
     if (!retry && (current?.status === 'loading' || current?.status === 'ready')) return;
     if (current?.status === 'loading') return;
     const request = ++serviceRequest;
-    directories.set(code, beginServiceDirectoryLoad(current, request));
-    void contentServicesResult(content, code, retry).then(
+    directories.set(key, beginServiceDirectoryLoad(current, request));
+    void contentServicesResult(content, code, retry, language).then(
       (found) => {
-        const latest = directories.get(code);
-        if (latest) directories.set(code, completeServiceDirectoryLoad(latest, request, found));
+        const latest = directories.get(key);
+        if (latest) directories.set(key, completeServiceDirectoryLoad(latest, request, found));
       },
       () => {
-        const latest = directories.get(code);
-        if (latest) directories.set(code, failServiceDirectoryLoad(latest, request));
+        const latest = directories.get(key);
+        if (latest) directories.set(key, failServiceDirectoryLoad(latest, request));
       },
     );
   }
   $effect(() => {
     const code = shownCountry;
+    const language = i18n.language;
     if (!servicesOpen) return;
-    const current = directories.get(code);
-    if (!current) loadServices(code);
+    const current = directories.get(directoryKey(code, language));
+    if (!current) loadServices(code, false, language);
   });
-  const directoryLoad = $derived(directories.get(shownCountry));
+  const directoryLoad = $derived(directories.get(directoryKey(shownCountry)));
   const directory = $derived(directoryLoad?.services ?? []);
   const effectiveServices = $derived(effectiveServicePicks(prefs, GUEST_PICKS));
   const picksByCountry = $derived(
@@ -247,7 +250,7 @@
   const pickNames = $derived(
     effectiveServices
       .flatMap((pick) => {
-        const found = directories.get(pick.country)?.services ?? [];
+        const found = directories.get(directoryKey(pick.country))?.services ?? [];
         const service = found.find((s) => matches(s, pick.id));
         if (!service) return [];
         return [pick.country === region ? service.name : `${service.name} (${pick.country})`];
