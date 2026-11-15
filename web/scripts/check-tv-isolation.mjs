@@ -364,5 +364,8 @@ if (process.argv.includes('--capture')) {
   // shrinks by 73 bytes. Its 1,121-byte page coordinator is separately lazy; the remaining Settings presentation,
   // link handoff and Worker protocol must bracket that coordinator so reload can recover before the form opens.
   // Allow the smallest 128-byte boundary containing the reviewed graph, retaining 40 bytes on the matched build.
-  if (coreTotalDelta > 113664) throw new Error('Browser total JS/CSS budget exceeded');
+  // Assistant recovery (#1278) stays in the existing lazy Connect/Settings boundaries, while acknowledged durable
+  // readback stays with the shared Worker that owns those rows. Reduced Tizen compiles the connector/queue runtime
+  // out entirely. Matched measurements and consolidation are in AGENTS.md; allow the smallest 128-byte boundary.
+  if (coreTotalDelta > 115072) throw new Error('Browser total JS/CSS budget exceeded');
 }

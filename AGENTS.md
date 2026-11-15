@@ -91,6 +91,26 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Truthful assistant recovery and the reduced-Tizen Web handoff (#1278/#1204) were measured on matched production
+  builds at base `92e5aae9` and head `1082574e`. Ordinary browser startup moves 206,041 → 206,062 gzip bytes
+  (+21), while the complete graph moves 888,421 → 890,492 and its independently lazy Spanish/Swedish catalogs
+  move 49,007 → 49,661, leaving the non-translation graph 839,414 → 840,831 (+1,417). The existing lazy
+  Connect dialog accounts for about 0.73 KiB and the existing lazy Settings surface for about 0.53 KiB; the
+  remaining non-translation delta is the shared Worker's acknowledged-row readback/protocol and minification.
+  WebOS startup moves 241,789 → 241,848 and its non-translation graph 939,310 → 940,936 (+1,626); supported
+  Tizen startup moves 242,493 → 242,580 and its non-translation graph 1,259,953 → 1,261,627 (+1,674). Reduced
+  Tizen 3 instead removes the connector, assistant queue and projection-Worker chunks: startup moves 193,447 →
+  193,377, the complete non-translation graph 2,371,801 → 2,354,772 (-17,029 gzip), and the raw JS/CSS graph
+  8,391,911 → 8,349,411 (-42,500 bytes), while retaining only a focusable handoff in its existing lazy Settings
+  chunk. Recovery adds no dependency, polling, timer, healthy-path request or background work; list and rollback
+  readbacks run only after the corresponding failure or explicit Retry. Consent lifetime and cleanup must remain in
+  the already lazy Connect dialog, presentation/focus in lazy Settings, and durable acknowledged-row proof in the
+  shared Worker that owns those rows. Splitting any again would add a request on the sole recovery path or duplicate
+  authority; locale copy is already independently lazy. The Tizen 3 Worker-constructor split is the only safe
+  additional boundary and removes rather than moves that runtime from the reduced package. The fixed startup and
+  translation ceilings remain unchanged, with 62 and 1,539 bytes of margin. The complete non-translation ceiling
+  advances from 113,664 to 115,072 over the fixed baseline, the smallest 128-byte boundary containing the matched
+  115,041-byte graph, retaining 31 bytes.
 - Optional title-facts recovery (#1270) was measured on matched production builds at base `a819734f` and the
   final repair: ordinary browser startup moves 203,991 → 203,986 gzip bytes (-5), while the complete graph moves
   878,272 → 879,947 (+1,675). Independently lazy Spanish/Swedish catalogs account for +68, so the complete
