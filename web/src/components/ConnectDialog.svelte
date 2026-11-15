@@ -6,9 +6,11 @@
      A member may also let it change the library, and read the watchlist and history (den-spec
      wire/assistant-v1.md, §15): each its own checkbox, unticked unless they tick it. -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { assistantLibrary } from '../lib/assistantLibrary.svelte';
+  import type { AssistantLibraryAuthority } from '../lib/assistantLibrary.svelte';
   import { guestGrants } from '../lib/grants.svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import { links } from '../lib/links.svelte';
   import {
     answer,
@@ -31,14 +33,22 @@
   let linking = $state(false);
   /** den-edge has forgotten the request: nothing here can answer it any more. */
   let expired = $state(false);
+  let operation = 0;
+  let requestGeneration = 0;
+  type PendingCleanup = {
+    authority: AssistantLibraryAuthority;
+    grant: string;
+    approvalProblem: string;
+  };
+  let pendingCleanup = $state.raw<PendingCleanup | null>(null);
 
   /** A browser that could say yes: linked to a library, or holding a live invite. */
   const eligible = $derived(!!links.current || guestGrants.list.some((grant) => !grant.ended));
   /** Changing the library is a member's to allow, for a request den-edge can grant it to. */
-  const canWrite = $derived(!!request?.write && !!assistantLibrary.model);
+  const canWrite = $derived(!!request?.write && !!assistantLibrary.authority?.model);
   let allowWrite = $state(false);
   /** So is reading the watchlist and history. */
-  const canRead = $derived(!!request?.read && !!assistantLibrary.model);
+  const canRead = $derived(!!request?.read && !!assistantLibrary.authority?.model);
   let allowRead = $state(false);
 
   const failures: Record<string, string> = {
@@ -50,7 +60,9 @@
   };
 
   function load(from: string) {
+    const generation = ++requestGeneration;
     void consentRequest(from).then((reply) => {
+      if (generation !== requestGeneration || id !== from) return;
       if (reply.ok) request = reply.value;
       else {
         expired = reply.error === 'request_expired';
@@ -74,30 +86,92 @@
     load(id);
   });
 
+  // Consent belongs to one exact model + membership proof. Replacement retires every old publication immediately;
+  // a captured old model may still finish its private cleanup, but never writes into the replacement dialog.
+  $effect(() => {
+    const authority = assistantLibrary.authority;
+    const cleanup = untrack(() => pendingCleanup);
+    ++operation;
+    working = false;
+    allowWrite = false;
+    allowRead = false;
+    if (cleanup?.authority !== authority) pendingCleanup = null;
+  });
+
   function startLinking() {
     linking = true;
     void LinkScreen.load();
   }
 
   /** The library's proof arrives once it has opened, which may be a moment after this page did. */
-  async function proofReady(): Promise<boolean> {
-    for (let waited = 0; waited < 10_000 && !canProve(); waited += 100)
+  async function proofReady(
+    ticket: number,
+    requestId: string,
+    authority: AssistantLibraryAuthority | null,
+  ): Promise<boolean> {
+    for (
+      let waited = 0;
+      waited < 10_000 && owns(ticket, requestId, authority) && !canProve();
+      waited += 100
+    )
       await new Promise((resolve) => setTimeout(resolve, 100));
-    return canProve();
+    return owns(ticket, requestId, authority) && canProve();
+  }
+
+  const owns = (ticket: number, requestId: string, authority: AssistantLibraryAuthority | null) =>
+    ticket === operation && id === requestId && assistantLibrary.authority === authority;
+
+  async function cleanGrant(cleanup: PendingCleanup): Promise<boolean> {
+    try {
+      await cleanup.authority.model.revokeAssistant(cleanup.grant);
+    } catch (error) {
+      // A lost task reply is ambiguous: the durable rows may already be revoked. Read those rows directly before
+      // asking the person to retry, without trusting this device's private refusal journal.
+      console.warn('den: an unused assistant grant revocation needs durable readback', error);
+    }
+    try {
+      return (
+        (await cleanup.authority.model.assistantRevocationReadback(cleanup.grant)) !== 'unverified'
+      );
+    } catch (error) {
+      console.error('den: an unused assistant grant could not be durably verified', error);
+      return false;
+    }
+  }
+
+  async function retryCleanup() {
+    const cleanup = pendingCleanup;
+    const requestId = id;
+    if (!cleanup || !requestId || working) return;
+    const ticket = ++operation;
+    working = true;
+    const cleaned = await cleanGrant(cleanup);
+    if (!owns(ticket, requestId, cleanup.authority) || pendingCleanup !== cleanup) return;
+    working = false;
+    if (cleaned) {
+      pendingCleanup = null;
+      problem = cleanup.approvalProblem;
+    } else {
+      problem = 'The connection failed and its library permission may remain. Retry cleanup.';
+    }
   }
 
   async function reply(allow: boolean) {
-    if (!id) return;
+    const requestId = id;
+    if (!requestId || working || pendingCleanup) return;
+    const authority = assistantLibrary.authority;
+    const ticket = ++operation;
     working = true;
     problem = null;
-    if (allow && !(await proofReady())) {
+    if (allow && !(await proofReady(ticket, requestId, authority))) {
+      if (!owns(ticket, requestId, authority)) return;
       working = false;
       problem = failures.not_a_member!;
       return;
     }
     const write = allow && canWrite && allowWrite;
     const read = allow && canRead && allowRead;
-    const model = write || read ? assistantLibrary.model : null;
+    const model = write || read ? authority?.model : null;
     // The grant and read record are written into the library before den-edge hears of them, so no request can reach
     // a device, and no projection be read, before the library records what allows it.
     let approval: Approval | undefined;
@@ -105,6 +179,14 @@
     if (model && request) {
       try {
         const keys = await model.consentAssistant(request.client, { write, read });
+        if (!owns(ticket, requestId, authority)) {
+          await cleanGrant({
+            authority: authority!,
+            grant: keys.grant,
+            approvalProblem: failures.unreachable!,
+          });
+          return;
+        }
         grant = keys.grant;
         approval = {
           ...(write ? { write: { grant: keys.grant, key: keys.key } } : {}),
@@ -113,30 +195,47 @@
             : {}),
         };
       } catch (error) {
+        if (!owns(ticket, requestId, authority)) return;
         console.error('den: an assistant grant could not be written', error);
         working = false;
         problem = 'Couldn’t save the permission in your library. Try again in a moment.';
         return;
       }
     }
+    if (!owns(ticket, requestId, authority)) return;
     // Approved for the library the rows were written to: on a split household, as the household's member.
-    const result = await answer(id, allow, assistantLibrary.fetch ?? relayFetch, approval);
+    const result = await answer(requestId, allow, authority?.fetch ?? relayFetch, approval);
+    if (!owns(ticket, requestId, authority)) {
+      if (authority && grant)
+        await cleanGrant({ authority, grant, approvalProblem: failures.unreachable! });
+      return;
+    }
     if (result.ok) {
       location.assign(result.value);
       return;
     }
     // Not approved: the grant and read record written for it must never be usable.
-    if (model && grant)
-      await model
-        .revokeAssistant(grant)
-        .catch((error: unknown) =>
-          console.error('den: an unused assistant grant could not be revoked', error),
-        );
+    const approvalProblem = failures[result.error] ?? 'That didn’t work. Try again in a moment.';
+    if (authority && model && grant) {
+      approval = undefined;
+      const cleanup = { authority, grant, approvalProblem };
+      if (!(await cleanGrant(cleanup))) {
+        if (!owns(ticket, requestId, authority)) return;
+        pendingCleanup = cleanup;
+        working = false;
+        problem = 'The connection failed and its library permission may remain. Retry cleanup.';
+        return;
+      }
+    }
+    if (!owns(ticket, requestId, authority)) return;
     working = false;
-    problem = failures[result.error] ?? 'That didn’t work. Try again in a moment.';
+    problem = approvalProblem;
   }
 
   function close() {
+    ++operation;
+    ++requestGeneration;
+    pendingCleanup = null;
     dialog?.close();
   }
 </script>
@@ -145,6 +244,10 @@
   bind:this={dialog}
   aria-labelledby="connect-title"
   onclose={() => {
+    ++operation;
+    ++requestGeneration;
+    working = false;
+    pendingCleanup = null;
     if (id) history.replaceState(history.state, '', '/');
     id = null;
   }}
@@ -200,7 +303,18 @@
   {:else}
     <h2 id="connect-title">Connect an assistant to Den?</h2>
   {/if}
-  {#if problem}<p role="alert" class="bad">{problem}</p>{/if}
+  {#if problem}<p role="alert" class="bad">{i18n.phrase(problem)}</p>{/if}
+  {#if pendingCleanup}
+    <div class="actions">
+      <Button
+        variant="primary"
+        label={working ? i18n.phrase('Trying again…') : i18n.phrase('Retry cleanup')}
+        busy={working}
+        disabled={working}
+        onclick={() => void retryCleanup()}
+      />
+    </div>
+  {/if}
   {#if !eligible}
     <p class="why">
       This browser isn’t linked to a Den library on this address. Link it to allow the connection.
@@ -237,7 +351,7 @@
         variant="primary"
         label={working ? 'Connecting…' : 'Allow'}
         busy={working}
-        disabled={!request || expired}
+        disabled={!request || expired || !!pendingCleanup}
         onclick={() => void reply(true)}
       />
       {#if expired}

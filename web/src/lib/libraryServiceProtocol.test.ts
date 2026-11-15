@@ -1597,6 +1597,30 @@ describe('library service server protocol', () => {
     ).toMatchObject({ ok: true });
   });
 
+  it('bounds raw assistant revocation readback at the Worker boundary', () => {
+    const ask = (grant: unknown) =>
+      decodeLibraryServiceClientMessage({
+        type: 'query',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'assistant-revocation-readback',
+        query: { kind: 'assistant.revocation-readback', grant },
+      });
+    expect(ask('0123456789abcdef0123456789abcdef')).toMatchObject({ ok: true });
+    expect(ask('not-a-grant')).toMatchObject({ ok: false });
+
+    const answer = (outcome: unknown) =>
+      decodeLibraryServiceServerMessage({
+        type: 'query-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'assistant-revocation-readback',
+        version,
+        result: { kind: 'assistant.revocation-readback', outcome },
+      });
+    for (const outcome of ['revoked', 'absent', 'unverified'])
+      expect(answer(outcome)).toMatchObject({ ok: true });
+    expect(answer('active')).toMatchObject({ ok: false });
+  });
+
   it('bounds canonical source wait questions and answers at the Worker boundary', () => {
     const ask = (query: Record<string, unknown>) =>
       decodeLibraryServiceClientMessage({

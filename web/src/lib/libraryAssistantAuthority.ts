@@ -460,6 +460,28 @@ export class LibraryAssistantAuthority {
   }
 
   /**
+   * Prove consent rollback from the refreshed durable rows alone. `grants()` intentionally joins this device's
+   * private refusal journal, which is correct for enforcement/UI but could mask a partial household write here.
+   */
+  async revocationReadback(grant: string): Promise<'revoked' | 'absent' | 'unverified'> {
+    await ensureAssistantPolicy();
+    await this.port.refresh();
+    const listed = assistantPolicy<AssistantGrantList>({
+      op: 'assistant_grants',
+      grants: this.#row(GRANTS_ROW),
+      read: this.#row(READ_ROW),
+      play: this.#row(PLAY_ROW),
+      localRevoked: [],
+      now: this.port.now(),
+    });
+    const matching = [...listed.grants, ...listed.reads, ...listed.plays].filter(
+      (item) => item.grant === grant,
+    );
+    if (!matching.length) return 'absent';
+    return matching.every((item) => item.state === 'revoked') ? 'revoked' : 'unverified';
+  }
+
+  /**
    * §1's, §15's and §16's consent step. To write: the library's drop-box key (made, written, and given to den-edge
    * when it has none), then a grant key and its row, and a play record, so it may also play on the TV. To read only: a
    * grant key with no grants row setting, so it can never write. To read: its read key, recorded in the read row. The

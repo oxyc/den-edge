@@ -173,7 +173,25 @@ if (assets.some((file) => file.includes('libraryServiceSharedWorker')))
   throw new Error(`${platform}: desktop SharedWorker leaked into the TV build`);
 const manifest = JSON.parse(await readFile(resolve(directory, '.vite/manifest.json'), 'utf8'));
 if (tizen3 && Object.keys(manifest).some((file) => file.endsWith('/profileKeyResetPage.ts')))
-  throw new Error('The compound profile-key reset coordinator leaked into the Tizen 3 viewer build');
+  throw new Error(
+    'The compound profile-key reset coordinator leaked into the Tizen 3 viewer build',
+  );
+if (
+  tizen3 &&
+  Object.keys(manifest).some((file) =>
+    /(?:AssistantsSection\.svelte|ConnectDialog\.svelte|assistantProjectionWorker\.ts|\/lib\/assistant\.ts)$/.test(
+      file,
+    ),
+  )
+)
+  throw new Error('Assistant connector or queue runtime leaked into the Tizen 3 viewer build');
+if (
+  tizen3 &&
+  assets.some((file) =>
+    /(?:AssistantsSection|ConnectDialog|assistantProjectionWorker|^assistant-)/i.test(file),
+  )
+)
+  throw new Error('An assistant connector/queue chunk leaked into the Tizen 3 viewer package');
 const fixture = Object.keys(manifest).some((file) => /(?:test\/|test-entry)/.test(file));
 if (fixture !== (process.env.DEN_TV_E2E === '1'))
   throw new Error('TV test fixture isolation failed');

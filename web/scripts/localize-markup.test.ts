@@ -57,6 +57,11 @@ describe('UI translation coverage', () => {
       Whodunits: 'Novelas policíacas',
       Services: 'Servicios',
       'Services unavailable': 'Servicios no disponibles',
+      'Assistant library permissions couldn’t be read. Try again.':
+        'No se pudieron leer los permisos de biblioteca de asistentes. Inténtalo de nuevo.',
+      'Retry cleanup': 'Reintentar limpieza',
+      'Manage assistants in a supported browser':
+        'Administrar asistentes en un navegador compatible',
     });
     expect(swedish).toMatchObject({
       More: 'Mer',
@@ -65,6 +70,10 @@ describe('UI translation coverage', () => {
       Play: 'Spela',
       Services: 'Tjänster',
       'Services unavailable': 'Tjänsterna är inte tillgängliga',
+      'Assistant library permissions couldn’t be read. Try again.':
+        'Assistenternas biblioteksbehörigheter kunde inte läsas. Försök igen.',
+      'Retry cleanup': 'Försök rensa igen',
+      'Manage assistants in a supported browser': 'Hantera assistenter i en webbläsare som stöds',
     });
   });
 

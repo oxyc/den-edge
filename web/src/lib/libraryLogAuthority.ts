@@ -797,6 +797,11 @@ export class LibraryLogAuthority {
         return this.#libraryMetadata(query.titles);
       case 'assistant.grants':
         return { kind: 'assistant.grants', ...(await this.#assistant.grants()) };
+      case 'assistant.revocation-readback':
+        return {
+          kind: 'assistant.revocation-readback',
+          outcome: await this.#assistant.revocationReadback(query.grant),
+        };
       case 'assistant.connection':
         return {
           kind: 'assistant.connection',

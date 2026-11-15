@@ -1338,4 +1338,31 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Den senaste kontrollen misslyckades, så detta är dina tidigare källresultat.',
   'The availability check is degraded, so some source details may be incomplete.':
     'Tillgänglighetskontrollen är begränsad, så vissa källuppgifter kan vara ofullständiga.',
+  'Assistant library permissions': 'Assistenternas biblioteksbehörigheter',
+  Unavailable: 'Inte tillgängligt',
+  'Assistant library permissions couldn’t be read. Try again.':
+    'Assistenternas biblioteksbehörigheter kunde inte läsas. Försök igen.',
+  'The connection failed and its library permission may remain. Retry cleanup.':
+    'Anslutningen misslyckades och biblioteksbehörigheten kan finnas kvar. Försök rensa igen.',
+  'This request has expired. Start connecting again from the assistant, and answer within ten minutes.':
+    'Begäran har gått ut. Börja ansluta från assistenten igen och svara inom tio minuter.',
+  'Den didn’t recognise this browser as part of a library or an invite. Open the link in a browser linked to your Den.':
+    'Den kände inte igen webbläsaren som en del av ett bibliotek eller en inbjudan. Öppna länken i en webbläsare som är länkad till din Den.',
+  'Couldn’t reach Den. Try again in a moment.':
+    'Det gick inte att nå Den. Försök igen om en stund.',
+  'Couldn’t save the permission in your library. Try again in a moment.':
+    'Det gick inte att spara behörigheten i biblioteket. Försök igen om en stund.',
+  'Couldn’t revoke it. Try again in a moment.':
+    'Det gick inte att återkalla behörigheten. Försök igen om en stund.',
+  'Couldn’t disconnect it. Try again in a moment.':
+    'Det gick inte att koppla från. Försök igen om en stund.',
+  'Link this browser to your library, or accept an invite, to see its assistants.':
+    'Länka webbläsaren till biblioteket eller acceptera en inbjudan för att se dess assistenter.',
+  'That didn’t work. Try again in a moment.': 'Det fungerade inte. Försök igen om en stund.',
+  'Retry cleanup': 'Försök rensa igen',
+  'Manage assistants in a supported browser': 'Hantera assistenter i en webbläsare som stöds',
+  'Assistant connections are not available on this TV':
+    'Assistentanslutningar är inte tillgängliga på den här TV:n',
+  'On a phone or computer linked to this household, open Den › Settings › Assistants.':
+    'Öppna Den › Inställningar › Assistenter på en telefon eller dator som är länkad till hushållet.',
 };

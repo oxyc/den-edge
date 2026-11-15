@@ -5,9 +5,14 @@
 
 import type { LibraryModel } from './libraryModel.svelte';
 
+export interface AssistantLibraryAuthority {
+  model: LibraryModel;
+  fetch: typeof fetch | null;
+}
+
 class AssistantLibrary {
-  model = $state.raw<LibraryModel | null>(null);
-  fetch = $state.raw<typeof fetch | null>(null);
+  /** Exact model + membership proof published atomically, so consent can never mix two households. */
+  authority = $state.raw<AssistantLibraryAuthority | null>(null);
 }
 
 export const assistantLibrary = new AssistantLibrary();

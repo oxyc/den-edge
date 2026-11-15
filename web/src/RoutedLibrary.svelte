@@ -1463,6 +1463,7 @@
   // Assistants (den-spec wire/assistant-v1.md): while a member's library is open here, the consent dialog may write
   // grants into it. A library kept only in this browser is no member's on den-edge, and has none.
   $effect(() => {
+    if (__DEN_TV_LEGACY_JS_CORE__) return;
     const model = implicitAssistantModel;
     if (!model) return;
     const household = assistantHousehold;
@@ -1475,17 +1476,16 @@
           if (!open) return;
           // A household den-edge does not know as a member yet could not be approved for: no consent is offered.
           if (household && !membership) return;
-          assistantLibrary.model = consent;
-          assistantLibrary.fetch = membership ? householdAssistantFetch(membership) : null;
+          assistantLibrary.authority = {
+            model: consent,
+            fetch: membership ? householdAssistantFetch(membership) : null,
+          };
         },
         () => {},
       );
     return () => {
       open = false;
-      if (assistantLibrary.model === consent) {
-        assistantLibrary.model = null;
-        assistantLibrary.fetch = null;
-      }
+      if (assistantLibrary.authority?.model === consent) assistantLibrary.authority = null;
     };
   });
 
@@ -1501,7 +1501,9 @@
   const memberModel = $derived(implicitAssistantModel);
   const connectionModel = $derived(assistantHousehold ?? memberModel);
   const drainNeeded = $derived(
-    session.foregrounded && (connectionModel?.settings.value?.assistant.write ?? false),
+    !__DEN_TV_LEGACY_JS_CORE__ &&
+      session.foregrounded &&
+      (connectionModel?.settings.value?.assistant.write ?? false),
   );
   // An LG or Samsung TV does not publish: the build reads the whole library and holds the Worker for seconds, which
   // those TVs' CPU and memory pay dearly for, and every browser and the Apple TV publish the same projection.
@@ -1534,6 +1536,9 @@
     ) => void,
     unavailable?: (signal: AbortSignal) => void,
   ) {
+    // The reduced Tizen 3 build has no assistant policy core. Refuse at the shared admission boundary, before a
+    // dynamic import, relay membership read, renewal, publish, household drain or TV play-lane drain can start.
+    if (__DEN_TV_LEGACY_JS_CORE__) return;
     const current = session;
     const model = memberModel;
     const household = assistantHousehold;

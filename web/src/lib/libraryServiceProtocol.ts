@@ -1052,6 +1052,8 @@ export type LibraryQuery =
   | { kind: 'library.metadata'; titles: TitleRef[] }
   /** The grants the library's row holds, whatever their state, for Settings › Assistants. */
   | { kind: 'assistant.grants' }
+  /** Raw durable-row proof for consent rollback; it deliberately ignores this device's local refusal journal. */
+  | { kind: 'assistant.revocation-readback'; grant: string }
   /** The household's assistant connection, to lend Owner's library on a household split into profiles. */
   | { kind: 'assistant.connection' }
   | { kind: 'profile-create.status' };
@@ -1146,6 +1148,10 @@ export type LibraryQueryResult =
       grants: AssistantGrantView[];
       reads: AssistantGrantView[];
       plays: AssistantGrantView[];
+    }
+  | {
+      kind: 'assistant.revocation-readback';
+      outcome: 'revoked' | 'absent' | 'unverified';
     }
   | { kind: 'assistant.connection'; connection: AssistantConnection | null };
 

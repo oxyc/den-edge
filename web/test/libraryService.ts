@@ -56,6 +56,7 @@ class FixtureService {
   readonly recoveryTasks: LibraryTask['kind'][] = [];
   readonly commandKinds: LibraryCommand['kind'][] = [];
   readonly progressOperationIds: string[] = [];
+  readonly assistantGrantQueries = { attempts: 0 };
   readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
   readonly #heldSelections = new Map<
@@ -65,6 +66,13 @@ class FixtureService {
   #nextSubscription = 0;
   #revision = 0;
   #ready = false;
+  #assistantGrantFailures = 0;
+  #assistantGrantReplyGate?: {
+    started: Promise<void>;
+    noteStarted: () => void;
+    reply: Promise<void>;
+    release: () => void;
+  };
   readonly #stopAuthority: () => void;
 
   constructor(
@@ -144,16 +152,28 @@ class FixtureService {
 
   async query(query: LibraryQuery, signal?: AbortSignal) {
     const historyDetails = query.kind === 'history.episodes';
+    const assistantGrants = query.kind === 'assistant.grants';
     if (historyDetails) this.historyDetails.attempts++;
+    if (assistantGrants) this.assistantGrantQueries.attempts++;
     try {
       if (this.failHistoryDetails && historyDetails)
         throw new Error('fixture history details failed');
+      if (assistantGrants && this.#assistantGrantFailures > 0) {
+        this.#assistantGrantFailures--;
+        throw new Error('fixture assistant grants failed');
+      }
       const requested =
         this.refreshDownloadSources && query.kind === 'download.sources'
           ? { ...query, refresh: true as const }
           : query;
       // Production's Worker owns each source lookup by its request id and aborts it on cancel; so does this one.
       const result = await this.authority.query(requested, signal);
+      if (assistantGrants && this.#assistantGrantReplyGate) {
+        const gate = this.#assistantGrantReplyGate;
+        this.#assistantGrantReplyGate = undefined;
+        gate.noteStarted();
+        await gate.reply;
+      }
       if (query.kind === 'download.refresh') await this.publish([{ kind: 'downloads' }]);
       if (historyDetails && result.kind === 'history.episodes') {
         this.historyDetails.successes++;
@@ -170,6 +190,19 @@ class FixtureService {
       }
       throw error;
     }
+  }
+
+  failNextAssistantGrants() {
+    this.#assistantGrantFailures++;
+  }
+
+  holdNextAssistantGrants() {
+    let noteStarted = () => {};
+    let release = () => {};
+    const started = new Promise<void>((resolve) => (noteStarted = resolve));
+    const reply = new Promise<void>((resolve) => (release = resolve));
+    this.#assistantGrantReplyGate = { started, noteStarted, reply, release };
+    return { started, release };
   }
 
   async task(task: LibraryTask, operationId: string = crypto.randomUUID()) {
@@ -491,11 +524,14 @@ export function fixtureLibraryService({
     historyImports: fixtureService.historyImports,
     recoveryTasks: fixtureService.recoveryTasks,
     commandKinds: fixtureService.commandKinds,
+    assistantGrantQueries: fixtureService.assistantGrantQueries,
     progressOperationIds: fixtureService.progressOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
     holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
     activeSelections: () => fixtureService.activeSelections(),
     failSelection: (kind: LibrarySelection['kind']) => fixtureService.failSelection(kind),
+    failNextAssistantGrants: () => fixtureService.failNextAssistantGrants(),
+    holdNextAssistantGrants: () => fixtureService.holdNextAssistantGrants(),
     failDownloadsSelection: () => fixtureService.failDownloadsSelection(),
   };
 }

@@ -1355,4 +1355,31 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'La última comprobación falló, así que estos son tus resultados anteriores.',
   'The availability check is degraded, so some source details may be incomplete.':
     'La comprobación de disponibilidad está degradada, por lo que algunos datos pueden estar incompletos.',
+  'Assistant library permissions': 'Permisos de biblioteca de asistentes',
+  Unavailable: 'No disponible',
+  'Assistant library permissions couldn’t be read. Try again.':
+    'No se pudieron leer los permisos de biblioteca de asistentes. Inténtalo de nuevo.',
+  'The connection failed and its library permission may remain. Retry cleanup.':
+    'La conexión falló y es posible que su permiso de biblioteca permanezca. Reintenta la limpieza.',
+  'This request has expired. Start connecting again from the assistant, and answer within ten minutes.':
+    'Esta solicitud ha caducado. Vuelve a iniciar la conexión desde el asistente y responde en un plazo de diez minutos.',
+  'Den didn’t recognise this browser as part of a library or an invite. Open the link in a browser linked to your Den.':
+    'Den no reconoció este navegador como parte de una biblioteca o invitación. Abre el enlace en un navegador vinculado a tu Den.',
+  'Couldn’t reach Den. Try again in a moment.':
+    'No se pudo acceder a Den. Inténtalo de nuevo en unos instantes.',
+  'Couldn’t save the permission in your library. Try again in a moment.':
+    'No se pudo guardar el permiso en tu biblioteca. Inténtalo de nuevo en unos instantes.',
+  'Couldn’t revoke it. Try again in a moment.':
+    'No se pudo revocar. Inténtalo de nuevo en unos instantes.',
+  'Couldn’t disconnect it. Try again in a moment.':
+    'No se pudo desconectar. Inténtalo de nuevo en unos instantes.',
+  'Link this browser to your library, or accept an invite, to see its assistants.':
+    'Vincula este navegador a tu biblioteca o acepta una invitación para ver sus asistentes.',
+  'That didn’t work. Try again in a moment.': 'No funcionó. Inténtalo de nuevo en unos instantes.',
+  'Retry cleanup': 'Reintentar limpieza',
+  'Manage assistants in a supported browser': 'Administrar asistentes en un navegador compatible',
+  'Assistant connections are not available on this TV':
+    'Las conexiones de asistentes no están disponibles en este televisor',
+  'On a phone or computer linked to this household, open Den › Settings › Assistants.':
+    'En un teléfono u ordenador vinculado a este hogar, abre Den › Configuración › Asistentes.',
 };

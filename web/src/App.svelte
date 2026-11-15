@@ -32,7 +32,7 @@
   $effect(() => {
     if (guestGrants.invite) invited = true;
   });
-  const consenting = consentRequestId(location.href) !== null;
+  const consenting = !__DEN_TV_LEGACY_JS_CORE__ && consentRequestId(location.href) !== null;
   $effect(() => {
     if (invited) void InviteDialogScreen.load();
   });

@@ -38,6 +38,7 @@ async function consentContext(
   {
     grants = [],
     asking = { client: 'Claude', redirectHost: 'claude.ai', verified: true, scope: 'den:search' },
+    refuseApproval = false,
   } = {},
 ) {
   const sent = [];
@@ -65,6 +66,7 @@ async function consentContext(
       const approve = url.pathname.endsWith('/approve');
       if (approve && !headers['x-den-grant'] && !headers['x-den-library-member'])
         return json(403, { error: 'not_a_member' });
+      if (approve && refuseApproval) return json(503, { error: 'unreachable' });
       return json(200, {
         redirect: approve
           ? `${CALLBACK}?code=abc&state=s`
@@ -193,7 +195,16 @@ test('a browser with no library and no invite is offered linking, not Allow', as
  * Two browsers on one relay: one with a library that hosts a pairing from Settings, and one on the consent page
  * that joins it. `expired` makes den-edge forget the request once the page has first read it.
  */
-async function linkingContexts(browser, { expired = false, write = false, read = false } = {}) {
+async function linkingContexts(
+  browser,
+  {
+    expired = false,
+    write = false,
+    read = false,
+    refuseApproval = false,
+    failRollbackOnce = false,
+  } = {},
+) {
   const slots = new Map();
   let sid = '';
   let opened = false;
@@ -204,6 +215,8 @@ async function linkingContexts(browser, { expired = false, write = false, read =
   let head = 0;
   const steps = [];
   const stepsAtApproval = [];
+  let approvalRefused = false;
+  let cleanupWrites = 0;
   const relay = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -235,6 +248,10 @@ async function linkingContexts(browser, { expired = false, write = false, read =
       stepsAtApproval.push(...steps, 'approve');
       steps.push('approve');
       if (!member) return json(403, { error: 'not_a_member' });
+      if (approve && refuseApproval) {
+        approvalRefused = true;
+        return json(503, { error: 'unreachable' });
+      }
       return json(200, { redirect: `${CALLBACK}?code=abc&state=s` });
     }
     if (url.pathname === '/assistant/dropbox' && request.method() === 'PUT') {
@@ -251,6 +268,10 @@ async function linkingContexts(browser, { expired = false, write = false, read =
         json: { error: 'not_found' },
       });
     if (/^\/lib\/[0-9a-f]+\/batch$/.test(url.pathname) && request.method() === 'POST') {
+      if (approvalRefused && failRollbackOnce && body.writes.length > 0 && ++cleanupWrites === 2) {
+        failRollbackOnce = false;
+        return route.abort('connectionfailed');
+      }
       const applied = [];
       for (const w of body.writes) {
         const entry = { k: w.k, seq: ++head, v: w.v };
@@ -423,6 +444,120 @@ test('a member allows changes to the library, and the grant is in the library be
     // key, grant and play rows (§16), then approval, with no duplicate or unrelated write between those boundaries.
     expect(deviceBatches.length).toBeLessThanOrEqual(2);
     expect(observed.filter((step) => step !== deviceBatch)).toEqual(consent);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('failed approval keeps partial durable rollback visible until cleanup Retry proves it', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { host, joiner, sent } = await linkingContexts(browser, {
+      write: true,
+      refuseApproval: true,
+      failRollbackOnce: true,
+    });
+    const hostPage = await host.newPage();
+    const page = await joiner.newPage();
+    await page.goto(`${ORIGIN}/connect?request=${ID}`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    await linkThroughDialog(hostPage, dialog);
+    await dialog
+      .getByRole('checkbox', { name: /Allow changes to my library and playing on my TV/ })
+      .check();
+    await dialog.getByRole('button', { name: 'Allow' }).click();
+
+    await expect(dialog.getByRole('alert')).toContainText(
+      'The connection failed and its library permission may remain',
+    );
+    await expect(dialog.getByRole('button', { name: 'Allow' })).toBeDisabled();
+    const retry = dialog.getByRole('button', { name: 'Retry cleanup' });
+    await expect(retry).toBeVisible();
+    await retry.click();
+    await expect(retry).toHaveCount(0);
+    await expect(dialog.getByRole('alert')).toContainText('Couldn’t reach Den');
+    await expect(dialog.getByRole('button', { name: 'Allow' })).toBeEnabled();
+    expect(sent.filter(({ path }) => path.endsWith('/approve'))).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('authority replacement cleans a held old consent without publishing into the replacement dialog', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { context, sent } = await consentContext(browser, {
+      grants: GUEST,
+      asking: {
+        client: 'Claude',
+        redirectHost: 'claude.ai',
+        verified: true,
+        write: true,
+      },
+    });
+    const page = await context.newPage();
+    await page.goto(`${ORIGIN}/test/connect-assistant-recovery.html?request=${ID}&hold-consent`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    const write = dialog.getByRole('checkbox', {
+      name: /Allow changes to my library and playing on my TV/,
+    });
+    await write.check();
+    await dialog.getByRole('button', { name: 'Allow' }).click();
+    await expect
+      .poll(() => page.evaluate(() => globalThis.assistantRecoveryFixture.calls().consent))
+      .toBe(1);
+    await page.evaluate(() => globalThis.assistantRecoveryFixture.replace());
+    await page.evaluate(() => globalThis.assistantRecoveryFixture.releaseConsent());
+    await expect
+      .poll(() => page.evaluate(() => globalThis.assistantRecoveryFixture.calls()))
+      .toMatchObject({ revoke: 1, readback: 1 });
+    await expect(write).not.toBeChecked();
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    expect(sent.filter(({ path }) => path.endsWith('/approve'))).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('authority replacement retires a held old rollback result and keeps the replacement usable', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { context } = await consentContext(browser, {
+      grants: GUEST,
+      asking: {
+        client: 'Claude',
+        redirectHost: 'claude.ai',
+        verified: true,
+        write: true,
+      },
+      refuseApproval: true,
+    });
+    const page = await context.newPage();
+    await page.goto(`${ORIGIN}/test/connect-assistant-recovery.html?request=${ID}&hold-cleanup`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    const write = dialog.getByRole('checkbox', {
+      name: /Allow changes to my library and playing on my TV/,
+    });
+    await write.check();
+    await dialog.getByRole('button', { name: 'Allow' }).click();
+    await expect
+      .poll(() => page.evaluate(() => globalThis.assistantRecoveryFixture.calls().revoke))
+      .toBe(1);
+    await page.evaluate(() => globalThis.assistantRecoveryFixture.replace());
+    await page.evaluate(() => globalThis.assistantRecoveryFixture.releaseCleanup());
+    await expect
+      .poll(() => page.evaluate(() => globalThis.assistantRecoveryFixture.calls().readback))
+      .toBe(1);
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Retry cleanup' })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Allow' })).toBeEnabled();
+    await expect(write).not.toBeChecked();
   } finally {
     await browser.close();
   }

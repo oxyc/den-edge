@@ -42,6 +42,7 @@
   const replacesAuthority =
     fixtureQuery.has('authority-replacement') ||
     fixtureQuery.has('recovery-authority-replacement') ||
+    fixtureQuery.has('assistant-authority-replacement') ||
     joinPresentationFixture;
   let releaseRecoveryWrite = () => {};
   const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
@@ -212,6 +213,7 @@
     library.historyImports;
   const primaryModel = library.model;
   const { session } = library;
+  if (fixtureQuery.has('assistant-grants-fail-once')) library.failNextAssistantGrants();
   const replacementLibrary = replacesAuthority
     ? fixtureLibraryService({
         log,
@@ -249,6 +251,7 @@
   let heldConnections: ReturnType<typeof library.holdNextSelection> | undefined;
   let heldSimkl: ReturnType<typeof library.holdNextSelection> | undefined;
   let heldAuthorityPublication: Promise<void> | undefined;
+  let heldAssistantGrants: ReturnType<typeof library.holdNextAssistantGrants> | undefined;
   const authorityReplacementControls = {
     failConnections() {
       library.failSelection('connections');
@@ -283,6 +286,23 @@
           'cccc000000000003.seen': { int: 15000 },
         }),
       );
+      if (fixtureQuery.has('assistant-authority-replacement'))
+        put(
+          row('assistant-grants', {
+            aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: {
+              string: JSON.stringify({
+                cap: 100,
+                client: 'Replacement assistant',
+                createdAt: 1_790_000_000_000,
+                expiresAt: 4_102_444_800_000,
+                ops: ['rate'],
+                pk: 'jftOjtUEDF6Jm8aGfb7qQZsWQBTKy8ED5zIpdrgtmk0',
+                revokedAt: null,
+                v: 1,
+              }),
+            },
+          }),
+        );
       model = replacementLibrary.model;
     },
     async releaseOldSelections() {
@@ -311,6 +331,33 @@
       fixtureSettingsAuthority?: typeof authorityReplacementControls;
     }
   ).fixtureSettingsAuthority = authorityReplacementControls;
+
+  const assistantRecoveryControls = {
+    attempts: () => ({
+      primary: library.assistantGrantQueries.attempts,
+      replacement: replacementLibrary?.assistantGrantQueries.attempts ?? 0,
+    }),
+    failNext() {
+      library.failNextAssistantGrants();
+    },
+    holdNext() {
+      heldAssistantGrants = library.holdNextAssistantGrants();
+    },
+    async held() {
+      await heldAssistantGrants?.started;
+    },
+    release() {
+      heldAssistantGrants?.release();
+    },
+    replace() {
+      authorityReplacementControls.replace();
+    },
+  };
+  (
+    globalThis as typeof globalThis & {
+      fixtureAssistantRecovery?: typeof assistantRecoveryControls;
+    }
+  ).fixtureAssistantRecovery = assistantRecoveryControls;
 
   type JoinGate = { promise: Promise<void>; release: () => void };
   const gate = (): JoinGate => {

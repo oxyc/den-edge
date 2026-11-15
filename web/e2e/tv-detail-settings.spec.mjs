@@ -196,6 +196,12 @@ test('Tizen 3 names the supported-browser administration handoffs', async ({ pag
     'only the Tizen 3 viewer omits guest administration',
   );
 
+  const assistantRequests = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith('/assistant') || path.startsWith('/oauth/connections'))
+      assistantRequests.push(`${request.method()} ${path}`);
+  });
   await setupSeries(page, { linked: true });
   // Give the reduced target the strongest otherwise-offered state: a linked household with a durable compound marker.
   // The viewer must still compile out the coordinator and replace the destructive continuation with its handoff.
@@ -216,6 +222,7 @@ test('Tizen 3 names the supported-browser administration handoffs', async ({ pag
   const sectionNavigation = page.getByRole('navigation', { name: 'Settings sections' });
   const connectionsSection = sectionNavigation.getByRole('link', { name: 'Connections' });
   const sharingSection = sectionNavigation.getByRole('link', { name: 'Sharing' });
+  const assistantsSection = sectionNavigation.getByRole('link', { name: 'Assistants' });
   await connectionsSection.focus();
   await page.keyboard.press('ArrowDown');
   await expect(sharingSection).toBeFocused();
@@ -251,6 +258,27 @@ test('Tizen 3 names the supported-browser administration handoffs', async ({ pag
     ),
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reset library keys…' })).toHaveCount(0);
+
+  // The reduced focus graph owns a truthful Web handoff, while the connector, policy and queue lanes remain absent.
+  await sharingSection.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(assistantsSection).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings#assistants`);
+  const assistantsHandoff = page.getByRole('button', {
+    name: 'Manage assistants in a supported browser Assistant connections are not available on this TV',
+  });
+  await page.keyboard.press('ArrowRight');
+  await expect(assistantsHandoff).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByText(
+      'On a phone or computer linked to this household, open Den › Settings › Assistants.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Connector address' })).toHaveCount(0);
+  expect(assistantRequests).toEqual([]);
 });
 
 test('remote changes seasons from the focused season tab', async ({ page }) => {

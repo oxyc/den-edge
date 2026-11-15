@@ -9,7 +9,7 @@ const GRANT = 'd7047d7faa4c6f77e1919c132bb6bd9f';
  * Settings, with den-edge's `/config` saying `config` and its `/oauth/connections` answering `connections`. Returns the
  * page and the connector requests it made.
  */
-async function settings(browser, { config, connections = [] }) {
+async function settings(browser, { config, connections = [], query = '', connectionFailures = 0 }) {
   const asked = [];
   const context = await browser.newContext({
     viewport: { width: 390, height: 900 },
@@ -31,9 +31,13 @@ async function settings(browser, { config, connections = [] }) {
     const path = new URL(request.url()).pathname;
     asked.push(`${request.method()} ${path}`);
     if (request.method() === 'DELETE') return route.fulfill({ status: 204 });
+    if (connectionFailures > 0) {
+      connectionFailures--;
+      return route.fulfill({ status: 503, json: { error: 'unreachable' } });
+    }
     return route.fulfill({ json: { connections } });
   });
-  await page.goto(`${E2E_ORIGIN}/test/settings.html`);
+  await page.goto(`${E2E_ORIGIN}/test/settings.html${query}`);
   return { page, asked };
 }
 
@@ -107,6 +111,9 @@ test('Assistants gives the connector address to copy, how to add it, and what is
     // The library's own record of who may change it, beside den-edge's connections.
     const allowed = page.getByRole('button', { name: /Allowed to change your library/ });
     await expect(allowed).toContainText('1 allowed');
+    expect(await page.evaluate(() => globalThis.fixtureAssistantRecovery.attempts().primary)).toBe(
+      1,
+    );
 
     // Disconnect asks first, then revokes its grant in the library and ends that connection alone.
     await section.getByRole('button', { name: 'Disconnect Claude' }).click();
@@ -154,6 +161,31 @@ test('Assistants says when the connector is not enabled on this server', async (
   }
 });
 
+test('a failed connection list stays unavailable until Retry returns an authoritative list', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { page, asked } = await settings(browser, {
+      config: { mcpUrl: MCP_URL },
+      connections: CONNECTED,
+      connectionFailures: 1,
+    });
+    const row = page.getByRole('button', { name: /Connected assistants/ });
+    await expect(row).not.toContainText('None');
+    await row.click();
+    const panel = page.getByRole('region', { name: 'Connected assistants' });
+    await expect(panel.getByRole('alert')).toContainText('Couldn’t reach Den');
+    await panel.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+    await expect(row).toContainText('2 connected');
+    await expect(panel.getByRole('listitem')).toHaveCount(2);
+    expect(asked).toEqual(['GET /oauth/connections', 'GET /oauth/connections']);
+  } finally {
+    await browser.close();
+  }
+});
+
 // The grants the library holds are listed whatever den-edge says, and any of them can be revoked from here.
 test('a grant in the library is listed and revoked even with the connector off', async () => {
   const browser = await chromium.launch({
@@ -177,6 +209,97 @@ test('a grant in the library is listed and revoked even with the connector off',
       .click();
     await expect(item).toContainText('revoked');
     await expect(section.getByRole('button', { name: 'Revoke Claude' })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a failed durable permission read never invents empty and Retry restores the list', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { page } = await settings(browser, {
+      config: {},
+      query: '?assistant-grants-fail-once',
+    });
+    const section = page.getByRole('region', { name: /Assistants/ });
+    await expect(section.getByRole('alert')).toContainText(
+      'Assistant library permissions couldn’t be read',
+    );
+    await expect(page.getByRole('button', { name: /Allowed to change your library/ })).toHaveCount(
+      0,
+    );
+    await section.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(section.getByRole('alert')).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: /Allowed to change your library/ }),
+    ).toContainText('1 allowed');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a failed refresh retains the last durable permission rows until authoritative retry', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { page } = await settings(browser, { config: {} });
+    const section = page.getByRole('region', { name: /Assistants/ });
+    const allowed = page.getByRole('button', { name: /Allowed to change your library/ });
+    await expect(allowed).toContainText('1 allowed');
+    await page.evaluate(() => globalThis.fixtureAssistantRecovery.failNext());
+    await allowed.click();
+    await section.getByRole('button', { name: 'Revoke Claude' }).click();
+    await section
+      .getByRole('group', { name: 'Stop Claude changing your library?' })
+      .getByRole('button', { name: 'Revoke' })
+      .click();
+    await expect(section.getByRole('alert')).toContainText(
+      'Assistant library permissions couldn’t be read',
+    );
+    await expect(allowed).toContainText('1 allowed');
+    await section.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(section.getByRole('alert')).toHaveCount(0);
+    await expect(allowed).toContainText('None');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a held old permission answer cannot republish after household authority replacement', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { page } = await settings(browser, {
+      config: {},
+      query: '?assistant-authority-replacement',
+    });
+    const section = page.getByRole('region', { name: /Assistants/ });
+    const allowed = page.getByRole('button', { name: /Allowed to change your library/ });
+    await expect(allowed).toContainText('1 allowed');
+    await page.evaluate(() => globalThis.fixtureAssistantRecovery.holdNext());
+    await allowed.click();
+    await section.getByRole('button', { name: 'Revoke Claude' }).click();
+    await section
+      .getByRole('group', { name: 'Stop Claude changing your library?' })
+      .getByRole('button', { name: 'Revoke' })
+      .click();
+    await page.evaluate(() => globalThis.fixtureAssistantRecovery.held());
+    await page.evaluate(() => globalThis.fixtureAssistantRecovery.replace());
+    await expect(
+      page.getByRole('button', { name: /Allowed to change your library/ }),
+    ).toContainText('1 allowed');
+    await page.evaluate(() => globalThis.fixtureAssistantRecovery.release());
+    const replacement = page.getByRole('button', { name: /Allowed to change your library/ });
+    await replacement.click();
+    const list = page
+      .getByRole('region', { name: 'Allowed to change your library' })
+      .getByRole('listitem');
+    await expect(list).toContainText('Replacement assistant');
+    await expect(list).not.toContainText('Claude');
   } finally {
     await browser.close();
   }

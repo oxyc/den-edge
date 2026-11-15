@@ -3,6 +3,7 @@
      included; a guest sees their own. Disconnecting ends a connection at its next call; one allowed to change the
      library also has its grant revoked in the library, which every device enforces (den-spec wire/assistant-v1.md). -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
   import Button from '../components/Button.svelte';
   import Confirm from './Confirm.svelte';
@@ -42,19 +43,42 @@
   let grants = $state<AssistantGrantView[] | null>(null);
   let reads = $state<AssistantGrantView[] | null>(null);
   let plays = $state<AssistantGrantView[] | null>(null);
+  let grantsProblem = $state<string | null>(null);
+  let grantsLoading = $state(false);
+  let grantsGeneration = 0;
+  const grantsAvailable = $derived(!!listGrants);
 
-  async function loadGrants() {
-    if (!listGrants) return;
+  async function loadGrants(list = listGrants) {
+    if (!list || grantsLoading) return;
+    const generation = ++grantsGeneration;
+    grantsLoading = true;
     try {
-      ({ grants, reads, plays } = await listGrants());
+      const listed = await list();
+      if (generation !== grantsGeneration) return;
+      ({ grants, reads, plays } = listed);
+      grantsProblem = null;
     } catch (error) {
+      if (generation !== grantsGeneration) return;
       console.error('den: assistant grants could not be listed', error);
-      grants = [];
-      reads = [];
-      plays = [];
+      grantsProblem = 'Assistant library permissions couldn’t be read. Try again.';
+    } finally {
+      if (generation === grantsGeneration) grantsLoading = false;
     }
   }
-  void loadGrants();
+  $effect(() => {
+    const available = grantsAvailable;
+    const list = untrack(() => listGrants);
+    ++grantsGeneration;
+    grantsLoading = false;
+    grants = null;
+    reads = null;
+    plays = null;
+    grantsProblem = null;
+    if (available && list) untrack(() => void loadGrants(list));
+    return () => {
+      ++grantsGeneration;
+    };
+  });
 
   const grantState = (grant: AssistantGrantView, may: string) => {
     switch (grant.state) {
@@ -92,6 +116,9 @@
   let asked = $state(false);
   let connections = $state<Connection[] | null>(null);
   let problem = $state<string | null>(null);
+  let connectionRetryable = $state(false);
+  let connectionLoading = $state(false);
+  let connectionGeneration = 0;
   let copied = $state(false);
   let manual = $state(false);
   let addressField = $state<HTMLInputElement>();
@@ -99,23 +126,44 @@
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 
-  async function load() {
+  async function load(source = connectionFetch) {
+    if (connectionLoading) return;
+    const generation = ++connectionGeneration;
+    connectionLoading = true;
     mcpUrl = await fetchMcpUrl();
+    if (generation !== connectionGeneration || source !== connectionFetch) return;
     asked = true;
-    if (!mcpUrl) return;
-    const listed = await listConnections(await connectionFetch);
+    if (!mcpUrl) {
+      connectionLoading = false;
+      return;
+    }
+    const listed = await listConnections(await source);
+    if (generation !== connectionGeneration || source !== connectionFetch) return;
+    connectionLoading = false;
     if (listed.ok) {
       connections = listed.value;
       problem = null;
+      connectionRetryable = false;
     } else {
-      connections = [];
+      connectionRetryable = listed.status !== 403;
       problem =
         listed.status === 403
           ? 'Link this browser to your library, or accept an invite, to see its assistants.'
           : 'Couldn’t reach Den. Try again in a moment.';
     }
   }
-  void load();
+  $effect(() => {
+    const source = connectionFetch;
+    ++connectionGeneration;
+    connectionLoading = false;
+    connections = null;
+    problem = null;
+    connectionRetryable = false;
+    untrack(() => void load(source));
+    return () => {
+      ++connectionGeneration;
+    };
+  });
 
   /** What a connection may do beyond searching, in a word or two. */
   const may = (connection: Connection) =>
@@ -242,7 +290,16 @@
       {:else if connections && !problem}
         <p class="status">No assistant is connected.</p>
       {/if}
-      {#if problem}<p class="status bad" role="alert">{problem}</p>{/if}
+      {#if problem}<p class="status bad" role="alert">{i18n.phrase(problem)}</p>{/if}
+      {#if problem && connectionRetryable}
+        <Button
+          variant="secondary"
+          icon="retry"
+          label={connectionLoading ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
+          disabled={connectionLoading}
+          onclick={() => void load()}
+        />
+      {/if}
     </SettingRow>
   {:else}
     <SettingRow id="assistant-connector" label="Connector" value={connectorValue} />
@@ -276,6 +333,22 @@
       'playing on your TV',
       'Your TV refuses anything it asks to play from now on. Revoking also stops it changing your library. It can be allowed again by connecting it again.',
     )}
+  {/if}
+  {#if grantsProblem}
+    <SettingRow
+      id="assistant-library-authority"
+      label={i18n.phrase('Assistant library permissions')}
+      value={i18n.phrase('Unavailable')}
+    >
+      <p class="status bad" role="alert">{i18n.phrase(grantsProblem)}</p>
+      <Button
+        variant="secondary"
+        icon="retry"
+        label={grantsLoading ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
+        disabled={grantsLoading}
+        onclick={() => void loadGrants()}
+      />
+    </SettingRow>
   {/if}
 </SettingsSection>
 

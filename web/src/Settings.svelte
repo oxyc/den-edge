@@ -145,7 +145,7 @@
     routesLoaded = true;
   });
   let edgeVersion = $state<string | null>(null);
-  const viewerSections = ['connections', 'sharing', 'advanced'] as const;
+  const viewerSections = ['connections', 'sharing', 'assistants', 'advanced'] as const;
   void fetch('/version')
     .then((res) => (res.ok ? (res.json() as Promise<{ version?: unknown }>) : null))
     .then((body) => {
@@ -528,6 +528,20 @@
                 'In Den on a browser linked to this household, open Settings › Connections › Linked devices to reset every profile library key together.',
               )}
             </p>
+          </SettingRow>
+        </SettingsSection>
+        <SettingsSection id="assistants" title={i18n.text('settings.section.assistants')}>
+          <SettingRow
+            id="assistant-management-handoff"
+            label={i18n.phrase('Manage assistants in a supported browser')}
+            detail={i18n.phrase('Assistant connections are not available on this TV')}
+          >
+            <p>
+              {i18n.phrase(
+                'On a phone or computer linked to this household, open Den › Settings › Assistants.',
+              )}
+            </p>
+            <p class="mono">{`${__DEN_TV_WEB_ORIGIN__ || location.origin}/settings#assistants`}</p>
           </SettingRow>
         </SettingsSection>
       {/if}

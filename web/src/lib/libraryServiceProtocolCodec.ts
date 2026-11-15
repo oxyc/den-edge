@@ -824,6 +824,8 @@ function query(value: unknown): value is LibraryQuery {
       unique(value.titles, titleIdentity)
     );
   if (value.kind === 'assistant.grants') return exact(value, ',kind,');
+  if (value.kind === 'assistant.revocation-readback')
+    return exact(value, ',kind,grant,') && hexId(value.grant);
   if (value.kind === 'assistant.connection') return exact(value, ',kind,');
   if (value.kind === 'profile-create.status') return exact(value, ',kind,');
   if (value.kind === 'recovery.seal')
@@ -1934,6 +1936,11 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       list(value.grants, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
       list(value.reads, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems) &&
       list(value.plays, assistantGrant, LIBRARY_SERVICE_WIRE_LIMITS.collectionItems)
+    );
+  if (value.kind === 'assistant.revocation-readback')
+    return (
+      exact(value, ',kind,outcome,') &&
+      (value.outcome === 'revoked' || value.outcome === 'absent' || value.outcome === 'unverified')
     );
   if (value.kind === 'library.metadata')
     return (

@@ -51,7 +51,11 @@ export const WatchlistScreen = lazy(() => import('../components/WatchlistPage.sv
 /** Asked only by a page that carries their question: an invite link, or an assistant's request to connect. */
 export const InviteDialogScreen = lazy(() => import('../components/InviteDialog.svelte'));
 export const PhoneDialogScreen = lazy(() => import('../components/PhoneDialog.svelte'));
-export const ConnectDialogScreen = lazy(() => import('../components/ConnectDialog.svelte'));
+export const ConnectDialogScreen = __DEN_TV_LEGACY_JS_CORE__
+  ? lazy(() =>
+      Promise.reject(new Error('Assistant connections are managed in a supported browser')),
+    )
+  : lazy(() => import('../components/ConnectDialog.svelte'));
 /** Loaded only when durable library retirement needs visible recovery. The receipt/fence stays eager. */
 export const LibraryRetirementNoticeScreen = lazy(
   () => import('../components/LibraryRetirementNotice.svelte'),

@@ -1093,6 +1093,15 @@ export class LibraryModel {
     return { grants: result.grants, reads: result.reads, plays: result.plays };
   }
 
+  /** Durable consent-rollback proof, without this device's local refusal journal masking partial row writes. */
+  async assistantRevocationReadback(grant: string) {
+    this.#assertOpen();
+    const { result } = await this.service.query({ kind: 'assistant.revocation-readback', grant });
+    if (result.kind !== 'assistant.revocation-readback')
+      throw wrongQueryResult('assistant revocation readback');
+    return result.outcome;
+  }
+
   /**
    * This household's assistant connection, to lend Owner's library on a household split into profiles; null while
    * den-edge does not know this library as a member.
