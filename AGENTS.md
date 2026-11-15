@@ -91,6 +91,17 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Native guest-administration handoff (#536) was measured on matched production builds at base `5f7d4ac6` and the
+  repair. The ordinary browser startup graph moved 203,915 → 203,925 gzip bytes (+10), while its complete graph
+  moved 877,552 → 877,726 (+174); independently lazy translation catalogs account for +211, so the complete
+  non-translation graph shrinks 104,703 → 104,666 and remains under the existing 104,704 ceiling. On reduced
+  Tizen 3, the complete JS graph moves 2,413,572 → 2,413,984 (+412): the already lazy Settings chunk accounts for
+  +223, the Spanish/Swedish catalogs for +206, and the two startup chunks together move 233,442 → 233,443 (+1).
+  The focusable handoff is compiled only for the deliberately reduced Tizen target; ordinary Browser, LG/webOS,
+  and supported Samsung/Tizen retain their existing full guest-administration surface. It adds no dependency,
+  request, timer, listener, persisted state or secret. The row belongs in the existing lazy Settings surface, and
+  splitting its three short strings or one focusable row behind another dynamic import would add a request at the
+  recovery handoff without reducing the complete graph. No budget changes are required.
 - Kid direct-read authority (#1221) was measured on the current-main merge build before and after consolidating its
   internal admission result from three repeated strings to `boolean | null`: startup moved 203,815 → 203,804 gzip
   bytes (baseline delta 7,419 → 7,408) and the complete non-translation graph moved 101,388 → 101,377 bytes.

@@ -900,6 +900,11 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Self Harm': 'autolesión',
   'Send them this link, or the code to paste under Settings › Sharing.':
     'Envíeles este enlace o el código para pegarlo en Configuración > Compartir.',
+  'Manage guests in a supported browser': 'Administrar invitados en un navegador compatible',
+  'Guest administration is not available on this TV':
+    'La administración de invitados no está disponible en este televisor',
+  'In Den on a browser linked to this household, open Settings › Sharing to invite, extend, limit, relink, or revoke a guest.':
+    'En Den, en un navegador vinculado a este hogar, abre Ajustes › Compartir para invitar, ampliar, limitar, volver a vincular o revocar a un invitado.',
   'Serial Killer': 'Asesino en serie',
   'Serial Killers': 'Asesinos en serie',
   Series: 'Series',

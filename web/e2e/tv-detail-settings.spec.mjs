@@ -190,6 +190,42 @@ test('Tizen 3 preserves queued managed-playback receipts for a capable linked de
   expect(receiptRequests).toEqual([]);
 });
 
+test('Tizen 3 names the supported-browser guest administration handoff', async ({ page }) => {
+  test.skip(
+    process.env.DEN_TIZEN_VERSION !== '3.0',
+    'only the Tizen 3 viewer omits guest administration',
+  );
+
+  await setupSeries(page, { linked: true });
+  await page.goto(`${E2E_ORIGIN}/settings`);
+
+  const sectionNavigation = page.getByRole('navigation', { name: 'Settings sections' });
+  const connectionsSection = sectionNavigation.getByRole('link', { name: 'Connections' });
+  const sharingSection = sectionNavigation.getByRole('link', { name: 'Sharing' });
+  await connectionsSection.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(sharingSection).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings#sharing`);
+
+  const handoff = page.getByRole('button', {
+    name: 'Manage guests in a supported browser Guest administration is not available on this TV',
+  });
+  await expect(handoff).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(handoff).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByText(
+      'In Den on a browser linked to this household, open Settings › Sharing to invite, extend, limit, relink, or revoke a guest.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Invite a guest Lend your addons' })).toHaveCount(
+    0,
+  );
+});
+
 test('remote changes seasons from the focused season tab', async ({ page }) => {
   await setupSeries(page);
 

@@ -10,6 +10,8 @@
   import PlaybackSection from './settings/PlaybackSection.svelte';
   import RecoveryCode from './settings/RecoveryCode.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
+  import SettingRow from './settings/SettingRow.svelte';
+  import SettingsSection from './settings/SettingsSection.svelte';
   import SharingSection from './settings/SharingSection.svelte';
   import type { PreferenceChanges } from './settings/preferences';
   import { flushSync, onDestroy } from 'svelte';
@@ -138,7 +140,7 @@
     routesLoaded = true;
   });
   let edgeVersion = $state<string | null>(null);
-  const viewerSections = ['connections', 'advanced'] as const;
+  const viewerSections = ['connections', 'sharing', 'advanced'] as const;
   void fetch('/version')
     .then((res) => (res.ok ? (res.json() as Promise<{ version?: unknown }>) : null))
     .then((body) => {
@@ -483,6 +485,20 @@
           {importHistory}
           {exportHistory}
         />
+      {:else}
+        <SettingsSection id="sharing" title={i18n.text('settings.section.sharing')}>
+          <SettingRow
+            id="guest-management-handoff"
+            label="Manage guests in a supported browser"
+            detail="Guest administration is not available on this TV"
+          >
+            <p>
+              {i18n.phrase(
+                'In Den on a browser linked to this household, open Settings › Sharing to invite, extend, limit, relink, or revoke a guest.',
+              )}
+            </p>
+          </SettingRow>
+        </SettingsSection>
       {/if}
       {#key authority.model}<AdvancedSection
           {link}

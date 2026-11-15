@@ -72,3 +72,40 @@ it('formats re-sync controls and notices from each live locale catalog', async (
     );
   }
 });
+
+it('localizes the reduced-TV guest administration handoff', async () => {
+  const cases = [
+    {
+      language: 'en',
+      title: 'Manage guests in a supported browser',
+      detail: 'Guest administration is not available on this TV',
+      route:
+        'In Den on a browser linked to this household, open Settings › Sharing to invite, extend, limit, relink, or revoke a guest.',
+    },
+    {
+      language: 'es',
+      title: 'Administrar invitados en un navegador compatible',
+      detail: 'La administración de invitados no está disponible en este televisor',
+      route:
+        'En Den, en un navegador vinculado a este hogar, abre Ajustes › Compartir para invitar, ampliar, limitar, volver a vincular o revocar a un invitado.',
+    },
+    {
+      language: 'sv',
+      title: 'Hantera gäster i en webbläsare som stöds',
+      detail: 'Gästadministration är inte tillgänglig på den här TV:n',
+      route:
+        'Öppna Inställningar › Delning i Den i en webbläsare som är länkad till hushållet för att bjuda in, förlänga, begränsa, länka om eller återkalla en gäst.',
+    },
+  ] as const;
+
+  for (const expected of cases) {
+    await setInterfaceLanguage(expected.language);
+    expect(i18n.phrase('Manage guests in a supported browser')).toBe(expected.title);
+    expect(i18n.phrase('Guest administration is not available on this TV')).toBe(expected.detail);
+    expect(
+      i18n.phrase(
+        'In Den on a browser linked to this household, open Settings › Sharing to invite, extend, limit, relink, or revoke a guest.',
+      ),
+    ).toBe(expected.route);
+  }
+});
