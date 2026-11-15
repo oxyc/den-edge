@@ -520,6 +520,12 @@ test('a profile household shows Owner PIN management instead of the legacy matur
 }) => {
   await page.goto(`${E2E_ORIGIN}/test/settings.html?profiles`);
 
+  await expect(
+    page.getByText(
+      'Rename, delete, and Adult profile creation are not available yet. They will be managed here in Den on the web.',
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(page.getByRole('button', { name: /Owner PIN Set/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Parental controls/ })).toHaveCount(0);
   await page.getByRole('button', { name: /Owner PIN Set/ }).click();

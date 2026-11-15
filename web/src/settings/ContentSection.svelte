@@ -60,6 +60,7 @@
     onpolicy,
     ownerPin = false,
     pinRemovable = true,
+    showProfileLifecycleNotice = false,
   }: {
     prefs: SettingsPreferences;
     /** Worker-owned provider metadata boundary. */
@@ -89,6 +90,8 @@
     ownerPin?: boolean;
     /** False while a Kid/Visitor is live or profile topology is unresolved; true for a resolved Owner-only home. */
     pinRemovable?: boolean;
+    /** Profile-aware Owner settings disclose the broader lifecycle's browser-primary boundary. */
+    showProfileLifecycleNotice?: boolean;
   } = $props();
 
   const languages = LANGUAGES.map((l) => ({ value: l.code, label: l.name }));
@@ -400,6 +403,16 @@
   title="Content"
   footer="Hidden genres, languages, and titles are removed from Home, Browse, and Search. Watched titles you hide stay under Watchlist → Watched."
 >
+  {#if showProfileLifecycleNotice}
+    <SettingRow
+      id="profile-lifecycle"
+      label={i18n.phrase(
+        __DEN_TV__
+          ? 'Rename, delete, and Adult profile creation are not available on this TV. They will be managed in Den on the web.'
+          : 'Rename, delete, and Adult profile creation are not available yet. They will be managed here in Den on the web.',
+      )}
+    />
+  {/if}
   <SettingRow id="hidden-genres" label="Hidden genres" value={count(hiddenGenreNames.length, '')}>
     <p class="summary">
       <span

@@ -245,6 +245,11 @@ test('Tizen 3 names the supported-browser administration handoffs', async ({ pag
   await contentSection.focus();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(`${E2E_ORIGIN}/settings#content`);
+  await expect(
+    page.getByText('This TV is viewer-only. Profile administration is not available on this TV.', {
+      exact: true,
+    }),
+  ).toBeVisible();
   const pinHandoff = page.getByRole('button', {
     name: 'Manage the Owner PIN in a supported browser Owner PIN administration is not available on this TV',
   });

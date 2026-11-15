@@ -1426,4 +1426,10 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Conéctalo aquí para este perfil de propietario y llegará a tus otros dispositivos a través de tu biblioteca.',
   'SIMKL connection is unavailable in this deployment. Ask the Den Web administrator to configure it.':
     'La conexión de SIMKL no está disponible en este despliegue. Pide al administrador de Den Web que la configure.',
+  'Rename, delete, and Adult profile creation are not available yet. They will be managed here in Den on the web.':
+    'El cambio de nombre, la eliminación y la creación de perfiles de adulto aún no están disponibles. Se administrarán aquí, en Den en la web.',
+  'Rename, delete, and Adult profile creation are not available on this TV. They will be managed in Den on the web.':
+    'El cambio de nombre, la eliminación y la creación de perfiles de adulto no están disponibles en este televisor. Se administrarán en Den en la web.',
+  'This TV is viewer-only. Profile administration is not available on this TV.':
+    'Este televisor es solo para visualización. La administración de perfiles no está disponible en este televisor.',
 };

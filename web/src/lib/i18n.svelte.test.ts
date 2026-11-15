@@ -110,6 +110,51 @@ it('localizes the reduced-TV guest administration handoff', async () => {
   }
 });
 
+it('localizes truthful broader-profile capability notices', async () => {
+  const cases = [
+    {
+      language: 'en',
+      browser:
+        'Rename, delete, and Adult profile creation are not available yet. They will be managed here in Den on the web.',
+      tv: 'Rename, delete, and Adult profile creation are not available on this TV. They will be managed in Den on the web.',
+      tizen3: 'This TV is viewer-only. Profile administration is not available on this TV.',
+    },
+    {
+      language: 'es',
+      browser:
+        'El cambio de nombre, la eliminación y la creación de perfiles de adulto aún no están disponibles. Se administrarán aquí, en Den en la web.',
+      tv: 'El cambio de nombre, la eliminación y la creación de perfiles de adulto no están disponibles en este televisor. Se administrarán en Den en la web.',
+      tizen3:
+        'Este televisor es solo para visualización. La administración de perfiles no está disponible en este televisor.',
+    },
+    {
+      language: 'sv',
+      browser:
+        'Det går inte att byta namn på, ta bort eller skapa vuxenprofiler ännu. De kommer att hanteras här i Den på webben.',
+      tv: 'Namnbyte, borttagning och skapande av vuxenprofiler är inte tillgängliga på den här TV:n. De kommer att hanteras i Den på webben.',
+      tizen3:
+        'Den här TV:n är endast för visning. Profiladministration är inte tillgänglig på den här TV:n.',
+    },
+  ] as const;
+
+  for (const expected of cases) {
+    await setInterfaceLanguage(expected.language);
+    expect(
+      i18n.phrase(
+        'Rename, delete, and Adult profile creation are not available yet. They will be managed here in Den on the web.',
+      ),
+    ).toBe(expected.browser);
+    expect(
+      i18n.phrase(
+        'Rename, delete, and Adult profile creation are not available on this TV. They will be managed in Den on the web.',
+      ),
+    ).toBe(expected.tv);
+    expect(
+      i18n.phrase('This TV is viewer-only. Profile administration is not available on this TV.'),
+    ).toBe(expected.tizen3);
+  }
+});
+
 it('localizes the reduced-TV download management handoff', async () => {
   const cases = [
     {
