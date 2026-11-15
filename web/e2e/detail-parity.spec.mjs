@@ -557,13 +557,20 @@ test('provider routing retires an old locale answer and keeps failure badges nam
   const spanishGate = new Promise((resolve) => (releaseSpanish = resolve));
   let sawSpanish;
   const spanishStarted = new Promise((resolve) => (sawSpanish = resolve));
+  let sawFailedDirectories;
+  const failedDirectories = new Promise((resolve) => (sawFailedDirectories = resolve));
   const languages = [];
   let failDirectory = false;
+  let directoryFailures = 0;
   await setup(page, {
     answerProviderDirectory: async (route) => {
       const language = new URL(route.request().url()).searchParams.get('language') ?? 'en';
       languages.push(language);
-      if (failDirectory) return route.fulfill({ status: 503, body: 'directory unavailable' });
+      if (failDirectory) {
+        await route.fulfill({ status: 503, body: 'directory unavailable' });
+        if (++directoryFailures === 2) sawFailedDirectories();
+        return;
+      }
       if (language === 'sv-SE') {
         sawSwedish();
         await swedishGate;
@@ -596,6 +603,7 @@ test('provider routing retires an old locale answer and keeps failure badges nam
 
   failDirectory = true;
   await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?language=sv`);
+  await failedDirectories;
   await expect(
     active.getByRole('img', { name: 'Netflix Standard with Ads', exact: true }),
   ).toBeVisible();
