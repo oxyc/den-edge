@@ -21,14 +21,14 @@ Legend:
 | Personal playback and content preferences | Supported for a ready linked profile; local-only mode has a smaller surface | Supported; Visitor values are visit-local | Supported | Supported | Supported | Subset: playback-facing profile controls only |
 | Mobile Visitor profile | **Unavailable**; tracked by [Den #529](https://github.com/oxyc/den/issues/529) | Supported, visit-local | Supported, visit-local | Supported, visit-local | Supported, visit-local | Subset; no household authority |
 | Household administration | Web handoff for complex operations | Subset of remote-practical controls; Web handoff for complex or destructive operations | **Primary supported surface** | Subset plus Web handoff | Subset plus Web handoff | **Unavailable**; Web handoff |
-| Add Kid | Web handoff | Web handoff | Supported | Supported | Supported | **Unavailable**; Web handoff |
+| Add Kid | Supported for the active Owner | Supported for the active Owner | Supported | Supported | Supported | **Unavailable**; no Add Kid handoff is currently rendered |
 | Broader profile lifecycle: rename, delete, or create an adult profile | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable** |
 | Persistent Kid title approvals | Exact-title Web handoff | Exact-title Web handoff | Supported | Web handoff | Web handoff | **Unavailable**; Web handoff |
 | Owner PIN administration | Verify or Web handoff; no duplicate secret editor | Verify or Web handoff | Supported | Supported | Supported | **Unavailable**; Web handoff |
 | Metadata, provider, and Apple TV Access credentials | Web handoff; the installed phone token is not rewritten by Web Access changes | Supported Owner administration | Supported Owner administration | Supported Owner administration | Supported Owner administration | **Unavailable**; no credential-management handoff is currently rendered |
 | Assistant onboarding and consent | List/revoke plus Web handoff | List/revoke plus Web handoff | Supported | Supported | Supported | **Unavailable**; Web handoff; assistant crypto and queues are compiled out |
 | Compound household/profile key reset | Supported native rotation and recovery | Supported native reset and recovery | Supported | Supported | Supported | **Unavailable**; Web handoff; reset crypto is compiled out |
-| SIMKL administration | **Unavailable**; no tracker-administration surface | Legacy Owner supported; persistent Owner uses Web handoff | Supported for the exact active Owner | Supported for the exact active Owner | Supported for the exact active Owner | **Unavailable**; Web handoff; tracker controls and delivery are compiled out |
+| SIMKL administration | Supported for the legacy or exact active Owner; unavailable to Kid and Visitor | Legacy Owner supported; persistent Owner uses Web handoff | Supported for the exact active Owner | Supported for the exact active Owner | Supported for the exact active Owner | **Unavailable**; Web handoff; tracker controls and delivery are compiled out |
 | Trakt administration | **Unavailable** | **Unavailable** | **Unavailable** | **Unavailable** | **Unavailable** | **Unavailable** |
 | History import/export | **Unavailable** | **Unavailable** | Supported | Capability-eligible but device chooser/download behavior is unqualified | Capability-eligible but device chooser/download behavior is unqualified | **Unavailable** |
 
@@ -36,6 +36,11 @@ The tracker rows reflect the authority and handoff contract completed by
 [Den PR #989](https://github.com/oxyc/den/pull/989) and
 [den-edge PR #1286](https://github.com/oxyc/den-edge/pull/1286). They do not claim live-provider or physical-TV
 qualification.
+
+The native Add Kid cells reflect the Owner-only production routes in `MobileProfilesView` /
+`PairedLibrarySession.createKidProfile` and `ProfilesSetupView` / `AddKidProfileView`. They do not imply rename,
+delete, Adult-profile creation, or physical-device qualification. The reduced Tizen 3 package compiles the Add Kid
+form out; its guest-administration handoff is not a profile-creation handoff.
 
 ## Boundaries that must stay visible
 
@@ -56,8 +61,6 @@ qualification.
 The table must not turn an open decision or an unqualified implementation into a supported claim. These original
 parity items remain open:
 
-- [Den #525](https://github.com/oxyc/den/issues/525): which download Retry, Resume, Cancel, Remove, and Play actions
-  belong on each client.
 - [Den #528](https://github.com/oxyc/den/issues/528): physical-device performance qualification for mobile
   next-episode prefetch and continuity.
 - [Den #529](https://github.com/oxyc/den/issues/529): transactional, ephemeral Mobile Visitor support.
