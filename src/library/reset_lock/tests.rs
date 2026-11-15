@@ -1751,18 +1751,19 @@ async fn the_retired_migration_surface_stays_absent_while_the_reset_keeps_its_ow
     let (_, owner_acquired) = acquire_member(&partial, ATTEMPT, OWNER, NEW_OWNER).await;
     let partial_off = Harness::in_dir_with(partial.dir.clone(), |_| {});
     assert_eq!(
-        post_lock(&partial_off, OWNER, profile_request(ATTEMPT, source_of(&partial_off, OWNER).await, NEW_OWNER))
-            .await,
+        post_lock(
+            &partial_off,
+            OWNER,
+            profile_request(ATTEMPT, source_of(&partial_off, OWNER).await, NEW_OWNER)
+        )
+        .await,
         (StatusCode::OK, owner_acquired),
         "a lost partial-member response replays while admission is off"
     );
     for (old, successor) in [(KID1, NEW_KID1), (KID2, NEW_KID2)] {
         assert_eq!(acquire_member(&partial_off, ATTEMPT, old, successor).await.0, StatusCode::OK);
     }
-    assert_eq!(
-        post_lock(&partial_off, HOUSEHOLD, household_request(OTHER, partial_source)).await,
-        absent
-    );
+    assert_eq!(post_lock(&partial_off, HOUSEHOLD, household_request(OTHER, partial_source)).await, absent);
     assert_eq!(abort(&partial_off, ATTEMPT).await.0, StatusCode::OK);
     assert_all_writable(&partial_off).await;
 
@@ -1777,7 +1778,8 @@ async fn the_retired_migration_surface_stays_absent_while_the_reset_keeps_its_ow
         absent
     );
     let toggled_on = enabled(toggled_off.dir.clone());
-    let admitted = post_lock(&toggled_on, HOUSEHOLD, household_request(ATTEMPT, toggled_source.clone())).await;
+    let admitted =
+        post_lock(&toggled_on, HOUSEHOLD, household_request(ATTEMPT, toggled_source.clone())).await;
     assert_eq!(admitted.0, StatusCode::OK);
     let toggled_off_again = Harness::in_dir_with(toggled_on.dir.clone(), |_| {});
     assert_eq!(
@@ -1804,19 +1806,13 @@ async fn the_retired_migration_surface_stays_absent_while_the_reset_keeps_its_ow
     build_old_set(&concurrent).await;
     acquire_all(&concurrent, ATTEMPT).await;
     let concurrent_off = Harness::in_dir_with(concurrent.dir.clone(), |_| {});
-    let (left, right) = tokio::join!(
-        recover(&concurrent_off, RECOVERY, None),
-        recover(&concurrent_off, RECOVERY2, None)
-    );
+    let (left, right) =
+        tokio::join!(recover(&concurrent_off, RECOVERY, None), recover(&concurrent_off, RECOVERY2, None));
     assert_eq!(left.0, StatusCode::OK);
     assert_eq!(right.0, StatusCode::OK);
     let first = lookup(&concurrent_off, HOUSEHOLD, RECOVERY).await.1;
     let second = lookup(&concurrent_off, HOUSEHOLD, RECOVERY2).await.1;
-    let (active, replaced) = if first["state"] == "open" {
-        (RECOVERY, second)
-    } else {
-        (RECOVERY2, first)
-    };
+    let (active, replaced) = if first["state"] == "open" { (RECOVERY, second) } else { (RECOVERY2, first) };
     assert_eq!(replaced["state"], "recovered");
     assert_eq!(replaced["recovery"], active);
     assert_eq!(abort(&concurrent_off, active).await.0, StatusCode::OK);
@@ -1886,10 +1882,7 @@ async fn the_retired_migration_surface_stays_absent_while_the_reset_keeps_its_ow
     assert_eq!(retire(&drain, members[1].0, ATTEMPT, members[1].1).await.0, StatusCode::OK);
     assert_eq!(retire(&drain, members[2].0, ATTEMPT, members[2].1).await.0, StatusCode::OK);
     let drain = Harness::in_dir_with(drain.dir.clone(), |_| {});
-    assert_eq!(
-        retire(&drain, HOUSEHOLD, ATTEMPT, NEW_HOUSEHOLD).await.0,
-        StatusCode::OK
-    );
+    assert_eq!(retire(&drain, HOUSEHOLD, ATTEMPT, NEW_HOUSEHOLD).await.0, StatusCode::OK);
     assert_eq!(lookup(&drain, HOUSEHOLD, ATTEMPT).await.1["state"], "retired");
     let metrics = drain.state.metrics.render();
     assert!(metrics.contains("den_edge_profile_reset_live{phase=\"retiring\"} 0"), "{metrics}");
@@ -1937,10 +1930,7 @@ async fn the_retired_migration_surface_stays_absent_while_the_reset_keeps_its_ow
     for (old, successor) in members.into_iter().skip(1) {
         assert_eq!(retire(&recovery_off, old, RECOVERY, successor).await.0, StatusCode::OK);
     }
-    assert_eq!(
-        retire(&recovery_off, HOUSEHOLD, RECOVERY, NEW_HOUSEHOLD).await.0,
-        StatusCode::OK
-    );
+    assert_eq!(retire(&recovery_off, HOUSEHOLD, RECOVERY, NEW_HOUSEHOLD).await.0, StatusCode::OK);
 }
 
 #[test]

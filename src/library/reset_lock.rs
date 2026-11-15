@@ -672,10 +672,7 @@ async fn source(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     let store = tri!(target_store(state, id, token_hash, &set, &mut guards).await);
     let owned_id = id.to_owned();
     let (source, _) = tri!(blocking("exclusive source", move || observed(&owned_id, store.as_ref())).await);
-    json_reply(
-        StatusCode::OK,
-        &json!({ "source": source, "newAttempt": state.profile_reset_enabled }),
-    )
+    json_reply(StatusCode::OK, &json!({ "source": source, "newAttempt": state.profile_reset_enabled }))
 }
 
 /// Whether exclusive retirement headers name a surface that existed before the operator disabled new admission.
@@ -874,7 +871,8 @@ async fn post(state: &AppState, id: &str, token_hash: [u8; 32], request: Request
     // and an exact same-library replay was returned above. The pure model below still verifies the member declaration,
     // source, successor and attempt before it commits anything.
     let continuing_member = if !state.profile_reset_enabled && acquire && body.role == Role::Profile {
-        let household = tri!(peer_or_500(state, household_id.as_deref().expect("profile household checked")).await);
+        let household =
+            tri!(peer_or_500(state, household_id.as_deref().expect("profile household checked")).await);
         match household.store {
             Some(store) => match tri!(read_record(&store).await) {
                 Some((record, _)) => record.role == Role::Household && record.attempt == body.attempt,

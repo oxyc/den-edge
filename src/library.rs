@@ -810,21 +810,20 @@ pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
     } else {
         false
     };
-    let exclusive_retire =
-        if retirement_route {
-            match reset_lock::retire_headers(req.headers()) {
-                Ok(headers) => headers,
-                Err(()) => {
-                    return with_wire_headers(
-                        state,
-                        json_reply(StatusCode::BAD_REQUEST, &error("bad_request")),
-                        protocol.as_ref(),
-                    );
-                }
+    let exclusive_retire = if retirement_route {
+        match reset_lock::retire_headers(req.headers()) {
+            Ok(headers) => headers,
+            Err(()) => {
+                return with_wire_headers(
+                    state,
+                    json_reply(StatusCode::BAD_REQUEST, &error("bad_request")),
+                    protocol.as_ref(),
+                );
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
     if let Some((attempt, successor)) = &exclusive_retire {
         let response =
             reset_lock::retire(state, id, token_hash, attempt, successor, sent_generation.as_deref()).await;
