@@ -1079,7 +1079,7 @@ test('Owner title access distinguishes wrong PIN from retryable save failure and
   }
 });
 
-test('a held title approval cannot close or publish into its replacement dialog', async () => {
+test('a held title approval cannot close or show an error in its replacement dialog', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });

@@ -6,6 +6,7 @@ import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProt
 import { legacyProfileIdentity } from './profileIdentity';
 import {
   allowsImplicitAssistant,
+  finishKidTitleApprovalPresentation,
   householdAdministration,
   profileMarkerPresent,
   ProfileModeCoordinator,
@@ -51,6 +52,23 @@ const capabilityResponse = (body: string, status = 200, cacheControl = 'no-store
 
 const switchToKid = (coordinator: ProfileModeCoordinator, pin?: string) =>
   coordinator.switchToPersistent(coordinator.choices.find(({ role }) => role === 'kid')!.id!, pin);
+
+describe('Kid title-approval presentation', () => {
+  it('publishes success only for the exact request that started the write', () => {
+    const request = {};
+    const replacement = {};
+    const publish = vi.fn();
+
+    expect(
+      finishKidTitleApprovalPresentation(request, replacement, { outcome: 'saved' }, publish),
+    ).toEqual({ outcome: 'superseded' });
+    expect(publish).not.toHaveBeenCalled();
+    expect(
+      finishKidTitleApprovalPresentation(request, request, { outcome: 'saved' }, publish),
+    ).toEqual({ outcome: 'saved' });
+    expect(publish).toHaveBeenCalledOnce();
+  });
+});
 
 function storageEvent(key: string): Event {
   const event = new Event('storage');

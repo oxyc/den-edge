@@ -116,7 +116,10 @@
     WatchlistView,
   } from './lib/libraryServiceProtocol';
   import { OverviewTitleIndex, titleViewRows } from './lib/libraryViewPresentation';
-  import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
+  import {
+    finishKidTitleApprovalPresentation,
+    type ProfileModeCoordinator,
+  } from './lib/profileModeCoordinator.svelte';
   import KidTitleAccessDialog from './components/KidTitleAccessDialog.svelte';
   import {
     airedThrough,
@@ -2952,8 +2955,7 @@
       request.allow,
       pin,
     );
-    if (kidAccessRequest !== request) return { outcome: 'superseded' };
-    if (result.outcome === 'saved')
+    return finishKidTitleApprovalPresentation(request, kidAccessRequest, result, () =>
       session.notify(
         request.allow
           ? i18n.format('notice.allowedForChild', 'Allowed “{title}” for {name}', {
@@ -2964,8 +2966,8 @@
               title: request.title.title,
               name: request.kid.name,
             }),
-      );
-    return result;
+      ),
+    );
   }}
 />
 
