@@ -91,6 +91,23 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Exact-current Owner PIN replacement/removal (#1145) was measured on matched production builds at base
+  `7fff9db5` and source `9509c5ab`. Ordinary Browser startup moves 206,062 → 206,132 gzip bytes (+70), while the
+  complete graph moves 890,492 → 892,313 (+1,821). Independently lazy Spanish/Swedish catalogs account for +418,
+  leaving the non-translation graph 840,831 → 842,234 (+1,403). WebOS startup moves 241,848 → 242,251 and its
+  non-translation graph 940,936 → 942,769 (+1,833); supported Tizen moves 242,580 → 242,898 and 1,261,627 →
+  1,263,272 (+1,645). Reduced Tizen 3 compiles the editor and its content-provider dependencies out while retaining
+  the fixed supported-browser handoff: startup moves 193,377 → 193,381 (+4), the complete non-translation graph
+  2,354,772 → 2,346,492 (-8,280 gzip), and the raw JS/CSS graph 8,349,411 → 8,323,703 (-25,708 bytes).
+  The PIN form remains in the existing lazy Settings chunk and the ES/SV copy remains independently catalog-lazy.
+  The protocol-version gate, exact-row compare-and-swap, current-PIN authentication, serialized profile-topology
+  guard and durable replay prevention must stay with the shared Worker that owns the row; another split would add an
+  authority request or duplicate the admission state before Settings can recover. The change adds no dependency,
+  polling, timer, cache, background task, provider call or healthy-path extra network round trip. One explicit
+  submit remains one library command and, on success, one settings-row write. The startup ceiling advances from
+  9,728 to 9,856, the smallest 128-byte boundary containing the 9,736-byte matched graph (120-byte margin); the
+  complete non-translation ceiling advances from 115,072 to 116,480, containing 116,444 with 36 bytes of margin.
+  The separate translation ceiling remains 51,200 with 1,121 bytes of margin.
 - Truthful assistant recovery and the reduced-Tizen Web handoff (#1278/#1204) were measured on matched production
   builds at base `92e5aae9` and head `1082574e`. Ordinary browser startup moves 206,041 → 206,062 gzip bytes
   (+21), while the complete graph moves 888,421 → 890,492 and its independently lazy Spanish/Swedish catalogs
