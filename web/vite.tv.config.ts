@@ -496,7 +496,12 @@ export default mergeConfig(
       ...(e2e
         ? {
             rolldownOptions: {
-              input: ['index.html', 'test/player.html', 'test/detail-parity.html'],
+              input: [
+                'index.html',
+                'test/player.html',
+                'test/detail-parity.html',
+                'test/profile-mode.html',
+              ],
             },
           }
         : {}),

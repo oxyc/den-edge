@@ -225,49 +225,6 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     await tv.getByRole('button', { name: 'Use Kids' }).click();
     const tvKid = tv.getByRole('button', { name: 'Switch profile, current Kids' });
     await expect(tvKid).toBeVisible({ timeout: 30_000 });
-    if (process.env.DEN_TIZEN_VERSION === '3.0') {
-      await tv.goto(`${E2E_ORIGIN}/settings`);
-      await tv.getByLabel('Owner PIN').fill('1234');
-      const profileContentHandoff = tv.getByRole('button', {
-        name: 'Manage profile content in a supported browser Profile content administration is not available on this TV',
-      });
-      await expect(profileContentHandoff).toBeVisible();
-      await profileContentHandoff.focus();
-      await tv.keyboard.press('Enter');
-      await expect(
-        tv.getByText(
-          'On a phone or computer linked to this household, switch to this profile and open Den › Settings › Content.',
-          { exact: true },
-        ),
-      ).toBeVisible();
-      await expect(tv.getByText(`${E2E_ORIGIN}/settings#content`, { exact: true })).toBeVisible();
-      await expect(tv.getByRole('button', { name: 'Hidden genres' })).toHaveCount(0);
-      await tv.goto(E2E_ORIGIN);
-      await expect(tvKid).toBeVisible({ timeout: 30_000 });
-      await tvKid.click();
-      await tv.getByRole('button', { name: 'Use Visitor' }).click();
-      const tvVisitor = tv.getByRole('button', { name: 'Switch profile, current Visitor' });
-      await expect(tvVisitor).toBeVisible({ timeout: 30_000 });
-      await tv.goto(`${E2E_ORIGIN}/settings`);
-      const visitorContentNotice = tv.getByRole('button', {
-        name: 'Visitor content preferences are unavailable on this TV Visitor preferences stay on the device where that visit was created',
-      });
-      await expect(visitorContentNotice).toBeVisible();
-      await visitorContentNotice.focus();
-      await tv.keyboard.press('Enter');
-      await expect(
-        tv.getByText(
-          'Use this TV for playback, or end the Visitor visit and choose a household profile. Nothing is changed.',
-          { exact: true },
-        ),
-      ).toBeVisible();
-      await expect(tv.getByText(`${E2E_ORIGIN}/settings#content`, { exact: true })).toHaveCount(0);
-      await tv.goto(E2E_ORIGIN);
-      await expect(tvVisitor).toBeVisible({ timeout: 30_000 });
-      await tvVisitor.click();
-      await tv.getByRole('button', { name: 'Use Kids' }).click();
-      await expect(tvKid).toBeVisible({ timeout: 30_000 });
-    }
     holdEligibility = true;
     eligibilitySeen = new Promise((resolve) => (eligibilityStarted = resolve));
     eligibilityGate = new Promise((resolve) => (releaseEligibility = resolve));
