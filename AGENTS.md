@@ -92,7 +92,7 @@ everything the committed code imports is committed too.
 ## Bundle budget records
 
 - Exact-current Owner PIN replacement/removal (#1145) was measured on matched production builds at base
-  `7fff9db5` and source `5d5322b3`. Ordinary Browser startup moves 206,062 → 206,150 gzip bytes (+88), while the
+  `7fff9db5` and production source `d0fa72a4`. Ordinary Browser startup moves 206,062 → 206,150 gzip bytes (+88), while the
   complete graph moves 890,492 → 892,631 (+2,139). Independently lazy Spanish/Swedish catalogs account for +707,
   leaving the non-translation graph 840,831 → 842,263 (+1,432). WebOS startup moves 241,848 → 242,284 and its
   non-translation graph 940,936 → 942,859 (+1,923); supported Tizen moves 242,580 → 242,903 and 1,261,627 →
