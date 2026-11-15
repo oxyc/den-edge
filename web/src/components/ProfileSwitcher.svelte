@@ -110,6 +110,12 @@
     kidFormFailed = false;
   }
 
+  async function closeKidFormForUser() {
+    closeKidForm();
+    await tick();
+    dialog?.querySelector<HTMLButtonElement>('.add-kid')?.focus({ preventScroll: true });
+  }
+
   async function beginKidCreation() {
     if (busy || !canOfferKidCreation || !loadAddKidProfileForm) return;
     kidFormFailed = false;
@@ -326,7 +332,7 @@
       <AddKidProfileForm
         {profiles}
         oncreated={(choice) => void kidCreated(choice)}
-        onclose={closeKidForm}
+        onclose={() => void closeKidFormForUser()}
         onbusy={(value) => (kidBusy = value)}
       />
     {:else if kidFormLoading}

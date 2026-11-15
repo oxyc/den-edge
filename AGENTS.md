@@ -211,8 +211,8 @@ everything the committed code imports is committed too.
   that contains the matched build, retaining 1 byte; the independent startup and translation ceilings remain
   unchanged.
 - Owner-only Kid creation for Browser, LG/webOS and supported Samsung/Tizen (#940) was measured after rebasing on
-  exact PR parent `c047e499`. Startup moves 203,986 → 206,089 gzip bytes (+2,103), the complete non-translation graph
-  moves 832,558 → 836,943 (+4,385), and the independently lazy Spanish/Swedish catalogs move 47,389 → 48,022
+  exact PR parent `c047e499`. Startup moves 203,986 → 206,114 gzip bytes (+2,128), the complete non-translation graph
+  moves 832,558 → 836,991 (+4,433), and the independently lazy Spanish/Swedish catalogs move 47,389 → 48,022
   (+633). The new form is already a separate 2,059-byte gzip JS/CSS chunk fetched
   only after an active Owner chooses Add Kid; the reduced Tizen 3 build compiles that import out and contains no
   AddKidProfileForm chunk. The remaining growth is the eagerly mounted profile switcher's localized loading/failure
@@ -222,10 +222,12 @@ everything the committed code imports is committed too.
   them behind the form would make admission/reload recovery depend on a second authority implementation or expose
   private coordinator state, while another form split would add a request without reducing the complete graph.
   Test fixtures do not ship. No dependency, polling, background task or healthy-path request was added; one create
-  task runs only after explicit Owner PIN submission, and one resume task runs only when Add Kid opens. The existing
+  task runs only after explicit Owner PIN submission, and one resume task runs only when Add Kid opens. The final
+  25-byte startup and 48-byte complete-graph increments restore remote focus after Back/Cancel; that code must stay
+  beside the eagerly mounted switcher because the lazy form is already gone when focus is repaired. The existing
   startup margin absorbs 182 bytes, so its ceiling advances to the next 128-byte boundary, 9,728 over baseline,
-  retaining 35 bytes. The complete-graph margin absorbs 33 bytes and its ceiling advances to 111,232 over baseline,
-  retaining 79. The fixed 51,200-byte translation ceiling remains unchanged with 3,178 bytes of margin.
+  retaining 10 bytes. The complete-graph margin absorbs 33 bytes and its ceiling advances to 111,232 over baseline,
+  retaining 31. The fixed 51,200-byte translation ceiling remains unchanged with 3,178 bytes of margin.
 
 ## Testing
 

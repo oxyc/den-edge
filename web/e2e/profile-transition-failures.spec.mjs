@@ -304,6 +304,19 @@ test('real Worker/Vault creates an additional Kid only after Owner PIN proof and
   await expect(sam).toBeFocused();
   expect(edge.libraries.size).toBe(before.length + 1);
 
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.denProfileTaskOperations.filter(({ kind }) => kind === 'profile.create.ack')
+            .length,
+      ),
+    )
+    .toBe(1);
+  await dialog.getByRole('button', { name: 'Add Kid' }).click();
+  await expect(page.getByLabel('Kid name')).toHaveValue('');
+  await page.getByRole('button', { name: 'Back to profiles' }).click();
+
   await sam.click();
   await expect(page.getByRole('button', { name: 'Switch profile, current Sam' })).toBeVisible({
     timeout: 30_000,

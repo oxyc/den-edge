@@ -1030,6 +1030,23 @@ test('Owner creates a selectable Kid after wrong-PIN and transient recovery', as
   await expect(page.locator('[data-mode]')).toHaveText('Kids active');
 });
 
+test('leaving Add Kid restores remote focus to its entry point', async ({ page }) => {
+  await openRealOwner(page);
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  const addKid = dialog.getByRole('button', { name: 'Add Kid' });
+
+  await addKid.click();
+  await expect(page.getByLabel('Kid name')).toBeFocused();
+  await page.getByRole('button', { name: 'Back to profiles' }).click();
+  await expect(addKid).toBeFocused();
+
+  await addKid.click();
+  await expect(page.getByLabel('Kid name')).toBeFocused();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(addKid).toBeFocused();
+});
+
 test('a lost create reply retries the same durable Kid instead of allocating twice', async ({
   page,
 }) => {

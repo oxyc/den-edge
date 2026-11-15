@@ -1984,8 +1984,14 @@ describe('additional Kid creation authority', () => {
       await vi.waitFor(() => expect(createKidProfile).toHaveBeenCalledOnce());
 
       if (replacement === 'session') {
-        await expect(harness.coordinator.switchToVisitor()).resolves.toMatchObject({
-          outcome: 'success',
+        const previous = harness.coordinator.session;
+        const next = structuredClone(harness.view);
+        const ownerProfile = next.profiles.find((profile) => profile.role === 'owner')!;
+        ownerProfile.approvals = [{ type: 'movie', id: 7 }];
+        harness.coordinator.updateDirectory(profileDirectoryChoices(next)!);
+        await vi.waitFor(() => {
+          expect(harness.coordinator.mode).toBe('owner');
+          expect(harness.coordinator.session).not.toBe(previous);
         });
       } else {
         const next = structuredClone(harness.view);
