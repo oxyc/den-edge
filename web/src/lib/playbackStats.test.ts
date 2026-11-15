@@ -48,6 +48,7 @@ describe('watchPlayback', () => {
       duration: 600,
       error: null,
       buffered: ranges([0, 30]),
+      played: ranges([0, until]),
       getVideoPlaybackQuality: () => ({ totalVideoFrames: frames, droppedVideoFrames: 0 }),
     }) as unknown as HTMLVideoElement & { currentTime: number };
     let clock = 0;
@@ -204,6 +205,29 @@ describe('PlaybackRecorder', () => {
     recorder.seeked(-1);
     recorder.seeked(900);
     expect(recorder.seeks).toEqual([2, 1_020, 900]);
+  });
+
+  it('does not hold a short stall in the opening seconds against the link, but every other stall', () => {
+    const recorder = new PlaybackRecorder('hls.js', 'x');
+    const at = (s: number) => ({
+      at: s,
+      kind: 'wait' as const,
+      videoAhead: null,
+      audioAhead: null,
+      ...noRequests,
+    });
+    recorder.stalled(0, at(2), true);
+    recorder.resumed(1_400);
+    expect(recorder.linkStalls(), 'early and 1.4 s').toBe(0);
+    recorder.stalled(2_000, at(4), true);
+    recorder.resumed(4_500);
+    expect(recorder.linkStalls(), 'early but 2.5 s').toBe(1);
+    recorder.stalled(10_000, at(120), false);
+    recorder.resumed(10_100);
+    expect(recorder.linkStalls(), 'short but mid-play').toBe(2);
+    recorder.stalled(20_000, at(5), true);
+    expect(recorder.linkStalls(), 'early and still under way').toBe(3);
+    expect(recorder.liveStalls(20_000).stallCount, 'the report counts every one').toBe(4);
   });
 
   it('sums the playing time spent idling on a low buffer', () => {

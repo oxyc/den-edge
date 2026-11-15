@@ -35,7 +35,7 @@ export const CONTENT_SERVICE_WIRE_LIMITS = {
   cursor: 128,
 } as const;
 
-/** Which intended-audience evidence Kid discovery accepts (den-atlas `kidAudience`). */
+/** Which intended-audience evidence Kid discovery and direct admission accept (den-atlas `kidAudience`). */
 export type ContentKidAudience = 'child' | 'child-or-teen';
 
 /**
@@ -46,7 +46,7 @@ export type ContentKidAudience = 'child' | 'child-or-teen';
 export interface ContentPolicy {
   maximumAge: number | null;
   unknownRatings: 'allow' | 'block';
-  /** Present for a Kid only: the audience-relevance gate on browse, search and recommendations. */
+  /** Present for a Kid only: the audience-relevance gate on discovery, recommendations and direct reads. */
   kidAudience?: ContentKidAudience;
   /** The viewer's ISO 3166-1 region, part of atlas' cache identity. */
   region?: string;

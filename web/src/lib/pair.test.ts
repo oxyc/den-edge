@@ -205,10 +205,25 @@ function relay(secret: string, approve = true) {
 
 /** den-edge's relay, in memory: `new` mints a nameplate for the host's sid, `open` trades it back, slots are
     write-once and answer 202 until written. */
+/** The longest one poll of the fake relay waits for the other side, in real milliseconds. */
+const RECHECK_MS = 10;
+
+/**
+ * den-edge's pairing relay, in memory. Its `wait` is the poll between reads, and it lasts until the other side moves —
+ * writes a slot or ends the session — rather than a fixed number of event-loop turns: a side's ten minutes of polls
+ * were 600 turns, which a loaded runner's CPace step could outlast, failing a pairing that real time would not.
+ */
 function fakeEdge(nameplate = 'ABCD') {
   const slots = new Map<string, string>();
   const inbox: string[] = [];
   let sid = '';
+  let ended = false;
+  let waiting: (() => void)[] = [];
+  const moved = () => {
+    const now = waiting;
+    waiting = [];
+    for (const resolve of now) resolve();
+  };
   const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status });
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -228,27 +243,39 @@ function fakeEdge(nameplate = 'ABCD') {
       const messages = inbox.splice(0).map((sealed) => ({ sealed }));
       return json(200, { messages });
     }
+    if (url === `/pair/${sid}` && init?.method === 'DELETE') {
+      ended = true;
+      moved();
+      return json(200, {});
+    }
     const slot = url.startsWith(`/pair/${sid}/`) ? url.slice(`/pair/${sid}/`.length) : null;
     if (!slot) return json(404, {});
+    if (ended) return json(410, {});
     if (init?.method === 'PUT') {
       if (slots.has(slot)) return json(409, {});
       slots.set(slot, body.m ?? '');
+      moved();
       return json(200, { written: true });
     }
     const m = slots.get(slot);
     return m === undefined ? json(202, { status: 'pending' }) : json(200, { m });
   };
-  return fetchImpl;
+  // At most RECHECK_MS too: a write that lands between a side's pending read and its wait would otherwise be missed.
+  const wait = () =>
+    new Promise<void>((resolve) => {
+      waiting.push(resolve);
+      setTimeout(resolve, RECHECK_MS);
+    });
+  return Object.assign(fetchImpl, { wait });
 }
 
 describe('hosting a pairing', () => {
   /** Both sides at once, as two browsers are: the host shows a code, the joiner types it. */
   async function pairThem(allow: (joiner: string) => Promise<boolean>, fetchImpl = fakeEdge()) {
     const libraryKey = new Uint8Array(32).fill(7);
-    // A poll that yields a turn of the event loop, not a no-op: the two sides take turns here as two browsers do, and
-    // a side that never yields spends its whole ten minutes of polls before the other writes a thing. No wall-clock
-    // time passes: a refused joiner polls out its session's ten minutes without the test waiting them.
-    const wait = () => new Promise<void>((resolve) => setImmediate(resolve));
+    // A poll lasts until the other side moves (`fakeEdge`): the two take turns as two browsers do, and a refused
+    // joiner learns at once that the host ended the session.
+    const { wait } = fetchImpl;
     let give: (code: string) => void = () => undefined;
     const code = new Promise<string>((resolve) => (give = resolve));
     const hosted = pair.host({
@@ -321,7 +348,7 @@ describe('hosting a pairing', () => {
 describe('TV-initiated pairing', () => {
   it('lets a scanned phone give its library and guest ticket to the waiting TV', async () => {
     const fetchImpl = fakeEdge();
-    const wait = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const { wait } = fetchImpl;
     const libraryKey = new Uint8Array(32).fill(9);
     const ticket = '1234abcd.ABCDEFGHJKLMNPQRSTUVWX';
     let show: (code: string) => void = () => undefined;

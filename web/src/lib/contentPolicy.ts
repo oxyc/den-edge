@@ -39,7 +39,7 @@ export function failsClosed(policy: ContentPolicy | undefined): policy is Conten
   return !!policy && (policy.unknownRatings === 'block' || !!policy.kidAudience);
 }
 
-/** Whether the policy limits what a direct request (detail, play, download) may open; the audience gate does not. */
+/** Whether the numeric age/unknown-rating rule limits a title; full direct admission applies the audience gate too. */
 export function isAgeRestricted(policy: ContentPolicy | undefined): policy is ContentPolicy {
   return !!policy && (policy.maximumAge !== null || policy.unknownRatings === 'block');
 }

@@ -21,6 +21,10 @@ export const MAX_REPORTS = 3;
 export const FROZEN_SECS = 3;
 /** Video seconds ahead below which a player that fetches nothing is counted as idling on a low buffer. */
 export const LOW_BUFFER_SECS = 10;
+/** Seconds of playing within which a stall counts as the start settling (`linkStalls`), when it is short. */
+export const EARLY_PLAYED_SECONDS = 10;
+/** The longest a stall in the opening seconds may last and still not count against the link. */
+export const EARLY_STALL_MS = 2_000;
 /** hls.js's own names for playback stopping on the buffer, or jumping a hole in it. */
 const STALL_DETAILS = new Set(['bufferStalledError', 'bufferSeekOverHole', 'bufferNudgeOnStall']);
 
@@ -127,7 +131,9 @@ export class PlaybackRecorder {
   private stalls: Stall[] = [];
   private stallCount = 0;
   private stalledMs = 0;
-  private open: { stall: Stall; since: number } | undefined;
+  private open: { stall: Stall; since: number; early: boolean } | undefined;
+  /** Stalls in the opening seconds that ended within EARLY_STALL_MS (`linkStalls`). */
+  private earlyShort = 0;
   private errors: PlaybackStats['errors'] = [];
   private idleLowMs = 0;
   /** `[count, total ms, longest ms]` of seeks, each from `seeking` to `seeked`. */
@@ -161,14 +167,25 @@ export class PlaybackRecorder {
     if (end > first) this.rates.push((bytes * 8) / (end - first));
   }
 
-  /** Playback stopped at `now`. False when it was already stopped: one stall, however many signals say so. */
-  stalled(now: number, stall: Omit<Stall, 'ms'>): boolean {
+  /**
+   * Playback stopped at `now`; `early`: within EARLY_PLAYED_SECONDS of playing. False when it was already stopped:
+   * one stall, however many signals say so.
+   */
+  stalled(now: number, stall: Omit<Stall, 'ms'>, early = false): boolean {
     if (this.open) return false;
     this.stallCount += 1;
     const entry: Stall = { ...stall, ms: null };
     if (this.stalls.length < MAX_STALLS) this.stalls.push(entry);
-    this.open = { stall: entry, since: now };
+    this.open = { stall: entry, since: now, early };
     return true;
+  }
+
+  /**
+   * The stalls that speak against the link: all of them, less those in the opening seconds that cleared within
+   * EARLY_STALL_MS — a player settling into its first fragments, which nearly every start has whatever the link.
+   */
+  linkStalls(): number {
+    return this.stallCount - this.earlyShort;
   }
 
   /** The stall under way, if any. */
@@ -192,6 +209,7 @@ export class PlaybackRecorder {
     const ms = Math.round(now - this.open.since);
     this.open.stall.ms = ms;
     this.stalledMs += ms;
+    if (this.open.early && ms < EARLY_STALL_MS) this.earlyShort += 1;
     this.open = undefined;
   }
 
@@ -491,7 +509,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
   ) => {
     if (stopped || !started || video.seeking) return;
     const stalled = { at: tenth(at), kind, ...buffered, ...requests() };
-    if (recorder.stalled(now(), stalled)) schedule.stall();
+    const early = playedSecondsOf(video.played) < EARLY_PLAYED_SECONDS;
+    if (recorder.stalled(now(), stalled, early)) schedule.stall();
   };
 
   const on = <K extends keyof HTMLMediaElementEventMap>(type: K, listener: () => void) =>
@@ -589,7 +608,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
           bps,
           fragments,
           playedSeconds: playedSecondsOf(video.played),
-          stalls: recorder.liveStalls(now()).stallCount,
+          stalls: recorder.linkStalls(),
         });
       schedule.end();
       stopped = true;

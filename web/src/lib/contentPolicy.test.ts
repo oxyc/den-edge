@@ -100,7 +100,7 @@ describe('ageAllowed (den-core)', () => {
     await expect(ageAllowed(ceilinged, null)).resolves.toBe(true);
     await expect(ageAllowed(ceilinged, 17)).resolves.toBe(false);
     await expect(ageAllowed(undefined, 18)).resolves.toBe(true);
-    // The audience gate is discovery's; a direct request is age policy only.
+    // This helper answers only the numeric age rule; ContentAuthority applies the audience gate to direct reads.
     await expect(
       ageAllowed({ maximumAge: null, unknownRatings: 'allow', kidAudience: 'child' }, 18),
     ).resolves.toBe(true);

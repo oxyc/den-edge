@@ -1,7 +1,10 @@
 // Holding a copy's start until it can play through (`prebuffer` in the session answer), with an honest countdown.
 
-/** The longest any start is held: den-remux ranks a copy that needs more below a transcode, and this is the cap. */
-export const MAX_HOLD_SECS = 30;
+/**
+ * The longest any start is held: den-remux's `LONG_PREBUFFER`, past which it ranks a copy below a transcode. A wait at
+ * the start is the price of a better picture that then plays through.
+ */
+export const MAX_HOLD_SECS = 60;
 /** Holds shorter than this show no countdown: a moment, not a wait to explain. */
 export const COUNTDOWN_FROM_SECS = 3;
 /** A buffer that has stood still this long won't grow however long the start is held: it lets go. */

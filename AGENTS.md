@@ -107,6 +107,14 @@ everything the committed code imports is committed too.
   another budget change. Preserving that typed failure through the lazy Detail screen and adding its translated,
   accessible recovery presentation then moves startup to 203,809 and the complete non-translation graph to 101,495,
   retaining 6 and 9 respectively; the separately excluded translation chunks move 46,350 → 46,397 gzip bytes.
+  After merging current main's Remux link learning and 60-second start hold, the matched combined production build
+  measures startup at 203,797 (baseline delta 7,401, 18-byte margin) and the complete non-translation graph at
+  101,667. Compared with the pre-merge Kid head, startup shrinks by 12 bytes and the complete graph grows by 172;
+  translations remain 46,397. The admission-sentinel consolidation and rejected wire-mapping/ternary experiments
+  above remain the smallest safe implementation, while the isolation gate's complete-graph accounting means moving
+  either the Worker admission or the existing Remux/playback code across a lazy boundary cannot reduce this total
+  and would add an authorization- or playback-critical request. The ceiling therefore advances one 128-byte step
+  from current main's 101,632 to 101,760, retaining 93 bytes on the combined build.
 
 ## Testing
 
