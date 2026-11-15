@@ -4,6 +4,7 @@
   import Button from './Button.svelte';
   import PinInput from './PinInput.svelte';
   import { i18n } from '../lib/i18n.svelte';
+  import type { KidTitleApprovalChangeResult } from '../lib/profileModeCoordinator.svelte';
 
   let {
     request,
@@ -11,32 +12,44 @@
     onclose,
   }: {
     request: { kid: { id: string; name: string }; title: Title; allow: boolean } | null;
-    onconfirm: (pin: string) => Promise<boolean>;
+    onconfirm: (pin: string) => Promise<KidTitleApprovalChangeResult>;
     onclose: () => void;
   } = $props();
   let dialog = $state<HTMLDialogElement>();
   let pin = $state('');
   let busy = $state(false);
-  let denied = $state(false);
+  let problem = $state<'denied' | 'failed' | null>(null);
+  let requestGeneration = 0;
+  let shownRequest: typeof request = null;
 
   $effect(() => {
-    if (request && !dialog?.open) {
+    const current = request;
+    requestGeneration += 1;
+    busy = false;
+    if (current !== shownRequest) {
+      shownRequest = current;
       pin = '';
-      denied = false;
+      problem = null;
+    }
+    if (current && !dialog?.open) {
       dialog?.showModal();
-    } else if (!request && dialog?.open) dialog.close();
+    } else if (!current && dialog?.open) dialog.close();
   });
 
   async function submit() {
     if (!/^\d{4}$/.test(pin) || busy) return;
+    const expectedRequest = request;
+    const expectedGeneration = requestGeneration;
     busy = true;
-    denied = false;
-    const saved = await onconfirm(pin);
+    problem = null;
+    const result = await onconfirm(pin);
+    if (request !== expectedRequest || requestGeneration !== expectedGeneration || !dialog?.open)
+      return;
     busy = false;
-    pin = '';
-    if (saved) close();
+    if (result.outcome === 'saved' || result.outcome === 'superseded') close();
     else {
-      denied = true;
+      problem = result.outcome;
+      if (result.outcome === 'denied') pin = '';
       await tick();
       dialog?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true });
     }
@@ -86,12 +99,14 @@
         label="Owner PIN"
         bind:value={pin}
         focusOnMount
-        invalid={denied}
-        onvalue={() => (denied = false)}
+        invalid={problem === 'denied'}
+        onvalue={() => (problem = null)}
         oncomplete={() => void submit()}
       />
-      {#if denied}<p class="bad" role="alert">
-          That PIN didn’t match, or the change couldn’t be saved.
+      {#if problem}<p class="bad" role="alert">
+          {problem === 'denied'
+            ? i18n.phrase('That PIN didn’t match.')
+            : i18n.phrase('Couldn’t save Kid access. Try again.')}
         </p>{/if}
       <div class="actions">
         <Button

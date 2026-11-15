@@ -2943,14 +2943,14 @@
   onclose={() => (kidAccessRequest = null)}
   onconfirm={async (pin) => {
     const request = kidAccessRequest;
-    if (!request || !profiles) return false;
-    const saved = await profiles.setKidTitleApproval(
+    if (!request || !profiles) return { outcome: 'superseded' };
+    const result = await profiles.setKidTitleApproval(
       request.kid.id,
       { type: request.title.type, id: request.title.id },
       request.allow,
       pin,
     );
-    if (saved)
+    if (result.outcome === 'saved')
       session.notify(
         request.allow
           ? i18n.format('notice.allowedForChild', 'Allowed “{title}” for {name}', {
@@ -2962,7 +2962,7 @@
               name: request.kid.name,
             }),
       );
-    return saved;
+    return result;
   }}
 />
 
@@ -3041,6 +3041,11 @@
     ceiling={detailPrefs.ceiling}
     onepisode={markEpisodeSeen}
     shown={relatedShown}
+    kidTitleAccessHandoff={__DEN_TV__ &&
+    profiles?.mode === 'owner' &&
+    profiles.choices.some((choice) => choice.role === 'kid' && choice.id)
+      ? `https://d.oxy.fi/${page.type}/${page.id}`
+      : undefined}
   />
 {:else if route.page === 'person' && !PersonScreen.current}
   <ScreenLoading screen={PersonScreen} />

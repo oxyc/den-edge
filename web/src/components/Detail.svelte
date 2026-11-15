@@ -97,6 +97,7 @@
     address,
     playRequest,
     trailerRequested = false,
+    kidTitleAccessHandoff,
   }: {
     ref: { type: MediaType; id: number };
     /**
@@ -108,6 +109,8 @@
     playRequest?: { season?: number; episode?: number; filename?: string };
     /** Address-bar intent from an exact trailer link opened directly or in another tab. */
     trailerRequested?: boolean;
+    /** Exact public route a TV names for browser-only persistent Kid title administration. */
+    kidTitleAccessHandoff?: string;
     active?: boolean;
     reel?: string | null;
     routes?: Routes;
@@ -1305,6 +1308,7 @@
                   // describe. Built from the route rather than from wherever this page happens to be open.
                   url: `${__DEN_TV_WEB_ORIGIN__ || location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
                 }}
+            {kidTitleAccessHandoff}
           />
         </div>
       </div>

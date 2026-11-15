@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
+import { LibraryServiceError } from './libraryServiceClient';
 import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProtocol';
 import { legacyProfileIdentity } from './profileIdentity';
 import {
@@ -2064,6 +2065,79 @@ describe('additional Kid creation authority', () => {
     });
     expect(acknowledgeKidProfile).toHaveBeenCalledOnce();
     expect(acknowledgeKidProfile).toHaveBeenCalledWith('create-sam', 'create-sam:ack');
+    harness.coordinator.dispose();
+  });
+
+  it('distinguishes a wrong PIN from a retryable Kid title-access failure', async () => {
+    const harness = await activeOwner();
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    const setKidTitleApproval = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new LibraryServiceError({ code: 'unauthorized', message: 'wrong PIN', retryable: false }),
+      )
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockResolvedValueOnce('changed');
+    Object.assign(harness.householdModel, { setKidTitleApproval });
+
+    await expect(
+      harness.coordinator.setKidTitleApproval(kid.id, { type: 'movie', id: 550 }, true, '0000'),
+    ).resolves.toEqual({ outcome: 'denied' });
+    await expect(
+      harness.coordinator.setKidTitleApproval(kid.id, { type: 'movie', id: 550 }, true, '1234'),
+    ).resolves.toMatchObject({ outcome: 'failed', cause: expect.any(Error) });
+    await expect(
+      harness.coordinator.setKidTitleApproval(kid.id, { type: 'movie', id: 550 }, true, '1234'),
+    ).resolves.toEqual({ outcome: 'saved' });
+    harness.coordinator.dispose();
+  });
+
+  it('fences a held Kid title-access answer after Kid authority replacement', async () => {
+    const harness = await activeOwner();
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    const held = deferred<'changed'>();
+    const setKidTitleApproval = vi.fn(() => held.promise);
+    Object.assign(harness.householdModel, { setKidTitleApproval });
+
+    const saving = harness.coordinator.setKidTitleApproval(
+      kid.id,
+      { type: 'movie', id: 550 },
+      true,
+      '1234',
+    );
+    await vi.waitFor(() => expect(setKidTitleApproval).toHaveBeenCalledOnce());
+    const replacement = structuredClone(harness.view);
+    replacement.profiles.find((entry) => entry.id === kid.id)!.keyVersion += 1;
+    harness.coordinator.updateDirectory(profileDirectoryChoices(replacement)!);
+    held.resolve('changed');
+
+    await expect(saving).resolves.toEqual({ outcome: 'superseded' });
+    harness.coordinator.dispose();
+  });
+
+  it('admits only one Kid title-access mutation while membership or storage is held', async () => {
+    const harness = await activeOwner();
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    const held = deferred<'changed'>();
+    const setKidTitleApproval = vi.fn(() => held.promise);
+    Object.assign(harness.householdModel, { setKidTitleApproval });
+
+    const first = harness.coordinator.setKidTitleApproval(
+      kid.id,
+      { type: 'movie', id: 550 },
+      true,
+      '1234',
+    );
+    const second = harness.coordinator.setKidTitleApproval(
+      kid.id,
+      { type: 'movie', id: 550 },
+      false,
+      '1234',
+    );
+    await expect(second).resolves.toMatchObject({ outcome: 'failed', cause: expect.any(Error) });
+    expect(setKidTitleApproval).toHaveBeenCalledOnce();
+    held.resolve('changed');
+    await expect(first).resolves.toEqual({ outcome: 'saved' });
     harness.coordinator.dispose();
   });
 });

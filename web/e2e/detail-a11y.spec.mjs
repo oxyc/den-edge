@@ -105,6 +105,41 @@ test('Right at the end of title actions does not leak diagonally into Cast', asy
   }
 });
 
+test('TV remote reaches the exact-title Kid access handoff and collapses it without a writer', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    await mock(page);
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html?actions&kid-handoff`);
+
+    const handoff = page.getByRole('button', { name: 'Manage Kid access on Den Web' });
+    const action = page.getByRole('button', { name: 'Share', exact: true });
+    await action.focus();
+    for (
+      let attempt = 0;
+      attempt < 4 && !(await handoff.evaluate((node) => node === document.activeElement));
+      attempt++
+    )
+      await page.keyboard.press('ArrowDown');
+    await expect(handoff).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(handoff).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('status')).toContainText(
+      'In a browser linked to this household, open this title’s menu to allow or remove access for a Kid.',
+    );
+    await expect(page.getByText('https://d.oxy.fi/movie/42', { exact: true })).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(handoff).toBeFocused();
+    await expect(handoff).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByText('https://d.oxy.fi/movie/42', { exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('Left at the start of title actions does not act as browser Back', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

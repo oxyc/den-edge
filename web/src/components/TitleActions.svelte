@@ -49,6 +49,7 @@
     seenOverride = undefined,
     seenItems,
     extraAction,
+    kidTitleAccessHandoff,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -121,11 +122,14 @@
     seenItems?: MenuItem[];
     /** A surface-specific action which belongs beside the title controls (the TV season picker). */
     extraAction?: Snippet;
+    /** Exact public title route on the capable-browser administration surface. TV packages never write approvals. */
+    kidTitleAccessHandoff?: string;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
   let copied = $state(false);
   let copiedFor: ReturnType<typeof setTimeout> | undefined;
+  let kidTitleAccessHandoffOpen = $state(false);
   const notify = toastContext();
 
   // A press shows at once and is saved after. Library writes share one command channel (and Watchlist/Seen share one
@@ -200,6 +204,11 @@
   ]);
   const opinionIcon = (value: Reaction | null) =>
     value === 'dislike' ? 'thumb-down' : value === 'like' ? 'thumb-up' : 'heart';
+
+  $effect(() => {
+    void kidTitleAccessHandoff;
+    kidTitleAccessHandoffOpen = false;
+  });
 </script>
 
 <svelte:window bind:innerWidth={viewportWidth} />
@@ -440,6 +449,33 @@
   </div>
 </div>
 
+{#if kidTitleAccessHandoff}
+  <div class="kid-access-handoff" data-spatial-section>
+    <Button
+      variant="tertiary"
+      icon="external"
+      label="Manage Kid access on Den Web"
+      aria-expanded={kidTitleAccessHandoffOpen}
+      aria-controls="kid-title-access-handoff-detail"
+      onclick={() => (kidTitleAccessHandoffOpen = !kidTitleAccessHandoffOpen)}
+      onkeydown={(event) => {
+        if (event.key !== 'Escape' || !kidTitleAccessHandoffOpen) return;
+        event.preventDefault();
+        event.stopPropagation();
+        kidTitleAccessHandoffOpen = false;
+      }}
+    />
+    {#if kidTitleAccessHandoffOpen}
+      <p id="kid-title-access-handoff-detail" role="status">
+        {i18n.phrase(
+          'In a browser linked to this household, open this title’s menu to allow or remove access for a Kid.',
+        )}
+        <span>{kidTitleAccessHandoff}</span>
+      </p>
+    {/if}
+  </div>
+{/if}
+
 {#snippet seenPicker()}
   <ButtonIcon name="eye" filled={seen} /><span>Seen</span>
 {/snippet}
@@ -469,6 +505,27 @@
     display: grid;
     gap: 10px;
     margin-bottom: 16px;
+  }
+
+  .kid-access-handoff {
+    display: grid;
+    justify-items: start;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .kid-access-handoff p {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
+  .kid-access-handoff span {
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow-wrap: anywhere;
   }
 
   .pills {

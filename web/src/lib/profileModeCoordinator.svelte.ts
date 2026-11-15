@@ -47,12 +47,19 @@ export type KidProfileCreateResult =
   | { readonly outcome: 'failed'; readonly cause: unknown }
   | { readonly outcome: 'superseded' };
 export type KidProfileResumeResult = KidProfileCreateResult | { readonly outcome: 'idle' };
+export type KidTitleApprovalChangeResult =
+  | { readonly outcome: 'saved' }
+  | { readonly outcome: 'denied' }
+  | { readonly outcome: 'failed'; readonly cause: unknown }
+  | { readonly outcome: 'superseded' };
 
 const TRANSITION_SUCCESS: ProfileTransitionResult = { outcome: 'success' };
 const TRANSITION_DENIED: ProfileTransitionResult = { outcome: 'denied' };
 const TRANSITION_SUPERSEDED: ProfileTransitionResult = VISITOR_CLEANUP_SUPERSEDED;
 const KID_CREATE_DENIED = { outcome: 'denied' } as const;
 const KID_CREATE_SUPERSEDED = { outcome: 'superseded' } as const;
+const KID_TITLE_APPROVAL_DENIED = { outcome: 'denied' } as const;
+const KID_TITLE_APPROVAL_SUPERSEDED = { outcome: 'superseded' } as const;
 export interface ProfileChoice {
   readonly id: ProfileId | null;
   readonly role: ActiveProfileMode;
@@ -233,6 +240,8 @@ export class ProfileModeCoordinator {
   #transition = 0;
   #kidCreation = 0;
   #kidCreationActive = false;
+  #kidTitleApproval = 0;
+  #kidTitleApprovalActive = false;
   /** Newest-wins ownership for Settings PIN checks that share an unchanged active Kid session. */
   #settingsUnlockAttempt = 0;
   #restoring = $state(0);
@@ -344,16 +353,43 @@ export class ProfileModeCoordinator {
     title: TitleRef,
     allow: boolean,
     pin: string,
-  ): Promise<boolean> {
+  ): Promise<KidTitleApprovalChangeResult> {
     this.#assertOpen();
-    if (this.mode !== 'owner') return false;
+    if (this.#kidTitleApprovalActive)
+      return {
+        outcome: 'failed',
+        cause: new Error('a Kid title-access change is already in progress'),
+      };
+    if (this.mode !== 'owner') return KID_TITLE_APPROVAL_DENIED;
     const kid = this.#choice(profile);
-    if (!kid || kid.role !== 'kid' || !kid.id) return false;
+    if (!kid || kid.role !== 'kid' || !kid.id) return KID_TITLE_APPROVAL_DENIED;
+    const owner = this.#session;
+    const ticket = ++this.#kidTitleApproval;
+    this.#kidTitleApprovalActive = true;
+    const current = () => {
+      const choice = this.#choice(profile);
+      return (
+        !this.#disposed &&
+        ticket === this.#kidTitleApproval &&
+        this.#session === owner &&
+        this.mode === 'owner' &&
+        choice?.id === kid.id &&
+        choice.role === 'kid' &&
+        choice.libraryKey === kid.libraryKey &&
+        choice.keyVersion === kid.keyVersion
+      );
+    };
     try {
-      return await this.#household.setKidTitleApproval(kid.id, title, allow, pin);
-    } catch (error) {
-      console.warn('den: Kid title access could not be changed', error);
-      return false;
+      await this.#household.setKidTitleApproval(kid.id, title, allow, pin);
+      return current() ? { outcome: 'saved' } : KID_TITLE_APPROVAL_SUPERSEDED;
+    } catch (cause) {
+      if (!current()) return KID_TITLE_APPROVAL_SUPERSEDED;
+      if (cause instanceof LibraryServiceError && cause.failure.code === 'unauthorized')
+        return KID_TITLE_APPROVAL_DENIED;
+      console.warn('den: Kid title access could not be changed', cause);
+      return { outcome: 'failed', cause };
+    } finally {
+      if (ticket === this.#kidTitleApproval) this.#kidTitleApprovalActive = false;
     }
   }
 

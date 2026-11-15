@@ -277,6 +277,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudo guardar. Comprueba que este dispositivo esté conectado a tu red.',
   'Couldn’t save that. Check your connection and try again.':
     'No se pudo guardar. Comprueba la conexión e inténtalo de nuevo.',
+  'Couldn’t save Kid access. Try again.':
+    'No se pudo guardar el acceso infantil. Inténtalo de nuevo.',
   'Couldn’t start that download. Try again.':
     'No se pudo iniciar esa descarga. Inténtalo de nuevo.',
   'Couldn’t try that release. Try again.': 'No se pudo probar esa versión. Inténtalo de nuevo.',
@@ -929,6 +931,9 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Send them this link, or the code to paste under Settings › Sharing.':
     'Envíeles este enlace o el código para pegarlo en Configuración > Compartir.',
   'Manage guests in a supported browser': 'Administrar invitados en un navegador compatible',
+  'Manage Kid access on Den Web': 'Administrar el acceso infantil en Den Web',
+  'In a browser linked to this household, open this title’s menu to allow or remove access for a Kid.':
+    'En un navegador vinculado a este hogar, abre el menú de este título para permitir o quitar el acceso a un perfil infantil.',
   'Guest administration is not available on this TV':
     'La administración de invitados no está disponible en este televisor',
   'In Den on a browser linked to this household, open Settings › Sharing to invite, extend, limit, relink, or revoke a guest.':

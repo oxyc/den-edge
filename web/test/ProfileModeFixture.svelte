@@ -6,6 +6,8 @@
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import ProfileSettings from '../src/ProfileSettings.svelte';
   import ContentSection from '../src/settings/ContentSection.svelte';
+  import KidTitleAccessDialog from '../src/components/KidTitleAccessDialog.svelte';
+  import type { Title } from '../src/lib/library';
   import { HouseholdSession } from '../src/lib/householdSession.svelte';
   import type {
     LibraryModel,
@@ -39,6 +41,8 @@
   let createRequests = 0;
   let createAcknowledgements = 0;
   let createFailures = 0;
+  let titleApprovalRequests = 0;
+  let titleApprovalFailures = 0;
   let resumedCreate = false;
   let resumeAttempts = 0;
   let releaseHeldCreate: (() => void) | null = null;
@@ -170,6 +174,48 @@
     },
     createKidProfile: async (name: string, maximumAge: number, pin: string, operationId: string) =>
       fixtureCreateKid(name, maximumAge, pin, operationId),
+    setKidTitleApproval: async (
+      profile: string,
+      title: { type: 'movie' | 'tv'; id: number },
+      allow: boolean,
+      pin: string,
+    ) => {
+      titleApprovalRequests++;
+      if (pin !== '1234')
+        throw new LibraryServiceError({
+          code: 'unauthorized',
+          message: 'fixture Owner PIN did not match',
+          retryable: false,
+        });
+      if (params.get('titleApprovalFailure') === 'once' && titleApprovalFailures === 0) {
+        titleApprovalFailures++;
+        throw new LibraryServiceError({
+          code: 'unavailable',
+          message: 'fixture title approval write unavailable',
+          retryable: true,
+        });
+      }
+      const key = `${title.type}:${title.id}`;
+      liveDirectory = {
+        ...liveDirectory,
+        profiles: liveDirectory.profiles.map((choice) =>
+          choice.id !== profile
+            ? choice
+            : {
+                ...choice,
+                approvals: allow
+                  ? [
+                      ...(choice.approvals ?? []).filter(
+                        (entry) => `${entry.type}:${entry.id}` !== key,
+                      ),
+                      title,
+                    ]
+                  : (choice.approvals ?? []).filter((entry) => `${entry.type}:${entry.id}` !== key),
+              },
+        ),
+      };
+      profiles?.updateDirectory(liveDirectory);
+    },
     acknowledgeKidProfile: async () => {
       createAcknowledgements++;
     },
@@ -240,6 +286,12 @@
     })),
   };
   let liveDirectory = realDirectory;
+  const approvalTitle: Title = { type: 'movie', id: 550, title: 'Fight Club' };
+  let titleApprovalRequest = $state<{
+    kid: { id: string; name: string };
+    title: Title;
+    allow: boolean;
+  } | null>(null);
 
   async function fixtureCreateKid(
     name: string,
@@ -331,6 +383,12 @@
         pinChecks,
         createRequests,
         createAcknowledgements,
+        titleApprovalRequests,
+        titleApprovalFailures,
+        titleApprovals:
+          liveDirectory.profiles
+            .find(({ role }) => role === 'kid')
+            ?.approvals?.map(({ type, id }) => `${type}:${id}`) ?? [],
         activeProfileId:
           profiles?.session?.identity.kind === 'profile' ? profiles.session.identity.id : null,
         watchlist:
@@ -509,6 +567,37 @@
         contentPolicy={policy}
         role="kid"
         onpolicy={async (next) => ((policy = next), true)}
+      />
+    {/if}
+    {#if params.has('titleApproval') && profiles.mode === 'owner'}
+      {@const kid = profiles.choices.find((choice) => choice.role === 'kid' && choice.id)}
+      {#if kid?.id}
+        {@const approved = (kid.approvals ?? []).some(
+          ({ type, id }) => type === approvalTitle.type && id === approvalTitle.id,
+        )}
+        <button
+          type="button"
+          onclick={() =>
+            (titleApprovalRequest = {
+              kid: { id: kid.id!, name: kid.name },
+              title: approvalTitle,
+              allow: !approved,
+            })}>{approved ? 'Remove Fight Club for Kids' : 'Allow Fight Club for Kids'}</button
+        >
+      {/if}
+      <KidTitleAccessDialog
+        request={titleApprovalRequest}
+        onclose={() => (titleApprovalRequest = null)}
+        onconfirm={async (pin) => {
+          const request = titleApprovalRequest;
+          if (!request) return { outcome: 'superseded' };
+          return profiles!.setKidTitleApproval(
+            request.kid.id,
+            { type: request.title.type, id: request.title.id },
+            request.allow,
+            pin,
+          );
+        }}
       />
     {/if}
   {:else if profiles}
