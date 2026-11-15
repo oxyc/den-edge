@@ -46,6 +46,8 @@ export interface SyncedPrefs {
   subtitlesPerLanguage: number;
   autoSkipSegments: boolean;
   autoplayTrailers: boolean;
+  playbackSourcePolicy: 'best' | 'remember';
+  preferredPlaybackSource?: 'torbox' | 'den-remux';
   ratingSources: string[];
   /** Empty shows every confirmed warning. */
   shownWarnings: string[];
@@ -100,6 +102,8 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
   const serviceValue = value('den.myServicePicks');
   const subtitle = readSubtitlePreference(row);
   const interfaceLanguage = readInterfaceLanguage(row);
+  const sourcePolicy = string('den.playbackSourcePolicy');
+  const preferredSource = string('den.preferredPlaybackSource');
   return {
     interfaceLanguage: interfaceLanguage.language,
     excludedGenres: genres && 'ints' in genres ? genres.ints : [],
@@ -114,6 +118,9 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
     subtitlesPerLanguage: int('den.maxSubtitlesPerLanguage') ?? 3,
     autoSkipSegments: bool('den.autoSkipSegments') ?? false,
     autoplayTrailers: bool('den.autoplayTrailers') ?? true,
+    playbackSourcePolicy: sourcePolicy === 'remember' ? 'remember' : 'best',
+    preferredPlaybackSource:
+      preferredSource === 'torbox' || preferredSource === 'den-remux' ? preferredSource : undefined,
     // Unset is every source; an explicit empty list is every source turned off.
     ratingSources: sources ?? RATING_SOURCES.map((s) => s.id),
     shownWarnings: strings('den.shownWarningCategories') ?? [],
@@ -399,6 +406,12 @@ export const change = {
   }),
   autoSkipSegments: (on: boolean): PrefChanges => ({ 'den.autoSkipSegments': { bool: on } }),
   autoplayTrailers: (on: boolean): PrefChanges => ({ 'den.autoplayTrailers': { bool: on } }),
+  playbackSourcePolicy: (policy: 'best' | 'remember'): PrefChanges => ({
+    'den.playbackSourcePolicy': policy === 'remember' ? { string: 'remember' } : null,
+  }),
+  preferredPlaybackSource: (source: 'torbox' | 'den-remux' | undefined): PrefChanges => ({
+    'den.preferredPlaybackSource': source ? { string: source } : null,
+  }),
   ratingSources: (ids: Iterable<string>): PrefChanges => ({
     'den.enabledRatingSources': sortedStrings(
       [...ids].filter((id) => PROFILE_RATING_SOURCES.has(id)),

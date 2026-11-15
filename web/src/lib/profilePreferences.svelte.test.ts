@@ -106,6 +106,22 @@ describe('preview profile preferences', () => {
     expect([...storage.values.keys()][0]).toContain('00000000000000000000000000000002');
   });
 
+  it('persists the profile source policy and its last explicit player choice', async () => {
+    const storage = new MemoryStorage();
+    const session = kid();
+    const first = new PreviewProfilePreferences(session.identity, session.policy!, storage, null);
+    await first.patch({
+      playbackSourcePolicy: 'remember',
+      preferredPlaybackSource: 'torbox',
+    });
+
+    const second = new PreviewProfilePreferences(session.identity, session.policy!, storage, null);
+    expect(second.value).toMatchObject({
+      playbackSourcePolicy: 'remember',
+      preferredPlaybackSource: 'torbox',
+    });
+  });
+
   it('keeps Visitor preferences for the visit and purges them when the visit ends', async () => {
     const storage = new MemoryStorage();
     const activity = new VisitorActivityNamespace(

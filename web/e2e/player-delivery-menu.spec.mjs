@@ -70,6 +70,24 @@ async function mockHearth(page, { beforePlayback } = {}) {
   return playback;
 }
 
+test('Remember my choice starts from the saved source without a managed cross-source fallback', async () => {
+  test.skip(!existsSync(chromium.executablePath()), 'Chromium is not installed here');
+  const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+  try {
+    const page = await browser.newPage();
+    const playback = await mockHearth(page);
+    await page.goto(
+      `${ORIGIN}/test/player.html?playback=managed&sourcePolicy=remember&preferredSource=den-remux`,
+    );
+    await expect(page.getByTestId('playback-source')).toHaveText('Den Remux', { timeout: 30_000 });
+    expect(playback).toHaveLength(1);
+    expect(playback[0]).toMatchObject({ directFailed: true });
+    expect(playback[0]).not.toHaveProperty('directOnly');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('delivery changes explain the wait immediately and until the replacement paints', async () => {
   test.skip(!existsSync(chromium.executablePath()), 'Chromium is not installed here');
   const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });

@@ -354,6 +354,8 @@ export interface LibraryPreferencesPatch {
   subtitlesPerLanguage?: number;
   autoSkipSegments?: boolean;
   autoplayTrailers?: boolean;
+  playbackSourcePolicy?: 'best' | 'remember';
+  preferredPlaybackSource?: 'torbox' | 'den-remux' | null;
   /** `default` restores every built-in source; `values: []` deliberately disables all sources. */
   ratingSources?: LibraryListPreferencePatch<RatingSource>;
   shownWarnings?: string[];
@@ -621,6 +623,10 @@ export interface LibraryPreferences {
   subtitlesPerLanguage: number;
   autoSkipSegments: boolean;
   autoplayTrailers: boolean;
+  /** Whether recovery may use either source or must retain the viewer's last explicit source choice. */
+  playbackSourcePolicy?: 'best' | 'remember';
+  /** Last source explicitly selected in the player; absent until the viewer chooses one. */
+  preferredPlaybackSource?: 'torbox' | 'den-remux';
   ratingSources: RatingSource[];
   shownWarnings: string[];
   watchRegion?: string;

@@ -2102,6 +2102,13 @@ export class LibraryLogAuthority {
       Object.assign(changes, preferenceChange.autoSkipSegments(patch.autoSkipSegments));
     if (patch.autoplayTrailers !== undefined)
       Object.assign(changes, preferenceChange.autoplayTrailers(patch.autoplayTrailers));
+    if (patch.playbackSourcePolicy !== undefined)
+      Object.assign(changes, preferenceChange.playbackSourcePolicy(patch.playbackSourcePolicy));
+    if (patch.preferredPlaybackSource !== undefined)
+      Object.assign(
+        changes,
+        preferenceChange.preferredPlaybackSource(patch.preferredPlaybackSource ?? undefined),
+      );
     if (patch.ratingSources !== undefined)
       Object.assign(
         changes,

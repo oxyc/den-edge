@@ -499,7 +499,7 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
     !Object.values(value).some((candidate) => candidate !== undefined) ||
     !exact(
       value,
-      ',interfaceLanguage,excludedGenres,excludedLanguages,hideAnime,hideWatched,minReleaseYear,audioLanguage,subtitlePreference,shownSubtitleLanguages,subtitlesPerLanguage,autoSkipSegments,autoplayTrailers,ratingSources,shownWarnings,watchRegion,services,maturityCeiling,',
+      ',interfaceLanguage,excludedGenres,excludedLanguages,hideAnime,hideWatched,minReleaseYear,audioLanguage,subtitlePreference,shownSubtitleLanguages,subtitlesPerLanguage,autoSkipSegments,autoplayTrailers,playbackSourcePolicy,preferredPlaybackSource,ratingSources,shownWarnings,watchRegion,services,maturityCeiling,',
     )
   )
     return false;
@@ -553,6 +553,16 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
       isProfileSubtitleLimit(value.subtitlesPerLanguage)) &&
     optional(value.autoSkipSegments, bool) &&
     optional(value.autoplayTrailers, bool) &&
+    optional(
+      value.playbackSourcePolicy,
+      (candidate): candidate is 'best' | 'remember' =>
+        candidate === 'best' || candidate === 'remember',
+    ) &&
+    optional(
+      value.preferredPlaybackSource,
+      (candidate): candidate is 'torbox' | 'den-remux' | null =>
+        candidate === null || candidate === 'torbox' || candidate === 'den-remux',
+    ) &&
     (sources === undefined ||
       (record(sources) &&
         ((exact(sources, ',kind,') && sources.kind === 'default') ||
@@ -1471,7 +1481,7 @@ function preferencesView(value: unknown): boolean {
     !record(value) ||
     !exact(
       value,
-      ',interfaceLanguage,excludedGenres,excludedLanguages,hideAnime,hideWatched,minReleaseYear,audioLanguage,subtitleLanguage,hasExplicitSubtitlePreference,shownSubtitleLanguages,subtitlesPerLanguage,autoSkipSegments,autoplayTrailers,ratingSources,shownWarnings,watchRegion,services,servicesConfigured,maturityCeiling,',
+      ',interfaceLanguage,excludedGenres,excludedLanguages,hideAnime,hideWatched,minReleaseYear,audioLanguage,subtitleLanguage,hasExplicitSubtitlePreference,shownSubtitleLanguages,subtitlesPerLanguage,autoSkipSegments,autoplayTrailers,playbackSourcePolicy,preferredPlaybackSource,ratingSources,shownWarnings,watchRegion,services,servicesConfigured,maturityCeiling,',
     )
   )
     return false;
@@ -1509,6 +1519,16 @@ function preferencesView(value: unknown): boolean {
     isProfileSubtitleLimit(value.subtitlesPerLanguage) &&
     bool(value.autoSkipSegments) &&
     bool(value.autoplayTrailers) &&
+    optional(
+      value.playbackSourcePolicy,
+      (candidate): candidate is 'best' | 'remember' =>
+        candidate === 'best' || candidate === 'remember',
+    ) &&
+    optional(
+      value.preferredPlaybackSource,
+      (candidate): candidate is 'torbox' | 'den-remux' =>
+        candidate === 'torbox' || candidate === 'den-remux',
+    ) &&
     list(sources, ratingSource, PROFILE_RATING_SOURCES.size) &&
     unique(sources) &&
     list(

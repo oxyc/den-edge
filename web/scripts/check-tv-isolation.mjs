@@ -154,7 +154,11 @@ if (process.argv.includes('--capture')) {
   // Holding a start for den-remux's media lead adds no startup code, but the lazy Player chunk's new name moves
   // startup 9 gzip bytes (7,421 -> 7,430 on matched main/head builds) against a main 2 bytes under the proportional
   // cap. Raise both caps to the next 128-byte boundary, retaining 122.
-  if (initialDelta > Math.min(7552, Math.floor(baseline.initialGzip * 0.0385)))
+  // A profile's explicit playback-source policy adds 319 gzip bytes to startup on matched current-main/head builds
+  // (203,822 -> 204,141). Its menu and AirPlay recovery remain in the existing lazy Settings/Player chunks; only the
+  // profile projection and strict cross-client codec stay in the initial graph so every host sees the same choice.
+  // Allow the next 128-byte boundary without adding a dependency, request or background work.
+  if (initialDelta > Math.min(7936, Math.floor(baseline.initialGzip * 0.0405)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -332,5 +336,8 @@ if (process.argv.includes('--capture')) {
   // Holding a start for den-remux's media lead (`prebufferLead`), with a bit-rate countdown and a still-buffer rule
   // that waits for an overdue segment, adds 247 gzip bytes on a local build, all in the lazy Player chunk; it adds no
   // request, timer or storage. On top of the Retry above that is about 102,574; allow the next 128-byte boundary.
-  if (coreTotalDelta > 102656) throw new Error('Browser total JS/CSS budget exceeded');
+  // The same source policy adds 1,044 gzip bytes to the non-translation graph on those matched builds. The 309-byte
+  // recovery stays in Player and the 121-byte control in SettingsNav, both already-lazy boundaries; splitting their
+  // small shared enums again would add loader overhead.
+  if (coreTotalDelta > 103680) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -54,6 +54,10 @@ export function acceptsProfilePreference(key: string, value: ConfigValue | null)
     case 'den.preferredSubtitleLanguage':
     case 'den.interfaceLanguage':
       return 'string' in value && isProfileLanguage(value.string);
+    case 'den.playbackSourcePolicy':
+      return 'string' in value && (value.string === 'best' || value.string === 'remember');
+    case 'den.preferredPlaybackSource':
+      return 'string' in value && (value.string === 'torbox' || value.string === 'den-remux');
     case 'den.shownSubtitleLanguages':
     case 'den.excludedLanguages':
       return (
@@ -102,6 +106,8 @@ export function validProfilePreferenceValues(values: SettingsRow['values']): Set
 const PROFILE_KEYS = new Set([
   'den.autoSkipSegments',
   'den.autoplayTrailers',
+  'den.playbackSourcePolicy',
+  'den.preferredPlaybackSource',
   'den.preferredAudioLanguage',
   'den.preferredSubtitleLanguage',
   'den.hasExplicitSubtitlePreference',

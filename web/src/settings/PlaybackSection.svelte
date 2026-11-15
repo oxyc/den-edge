@@ -90,6 +90,25 @@
       />
     {/snippet}
   </SettingRow>
+  <SettingRow
+    id="playback-source-policy"
+    label={i18n.text('settings.playbackSource')}
+    detail={i18n.text('settings.playbackSourceDetail')}
+  >
+    {#snippet control()}
+      <Select
+        labelledby="playback-source-policy-label"
+        value={prefs.playbackSourcePolicy ?? 'best'}
+        options={[
+          { value: 'best', label: i18n.text('settings.playbackSourceBest') },
+          { value: 'remember', label: i18n.text('settings.playbackSourceRemember') },
+        ]}
+        {disabled}
+        onchange={(policy) =>
+          save(change.playbackSourcePolicy(policy === 'remember' ? 'remember' : 'best'))}
+      />
+    {/snippet}
+  </SettingRow>
   <SettingRow id="auto-skip" label={i18n.text('settings.autoSkip')}>
     {#snippet control()}
       <Switch

@@ -30,6 +30,11 @@ export const messages = {
   'settings.automaticFollowsInterface': 'Automático usa el idioma de la interfaz',
   'settings.autoSkip': 'Omitir automáticamente introducciones y créditos',
   'settings.autoplayTrailers': 'Reproducir tráileres automáticamente en los detalles',
+  'settings.playbackSource': 'Fuente de reproducción',
+  'settings.playbackSourceDetail':
+    'Elegir automáticamente o conservar la última fuente seleccionada',
+  'settings.playbackSourceBest': 'La mejor disponible',
+  'settings.playbackSourceRemember': 'Recordar mi elección',
   'settings.original': 'Original',
   'settings.automatic': 'Automático',
   'settings.off': 'Desactivados',

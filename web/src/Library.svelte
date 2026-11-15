@@ -1942,8 +1942,20 @@
       shownSubtitleLanguages: value?.shownSubtitleLanguages ?? [],
       maxSubtitlesPerLanguage: value?.subtitlesPerLanguage ?? 3,
       autoSkipSegments: value?.autoSkipSegments ?? false,
+      playbackSourcePolicy: value?.playbackSourcePolicy ?? 'best',
+      preferredPlaybackSource: value?.preferredPlaybackSource,
     };
   });
+
+  /** The source menu is part of playback, but its explicit choice is a profile preference like audio language. */
+  function rememberPlaybackSource(source: 'torbox' | 'den-remux'): void {
+    const patch = { preferredPlaybackSource: source } as const;
+    const saving = session.preferences?.patch(patch) ?? model?.patchPreferences(patch);
+    if (saving)
+      void saving.catch((error: unknown) =>
+        console.warn('den: playback source preference save failed', error),
+      );
+  }
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(
@@ -3334,6 +3346,8 @@
       shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
       maxSubtitlesPerLanguage={playbackPrefs.maxSubtitlesPerLanguage}
       autoSkip={playbackPrefs.autoSkipSegments}
+      playbackSourcePolicy={playbackPrefs.playbackSourcePolicy}
+      preferredPlaybackSource={playbackPrefs.preferredPlaybackSource}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
@@ -3342,6 +3356,7 @@
       onfinalprogress={(fraction, seconds, at) =>
         finalProgressed({ title: target.title, ...at }, fraction, seconds)}
       onmanagedplayback={scout.playback ? preparePlaybackReceipts : undefined}
+      onplaybacksourcepreference={rememberPlaybackSource}
       playbackReceiptHandoffAsOwner={session.administersHousehold}
       onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
       onnext={after ? () => void advance(after) : undefined}

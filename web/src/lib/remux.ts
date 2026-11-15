@@ -180,7 +180,7 @@ export interface Want {
   /** Bits a second a session may need, away from home (`linkLimit`): den-remux picks a release, or a transcode, that fits. */
   maxBitrate?: number;
   /** The HLS player this page chose (`nativeHls`), for den-remux's session log. */
-  player?: 'native' | 'hls.js' | 'cast';
+  player?: 'native' | 'hls.js' | 'cast' | 'airplay';
   /** TV packaging target, kept separate from the playback engine so Hearth can apply platform workarounds narrowly. */
   platform?: 'webos' | 'tizen';
   /**

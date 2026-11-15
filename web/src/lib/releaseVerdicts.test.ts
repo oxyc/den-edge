@@ -204,7 +204,7 @@ describe('unchangedNotice', () => {
     const refused = (cause?: string) =>
       unchangedNotice('request', null, { code: 'direct_unavailable', cause });
     expect(refused('torbox_receiver_unsupported')).toBe(
-      'The Chromecast can’t play this release as TorBox streams it, so this carries on as it was.',
+      'The receiver can’t play this release as TorBox streams it, so this carries on as it was.',
     );
     expect(refused('torbox_dolby_vision_unsupported')).toContain('Dolby Vision');
     expect(refused('torbox_item_not_found')).toContain('TorBox no longer has this release');

@@ -87,6 +87,12 @@ export const preferenceChange = {
   }),
   autoSkipSegments: (autoSkipSegments: boolean): PreferenceChanges => ({ autoSkipSegments }),
   autoplayTrailers: (autoplayTrailers: boolean): PreferenceChanges => ({ autoplayTrailers }),
+  playbackSourcePolicy: (playbackSourcePolicy: 'best' | 'remember'): PreferenceChanges => ({
+    playbackSourcePolicy,
+  }),
+  preferredPlaybackSource: (
+    preferredPlaybackSource: 'torbox' | 'den-remux' | undefined,
+  ): PreferenceChanges => ({ preferredPlaybackSource: preferredPlaybackSource ?? null }),
   ratingSources: (values: Iterable<string>): PreferenceChanges => ({
     ratingSources: {
       kind: 'values',

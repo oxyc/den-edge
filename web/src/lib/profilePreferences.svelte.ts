@@ -50,6 +50,8 @@ const personalDefaults = (): PersonalPreferences => ({
   subtitlesPerLanguage: 3,
   autoSkipSegments: false,
   autoplayTrailers: true,
+  playbackSourcePolicy: 'best',
+  preferredPlaybackSource: undefined,
   ratingSources: RATING_SOURCES.map((source) => source.id) as PersonalPreferences['ratingSources'],
   shownWarnings: [],
   watchRegion: undefined,
@@ -132,6 +134,12 @@ const readPersonal = (value: unknown): PersonalPreferences => {
       typeof stored.autoplayTrailers === 'boolean'
         ? stored.autoplayTrailers
         : defaults.autoplayTrailers,
+    playbackSourcePolicy:
+      stored.playbackSourcePolicy === 'remember' ? 'remember' : defaults.playbackSourcePolicy,
+    preferredPlaybackSource:
+      stored.preferredPlaybackSource === 'torbox' || stored.preferredPlaybackSource === 'den-remux'
+        ? stored.preferredPlaybackSource
+        : defaults.preferredPlaybackSource,
     ratingSources: validRatings(stored.ratingSources) ?? defaults.ratingSources,
     shownWarnings: validWarnings(stored.shownWarnings) ?? defaults.shownWarnings,
     watchRegion: isProfileRegion(stored.watchRegion) ? stored.watchRegion : defaults.watchRegion,
@@ -191,6 +199,10 @@ const applyPersonalPatch = (
     next.subtitlesPerLanguage = patch.subtitlesPerLanguage;
   if (patch.autoSkipSegments !== undefined) next.autoSkipSegments = patch.autoSkipSegments;
   if (patch.autoplayTrailers !== undefined) next.autoplayTrailers = patch.autoplayTrailers;
+  if (patch.playbackSourcePolicy !== undefined)
+    next.playbackSourcePolicy = patch.playbackSourcePolicy;
+  if (patch.preferredPlaybackSource !== undefined)
+    next.preferredPlaybackSource = patch.preferredPlaybackSource ?? undefined;
   if (patch.ratingSources)
     next.ratingSources =
       patch.ratingSources.kind === 'default'
@@ -371,6 +383,13 @@ const assertPersonalPatch = (patch: PreferenceChanges): void => {
       patch.ratingSources.kind === 'default' ||
       validRatings(patch.ratingSources.values) !== undefined) &&
     (patch.shownWarnings === undefined || validWarnings(patch.shownWarnings) !== undefined) &&
+    (patch.playbackSourcePolicy === undefined ||
+      patch.playbackSourcePolicy === 'best' ||
+      patch.playbackSourcePolicy === 'remember') &&
+    (patch.preferredPlaybackSource === undefined ||
+      patch.preferredPlaybackSource === null ||
+      patch.preferredPlaybackSource === 'torbox' ||
+      patch.preferredPlaybackSource === 'den-remux') &&
     (patch.watchRegion === undefined ||
       patch.watchRegion === null ||
       isProfileRegion(patch.watchRegion)) &&

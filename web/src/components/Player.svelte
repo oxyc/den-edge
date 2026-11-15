@@ -181,6 +181,8 @@
     shownSubtitleLanguages,
     maxSubtitlesPerLanguage = 3,
     autoSkip = false,
+    playbackSourcePolicy = 'best',
+    preferredPlaybackSource,
     resume,
     next,
     nextEpisode,
@@ -188,6 +190,7 @@
     onprogress,
     onfinalprogress,
     onmanagedplayback,
+    onplaybacksourcepreference,
     playbackReceiptHandoffAsOwner,
     onplaybackreceipthandoff,
     onnext,
@@ -220,6 +223,9 @@
     maxSubtitlesPerLanguage?: number;
     /** Settings › Playback's "Auto-skip intros & credits". A Skip button shows either way. */
     autoSkip?: boolean;
+    /** Best available may cross sources during recovery; remember retains the viewer's last explicit choice. */
+    playbackSourcePolicy?: 'best' | 'remember';
+    preferredPlaybackSource?: 'torbox' | 'den-remux';
     /** Where the library says this was left. */
     resume: { fraction: number; seconds?: number };
     /** The episode after this one, as `S2 · E4`, when there is one. */
@@ -234,6 +240,7 @@
     onfinalprogress: (fraction: number, seconds: number, at: Episode, playing: false) => void;
     /** Establish the household completion-receipt authority before the first managed playback intent crosses Edge. */
     onmanagedplayback?: (signal: AbortSignal) => Promise<PlaybackReceiptPreparation>;
+    onplaybacksourcepreference?: (source: 'torbox' | 'den-remux') => void;
     /** Whether the authorized recovery opens Connections directly or first switches to Owner. */
     playbackReceiptHandoffAsOwner: boolean;
     /** Leaves playback only after handing terminal progress to the host's durable recovery surface. */
@@ -261,6 +268,20 @@
   type Episode = { season?: number; episode?: number };
 
   const REPORT_MS = PLAYBACK_PROGRESS_SAVE_MS;
+  let selectedPlaybackSource = $state<'torbox' | 'den-remux' | undefined>();
+  const rememberedPlaybackSource = $derived(selectedPlaybackSource ?? preferredPlaybackSource);
+
+  const preferredStartDelivery = (): 'ordinary' | 'direct' | 'fallback' =>
+    playbackSourcePolicy !== 'remember' || rememberedPlaybackSource === undefined
+      ? 'ordinary'
+      : rememberedPlaybackSource === 'torbox'
+        ? 'direct'
+        : 'fallback';
+
+  function rememberSource(source: 'torbox' | 'den-remux'): void {
+    selectedPlaybackSource = source;
+    onplaybacksourcepreference?.(source);
+  }
   /** How often a paused viewer's "still here" goes out — comfortably under den-remux's own UNATTENDED_IDLE
    * (60s), with room for a missed beat, so a deliberate pause is told apart from a closed tab. */
   const HEARTBEAT_MS = 20_000;
@@ -400,7 +421,7 @@
     torbox_dolby_vision_unsupported:
       'TorBox can’t stream this Dolby Vision release correctly, and the home player could not prepare it either. Try again or pick another release.',
     torbox_receiver_unsupported:
-      'The Chromecast can’t play this release as TorBox streams it, and the home player could not prepare it either. Try another release.',
+      'The receiver can’t play this release as TorBox streams it, and the home player could not prepare it either. Try another release.',
     torbox_refused:
       'TorBox refused to prepare this stream, and the home player could not prepare it either. Check your TorBox account, then try again.',
     torbox_playlist_unavailable:
@@ -440,6 +461,8 @@
   let airPlaySessionSecs = 0;
   let airPlayProgressTimer: ReturnType<typeof setTimeout> | undefined;
   let airPlayFallbackSession: Session | undefined;
+  /** A TorBox session selected with receiver constraints after the original direct rendition stalled on AirPlay. */
+  let airPlayReceiverSafeSession: Session | undefined;
   const AIRPLAY_DIRECT_PROGRESS_MS = 12_000;
   const AIRPLAY_DIRECT_PROGRESS_SECS = 0.5;
   let webControlsVisible = $state(true);
@@ -1123,7 +1146,7 @@
       { audioTrack?: number; subtitleTrack?: number; filename: string } | undefined = chosenRelease
       ? { filename: chosenRelease }
       : undefined,
-    extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
+    extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate' | 'player'> = {},
     replacing?: Session,
     delivery: 'ordinary' | 'refresh' | 'fallback' | 'direct' = 'ordinary',
     retryNotice: string | null = null,
@@ -1925,7 +1948,12 @@
     endSession(current);
     session = null;
     showTransition('Resuming…');
-    void begin({ filename: current.release.filename });
+    void begin(
+      { filename: current.release.filename },
+      {},
+      undefined,
+      current.external ? 'direct' : 'fallback',
+    );
   }
 
   async function letIn(event: SubmitEvent) {
@@ -1941,12 +1969,12 @@
     }
     key = '';
     continueManualSwitch(pending, 'Opening playback…');
-    void begin();
+    void begin(undefined, {}, undefined, preferredStartDelivery());
   }
 
   function tryAgain() {
     showTransition('Retrying playback…');
-    void begin();
+    void begin(undefined, {}, undefined, preferredStartDelivery());
   }
 
   $effect(() => {
@@ -2966,6 +2994,7 @@
       } else {
         clearAirPlayProgressWatch();
         airPlayFallbackSession = undefined;
+        airPlayReceiverSafeSession = undefined;
         endAirPlaySession();
         revealWebControls();
       }
@@ -3012,6 +3041,61 @@
       return false;
     clearAirPlayProgressWatch();
     airPlayFallbackSession = current;
+    report();
+    carryPosition();
+
+    // TorBox managed HLS carries HEVC in MPEG-TS. Apple TV accepts that observed stream, but Apple's AirPlay 2 TV
+    // contract requires HEVC in fMP4 and the LG receiver consequently never advances it. Preserve the fast Apple TV
+    // path: only after a real stall ask Hearth again as a receiver. The named release is retained when receiver-safe;
+    // where it is HEVC, Hearth answers `torbox_receiver_unsupported` and the unpinned retry selects an H.264 release.
+    if (airPlayReceiverSafeSession !== current) {
+      playbackRouteLog({
+        event: 'recovery',
+        from: 'torbox',
+        to: 'torbox',
+        stage: played ? 'mid_playback' : 'startup',
+        attempt: directAttempt ?? 'initial',
+      });
+      const receiverDirect = (pick: { filename: string } | undefined) => {
+        replacementRefusal = undefined;
+        return begin(
+          pick,
+          { transcode: 'never', player: 'airplay' },
+          current,
+          'refresh',
+          null,
+          true,
+        ).catch((error: unknown): Failure => {
+          console.warn('AirPlay receiver-safe TorBox recovery got no answer.', error);
+          return 'unreachable';
+        });
+      };
+      let moved = await receiverDirect({ filename: current.release.filename });
+      if (
+        moved !== true &&
+        session === current &&
+        replacementRefusal?.cause === 'torbox_receiver_unsupported'
+      )
+        moved = await receiverDirect(undefined);
+      if (moved === true) {
+        airPlayReceiverSafeSession = session ?? undefined;
+        airPlayFallbackSession = undefined;
+        airPlayFailed = false;
+        airPlayFailReason = undefined;
+        return true;
+      }
+    }
+
+    if (
+      playbackSourcePolicy === 'remember' &&
+      rememberedPlaybackSource === 'torbox' &&
+      session === current
+    ) {
+      airPlayFailed = true;
+      airPlayFailReason = 'media_error';
+      return false;
+    }
+
     playbackRouteLog({
       event: 'recovery',
       from: 'torbox',
@@ -3019,8 +3103,6 @@
       stage: played ? 'mid_playback' : 'startup',
       attempt: directAttempt ?? 'initial',
     });
-    report();
-    carryPosition();
     const moved = await begin(
       { filename: current.release.filename },
       { transcode: 'never' },
@@ -3033,6 +3115,7 @@
       return 'unreachable';
     });
     if (moved === true) {
+      airPlayReceiverSafeSession = undefined;
       airPlayFailed = false;
       airPlayFailReason = undefined;
       return true;
@@ -3047,8 +3130,8 @@
   /**
    * WebKit can finish an AirPlay handoff even when the receiver never starts the direct media URL. The LG then
    * stays on its connected screen and emits no media error back to Safari. Preserve direct delivery for receivers
-   * such as Apple TV that advance it; only a playing target whose clock remains still for the whole bound falls
-   * back to the same release through Den Remux.
+   * such as Apple TV that advance it. A playing target whose clock remains still for the whole bound first gets a
+   * receiver-safe TorBox release; Best Available may then use Remux, while Remember My Choice never crosses sources.
    */
   function watchAirPlayDirectProgress() {
     clearAirPlayProgressWatch();
@@ -3076,7 +3159,12 @@
         Math.abs(element.currentTime - position) > AIRPLAY_DIRECT_PROGRESS_SECS
       )
         return;
-      void recoverAirPlayDirect(current);
+      void recoverAirPlayDirect(current).then((moved) => {
+        if (!moved && session === current) {
+          letGo();
+          failure = 'source';
+        }
+      });
     }, AIRPLAY_DIRECT_PROGRESS_MS);
   }
 
@@ -4697,6 +4785,7 @@
         if (moved === true) {
           switchCount += 1;
           lastSwitchReason = 'user';
+          rememberSource(current.external ? 'den-remux' : 'torbox');
           return;
         }
         clearTransition(pending);
@@ -4743,7 +4832,10 @@
         return false;
       })
       .then((moved) => {
-        if (moved === true) return;
+        if (moved === true) {
+          rememberSource(source);
+          return;
+        }
         clearTransition(pending);
         if (!compatibleSubtitles && !session && retry === undefined) {
           subtitleChoice = previousSubtitle;
@@ -4987,6 +5079,7 @@
       airPlaySessionSecs = 0;
       clearAirPlayProgressWatch();
       airPlayFallbackSession = undefined;
+      airPlayReceiverSafeSession = undefined;
       if (airPlayActive) {
         airPlayFunnel = 'started';
         airPlayStartedAt = performance.now();
@@ -5014,7 +5107,7 @@
     lastPosition = undefined;
     remoteTime = remoteDuration = 0;
     remotePaused = true;
-    void begin();
+    void begin(undefined, {}, undefined, preferredStartDelivery());
   }
 
   // An advance names the next episode; anything else about the title is the same.
@@ -5748,7 +5841,7 @@
   });
 
   $effect(() => {
-    untrack(() => void begin());
+    untrack(() => void begin(undefined, {}, undefined, preferredStartDelivery()));
     const focusBeforePlayer = document.activeElement as HTMLElement | null;
     const root = untrack(() => playerRoot);
     let initialFocusFrame: number | undefined;

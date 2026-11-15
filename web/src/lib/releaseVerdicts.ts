@@ -135,7 +135,7 @@ export function unchangedNotice(
   // in the page, when what refused was TorBox, or the receiver it was meant for.
   switch (refused?.cause) {
     case 'torbox_receiver_unsupported':
-      return `The Chromecast can’t play this release as TorBox streams it, so ${carriesOn}`;
+      return `The receiver can’t play this release as TorBox streams it, so ${carriesOn}`;
     case 'torbox_dolby_vision_unsupported':
       return `TorBox can’t stream this Dolby Vision release correctly, so ${carriesOn}`;
     case 'torbox_item_not_found':
