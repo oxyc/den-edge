@@ -49,6 +49,25 @@ export const messages = {
   'profile.loadingSettings': 'Läser in dina inställningar…',
   'profile.saveFailed': 'Det gick inte att spara. Försök igen.',
   'profile.policySaveFailed': 'Det gick inte att ändra. Kontrollera anslutningen och försök igen.',
+  'profile.addKid': 'Lägg till barnprofil',
+  'profile.addKidTitle': 'Lägg till en barnprofil',
+  'profile.kidName': 'Barnets namn',
+  'profile.maximumAge': 'Högsta ålder',
+  'profile.createKid': 'Skapa barnprofil',
+  'profile.creatingKid': 'Skapar…',
+  'profile.createKidFailed': 'Det gick inte att skapa barnprofilen. Försök igen.',
+  'profile.setPinBeforeKid':
+    'Ställ in ägarens PIN-kod i Inställningar innan du lägger till en barnprofil.',
+  'profile.backToProfiles': 'Tillbaka till profiler',
+  'profile.loadingKidControls': 'Läser in kontroller för barnprofil…',
+  'profile.kidControlsLoadFailed':
+    'Det gick inte att läsa in kontrollerna för barnprofilen. Försök igen.',
+  'profile.checkingKidCreation': 'Söker efter en oavslutad konfiguration av barnprofil…',
+  'profile.kidCreationRecovery':
+    'Den kunde inte slutföra den tidigare konfigurationen av barnprofilen. Försök igen. Använd en annan länkad webbläsare om problemet kvarstår.',
+  'profile.retryKidCreation': 'Försök konfigurera igen',
+  'profile.retrySameKid':
+    'Ett nytt försök behåller exakt samma namn och ålder så att Den säkert kan slutföra samma konfiguration.',
   'page.downloads': 'Hämtningar',
   'page.people': 'Personer',
   'page.service': 'Tjänst',
@@ -61,6 +80,8 @@ export const messages = {
   'player.subtitleReset': 'Återställ',
   'player.subtitleDone': 'Klart',
   'player.subtitleTimingInstructions': 'Vänster eller höger för att justera · Välj för att avsluta',
+  'common.cancel': 'Avbryt',
+  'common.done': 'Klar',
   'retirement.title': 'Biblioteksrensningen måste försökas igen',
   'retirement.detail':
     'Du är utloggad. Den måste fortfarande ta bort krypterade biblioteksdata som sparats på den här enheten. Du kan lämna säkert; ett nytt försök görs nästa gång.',

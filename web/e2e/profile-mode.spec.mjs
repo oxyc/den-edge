@@ -984,6 +984,143 @@ test('TV remote follows profile row order when modal geometry cannot distinguish
   await expect(owner).toBeFocused();
 });
 
+async function openRealOwner(page, suffix = '') {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000001',
+      }),
+    ),
+  );
+  await open(page, true, `?realProfiles&pin=1234${suffix}`);
+  await expect(page.locator('[data-mode]')).toHaveText('Owner active');
+}
+
+test('Owner creates a selectable Kid after wrong-PIN and transient recovery', async ({ page }) => {
+  await openRealOwner(page, '&createFailure=once');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await dialog.getByRole('button', { name: 'Add Kid' }).click();
+  await page.getByLabel('Kid name').fill('Sam');
+  await page.getByLabel('Maximum age').fill('8');
+
+  await page.getByLabel('Owner PIN').fill('0000');
+  await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
+  await expect(page.getByLabel('Owner PIN')).toBeFocused();
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.getByRole('alert')).toHaveText(
+    'The Kid profile couldn’t be created. Try again.',
+  );
+  await expect(page.getByLabel('Kid name')).toHaveValue('Sam');
+  await expect(page.getByLabel('Maximum age')).toHaveValue('8');
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  const sam = dialog.getByRole('button', { name: 'Use Sam' });
+  await expect(sam).toBeVisible();
+  await expect(sam).toBeFocused();
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({ createRequests: 3, createAcknowledgements: 1 });
+
+  await sam.click();
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+});
+
+test('a lost create reply retries the same durable Kid instead of allocating twice', async ({
+  page,
+}) => {
+  await openRealOwner(page, '&createFailure=lost-reply');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await dialog.getByRole('button', { name: 'Add Kid' }).click();
+  await page.getByLabel('Kid name').fill('Robin');
+  await page.getByLabel('Maximum age').fill('10');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.getByRole('alert')).toHaveText(
+    'The Kid profile couldn’t be created. Try again.',
+  );
+
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(dialog.getByRole('button', { name: 'Use Robin' })).toHaveCount(1);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({ createRequests: 2, createAcknowledgements: 1 });
+});
+
+test('opening Add Kid resumes and acknowledges a durable lost-reply Kid before a new form', async ({
+  page,
+}) => {
+  await openRealOwner(page, '&resumeKid');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await dialog.getByRole('button', { name: 'Add Kid' }).click();
+
+  const resumed = dialog.getByRole('button', { name: 'Use Resumed Kid' });
+  await expect(resumed).toBeVisible();
+  await expect(resumed).toBeFocused();
+  await expect(page.getByLabel('Kid name')).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({ createRequests: 1, createAcknowledgements: 1 });
+});
+
+test('resume keeps its durable receipt until the exact Kid is published to this page', async ({
+  page,
+}) => {
+  await openRealOwner(page, '&resumeKid&resumeWithoutPublication');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Who’s watching?' });
+  await dialog.getByRole('button', { name: 'Add Kid' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText(
+    'Den couldn’t finish the earlier Kid profile setup. Try again. If this keeps happening, use another linked browser.',
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({ createRequests: 0, createAcknowledgements: 0 });
+
+  await page.getByRole('button', { name: 'Try setup again' }).click();
+  await expect(dialog.getByRole('button', { name: 'Use Resumed Kid' })).toBeFocused();
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+    .toMatchObject({ createRequests: 1, createAcknowledgements: 1 });
+});
+
+test('Kid and Visitor profiles cannot reach additional Kid creation', async ({ page }) => {
+  await openRealOwner(page);
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).click();
+  await expect(page.getByRole('button', { name: 'Add Kid' })).toHaveCount(0);
+});
+
+test('an in-flight create cannot publish into a replacement profile surface', async ({ page }) => {
+  await openRealOwner(page, '&twoKids&holdCreate');
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Add Kid' }).click();
+  await page.getByLabel('Kid name').fill('Held Kid');
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.getByRole('status')).toHaveText('Creating…');
+  await expect(page.getByRole('button', { name: 'Create Kid' })).toBeDisabled();
+
+  const replacementProfile = await page.evaluate(() =>
+    window.denProfileModeFixture.replaceWithSecondKid(),
+  );
+  await expect(page.locator('[data-mode]')).toHaveText('Kids active');
+  await page.evaluate(() => window.denProfileModeFixture.resolveHeldCreate());
+
+  await expect(page.getByRole('dialog', { name: 'Who’s watching?' })).toBeHidden();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().activeProfileId))
+    .toBe(replacementProfile);
+});
+
 test('an authorized Owner handoff targets Owner directly and continues only after PIN success', async ({
   page,
 }) => {

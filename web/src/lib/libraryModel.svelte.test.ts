@@ -49,6 +49,11 @@ class FakeService {
   readonly commands: Array<{ command: LibraryCommand; operationId?: string }> = [];
   readonly queries: LibraryQuery[] = [];
   readonly observations: LibraryObservation[] = [];
+  readonly tasks: Array<{ task: LibraryTask; operationId?: string }> = [];
+  profileCreateStatus: Extract<LibraryQueryResult, { kind: 'profile-create.status' }> = {
+    kind: 'profile-create.status',
+    phase: 'idle',
+  };
   readonly close = vi.fn();
   readonly retry = vi.fn(async () => version(9));
   openFailure?: LibraryServiceFailure;
@@ -118,6 +123,8 @@ class FakeService {
         },
         version: version(6),
       };
+    if (query.kind === 'profile-create.status')
+      return { result: this.profileCreateStatus, version: version(6) };
     if (query.kind === 'retained.billboard.get')
       return {
         result: {
@@ -168,7 +175,43 @@ class FakeService {
     };
   }
 
-  async task(_task: LibraryTask): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+  async task(
+    task: LibraryTask,
+    operationId?: string,
+  ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
+    this.tasks.push({ task, ...(operationId ? { operationId } : {}) });
+    if (task.kind === 'profile.create')
+      return {
+        result: {
+          kind: 'profile.create',
+          outcome: 'created',
+          profile: '2'.repeat(32),
+          name: task.name,
+          maximumAge: task.maximumAge,
+          receipt: operationId ?? 'generated-operation',
+        },
+        version: version(7),
+      };
+    if (task.kind === 'profile.create.resume')
+      return {
+        result:
+          this.profileCreateStatus.phase === 'created'
+            ? {
+                kind: 'profile.create.resume',
+                outcome: 'created',
+                profile: this.profileCreateStatus.profile,
+                name: this.profileCreateStatus.name,
+                maximumAge: this.profileCreateStatus.maximumAge,
+                receipt: this.profileCreateStatus.receipt,
+              }
+            : { kind: 'profile.create.resume', outcome: 'idle' },
+        version: version(7),
+      };
+    if (task.kind === 'profile.create.ack')
+      return {
+        result: { kind: 'profile.create.ack', outcome: 'acknowledged' },
+        version: version(8),
+      };
     throw new Error('unsupported task in fake service');
   }
 
@@ -920,6 +963,61 @@ it('exposes the open model’s relay membership without consulting global profil
     memberToken: 'member-1',
   });
   expect(service.queries.at(-1)).toEqual({ kind: 'relay.membership' });
+  model.close();
+});
+
+it('creates and separately acknowledges one additional Kid with stable operation identities', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  await expect(model.createKidProfile('Sam', 8, '1234', 'create-sam')).resolves.toEqual({
+    profile: '2'.repeat(32),
+    name: 'Sam',
+    maximumAge: 8,
+    receipt: 'create-sam',
+  });
+  await expect(
+    model.acknowledgeKidProfile('create-sam', 'create-sam:ack'),
+  ).resolves.toBeUndefined();
+  expect(service.tasks).toEqual([
+    {
+      task: { kind: 'profile.create', name: 'Sam', maximumAge: 8, pin: '1234' },
+      operationId: 'create-sam',
+    },
+    {
+      task: { kind: 'profile.create.ack', receipt: 'create-sam' },
+      operationId: 'create-sam:ack',
+    },
+  ]);
+  model.close();
+});
+
+it('exposes a resumed durable Kid receipt without inventing one for an idle journal', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+
+  await expect(model.resumeKidProfileCreation()).resolves.toEqual({ phase: 'idle' });
+  service.profileCreateStatus = {
+    kind: 'profile-create.status',
+    phase: 'created',
+    profile: '3'.repeat(32),
+    name: 'Robin',
+    maximumAge: 10,
+    receipt: 'create-robin',
+  };
+  await expect(model.resumeKidProfileCreation()).resolves.toEqual({
+    phase: 'created',
+    profile: '3'.repeat(32),
+    name: 'Robin',
+    maximumAge: 10,
+    receipt: 'create-robin',
+  });
+  expect(service.tasks.slice(-2)).toEqual([
+    { task: { kind: 'profile.create.resume' } },
+    { task: { kind: 'profile.create.resume' } },
+  ]);
   model.close();
 });
 

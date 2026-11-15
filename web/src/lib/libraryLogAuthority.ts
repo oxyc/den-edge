@@ -1023,6 +1023,16 @@ export class LibraryLogAuthority {
     if (task.kind === 'profile.create-default') return this.#createDefaultKid();
     if (task.kind === 'household.join') return this.#joinHousehold(task);
     if (task.kind === 'profile.create') return this.#profileCreateTask(task, operationId);
+    if (task.kind === 'profile.create.resume') {
+      const result = await this.#profileKidCreate().resume();
+      return {
+        result: result
+          ? { kind: 'profile.create.resume', outcome: 'created', ...result }
+          : { kind: 'profile.create.resume', outcome: 'idle' },
+        // Keep the terminal receipt until the page observes this replacement and separately acknowledges it.
+        affected: result ? [{ kind: 'profiles' }] : [],
+      };
+    }
     if (task.kind === 'profile.policy.set') return this.#profilePolicyTask(task);
     if (task.kind === 'kid-title-approval.set') return this.#kidTitleApprovalTask(task);
     if (task.kind === 'profile.create.ack') {
@@ -1207,9 +1217,11 @@ export class LibraryLogAuthority {
    */
   async #createDefaultKid(): Promise<LibraryAuthorityTaskResult> {
     const kids = this.#profileKidCreate();
-    // A creation this device left pending or unacknowledged is finished first; it may be the default Kid itself.
+    // Finish a creation this device left pending so the fresh directory read below sees it. Only this task may
+    // acknowledge the fixed default operation: an explicit Add Kid receipt belongs to the mounted recovery surface,
+    // which must observe the exact published choice before retiring it after a lost page reply/reload.
     const earlier = await kids.resume();
-    if (earlier) await kids.acknowledge(earlier.receipt);
+    if (earlier?.receipt === DEFAULT_KID_OPERATION) await kids.acknowledge(earlier.receipt);
     const { directory } = await this.#log.readKidProfileDirectory();
     if (
       Object.values(directory.profiles).some(

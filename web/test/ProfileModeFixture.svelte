@@ -12,6 +12,7 @@
     LibraryModelLease,
     LibraryModelSnapshot,
   } from '../src/lib/libraryModel.svelte';
+  import { LibraryServiceError } from '../src/lib/libraryServiceClient';
   import type { ConnectionsView } from '../src/lib/libraryServiceProtocol';
   import { legacyProfileIdentity, profileId, profileSessionKey } from '../src/lib/profileIdentity';
   import { scopeRecentSearches } from '../src/lib/recentSearches';
@@ -35,6 +36,17 @@
     params.get('connectionFailures') ?? (connectionsMode === 'repeat' ? 1 : 0),
   );
   let pinChecks = 0;
+  let createRequests = 0;
+  let createAcknowledgements = 0;
+  let createFailures = 0;
+  let resumedCreate = false;
+  let resumeAttempts = 0;
+  let releaseHeldCreate: (() => void) | null = null;
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Test-only durable receipt store; UI observes counters.
+  const createReceipts = new Map<
+    string,
+    { profile: string; name: string; maximumAge: number; receipt: string }
+  >();
   let releaseHeldPin: ((matches: boolean) => void) | null = null;
   if (params.has('orphan'))
     localStorage.setItem(
@@ -156,6 +168,26 @@
         return new Promise<boolean>((resolve) => (releaseHeldPin = resolve));
       return pin === '1234';
     },
+    createKidProfile: async (name: string, maximumAge: number, pin: string, operationId: string) =>
+      fixtureCreateKid(name, maximumAge, pin, operationId),
+    acknowledgeKidProfile: async () => {
+      createAcknowledgements++;
+    },
+    resumeKidProfileCreation: async () => {
+      if (!params.has('resumeKid') || resumedCreate) return { phase: 'idle' as const };
+      resumeAttempts++;
+      if (params.has('resumeWithoutPublication') && resumeAttempts === 1)
+        return {
+          phase: 'created' as const,
+          profile: '0000000000000000000000000000000a',
+          name: 'Resumed Kid',
+          maximumAge: 9,
+          receipt: 'resumed-create',
+        };
+      resumedCreate = true;
+      const result = await fixtureCreateKid('Resumed Kid', 9, '1234', 'resumed-create');
+      return { phase: 'created' as const, ...result };
+    },
     close: () => {},
   } as unknown as LibraryModel;
   const household = new HouseholdSession(
@@ -207,6 +239,59 @@
       keyVersion: 1,
     })),
   };
+  let liveDirectory = realDirectory;
+
+  async function fixtureCreateKid(
+    name: string,
+    maximumAge: number,
+    pin: string,
+    operationId: string,
+  ) {
+    createRequests++;
+    if (pin !== '1234')
+      throw new LibraryServiceError({
+        code: 'unauthorized',
+        message: 'fixture Owner PIN did not match',
+        retryable: false,
+      });
+    if (params.get('createFailure') === 'once' && createFailures++ === 0)
+      throw new LibraryServiceError({
+        code: 'unavailable',
+        message: 'fixture profile creation unavailable',
+        retryable: true,
+      });
+    if (params.has('holdCreate') && !createReceipts.has(operationId))
+      await new Promise<void>((resolve) => (releaseHeldCreate = resolve));
+    let result = createReceipts.get(operationId);
+    if (!result) {
+      const profile = (10 + createReceipts.size).toString(16).padStart(32, '0');
+      result = { profile, name, maximumAge, receipt: operationId };
+      createReceipts.set(operationId, result);
+      liveDirectory = {
+        ...liveDirectory,
+        profiles: [
+          ...liveDirectory.profiles,
+          {
+            id: profileId(profile),
+            role: 'kid' as const,
+            name,
+            avatar: 'kid',
+            policy: { maximumAge, unknownRatings: 'block' as const },
+            libraryKey: `fixture-profile-${profile}`,
+            keyVersion: 1,
+          },
+        ],
+      };
+      profiles?.updateDirectory(liveDirectory);
+      if (params.get('createFailure') === 'lost-reply' && createFailures++ === 0)
+        throw new LibraryServiceError({
+          code: 'unavailable',
+          message: 'fixture lost the first creation reply',
+          retryable: true,
+        });
+    }
+    return result;
+  }
 
   const fixture = {
     snapshot() {
@@ -244,6 +329,8 @@
         connectionRetries,
         connectionReleases,
         pinChecks,
+        createRequests,
+        createAcknowledgements,
         activeProfileId:
           profiles?.session?.identity.kind === 'profile' ? profiles.session.identity.id : null,
         watchlist:
@@ -293,6 +380,11 @@
       const resolve = releaseHeldPin;
       releaseHeldPin = null;
       resolve?.(matches);
+    },
+    resolveHeldCreate() {
+      const resolve = releaseHeldCreate;
+      releaseHeldCreate = null;
+      resolve?.();
     },
     replaceWithSecondKid() {
       const secondKid = realDirectory.profiles.filter(({ role }) => role === 'kid')[1];

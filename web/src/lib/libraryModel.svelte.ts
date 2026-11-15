@@ -627,6 +627,65 @@ export class LibraryModel {
     return result.outcome;
   }
 
+  /** Create one additional Kid and return its durable receipt after the directory has been read back. */
+  async createKidProfile(
+    name: string,
+    maximumAge: number,
+    pin: string,
+    operationId: string,
+  ): Promise<{ profile: string; name: string; maximumAge: number; receipt: string }> {
+    const { result } = await this.task(
+      { kind: 'profile.create', name, maximumAge, pin },
+      operationId,
+    );
+    if (result.kind !== 'profile.create') throw wrongQueryResult('Kid profile creation');
+    return {
+      profile: result.profile,
+      name: result.name,
+      maximumAge: result.maximumAge,
+      receipt: result.receipt,
+    };
+  }
+
+  /** Retire a durable Kid-creation receipt only after its caller has observed the refreshed directory. */
+  async acknowledgeKidProfile(receipt: string, operationId: string): Promise<void> {
+    const { result } = await this.task({ kind: 'profile.create.ack', receipt }, operationId);
+    if (result.kind !== 'profile.create.ack')
+      throw wrongQueryResult('Kid profile creation acknowledgement');
+  }
+
+  /** Finish a journaled/lost-reply creation after reload without allocating a second Kid. */
+  async resumeKidProfileCreation(): Promise<
+    | { phase: 'idle' }
+    | {
+        phase: 'created';
+        profile: string;
+        name: string;
+        maximumAge: number;
+        receipt: string;
+      }
+  > {
+    this.#assertOpen();
+    const { result } = await this.task({ kind: 'profile.create.resume' });
+    if (result.kind !== 'profile.create.resume')
+      throw wrongQueryResult('Kid profile creation status');
+    if (result.outcome === 'idle') return { phase: 'idle' };
+    if (
+      !result.profile ||
+      result.name === undefined ||
+      result.maximumAge === undefined ||
+      !result.receipt
+    )
+      throw wrongQueryResult('completed Kid profile creation status');
+    return {
+      phase: 'created',
+      profile: result.profile,
+      name: result.name,
+      maximumAge: result.maximumAge,
+      receipt: result.receipt,
+    };
+  }
+
   setRemoteAccess(
     credentials: { clientId: string; clientSecret: string } | null,
     operationId?: string,

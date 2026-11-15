@@ -803,6 +803,7 @@ export type LibraryTask =
       tv?: { awakeSince: number };
     }
   | { kind: 'profile.create'; name: string; maximumAge: number; pin: string }
+  | { kind: 'profile.create.resume' }
   | { kind: 'profile.create.ack'; receipt: string }
   /**
    * Change a Kid's content policy (profiles-v1 §5): an owner-authorized write to the directory, authorized by the
@@ -952,6 +953,14 @@ export type LibraryTaskResult =
       name: string;
       maximumAge: number;
       receipt: string;
+    }
+  | {
+      kind: 'profile.create.resume';
+      outcome: 'idle' | 'created';
+      profile?: string;
+      name?: string;
+      maximumAge?: number;
+      receipt?: string;
     }
   | { kind: 'profile.create.ack'; outcome: 'acknowledged' }
   | { kind: 'profile.policy.set'; outcome: 'changed' | 'unchanged' }

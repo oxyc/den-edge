@@ -111,6 +111,21 @@ export class HouseholdSession {
     return true;
   }
 
+  async createKidProfile(name: string, maximumAge: number, pin: string, operationId: string) {
+    if (!this.#model) throw new Error('the household control library is unavailable');
+    return this.#model.createKidProfile(name, maximumAge, pin, operationId);
+  }
+
+  async acknowledgeKidProfile(receipt: string, operationId: string): Promise<void> {
+    if (!this.#model) throw new Error('the household control library is unavailable');
+    await this.#model.acknowledgeKidProfile(receipt, operationId);
+  }
+
+  async resumeKidProfileCreation() {
+    if (!this.#model) throw new Error('the household control library is unavailable');
+    return this.#model.resumeKidProfileCreation();
+  }
+
   /** Set the household's Owner PIN; true once den-edge holds it, so every device asks for it. */
   async setParentalPin(pin: string): Promise<boolean> {
     if (!this.#model) return false;

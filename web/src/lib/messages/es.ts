@@ -51,6 +51,25 @@ export const messages = {
   'profile.loadingSettings': 'Cargando tus ajustes…',
   'profile.saveFailed': 'No se pudo guardar. Inténtalo de nuevo.',
   'profile.policySaveFailed': 'No se pudo cambiar. Comprueba la conexión e inténtalo de nuevo.',
+  'profile.addKid': 'Añadir perfil infantil',
+  'profile.addKidTitle': 'Añadir un perfil infantil',
+  'profile.kidName': 'Nombre del perfil infantil',
+  'profile.maximumAge': 'Edad máxima',
+  'profile.createKid': 'Crear perfil infantil',
+  'profile.creatingKid': 'Creando…',
+  'profile.createKidFailed': 'No se pudo crear el perfil infantil. Inténtalo de nuevo.',
+  'profile.setPinBeforeKid':
+    'Configura un PIN del propietario en Ajustes antes de añadir otro perfil infantil.',
+  'profile.backToProfiles': 'Volver a perfiles',
+  'profile.loadingKidControls': 'Cargando los controles del perfil infantil…',
+  'profile.kidControlsLoadFailed':
+    'No se pudieron cargar los controles del perfil infantil. Inténtalo de nuevo.',
+  'profile.checkingKidCreation': 'Buscando una configuración infantil sin terminar…',
+  'profile.kidCreationRecovery':
+    'Den no pudo terminar la configuración infantil anterior. Inténtalo de nuevo. Si sigue ocurriendo, usa otro navegador vinculado.',
+  'profile.retryKidCreation': 'Reintentar la configuración',
+  'profile.retrySameKid':
+    'El reintento conserva exactamente el nombre y la edad para terminar la misma configuración de forma segura.',
   'page.downloads': 'Descargas',
   'page.people': 'Personas',
   'page.service': 'Servicio',
@@ -64,6 +83,8 @@ export const messages = {
   'player.subtitleDone': 'Listo',
   'player.subtitleTimingInstructions':
     'Izquierda o derecha para ajustar · Seleccionar para terminar',
+  'common.cancel': 'Cancelar',
+  'common.done': 'Hecho',
   'retirement.title': 'Hay que volver a intentar limpiar la biblioteca',
   'retirement.detail':
     'Has cerrado sesión. Den todavía debe eliminar los datos cifrados de la biblioteca guardados en este dispositivo. Puedes salir con seguridad; se volverá a intentar la próxima vez.',

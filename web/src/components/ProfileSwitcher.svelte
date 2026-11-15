@@ -17,6 +17,13 @@
   let denied = $state(false);
   let failed = $state(false);
   let switching = $state(false);
+  let addingKid = $state(false);
+  let kidFormLoading = $state(false);
+  let kidFormFailed = $state(false);
+  let kidBusy = $state(false);
+  let AddKidProfileForm = $state.raw<typeof import('./AddKidProfileForm.svelte').default | null>(
+    null,
+  );
   let pending = $state<ProfileChoice | null>(null);
   // The first switch to Kid with no Owner PIN yet sets one: entered, then entered again.
   let settingPin = $state(false);
@@ -30,9 +37,18 @@
   // Only receipt-incapable artifacts request an authorized Owner continuation. The E2E build keeps that exact path
   // injectable so the browser suite can cover it without duplicating the much heavier Tizen 3 build transform.
   const ownerContinuationEnabled = !__DEN_MANAGED_PLAYBACK_RECEIPTS__ || import.meta.env.DEN_E2E;
+  // Keep the reduced Tizen 3 artifact free of the form and its recovery protocol. A derived-false affordance is not
+  // enough: Rollup still retains an unconditional dynamic import as a legacy chunk even when no UI can call it.
+  const loadAddKidProfileForm = __DEN_TV_LEGACY_JS_CORE__
+    ? null
+    : () => import('./AddKidProfileForm.svelte');
 
   const active = $derived(profiles.activeChoice);
   const pinConfigured = $derived(profiles.parentalPinConfigured);
+  const busy = $derived(switching || kidBusy || kidFormLoading);
+  const canOfferKidCreation = $derived(
+    !__DEN_TV_LEGACY_JS_CORE__ && profiles.canCreateKid && !profiles.preview,
+  );
   const switchLabel = $derived(
     i18n.format('actions.switchProfileCurrent', 'Switch profile, current {value}', {
       value: active?.name ?? i18n.phrase('profile'),
@@ -41,6 +57,12 @@
   const pendingLabel = $derived(
     pending ? i18n.format('actions.use', 'Use {value}', { value: pending.name }) : '',
   );
+
+  $effect(() => {
+    if (!addingKid || canOfferKidCreation) return;
+    closeKidForm();
+    dialog?.close();
+  });
 
   function focusPinAfterPaint() {
     requestAnimationFrame(() =>
@@ -56,6 +78,7 @@
     settingPin = false;
     firstPin = null;
     mismatch = false;
+    closeKidForm();
     returnFocus = opener;
     restoreTriggerFocus = restoreFocus;
     // A continuation belongs to the requested profile, not to the dialog. If the viewer backs out and chooses a
@@ -77,6 +100,40 @@
     pin = '';
     successPath = undefined;
     successRole = undefined;
+    closeKidForm();
+  }
+
+  function closeKidForm() {
+    addingKid = false;
+    kidFormLoading = false;
+    kidBusy = false;
+    kidFormFailed = false;
+  }
+
+  async function beginKidCreation() {
+    if (busy || !canOfferKidCreation || !loadAddKidProfileForm) return;
+    kidFormFailed = false;
+    kidFormLoading = true;
+    const loaded = await loadAddKidProfileForm().catch((error: unknown) => {
+      console.error('den: Kid profile controls could not be loaded', error);
+      kidFormFailed = true;
+      return null;
+    });
+    if (!loaded || !canOfferKidCreation || !dialog?.open) {
+      kidFormLoading = false;
+      return;
+    }
+    AddKidProfileForm = loaded.default;
+    kidFormLoading = false;
+    addingKid = true;
+  }
+
+  async function kidCreated(choice: ProfileChoice) {
+    closeKidForm();
+    await tick();
+    dialog
+      ?.querySelector<HTMLButtonElement>(`[data-profile-id="${choice.id}"]`)
+      ?.focus({ preventScroll: true });
   }
 
   onMount(() =>
@@ -96,7 +153,7 @@
     choice?.role === 'visitor' ? 'visitor' : choice?.id;
 
   async function switchTo(choice: ProfileChoice) {
-    if (switching) return;
+    if (busy) return;
     switching = true;
     denied = false;
     failed = false;
@@ -222,14 +279,14 @@
 
 <dialog
   bind:this={dialog}
-  aria-labelledby="profile-switcher-title"
+  aria-labelledby={addingKid ? 'add-kid-title' : 'profile-switcher-title'}
   oncancel={(event) => {
-    if (switching) event.preventDefault();
+    if (busy) event.preventDefault();
   }}
   onpointerdown={(event) => (backdropPress = event.target === dialog)}
   onpointercancel={() => (backdropPress = false)}
   onclick={(event) => {
-    if (!switching && backdropPress && event.target === dialog) {
+    if (!busy && backdropPress && event.target === dialog) {
       restoreTriggerFocus = false;
       dialog?.close();
     }
@@ -242,6 +299,7 @@
     settingPin = false;
     firstPin = null;
     mismatch = false;
+    closeKidForm();
     successPath = undefined;
     successRole = undefined;
     requestAnimationFrame(() => {
@@ -260,11 +318,20 @@
       if (pending && /^\d{4}$/.test(pin)) void (settingPin ? setPin(pin) : switchTo(pending));
     }}
   >
-    <h2 id="profile-switcher-title">Who’s watching?</h2>
+    {#if !addingKid}<h2 id="profile-switcher-title">Who’s watching?</h2>{/if}
     {#if failed}<p class="denied" role="alert">
         The profile switch couldn’t be completed. Try again.
       </p>{/if}
-    {#if pending}
+    {#if addingKid && AddKidProfileForm}
+      <AddKidProfileForm
+        {profiles}
+        oncreated={(choice) => void kidCreated(choice)}
+        onclose={closeKidForm}
+        onbusy={(value) => (kidBusy = value)}
+      />
+    {:else if kidFormLoading}
+      <p role="status">{i18n.text('profile.loadingKidControls')}</p>
+    {:else if pending}
       <button class="back" type="button" disabled={switching} onclick={backToProfiles}
         >← Profiles</button
       >
@@ -342,6 +409,7 @@
               type="button"
               disabled={switching || profiles.waitsForPin(choice.role)}
               aria-label={i18n.format('actions.use', 'Use {value}', { value: choice.name })}
+              data-profile-id={choice.id}
               data-spatial-anchor
               onclick={() => void choose(choice)}
             >
@@ -364,8 +432,27 @@
           </div>
         {/each}
       </div>
+      {#if canOfferKidCreation}
+        {#if kidFormFailed}<p class="denied" role="alert">
+            {i18n.text('profile.kidControlsLoadFailed')}
+          </p>{/if}
+        {#if pinConfigured === true}
+          <button
+            class="add-kid"
+            type="button"
+            disabled={busy}
+            onclick={() => void beginKidCreation()}>{i18n.text('profile.addKid')}</button
+          >
+        {:else if pinConfigured === false}
+          <p class="kid-pin-handoff">
+            <a href="/settings#owner-pin">{i18n.text('profile.setPinBeforeKid')}</a>
+          </p>
+        {/if}
+      {/if}
       <div class="actions">
-        <button type="button" disabled={switching} onclick={() => dialog?.close()}>Done</button>
+        <button type="button" disabled={busy} onclick={() => dialog?.close()}
+          >{i18n.text('common.done')}</button
+        >
       </div>
     {/if}
   </form>
@@ -425,6 +512,15 @@
   h2,
   p {
     margin: 0;
+  }
+
+  .add-kid {
+    justify-self: start;
+    min-height: 40px;
+  }
+
+  .kid-pin-handoff {
+    font-size: 13px;
   }
 
   p {

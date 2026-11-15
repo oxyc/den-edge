@@ -1,4 +1,5 @@
 import type { LibraryModel, LibraryModelLease } from './libraryModel.svelte';
+import { LibraryServiceError } from './libraryServiceClient';
 import type { ConnectionsView, ProfileDirectoryView, TitleRef } from './libraryServiceProtocol';
 import {
   legacyProfileIdentity,
@@ -40,9 +41,18 @@ export type ProfileTransitionResult =
   | { readonly outcome: 'failed'; readonly cause: unknown }
   | { readonly outcome: 'superseded' };
 
+export type KidProfileCreateResult =
+  | { readonly outcome: 'created'; readonly choice: ProfileChoice }
+  | { readonly outcome: 'denied' }
+  | { readonly outcome: 'failed'; readonly cause: unknown }
+  | { readonly outcome: 'superseded' };
+export type KidProfileResumeResult = KidProfileCreateResult | { readonly outcome: 'idle' };
+
 const TRANSITION_SUCCESS: ProfileTransitionResult = { outcome: 'success' };
 const TRANSITION_DENIED: ProfileTransitionResult = { outcome: 'denied' };
 const TRANSITION_SUPERSEDED: ProfileTransitionResult = VISITOR_CLEANUP_SUPERSEDED;
+const KID_CREATE_DENIED = { outcome: 'denied' } as const;
+const KID_CREATE_SUPERSEDED = { outcome: 'superseded' } as const;
 export interface ProfileChoice {
   readonly id: ProfileId | null;
   readonly role: ActiveProfileMode;
@@ -221,6 +231,8 @@ export class ProfileModeCoordinator {
   readonly #openingModels = new Set<ProfileActivityModelHandle>();
   #pendingOwner: ProfileSession | null;
   #transition = 0;
+  #kidCreation = 0;
+  #kidCreationActive = false;
   /** Newest-wins ownership for Settings PIN checks that share an unchanged active Kid session. */
   #settingsUnlockAttempt = 0;
   #restoring = $state(0);
@@ -396,6 +408,103 @@ export class ProfileModeCoordinator {
 
   get preview(): boolean {
     return this.#preview;
+  }
+
+  /** Additional Kids require a real directory, an active Owner and the retained household control model. */
+  get canCreateKid(): boolean {
+    return this.mode === 'owner' && !!this.#directory && !!this.#profileModels && !this.#preview;
+  }
+
+  /**
+   * Create one additional Kid behind a fresh Owner PIN. The durable service operation is retried with the caller's
+   * stable id; publication remains owned by this exact Owner session and directory lifetime.
+   */
+  async createKidProfile(
+    name: string,
+    maximumAge: number,
+    pin: string,
+    operationId: string,
+  ): Promise<KidProfileCreateResult> {
+    this.#assertOpen();
+    if (!this.canCreateKid) return KID_CREATE_DENIED;
+    if (this.#kidCreationActive)
+      return { outcome: 'failed', cause: new Error('Kid profile creation is already in progress') };
+    const owner = this.#session;
+    const ownerChoice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
+    const ticket = ++this.#kidCreation;
+    this.#kidCreationActive = true;
+    const current = () =>
+      !this.#disposed &&
+      ticket === this.#kidCreation &&
+      this.#session === owner &&
+      this.mode === 'owner' &&
+      ownerChoice?.id === this.#directory?.owner &&
+      ownerChoice?.libraryKey === this.#choice(this.#directory!.owner)?.libraryKey &&
+      ownerChoice?.keyVersion === this.#choice(this.#directory!.owner)?.keyVersion;
+    try {
+      const created = await this.#household.createKidProfile(name, maximumAge, pin, operationId);
+      if (!current()) return KID_CREATE_SUPERSEDED;
+      const choice = this.#choice(created.profile);
+      if (
+        !choice?.id ||
+        choice.role !== 'kid' ||
+        choice.name !== created.name ||
+        choice.policy?.maximumAge !== created.maximumAge
+      )
+        throw new Error('the created Kid is not ready in the household directory');
+      await this.#household.acknowledgeKidProfile(created.receipt, `${operationId}:ack`);
+      if (!current()) return KID_CREATE_SUPERSEDED;
+      return { outcome: 'created', choice: this.#publicChoice(choice)! };
+    } catch (cause) {
+      if (!current()) return KID_CREATE_SUPERSEDED;
+      return cause instanceof LibraryServiceError && cause.failure.code === 'unauthorized'
+        ? KID_CREATE_DENIED
+        : { outcome: 'failed', cause };
+    } finally {
+      if (ticket === this.#kidCreation) this.#kidCreationActive = false;
+    }
+  }
+
+  /** Resume one durable attempt before accepting a new payload after reload or an ambiguous reply. */
+  async resumeKidProfileCreation(): Promise<KidProfileResumeResult> {
+    this.#assertOpen();
+    if (!this.canCreateKid) return KID_CREATE_DENIED;
+    if (this.#kidCreationActive)
+      return { outcome: 'failed', cause: new Error('Kid profile creation is already in progress') };
+    const owner = this.#session;
+    const ownerChoice = this.#directory ? this.#choice(this.#directory.owner) : undefined;
+    const ticket = ++this.#kidCreation;
+    this.#kidCreationActive = true;
+    const current = () =>
+      !this.#disposed &&
+      ticket === this.#kidCreation &&
+      this.#session === owner &&
+      this.mode === 'owner' &&
+      ownerChoice?.id === this.#directory?.owner &&
+      ownerChoice?.libraryKey === this.#choice(this.#directory!.owner)?.libraryKey &&
+      ownerChoice?.keyVersion === this.#choice(this.#directory!.owner)?.keyVersion;
+    try {
+      const status = await this.#household.resumeKidProfileCreation();
+      if (!current()) return KID_CREATE_SUPERSEDED;
+      if (status.phase === 'idle') return { outcome: 'idle' };
+      const choice = this.#choice(status.profile);
+      if (
+        !choice?.id ||
+        choice.role !== 'kid' ||
+        choice.name !== status.name ||
+        choice.policy?.maximumAge !== status.maximumAge
+      )
+        throw new Error('the resumed Kid is not ready in the household directory');
+      // The terminal receipt is the recovery authority if the task's affected-profile publication was lost.
+      // Retire it only after this page can prove the exact created choice is present and still Owner-owned.
+      await this.#household.acknowledgeKidProfile(status.receipt, `${status.receipt}:ack`);
+      if (!current()) return KID_CREATE_SUPERSEDED;
+      return { outcome: 'created', choice: this.#publicChoice(choice)! };
+    } catch (cause) {
+      return current() ? { outcome: 'failed', cause } : KID_CREATE_SUPERSEDED;
+    } finally {
+      if (ticket === this.#kidCreation) this.#kidCreationActive = false;
+    }
   }
 
   /**

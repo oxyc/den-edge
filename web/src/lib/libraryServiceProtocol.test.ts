@@ -323,6 +323,37 @@ describe('library service client protocol', () => {
         messages: [{ seq: 1, sealed: 'ciphertext', plaintext: 'leak' }],
       }),
     ).toMatchObject({ ok: false });
+    for (const result of [
+      { kind: 'profile.create.resume', outcome: 'idle' },
+      {
+        kind: 'profile.create.resume',
+        outcome: 'created',
+        profile: 'a'.repeat(32),
+        name: 'Sam',
+        maximumAge: 8,
+        receipt: 'create-sam',
+      },
+    ])
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'task-result',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          requestId: 'profile-create-resume',
+          operationId: 'profile-create-resume-op',
+          result,
+          version,
+        }),
+      ).toMatchObject({ ok: true });
+    expect(
+      decodeLibraryServiceServerMessage({
+        type: 'task-result',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'profile-create-resume-bad',
+        operationId: 'profile-create-resume-bad-op',
+        result: { kind: 'profile.create.resume', outcome: 'created', name: 'Missing proof' },
+        version,
+      }),
+    ).toMatchObject({ ok: false });
     expect(
       decodeTask({
         kind: 'assistant.receipts.apply',
@@ -362,6 +393,10 @@ describe('library service client protocol', () => {
     expect(
       decodeTask({ kind: 'profile.create', name: '😀'.repeat(65), maximumAge: 8, pin: '1234' }),
     ).toMatchObject({ ok: false });
+    expect(decodeTask({ kind: 'profile.create.resume' })).toMatchObject({ ok: true });
+    expect(decodeTask({ kind: 'profile.create.resume', receipt: 'unexpected' })).toMatchObject({
+      ok: false,
+    });
     const kid = 'a'.repeat(32);
     for (const [maximumAge, unknownRatings, pin, ok] of [
       [8, 'block', '1234', true],

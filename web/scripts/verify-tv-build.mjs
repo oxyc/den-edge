@@ -74,6 +74,8 @@ if (platform === 'tizen' && (tizen3 || tizenVersion === '5.5')) {
 }
 if (tizen3) {
   verifyTizen3Core();
+  if (assets.some((file) => file.includes('AddKidProfileForm')))
+    throw new Error('Owner-only Add Kid form leaked into the reduced Tizen 3 package');
   if (/type=["']module["']|rel=["']modulepreload["']/.test(entryHtml))
     throw new Error('Native module loading remains in the Tizen 3 build');
   if (

@@ -1947,6 +1947,120 @@ describe('choosing Kid before the Owner PIN’s state is known (den#295)', () =>
   });
 });
 
+describe('additional Kid creation authority', () => {
+  async function activeOwner() {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const ownerProfile = view.profiles.find((profile) => profile.role === 'owner')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[ownerProfile.libraryKey, opening]]));
+    const harness = owner(storage, true, null, undefined, directory, models.factory, true);
+    opening.resolve({});
+    await vi.waitFor(() => expect(harness.coordinator.mode).toBe('owner'));
+    return { ...harness, storage, view, directory, models };
+  }
+
+  it.each(['session', 'id', 'libraryKey', 'keyVersion'] as const)(
+    'rejects a completed create after same-Owner %s authority replacement',
+    async (replacement) => {
+      const harness = await activeOwner();
+      const pendingCreate = deferred<{
+        profile: string;
+        name: string;
+        maximumAge: number;
+        receipt: string;
+      }>();
+      const createKidProfile = vi.fn(() => pendingCreate.promise);
+      const acknowledgeKidProfile = vi.fn(async () => undefined);
+      Object.assign(harness.householdModel, { createKidProfile, acknowledgeKidProfile });
+      const kid = harness.view.profiles.find((profile) => profile.role === 'kid')!;
+
+      const creating = harness.coordinator.createKidProfile('Sam', 8, '1234', 'create-sam');
+      await vi.waitFor(() => expect(createKidProfile).toHaveBeenCalledOnce());
+
+      if (replacement === 'session') {
+        await expect(harness.coordinator.switchToVisitor()).resolves.toMatchObject({
+          outcome: 'success',
+        });
+      } else {
+        const next = structuredClone(harness.view);
+        const ownerProfile = next.profiles.find((profile) => profile.role === 'owner')!;
+        if (replacement === 'id') {
+          ownerProfile.id = 'b'.repeat(32);
+          next.owner = ownerProfile.id;
+        } else if (replacement === 'libraryKey') ownerProfile.libraryKey = 'rotated-owner-key';
+        else ownerProfile.keyVersion += 1;
+        harness.coordinator.updateDirectory(profileDirectoryChoices(next)!);
+      }
+
+      pendingCreate.resolve({
+        profile: kid.id,
+        name: 'Sam',
+        maximumAge: 8,
+        receipt: 'create-sam',
+      });
+      await expect(creating).resolves.toEqual({ outcome: 'superseded' });
+      expect(acknowledgeKidProfile).not.toHaveBeenCalled();
+      harness.coordinator.dispose();
+    },
+  );
+
+  it('acknowledges a recovered receipt only after the exact Kid is present in the current directory', async () => {
+    const harness = await activeOwner();
+    const profile = 'c'.repeat(32);
+    const recovered = {
+      phase: 'created' as const,
+      profile,
+      name: 'Sam',
+      maximumAge: 8,
+      receipt: 'create-sam',
+    };
+    const resumeKidProfileCreation = vi.fn(async () => recovered);
+    const acknowledgeKidProfile = vi.fn(async () => undefined);
+    Object.assign(harness.householdModel, {
+      resumeKidProfileCreation,
+      acknowledgeKidProfile,
+    });
+
+    await expect(harness.coordinator.resumeKidProfileCreation()).resolves.toMatchObject({
+      outcome: 'failed',
+      cause: expect.objectContaining({
+        message: 'the resumed Kid is not ready in the household directory',
+      }),
+    });
+    expect(acknowledgeKidProfile).not.toHaveBeenCalled();
+
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    harness.coordinator.updateDirectory(
+      profileDirectoryChoices({
+        ...harness.view,
+        profiles: [
+          ...harness.view.profiles,
+          {
+            ...kid,
+            id: profile,
+            name: 'Sam',
+            libraryKey: 'sam-profile-key',
+            policy: { ...kid.policy, maximumAge: 8 },
+          },
+        ],
+      })!,
+    );
+    await expect(harness.coordinator.resumeKidProfileCreation()).resolves.toMatchObject({
+      outcome: 'created',
+      choice: { id: profile, name: 'Sam', policy: { maximumAge: 8 } },
+    });
+    expect(acknowledgeKidProfile).toHaveBeenCalledOnce();
+    expect(acknowledgeKidProfile).toHaveBeenCalledWith('create-sam', 'create-sam:ack');
+    harness.coordinator.dispose();
+  });
+});
+
 describe('household parental-control selection authority', () => {
   it('distinguishes failed retained data, rebinds once and accepts only a fresh ready value', () => {
     const first = owner(memoryStorage(), false);

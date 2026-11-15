@@ -158,7 +158,10 @@ if (process.argv.includes('--capture')) {
   // (203,804 -> 204,130). Its menu and AirPlay recovery remain in the existing lazy Settings/Player chunks; only the
   // profile projection and strict cross-client codec stay in the initial graph so every host sees the same choice.
   // Allow the next 128-byte boundary, retaining 74 bytes without a dependency, request or background task.
-  if (initialDelta > Math.min(7808, Math.floor(baseline.initialGzip * 0.0398)))
+  // Owner-only Kid creation (#940) adds 2,103 gzip bytes to startup on matched base/head builds after placing the
+  // complete form in a new lazy chunk. Admission, durable recovery and the shared Worker task contract stay eager so
+  // every browser/TV host observes one authority before the form loads. AGENTS.md records the full consolidation.
+  if (initialDelta > Math.min(9728, Math.floor(baseline.initialGzip * 0.04955)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -354,5 +357,8 @@ if (process.argv.includes('--capture')) {
   // Optional title-facts recovery then adds 1,607 bytes on matched a819734f/head builds, split between the existing
   // lazy Detail and content-service Worker boundaries. Another split adds a request on the failure path or Worker
   // startup and cannot reduce the complete graph. Allow the smallest 128-byte boundary, retaining 112 bytes.
-  if (coreTotalDelta > 106880) throw new Error('Browser total JS/CSS budget exceeded');
+  // Owner-only Kid creation (#940) adds 4,385 gzip bytes to the complete non-translation graph; 2,060 bytes are the
+  // separately lazy form, while the remaining admission/recovery authority is shared by the startup page and Worker.
+  // The final matched current-main/head measurement and smallest combined boundary are recorded in AGENTS.md.
+  if (coreTotalDelta > 111232) throw new Error('Browser total JS/CSS budget exceeded');
 }

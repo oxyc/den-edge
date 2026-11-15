@@ -1057,6 +1057,8 @@ function task(value: unknown): value is LibraryTask {
         value.maximumAge <= 18 &&
         pin(value.pin)
       );
+    case 'profile.create.resume':
+      return exact(value, ',kind,');
     case 'profile.create.ack':
       return exact(value, ',kind,receipt,') && boundedText(value.receipt, 256);
     case 'profile.policy.set':
@@ -2417,6 +2419,18 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         value.maximumAge >= 0 &&
         value.maximumAge <= 18 &&
         boundedText(value.receipt, 256)
+      );
+    case 'profile.create.resume':
+      return (
+        exact(value, ',kind,outcome,profile,name,maximumAge,receipt,') &&
+        (value.outcome === 'idle' ||
+          (value.outcome === 'created' &&
+            hexId(value.profile) &&
+            boundedScalarText(value.name, 64) &&
+            integer(value.maximumAge) &&
+            value.maximumAge >= 0 &&
+            value.maximumAge <= 18 &&
+            boundedText(value.receipt, 256)))
       );
     case 'profile.create.ack':
       return exact(value, ',kind,outcome,') && value.outcome === 'acknowledged';
