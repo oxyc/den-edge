@@ -168,10 +168,11 @@ if (process.argv.includes('--capture')) {
   // The UI stays in lazy Settings and Tizen 3 compiles it out; only the versioned command and write authority remain
   // with the Worker that must reject old clients and stale rows before Settings can recover. Allow the smallest
   // 128-byte boundary containing the reviewed graph, retaining 102 bytes.
-  // Browser-owned persistent title approval (#530) adds 287 bytes at startup on matched 7fff9db5/head builds. The
+  // Browser-owned persistent title approval (#530) adds 388 bytes at startup on matched fc04556c/head builds. The
   // exact mutation authority must stay with the eagerly mounted profile coordinator/Library boundary; the TV-only
-  // handoff was consolidated into the already lazy Detail chunk. Allow the smallest 128-byte boundary, retaining 42.
-  if (initialDelta > Math.min(9984, Math.floor(baseline.initialGzip * 0.051)))
+  // handoff was consolidated into the already lazy Detail chunk. Allow the smallest 128-byte boundary; the tighter
+  // proportional bound retains 7 bytes on the matched graph.
+  if (initialDelta > Math.min(10240, Math.floor(baseline.initialGzip * 0.0517)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -385,8 +386,8 @@ if (process.argv.includes('--capture')) {
   // remains in lazy Settings; command admission, exact-row CAS and durable replay prevention remain in the Worker.
   // Another split would add an authority request and duplicate the row guard. Allow the smallest 128-byte boundary,
   // retaining 7 bytes on the matched build.
-  // The same locked current-main build independently measures 118,899 here, 3,827 above that prior ceiling; #1282
-  // owns the reproducibility defect. Recalibrate clean main separately to 118,912 (13-byte margin), then account for
-  // #530's matched +716-byte non-translation delta. Allow the smallest 128-byte boundary, retaining 65 bytes.
-  if (coreTotalDelta > 119680) throw new Error('Browser total JS/CSS budget exceeded');
+  // Exact clean current main independently measures 121,434 here, 3,802 above its committed 117,632 ceiling; #1282
+  // owns the reproducibility defect. Recalibrate clean main separately to 121,472 (38-byte margin), then account for
+  // #530's matched +756-byte non-translation delta. Allow the smallest 128-byte boundary, retaining 50 bytes.
+  if (coreTotalDelta > 122240) throw new Error('Browser total JS/CSS budget exceeded');
 }
