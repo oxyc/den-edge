@@ -1302,12 +1302,10 @@ describe('LibraryLogAuthority', () => {
     });
     const opened = authority(log, clock, 'online');
     await opened.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
-    vi.spyOn(log, 'profileDirectory').mockReturnValue(
-      ({
-        owner: 'owner',
-        profiles: { owner: { role: 'owner', deleted: { value: false } } },
-      }) as never,
-    );
+    vi.spyOn(log, 'profileDirectory').mockReturnValue({
+      owner: 'owner',
+      profiles: { owner: { role: 'owner', deleted: { value: false } } },
+    } as never);
     const put = vault.put.bind(vault);
     let refusedPending = false;
     vi.spyOn(vault, 'put').mockImplementation(async (key, value) => {
@@ -1320,10 +1318,7 @@ describe('LibraryLogAuthority', () => {
     const writesBeforeRemoval = server.writeRequests;
 
     await expect(
-      opened.command(
-        { kind: 'parental-pin.set', current: '1234', pin: null },
-        'unstaged-remove',
-      ),
+      opened.command({ kind: 'parental-pin.set', current: '1234', pin: null }, 'unstaged-remove'),
     ).rejects.toMatchObject({ failure: { code: 'unavailable' } });
     expect(refusedPending).toBe(true);
     await expect(opened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
