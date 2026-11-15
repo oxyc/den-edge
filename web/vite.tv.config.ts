@@ -25,6 +25,9 @@ const platform = process.env.DEN_TV_PLATFORM ?? 'webos';
 if (platform !== 'webos' && platform !== 'tizen') throw new Error('Unknown DEN_TV_PLATFORM');
 const standardCompat = fileURLToPath(new URL('./src/tv/compat.ts', import.meta.url));
 const legacyCompat = fileURLToPath(new URL('./src/tv/compat-legacy.ts', import.meta.url));
+const tizen3ContentSection = fileURLToPath(
+  new URL('./src/settings/ContentSection-tizen3.svelte', import.meta.url),
+);
 const tizen3WorkerCompat = fileURLToPath(
   new URL('./src/tv/compat-tizen3-worker.ts', import.meta.url),
 );
@@ -417,6 +420,13 @@ export default mergeConfig(
       alias: [
         ...(tizen3
           ? [
+              {
+                // Tizen 3 is deliberately viewer-only. Settings renders the supported-browser Content handoff;
+                // replacing both static ContentSection imports keeps the unreachable PIN/policy editor and its
+                // provider-directory dependencies out of the reduced package instead of merely hiding their UI.
+                find: /^(?:.*\/)?settings\/ContentSection\.svelte$/,
+                replacement: tizen3ContentSection,
+              },
               { find: /^hls\.js$/, replacement: tizen3UnsupportedMediaEngine },
               { find: './pairCurve', replacement: tizen3PairCurve },
               { find: './syncLoader', replacement: tizen3SyncLoader },
