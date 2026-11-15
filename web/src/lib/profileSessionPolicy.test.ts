@@ -110,6 +110,23 @@ describe('a restricted profile names only the titles its policy establishes', ()
       let bDown = true;
       let atlasACalls = 0,
         atlasBCalls = 0;
+      const tmdbFetch = vi.fn(async (input: RequestInfo | URL) => {
+        const id = Number(/\/(?:movie|tv)\/(\d+)/.exec(String(input))?.[1] ?? 0);
+        return new Response(
+          JSON.stringify({
+            id,
+            title: `Title ${id}`,
+            release_date: '2020-01-01',
+            credits: { cast: [], crew: [] },
+            recommendations: { results: [] },
+            videos: { results: [] },
+            external_ids: {},
+            release_dates: { results: [] },
+            'watch/providers': { results: {} },
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      });
       const authority = new ContentAuthority(credentials, {
         providerFetch: async (input) => {
           const url = String(input);
@@ -133,6 +150,7 @@ describe('a restricted profile names only the titles its policy establishes', ()
           }
           throw new Error(`unexpected provider request: ${url}`);
         },
+        tmdbFetch,
       });
       const content = {
         query: async (request, signal, policy) => {
@@ -184,6 +202,17 @@ describe('a restricted profile names only the titles its policy establishes', ()
       await nameLibraryTitles(current, [refs[0]!]);
       expect(current.displayMissing(refs[0]!)).toBe(false);
       expect([...current.displayTitles().values()]).toEqual([]);
+      const unavailable = await current.content.query({
+        kind: 'title.detail',
+        title: refs[0]!,
+        region: 'US',
+      });
+      expect(unavailable.detail).toMatchObject({
+        state: 'unavailable',
+        provider: 'atlas',
+        reason: 'network',
+      });
+      expect(tmdbFetch).not.toHaveBeenCalled();
 
       bDown = false;
       await vi.advanceTimersByTimeAsync(1_000);
@@ -192,11 +221,15 @@ describe('a restricted profile names only the titles its policy establishes', ()
           { type: 'movie', id: 1, title: 'One' },
         ]),
       );
+      await expect(
+        current.content.query({ kind: 'title.detail', title: refs[0]!, region: 'US' }),
+      ).resolves.toMatchObject({ detail: { state: 'ready' } });
+      expect(tmdbFetch).toHaveBeenCalledTimes(1);
 
       releaseStale();
       await staleNaming;
       expect([...stale.displayTitles().values()]).toEqual([]);
-      expect([atlasACalls, atlasBCalls]).toEqual([1, 2]);
+      expect([atlasACalls, atlasBCalls]).toEqual([1, 3]);
     } finally {
       warn.mockRestore();
       vi.useRealTimers();

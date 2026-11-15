@@ -104,7 +104,9 @@ everything the committed code imports is committed too.
   and retains 15 bytes. The production hydration fix then deleted the profile layer's conversion of an authority
   failure into an empty eligibility answer, letting the existing bounded library-naming retry own it. On the same
   build it adds 6 startup and 25 complete-graph bytes (203,810 and 101,402), retaining 9 and 102 respectively without
-  another budget change.
+  another budget change. Preserving that typed failure through the lazy Detail screen and adding its translated,
+  accessible recovery presentation then moves startup to 203,809 and the complete non-translation graph to 101,495,
+  retaining 6 and 9 respectively; the separately excluded translation chunks move 46,350 → 46,397 gzip bytes.
 
 ## Testing
 

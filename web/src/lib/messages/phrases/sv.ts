@@ -125,6 +125,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.':
     'Godkänn också att ta bort dem från din SIMKL bevakningslista. Att godkänna här räknas för varje enhet.',
   Arabic: 'arabiska',
+  'Atlas couldn’t check this title for this profile.':
+    'Atlas kunde inte kontrollera den här titeln för den här profilen.',
   'Art House': 'Konsthus',
   'Assassin & Hitman': 'Lönnmördare',
   Assault: 'Överfall',

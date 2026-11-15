@@ -49,6 +49,7 @@
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type { DownloadsView } from '../lib/libraryServiceProtocol';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import type { OptionalContent } from '../lib/contentServiceProtocol';
   import type { Warning } from '../lib/contentWarnings';
   import type { MenuItem } from '../lib/titleActions';
   import type { HouseholdTv } from '../lib/householdTvs';
@@ -331,6 +332,7 @@
    * spent 24 ms in this flush.
    */
   let detail = $state.raw<TitleDetail | null | undefined>();
+  let detailFailure = $state.raw<OptionalContent<TitleDetail>>();
   /** The active profile's content policy does not allow this title: nothing about it is shown or offered. */
   let withheld = $state(false);
   /** The curated studios credited on this title; undefined while they are asked for. */
@@ -435,6 +437,7 @@
     void retry;
     const controller = new AbortController();
     detail = undefined;
+    detailFailure = undefined;
     withheld = false;
     season = null;
     seasonAsked = null;
@@ -453,12 +456,16 @@
           loaded.state === 'unavailable' &&
           loaded.provider === 'atlas' &&
           loaded.reason === 'refused';
+        detailFailure = loaded.state === 'ready' ? undefined : loaded;
         detail = loaded.state === 'ready' ? loaded.value : null;
         seasonAsked = untrack(() => requestedSeason);
         season = detail ? openingSeason(detail, seasonAsked) : null;
       })
       .catch(() => {
-        if (!controller.signal.aborted) detail = null;
+        if (!controller.signal.aborted) {
+          detailFailure = undefined;
+          detail = null;
+        }
       });
     return () => controller.abort();
   });
@@ -945,7 +952,13 @@
 {#if withheld}
   <p class="note">This title isn’t available on this profile.</p>
 {:else if detail === null}
-  <p class="note">Couldn’t load this title from TMDB.</p>
+  <p class="note" role="alert">
+    {detailFailure?.state === 'unavailable' &&
+    detailFailure.provider === 'atlas' &&
+    detailFailure.reason !== 'refused'
+      ? 'Atlas couldn’t check this title for this profile.'
+      : 'Couldn’t load this title from TMDB.'}
+  </p>
   <button class="retry" onclick={() => retry++}>Try again</button>
 {:else}
   <!-- One hero, and one picture frame in it, from the moment the page opens until it is left: TMDB's answer fills
