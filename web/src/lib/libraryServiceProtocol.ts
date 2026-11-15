@@ -10,9 +10,10 @@
  * adds the `airing` observation and Continue Watching's `upcoming` day. Version 12 carries fresh-source admission
  * separately from the source list's coverage. Version 13 preserves the count of sources still answering when an
  * early source list was returned. Version 14 asks the authority Worker for den-core's source wait decision, keeping
- * the deferred policy module out of the page realm.
+ * the deferred policy module out of the page realm. Version 15 binds an Owner PIN mutation to the exact current
+ * PIN observed by the authority and exposes whether that PIN may be removed from the current profile topology.
  */
-export const LIBRARY_SERVICE_PROTOCOL = 14 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 15 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -285,7 +286,7 @@ export type LibraryCommand =
       service: LibraryApiKeyService;
       value: string | null;
     }
-  | { kind: 'parental-pin.set'; pin: string | null }
+  | { kind: 'parental-pin.set'; current: string | null; pin: string | null }
   | {
       kind: 'remote-access.set';
       credentials: { clientId: string; clientSecret: string } | null;
@@ -583,6 +584,8 @@ export interface ConnectionsView {
   kind: 'connections';
   apiKeys: Partial<Record<LibraryApiKeyService, { configured: true; masked: string }>>;
   parentalPinConfigured: boolean;
+  /** False for a live restricted profile or unresolved profile topology; a resolved Owner-only household is true. */
+  parentalPinRemovable: boolean;
   /** `queued` means the shown PIN is only a durable local projection and cannot authorize security actions yet. */
   parentalPinDelivery: 'synced' | 'queued' | 'local';
   remoteAccessConfigured: boolean;

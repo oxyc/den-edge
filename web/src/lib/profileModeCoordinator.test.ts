@@ -83,6 +83,7 @@ function owner(
             value: {
               kind: 'connections',
               parentalPinConfigured: configured,
+              parentalPinRemovable: !configured,
               parentalPinDelivery: 'synced',
             },
           },
@@ -2078,6 +2079,7 @@ describe('household parental-control selection authority', () => {
       value: {
         kind: 'connections',
         parentalPinConfigured: false,
+        parentalPinRemovable: true,
         parentalPinDelivery: 'synced',
       } as ConnectionsView,
       error: { code: 'unavailable', message: 'control selection failed', retryable: true },
@@ -2100,6 +2102,7 @@ describe('household parental-control selection authority', () => {
       value: {
         kind: 'connections',
         parentalPinConfigured: true,
+        parentalPinRemovable: false,
         parentalPinDelivery: 'synced',
       } as ConnectionsView,
     };

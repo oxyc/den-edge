@@ -159,12 +159,14 @@ async function pinDeliveryServer() {
   const stored = new Map<string, { k: string; seq: number; v: string }>();
   let head = 0;
   let acceptWrites = false;
+  let writeRequests = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
     if (init?.method === 'POST') {
       const body = JSON.parse(String(init.body)) as {
         writes?: { k: string; base: number; v: string }[];
       };
       if (!body.writes) return new Response('{}');
+      writeRequests += 1;
       if (!acceptWrites) return new Response('{"error":"unavailable"}', { status: 503 });
       const applied: { k: string; seq: number }[] = [];
       const conflicts: { k: string; seq: number; v: string | null }[] = [];
@@ -183,7 +185,13 @@ async function pinDeliveryServer() {
     const entries = [...stored.values()].filter((entry) => entry.seq > since);
     return new Response(JSON.stringify({ entries, head, more: false, generation: 'pin-test' }));
   };
-  return { fetchImpl, allowWrites: () => (acceptWrites = true) };
+  return {
+    fetchImpl,
+    allowWrites: () => (acceptWrites = true),
+    get writeRequests() {
+      return writeRequests;
+    },
+  };
 }
 
 describe('LibraryLogAuthority', () => {
@@ -835,7 +843,7 @@ describe('LibraryLogAuthority', () => {
     const first = authority(firstLog, firstClock, 'online');
 
     await expect(
-      first.command({ kind: 'parental-pin.set', pin: '1234' }, 'first'),
+      first.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'first'),
     ).resolves.toMatchObject({
       outcome: 'applied',
       delivery: 'queued',
@@ -861,24 +869,29 @@ describe('LibraryLogAuthority', () => {
       parentalPinDelivery: 'queued',
     });
     await expect(
-      reopened.command({ kind: 'parental-pin.set', pin: '1234' }, 'retry-offline'),
+      reopened.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'retry-offline'),
     ).resolves.toMatchObject({ outcome: 'unchanged', delivery: 'queued' });
     await expect(reopened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
       kind: 'parental-pin.verify',
       matches: false,
     });
     await expect(
-      reopened.command({ kind: 'parental-pin.set', pin: '4321' }, 'replace-offline'),
-    ).resolves.toMatchObject({ outcome: 'applied', delivery: 'queued' });
-    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '4321' })).resolves.toEqual({
-      kind: 'parental-pin.verify',
-      matches: false,
-    });
+      reopened.command(
+        { kind: 'parental-pin.set', current: '1234', pin: '4321' },
+        'replace-offline',
+      ),
+    ).rejects.toMatchObject({ failure: { code: 'not-ready', retryable: true } });
 
     server.allowWrites();
     await expect(
-      reopened.command({ kind: 'parental-pin.set', pin: '4321' }, 'retry-online'),
+      reopened.command(
+        { kind: 'parental-pin.set', current: null, pin: '1234' },
+        'sync-initial-online',
+      ),
     ).resolves.toMatchObject({ outcome: 'unchanged', delivery: 'synced' });
+    await expect(
+      reopened.command({ kind: 'parental-pin.set', current: '1234', pin: '4321' }, 'retry-online'),
+    ).resolves.toMatchObject({ outcome: 'applied', delivery: 'synced' });
     await expect(reopened.select({ kind: 'connections' })).resolves.toMatchObject({
       parentalPinConfigured: true,
       parentalPinDelivery: 'synced',
@@ -905,9 +918,9 @@ describe('LibraryLogAuthority', () => {
       createDevice: () => '0123456789abcdef',
     });
     const owned = authority(log, clock, 'online');
-    await owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'set-pin');
+    await owned.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set-pin');
     await expect(
-      owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'confirm-pin'),
+      owned.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'confirm-pin'),
     ).resolves.toMatchObject({ delivery: 'synced' });
 
     // An Owner and a Kid at 12 and under, read fresh from "den-edge" on every attempt.
@@ -980,8 +993,8 @@ describe('LibraryLogAuthority', () => {
       createDevice: () => '0123456789abcdef',
     });
     const owned = authority(log, clock, 'online');
-    await owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'set-pin');
-    await owned.command({ kind: 'parental-pin.set', pin: '1234' }, 'confirm-pin');
+    await owned.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set-pin');
+    await owned.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'confirm-pin');
 
     const ownerDirectory = structuredClone(
       profileFixture.migrationBase,
@@ -1128,7 +1141,7 @@ describe('LibraryLogAuthority', () => {
 
   it('replaces but never removes the parental PIN while a restricted profile is live', async () => {
     const { log, authority } = await localAuthority();
-    await authority.command({ kind: 'parental-pin.set', pin: '1234' }, 'set');
+    await authority.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
     const directory = (kidDeleted: boolean) =>
       ({
         owner: 'owner',
@@ -1140,16 +1153,264 @@ describe('LibraryLogAuthority', () => {
     const spy = vi.spyOn(log, 'profileDirectory').mockReturnValue(directory(false));
 
     await expect(
-      authority.command({ kind: 'parental-pin.set', pin: null }, 'clear'),
+      authority.command({ kind: 'parental-pin.set', current: '1234', pin: null }, 'clear'),
     ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+    await expect(authority.select({ kind: 'connections' })).resolves.toMatchObject({
+      parentalPinRemovable: false,
+    });
     await expect(
-      authority.command({ kind: 'parental-pin.set', pin: '4321' }, 'replace'),
+      authority.command({ kind: 'parental-pin.set', current: '1234', pin: '4321' }, 'replace'),
     ).resolves.toMatchObject({ outcome: 'applied' });
 
     spy.mockReturnValue(directory(true));
+    await expect(authority.select({ kind: 'connections' })).resolves.toMatchObject({
+      parentalPinRemovable: true,
+    });
     await expect(
-      authority.command({ kind: 'parental-pin.set', pin: null }, 'clear-after-delete'),
+      authority.command(
+        { kind: 'parental-pin.set', current: '4321', pin: null },
+        'clear-after-delete',
+      ),
     ).resolves.toMatchObject({ outcome: 'applied' });
+  });
+
+  it('fails PIN removal closed while profile topology is invalid or missing at wire 5', async () => {
+    const { log, authority } = await localAuthority();
+    await authority.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
+    vi.spyOn(log, 'profileDirectory').mockReturnValue(null);
+    const topology = vi.spyOn(log, 'profileTopologyPresent', 'get').mockReturnValue(true);
+
+    await expect(authority.select({ kind: 'connections' })).resolves.toMatchObject({
+      parentalPinRemovable: false,
+      diagnostics: { profileTopologyBlocked: true },
+    });
+    await expect(
+      authority.command({ kind: 'parental-pin.set', current: '1234', pin: null }, 'invalid'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+
+    topology.mockReturnValue(false);
+    vi.spyOn(log, 'wireMinimum', 'get').mockReturnValue(5);
+    await expect(
+      authority.command({ kind: 'parental-pin.set', current: '1234', pin: null }, 'missing'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+  });
+
+  it('rejects PIN removal when profile topology changes at the serialized write boundary', async () => {
+    const { log, authority } = await localAuthority();
+    await authority.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
+    const directory = (kidDeleted: boolean) =>
+      ({
+        owner: 'owner',
+        profiles: {
+          owner: { role: 'owner', deleted: { value: false } },
+          kid: { role: 'kid', deleted: { value: kidDeleted } },
+        },
+      }) as never;
+    const profileDirectory = vi.spyOn(log, 'profileDirectory').mockReturnValue(directory(true));
+    const write = log.write.bind(log);
+    vi.spyOn(log, 'write').mockImplementation(async (row, outcome, durable, guard) => {
+      profileDirectory.mockReturnValue(directory(false));
+      return write(row, outcome, durable, guard);
+    });
+
+    await expect(
+      authority.command({ kind: 'parental-pin.set', current: '1234', pin: null }, 'raced-remove'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+    await expect(authority.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+  });
+
+  it('never journals an online PIN removal refused at the serialized write boundary', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    server.allowWrites();
+    const log = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'online-pin-removal-race-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const opened = authority(log, clock, 'online');
+    await opened.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
+
+    const directory = (kidDeleted: boolean) =>
+      ({
+        owner: 'owner',
+        profiles: {
+          owner: { role: 'owner', deleted: { value: false } },
+          kid: { role: 'kid', deleted: { value: kidDeleted } },
+        },
+      }) as never;
+    const profileDirectory = vi.spyOn(log, 'profileDirectory').mockReturnValue(directory(true));
+    const remove = vi.spyOn(vault, 'delete').mockRejectedValue(new Error('storage unavailable'));
+    const write = log.write.bind(log);
+    vi.spyOn(log, 'write').mockImplementation(async (row, outcome, durable, guard) => {
+      let admitted = 0;
+      return write(row, outcome, durable, () => {
+        const allowed = guard?.() ?? true;
+        admitted += 1;
+        if (admitted === 1) profileDirectory.mockReturnValue(directory(false));
+        return allowed;
+      });
+    });
+    const writesBeforeRemoval = server.writeRequests;
+
+    await expect(
+      opened.command(
+        { kind: 'parental-pin.set', current: '1234', pin: null },
+        'online-raced-remove',
+      ),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+    await expect(opened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+    expect(server.writeRequests).toBe(writesBeforeRemoval);
+    expect(log.pendingActions).toBe(0);
+    expect(log.queuedActions).toBe(0);
+    expect(remove).not.toHaveBeenCalled();
+    log.close();
+
+    const reopenedLog = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    await reopenedLog.refresh();
+    expect(server.writeRequests).toBe(writesBeforeRemoval);
+    expect(reopenedLog.pendingActions).toBe(0);
+    expect(reopenedLog.queuedActions).toBe(0);
+    const reopenedClock = await openClockStore(vault, {
+      key: 'online-pin-removal-race-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const reopened = authority(reopenedLog, reopenedClock, 'online');
+    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+    reopenedLog.close();
+  });
+
+  it('never projects or replays a guarded PIN removal whose durable staging fails', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault();
+    const server = await pinDeliveryServer();
+    server.allowWrites();
+    const log = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'online-pin-removal-staging-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const opened = authority(log, clock, 'online');
+    await opened.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
+    vi.spyOn(log, 'profileDirectory').mockReturnValue(
+      ({
+        owner: 'owner',
+        profiles: { owner: { role: 'owner', deleted: { value: false } } },
+      }) as never,
+    );
+    const put = vault.put.bind(vault);
+    let refusedPending = false;
+    vi.spyOn(vault, 'put').mockImplementation(async (key, value) => {
+      if (!refusedPending && key.includes(':runtime:pending:rows:')) {
+        refusedPending = true;
+        throw new Error('storage unavailable');
+      }
+      return put(key, value);
+    });
+    const writesBeforeRemoval = server.writeRequests;
+
+    await expect(
+      opened.command(
+        { kind: 'parental-pin.set', current: '1234', pin: null },
+        'unstaged-remove',
+      ),
+    ).rejects.toMatchObject({ failure: { code: 'unavailable' } });
+    expect(refusedPending).toBe(true);
+    await expect(opened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+    expect(server.writeRequests).toBe(writesBeforeRemoval);
+    expect(log.pendingActions).toBe(0);
+    expect(log.queuedActions).toBe(0);
+    log.close();
+
+    const reopenedLog = (await LibraryLog.open(KEY, server.fetchImpl, undefined, vault))!;
+    await reopenedLog.refresh();
+    expect(server.writeRequests).toBe(writesBeforeRemoval);
+    expect(reopenedLog.pendingActions).toBe(0);
+    expect(reopenedLog.queuedActions).toBe(0);
+    const reopenedClock = await openClockStore(vault, {
+      key: 'online-pin-removal-staging-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const reopened = authority(reopenedLog, reopenedClock, 'online');
+    await expect(reopened.query({ kind: 'parental-pin.verify', pin: '1234' })).resolves.toEqual({
+      kind: 'parental-pin.verify',
+      matches: true,
+    });
+    reopenedLog.close();
+  });
+
+  it('rejects a PIN replacement when the exact authenticated row changes during hashing', async () => {
+    const { log, authority } = await localAuthority();
+    await authority.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
+    const settings = log.settings.bind(log);
+    const observed = structuredClone(settings('keys')!);
+    const replaced = structuredClone(observed);
+    replaced.values.parentalPIN!.at = [
+      replaced.values.parentalPIN!.at[0] + 1,
+      replaced.values.parentalPIN!.at[1],
+      'fedcba9876543210',
+    ];
+    let keyReads = 0;
+    vi.spyOn(log, 'settings').mockImplementation((name) => {
+      if (name !== 'keys') return settings(name);
+      keyReads += 1;
+      return keyReads <= 3 ? observed : replaced;
+    });
+
+    await expect(
+      authority.command({ kind: 'parental-pin.set', current: '1234', pin: '4321' }, 'stale-change'),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+  });
+
+  it('binds first set to exact absence and distinguishes an incorrect current PIN', async () => {
+    const first = await localAuthority();
+    const settings = first.log.settings.bind(first.log);
+    const absent = {
+      kind: 'set' as const,
+      schema: 2,
+      name: 'keys',
+      values: {},
+    };
+    const concurrent = {
+      ...absent,
+      values: {
+        parentalPIN: {
+          value: { string: '9999' },
+          at: [2, 0, 'replacement-device'] as [number, number, string],
+        },
+      },
+    };
+    let keyReads = 0;
+    vi.spyOn(first.log, 'settings').mockImplementation((name) => {
+      if (name !== 'keys') return settings(name);
+      keyReads += 1;
+      return keyReads <= 3 ? absent : concurrent;
+    });
+    await expect(
+      first.authority.command(
+        { kind: 'parental-pin.set', current: null, pin: '1234' },
+        'first-race',
+      ),
+    ).rejects.toMatchObject({ failure: { code: 'conflict' } });
+
+    const wrong = await localAuthority();
+    await wrong.authority.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'set');
+    await expect(
+      wrong.authority.command({ kind: 'parental-pin.set', current: '0000', pin: '4321' }, 'wrong'),
+    ).rejects.toMatchObject({ failure: { code: 'unauthorized' } });
   });
 
   it('owns minimal runtime discovery and the named retained Home values', async () => {
@@ -2238,7 +2499,7 @@ describe('LibraryLogAuthority', () => {
     for (const [command, operation] of [
       [{ kind: 'api-key.set', service: 'tmdb', value: 'tmdb-secret' }, 'tmdb'],
       [{ kind: 'api-key.set', service: 'content-warnings', value: 'warnings-secret' }, 'warnings'],
-      [{ kind: 'parental-pin.set', pin: '1234' }, 'pin'],
+      [{ kind: 'parental-pin.set', current: null, pin: '1234' }, 'pin'],
       [
         {
           kind: 'remote-access.set',
@@ -2283,6 +2544,7 @@ describe('LibraryLogAuthority', () => {
         'content-warnings': { configured: true, masked: '••••cret' },
       },
       parentalPinConfigured: true,
+      parentalPinRemovable: true,
       parentalPinDelivery: 'local',
       remoteAccessConfigured: true,
       plugins: [
@@ -2325,7 +2587,7 @@ describe('LibraryLogAuthority', () => {
       matches: false,
     });
     await expect(
-      authority.command({ kind: 'parental-pin.set', pin: '1234' }, 'same-pin'),
+      authority.command({ kind: 'parental-pin.set', current: null, pin: '1234' }, 'same-pin'),
     ).resolves.toMatchObject({ outcome: 'unchanged', affected: [] });
     await expect(authority.query({ kind: 'relay.membership' })).resolves.toEqual({
       kind: 'relay.membership',

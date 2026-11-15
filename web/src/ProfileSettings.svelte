@@ -160,7 +160,7 @@
           pinConfigured={false}
           disabled={saving}
           {save}
-          savePin={async () => false}
+          savePin={async () => 'failed' as const}
           verifyPin={async () => false}
           personalOnly
           contentPolicy={session.contentPolicy}

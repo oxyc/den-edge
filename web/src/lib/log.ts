@@ -3503,13 +3503,21 @@ export class LibraryLog {
    * ours is merged on top of it and written again. Resolves to the row as stored, or null when it couldn't be saved
    * — `moved` says when that is because the library moved to a new key.
    */
-  async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
+  async write(
+    local: Row,
+    outcome?: Outcome,
+    durable = true,
+    /** Rechecked before guarded work is durably staged inside the serialized write queue. */
+    guard?: () => boolean,
+  ): Promise<Row | null> {
+    const admitted = () => guard?.() ?? true;
     await ensureDeferredSyncPolicy();
     await this.followKeptForm();
-    if (this.readOnly) return null;
+    if (this.readOnly || !admitted()) return null;
     if (local.kind !== 'set') {
       if (local.kind !== 'rec' && local.kind !== 'ep') return null;
       if (this.offline) {
+        if (!admitted()) return null;
         const before = this.before(local);
         for (const document of applyOps(opsFor(before, local), (name) => this.document(name)))
           this.keepLocally(document, false);
@@ -3520,13 +3528,24 @@ export class LibraryLog {
       return this.writeEdit(this.before(local), local, outcome, durable);
     }
     let kept: string | undefined;
-    if (durable && !this.offline && this.runtimeAvailable) {
-      kept = this.pendingPrefix + 'rows:' + crypto.randomUUID();
-      if (!(await this.keepPending(kept, JSON.stringify({ rows: [await seal(this.keys, local)] }))))
-        return null;
-    }
+    const keep = async () => {
+      if (!durable || this.offline || !this.runtimeAvailable) return true;
+      const key = this.pendingPrefix + 'rows:' + crypto.randomUUID();
+      if (!(await this.keepPending(key, JSON.stringify({ rows: [await seal(this.keys, local)] }))))
+        return false;
+      kept = key;
+      return true;
+    };
+    // Ordinary writes retain the established crash-safe behavior while waiting for their queue turn. Guarded writes
+    // must not journal a row until their final serialized admission check: rejected authority work must never depend
+    // on a fallible cleanup to prevent a later reload from replaying it.
+    if (!guard && !(await keep())) return null;
     const result = outcome ?? { refused: false };
-    const run = this.writes.then(() => this.writeSerial(local, result));
+    const run = this.writes.then(async () => {
+      if (!admitted()) return null;
+      if (guard && !(await keep())) return null;
+      return this.writeSerial(local, result);
+    });
     this.writes = run.catch(() => null);
     const saved = await run;
     if (!saved && result.refused && this.refusal === 'profile_scoped') {

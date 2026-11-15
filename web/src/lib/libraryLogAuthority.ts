@@ -668,7 +668,7 @@ export class LibraryLogAuthority {
       case 'api-key.set':
         return this.#setApiKey(command.service, command.value);
       case 'parental-pin.set':
-        return this.#setParentalPin(command.pin);
+        return this.#setParentalPin(command.current, command.pin);
       case 'remote-access.set':
         return this.#setRemoteAccess(command.credentials);
       case 'plugin.install':
@@ -1679,6 +1679,7 @@ export class LibraryLogAuthority {
       kind: 'connections',
       apiKeys,
       parentalPinConfigured: !!readApiKey(keys, 'parentalPIN'),
+      parentalPinRemovable: this.#parentalPinRemovable(),
       parentalPinDelivery: this.#parentalPinDelivery(),
       remoteAccessConfigured:
         !!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'),
@@ -2223,45 +2224,109 @@ export class LibraryLogAuthority {
     );
   }
 
-  async #setParentalPin(pin: string | null): Promise<LibraryAuthorityCommandResult> {
+  async #setParentalPin(
+    currentPin: string | null,
+    pin: string | null,
+  ): Promise<LibraryAuthorityCommandResult> {
+    if (currentPin !== null && !/^\d{4}$/.test(currentPin))
+      throw authorityError('invalid-request', 'current parental PIN must be four digits');
     if (pin !== null && !/^\d{4}$/.test(pin))
       throw authorityError('invalid-request', 'parental PIN must be four digits');
-    // The PIN is what returns a Kid to Owner: it may be replaced, never removed, while a restricted profile is live.
-    if (pin === null && this.#restrictedProfileLive())
+    // The PIN returns a Kid or Visitor to Owner. Removal is allowed only for a legacy household or a fully decoded,
+    // Owner-only profile directory; invalid/missing wire-5 state fails closed.
+    const removalEvidence = pin === null ? this.#parentalPinRemovalEvidence() : null;
+    if (pin === null && (!this.#parentalPinRemovable() || removalEvidence === null))
       throw authorityError(
         'conflict',
-        'the parental PIN cannot be removed while a Kid profile exists',
+        'the Owner PIN cannot be removed while a restricted profile exists or profile state is unresolved',
       );
-    const current = readApiKey(this.#log.settings('keys'), 'parentalPIN');
-    const matches = pin === null ? !current : !!current && (await pinMatches(current, pin));
-    if (matches) {
-      // A queued PIN is already projected into `settings`, including after reload. Drive its durable recovery row
-      // before deciding that the repeated command is unchanged; only den-edge's authenticated copy proves sync.
+    const requestedMatches = async () => {
+      const held = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+      return pin === null ? !held : !!held && (await pinMatches(held, pin));
+    };
+    if (await requestedMatches()) {
+      // A lost reply may leave the exact requested value projected locally. Refresh queued delivery before
+      // reporting durable success, then reuse the same operation safely across reload.
       if (this.#parentalPinDelivery() === 'queued') await this.#log.refresh();
-      const refreshed = readApiKey(this.#log.settings('keys'), 'parentalPIN');
-      const stillMatches =
-        pin === null ? !refreshed : !!refreshed && (await pinMatches(refreshed, pin));
-      if (stillMatches)
+      if (await requestedMatches())
         return {
           outcome: 'unchanged',
           delivery: this.#parentalPinDelivery(),
           affected: [],
         };
     }
-    return this.#patchSettings(
-      'keys',
-      { parentalPIN: pin === null ? null : { string: await hashPin(pin) } },
+    const observed = this.#log.settings('keys')?.values.parentalPIN;
+    const current = readApiKey(this.#log.settings('keys'), 'parentalPIN');
+    if (currentPin === null ? !!current : !current || !(await pinMatches(current, currentPin)))
+      throw authorityError(
+        currentPin === null ? 'conflict' : 'unauthorized',
+        currentPin === null
+          ? 'the Owner PIN was set on another device; enter its current value'
+          : 'the current Owner PIN did not match',
+      );
+    if (currentPin !== null && this.#parentalPinDelivery() === 'queued')
+      throw authorityError(
+        'not-ready',
+        'the current Owner PIN is still waiting to sync; try again when this device reconnects',
+        true,
+      );
+
+    const next = pin === null ? null : { string: await hashPin(pin) };
+    // Hashing and clock work suspend. A newer row may arrive meanwhile; bind this write to the exact value and stamp
+    // that the current PIN authenticated instead of letting a stale Settings screen overwrite it.
+    const sameObserved = () => {
+      const latest = this.#log.settings('keys')?.values.parentalPIN;
+      return observed === undefined
+        ? latest === undefined
+        : latest !== undefined &&
+            observed.at[0] === latest.at[0] &&
+            observed.at[1] === latest.at[1] &&
+            observed.at[2] === latest.at[2] &&
+            sameConfig(observed.value, latest.value);
+    };
+    const removalStillAllowed = () =>
+      pin !== null ||
+      (this.#parentalPinRemovable() &&
+        removalEvidence !== null &&
+        this.#parentalPinRemovalEvidence() === removalEvidence);
+    if (!sameObserved() || !removalStillAllowed())
+      throw authorityError('conflict', 'the Owner PIN changed on another device; enter it again');
+    if (sameConfig(observed?.value ?? null, next)) return this.#unchanged();
+    const at = await this.#settingsStamp();
+    if (!sameObserved() || !removalStillAllowed())
+      throw authorityError('conflict', 'the Owner PIN changed on another device; enter it again');
+    const base = this.#log.settings('keys') ?? {
+      kind: 'set' as const,
+      schema: 2,
+      name: 'keys',
+      values: {},
+    };
+    return this.#writeRowGuarded(
+      { ...base, values: { ...base.values, parentalPIN: { value: next, at } } },
       [{ kind: 'connections' }],
+      () => sameObserved() && removalStillAllowed(),
+      'the Owner PIN or profile state changed on another device; enter it again',
     );
   }
 
-  #restrictedProfileLive(): boolean {
+  #parentalPinRemovalEvidence(): string | null {
     const directory = this.#log.profileDirectory();
-    return (
-      !!directory &&
-      Object.values(directory.profiles).some(
-        (profile) => profile.role !== 'owner' && !profile.deleted.value,
-      )
+    try {
+      return JSON.stringify({
+        wireMinimum: this.#log.wireMinimum,
+        profileTopologyPresent: this.#log.profileTopologyPresent,
+        directory,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  #parentalPinRemovable(): boolean {
+    const directory = this.#log.profileDirectory();
+    if (!directory) return !(this.#log.profileTopologyPresent || this.#log.wireMinimum >= 5);
+    return !Object.values(directory.profiles).some(
+      (profile) => profile.role !== 'owner' && !profile.deleted.value,
     );
   }
 
@@ -2804,6 +2869,28 @@ export class LibraryLogAuthority {
     const pending = this.#log.pendingActions;
     const queued = this.#log.queuedActions;
     if (!(await this.#log.write(row))) this.#writeFailed();
+    return {
+      outcome: 'applied',
+      delivery: this.#editDelivery(queued),
+      affected: this.#withPendingStatus(pending, affected),
+    };
+  }
+
+  async #writeRowGuarded(
+    row: TitleRow | EpisodeRow | SettingsRow,
+    affected: LibraryAffectedSelection[],
+    guard: () => boolean,
+    conflict: string,
+  ): Promise<LibraryAuthorityCommandResult> {
+    const pending = this.#log.pendingActions;
+    const queued = this.#log.queuedActions;
+    let admitted = true;
+    const written = await this.#log.write(row, undefined, true, () => {
+      admitted = guard();
+      return admitted;
+    });
+    if (!admitted) throw authorityError('conflict', conflict);
+    if (!written) this.#writeFailed();
     return {
       outcome: 'applied',
       delivery: this.#editDelivery(queued),

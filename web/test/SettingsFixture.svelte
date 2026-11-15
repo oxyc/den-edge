@@ -32,23 +32,33 @@
   const fixtureQuery = new URLSearchParams(location.search);
   const profileResetFixture =
     fixtureQuery.has('profiles') ||
+    fixtureQuery.has('profiles-owner-only') ||
     fixtureQuery.has('wire5-missing') ||
     fixtureQuery.has('profile-reset-pending');
   const joinPresentationFixture = fixtureQuery.has('join-presentation');
-  const profileDirectory =
-    profileResetFixture && !fixtureQuery.has('wire5-missing')
-      ? validateStoredProfileDirectory(structuredClone(profileFixture.migrationBase))
-      : null;
+  const profileDirectory = (() => {
+    if (!profileResetFixture || fixtureQuery.has('wire5-missing')) return null;
+    const stored = structuredClone(profileFixture.migrationBase);
+    if (fixtureQuery.has('profiles-owner-only'))
+      for (const profile of Object.values(stored.profiles))
+        if (profile.role !== 'owner') profile.deleted.value = true;
+    return validateStoredProfileDirectory(stored);
+  })();
   const replacesAuthority =
     fixtureQuery.has('authority-replacement') ||
     fixtureQuery.has('recovery-authority-replacement') ||
     fixtureQuery.has('assistant-authority-replacement') ||
+    fixtureQuery.has('pin-authority-replacement') ||
     joinPresentationFixture;
   let releaseRecoveryWrite = () => {};
   const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
     ? new Promise<void>((resolve) => (releaseRecoveryWrite = resolve))
     : undefined;
   let recoveryWriteHeld = false;
+  let releasePinReply = () => {};
+  const pinReplyGate = fixtureQuery.has('hold-pin-reply')
+    ? new Promise<void>((resolve) => (releasePinReply = resolve))
+    : undefined;
   const row = (name: string, values: Record<string, ConfigValue>): SettingsRow => ({
     kind: 'set',
     schema: 2,
@@ -110,7 +120,8 @@
     wireMinimum:
       fixtureQuery.has('wire5-missing') || fixtureQuery.has('profile-reset-pending') ? 5 : 4,
     get profileTopologyPresent() {
-      return new URLSearchParams(location.search).has('profiles');
+      const query = new URLSearchParams(location.search);
+      return query.has('profiles') || query.has('profiles-owner-only');
     },
     currentGeneration: undefined,
     logHead: 0,
@@ -208,11 +219,40 @@
     loseHistoryImportReplyOnce: fixtureQuery.has('lose-import-reply'),
     historyImportReplyGate,
     loseRecoveryConfirmReplyOnce: fixtureQuery.has('recovery-authority-replacement'),
+    loseParentalPinReplyOnce: fixtureQuery.has('lose-pin-reply'),
+    parentalPinReplyGate: pinReplyGate,
   });
   (globalThis as { fixtureHistoryImports?: typeof library.historyImports }).fixtureHistoryImports =
     library.historyImports;
   const primaryModel = library.model;
   const { session } = library;
+  const ownerPinControls = {
+    replace(pin: string) {
+      const keys = stored.find(
+        (held): held is SettingsRow => held.kind === 'set' && held.name === 'keys',
+      )!;
+      put({
+        ...keys,
+        values: {
+          ...keys.values,
+          parentalPIN: { value: { string: pin }, at: [2, 0, 'replacement-device'] as Stamp },
+        },
+      });
+    },
+    value() {
+      const keys = stored.find(
+        (held): held is SettingsRow => held.kind === 'set' && held.name === 'keys',
+      );
+      const value = keys?.values.parentalPIN?.value;
+      return value && 'string' in value ? value.string : null;
+    },
+    verify(pin: string) {
+      return primaryModel.verifyParentalPin(pin);
+    },
+  };
+  (
+    globalThis as typeof globalThis & { fixtureOwnerPin?: typeof ownerPinControls }
+  ).fixtureOwnerPin = ownerPinControls;
   if (fixtureQuery.has('assistant-grants-fail-once')) library.failNextAssistantGrants();
   const replacementLibrary = replacesAuthority
     ? fixtureLibraryService({
@@ -304,6 +344,12 @@
           }),
         );
       model = replacementLibrary.model;
+    },
+    releasePinReply() {
+      releasePinReply();
+    },
+    pinOperationIds() {
+      return [...library.parentalPinOperationIds];
     },
     async releaseOldSelections() {
       heldConnections?.release();

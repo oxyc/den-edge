@@ -294,6 +294,7 @@ const connectionsValue = (): LibrarySelectionValue => ({
   kind: 'connections',
   apiKeys: { tmdb: { configured: true, masked: '•••' } },
   parentalPinConfigured: true,
+  parentalPinRemovable: true,
   parentalPinDelivery: 'synced',
   remoteAccessConfigured: false,
   plugins: [],
@@ -850,7 +851,7 @@ it('forwards semantic commands and active observations without UI policy', async
     watched: true,
   });
   await model.setApiKey('tmdb', 'secret', 'key-one');
-  await model.setParentalPin('1234', 'pin-one');
+  await model.setParentalPin(null, '1234', 'pin-one');
   await model.setRemoteAccess({ clientId: 'client', clientSecret: 'secret' }, 'access-one');
   await model.installPlugin('https://addon.example/manifest.json', 'plugin-one');
   await model.setPluginTrust('https://addon.example/manifest.json', 'public-key', 'trust-one');

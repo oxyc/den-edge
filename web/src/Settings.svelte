@@ -29,6 +29,7 @@
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import type { LibraryModel } from './lib/libraryModel.svelte';
+  import { LibraryServiceError } from './lib/libraryServiceClient';
   import type { KeyResetOutcome } from './lib/libraryServiceProtocol';
   import type { CompoundResetStartResult } from './lib/profileKeyResetPage';
   import type { JoinLibrary } from './lib/browserHousehold';
@@ -145,7 +146,7 @@
     routesLoaded = true;
   });
   let edgeVersion = $state<string | null>(null);
-  const viewerSections = ['connections', 'sharing', 'assistants', 'advanced'] as const;
+  const viewerSections = ['content', 'connections', 'sharing', 'assistants', 'advanced'] as const;
   void fetch('/version')
     .then((res) => (res.ok ? (res.json() as Promise<{ version?: unknown }>) : null))
     .then((body) => {
@@ -255,6 +256,39 @@
     }
   }
   const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));
+  async function saveParentalPin(
+    current: string | null,
+    pin: string | null,
+    operationId: string,
+  ): Promise<'saved' | 'incorrect' | 'changed' | 'pending' | 'failed'> {
+    let expected: 'incorrect' | 'changed' | 'pending' | undefined;
+    let pending = false;
+    const saved = await run(async () => {
+      try {
+        const result = await authority.model.setParentalPin(current, pin, operationId);
+        pending = result.delivery === 'queued';
+      } catch (error) {
+        if (error instanceof LibraryServiceError && error.failure.code === 'unauthorized') {
+          expected = 'incorrect';
+          return;
+        }
+        if (error instanceof LibraryServiceError && error.failure.code === 'conflict') {
+          expected = 'changed';
+          return;
+        }
+        if (
+          error instanceof LibraryServiceError &&
+          error.failure.code === 'not-ready' &&
+          error.failure.retryable
+        ) {
+          expected = 'pending';
+          return;
+        }
+        throw error;
+      }
+    });
+    return expected ?? (saved ? (pending ? 'pending' : 'saved') : 'failed');
+  }
   const removeLibraryDevice = (id: string) => run(() => authority.model.removeDevice(id));
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
@@ -421,16 +455,32 @@
     {:else}
       {#if !__DEN_TV_LEGACY_JS_CORE__}
         <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
-        <ContentSection
-          prefs={prefs!}
-          {content}
-          pinConfigured={connections?.parentalPinConfigured ?? false}
-          {disabled}
-          save={savePrefs}
-          savePin={(pin) => run(() => authority.model.setParentalPin(pin))}
-          verifyPin={(pin) => authority.model.verifyParentalPin(pin)}
-          pinRemovable={!profileAware}
-        />
+        {#key authority.model}<ContentSection
+            prefs={prefs!}
+            {content}
+            pinConfigured={connections?.parentalPinConfigured ?? false}
+            {disabled}
+            save={savePrefs}
+            savePin={saveParentalPin}
+            verifyPin={(pin) => authority.model.verifyParentalPin(pin)}
+            ownerPin={profileAware}
+            pinRemovable={connections?.parentalPinRemovable ?? false}
+          />{/key}
+      {:else}
+        <SettingsSection id="content" title={i18n.text('settings.section.content')}>
+          <SettingRow
+            id="owner-pin-management-handoff"
+            label={i18n.phrase('Manage the Owner PIN in a supported browser')}
+            detail={i18n.phrase('Owner PIN administration is not available on this TV')}
+          >
+            <p>
+              {i18n.phrase(
+                'On a phone or computer linked to this household, open Den › Settings › Content to set, change, or remove the Owner PIN.',
+              )}
+            </p>
+            <p class="mono">{`${__DEN_TV_WEB_ORIGIN__ || location.origin}/settings#content`}</p>
+          </SettingRow>
+        </SettingsSection>
       {/if}
       {#key authority.model}<ConnectionsSection
           {link}

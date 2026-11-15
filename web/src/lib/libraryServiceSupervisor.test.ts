@@ -510,6 +510,7 @@ const selectionValue = (selection: LibrarySelection, instance: string): LibraryS
       kind: 'connections',
       apiKeys: { tmdb: { configured: true, masked: '••••-key' } },
       parentalPinConfigured: false,
+      parentalPinRemovable: true,
       parentalPinDelivery: 'synced',
       remoteAccessConfigured: false,
       plugins: [

@@ -654,7 +654,7 @@ describe('library service client protocol', () => {
       });
     for (const command of [
       { kind: 'api-key.set', service: 'tmdb', value: 'key' },
-      { kind: 'parental-pin.set', pin: '1234' },
+      { kind: 'parental-pin.set', current: null, pin: '1234' },
       {
         kind: 'remote-access.set',
         credentials: { clientId: 'client', clientSecret: 'secret' },
@@ -699,7 +699,10 @@ describe('library service client protocol', () => {
       ).toMatchObject({ ok: false });
     expect(decodeCommand({ kind: 'device.played', at: 1 })).toMatchObject({ ok: false });
 
-    expect(decodeCommand({ kind: 'parental-pin.set', pin: '12345' })).toMatchObject({ ok: false });
+    expect(decodeCommand({ kind: 'parental-pin.set', current: null, pin: '12345' })).toMatchObject({
+      ok: false,
+    });
+    expect(decodeCommand({ kind: 'parental-pin.set', pin: '1234' })).toMatchObject({ ok: false });
     expect(
       decodeCommand({ kind: 'api-key.set', service: 'simkl', value: 'not-in-this-slice' }),
     ).toMatchObject({ ok: false });
@@ -1415,6 +1418,7 @@ describe('library service server protocol', () => {
       kind: 'connections',
       apiKeys: { tmdb: { configured: true, masked: '••••cret' } },
       parentalPinConfigured: true,
+      parentalPinRemovable: true,
       parentalPinDelivery: 'synced',
       remoteAccessConfigured: false,
       plugins: [

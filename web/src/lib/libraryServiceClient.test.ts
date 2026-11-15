@@ -291,6 +291,7 @@ it('correlates connection replacements and non-playback query results without ti
     kind: 'connections' as const,
     apiKeys: {},
     parentalPinConfigured: false,
+    parentalPinRemovable: true,
     parentalPinDelivery: 'synced' as const,
     remoteAccessConfigured: false,
     plugins: [],

@@ -573,8 +573,12 @@ export class LibraryModel {
     return this.#command({ kind: 'api-key.set', service, value }, operationId);
   }
 
-  setParentalPin(pin: string | null, operationId?: string): Promise<LibraryServiceCommandResult> {
-    return this.#command({ kind: 'parental-pin.set', pin }, operationId);
+  setParentalPin(
+    current: string | null,
+    pin: string | null,
+    operationId?: string,
+  ): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'parental-pin.set', current, pin }, operationId);
   }
 
   async verifyParentalPin(pin: string): Promise<boolean> {

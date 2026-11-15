@@ -42,6 +42,24 @@ async function numericBack(page, keyCode) {
   }, keyCode);
 }
 
+async function waitForScrollToSettle(page) {
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        let last = scrollY;
+        let stableFrames = 0;
+        const frame = () => {
+          if (scrollY === last) stableFrames += 1;
+          else stableFrames = 0;
+          last = scrollY;
+          if (stableFrames >= 3) resolve();
+          else requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      }),
+  );
+}
+
 async function setupSeries(page, { linked = false, playback = false } = {}) {
   const edge = newEdge();
   await routeGuestEdge(page, edge);
@@ -220,10 +238,33 @@ test('Tizen 3 names the supported-browser administration handoffs', async ({ pag
   await page.goto(`${E2E_ORIGIN}/settings`);
 
   const sectionNavigation = page.getByRole('navigation', { name: 'Settings sections' });
+  const contentSection = sectionNavigation.getByRole('link', { name: 'Content' });
   const connectionsSection = sectionNavigation.getByRole('link', { name: 'Connections' });
   const sharingSection = sectionNavigation.getByRole('link', { name: 'Sharing' });
   const assistantsSection = sectionNavigation.getByRole('link', { name: 'Assistants' });
-  await connectionsSection.focus();
+  await contentSection.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/settings#content`);
+  const pinHandoff = page.getByRole('button', {
+    name: 'Manage the Owner PIN in a supported browser Owner PIN administration is not available on this TV',
+  });
+  await expect(pinHandoff).toBeVisible();
+  await waitForScrollToSettle(page);
+  await page.keyboard.press('ArrowRight');
+  await expect(pinHandoff).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByText(
+      'On a phone or computer linked to this household, open Den › Settings › Content to set, change, or remove the Owner PIN.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.getByText(`${E2E_ORIGIN}/settings#content`, { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Owner PIN', { exact: true })).toHaveCount(0);
+
+  await contentSection.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(connectionsSection).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(sharingSection).toBeFocused();
   await page.keyboard.press('Enter');

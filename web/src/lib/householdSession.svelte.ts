@@ -129,7 +129,7 @@ export class HouseholdSession {
   /** Set the household's Owner PIN; true once den-edge holds it, so every device asks for it. */
   async setParentalPin(pin: string): Promise<boolean> {
     if (!this.#model) return false;
-    return (await this.#model.setParentalPin(pin)).delivery === 'synced';
+    return (await this.#model.setParentalPin(null, pin)).delivery === 'synced';
   }
 
   get updateRequired(): boolean {

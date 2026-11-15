@@ -3,7 +3,7 @@
      TV's pushed screens opens in place here. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import Button from '../components/Button.svelte';
   import PinInput from '../components/PinInput.svelte';
   import { SvelteMap } from 'svelte/reactivity';
@@ -58,6 +58,7 @@
     contentPolicy = null,
     role = 'owner',
     onpolicy,
+    ownerPin = false,
     pinRemovable = true,
   }: {
     prefs: SettingsPreferences;
@@ -67,7 +68,11 @@
     pinConfigured: boolean;
     disabled: boolean;
     save: (changes: PreferenceChanges) => void;
-    savePin: (pin: string | null) => Promise<boolean>;
+    savePin: (
+      current: string | null,
+      pin: string | null,
+      operationId: string,
+    ) => Promise<'saved' | 'incorrect' | 'changed' | 'pending' | 'failed'>;
     verifyPin: (pin: string) => Promise<boolean>;
     personalOnly?: boolean;
     contentPolicy?: {
@@ -80,7 +85,9 @@
       maximumAge: number | null;
       unknownRatings: 'allow' | 'block';
     }) => Promise<boolean>;
-    /** False once profiles exist: the PIN can be changed but not removed, since it returns a Kid to Owner. */
+    /** Profile households use Owner-PIN copy and no legacy maturity ceiling, independently of removal eligibility. */
+    ownerPin?: boolean;
+    /** False while a Kid/Visitor is live or profile topology is unresolved; true for a resolved Owner-only home. */
     pinRemovable?: boolean;
   } = $props();
 
@@ -274,6 +281,18 @@
   let unlocked = $state(false);
   let pinEntry = $state('');
   let pinWrong = $state(false);
+  let pinBusy = $state(false);
+  let pinProblem = $state<string | null>(null);
+  let currentPin = $state<string | null>(null);
+  let pinGeneration = 0;
+  onDestroy(() => {
+    pinGeneration += 1;
+  });
+  let retryPin = $state<{
+    current: string | null;
+    pin: string | null;
+    operationId: string;
+  } | null>(null);
   let newPin = $state('');
   let unlockForm = $state<HTMLFormElement>();
   let newPinForm = $state<HTMLFormElement>();
@@ -282,27 +301,94 @@
     prefs.maturityCeiling === 'pg13' ? 'PG-13' : prefs.maturityCeiling === 'r' ? 'R' : 'None',
   );
   async function unlock() {
-    pinWrong = !(pinConfigured && (await verifyPin(pinEntry)));
-    if (!pinWrong) unlocked = true;
+    if (pinBusy || !/^\d{4}$/.test(pinEntry)) return;
+    const generation = ++pinGeneration;
+    const attempted = pinEntry;
+    pinBusy = true;
+    pinProblem = null;
+    try {
+      pinWrong = !(pinConfigured && (await verifyPin(attempted)));
+      if (generation !== pinGeneration) return;
+      if (!pinWrong) {
+        currentPin = attempted;
+        unlocked = true;
+      }
+    } catch (error) {
+      if (generation !== pinGeneration) return;
+      console.warn('den: the Owner PIN could not be checked', error);
+      pinProblem = 'Owner PIN couldn’t be checked. Try again.';
+    } finally {
+      if (generation === pinGeneration) pinBusy = false;
+    }
+    if (generation !== pinGeneration) return;
     pinEntry = '';
     await tick();
-    if (pinWrong)
+    if (pinWrong || pinProblem)
       requestAnimationFrame(() =>
         unlockForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }),
       );
   }
-  async function setPin() {
-    if (!/^\d{4}$/.test(newPin)) return;
-    // The service hashes it before it reaches the encrypted library.
-    if (await savePin(newPin)) {
-      newPin = '';
-      unlocked = true;
+  async function setPin(pin: string | null = newPin) {
+    if (pinBusy || (pin !== null && !/^\d{4}$/.test(pin))) return;
+    const current = pinConfigured ? currentPin : null;
+    if (pinConfigured && current === null) {
+      unlocked = false;
+      pinProblem = 'Enter your current Owner PIN and try again.';
+      await tick();
+      unlockForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true });
       return;
     }
-    newPin = '';
+    const retry = retryPin;
+    const operationId =
+      retry && retry.current === current && retry.pin === pin
+        ? retry.operationId
+        : crypto.randomUUID();
+    const generation = ++pinGeneration;
+    pinBusy = true;
+    pinProblem = null;
+    const result = await savePin(current, pin, operationId);
+    if (generation !== pinGeneration) return;
+    pinBusy = false;
+    if (result === 'saved') {
+      newPin = '';
+      currentPin = null;
+      retryPin = null;
+      // PINs stay only for the one authority operation. A later change must authenticate again instead of keeping
+      // a four-digit household secret in a long-lived Settings component.
+      unlocked = false;
+      return;
+    }
+    if (result === 'failed' || result === 'pending') {
+      // An ambiguous lost reply reuses its operation id. A known queued result needs a fresh command on Retry so
+      // the authority can refresh and prove durable readback instead of replaying the earlier queued result.
+      retryPin = result === 'failed' ? { current, pin, operationId } : null;
+      pinProblem =
+        result === 'pending'
+          ? 'Saved on this device. Reconnect, then try again to confirm every device has it.'
+          : 'Couldn’t save that. Check your connection and try again.';
+      await tick();
+      if (generation !== pinGeneration) return;
+      requestAnimationFrame(() =>
+        generation === pinGeneration
+          ? newPinForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true })
+          : undefined,
+      );
+      return;
+    }
+    retryPin = null;
+    currentPin = null;
+    unlocked = false;
+    pinWrong = result === 'incorrect';
+    pinProblem =
+      result === 'incorrect'
+        ? 'Wrong PIN.'
+        : 'The Owner PIN or profile state changed. Enter the current PIN and try again.';
     await tick();
+    if (generation !== pinGeneration) return;
     requestAnimationFrame(() =>
-      newPinForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }),
+      generation === pinGeneration
+        ? unlockForm?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true })
+        : undefined,
     );
   }
 
@@ -652,11 +738,11 @@
     </SettingRow>
   {:else}
     <SettingRow
-      id={pinRemovable ? 'parental-controls' : 'owner-pin'}
-      label={pinRemovable ? 'Parental controls' : 'Owner PIN'}
-      value={pinRemovable ? limitLabel : pinConfigured ? 'Set' : 'Not set'}
+      id={ownerPin ? 'owner-pin' : 'parental-controls'}
+      label={ownerPin ? 'Owner PIN' : 'Parental controls'}
+      value={ownerPin ? (pinConfigured ? 'Set' : 'Not set') : limitLabel}
     >
-      {#if pinRemovable}
+      {#if !ownerPin}
         <h3 id="maturity-ceiling">Maturity ceiling</h3>
         <Segmented
           name="maturity-ceiling"
@@ -682,24 +768,32 @@
         >
           <PinInput
             id="parental-pin"
-            label={pinRemovable ? 'Parental PIN' : 'Owner PIN'}
+            label={ownerPin ? 'Owner PIN' : 'Parental PIN'}
             bind:value={pinEntry}
             invalid={pinWrong}
-            onvalue={() => (pinWrong = false)}
+            onvalue={() => {
+              pinWrong = false;
+              pinProblem = null;
+            }}
             oncomplete={() => void unlock()}
           />
           <Button
             type="submit"
             variant="primary"
-            label={pinRemovable ? 'Unlock' : 'Continue'}
-            disabled={pinEntry.length < 4}
+            label={pinBusy ? 'Checking…' : ownerPin ? 'Continue' : 'Unlock'}
+            busy={pinBusy}
+            disabled={pinBusy || pinEntry.length < 4}
           />
         </form>
-        {#if pinWrong}<p class="status bad" role="alert">Wrong PIN.</p>{/if}
+        {#if pinProblem}
+          <p class="status bad" role="alert">{i18n.phrase(pinProblem)}</p>
+        {:else if pinWrong}
+          <p class="status bad" role="alert">{i18n.phrase('Wrong PIN.')}</p>
+        {/if}
         <p class="foot">
-          {pinRemovable
-            ? 'A PIN protects the maturity ceiling. Enter it to change the ceiling.'
-            : 'Enter your current Owner PIN to change it.'}
+          {ownerPin
+            ? 'Enter your current Owner PIN to change it.'
+            : 'A PIN protects the maturity ceiling. Enter it to change the ceiling.'}
         </p>
       {:else}
         <h3>{pinConfigured ? 'Change PIN' : 'PIN'}</h3>
@@ -714,12 +808,12 @@
           <PinInput
             id="new-parental-pin"
             label={pinConfigured
-              ? pinRemovable
-                ? 'New parental PIN'
-                : 'New Owner PIN'
-              : pinRemovable
-                ? 'Set a parental PIN'
-                : 'Set an Owner PIN'}
+              ? ownerPin
+                ? 'New Owner PIN'
+                : 'New parental PIN'
+              : ownerPin
+                ? 'Set an Owner PIN'
+                : 'Set a parental PIN'}
             bind:value={newPin}
             autocomplete="new-password"
             oncomplete={() => void setPin()}
@@ -727,24 +821,34 @@
           <Button
             type="submit"
             variant="primary"
-            label={pinConfigured ? 'Change PIN' : 'Set PIN'}
-            disabled={disabled || !/^\d{4}$/.test(newPin)}
+            label={pinBusy
+              ? 'Saving…'
+              : retryPin
+                ? 'Try again'
+                : pinConfigured
+                  ? 'Change PIN'
+                  : 'Set PIN'}
+            busy={pinBusy}
+            disabled={disabled || pinBusy || !/^\d{4}$/.test(newPin)}
           />
           {#if pinConfigured && pinRemovable}
             <Confirm
               label="Remove PIN"
-              question="Remove the parental PIN?"
-              detail="Anyone could then change the maturity ceiling, on every device."
+              question={ownerPin ? 'Remove the Owner PIN?' : 'Remove the parental PIN?'}
+              detail={ownerPin
+                ? 'This household will no longer require a PIN to open Owner settings.'
+                : 'Anyone could then change the maturity ceiling, on every device.'}
               confirmLabel="Remove"
-              {disabled}
-              onconfirm={() => void savePin(null)}
+              disabled={disabled || pinBusy}
+              onconfirm={() => void setPin(null)}
             />
           {/if}
         </form>
+        {#if pinProblem}<p class="status bad" role="alert">{i18n.phrase(pinProblem)}</p>{/if}
         <p class="foot">
-          {pinRemovable
-            ? 'A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a looser ceiling set here waits on each Apple TV until someone enters the PIN there.'
-            : 'The Owner PIN protects leaving a Kid profile and opens Kid Settings.'}
+          {ownerPin
+            ? 'The Owner PIN protects leaving a Kid profile and opens Kid Settings.'
+            : 'A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a looser ceiling set here waits on each Apple TV until someone enters the PIN there.'}
         </p>
       {/if}
     </SettingRow>

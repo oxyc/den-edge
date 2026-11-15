@@ -454,8 +454,93 @@ test('a profile household shows Owner PIN management instead of the legacy matur
   await expect(page.getByRole('button', { name: /Owner PIN Set/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Parental controls/ })).toHaveCount(0);
   await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  const ownerPin = page.getByRole('region', { name: 'Owner PIN' });
   await expect(page.getByRole('heading', { name: 'Maturity ceiling' })).toHaveCount(0);
   await expect(page.getByText('Enter your current Owner PIN to change it.')).toBeVisible();
+  await ownerPin.getByRole('textbox', { name: 'Owner PIN' }).fill('0000');
+  await expect(ownerPin.getByRole('alert')).toHaveText('Wrong PIN.');
+  await expect(ownerPin.getByRole('textbox', { name: 'Owner PIN' })).toBeFocused();
+  await ownerPin.getByRole('textbox', { name: 'Owner PIN' }).fill('1234');
+  await expect(page.getByRole('button', { name: 'Remove PIN' })).toHaveCount(0);
+});
+
+test('a resolved Owner-only profile household may remove its PIN', async ({ page }) => {
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?profiles-owner-only`);
+  await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  const ownerPin = page.getByRole('region', { name: 'Owner PIN' });
+  await ownerPin.getByLabel('Owner PIN', { exact: true }).fill('1234');
+  await ownerPin.getByRole('button', { name: 'Remove PIN' }).click();
+  await ownerPin.getByRole('button', { name: 'Remove' }).click();
+  await expect.poll(() => page.evaluate(() => window.fixtureOwnerPin.value())).toBe(null);
+});
+
+test('an Owner PIN change refuses a newer row, restores current-PIN focus and retries exactly', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?profiles`);
+  await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  const ownerPin = page.getByRole('region', { name: 'Owner PIN' });
+
+  await ownerPin.getByLabel('Owner PIN', { exact: true }).fill('1234');
+  await expect(ownerPin.getByLabel('New Owner PIN')).toBeVisible();
+  await page.evaluate(() => window.fixtureOwnerPin.replace('5678'));
+  // PinInput submits as soon as the fourth digit is entered.
+  await ownerPin.getByLabel('New Owner PIN').fill('4321');
+
+  await expect(ownerPin.getByRole('alert')).toHaveText('Wrong PIN.');
+  await expect(ownerPin.getByLabel('Owner PIN', { exact: true })).toBeFocused();
+  await ownerPin.getByLabel('Owner PIN', { exact: true }).fill('5678');
+  await expect(ownerPin.getByLabel('New Owner PIN')).toHaveValue('4321');
+  await ownerPin.getByRole('button', { name: 'Change PIN' }).click();
+  await expect.poll(() => page.evaluate(() => window.fixtureOwnerPin.verify('4321'))).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.fixtureOwnerPin.verify('5678'))).toBe(false);
+});
+
+test('an Owner PIN lost reply keeps the candidate and retries the same operation idempotently', async ({
+  page,
+}) => {
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?profiles&lose-pin-reply`);
+  await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  const ownerPin = page.getByRole('region', { name: 'Owner PIN' });
+  await ownerPin.getByRole('textbox', { name: 'Owner PIN' }).fill('1234');
+  await ownerPin.getByLabel('New Owner PIN').fill('4321');
+
+  await expect(ownerPin.getByRole('alert')).toHaveText(
+    'Couldn’t save that. Check your connection and try again.',
+  );
+  await expect(ownerPin.getByLabel('New Owner PIN')).toHaveValue('4321');
+  await ownerPin.getByRole('button', { name: 'Try again' }).click();
+  await expect(ownerPin.getByRole('alert')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.fixtureOwnerPin.verify('4321'))).toBe(true);
+  expect(await page.evaluate(() => window.fixtureSettingsAuthority.pinOperationIds())).toEqual(
+    expect.arrayContaining([expect.any(String), expect.any(String)]),
+  );
+  const operationIds = await page.evaluate(() => window.fixtureSettingsAuthority.pinOperationIds());
+  expect(new Set(operationIds).size).toBe(1);
+});
+
+test('a held old Owner PIN reply cannot unlock or publish into a replacement household', async ({
+  page,
+}) => {
+  await page.goto(
+    `${E2E_ORIGIN}/test/settings.html?profiles&pin-authority-replacement&hold-pin-reply`,
+  );
+  await page.getByRole('button', { name: /Owner PIN Set/ }).click();
+  let ownerPin = page.getByRole('region', { name: 'Owner PIN' });
+  await ownerPin.getByRole('textbox', { name: 'Owner PIN' }).fill('1234');
+  await ownerPin.getByLabel('New Owner PIN').fill('4321');
+  await expect
+    .poll(() => page.evaluate(() => window.fixtureSettingsAuthority.pinOperationIds().length))
+    .toBe(1);
+
+  await page.evaluate(() => window.fixtureSettingsAuthority.replace());
+  await page.evaluate(() => window.fixtureSettingsAuthority.releasePinReply());
+  ownerPin = page.getByRole('region', { name: 'Owner PIN' });
+  await expect(ownerPin.getByRole('textbox', { name: 'Owner PIN' })).toBeVisible();
+  await expect(ownerPin.getByLabel('New Owner PIN')).toHaveCount(0);
+  await expect(ownerPin.getByRole('alert')).toHaveCount(0);
+  await ownerPin.getByRole('textbox', { name: 'Owner PIN' }).fill('5678');
+  await expect(ownerPin.getByLabel('New Owner PIN')).toBeVisible();
 });
 
 test('a profile household uses the Owner-PIN compound reset and never exposes legacy reset', async ({

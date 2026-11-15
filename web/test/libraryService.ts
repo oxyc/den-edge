@@ -10,7 +10,11 @@ import { LibraryLogAuthority } from '../src/lib/libraryLogAuthority';
 import { LibraryModel } from '../src/lib/libraryModel.svelte';
 import { legacyProfileSession } from '../src/lib/profileSession.svelte';
 import { LibraryServiceError } from '../src/lib/libraryServiceClient';
-import type { LibraryAuthorityEvent, LibrarySelectionScope } from '../src/lib/libraryServiceCore';
+import {
+  LibraryServiceAuthorityError,
+  type LibraryAuthorityEvent,
+  type LibrarySelectionScope,
+} from '../src/lib/libraryServiceCore';
 import type {
   DownloadTarget,
   LibraryCommand,
@@ -56,6 +60,7 @@ class FixtureService {
   readonly recoveryTasks: LibraryTask['kind'][] = [];
   readonly commandKinds: LibraryCommand['kind'][] = [];
   readonly progressOperationIds: string[] = [];
+  readonly parentalPinOperationIds: string[] = [];
   readonly assistantGrantQueries = { attempts: 0 };
   readonly #completedTasks = new Map<string, Awaited<ReturnType<LibraryLogAuthority['task']>>>();
   readonly #statusListeners = new Set<(status: LibrarySessionStatus) => void>();
@@ -90,6 +95,8 @@ class FixtureService {
     private loseRecoveryConfirmReplyOnce = false,
     private rejectProgressCommands = 0,
     private readonly progressReplyGate?: Promise<void>,
+    private loseParentalPinReplyOnce = false,
+    private readonly parentalPinReplyGate?: Promise<void>,
   ) {
     this.#stopAuthority = authority.listen((event) => this.#forwardAuthorityEvent(event));
   }
@@ -125,6 +132,7 @@ class FixtureService {
     operationId: string = crypto.randomUUID(),
   ): Promise<LibraryServiceCommandResult> {
     this.commandKinds.push(command.kind);
+    if (command.kind === 'parental-pin.set') this.parentalPinOperationIds.push(operationId);
     if (command.kind === 'progress.record') {
       this.progressOperationIds.push(operationId);
       if (command.playing === false && this.rejectProgressCommands > 0) {
@@ -132,13 +140,33 @@ class FixtureService {
         throw new Error('fixture rejected progress command');
       }
     }
-    const result = await this.authority.command(command, operationId);
+    let result: Awaited<ReturnType<LibraryLogAuthority['command']>>;
+    try {
+      result = await this.authority.command(command, operationId);
+    } catch (error) {
+      // Production serializes authority refusals through the Worker protocol and the client restores the typed
+      // service error. Keep component fixtures on that same boundary instead of exposing an in-process-only class.
+      if (error instanceof LibraryServiceAuthorityError)
+        throw new LibraryServiceError(error.failure);
+      throw error;
+    }
     if (result.outcome === 'applied') {
       this.#revision++;
       await this.publish(result.affected);
     }
     if (command.kind === 'progress.record' && command.playing === false)
       await this.progressReplyGate;
+    if (command.kind === 'parental-pin.set') {
+      await this.parentalPinReplyGate;
+      if (this.loseParentalPinReplyOnce) {
+        this.loseParentalPinReplyOnce = false;
+        throw new LibraryServiceError({
+          code: 'unavailable',
+          message: 'fixture lost the Owner PIN reply',
+          retryable: true,
+        });
+      }
+    }
     return {
       type: 'command-result',
       protocol: 1,
@@ -405,6 +433,10 @@ export interface FixtureLibraryServiceOptions {
   rejectProgressCommands?: number;
   /** Playback fixture only: hold the semantic reply after progress is durably applied and published. */
   progressReplyGate?: Promise<void>;
+  /** Settings fixture only: commit one Owner PIN change, then lose its semantic reply. */
+  loseParentalPinReplyOnce?: boolean;
+  /** Settings fixture only: hold the semantic reply after an Owner PIN change is durably applied and published. */
+  parentalPinReplyGate?: Promise<void>;
 }
 
 /**
@@ -432,6 +464,8 @@ export function fixtureLibraryService({
   loseRecoveryConfirmReplyOnce,
   rejectProgressCommands,
   progressReplyGate,
+  loseParentalPinReplyOnce,
+  parentalPinReplyGate,
 }: FixtureLibraryServiceOptions) {
   let last: Stamp = [0, 0, device];
   const clock: ClockStore = {
@@ -506,6 +540,8 @@ export function fixtureLibraryService({
     loseRecoveryConfirmReplyOnce,
     rejectProgressCommands,
     progressReplyGate,
+    loseParentalPinReplyOnce,
+    parentalPinReplyGate,
   );
   fixtureState.service = fixtureService;
   const model = new LibraryModel(fixtureService as ConstructorParameters<typeof LibraryModel>[0], {
@@ -526,6 +562,7 @@ export function fixtureLibraryService({
     commandKinds: fixtureService.commandKinds,
     assistantGrantQueries: fixtureService.assistantGrantQueries,
     progressOperationIds: fixtureService.progressOperationIds,
+    parentalPinOperationIds: fixtureService.parentalPinOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),
     holdNextSelection: (kind: LibrarySelection['kind']) => fixtureService.holdNextSelection(kind),
     activeSelections: () => fixtureService.activeSelections(),

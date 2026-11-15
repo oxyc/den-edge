@@ -660,7 +660,11 @@ function command(value: unknown): value is LibraryCommand {
         nullable(value.value, (candidate): candidate is string => boundedText(candidate, 16_384))
       );
     case 'parental-pin.set':
-      return exact(value, ',kind,pin,') && nullable(value.pin, pin);
+      return (
+        exact(value, ',kind,current,pin,') &&
+        nullable(value.current, pin) &&
+        nullable(value.pin, pin)
+      );
     case 'remote-access.set':
       return (
         exact(value, ',kind,credentials,') &&
@@ -1577,7 +1581,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
     !record(value) ||
     !exact(
       value,
-      ',kind,apiKeys,parentalPinConfigured,parentalPinDelivery,remoteAccessConfigured,plugins,servers,devices,diagnostics,',
+      ',kind,apiKeys,parentalPinConfigured,parentalPinRemovable,parentalPinDelivery,remoteAccessConfigured,plugins,servers,devices,diagnostics,',
     ) ||
     value.kind !== 'connections' ||
     !record(value.apiKeys) ||
@@ -1590,6 +1594,7 @@ function connectionsView(value: unknown): value is ConnectionsView {
         boundedText(candidate.masked, 32),
     ) ||
     !bool(value.parentalPinConfigured) ||
+    !bool(value.parentalPinRemovable) ||
     (value.parentalPinDelivery !== 'synced' &&
       value.parentalPinDelivery !== 'queued' &&
       value.parentalPinDelivery !== 'local') ||

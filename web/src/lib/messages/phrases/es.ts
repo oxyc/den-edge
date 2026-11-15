@@ -1381,4 +1381,21 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Las conexiones de asistentes no están disponibles en este televisor',
   'On a phone or computer linked to this household, open Den › Settings › Assistants.':
     'En un teléfono u ordenador vinculado a este hogar, abre Den › Configuración › Asistentes.',
+  'Owner PIN couldn’t be checked. Try again.':
+    'No se pudo comprobar el PIN del propietario. Inténtalo de nuevo.',
+  'Enter your current Owner PIN and try again.':
+    'Introduce tu PIN de propietario actual e inténtalo de nuevo.',
+  'The Owner PIN or profile state changed. Enter the current PIN and try again.':
+    'El PIN del propietario o el estado de los perfiles cambió. Introduce el PIN actual e inténtalo de nuevo.',
+  'Saved on this device. Reconnect, then try again to confirm every device has it.':
+    'Guardado en este dispositivo. Vuelve a conectarte y reinténtalo para confirmar que todos los dispositivos lo tienen.',
+  'Manage the Owner PIN in a supported browser':
+    'Administrar el PIN del propietario en un navegador compatible',
+  'Owner PIN administration is not available on this TV':
+    'La administración del PIN del propietario no está disponible en este televisor',
+  'Remove the Owner PIN?': '¿Quitar el PIN del propietario?',
+  'This household will no longer require a PIN to open Owner settings.':
+    'Este hogar ya no requerirá un PIN para abrir los ajustes del propietario.',
+  'On a phone or computer linked to this household, open Den › Settings › Content to set, change, or remove the Owner PIN.':
+    'En un teléfono u ordenador vinculado a este hogar, abre Den › Configuración › Contenido para establecer, cambiar o eliminar el PIN del propietario.',
 };
