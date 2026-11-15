@@ -28,6 +28,9 @@ const legacyCompat = fileURLToPath(new URL('./src/tv/compat-legacy.ts', import.m
 const tizen3ContentSection = fileURLToPath(
   new URL('./src/settings/ContentSection-tizen3.svelte', import.meta.url),
 );
+const tvKidTitleAccessDialog = fileURLToPath(
+  new URL('./src/components/KidTitleAccessDialog-tv.svelte', import.meta.url),
+);
 const tizen3WorkerCompat = fileURLToPath(
   new URL('./src/tv/compat-tizen3-worker.ts', import.meta.url),
 );
@@ -427,6 +430,12 @@ export default mergeConfig(
     // to wrappers with byte-identical APIs beside the compatible generated modules.
     resolve: {
       alias: [
+        {
+          // Every TV tier hands persistent title administration to the supported Browser. Replace the static
+          // Library import at resolution time so bundler/chunking changes cannot retain the unreachable writer.
+          find: /^(?:.*\/)?components\/KidTitleAccessDialog\.svelte$/,
+          replacement: tvKidTitleAccessDialog,
+        },
         ...(tizen3
           ? [
               {
