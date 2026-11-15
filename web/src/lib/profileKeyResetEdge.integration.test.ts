@@ -8,6 +8,7 @@ import fixture from '../vendor/den-core/profiles-v1.json';
 import { LibraryLog } from './log';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
+  attemptPath,
   HttpProfileKeyResetBackend,
   observeResetSource,
   registerMember,
@@ -461,16 +462,21 @@ describe.skipIf(!available)(
     });
 
     it('is open only under PROFILE_RESET_ENABLED, not the retired PROFILE_MIGRATION_ENABLED', async () => {
-      const observe = async (env: Record<string, string>) => {
+      const admission = async (env: Record<string, string>) => {
         const edge = await startEdge(env);
         await seed(edge, keyOf(10), 5, [preferences('household')], directory());
         const household = await LibraryLog.forReset(keyOf(10), 5, edge.fetch, undefined, null);
-        return observeResetSource(household, 5);
+        const reply = await household.resetRequest({
+          method: 'GET',
+          path: `${attemptPath(household.libraryId)}/source`,
+        });
+        expect(reply.status).toBe(200);
+        return (reply.body as Record<string, unknown>).newAttempt;
       };
-      await expect(observe({ PROFILE_RESET_ENABLED: '1' })).resolves.not.toBeNull();
+      await expect(admission({ PROFILE_RESET_ENABLED: '1' })).resolves.toBe(true);
       await expect(
-        observe({ PROFILE_RESET_ENABLED: '', PROFILE_MIGRATION_ENABLED: '1' }),
-      ).rejects.toMatchObject({ reason: 'library-unavailable' });
+        admission({ PROFILE_RESET_ENABLED: '', PROFILE_MIGRATION_ENABLED: '1' }),
+      ).resolves.toBe(false);
     });
   },
 );
