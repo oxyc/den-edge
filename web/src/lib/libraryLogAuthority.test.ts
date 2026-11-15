@@ -2037,7 +2037,7 @@ describe('LibraryLogAuthority', () => {
         subtitlesPerLanguage: 3,
         autoSkipSegments: false,
         autoplayTrailers: true,
-        playbackSourcePolicy: 'best',
+        playbackSourcePolicy: 'remember',
         preferredPlaybackSource: undefined,
         ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
         shownWarnings: [],
