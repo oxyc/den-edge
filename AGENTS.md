@@ -102,8 +102,9 @@ everything the committed code imports is committed too.
   Tizen 3 instead removes the connector, assistant queue and projection-Worker chunks: startup moves 193,447 →
   193,377, the complete non-translation graph 2,371,801 → 2,354,772 (-17,029 gzip), and the raw JS/CSS graph
   8,391,911 → 8,349,411 (-42,500 bytes), while retaining only a focusable handoff in its existing lazy Settings
-  chunk. Recovery adds no dependency, polling, timer, healthy-path request or background work; list and rollback
-  readbacks run only after the corresponding failure or explicit Retry. Consent lifetime and cleanup must remain in
+  chunk. Recovery adds no dependency, standing/background polling, healthy-path request or background work; the
+  post-link consent race uses one bounded local 100 ms authority wait, for at most 10 seconds. Additional list
+  retries and rollback readbacks run only after failure or explicit Retry. Consent lifetime and cleanup must remain in
   the already lazy Connect dialog, presentation/focus in lazy Settings, and durable acknowledged-row proof in the
   shared Worker that owns those rows. Splitting any again would add a request on the sole recovery path or duplicate
   authority; locale copy is already independently lazy. The Tizen 3 Worker-constructor split is the only safe
