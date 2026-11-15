@@ -8,15 +8,28 @@
   import '../src/app.css';
 
   const membership = { libraryId: 'f'.repeat(32), memberToken: 'proof' };
+  const replacementMembership = { libraryId: 'd'.repeat(32), memberToken: 'replacement-proof' };
+  const fixtureMode = new URLSearchParams(location.search);
   // Profile mode has a different global Owner credential. Sharing must deliberately use the household model below.
   useLibraryCredential({ id: 'e'.repeat(32), member: 'owner-proof' });
-  const model = {
-    relayMembership: async () => {
-      if (new URLSearchParams(location.search).has('membership-fails'))
-        throw new Error('fixture membership failure');
-      return membership;
-    },
-  } as LibraryModel;
+  let holdNextMembership = false;
+  let membershipWaiting = $state(false);
+  let releaseMembership: (() => void) | null = null;
+  const modelFor = (value: typeof membership, fails = false) =>
+    ({
+      relayMembership: async () => {
+        if (fails) throw new Error('fixture membership failure');
+        if (holdNextMembership) {
+          holdNextMembership = false;
+          membershipWaiting = true;
+          await new Promise<void>((resolve) => (releaseMembership = resolve));
+          membershipWaiting = false;
+          releaseMembership = null;
+        }
+        return value;
+      },
+    }) as LibraryModel;
+  let model = $state.raw(modelFor(membership, fixtureMode.has('membership-fails')));
 
   const link: Link = {
     inboxKey: 'deadbeefcafe1234',
@@ -42,5 +55,16 @@
 </script>
 
 <main style="padding:24px; max-width:420px">
+  {#if fixtureMode.has('replacement')}
+    <button type="button" onclick={() => (model = modelFor(replacementMembership))}>
+      Replace household
+    </button>
+  {/if}
+  {#if fixtureMode.has('hold-membership')}
+    <button type="button" onclick={() => (holdNextMembership = true)}>Hold next membership</button>
+    <button type="button" disabled={!membershipWaiting} onclick={() => releaseMembership?.()}>
+      Release membership
+    </button>
+  {/if}
   <SharingSection {link} {model} {plugins} {routes} ready={true} />
 </main>

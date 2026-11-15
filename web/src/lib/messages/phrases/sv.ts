@@ -287,6 +287,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load this title from TMDB.': 'Det gick inte att ladda den här titeln från TMDB.',
   'Couldn’t load your settings.': 'Det gick inte att ladda dina inställningar.',
   'Couldn’t make the file. Please try again.': 'Det gick inte att skapa filen. Försök igen.',
+  'Couldn’t open household sharing. Try again.':
+    'Det gick inte att öppna hushållets delning. Försök igen.',
   'Couldn’t open your library': 'Det gick inte att öppna ditt bibliotek',
   'Couldn’t reach the service directory. Check your connection and try again.':
     'Det gick inte att nå tjänstekatalogen. Kontrollera din anslutning och försök igen.',
@@ -951,6 +953,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Social: 'Social',
   'Someone shared their Den addons with you. Accepting lets this browser use them to find and play things. You can leave it any time under Settings › Sharing.':
     'Någon delade sina Den-tillägg med dig. Om du accepterar kan den här webbläsaren använda dem för att hitta och spela saker. Du kan lämna det när som helst under Inställningar › Delning.',
+  'Some guest sharing settings may be out of date.':
+    'Vissa inställningar för gästdelning kan vara inaktuella.',
   'Something went wrong on this page.': 'Något gick fel på den här sidan.',
   'Sort people': 'Sortera folk',
   Sources: 'Källor',
@@ -1003,6 +1007,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Telugu: 'Telugu',
   'Terms of Use': 'Användarvillkor',
   Thai: 'Thai',
+  'That didn’t work. Try again in a moment.': 'Det fungerade inte. Försök igen om en stund.',
   'That file has no viewing history in it.': 'Den filen har ingen visningshistorik.',
   'That code collided with another. Make a new one.':
     'Den koden kolliderade med en annan. Skapa en ny.',

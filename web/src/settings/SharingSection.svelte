@@ -100,7 +100,11 @@
   const installs = $derived(hostedInstalls(plugins, routes));
   let grants = $state.raw<Grant[] | null>(null);
   let problem = $state<string | null>(null);
+  let refreshProblem = $state<string | null>(null);
   let working = $state(false);
+  let authorityGeneration = 0;
+  let mutationSequence = 0;
+  let activeMutation: number | null = null;
   let name = $state('');
   let trial = $state<'none' | '7' | '30' | 'custom'>('none');
   let customDays = $state(14);
@@ -142,30 +146,76 @@
   const said = (reply: Extract<Reply<unknown>, { ok: false }>) =>
     failures[reply.error] ?? 'That didn’t work. Try again in a moment.';
 
-  async function host() {
+  async function host(expectedModel: LibraryModel = model, reportProblem = true) {
     try {
-      const membership = await model.relayMembership();
+      const membership = await expectedModel.relayMembership();
       if (membership) return { id: membership.libraryId, fetch: hostGrantsFetch(membership) };
     } catch (error) {
       console.error('Could not read the household sharing membership', error);
     }
-    problem = 'Couldn’t open household sharing. Try again.';
+    if (reportProblem) problem = 'Couldn’t open household sharing. Try again.';
     return null;
   }
 
   async function refresh() {
-    const household = await host();
-    if (!household) return;
-    const listed = await listGrants(household.id, household.fetch);
-    if (!listed.ok) {
-      problem = said(listed);
+    const generation = refreshGeneration;
+    const expectedModel = model;
+    const expectedLink = link;
+    const expectedInstallsKey = installsKey;
+    const expectedInstalls = { ...installs };
+    const current = () =>
+      generation === refreshGeneration &&
+      ready &&
+      model === expectedModel &&
+      link === expectedLink &&
+      installsKey === expectedInstallsKey;
+
+    const household = await host(expectedModel, false);
+    if (!current()) return;
+    if (!household) {
+      refreshProblem = 'Couldn’t open household sharing. Try again.';
       return;
     }
-    problem = null;
+    const listed = await listGrants(household.id, household.fetch);
+    if (!current()) return;
+    if (!listed.ok) {
+      refreshProblem = said(listed);
+      return;
+    }
     grants = listed.value;
     codes = keptCodes(listed.value.filter((g) => g.status === 'invited').map((g) => g.gid));
     // The plugin list may have changed since the escrow was made: what den-edge holds follows it.
-    await reuploadInstalls(household.id, listed.value, installs, household.fetch);
+    const outcomes = await reuploadInstalls(
+      household.id,
+      listed.value,
+      expectedInstalls,
+      household.fetch,
+    );
+    if (!current()) return;
+    const updated = outcomes.filter(({ outcome }) => outcome === 'updated');
+    const failed = outcomes.some(({ outcome }) =>
+      ['refused', 'blocked-by-refusal', 'transient-failure'].includes(outcome),
+    );
+    if (updated.length) {
+      const readback = await listGrants(household.id, household.fetch);
+      if (!current()) return;
+      if (!readback.ok) {
+        refreshProblem = said(readback);
+        return;
+      }
+      grants = readback.value;
+      codes = keptCodes(
+        readback.value.filter((grant) => grant.status === 'invited').map((grant) => grant.gid),
+      );
+      const durable = updated.every(({ gid, escrow }) =>
+        readback.value.some((grant) => grant.gid === gid && grant.escrow === escrow),
+      );
+      if (!durable) {
+        refreshProblem = 'Some guest sharing settings may be out of date.';
+        return;
+      }
+    }
+    refreshProblem = failed ? 'Some guest sharing settings may be out of date.' : null;
   }
 
   /**
@@ -173,7 +223,7 @@
    * addon): two refreshes running at once each found the other's invites not yet rewritten, and wrote them again.
    * A change during a refresh asks for one more after it, with what is current then.
    */
-  let refreshing = false;
+  let refreshing = $state(false);
   let refreshAgain = false;
   async function refreshOnce() {
     if (refreshing) {
@@ -194,16 +244,103 @@
   // Listed once the library is open, and again whenever what would be escrowed changes: its content, as a string,
   // since a list re-read from the log is a new array with the same installs every time the library refreshes.
   const installsKey = $derived(JSON.stringify(installs));
+  let refreshGeneration = 0;
+  let presentedModel: LibraryModel | undefined;
+  let presentedLink: Link | null | undefined;
+  let presentedReady: boolean | undefined;
+  $effect.pre(() => {
+    void installsKey;
+    refreshGeneration += 1;
+    const authorityChanged =
+      model !== presentedModel || link !== presentedLink || ready !== presentedReady;
+    presentedModel = model;
+    presentedLink = link;
+    presentedReady = ready;
+    if (!authorityChanged) return;
+    authorityGeneration += 1;
+    activeMutation = null;
+    working = false;
+    grants = null;
+    codes = {};
+    refreshProblem = null;
+    problem = null;
+    created = null;
+    copied = null;
+    manualLink = false;
+    manualCode = false;
+    renaming = null;
+    revoking = null;
+    revokeNext = null;
+    deviceLimits = {};
+    menus = {};
+  });
   $effect(() => {
     void installsKey;
+    void model;
+    void link;
+    void ready;
     if (ready && link) untrack(() => void refreshOnce());
   });
 
-  async function invite() {
-    const household = await host();
-    if (!household || !name.trim() || !shareable.length) return;
+  type AuthorityClaim = {
+    generation: number;
+    model: LibraryModel;
+    link: Link | null;
+  };
+  const authorityClaim = (): AuthorityClaim => ({ generation: authorityGeneration, model, link });
+  const ownsAuthority = (claim: AuthorityClaim) =>
+    claim.generation === authorityGeneration &&
+    claim.model === model &&
+    claim.link === link &&
+    ready &&
+    link !== null;
+
+  function beginMutation(claim: AuthorityClaim): number | null {
+    if (!ownsAuthority(claim) || activeMutation !== null) return null;
+    const ticket = ++mutationSequence;
+    activeMutation = ticket;
     working = true;
     problem = null;
+    return ticket;
+  }
+
+  const ownsMutation = (ticket: number, claim: AuthorityClaim) =>
+    activeMutation === ticket && ownsAuthority(claim);
+
+  function finishMutation(ticket: number) {
+    if (activeMutation !== ticket) return;
+    activeMutation = null;
+    working = false;
+  }
+
+  async function beginHostedMutation(claim: AuthorityClaim) {
+    // Own the mutation before membership lookup suspends. Otherwise a second action can reach Edge while the first
+    // lookup is held, and two destructive requests (new-link in particular) can invalidate each other's result.
+    const ticket = beginMutation(claim);
+    if (ticket === null) return null;
+    const household = await host(claim.model, false);
+    if (!ownsMutation(ticket, claim)) return null;
+    if (!household) {
+      finishMutation(ticket);
+      problem = 'Couldn’t open household sharing. Try again.';
+      return null;
+    }
+    return { ticket, household };
+  }
+
+  async function retryRefresh() {
+    await refreshOnce();
+    if (refreshProblem) return;
+    await tick();
+    document.querySelector<HTMLElement>('#invite-guest > .row')?.focus();
+  }
+
+  async function invite() {
+    const claim = authorityClaim();
+    if (!name.trim() || !shareable.length) return;
+    const mutation = await beginHostedMutation(claim);
+    if (!mutation) return;
+    const { ticket, household } = mutation;
     const picks = Object.fromEntries(shareable.map((addon) => [addon, installs[addon]]));
     const reply = await createGrant(
       household.id,
@@ -223,12 +360,15 @@
       },
       household.fetch,
     );
-    working = false;
+    if (!ownsMutation(ticket, claim)) return;
     if (!reply.ok) {
+      finishMutation(ticket);
       problem = said(reply);
       return;
     }
     await keepUploaded(reply.value.grant.gid, installs, shareable);
+    if (!ownsMutation(ticket, claim)) return;
+    finishMutation(ticket);
     keepCode(reply.value.grant.gid, reply.value.code);
     codes = { ...codes, [reply.value.grant.gid]: reply.value.code };
     created = {
@@ -264,12 +404,13 @@
   }
 
   async function change(grant: Grant, patch: GrantChange): Promise<boolean> {
-    const household = await host();
-    if (!household) return false;
-    working = true;
-    problem = null;
+    const claim = authorityClaim();
+    const mutation = await beginHostedMutation(claim);
+    if (!mutation) return false;
+    const { ticket, household } = mutation;
     const reply = await updateGrant(household.id, grant.gid, patch, household.fetch);
-    working = false;
+    if (!ownsMutation(ticket, claim)) return false;
+    finishMutation(ticket);
     if (!reply.ok) {
       problem = said(reply);
       return false;
@@ -281,12 +422,13 @@
 
   /** A new link for a guest who already exists (their phone, say): the previous one stops working. */
   async function newLink(grant: Grant) {
-    const household = await host();
-    if (!household) return;
-    working = true;
-    problem = null;
+    const claim = authorityClaim();
+    const mutation = await beginHostedMutation(claim);
+    if (!mutation) return;
+    const { ticket, household } = mutation;
     const reply = await newGrantCode(household.id, grant.gid, household.fetch);
-    working = false;
+    if (!ownsMutation(ticket, claim)) return;
+    finishMutation(ticket);
     if (!reply.ok) {
       problem =
         reply.error === 'devices_full'
@@ -325,8 +467,10 @@
 
   async function changeDeviceLimit(grant: Grant, devices: number | null): Promise<void> {
     if (devices === grant.devices || (devices !== null && (devices < 1 || devices > 5))) return;
+    const generation = authorityGeneration;
     deviceLimits = { ...deviceLimits, [grant.gid]: devices };
     await change(grant, { devices });
+    if (generation !== authorityGeneration) return;
     const next = { ...deviceLimits };
     delete next[grant.gid];
     deviceLimits = next;
@@ -344,9 +488,13 @@
   }
 
   async function revoke(grant: Grant) {
-    const household = await host();
-    if (!household) return;
+    const claim = authorityClaim();
+    const mutation = await beginHostedMutation(claim);
+    if (!mutation) return;
+    const { ticket, household } = mutation;
     const reply = await revokeGrant(household.id, grant.gid, household.fetch);
+    if (!ownsMutation(ticket, claim)) return;
+    finishMutation(ticket);
     if (!reply.ok) {
       problem = said(reply);
       return;
@@ -578,6 +726,17 @@
           first.
         </p>
       {/if}
+      {#if refreshProblem}
+        <div class="recovery status bad" role="alert">
+          <span>{refreshProblem}</span>
+          <Button
+            variant="secondary"
+            label="Try again"
+            busy={refreshing}
+            onclick={() => void retryRefresh()}
+          />
+        </div>
+      {/if}
       {#if problem}<p class="status bad" role="alert">{problem}</p>{/if}
       <p class="foot">
         Guests never see your addons, keys or watchlist. They can fall back to your debrid account
@@ -757,6 +916,13 @@
     margin: 0;
     color: var(--muted);
     font-size: 14px;
+  }
+
+  .recovery {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
   }
 
   .made p b {

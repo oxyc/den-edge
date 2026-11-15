@@ -132,6 +132,19 @@ everything the committed code imports is committed too.
   was available to remove without losing the localized failure, stale-result, focus or retry contract. The ceiling
   therefore advances from 101,760 to 102,400, the next 128-byte boundary, retaining 73 bytes; the independent
   startup and translation ceilings remain unchanged.
+- Household-sharing escrow recovery (#1146) was measured on matched production builds at base `e099edbd` and the
+  repair: startup moved 203,801 → 203,870 gzip bytes (+69), while the complete graph moved 875,858 → 876,745
+  and its independently accounted translation catalogs moved 46,557 → 46,684, leaving the non-translation graph
+  829,301 → 830,061 (+760). The existing lazy Settings chunk accounts for +761 bytes and the already shared lazy
+  grants module for +98; the initial app chunk shrinks by 7 and minification changes elsewhere offset the remainder.
+  The repair adds no dependency, polling, timer or healthy-path request: its extra readback and retry occur only
+  after an automatic escrow write fails. The authority lifetime, durable readback, visible recovery and localized
+  notice must stay with the existing lazy Sharing settings, while the grants result contract is shared by that
+  surface and its tests. Moving either behind another dynamic import would add a request on an already-failing
+  recovery path and cannot reduce the complete-graph total; translation copy already uses the lazy locale catalogs.
+  No production branch can be removed without losing a reviewed failure, refusal, stale-authority or retry outcome.
+  The complete-graph ceiling therefore advances from 103,680 to 104,320, the next 128-byte boundary, retaining 49
+  bytes on the matched build; the independent startup and translation ceilings remain unchanged.
 
 ## Testing
 

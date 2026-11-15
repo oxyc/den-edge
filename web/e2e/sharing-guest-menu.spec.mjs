@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { createHash } from 'node:crypto';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 // Settings › Sharing › Your guests: every per-guest control sits behind one ⋯ menu, so the row is the name and
@@ -25,6 +26,19 @@ const grant = (over = {}) => ({
   ...over,
 });
 
+const GRANT_ADDONS = ['den', 'scout', 'atlas', 'reel', 'subtitles'];
+const escrowOf = ({ addons, installs }) =>
+  createHash('sha256')
+    .update(
+      JSON.stringify(
+        GRANT_ADDONS.filter((addon) => addons.includes(addon)).map((addon) => [
+          addon,
+          installs[addon] ?? '',
+        ]),
+      ),
+    )
+    .digest('hex');
+
 async function open(page, over = {}) {
   const calls = [];
   let current = grant(over);
@@ -33,7 +47,12 @@ async function open(page, over = {}) {
     const request = route.request();
     calls.push({ method: request.method(), body: request.postDataJSON?.() ?? null });
     if (request.method() === 'PUT') {
-      current = { ...current, ...request.postDataJSON() };
+      const change = request.postDataJSON();
+      current = {
+        ...current,
+        ...change,
+        ...(change.addons && change.installs ? { escrow: escrowOf(change) } : {}),
+      };
       return route.fulfill({ json: { grant: current } });
     }
     return route.fulfill({ json: {} });
@@ -68,16 +87,237 @@ test('host actions use the household model while Owner is the active profile', a
 test('a missing household membership is shown instead of an empty guest list', async ({ page }) => {
   await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html?membership-fails`);
   await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
-  await expect(page.getByRole('alert')).toHaveText('Couldn’t open household sharing. Try again.');
+  await expect(page.getByRole('alert')).toContainText(
+    'Couldn’t open household sharing. Try again.',
+  );
+  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+});
+
+test('a failed escrow refresh keeps the guest list visible and retries the durable write', async ({
+  page,
+}) => {
+  let puts = 0;
+  let current = grant({ escrow: 'f'.repeat(64) });
+  let releaseRetry;
+  const heldRetry = new Promise((resolve) => {
+    releaseRetry = resolve;
+  });
+  let sawRetry;
+  const retryStarted = new Promise((resolve) => {
+    sawRetry = resolve;
+  });
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [current] } }));
+  await page.route('**/lib/*/grants/*', async (route) => {
+    puts += 1;
+    if (puts === 1) return route.fulfill({ status: 500, json: { error: 'temporary' } });
+    sawRetry();
+    await heldRetry;
+    const change = route.request().postDataJSON();
+    current = { ...current, ...change, escrow: escrowOf(change) };
+    return route.fulfill({ json: { grant: current } });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html`);
+  const rowButton = page.getByRole('button', { name: 'Invite a guest Lend your addons' });
+  await rowButton.click();
+  await expect(page.locator('li.guest-line')).toContainText('Alex');
+  await expect(page.getByRole('alert')).toContainText(
+    'Some guest sharing settings may be out of date.',
+  );
+
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await retry.click();
+  await retryStarted;
+  await expect(page.getByRole('alert')).toContainText(
+    'Some guest sharing settings may be out of date.',
+  );
+  await expect(retry).toHaveAttribute('aria-busy', 'true');
+  releaseRetry();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(rowButton).toBeFocused();
+  expect(puts).toBe(2);
+});
+
+test('a failed initial guest list has a working retry without inventing an empty state', async ({
+  page,
+}) => {
+  let lists = 0;
+  await page.route('**/lib/*/grants', (route) => {
+    lists += 1;
+    return lists === 1
+      ? route.fulfill({ status: 500, json: { error: 'temporary' } })
+      : route.fulfill({ json: { grants: [] } });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html`);
+  const rowButton = page.getByRole('button', { name: 'Invite a guest Lend your addons' });
+  await rowButton.click();
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByText('No one yet.')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('No one yet.')).toBeVisible();
+  await expect(rowButton).toBeFocused();
+  expect(lists).toBe(2);
+});
+
+test('a replacement household retires published guests and a held old retry', async ({ page }) => {
+  let releaseOldRetry;
+  const heldOldRetry = new Promise((resolve) => {
+    releaseOldRetry = resolve;
+  });
+  let sawOldRetry;
+  const oldRetryStarted = new Promise((resolve) => {
+    sawOldRetry = resolve;
+  });
+  const requests = [];
+  let oldPuts = 0;
+  let replacement = grant({ gid: 'd1d2d3d4', name: 'Replacement guest' });
+  await page.route('**/lib/*/grants', (route) => {
+    const url = route.request().url();
+    requests.push(url);
+    return route.fulfill({
+      json: {
+        grants: url.includes('f'.repeat(32))
+          ? [grant({ name: 'Old household guest', escrow: 'f'.repeat(64) })]
+          : [replacement],
+      },
+    });
+  });
+  await page.route('**/lib/*/grants/*', async (route) => {
+    const url = route.request().url();
+    if (url.includes('f'.repeat(32))) {
+      oldPuts += 1;
+      if (oldPuts === 1)
+        return route.fulfill({ status: 500, json: { error: 'old-household-failure' } });
+      sawOldRetry();
+      await heldOldRetry;
+      return route.fulfill({ status: 500, json: { error: 'late-old-household-failure' } });
+    }
+    const change = route.request().postDataJSON();
+    replacement = { ...replacement, ...change, escrow: escrowOf(change) };
+    return route.fulfill({ json: { grant: replacement } });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html?replacement`);
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  await expect(page.locator('li.guest-line')).toContainText('Old household guest');
+  await expect(page.getByRole('alert')).toContainText(
+    'Some guest sharing settings may be out of date.',
+  );
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await oldRetryStarted;
+  await page.getByRole('button', { name: 'Replace household' }).click();
+  await expect(page.getByText('Old household guest')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  releaseOldRetry();
+  await expect(page.locator('li.guest-line')).toContainText('Replacement guest');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(requests.filter((url) => url.includes('d'.repeat(32)))).toHaveLength(2);
+});
+
+test('a held old new-link response cannot publish its invite code after household replacement', async ({
+  page,
+}) => {
+  let releaseCode;
+  const heldCode = new Promise((resolve) => {
+    releaseCode = resolve;
+  });
+  let sawCode;
+  const codeStarted = new Promise((resolve) => {
+    sawCode = resolve;
+  });
+  let oldLists = 0;
+  let oldGrant = grant({ name: 'Old household guest' });
+  let replacementGrant = grant({ gid: 'd1d2d3d4', name: 'Replacement guest' });
+  await page.route('**/lib/*/grants', (route) => {
+    const old = route.request().url().includes('f'.repeat(32));
+    if (old) oldLists += 1;
+    return route.fulfill({ json: { grants: [old ? oldGrant : replacementGrant] } });
+  });
+  await page.route('**/lib/*/grants/*', (route) => {
+    const change = route.request().postDataJSON();
+    if (route.request().url().includes('f'.repeat(32))) {
+      oldGrant = { ...oldGrant, ...change, escrow: escrowOf(change) };
+      return route.fulfill({ json: { grant: oldGrant } });
+    }
+    replacementGrant = { ...replacementGrant, ...change, escrow: escrowOf(change) };
+    return route.fulfill({ json: { grant: replacementGrant } });
+  });
+  await page.route('**/lib/*/grants/*/code', async (route) => {
+    sawCode();
+    await heldCode;
+    return route.fulfill({
+      json: { code: NEW_CODE, devicesRaised: false, grant: oldGrant },
+    });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html?replacement`);
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  await expect(page.locator('li.guest-line')).toContainText('Old household guest');
+  await expect.poll(() => oldLists).toBe(2);
+  await page.getByRole('button', { name: 'More actions for Old household guest' }).click();
+  await page.getByRole('menuitem', { name: 'New link' }).click();
+  await codeStarted;
+  await page.getByRole('button', { name: 'Replace household' }).click();
+  await expect(page.getByText('Old household guest')).toHaveCount(0);
+  releaseCode();
+  await expect(page.locator('li.guest-line')).toContainText('Replacement guest');
+  await expect(page.getByLabel('Invite code')).toHaveCount(0);
+  await expect(page.getByText('Old household guest’s new link.')).toHaveCount(0);
+  await page.getByRole('button', { name: 'More actions for Replacement guest' }).click();
+  await expect(page.getByRole('menuitem', { name: 'New link' })).toBeVisible();
+});
+
+test('a held membership lookup admits only one new-link mutation', async ({ page }) => {
+  let posts = 0;
+  let listed = grant();
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [listed] } }));
+  await page.route('**/lib/*/grants/*', (route) => {
+    const change = route.request().postDataJSON();
+    listed = { ...listed, ...change, escrow: escrowOf(change) };
+    return route.fulfill({ json: { grant: listed } });
+  });
+  await page.route('**/lib/*/grants/*/code', (route) => {
+    posts += 1;
+    return route.fulfill({
+      json: { code: NEW_CODE, devicesRaised: false, grant: listed },
+    });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/sharing-copy.html?hold-membership`);
+  await page.getByRole('button', { name: 'Invite a guest Lend your addons' }).click();
+  await expect(page.locator('li.guest-line')).toContainText('Alex');
+  await page.getByRole('button', { name: 'Hold next membership' }).click();
+  await page.getByRole('button', { name: 'More actions for Alex' }).click();
+  const newLink = page.getByRole('menuitem', { name: 'New link' });
+  await newLink.evaluate((button) => {
+    button.click();
+    button.click();
+  });
+  const release = page.getByRole('button', { name: 'Release membership' });
+  await expect(release).toBeEnabled();
+  expect(posts).toBe(0);
+  await release.click();
+  await expect(page.getByLabel('Invite code')).toHaveValue(NEW_CODE);
+  expect(posts).toBe(1);
 });
 
 /** Opens the guest list with `POST …/code` answered by `reply`, and returns the code calls it saw. */
 async function openWithNewLink(page, current, reply) {
   const posts = [];
+  let listed = current;
   await page
     .context()
     .grantPermissions(['clipboard-read', 'clipboard-write'], { origin: E2E_ORIGIN });
-  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [current] } }));
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [listed] } }));
+  // The opening refresh may heal this fixture grant's deliberately omitted escrow hash. Keep that production
+  // recovery request local to the fixture instead of letting it fall through to the E2E server's dead Edge port.
+  await page.route('**/lib/*/grants/*', (route) => {
+    const change = route.request().postDataJSON();
+    listed = { ...listed, ...change, escrow: escrowOf(change) };
+    return route.fulfill({ json: { grant: listed } });
+  });
   await page.route('**/lib/*/grants/*/code', (route) => {
     posts.push(route.request().postDataJSON());
     return route.fulfill(reply(current));

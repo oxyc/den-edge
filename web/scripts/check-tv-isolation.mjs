@@ -339,5 +339,9 @@ if (process.argv.includes('--capture')) {
   // The same source policy adds 1,039 gzip bytes to the non-translation graph on those matched builds. The 309-byte
   // recovery stays in Player and the 121-byte control in SettingsNav, both already-lazy boundaries; splitting their
   // small shared enums again would add loader overhead. Allow the next 128-byte boundary, retaining 60 bytes.
-  if (coreTotalDelta > 103680) throw new Error('Browser total JS/CSS budget exceeded');
+  // Household-sharing escrow recovery adds 760 gzip bytes to the complete non-translation graph and 69 at startup
+  // on matched current-main/head builds. Its authority fencing, durable readback and Retry stay in the existing lazy
+  // Settings and grants chunks; another split would add a request on the failure path without reducing this total.
+  // Allow the next 128-byte boundary past the combined graph, retaining 49 bytes on the matched build.
+  if (coreTotalDelta > 104320) throw new Error('Browser total JS/CSS budget exceeded');
 }

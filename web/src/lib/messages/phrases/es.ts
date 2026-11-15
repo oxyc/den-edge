@@ -293,6 +293,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load your settings.': 'No se pudo cargar tu configuración.',
   'Couldn’t make the file. Please try again.':
     'No se pudo crear el archivo. Por favor inténtalo de nuevo.',
+  'Couldn’t open household sharing. Try again.':
+    'No se pudo abrir el uso compartido del hogar. Inténtalo de nuevo.',
   'Couldn’t open your library': 'No se pudo abrir tu biblioteca',
   'Couldn’t reach the service directory. Check your connection and try again.':
     'No se pudo acceder al directorio de servicios. Comprueba tu conexión y vuelve a intentarlo.',
@@ -965,6 +967,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Social: 'sociales',
   'Someone shared their Den addons with you. Accepting lets this browser use them to find and play things. You can leave it any time under Settings › Sharing.':
     'Alguien compartió sus complementos Den contigo. Aceptar permite que este navegador los use para buscar y reproducir cosas. Puedes dejarlo en cualquier momento en Configuración › Compartir.',
+  'Some guest sharing settings may be out of date.':
+    'Es posible que algunos ajustes para compartir con invitados estén desactualizados.',
   'Something went wrong on this page.': 'Algo salió mal en esta página.',
   'Sort people': 'ordenar personas',
   Sources: 'Fuentes',
@@ -1017,6 +1021,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Telugu: 'telugu',
   'Terms of Use': 'Términos de uso',
   Thai: 'tailandés',
+  'That didn’t work. Try again in a moment.': 'No funcionó. Inténtalo de nuevo en un momento.',
   'That file has no viewing history in it.': 'Ese archivo no tiene historial de visualización.',
   'That code collided with another. Make a new one.':
     'Ese código coincidió con otro. Crea uno nuevo.',

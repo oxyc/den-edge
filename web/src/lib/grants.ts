@@ -391,36 +391,62 @@ export async function keepUploaded(
 }
 
 /**
- * Re-upload every live grant whose shared installs changed, and return those grants. A migrated combined Hearth
+ * Re-upload every live grant whose shared installs changed, and return the outcome of every grant this browser
+ * could compare. A migrated combined Hearth
  * replaces legacy Scout, Reel and Subtitles while retaining separate Atlas discovery, so guests created before that
  * migration heal on the host's next refresh. Without one, a grant is left alone if a shared install disappeared.
  *
  * What den-edge holds is what it says (`escrow`, the same hash of its addons and installs), so a grant already
  * current is left alone on every browser; only a den-edge too old to say leaves it to what this browser last sent.
  */
+export type GrantEscrowRefresh = {
+  gid: string;
+  outcome: 'already-current' | 'updated' | 'refused' | 'blocked-by-refusal' | 'transient-failure';
+  /** The exact hash a successful durable readback must report. */
+  escrow?: string;
+  /** Present only for a refused or failed write; safe for presentation mapping, never a secret. */
+  error?: string;
+};
+
 export async function reuploadInstalls(
   id: string,
   grants: readonly Grant[],
   installs: Partial<Record<GrantAddon, string>>,
   fetchImpl: typeof fetch = relayFetch,
-): Promise<string[]> {
-  const updated: string[] = [];
+): Promise<GrantEscrowRefresh[]> {
+  const outcomes: GrantEscrowRefresh[] = [];
+  let authorityRefused = false;
   for (const grant of grants) {
     if (grant.status !== 'invited' && grant.status !== 'active') continue;
     const addons: GrantAddon[] = installs.den ? shareableAddons(installs) : [...grant.addons];
     if (!addons.every((addon) => installs[addon])) continue;
     const hash = await hashInstalls(installs, addons);
-    if ((grant.escrow ?? keptHashes()[grant.gid]) === hash) continue;
+    if ((grant.escrow ?? keptHashes()[grant.gid]) === hash) {
+      outcomes.push({ gid: grant.gid, outcome: 'already-current', escrow: hash });
+      continue;
+    }
+    if (authorityRefused) {
+      outcomes.push({ gid: grant.gid, outcome: 'blocked-by-refusal', escrow: hash });
+      continue;
+    }
     const picked = Object.fromEntries(addons.map((addon) => [addon, installs[addon]]));
     const reply = await updateGrant(id, grant.gid, { addons, installs: picked }, fetchImpl);
     // A 403 refuses this browser's proof for the household, not this one grant: every other grant would be refused
     // the same way, so asking again for each of them is only more refusals in den-edge's log.
-    if (!reply.ok && reply.status === 403) break;
-    if (!reply.ok) continue;
+    if (!reply.ok) {
+      outcomes.push({
+        gid: grant.gid,
+        outcome: reply.status === 403 ? 'refused' : 'transient-failure',
+        escrow: hash,
+        error: reply.error,
+      });
+      if (reply.status === 403) authorityRefused = true;
+      continue;
+    }
     await keepUploaded(grant.gid, installs, addons);
-    updated.push(grant.gid);
+    outcomes.push({ gid: grant.gid, outcome: 'updated', escrow: hash });
   }
-  return updated;
+  return outcomes;
 }
 
 // The guest's side. These take the grant's secret explicitly: a guest is not a library member.

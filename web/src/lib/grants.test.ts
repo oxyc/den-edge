@@ -468,9 +468,9 @@ test('escrow is re-uploaded only for a live grant whose addons changed, and only
   const expired: Grant = { ...GRANT, gid: 'deadbeef', status: 'expired' };
   const needsMore: Grant = { ...GRANT, gid: 'cafef00d', addons: ['scout', 'subtitles'] };
 
-  expect(await reuploadInstalls('abc123', [GRANT, expired, needsMore], installs, spy)).toEqual([
-    'a1b2c3d4',
-  ]);
+  expect(
+    await reuploadInstalls('abc123', [GRANT, expired, needsMore], installs, spy),
+  ).toMatchObject([{ gid: 'a1b2c3d4', outcome: 'updated' }]);
   expect(spy).toHaveBeenCalledTimes(1);
   // Only the addons this grant shares travel with it.
   expect(JSON.parse(String(spy.mock.calls[0]![1]?.body))).toEqual({
@@ -479,21 +479,21 @@ test('escrow is re-uploaded only for a live grant whose addons changed, and only
   });
 
   // Nothing changed for it: no churn, even though another addon did.
-  expect(await reuploadInstalls('abc123', [GRANT], { ...installs, reel: 'changed' }, spy)).toEqual(
-    [],
-  );
+  expect(
+    await reuploadInstalls('abc123', [GRANT], { ...installs, reel: 'changed' }, spy),
+  ).toMatchObject([{ gid: 'a1b2c3d4', outcome: 'already-current' }]);
   expect(spy).toHaveBeenCalledTimes(1);
 
-  expect(await reuploadInstalls('abc123', [GRANT], { ...installs, atlas: 'rotated' }, spy)).toEqual(
-    ['a1b2c3d4'],
-  );
+  expect(
+    await reuploadInstalls('abc123', [GRANT], { ...installs, atlas: 'rotated' }, spy),
+  ).toMatchObject([{ gid: 'a1b2c3d4', outcome: 'updated' }]);
   expect(spy).toHaveBeenCalledTimes(2);
 });
 
 test('a migrated combined Hearth replaces missing legacy installs on an existing grant', async () => {
   const spy = answering(200, { grant: { ...GRANT, addons: ['den'] } });
-  expect(await reuploadInstalls('abc123', [GRANT], { den: 'opaque-hearth' }, spy)).toEqual([
-    'a1b2c3d4',
+  expect(await reuploadInstalls('abc123', [GRANT], { den: 'opaque-hearth' }, spy)).toMatchObject([
+    { gid: 'a1b2c3d4', outcome: 'updated' },
   ]);
   expect(JSON.parse(String(spy.mock.calls[0]![1]?.body))).toEqual({
     addons: ['den'],
@@ -511,7 +511,7 @@ test('a migrated combined Hearth keeps and adds installed Atlas discovery', asyn
       { den: 'hearth', atlas: 'atlas' },
       spy,
     ),
-  ).toEqual(['a1b2c3d4']);
+  ).toMatchObject([{ gid: 'a1b2c3d4', outcome: 'updated' }]);
   expect(JSON.parse(String(spy.mock.calls[0]![1]?.body))).toEqual({
     addons: ['den', 'atlas'],
     installs: { den: 'hearth', atlas: 'atlas' },
@@ -525,32 +525,77 @@ test('a grant den-edge says already escrows these installs is not written, on an
   expect(await hashInstalls(installs, ['atlas', 'den'])).toBe(escrow);
   const spy = answering(200, { grant: GRANT });
   const current: Grant = { ...GRANT, addons: ['den', 'atlas'], escrow };
-  expect(await reuploadInstalls('abc123', [current], installs, spy)).toEqual([]);
+  expect(await reuploadInstalls('abc123', [current], installs, spy)).toMatchObject([
+    { gid: 'a1b2c3d4', outcome: 'already-current' },
+  ]);
   expect(spy).not.toHaveBeenCalled();
   // What den-edge holds outranks what this browser last sent.
   expect(
     await reuploadInstalls('abc123', [{ ...current, escrow: 'f'.repeat(64) }], installs, spy),
-  ).toEqual(['a1b2c3d4']);
+  ).toMatchObject([{ gid: 'a1b2c3d4', outcome: 'updated' }]);
 });
 
 test('a failed upload is tried again next time', async () => {
   const installs = { scout: 'one', atlas: 'two' };
   const failing = answering(500, { error: 'boom' });
-  expect(await reuploadInstalls('abc123', [GRANT], installs, failing)).toEqual([]);
+  expect(await reuploadInstalls('abc123', [GRANT], installs, failing)).toMatchObject([
+    { gid: 'a1b2c3d4', outcome: 'transient-failure', error: 'boom' },
+  ]);
   const working = answering(200, { grant: GRANT });
-  expect(await reuploadInstalls('abc123', [GRANT], installs, working)).toEqual(['a1b2c3d4']);
+  expect(await reuploadInstalls('abc123', [GRANT], installs, working)).toMatchObject([
+    { gid: 'a1b2c3d4', outcome: 'updated' },
+  ]);
 });
 
 test('a refused proof stops the re-upload at the first grant instead of asking for each', async () => {
   const installs = { scout: 'one', atlas: 'two' };
   const grants = ['a1b2c3d4', 'b1b2c3d4', 'c1b2c3d4', 'd1b2c3d4'].map((gid) => ({ ...GRANT, gid }));
   const refused = answering(403, { error: 'forbidden' });
-  expect(await reuploadInstalls('abc123', grants, installs, refused)).toEqual([]);
+  expect(await reuploadInstalls('abc123', grants, installs, refused)).toMatchObject([
+    { gid: 'a1b2c3d4', outcome: 'refused', error: 'forbidden' },
+    ...grants.slice(1).map(({ gid }) => ({ gid, outcome: 'blocked-by-refusal' })),
+  ]);
   expect(refused).toHaveBeenCalledTimes(1);
   // Any other failure is that grant's alone: the rest are still tried.
   const failing = answering(500, { error: 'boom' });
-  expect(await reuploadInstalls('abc123', grants, installs, failing)).toEqual([]);
+  expect(await reuploadInstalls('abc123', grants, installs, failing)).toMatchObject(
+    grants.map(({ gid }) => ({ gid, outcome: 'transient-failure', error: 'boom' })),
+  );
   expect(failing).toHaveBeenCalledTimes(4);
+});
+
+test('mixed escrow outcomes retain every stale grant and retry only the failed member', async () => {
+  const installs = { scout: 'one', atlas: 'two' };
+  const escrow = await hashInstalls(installs, ['scout', 'atlas']);
+  const current = { ...GRANT, escrow };
+  const updated = { ...GRANT, gid: 'b1b2c3d4' };
+  const failed = { ...GRANT, gid: 'c1b2c3d4' };
+  const mixed = vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).includes(updated.gid)) {
+      return new Response(JSON.stringify({ grant: { ...updated, escrow } }), { status: 200 });
+    }
+    throw new Error('controlled timeout');
+  });
+
+  expect(
+    await reuploadInstalls('abc123', [current, updated, failed], installs, mixed),
+  ).toMatchObject([
+    { gid: current.gid, outcome: 'already-current' },
+    { gid: updated.gid, outcome: 'updated' },
+    { gid: failed.gid, outcome: 'transient-failure', error: 'unreachable' },
+  ]);
+  expect(mixed).toHaveBeenCalledTimes(2);
+
+  const retry = answering(200, { grant: { ...failed, escrow } });
+  expect(
+    await reuploadInstalls('abc123', [current, { ...updated, escrow }, failed], installs, retry),
+  ).toMatchObject([
+    { gid: current.gid, outcome: 'already-current' },
+    { gid: updated.gid, outcome: 'already-current' },
+    { gid: failed.gid, outcome: 'updated' },
+  ]);
+  expect(retry).toHaveBeenCalledTimes(1);
+  expect(String(retry.mock.calls[0]![0])).toContain(failed.gid);
 });
 
 test('nothing breaks where browser storage is refused', async () => {
@@ -563,9 +608,9 @@ test('nothing breaks where browser storage is refused', async () => {
     },
   });
   const spy = answering(200, { grant: GRANT });
-  expect(await reuploadInstalls('abc123', [GRANT], { scout: 'one', atlas: 'two' }, spy)).toEqual([
-    'a1b2c3d4',
-  ]);
+  expect(
+    await reuploadInstalls('abc123', [GRANT], { scout: 'one', atlas: 'two' }, spy),
+  ).toMatchObject([{ gid: 'a1b2c3d4', outcome: 'updated' }]);
 });
 
 test('reserving a library sends the id and the hash of its token, with the grant, never the token', async () => {
