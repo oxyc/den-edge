@@ -445,7 +445,7 @@ test('a TorBox stream the receiver can’t take is refused and named, never cast
     expect(asked.managed[2]).toMatchObject({ player: 'cast' });
     expect(asked.managed[2].filename).toBeUndefined();
     await expect(
-      page.getByText('The Chromecast can’t play this release as TorBox streams it'),
+      page.getByText('The receiver can’t play this release as TorBox streams it'),
     ).toBeVisible();
     await page.waitForTimeout(CAST_PLAY_MS * 2);
     expect(await castLoads(page)).toHaveLength(0);
