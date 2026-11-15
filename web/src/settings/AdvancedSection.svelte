@@ -176,8 +176,9 @@
         </div>
       </dl>
       <p class="foot">
-        The Apple TV’s own diagnostics — plugin health, recent log events, a report to share — are
-        on the TV, under Settings › Advanced › Diagnostics.
+        Apple TV diagnostics — plugin health, recent log events, and an on-screen report — are under
+        Settings › Advanced › Diagnostics. This on-screen report is not uploaded or linked to a
+        support ID.
       </p>
     </SettingRow>
 

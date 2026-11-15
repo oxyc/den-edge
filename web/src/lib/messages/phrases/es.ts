@@ -1048,8 +1048,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'That PIN didn’t match, or the change couldn’t be saved.':
     'Ese PIN no coincidió o no se pudo guardar el cambio.',
   'That PIN didn’t match.': 'Ese PIN no coincide.',
-  'The Apple TV’s own diagnostics — plugin health, recent log events, a report to share — are on the TV, under Settings › Advanced › Diagnostics.':
-    'Los diagnósticos propios del Apple TV (estado del complemento, eventos de registro recientes, un informe para compartir) se encuentran en el televisor, en Configuración > Avanzado > Diagnóstico.',
+  'Apple TV diagnostics — plugin health, recent log events, and an on-screen report — are under Settings › Advanced › Diagnostics. This on-screen report is not uploaded or linked to a support ID.':
+    'Los diagnósticos del Apple TV (estado del complemento, eventos de registro recientes y un informe en pantalla) están en Configuración > Avanzado > Diagnóstico. Este informe en pantalla no se carga ni se vincula a un ID de soporte.',
   'The Cloudflare Access service token that lets an Apple TV in another home reach your plugins. Enter it once; it syncs through your library.':
     'El token de servicio de acceso de Cloudflare que permite que un Apple TV en otro hogar acceda a sus complementos. Introdúzcalo una vez; se sincroniza a través de su biblioteca.',
   'The code’s last four characters': 'Los últimos cuatro caracteres del código.',

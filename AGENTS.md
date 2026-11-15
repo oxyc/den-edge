@@ -91,6 +91,15 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- The truthful Apple TV diagnostics handoff for Den #538 was measured on matched production builds at base
+  `9783e49c` and the final repair: ordinary browser startup moved 204,013 → 203,991 gzip bytes (-22), while the
+  complete graph moved 878,206 → 878,272 (+66). Independently lazy Spanish/Swedish catalogs account for +51, so
+  the complete non-translation graph moves 105,146 → 105,161 (+15) and remains below the existing 105,216 ceiling
+  with 55 bytes of margin. The copy was consolidated to one short sentence after a first draft crossed the budget;
+  no correctness text can be removed without again implying an upload/share route or correlated support id that
+  does not exist. It stays in the existing lazy Settings chunk and existing lazy locale catalogs. Another dynamic
+  import would add a request to render one paragraph and cannot reduce the complete graph. No budget changes are
+  required, and no request, timer, listener, storage, dependency or startup work is added.
 - Canonical provider-variant routing (#1271) was measured on matched production builds at base `320867eb` and the
   final repair: ordinary browser startup moved 203,925 → 204,013 gzip bytes (+88), while the complete graph moved
   877,726 → 878,206 (+480); translation catalogs are unchanged at 47,270, so the complete non-translation graph
