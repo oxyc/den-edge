@@ -44,6 +44,7 @@
   };
   let pendingCleanup = $state.raw<PendingCleanup | null>(null);
   let allowButton = $state<HTMLButtonElement>();
+  let retryCleanupButton = $state<HTMLButtonElement>();
 
   /** A browser that could say yes: linked to a library, or holding a live invite. */
   const eligible = $derived(!!links.current || guestGrants.list.some((grant) => !grant.ended));
@@ -259,6 +260,9 @@
         pendingCleanup = cleanup;
         working = false;
         problem = 'The connection failed and its library permission may remain. Retry cleanup.';
+        await tick();
+        if (owns(ticket, requestId, authority) && pendingCleanup === cleanup)
+          retryCleanupButton?.focus();
         return;
       }
     }
@@ -278,6 +282,11 @@
 <dialog
   bind:this={dialog}
   aria-labelledby="connect-title"
+  oncancel={(event) => {
+    if (!pendingCleanup) return;
+    event.preventDefault();
+    retryCleanupButton?.focus();
+  }}
   onclose={() => {
     ++operation;
     ++requestGeneration;
@@ -342,6 +351,7 @@
   {#if pendingCleanup}
     <div class="actions">
       <Button
+        bind:element={retryCleanupButton}
         variant="primary"
         label={working ? i18n.phrase('Trying again…') : i18n.phrase('Retry cleanup')}
         busy={working}
@@ -380,7 +390,7 @@
         <Button label="Close" onclick={close} />
       </div>
     {/if}
-  {:else}
+  {:else if !pendingCleanup}
     <div class="actions">
       <Button
         bind:element={allowButton}

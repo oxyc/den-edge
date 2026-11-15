@@ -488,8 +488,13 @@ test('failed approval keeps partial durable rollback visible until cleanup Retry
     await expect(dialog.getByRole('alert')).toContainText(
       'The connection failed and its library permission may remain',
     );
-    await expect(dialog.getByRole('button', { name: 'Allow' })).toBeDisabled();
+    await expect(dialog.getByRole('button', { name: 'Allow' })).toHaveCount(0);
     const retry = dialog.getByRole('button', { name: 'Retry cleanup' });
+    await expect(retry).toBeFocused();
+    await expect(dialog.getByRole('button', { name: 'Deny' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeVisible();
+    await expect(retry).toBeFocused();
     await expect(retry).toBeVisible();
     permitRollback();
     await retry.click();
