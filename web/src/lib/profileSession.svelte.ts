@@ -268,13 +268,12 @@ export class ProfileSession {
     };
     if (!this.model || !this.restricted || !refs.length) return found;
     // The library names its own titles through its own provider reads. A title the policy does not establish is
-    // answered as absent, so no shelf, history row or seed shows it; a policy that cannot be asked refuses all.
-    const allowed = await this.content
-      .query({ kind: 'title.eligibility', titles: refs.map(({ type, id }) => ({ type, id })) })
-      .then(
-        (answer) => new SvelteSet(answer.allowed.map(titleKey)),
-        () => new SvelteSet<string>(),
-      );
+    // answered as absent; a failed policy question reaches libraryNaming's bounded retry instead of becoming absent.
+    const answer = await this.content.query({
+      kind: 'title.eligibility',
+      titles: refs.map(({ type, id }) => ({ type, id })),
+    });
+    const allowed = new SvelteSet(answer.allowed.map(titleKey));
     return {
       ...found,
       titles: found.titles.filter((title) => allowed.has(titleKey(title))),

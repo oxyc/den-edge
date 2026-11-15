@@ -101,7 +101,10 @@ everything the committed code imports is committed too.
   existing page lazy chunk is unsafe because Browser, LG/webOS, Samsung/Tizen and reduced-Tizen all ask the Worker,
   while compiling it out for a target would remove the same Kid veto. The ceiling therefore advances to the next
   128-byte boundary, 101,504, retaining 127 bytes on the matched build; the independent startup ceiling is unchanged
-  and retains 15 bytes.
+  and retains 15 bytes. The production hydration fix then deleted the profile layer's conversion of an authority
+  failure into an empty eligibility answer, letting the existing bounded library-naming retry own it. On the same
+  build it adds 6 startup and 25 complete-graph bytes (203,810 and 101,402), retaining 9 and 102 respectively without
+  another budget change.
 
 ## Testing
 

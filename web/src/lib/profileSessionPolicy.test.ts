@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ContentServiceClientPort } from './contentServiceClient';
+import { ContentAuthority, WorkerContentCredentials } from './contentAuthority';
+import { ContentServiceError, type ContentServiceClientPort } from './contentServiceClient';
+import { ContentServiceFault } from './contentServiceCore';
 import {
   decodeContentServiceClientMessage,
   decodeContentServiceServerMessage,
@@ -7,6 +9,7 @@ import {
 import { CONTENT_SERVICE_PROTOCOL } from './contentServiceProtocol';
 import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
+import { nameLibraryTitles } from './libraryNaming';
 import { persistentProfileIdentity } from './profileIdentity';
 import { profilePolicy } from './profilePolicy';
 import { ProfileSession } from './profileSession.svelte';
@@ -85,13 +88,119 @@ describe('a restricted profile names only the titles its policy establishes', ()
     });
   });
 
-  it('names nothing when the check cannot be asked', async () => {
+  it('keeps a failed check as a retryable question rather than an empty answer', async () => {
     const { session: kid, query } = session({
       policy: { maximumAge: 12, unknownRatings: 'block' },
       kid: true,
     });
     query.mockRejectedValueOnce(new Error('offline'));
-    expect((await kid.libraryMetadata(refs)).titles).toEqual([]);
+    await expect(kid.libraryMetadata(refs)).rejects.toThrow('offline');
+  });
+
+  it('retries an Atlas outage only for the current profile and provider generation', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const credentials = new WorkerContentCredentials();
+      credentials.configureAtlas('/atlas-a');
+      let releaseStale!: () => void;
+      const staleGate = new Promise<void>((resolve) => (releaseStale = resolve));
+      let staleStarted!: () => void;
+      const sawStale = new Promise<void>((resolve) => (staleStarted = resolve));
+      let bDown = true;
+      let atlasACalls = 0,
+        atlasBCalls = 0;
+      const authority = new ContentAuthority(credentials, {
+        providerFetch: async (input) => {
+          const url = String(input);
+          if (url.startsWith('/atlas-a/')) {
+            atlasACalls++;
+            staleStarted();
+            await staleGate;
+            return new Response(JSON.stringify({ minimumAge: 7, eligible: true }), {
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (url.startsWith('/atlas-b/')) {
+            atlasBCalls++;
+            return new Response(
+              JSON.stringify(bDown ? { error: 'down' } : { minimumAge: 7, eligible: true }),
+              {
+                status: bDown ? 503 : 200,
+                headers: { 'content-type': 'application/json' },
+              },
+            );
+          }
+          throw new Error(`unexpected provider request: ${url}`);
+        },
+      });
+      const content = {
+        query: async (request, signal, policy) => {
+          try {
+            return await authority.query(request, signal ?? new AbortController().signal, policy);
+          } catch (error) {
+            if (error instanceof ContentServiceFault) throw new ContentServiceError(error.failure);
+            throw error;
+          }
+        },
+        onStatus: () => () => {},
+      } as ContentServiceClientPort;
+      const model = {
+        libraryMetadata: vi.fn(async () => ({
+          titles: [{ type: 'movie' as const, id: 1, title: 'One' }],
+          shapes: [],
+          retryable: [],
+        })),
+      } as unknown as LibraryModel;
+      const open = (id: string) => {
+        const household = new HouseholdSession(
+          { kind: 'legacy', libraryKey: 'household', configurationOnly: false },
+          model,
+          content,
+        );
+        return new ProfileSession(
+          persistentProfileIdentity(id.repeat(32), 'key'),
+          household,
+          model,
+          false,
+          false,
+          undefined,
+          null,
+          { maximumAge: null, unknownRatings: 'allow' },
+          null,
+          null,
+          false,
+          true,
+        );
+      };
+
+      const stale = open('b');
+      const staleNaming = nameLibraryTitles(stale, [refs[0]!]);
+      await sawStale;
+      stale.close();
+      credentials.configureAtlas('/atlas-b');
+
+      const current = open('c');
+      await nameLibraryTitles(current, [refs[0]!]);
+      expect(current.displayMissing(refs[0]!)).toBe(false);
+      expect([...current.displayTitles().values()]).toEqual([]);
+
+      bDown = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() =>
+        expect([...current.displayTitles().values()]).toEqual([
+          { type: 'movie', id: 1, title: 'One' },
+        ]),
+      );
+
+      releaseStale();
+      await staleNaming;
+      expect([...stale.displayTitles().values()]).toEqual([]);
+      expect([atlasACalls, atlasBCalls]).toEqual([1, 2]);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('leaves an unrestricted profile’s library naming exactly as the library answered', async () => {
