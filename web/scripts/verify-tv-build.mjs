@@ -85,6 +85,10 @@ if (tizen3) {
   ).join('\n');
   if (!pageScripts.includes('owner-pin-management-handoff'))
     throw new Error('Tizen 3 is missing the supported-browser Owner PIN handoff');
+  if (!pageScripts.includes('profile-content-management-handoff'))
+    throw new Error('Tizen 3 is missing the supported-browser profile Content handoff');
+  if (!pageScripts.includes('visitor-content-unavailable'))
+    throw new Error('Tizen 3 is missing the local Visitor Content unsupported state');
   if (pageScripts.includes('new-parental-pin'))
     throw new Error('Owner PIN editor leaked into the reduced Tizen 3 package');
   if (/type=["']module["']|rel=["']modulepreload["']/.test(entryHtml))

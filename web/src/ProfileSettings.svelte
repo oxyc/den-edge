@@ -10,7 +10,9 @@
   import AboutSection from './settings/AboutSection.svelte';
   import ContentSection from './settings/ContentSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
+  import SettingRow from './settings/SettingRow.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
+  import SettingsSection from './settings/SettingsSection.svelte';
   import { AIRING_CREDIT, ATLAS_FALLBACK } from './settings/credits';
   import type { ProfileSession } from './lib/profileSession.svelte';
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
@@ -154,21 +156,54 @@
         <p class="banner" role="status">{i18n.text('profile.loadingSettings')}</p>
       {:else}
         <PlaybackSection {prefs} disabled={saving} {save} />
-        <ContentSection
-          {prefs}
-          content={session.content}
-          pinConfigured={false}
-          disabled={saving}
-          {save}
-          savePin={async () => 'failed' as const}
-          verifyPin={async () => false}
-          personalOnly
-          contentPolicy={session.contentPolicy}
-          role={session.identity.kind === 'visitor' ? 'visitor' : 'kid'}
-          onpolicy={profiles && !profiles.preview && session.identity.kind === 'profile'
-            ? changePolicy
-            : undefined}
-        />
+        {#if __DEN_TV_LEGACY_JS_CORE__}
+          <SettingsSection id="content" title={i18n.text('settings.section.content')}>
+            {#if session.identity.kind === 'visitor'}
+              <SettingRow
+                id="visitor-content-unavailable"
+                label={i18n.phrase('Visitor content preferences are unavailable on this TV')}
+                detail={i18n.phrase(
+                  'Visitor preferences stay on the device where that visit was created',
+                )}
+              >
+                <p>
+                  {i18n.phrase(
+                    'Use this TV for playback, or end the Visitor visit and choose a household profile. Nothing is changed.',
+                  )}
+                </p>
+              </SettingRow>
+            {:else}
+              <SettingRow
+                id="profile-content-management-handoff"
+                label={i18n.phrase('Manage profile content in a supported browser')}
+                detail={i18n.phrase('Profile content administration is not available on this TV')}
+              >
+                <p>
+                  {i18n.phrase(
+                    'On a phone or computer linked to this household, switch to this profile and open Den › Settings › Content.',
+                  )}
+                </p>
+                <p class="mono">{`${__DEN_TV_WEB_ORIGIN__ || location.origin}/settings#content`}</p>
+              </SettingRow>
+            {/if}
+          </SettingsSection>
+        {:else}
+          <ContentSection
+            {prefs}
+            content={session.content}
+            pinConfigured={false}
+            disabled={saving}
+            {save}
+            savePin={async () => 'failed' as const}
+            verifyPin={async () => false}
+            personalOnly
+            contentPolicy={session.contentPolicy}
+            role={session.identity.kind === 'visitor' ? 'visitor' : 'kid'}
+            onpolicy={profiles && !profiles.preview && session.identity.kind === 'profile'
+              ? changePolicy
+              : undefined}
+          />
+        {/if}
       {/if}
       <AboutSection credits={[...ATLAS_FALLBACK, AIRING_CREDIT]} />
     </div>

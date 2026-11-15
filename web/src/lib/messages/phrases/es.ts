@@ -1391,11 +1391,23 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Guardado en este dispositivo. Vuelve a conectarte y reinténtalo para confirmar que todos los dispositivos lo tienen.',
   'Manage the Owner PIN in a supported browser':
     'Administrar el PIN del propietario en un navegador compatible',
+  'Manage profile content in a supported browser':
+    'Administrar el contenido del perfil en un navegador compatible',
   'Owner PIN administration is not available on this TV':
     'La administración del PIN del propietario no está disponible en este televisor',
+  'Profile content administration is not available on this TV':
+    'La administración del contenido del perfil no está disponible en este televisor',
+  'Visitor content preferences are unavailable on this TV':
+    'Las preferencias de contenido del visitante no están disponibles en este televisor',
+  'Visitor preferences stay on the device where that visit was created':
+    'Las preferencias del visitante permanecen en el dispositivo donde se creó la visita',
   'Remove the Owner PIN?': '¿Quitar el PIN del propietario?',
   'This household will no longer require a PIN to open Owner settings.':
     'Este hogar ya no requerirá un PIN para abrir los ajustes del propietario.',
   'On a phone or computer linked to this household, open Den › Settings › Content to set, change, or remove the Owner PIN.':
     'En un teléfono u ordenador vinculado a este hogar, abre Den › Configuración › Contenido para establecer, cambiar o eliminar el PIN del propietario.',
+  'On a phone or computer linked to this household, switch to this profile and open Den › Settings › Content.':
+    'En un teléfono u ordenador vinculado a este hogar, cambia a este perfil y abre Den › Configuración › Contenido.',
+  'Use this TV for playback, or end the Visitor visit and choose a household profile. Nothing is changed.':
+    'Usa este televisor para reproducir, o finaliza la visita y elige un perfil del hogar. No se cambia nada.',
 };

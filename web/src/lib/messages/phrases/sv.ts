@@ -1373,11 +1373,23 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Sparat på den här enheten. Anslut igen och försök sedan på nytt för att bekräfta att alla enheter har det.',
   'Manage the Owner PIN in a supported browser':
     'Hantera ägarens PIN-kod i en webbläsare som stöds',
+  'Manage profile content in a supported browser':
+    'Hantera profilinnehåll i en webbläsare som stöds',
   'Owner PIN administration is not available on this TV':
     'Hantering av ägarens PIN-kod är inte tillgänglig på den här TV:n',
+  'Profile content administration is not available on this TV':
+    'Hantering av profilinnehåll är inte tillgänglig på den här TV:n',
+  'Visitor content preferences are unavailable on this TV':
+    'Besökarens innehållsinställningar är inte tillgängliga på den här TV:n',
+  'Visitor preferences stay on the device where that visit was created':
+    'Besökarens inställningar stannar på enheten där besöket skapades',
   'Remove the Owner PIN?': 'Ta bort ägarens PIN-kod?',
   'This household will no longer require a PIN to open Owner settings.':
     'Det här hushållet kräver inte längre en PIN-kod för att öppna ägarinställningarna.',
   'On a phone or computer linked to this household, open Den › Settings › Content to set, change, or remove the Owner PIN.':
     'Öppna Den › Inställningar › Innehåll på en telefon eller dator som är länkad till hushållet för att ställa in, ändra eller ta bort ägarens PIN-kod.',
+  'On a phone or computer linked to this household, switch to this profile and open Den › Settings › Content.':
+    'Byt till den här profilen och öppna Den › Inställningar › Innehåll på en telefon eller dator som är länkad till hushållet.',
+  'Use this TV for playback, or end the Visitor visit and choose a household profile. Nothing is changed.':
+    'Använd TV:n för uppspelning, eller avsluta besöket och välj en hushållsprofil. Ingenting ändras.',
 };
