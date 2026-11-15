@@ -367,7 +367,7 @@
   {:else}
     <header class="bar glass" class:searching={expanded} class:people={onPeople}>
       <div class="leading">
-        <a class="brand" href="/" aria-label="Den home"
+        <a class="brand" href="/" aria-label={i18n.phrase('Den home')}
           ><img src={icon} width="54" height="32" alt="" /></a
         >
         {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}

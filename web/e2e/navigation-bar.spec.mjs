@@ -15,11 +15,31 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
     await page.goto(`${E2E_ORIGIN}/test/navigation-bar.html`);
     const back = page.getByRole('button', { name: 'Back', exact: true });
     await expect(back).toHaveCount(0);
-    await expect(page.getByRole('link', { name: 'Den home' }).locator('img')).toBeVisible();
+    const brand = page.locator('a.brand');
+    await expect(brand).toHaveAccessibleName('Den home');
+    const mark = brand.locator('img');
+    await expect(mark).toBeVisible();
+    await expect(mark).toHaveAttribute('alt', '');
+    await brand.focus();
+    await expect(brand).toBeFocused();
+    for (const [language, name] of [
+      ['es', 'Inicio de Den'],
+      ['sv', 'Den hem'],
+    ]) {
+      await page.evaluate(
+        (next) => window.denNavigationFixture.replaceProfileLanguage(next),
+        language,
+      );
+      await expect(page.getByRole('link', { name, exact: true })).toBeVisible();
+      await expect(brand).toBeFocused();
+      await expect(mark).toHaveAttribute('alt', '');
+    }
+    await page.evaluate(() => window.denNavigationFixture.replaceProfileLanguage('en'));
+    await expect(brand).toHaveAccessibleName('Den home');
+    await expect(brand).toBeFocused();
     await page.evaluate(() => scrollTo(0, 900));
     await page.locator('[data-active="true"]').getByText('Details', { exact: true }).click();
     await expect(back).toBeVisible();
-    const brand = page.getByRole('link', { name: 'Den home' });
     const home = page
       .getByRole('navigation', { name: 'Main navigation' })
       .getByRole('link', { name: 'Home', exact: true });
