@@ -19,12 +19,27 @@ export async function buildProjection(request: string): Promise<string> {
     await ensureAssistantPolicy();
     return assistantAnswer(request);
   }
+  let worker: Worker;
   try {
-    const { buildProjectionInWorker } = await import('./assistantProjectionWorkerClient');
-    return await buildProjectionInWorker(request);
+    const { projectionWorker } = await import('./assistantProjectionWorkerClient');
+    worker = projectionWorker();
   } catch (error) {
     console.warn('den: no Worker could be started for the assistant projection', error);
     await ensureAssistantPolicy();
     return assistantAnswer(request);
+  }
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      worker.onmessage = ({ data }: MessageEvent<ProjectionBuilt>) =>
+        'answer' in data ? resolve(data.answer) : reject(new Error(data.error));
+      worker.onerror = (event) => {
+        event.preventDefault();
+        reject(new Error(`the projection Worker failed: ${event.message}`));
+      };
+      const bytes = new TextEncoder().encode(request).buffer;
+      worker.postMessage({ request: bytes } satisfies ProjectionBuild, [bytes]);
+    });
+  } finally {
+    worker.terminate();
   }
 }
