@@ -266,10 +266,12 @@ everything the committed code imports is committed too.
   graph ceiling advances from 111,232 to 113,664, the smallest 128-byte boundary containing the matched build,
   retaining 40 bytes.
 - Making “Remember my choice” the playback-source default was measured on matched current-main/head production
-  builds: startup shrinks 206,041 → 206,030 gzip bytes (-11), and the complete non-translation graph shrinks
-  839,414 → 839,364 (-50); translation catalogs remain 49,007 bytes. The change only reverses existing default
-  branches and persists both explicit policy choices compatibly. It adds no dependency, request, timer, listener,
-  background work or bundle-budget allowance.
+  builds after rebasing onto `7fff9db5`: startup moves 206,062 → 206,070 gzip bytes (+8), and the complete
+  non-translation graph moves 840,831 → 840,837 (+6); translation catalogs remain 49,661 bytes. Player owns the
+  single Library fallback, removing a duplicate default expression; Settings retains its defensive fallback because
+  the cross-version protocol field is optional. The change only reverses existing default branches and persists both
+  explicit policy choices compatibly. It adds no dependency, request, timer, listener, background work or
+  bundle-budget allowance; the existing startup and complete-graph ceilings retain 54 and 25 bytes respectively.
 
 ## Testing
 
