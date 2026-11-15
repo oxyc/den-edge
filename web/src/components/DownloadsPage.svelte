@@ -9,6 +9,7 @@
   import DownloadPosterCard from './DownloadPosterCard.svelte';
   import type { LibraryModel, LibraryModelLease } from '../lib/libraryModel.svelte';
   import type { DownloadTitleDescriptor, DownloadViewItem } from '../lib/libraryServiceProtocol';
+  import { downloadIsInFlight } from '../lib/downloadLifecycle';
   import { viewHeadline } from '../lib/downloadStatus';
   import type { Title } from '../lib/library';
   import { titleHref } from '../lib/route';
@@ -134,12 +135,17 @@
   let message = $state('');
 
   async function drop(download: DownloadViewItem) {
+    // The row may be replaced while this command is in flight. Name any refusal for the operation the user actually
+    // activated, not for a later projection of the same durable download.
+    const cancel = downloadIsInFlight(download.status.state);
     busy = download.content;
     message = '';
     try {
       await model?.removeDownload(descriptorOf(download).target);
     } catch {
-      message = 'Couldn’t remove that download. Try again.';
+      message = cancel
+        ? 'Couldn’t cancel that download. Try again.'
+        : 'Couldn’t remove that download. Try again.';
     } finally {
       busy = null;
     }
@@ -220,9 +226,9 @@
               class="control"
               disabled={busy === download.content}
               onclick={() => void drop(download)}
-              >{download.status.phase === 'queued' || download.status.phase === 'downloading'
-                ? 'Cancel download'
-                : 'Remove'}</button
+              >{i18n.phrase(
+                downloadIsInFlight(download.status.state) ? 'Cancel download' : 'Remove',
+              )}</button
             >
           </li>
         {/each}

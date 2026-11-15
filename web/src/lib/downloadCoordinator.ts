@@ -365,9 +365,12 @@ export class DownloadCoordinator {
 
   async remove(download: Download, cancel: boolean): Promise<boolean> {
     if (cancel) {
-      await this.cancelIfSafe(download);
+      if (!(await this.cancelIfSafe(download))) return false;
       for (const entry of download.race.entries)
-        await this.cancelEntryIfSafe(download, entry.identity, this.entryUrl(download, entry));
+        if (
+          !(await this.cancelEntryIfSafe(download, entry.identity, this.entryUrl(download, entry)))
+        )
+          return false;
     }
     const current = this.log.settings(download.name);
     if (!current) return true;
@@ -757,19 +760,20 @@ export class DownloadCoordinator {
     }
   }
 
-  async cancelIfSafe(download: Download): Promise<void> {
+  async cancelIfSafe(download: Download): Promise<boolean> {
     const url = this.urlFor(download);
-    if (this.#cancelSafe(download) && url) await this.effects.cancel(url, false);
+    return !this.#cancelSafe(download) || !url || this.effects.cancel(url, false);
   }
 
   /** Cancel one release the row races, unless another row still names or races it (`download_cancel_safe`). */
-  async cancelEntryIfSafe(download: Download, identity: string, url: string | null): Promise<void> {
-    if (this.#cancelSafe(download, identity) && url) await this.effects.cancel(url, false);
+  async cancelEntryIfSafe(
+    download: Download,
+    identity: string,
+    url: string | null,
+  ): Promise<boolean> {
+    return !this.#cancelSafe(download, identity) || !url || this.effects.cancel(url, false);
   }
 }
-
-export const downloadIsInFlight = (state: DownloadStatus['state']) =>
-  state === 'starting' || state === 'fetching' || state === 'not_started' || state === 'paused';
 
 export const sourceAnswerComplete = (answer: SourceAnswer | undefined): boolean =>
   !(

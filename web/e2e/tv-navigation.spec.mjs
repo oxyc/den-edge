@@ -444,6 +444,29 @@ test('interface language translates routes and actions and survives a reload', a
   await expect(page.locator('#interface-language select')).toHaveValue('en', { timeout: 30_000 });
 });
 
+test('reduced Tizen hands download management to a supported browser', async ({ page }) => {
+  test.skip(process.env.DEN_TIZEN_VERSION !== '3.0', 'Tizen 3 is the viewer-only tier');
+  await setup(page);
+  await page.getByRole('button', { name: 'Look around instead' }).click();
+  const selectionsBeforeRoute = await page.evaluate(() =>
+    Number(sessionStorage.getItem('den.test.downloadsSelectionAttempts') ?? 0),
+  );
+  expect(selectionsBeforeRoute).toBeGreaterThan(0);
+
+  await page.goto(`${E2E_ORIGIN}/downloads`);
+  await expect(page.getByRole('heading', { name: 'Downloads', level: 1 })).toBeVisible();
+  await expect(page.getByText('Manage downloads in a supported browser')).toBeVisible();
+  await expect(page.getByText(`${E2E_ORIGIN}/downloads`, { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Cancel download|Remove/ })).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Number(sessionStorage.getItem('den.test.downloadsSelectionAttempts') ?? 0),
+      ),
+    )
+    .toBe(selectionsBeforeRoute);
+});
+
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({
   page,
 }) => {

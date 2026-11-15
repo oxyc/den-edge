@@ -263,6 +263,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'Avsnitten kunde inte läsas in. Inget markerades som sett.',
   'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',
+  'Couldn’t cancel that download. Try again.': 'Hämtningen kunde inte avbrytas. Försök igen.',
   'Couldn’t cancel that recovery code setup. Check your connection and try again.':
     'Det gick inte att avbryta inställningen av återställningskoden. Kontrollera anslutningen och försök igen.',
   'Couldn’t save the code. Check that this device is on your network.':
@@ -388,6 +389,9 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Downloaded: 'Nedladdat',
   Downloading: 'Laddar ner',
   Downloads: 'Hämtningar',
+  'Manage downloads in a supported browser': 'Hantera hämtningar i en webbläsare som stöds',
+  'On a phone or computer linked to this household, open Den › Downloads.':
+    'Öppna Den › Hämtningar på en telefon eller dator som är länkad till hushållet.',
   'Downloads ›': 'Hämtningar ›',
   'Downloads are managed by the Owner.': 'Hämtningar hanteras av ägaren.',
   'Downloads couldn’t be opened. Try again.': 'Hämtningarna kunde inte öppnas. Försök igen.',

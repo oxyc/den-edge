@@ -47,7 +47,20 @@ function store() {
   };
 }
 
-async function open(context, shared, query, tmdb = movie) {
+async function open(
+  context,
+  shared,
+  query,
+  tmdb = movie,
+  providerAnswer = {
+    progress: 0.25,
+    bytesPerSecond: 1_000_000,
+    state: 'downloading',
+    seeds: 5,
+    peers: 9,
+  },
+  providerRequests = [],
+) {
   const page = await context.newPage();
   await guardNetwork(page);
   await page.route('**/fixture-store/rows', shared.route);
@@ -72,12 +85,18 @@ async function open(context, shared, query, tmdb = movie) {
       },
     }),
   );
-  await page.route('**/scout/p/**', (r) =>
-    r.fulfill({
+  await page.route('**/scout/p/**', (r) => {
+    const method = r.request().method();
+    providerRequests.push(method);
+    if (method === 'DELETE' && providerAnswer.rejectDeletes > 0) {
+      providerAnswer.rejectDeletes--;
+      return r.abort('connectionrefused');
+    }
+    return r.fulfill({
       status: 202,
-      json: { progress: 0.25, bytesPerSecond: 1_000_000, state: 'downloading', seeds: 5, peers: 9 },
-    }),
-  );
+      json: providerAnswer,
+    });
+  });
   await page.goto(`${E2E_ORIGIN}/test/downloads.html?${query}`);
   return page;
 }
@@ -151,7 +170,15 @@ test('a download queued on a title page is a row every device reads', async () =
   try {
     const shared = store();
     const here = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-    const title = await open(here, shared, 'page=title');
+    const providerAnswer = {
+      progress: 0.25,
+      bytesPerSecond: 1_000_000,
+      state: 'downloading',
+      seeds: 5,
+      peers: 9,
+    };
+    const providerRequests = [];
+    const title = await open(here, shared, 'page=title', movie, providerAnswer, providerRequests);
     await title.getByRole('button', { name: 'Download', exact: true }).click();
     await expect.poll(() => shared.rows.has('set:download:movie:42:-1:-1')).toBe(true);
 
@@ -161,8 +188,52 @@ test('a download queued on a title page is a row every device reads', async () =
     await expect(card).toContainText('The Movie');
     await expect(card).toContainText('Downloading 25%');
     await expect(card.getByRole('button', { name: 'Cancel download' })).toBeVisible();
+
+    // Provider trouble does not settle the durable fetch: the same authority action still asks Scout to cancel it
+    // before tombstoning the row, so the visible action must not claim it merely removes a finished card.
+    providerAnswer.state = 'failed';
+    await title.evaluate(() => window.downloadsFixture.refresh());
+    await expect(card).toContainText('Download failed');
+    await expect(card.getByRole('button', { name: 'Cancel download' })).toBeVisible();
+    await expect(card.getByRole('button', { name: 'Remove' })).toHaveCount(0);
+
+    providerAnswer.state = 'stalled';
+    await title.evaluate(() => window.downloadsFixture.refresh());
+    await expect(card).toContainText('Download stalled');
+    await expect(card.getByRole('button', { name: 'Cancel download' })).toBeVisible();
+    await expect(card.getByRole('button', { name: 'Remove' })).toHaveCount(0);
+    providerAnswer.state = 'downloading';
+
+    await title.goto(`${E2E_ORIGIN}/test/downloads.html?page=downloads&language=es`);
+    await expect(
+      title
+        .locator('[data-download="movie:42:-1:-1"]')
+        .getByRole('button', { name: 'Cancelar descarga' }),
+    ).toBeVisible();
+    await title.goto(`${E2E_ORIGIN}/test/downloads.html?page=downloads&language=sv`);
+    await expect(
+      title
+        .locator('[data-download="movie:42:-1:-1"]')
+        .getByRole('button', { name: 'Avbryt nedladdning' }),
+    ).toBeVisible();
     // This browser queued it, so it says nothing about who did.
-    await expect(card).not.toContainText('Queued from');
+    await expect(title.locator('[data-download="movie:42:-1:-1"]')).not.toContainText(
+      'Queued from',
+    );
+
+    // A refused cancellation leaves the durable row intact, names the action that failed in the active language,
+    // and keeps the same control available for a successful retry.
+    providerAnswer.rejectDeletes = 1;
+    const cancel = title.getByRole('button', { name: 'Avbryt nedladdning' });
+    await cancel.click();
+    await expect(
+      title.getByText('Hämtningen kunde inte avbrytas. Försök igen.', { exact: true }),
+    ).toBeVisible();
+    await expect(cancel).toBeVisible();
+    await expect(cancel).toBeEnabled();
+    expect(shared.rows.get('set:download:movie:42:-1:-1')?.values.removed).toBeUndefined();
+    const refusedDeleteRequests = providerRequests.filter((method) => method === 'DELETE').length;
+    expect(refusedDeleteRequests).toBeGreaterThan(0);
 
     // Another device, on its next read of the library.
     const there = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -171,6 +242,16 @@ test('a download queued on a title page is a row every device reads', async () =
     await expect(theirs).toContainText('The Movie', { timeout: 2000 });
     await expect(theirs).toContainText('Queued from Chrome on Mac');
     expect(await other.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+
+    await cancel.click();
+    await expect
+      .poll(() => providerRequests.filter((method) => method === 'DELETE').length)
+      .toBeGreaterThan(refusedDeleteRequests);
+    await expect
+      .poll(() => shared.rows.get('set:download:movie:42:-1:-1')?.values.removed?.value.bool)
+      .toBe(true);
+    await expect(title.locator('[data-download="movie:42:-1:-1"]')).toHaveCount(0);
+    await expect(theirs).toHaveCount(0);
   } finally {
     await browser.close();
   }

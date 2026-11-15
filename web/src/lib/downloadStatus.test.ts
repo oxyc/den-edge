@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { downloadIsInFlight } from './downloadLifecycle';
 import { viewFacts, viewHeadline, viewTrouble } from './downloadStatus';
 import type { DownloadViewItem } from './libraryServiceProtocol';
 
@@ -32,6 +33,24 @@ describe('download view presentation', () => {
     expect(
       viewHeadline(item({ fetch: { state: 'stalled' }, phase: 'trouble', stalled: true })),
     ).toBe('Download stalled');
+  });
+
+  it('keeps troubled live fetches cancellable while settled trouble is removable', () => {
+    expect(downloadIsInFlight('not_started')).toBe(true);
+    expect(downloadIsInFlight('not-started')).toBe(true);
+    expect(downloadIsInFlight('paused')).toBe(true);
+    expect(
+      downloadIsInFlight(item({ fetch: { state: 'failed' }, phase: 'trouble' }).status.state),
+    ).toBe(true);
+    expect(
+      downloadIsInFlight(
+        item({ fetch: { state: 'stalled' }, phase: 'trouble', stalled: true }).status.state,
+      ),
+    ).toBe(true);
+    expect(downloadIsInFlight(item({ state: 'unreachable', phase: 'trouble' }).status.state)).toBe(
+      false,
+    );
+    expect(downloadIsInFlight(item({ state: 'ready', phase: 'ready' }).status.state)).toBe(false);
   });
 
   it('shows normalized service, pause, and attempts while rejecting implausible ETAs', () => {

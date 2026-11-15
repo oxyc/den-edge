@@ -267,6 +267,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudieron cargar los episodios. No se marcó ninguno como visto.',
   'Couldn’t remove that download. Try again.':
     'No se pudo quitar esa descarga. Inténtalo de nuevo.',
+  'Couldn’t cancel that download. Try again.':
+    'No se pudo cancelar la descarga. Inténtalo de nuevo.',
   'Couldn’t cancel that recovery code setup. Check your connection and try again.':
     'No se pudo cancelar la configuración del código de recuperación. Comprueba la conexión e inténtalo de nuevo.',
   'Couldn’t save the code. Check that this device is on your network.':
@@ -398,6 +400,9 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Downloaded: 'Descargado',
   Downloading: 'Descargando',
   Downloads: 'Descargas',
+  'Manage downloads in a supported browser': 'Administrar descargas en un navegador compatible',
+  'On a phone or computer linked to this household, open Den › Downloads.':
+    'En un teléfono u ordenador vinculado a este hogar, abre Den › Descargas.',
   'Downloads ›': 'Descargas ›',
   'Downloads are managed by the Owner.': 'Las descargas son gestionadas por el Propietario.',
   'Downloads couldn’t be opened. Try again.':

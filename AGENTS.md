@@ -107,6 +107,26 @@ everything the committed code imports is committed too.
   decoder, background work or healthy-path network round trip. No budget changes are required: the independently
   enforced startup ceiling retains 4 bytes, the complete non-translation ceiling retains 3,631 bytes, and the
   fixed 51,200-byte translation ceiling retains 468 bytes.
+- Download-management truthfulness and reduced-Tizen handoff (#525) were measured on matched production builds at
+  exact base `5b15e694` and production source `bfae8b5e`. Ordinary Browser startup moves 206,566 → 206,555 gzip
+  bytes (-11), while its complete graph moves 894,656 → 894,790 (+134); independently lazy translations move
+  50,495 → 50,586 (+91), leaving the non-translation graph 844,161 → 844,204 (+43). WebOS startup moves
+  241,242 → 241,219 (-23), its complete graph 993,959 → 994,019 (+60), translations 50,495 → 50,586
+  (+91), and non-translation graph 943,464 → 943,433 (-31). Supported Tizen startup moves 241,877 →
+  241,937 (+60), its complete graph 1,314,401 → 1,314,703 (+302), translations 50,495 → 50,586 (+91),
+  and non-translation graph 1,263,906 → 1,264,117 (+211). Reduced Tizen 3 startup moves 193,379 → 193,387
+  (+8), its complete graph 2,398,293 → 2,391,622 (-6,671), translations 50,586 → 50,679 (+93), and
+  non-translation graph 2,347,707 → 2,340,943 (-6,764); its JS/CSS file count falls from 98 to 96 because the
+  management screen is absent and only the browser handoff remains.
+  The first implementation put handoff copy in the eager Library shell and the shared lifecycle predicate in an
+  eager status module. Moving the handoff behind the target-specific lazy Downloads screen and the predicate into
+  a module imported only by the lazy management screen and download authority removed that avoidable startup cost.
+  Browser's fixed-baseline budget delta improves from the base's pre-existing +10,170 to +10,159; its absolute
+  failure remains owned by #1282, and this repair changes no budget. The retained supported-Tizen growth is the
+  smallest reviewed cancellation-refusal authority contract plus independently lazy EN/ES/SV copy. Authority must
+  remain in the shared service Worker so a refused upstream cancellation cannot be presented as a durable removal;
+  moving it behind DownloadsPage would omit the enforcement from non-page callers or duplicate authority. Another
+  presentation split would add a request at the recovery action and cannot reduce the complete graph.
 - Exact-current Owner PIN replacement/removal (#1145) was measured on matched production builds at base
   `7fff9db5` and production source `d0fa72a4`. Ordinary Browser startup moves 206,062 → 206,150 gzip bytes (+88), while the
   complete graph moves 890,492 → 892,631 (+2,139). Independently lazy Spanish/Swedish catalogs account for +707,

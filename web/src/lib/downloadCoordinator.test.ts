@@ -4,7 +4,6 @@ import {
   DOWNLOAD_ENTRY_RECOVERY_MS,
   DownloadCoordinator,
   downloadDiagnostic,
-  downloadIsInFlight,
   downloadPollDelay,
 } from './downloadCoordinator';
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
@@ -183,12 +182,6 @@ describe('DownloadCoordinator', () => {
     expect(downloadPollDelay(0)).toBe(5_000);
     expect(downloadPollDelay(3)).toBe(40_000);
     expect(downloadPollDelay(20)).toBe(60_000);
-  });
-
-  it('treats paused and not-yet-started work as cancellable upstream', () => {
-    expect(downloadIsInFlight('paused')).toBe(true);
-    expect(downloadIsInFlight('not_started')).toBe(true);
-    expect(downloadIsInFlight('ready')).toBe(false);
   });
 
   it.each([
@@ -1298,6 +1291,23 @@ describe('DownloadCoordinator', () => {
     expect(queue.status(download).state).toBe('paused');
     await queue.remove(download, true);
     expect(cancelled).toEqual([first.url]);
+  });
+
+  it('keeps a live download when its upstream cancellation is refused', async () => {
+    const shared = testLog();
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      { ...effects(), cancel: async () => false },
+      { now: () => T0 },
+    );
+    await queue.enqueue(title, first, 1);
+    await Promise.resolve();
+    const download = queue.get(NAME)!;
+
+    await expect(queue.remove(download, true)).resolves.toBe(false);
+    expect(queue.get(NAME)).toBeDefined();
+    expect(shared.log.settings(NAME)?.values.removed).toBeUndefined();
   });
 
   it('moves a download whose release is no longer listed on to the next release', async () => {

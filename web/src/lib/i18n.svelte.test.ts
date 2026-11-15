@@ -109,3 +109,35 @@ it('localizes the reduced-TV guest administration handoff', async () => {
     ).toBe(expected.route);
   }
 });
+
+it('localizes the reduced-TV download management handoff', async () => {
+  const cases = [
+    {
+      language: 'en',
+      title: 'Manage downloads in a supported browser',
+      route: 'On a phone or computer linked to this household, open Den › Downloads.',
+      cancelFailure: 'Couldn’t cancel that download. Try again.',
+    },
+    {
+      language: 'es',
+      title: 'Administrar descargas en un navegador compatible',
+      route: 'En un teléfono u ordenador vinculado a este hogar, abre Den › Descargas.',
+      cancelFailure: 'No se pudo cancelar la descarga. Inténtalo de nuevo.',
+    },
+    {
+      language: 'sv',
+      title: 'Hantera hämtningar i en webbläsare som stöds',
+      route: 'Öppna Den › Hämtningar på en telefon eller dator som är länkad till hushållet.',
+      cancelFailure: 'Hämtningen kunde inte avbrytas. Försök igen.',
+    },
+  ] as const;
+
+  for (const expected of cases) {
+    await setInterfaceLanguage(expected.language);
+    expect(i18n.phrase('Manage downloads in a supported browser')).toBe(expected.title);
+    expect(
+      i18n.phrase('On a phone or computer linked to this household, open Den › Downloads.'),
+    ).toBe(expected.route);
+    expect(i18n.phrase('Couldn’t cancel that download. Try again.')).toBe(expected.cancelFailure);
+  }
+});

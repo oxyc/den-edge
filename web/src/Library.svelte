@@ -571,7 +571,12 @@
       : 'temporarily-unavailable';
   }
   $effect(() => {
-    if (!downloadsModel || (route.page !== 'library' && route.page !== 'downloads')) return;
+    const downloadsPage = route.page === 'downloads' && !__DEN_TV_LEGACY_JS_CORE__;
+    if (!downloadsModel || (route.page !== 'library' && !downloadsPage)) return;
+    if (import.meta.env.DEN_E2E) {
+      const key = 'den.test.downloadsSelectionAttempts';
+      sessionStorage.setItem(key, String(Number(sessionStorage.getItem(key) ?? 0) + 1));
+    }
     const lease = downloadsModel.downloads();
     downloadsLease = lease;
     return () => {
@@ -3115,7 +3120,11 @@
     onretry={() => discovered.retry()}
   />
 {:else if route.page === 'downloads'}
-  {#if !session.administersHousehold}
+  {#if __DEN_TV_LEGACY_JS_CORE__ && !DownloadsScreen.current}
+    <ScreenLoading screen={DownloadsScreen} />
+  {:else if __DEN_TV_LEGACY_JS_CORE__}
+    <DownloadsScreen.current model={downloadsModel ?? undefined} {active} />
+  {:else if !session.administersHousehold}
     <p class="note">Downloads are managed by the Owner.</p>
   {:else if !downloadsModel}
     <p class="note">

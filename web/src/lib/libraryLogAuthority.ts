@@ -16,11 +16,8 @@ import {
   updateProgress,
 } from './actions';
 import type { ClockStore } from './clockStore';
-import {
-  downloadIsInFlight,
-  type DownloadCoordinator,
-  type DownloadStatus,
-} from './downloadCoordinator';
+import type { DownloadCoordinator, DownloadStatus } from './downloadCoordinator';
+import { downloadIsInFlight } from './downloadLifecycle';
 import { episodeProgress } from './detailPresentation';
 import {
   contentKey,

@@ -87,6 +87,8 @@ if (tizen3) {
     throw new Error('Tizen 3 is missing the supported-browser Owner PIN handoff');
   if (!pageScripts.includes('profile-content-management-handoff'))
     throw new Error('Tizen 3 is missing the supported-browser profile Content handoff');
+  if (!pageScripts.includes('Manage downloads in a supported browser'))
+    throw new Error('Tizen 3 is missing the supported-browser download management handoff');
   if (!pageScripts.includes('visitor-content-unavailable'))
     throw new Error('Tizen 3 is missing the local Visitor Content unsupported state');
   if (pageScripts.includes('new-parental-pin'))
@@ -203,6 +205,8 @@ if (tizen3 && Object.keys(manifest).some((file) => file.endsWith('/profileKeyRes
   throw new Error(
     'The compound profile-key reset coordinator leaked into the Tizen 3 viewer build',
   );
+if (tizen3 && Object.keys(manifest).some((file) => file.endsWith('/DownloadsPage.svelte')))
+  throw new Error('The download management page leaked into the Tizen 3 viewer build');
 if (
   tizen3 &&
   Object.keys(manifest).some((file) =>

@@ -41,7 +41,9 @@ export const PersonScreen = lazy(() => import('../components/Person.svelte'));
 export const SearchScreen = lazy(() => import('../components/Search.svelte'));
 export const PeopleScreen = lazy(() => import('../components/People.svelte'));
 export const PlayerScreen = lazy(() => import('../components/Player.svelte'));
-export const DownloadsScreen = lazy(() => import('../components/DownloadsPage.svelte'));
+export const DownloadsScreen = __DEN_TV_LEGACY_JS_CORE__
+  ? lazy(() => import('../components/DownloadsHandoff-tizen3.svelte'))
+  : lazy(() => import('../components/DownloadsPage.svelte'));
 export const ServiceScreen = lazy(() => import('../components/ServicePage.svelte'));
 export const SettingsScreen = lazy(() => import('../Settings.svelte'));
 /** A Kid's or a Visitor's own Settings. */
