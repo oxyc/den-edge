@@ -1079,6 +1079,40 @@ test('Owner title access distinguishes wrong PIN from retryable save failure and
   }
 });
 
+test('a held title approval cannot close or publish into its replacement dialog', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage();
+    await openRealOwner(page, '&titleApproval&holdTitleApproval');
+    await page.getByRole('button', { name: 'Allow Fight Club for Kids' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Allow for Kids?' });
+    await dialog.getByLabel('Owner PIN').fill('1234');
+    await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+
+    await page.evaluate(() => window.denProfileModeFixture.replaceTitleApprovalRequest());
+    await expect(dialog).toContainText('Game of Thrones');
+    await expect(dialog.getByLabel('Owner PIN')).toHaveValue('');
+    await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+
+    await page.evaluate(() => window.denProfileModeFixture.resolveHeldTitleApproval());
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Allow', exact: true })).toBeDisabled();
+    await dialog.getByLabel('Owner PIN').fill('1234');
+    await expect(dialog).toBeHidden();
+    await expect
+      .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot()))
+      .toMatchObject({
+        titleApprovalRequests: 2,
+        titleApprovals: ['movie:550', 'tv:1399'],
+      });
+  } finally {
+    await browser.close();
+  }
+});
+
 test('leaving Add Kid restores remote focus to its entry point', async ({ page }) => {
   await openRealOwner(page);
   await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();

@@ -25,7 +25,6 @@
   $effect(() => {
     const current = request;
     requestGeneration += 1;
-    busy = false;
     if (current !== shownRequest) {
       shownRequest = current;
       pin = '';
@@ -43,8 +42,10 @@
     busy = true;
     problem = null;
     const result = await onconfirm(pin);
-    if (request !== expectedRequest || requestGeneration !== expectedGeneration || !dialog?.open)
+    if (request !== expectedRequest || requestGeneration !== expectedGeneration || !dialog?.open) {
+      busy = false;
       return;
+    }
     busy = false;
     if (result.outcome === 'saved' || result.outcome === 'superseded') close();
     else {

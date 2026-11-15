@@ -46,6 +46,7 @@
   let resumedCreate = false;
   let resumeAttempts = 0;
   let releaseHeldCreate: (() => void) | null = null;
+  let releaseHeldTitleApproval: (() => void) | null = null;
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Test-only durable receipt store; UI observes counters.
   const createReceipts = new Map<
     string,
@@ -195,6 +196,8 @@
           retryable: true,
         });
       }
+      if (params.has('holdTitleApproval') && titleApprovalRequests === 1)
+        await new Promise<void>((resolve) => (releaseHeldTitleApproval = resolve));
       const key = `${title.type}:${title.id}`;
       liveDirectory = {
         ...liveDirectory,
@@ -442,6 +445,20 @@
     resolveHeldCreate() {
       const resolve = releaseHeldCreate;
       releaseHeldCreate = null;
+      resolve?.();
+    },
+    replaceTitleApprovalRequest() {
+      const kid = profiles?.choices.find((choice) => choice.role === 'kid' && choice.id);
+      if (!kid?.id) throw new Error('fixture has no Kid title approval target');
+      titleApprovalRequest = {
+        kid: { id: kid.id, name: kid.name },
+        title: { type: 'tv', id: 1399, title: 'Game of Thrones' },
+        allow: true,
+      };
+    },
+    resolveHeldTitleApproval() {
+      const resolve = releaseHeldTitleApproval;
+      releaseHeldTitleApproval = null;
       resolve?.();
     },
     replaceWithSecondKid() {

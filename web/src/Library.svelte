@@ -1656,7 +1656,8 @@
       );
     },
     get kids() {
-      if (profiles?.mode !== 'owner' || profiles.parentalPinConfigured !== true) return [];
+      if (__DEN_TV__ || profiles?.mode !== 'owner' || profiles.parentalPinConfigured !== true)
+        return [];
       return profiles.choices.flatMap((choice) =>
         choice.role === 'kid' && choice.id
           ? [
@@ -1670,6 +1671,7 @@
       );
     },
     changeKidAccess: (kid, title, allow) => {
+      if (__DEN_TV__) return;
       kidAccessRequest = { kid, title, allow };
     },
     get play() {
@@ -2950,6 +2952,7 @@
       request.allow,
       pin,
     );
+    if (kidAccessRequest !== request) return { outcome: 'superseded' };
     if (result.outcome === 'saved')
       session.notify(
         request.allow
