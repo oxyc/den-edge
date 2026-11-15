@@ -116,10 +116,8 @@
     WatchlistView,
   } from './lib/libraryServiceProtocol';
   import { OverviewTitleIndex, titleViewRows } from './lib/libraryViewPresentation';
-  import {
-    finishKidTitleApprovalPresentation,
-    type ProfileModeCoordinator,
-  } from './lib/profileModeCoordinator.svelte';
+  import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
+  import { finishKidTitleApprovalPresentation } from './lib/kidTitleApprovalPresentation';
   import KidTitleAccessDialog from './components/KidTitleAccessDialog.svelte';
   import {
     airedThrough,

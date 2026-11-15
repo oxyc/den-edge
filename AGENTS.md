@@ -109,6 +109,25 @@ everything the committed code imports is committed too.
   9,728 to 9,856, the smallest 128-byte boundary containing the 9,754-byte matched graph (102-byte margin); the
   complete non-translation ceiling advances from 115,072 to 116,480, containing 116,473 with 7 bytes of margin.
   The separate translation ceiling remains 51,200 with 832 bytes of margin.
+- Persistent per-title Kid approval management (#530) was measured on matched production builds at exact current
+  main `7fff9db5` and the final source. Ordinary Browser startup moves 206,051 → 206,338 gzip bytes (+287), while
+  the complete graph moves 894,350 → 895,191; independently lazy Spanish/Swedish catalogs account for +125, so
+  the non-translation graph moves 844,689 → 845,405 (+716). The exact mutation admission, Owner/Kid directory
+  generation fences and durable outcome mapping remain in the eagerly mounted Library/profile coordinator because
+  they own the existing Browser writer before a dialog may open. The TV-only handoff was removed from shared
+  `TitleActions` and placed in the already lazy Detail chunk; moving the Browser authority there would duplicate or
+  delay the writer, while another Detail split would add a request to the sole recovery handoff. Locale copy remains
+  independently lazy. WebOS startup moves 241,819 → 242,190 and its non-translation graph 960,558 → 961,411
+  (+853); supported Tizen startup moves 242,510 → 242,895 and its non-translation graph 1,281,143 → 1,281,982
+  (+839). Reduced Tizen 3 compiles every approval writer out and retains only the exact-title handoff: startup moves
+  193,726 → 193,723 (-3), the complete non-translation graph 2,355,957 → 2,356,634 (+677), and the raw JS/CSS
+  graph 8,350,960 → 8,354,027 (+3,067). No dependency, polling, timer, healthy-path request or background work is
+  added; one existing mutation runs only after explicit Owner PIN submission and reads back through its existing
+  durable profile directory. The startup ceiling advances to the smallest 128-byte boundary, 9,984 over baseline,
+  retaining 42 bytes. Exact clean main itself measures a 118,899-byte non-translation delta, 3,827 above the prior
+  115,072 ceiling; #1282 owns that pre-existing reproducibility defect. Its separate clean-main calibration is
+  118,912 (13-byte margin), after which #530 advances the complete-graph ceiling to the smallest boundary, 119,680,
+  retaining 65 bytes. The fixed 51,200-byte translation ceiling remains unchanged with 1,414 bytes of margin.
 - Truthful assistant recovery and the reduced-Tizen Web handoff (#1278/#1204) were measured on matched production
   builds at base `92e5aae9` and head `1082574e`. Ordinary browser startup moves 206,041 → 206,062 gzip bytes
   (+21), while the complete graph moves 888,421 → 890,492 and its independently lazy Spanish/Swedish catalogs

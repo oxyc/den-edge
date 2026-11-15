@@ -18,6 +18,7 @@
   import PersonCard from './PersonCard.svelte';
   import PosterRow from './PosterRow.svelte';
   import TitleActions from './TitleActions.svelte';
+  import Button from './Button.svelte';
   import TitleMetadata from './TitleMetadata.svelte';
   import ProductionMetadata from './ProductionMetadata.svelte';
   import DetailTabs from './DetailTabs.svelte';
@@ -251,8 +252,14 @@
    * every such case read as "no trailer here".
    */
   let trailerOpen = $state(false);
+  let kidTitleAccessHandoffOpen = $state(false);
   let handledPlayRequest = $state<string>();
   let handledTrailerRequest = $state(false);
+
+  $effect(() => {
+    void kidTitleAccessHandoff;
+    kidTitleAccessHandoffOpen = false;
+  });
 
   $effect(() => {
     if (!playRequest) {
@@ -1308,8 +1315,33 @@
                   // describe. Built from the route rather than from wherever this page happens to be open.
                   url: `${__DEN_TV_WEB_ORIGIN__ || location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
                 }}
-            {kidTitleAccessHandoff}
           />
+          {#if kidTitleAccessHandoff}
+            <div class="kid-access-handoff">
+              <Button
+                variant="tertiary"
+                icon="external"
+                label="Manage Kid access on Den Web"
+                aria-expanded={kidTitleAccessHandoffOpen}
+                aria-controls="kid-title-access-handoff-detail"
+                onclick={() => (kidTitleAccessHandoffOpen = !kidTitleAccessHandoffOpen)}
+                onkeydown={(event) => {
+                  if (event.key !== 'Escape' || !kidTitleAccessHandoffOpen) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  kidTitleAccessHandoffOpen = false;
+                }}
+              />
+              {#if kidTitleAccessHandoffOpen}
+                <p id="kid-title-access-handoff-detail" role="status">
+                  {i18n.phrase(
+                    'In a browser linked to this household, open this title’s menu to allow or remove access for a Kid.',
+                  )}
+                  <span>{kidTitleAccessHandoff}</span>
+                </p>
+              {/if}
+            </div>
+          {/if}
         </div>
       </div>
     {/if}
@@ -1672,6 +1704,27 @@
 
   .hero-actions :global(.actions.detail-page) {
     margin-bottom: 0;
+  }
+
+  .kid-access-handoff {
+    display: grid;
+    justify-items: start;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .kid-access-handoff p {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
+  .kid-access-handoff span {
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow-wrap: anywhere;
   }
 
   .head {

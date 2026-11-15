@@ -6,7 +6,6 @@ import type { ConnectionsView, ProfileDirectoryView } from './libraryServiceProt
 import { legacyProfileIdentity } from './profileIdentity';
 import {
   allowsImplicitAssistant,
-  finishKidTitleApprovalPresentation,
   householdAdministration,
   profileMarkerPresent,
   ProfileModeCoordinator,
@@ -18,6 +17,7 @@ import {
   type ProfileActivityModelFactory,
   type PreviewProfileDirectory,
 } from './profileModeCoordinator.svelte';
+import { finishKidTitleApprovalPresentation } from './kidTitleApprovalPresentation';
 import { ProfileSession } from './profileSession.svelte';
 import { profileHouseholdSettingsModel, profileSettingsRoute } from './profileSettingsRoute';
 import {
