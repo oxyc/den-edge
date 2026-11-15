@@ -319,7 +319,16 @@
     kid: { id: string; name: string };
     title: Title;
     allow: boolean;
+    authority: object;
   } | null>(null);
+  $effect(() => {
+    const request = kidAccessRequest;
+    if (
+      request &&
+      (!profiles || profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority)
+    )
+      kidAccessRequest = null;
+  });
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -1672,8 +1681,9 @@
       );
     },
     changeKidAccess: (kid, title, allow) => {
-      if (__DEN_TV__) return;
-      kidAccessRequest = { kid, title, allow };
+      const authority = profiles?.kidTitleApprovalAuthority(kid.id);
+      if (!authority) return;
+      kidAccessRequest = { kid, title, allow, authority };
     },
     get play() {
       const send = play;
@@ -2941,33 +2951,40 @@
   }
 </script>
 
-<KidTitleAccessDialog
-  request={kidAccessRequest}
-  onclose={() => (kidAccessRequest = null)}
-  onconfirm={async (pin) => {
-    const request = kidAccessRequest;
-    if (!request || !profiles) return { outcome: 'superseded' };
-    const result = await profiles.setKidTitleApproval(
-      request.kid.id,
-      { type: request.title.type, id: request.title.id },
-      request.allow,
-      pin,
-    );
-    return finishKidTitleApprovalPresentation(request, kidAccessRequest, result, () =>
-      session.notify(
-        request.allow
-          ? i18n.format('notice.allowedForChild', 'Allowed “{title}” for {name}', {
-              title: request.title.title,
-              name: request.kid.name,
-            })
-          : i18n.format('notice.removedFromChild', 'Removed “{title}” from {name}', {
-              title: request.title.title,
-              name: request.kid.name,
-            }),
-      ),
-    );
-  }}
-/>
+{#if !__DEN_TV__}
+  <KidTitleAccessDialog
+    request={kidAccessRequest}
+    onclose={() => (kidAccessRequest = null)}
+    onconfirm={async (pin) => {
+      const request = kidAccessRequest;
+      if (
+        !request ||
+        !profiles ||
+        profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority
+      )
+        return { outcome: 'superseded' };
+      const result = await profiles.setKidTitleApproval(
+        request.kid.id,
+        { type: request.title.type, id: request.title.id },
+        request.allow,
+        pin,
+      );
+      return finishKidTitleApprovalPresentation(request, kidAccessRequest, result, () =>
+        session.notify(
+          request.allow
+            ? i18n.format('notice.allowedForChild', 'Allowed “{title}” for {name}', {
+                title: request.title.title,
+                name: request.kid.name,
+              })
+            : i18n.format('notice.removedFromChild', 'Removed “{title}” from {name}', {
+                title: request.title.title,
+                name: request.kid.name,
+              }),
+        ),
+      );
+    }}
+  />
+{/if}
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">

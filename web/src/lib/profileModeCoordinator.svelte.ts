@@ -355,6 +355,9 @@ export class ProfileModeCoordinator {
     pin: string,
   ): Promise<KidTitleApprovalChangeResult> {
     this.#assertOpen();
+    // Packaged TVs hand this administration to the supported Browser. A programmatic caller still fails closed,
+    // and the build can remove the Browser-only mutation body and recovery copy.
+    if (__DEN_TV__) return KID_TITLE_APPROVAL_DENIED;
     if (this.#kidTitleApprovalActive)
       return {
         outcome: 'failed',
@@ -433,6 +436,13 @@ export class ProfileModeCoordinator {
   /** Undefined while parental-control authority is opening or failed; callers therefore remain fail-closed. */
   get parentalPinConfigured(): boolean | undefined {
     return this.parentalControls ?? undefined;
+  }
+
+  /** Exact in-memory authority for presenting one Owner-only Kid title edit; replacement returns a new token. */
+  kidTitleApprovalAuthority(profile: string): object | null {
+    if (__DEN_TV__ || this.mode !== 'owner' || this.parentalPinConfigured !== true) return null;
+    const kid = this.#choice(profile);
+    return kid?.id && kid.role === 'kid' ? kid : null;
   }
 
   /** Reacquire only the failed household security selection; the ready service and its other views stay intact. */

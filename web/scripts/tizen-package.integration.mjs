@@ -141,6 +141,24 @@ const rejected = spawnSync(
 );
 if (rejected.status === 0 || !rejected.stderr.includes('exact HTTPS origin'))
   throw new Error('Packager accepted an API URL with a path');
+const credentialedWebOrigin = spawnSync(
+  process.platform === 'win32' ? 'npm.cmd' : 'npm',
+  ['run', 'build:tv:tizen'],
+  {
+    cwd: webRoot,
+    env: {
+      ...process.env,
+      DEN_TV_WEB_ORIGIN: 'https://user:secret@household.example',
+      DEN_TIZEN_VERSION: '8.0',
+    },
+    encoding: 'utf8',
+  },
+);
+if (
+  credentialedWebOrigin.status === 0 ||
+  !credentialedWebOrigin.stderr.includes('without credentials')
+)
+  throw new Error('TV build accepted a credential-bearing Web origin');
 console.log(
   'Tizen 8.0, 6.5, 5.5, and experimental 3.0 unsigned WGTs passed metadata, CSP, root-layout, asset-path, icon, and optional XML validation.',
 );

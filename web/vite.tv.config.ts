@@ -120,8 +120,17 @@ if (serviceOriginText) {
 let webOrigin = serviceOrigin;
 if (process.env.DEN_TV_WEB_ORIGIN) {
   const parsed = new URL(process.env.DEN_TV_WEB_ORIGIN);
-  if (parsed.protocol !== 'https:' || parsed.pathname !== '/' || parsed.search || parsed.hash)
-    throw new Error('DEN_TV_WEB_ORIGIN must be an exact HTTPS origin');
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== '/' ||
+    parsed.search ||
+    parsed.hash
+  )
+    throw new Error(
+      'DEN_TV_WEB_ORIGIN must be an exact HTTPS origin without credentials, path, query, or fragment',
+    );
   webOrigin = parsed.origin;
 }
 if (packaged && platform !== 'tizen')
