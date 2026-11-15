@@ -129,12 +129,12 @@ test('TV remote reaches the exact-title Kid access handoff and collapses it with
     await expect(page.getByRole('status')).toContainText(
       'In a browser linked to this household, open this title’s menu to allow or remove access for a Kid.',
     );
-    await expect(page.getByText('https://d.oxy.fi/movie/42', { exact: true })).toBeVisible();
+    await expect(page.getByText(`${E2E_ORIGIN}/movie/42`, { exact: true })).toBeVisible();
 
     await page.keyboard.press('Escape');
     await expect(handoff).toBeFocused();
     await expect(handoff).toHaveAttribute('aria-expanded', 'false');
-    await expect(page.getByText('https://d.oxy.fi/movie/42', { exact: true })).toHaveCount(0);
+    await expect(page.getByText(`${E2E_ORIGIN}/movie/42`, { exact: true })).toHaveCount(0);
   } finally {
     await browser.close();
   }

@@ -3047,7 +3047,7 @@
     kidTitleAccessHandoff={__DEN_TV__ &&
     profiles?.mode === 'owner' &&
     profiles.choices.some((choice) => choice.role === 'kid' && choice.id)
-      ? `https://d.oxy.fi/${page.type}/${page.id}`
+      ? `${__DEN_TV_WEB_ORIGIN__ || location.origin}${titleHref(page)}`
       : undefined}
   />
 {:else if route.page === 'person' && !PersonScreen.current}

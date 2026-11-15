@@ -152,7 +152,9 @@
     onplay={fullActions ? noop : undefined}
     tvs={fullActions ? [{ id: 'aaaa000000000001', name: 'Living room', play: 'A'.repeat(43) }] : []}
     onplayhere={fullActions ? noop : undefined}
-    kidTitleAccessHandoff={search.has('kid-handoff') ? 'https://d.oxy.fi/movie/42' : undefined}
+    kidTitleAccessHandoff={search.has('kid-handoff')
+      ? `${__DEN_TV_WEB_ORIGIN__ || location.origin}/movie/42`
+      : undefined}
     onepisode={() => {}}
   />
 </main>
