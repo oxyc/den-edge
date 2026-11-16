@@ -2190,7 +2190,6 @@
         if (!current) return;
         directoryServices = directory;
         directoryModuleState = 'ready';
-        directoryModuleRetrying = false;
       },
       () => {
         if (!current) return;
@@ -2279,9 +2278,19 @@
           },
         )
         .finally(() => {
-          if (!current || !untrack(() => retryingDirectories[key])) return;
-          const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
-          retryingDirectories = rest;
+          if (!current) return;
+          if (untrack(() => retryingDirectories[key])) {
+            const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
+            retryingDirectories = rest;
+          }
+          if (
+            untrack(() => directoryModuleRetrying) &&
+            untrack(() => currentDirectoryKeys).every((currentKey) => {
+              const status = untrack(() => directoryLoads[currentKey]?.status);
+              return status && status !== 'loading';
+            })
+          )
+            directoryModuleRetrying = false;
         });
     }
     return () => {
