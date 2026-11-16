@@ -1524,11 +1524,51 @@ describe('DownloadCoordinator', () => {
     const driver = new DownloadCoordinatorDriver(queue);
 
     expect(driver.hearthDelay(T0)).toBe(0);
-    await driver.run({ now: T0, observedFor: 120_001 });
+    await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
     expect(handed).toEqual([[]]);
-    expect(driver.hearthDelay(T0)).toBeUndefined();
+    expect(driver.hearthDelay(T0 + 30_000)).toBeUndefined();
     await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
     expect(handed).toEqual([[]]);
+  });
+
+  it('rebinds the same digest to a replacement Hearth and fences the old response', async () => {
+    const handed: Array<{ authority?: string; count: number }> = [];
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const sending = new Promise<void>((resolve) => (started = resolve));
+    const queue = new DownloadCoordinator(testLog().log, clock(), {
+      ...effects(),
+      wanted: async (items, authority) => {
+        handed.push({ authority, count: items.length });
+        if (authority === 'hearth-a') {
+          started();
+          await gate;
+        }
+        return [];
+      },
+    });
+    const driver = new DownloadCoordinatorDriver(queue);
+    driver.bindHearthAuthority('hearth-a');
+
+    const old = driver.run({ now: T0, observedFor: 120_001 });
+    await sending;
+    driver.bindHearthAuthority('hearth-b');
+    release();
+    await expect(old).resolves.toBe(false);
+
+    expect(driver.hearthDelay(T0)).toBe(0);
+    await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
+    expect(handed).toEqual([
+      { authority: 'hearth-a', count: 0 },
+      { authority: 'hearth-b', count: 0 },
+    ]);
+    expect(driver.hearthDelay(T0 + 30_000)).toBeUndefined();
+
+    driver.bindHearthAuthority(null);
+    expect(driver.hearthDelay(T0)).toBeUndefined();
+    await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
+    expect(handed).toHaveLength(2);
   });
 
   it('does not let a late clear from a replaced authority suppress newer wanted intent', async () => {

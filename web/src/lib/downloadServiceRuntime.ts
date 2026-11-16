@@ -110,9 +110,11 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             ? { ...found, imdb: 'resolved' as const, failure: 'unreachable' as const }
             : { ...found, imdb: 'resolved' as const };
         },
-        wanted: async (items) => {
+        wanted: async (items, authority) => {
           const { den } = await providers();
-          return den ? sendWanted(den.base, items, this.fetchImpl) : null;
+          return den && (!authority || den.install === authority)
+            ? sendWanted(den.base, items, this.fetchImpl)
+            : null;
         },
       },
       {
@@ -132,12 +134,14 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
 
   async run(current: () => boolean = () => true): Promise<boolean> {
     let scout: Addon | null;
+    let den: Addon | null;
     try {
-      ({ scout } = await this.#getProviders());
+      ({ scout, den } = await this.#getProviders());
     } catch (error) {
       this.#providersUnavailable = true;
       throw error;
     }
+    this.driver.bindHearthAuthority(den?.install ?? null);
     this.#providersUnavailable = !scout;
     if (!scout || !current()) return false;
     const before = this.#digest();
