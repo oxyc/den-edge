@@ -2,6 +2,7 @@
   import { i18n } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
+  import ServerUnreachable from './components/ServerUnreachable.svelte';
   import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Billboard from './components/Billboard.svelte';
@@ -3186,6 +3187,12 @@
       onseen={setSeen}
     />
   {/if}
+{:else if session.kid && !facet && discovered.atlasUnreachable}
+  <!-- Kid discovery deliberately has no saved-content fallback. Once live Atlas discovery has conclusively failed,
+       replace the indefinite shelf load with the same retry authority People and service pages use. -->
+  <section class="kid-home-unreachable" aria-label="Home">
+    <ServerUnreachable onretry={() => discovered.retry()} />
+  </section>
 {:else}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   <Billboard
@@ -3478,6 +3485,11 @@
   .library-failure h1 {
     margin-bottom: 8px;
     font-size: clamp(1.5rem, 5vw, 2rem);
+  }
+
+  .kid-home-unreachable {
+    max-width: 520px;
+    margin: 48px auto;
   }
 
   .retry {
