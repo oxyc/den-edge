@@ -378,6 +378,8 @@ interface KeptWork {
 const SNAPSHOT = 'log.v1';
 /** Where earlier builds kept a library on den-edge at v4 whole; `convertSnapshot` moves it into the fact store. */
 const SNAPSHOT_V4 = 'log.v4';
+/** Durable inert value replacing pre-split work before its deletion is attempted. */
+const SPLIT_DISCARD_MARKER = '{"splitDiscard":1}';
 /** The generation this browser's membership was registered under (`putMember`). */
 const MEMBER = 'log-member.v1';
 /** Unsealed existence marker for a browser-local library. It contains no key or library data. */
@@ -455,6 +457,8 @@ export class LibraryLog {
   private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
   private readonly flushing = new Set<string>();
+  /** Pre-split work durably quarantined from replay until its local deletion succeeds. */
+  private readonly splitDiscard = new Set<string>();
   /** Told how each edit answered before it was sent came to end; the authority turns that into what the page sees. */
   onDeferred: ((delivery: DeferredDelivery) => void) | null = null;
   /**
@@ -754,8 +758,12 @@ export class LibraryLog {
 
   private installRuntime(stored: ReadonlyMap<string, string>): void {
     this.pending.clear();
+    this.splitDiscard.clear();
     for (const [key, value] of stored)
-      if (key.startsWith(this.pendingPrefix)) this.pending.set(key, value);
+      if (key.startsWith(this.pendingPrefix)) {
+        this.pending.set(key, value);
+        if (value === SPLIT_DISCARD_MARKER) this.splitDiscard.add(key);
+      }
     this.observed = stored.get(this.metaKey('observed'));
     const remembered = Number(stored.get(this.metaKey('wireMin')));
     if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
@@ -776,8 +784,14 @@ export class LibraryLog {
         const { key, value } = event.data ?? {};
         if (!key?.startsWith(this.runtimePrefix)) return;
         if (key.startsWith(this.pendingPrefix)) {
-          if (value === undefined) this.pending.delete(key);
-          else this.pending.set(key, value);
+          if (value === undefined) {
+            this.pending.delete(key);
+            this.splitDiscard.delete(key);
+          } else {
+            this.pending.set(key, value);
+            if (value === SPLIT_DISCARD_MARKER) this.splitDiscard.add(key);
+            else this.splitDiscard.delete(key);
+          }
         } else if (key === this.metaKey('observed')) this.observed = value;
         else if (key === this.metaKey('wireMin')) {
           const minimum = Number(value);
@@ -849,16 +863,28 @@ export class LibraryLog {
     for (const [key, value] of found) this.pending.set(key, value);
   }
 
-  private async discard(key: string): Promise<void> {
+  private async discard(key: string): Promise<boolean> {
     const legacyKey = this.legacyPendingPrefix + key.slice(this.pendingPrefix.length);
     try {
       if (this.runtimeVault) await this.runtimeVault.delete(key);
       this.storage?.removeItem(legacyKey);
       this.pending.delete(key);
+      this.splitDiscard.delete(key);
       this.announceRuntime(key);
+      return true;
     } catch {
       // Retrying accepted work is harmless; a later scan keeps counting it.
+      return false;
     }
+  }
+
+  /** Replace stale work with an inert durable marker before deletion, so a failed delete cannot replay after reload. */
+  private async quarantineSplitWork(key: string): Promise<boolean> {
+    const legacyKey = this.legacyPendingPrefix + key.slice(this.pendingPrefix.length);
+    this.splitDiscard.add(key);
+    if (!(await this.putRuntime(key, SPLIT_DISCARD_MARKER, legacyKey))) return false;
+    this.pending.set(key, SPLIT_DISCARD_MARKER);
+    return true;
   }
 
   private async forgetRuntime(): Promise<void> {
@@ -2185,8 +2211,8 @@ export class LibraryLog {
         if (!(await to.keepPending(movedKey, JSON.stringify(moved))))
           throw new Error('destination runtime storage refused the pending edit');
         await this.discard(key);
-      } catch (error) {
-        console.warn('den: an unsent edit could not be moved to the new library key', error);
+      } catch {
+        console.warn('den: an unsent edit could not be moved to the new library key');
       }
     }
   }
@@ -4478,41 +4504,64 @@ export class LibraryLog {
           ]),
         )
         .then(() => undefined)
-        .catch((error: unknown) =>
-          console.error(
-            'den: the kept copy of the household from before its split could not be removed',
-            error,
-          ),
-        );
+        .catch(() => console.error('den: the pre-split household cache could not be removed'));
     await this.refreshPending();
     if (!active()) return;
     const opened = new Map((await this.keptWork()).map((work) => [work.key, work]));
     if (!active()) return;
-    const dropped = boundaryCounts();
-    let droppedWork = 0;
     for (const key of [...this.pending.keys()]) {
       if (!active()) return;
-      const work = opened.get(key);
-      droppedWork++;
-      if (!work) addBoundaryCount(dropped, 'unknown');
-      else if (work.kind === 'ops') {
-        // One title plus the season coordinates each op reads. Counting the shape avoids allocating the title ids
-        // `touched` would format solely for a diagnostic on work that is about to be deleted.
-        for (const { write } of work.ops ?? []) {
-          addBoundaryCount(dropped, 'activity');
-          if (Array.isArray(write.episode)) addBoundaryCount(dropped, 'activity');
-          else if (Array.isArray(write.episodes))
-            addBoundaryCount(dropped, 'activity', write.episodes.length);
-          else if (typeof write.season === 'number') addBoundaryCount(dropped, 'activity');
-        }
-        addBoundaryCount(dropped, 'settings', work.riders?.length ?? 0);
-      } else for (const row of work.rows) addBoundaryRow(dropped, row);
-      await this.discard(key);
+      await this.quarantineSplitWork(key);
       if (!active()) return;
+    }
+    await this.discardSplitWork(opened, active);
+  }
+
+  /** Retry quarantined pre-split deletion and report only work whose durable marker was actually removed. */
+  private async discardSplitWork(
+    opened: ReadonlyMap<string, KeptWork> = new Map(),
+    active: () => boolean = () => true,
+  ): Promise<void> {
+    const dropped = boundaryCounts();
+    let droppedWork = 0;
+    let failed = 0;
+    for (const key of [...this.splitDiscard]) {
+      if (!active()) return;
+      if (!this.pending.has(key)) {
+        this.splitDiscard.delete(key);
+        continue;
+      }
+      if (!(await this.discard(key))) {
+        failed++;
+        continue;
+      }
+      droppedWork++;
+      const work = opened.get(key);
+      if (!work) addBoundaryCount(dropped, 'unknown');
+      else {
+        const before = Object.values(dropped).reduce((sum, count) => sum + count, 0);
+        if (work.kind === 'ops') {
+          // One title plus the season coordinates each op reads. Counting the shape avoids allocating title ids.
+          for (const { write } of work.ops ?? []) {
+            addBoundaryCount(dropped, 'activity');
+            if (Array.isArray(write.episode)) addBoundaryCount(dropped, 'activity');
+            else if (Array.isArray(write.episodes))
+              addBoundaryCount(dropped, 'activity', write.episodes.length);
+            else if (typeof write.season === 'number') addBoundaryCount(dropped, 'activity');
+          }
+          addBoundaryCount(dropped, 'settings', work.riders?.length ?? 0);
+        } else for (const row of work.rows) addBoundaryRow(dropped, row);
+        if (Object.values(dropped).reduce((sum, count) => sum + count, 0) === before)
+          addBoundaryCount(dropped, 'unknown');
+      }
     }
     if (droppedWork)
       console.error(
         `den: ${droppedWork} kept work items from before the household split were dropped (${boundarySummary(dropped)})`,
+      );
+    if (failed)
+      console.error(
+        `den: ${failed} pre-split kept work items remain quarantined until local deletion can be retried`,
       );
   }
 
@@ -4552,10 +4601,9 @@ export class LibraryLog {
       }
       this.recoveryRows = [...retained.values()];
       return true;
-    } catch (error) {
+    } catch {
       console.warn(
         'den: the library changed generation, but its rows could not be kept to recover',
-        error,
       );
       return false;
     } // Do not discard the old cursors until recovery work is safely retained.
@@ -4710,6 +4758,10 @@ export class LibraryLog {
     await this.refreshPending();
     const kept: KeptWork[] = [];
     for (const [key, encoded] of this.pending) {
+      if (encoded === SPLIT_DISCARD_MARKER) {
+        this.splitDiscard.add(key);
+        continue;
+      }
       try {
         const pending = JSON.parse(encoded) as {
           k: string;
@@ -4755,7 +4807,7 @@ export class LibraryLog {
   private async projectKept(): Promise<void> {
     const kept = await this.keptWork();
     if (kept.length) await ensureDeferredSyncPolicy();
-    for (const work of kept) this.projectWork(work);
+    for (const work of kept) if (!this.splitDiscard.has(work.key)) this.projectWork(work);
   }
 
   private projectWork(work: KeptWork): void {
@@ -4816,6 +4868,8 @@ export class LibraryLog {
   private async replay(active: () => boolean = () => true): Promise<boolean> {
     const projected = this.projected;
     if (!active()) return false;
+    if (this.splitDiscard.size) await this.discardSplitWork(new Map(), active);
+    if (!active()) return false;
     // Kept, and sent once a read finds the log again (`refresh`).
     if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
       return this.projectKeptChanged(projected, active);
@@ -4838,6 +4892,7 @@ export class LibraryLog {
     for (const work of kept) {
       if (!active()) return false;
       const { key, kind } = work;
+      if (this.splitDiscard.has(key)) continue;
       // Sent by a send that ended since it was read.
       if (this.flushing.has(key) || !this.pending.has(key)) continue;
       if (Date.now() - (this.rejected.get(key) ?? 0) < RECHECK_MS) {
@@ -4934,7 +4989,7 @@ export class LibraryLog {
     if (!active()) return false;
     if (kept.length) await ensureDeferredSyncPolicy();
     if (!active()) return false;
-    for (const work of kept) this.projectWork(work);
+    for (const work of kept) if (!this.splitDiscard.has(work.key)) this.projectWork(work);
     return active() && this.projected !== projected;
   }
 }

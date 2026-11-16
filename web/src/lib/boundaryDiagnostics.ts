@@ -41,3 +41,11 @@ export function boundarySummary(counts: BoundaryCounts): string {
     .map(([kind, count]) => `${kind}=${count}`)
     .join(', ');
 }
+
+/** Describe a profile switch failure using fixed vocabulary, never its chosen name or raw cause. */
+export function profileSwitchDiagnostic(
+  role: 'owner' | 'kid' | 'visitor',
+  outcome: 'failed' | 'denied',
+): string {
+  return `den: the ${role} profile switch ${outcome === 'failed' ? 'failed' : 'was refused'}`;
+}

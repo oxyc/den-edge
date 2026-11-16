@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   addBoundaryCount,
   addBoundaryRow,
   boundaryCounts,
   boundarySummary,
+  profileSwitchDiagnostic,
 } from './boundaryDiagnostics';
 import type { Row } from './wire';
 
@@ -49,5 +51,49 @@ describe('split-household boundary diagnostics', () => {
       } as Row);
 
     expect(boundarySummary(counts)).toBe('activity=10000');
+  });
+
+  it('describes profile switch failures with bounded role and outcome vocabulary', () => {
+    const failed = profileSwitchDiagnostic('kid', 'failed');
+    const denied = profileSwitchDiagnostic('kid', 'denied');
+
+    expect(failed).toBe('den: the kid profile switch failed');
+    expect(denied).toBe('den: the kid profile switch was refused');
+  });
+
+  it('keeps production profile transition call sites from forwarding names or caught causes', () => {
+    const switcher = readFileSync(
+      new URL('../components/ProfileSwitcher.svelte', import.meta.url),
+      'utf8',
+    );
+    const ownerGate = readFileSync(
+      new URL('../components/ProfileOwnerGate.svelte', import.meta.url),
+      'utf8',
+    );
+    const routed = readFileSync(new URL('../RoutedLibrary.svelte', import.meta.url), 'utf8');
+    const log = readFileSync(new URL('./log.ts', import.meta.url), 'utf8');
+
+    const switchBody = switcher.match(/async function switchTo[\s\S]*?async function setPin/)?.[0];
+    expect(switchBody).toContain("profileSwitchDiagnostic(choice.role, 'failed')");
+    expect(switchBody).toContain("profileSwitchDiagnostic(choice.role, 'denied')");
+    expect(switchBody).not.toContain('choice.name');
+    expect(switchBody).not.toContain('result.cause');
+    expect(switcher).not.toMatch(/profile controls could not be loaded'\s*,/);
+    expect(switcher).not.toMatch(/Owner PIN could not be saved'\s*,/);
+
+    const ownerBody = ownerGate.match(/async function establishOwner[\s\S]*?<\/script>/)?.[0];
+    expect(ownerBody).toContain("profileSwitchDiagnostic('owner', 'failed')");
+    expect(ownerBody).not.toContain('result.cause');
+
+    const staged = routed.match(/let kidAfterHousehold[\s\S]*?RENEW_EVERY_MS/)?.[0];
+    expect(staged).toContain("profileSwitchDiagnostic('kid', 'failed')");
+    expect(staged).toContain("profileSwitchDiagnostic('kid', 'denied')");
+    expect(staged).not.toContain('result.cause');
+    expect(staged).not.toMatch(/console\.(?:warn|error)\([^\n]*,\s*error/);
+
+    const rekey = log.match(/async rekeyKept[\s\S]*?async takeMoved/)?.[0];
+    const recovery = log.match(/private async stageRecovery[\s\S]*?private holds/)?.[0];
+    expect(rekey).not.toMatch(/console\.warn\([^;]*,\s*error/s);
+    expect(recovery).not.toMatch(/console\.warn\([^;]*,\s*error/s);
   });
 });

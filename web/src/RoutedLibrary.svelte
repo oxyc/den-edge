@@ -16,6 +16,7 @@
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { releaseEarlyLibraryWorkers } from './lib/libraryWorkerStart';
   import { LibraryServiceError } from './lib/libraryServiceClient';
+  import { profileSwitchDiagnostic } from './lib/boundaryDiagnostics';
   import { untilServiceSettles } from './lib/serviceSettles';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
@@ -721,9 +722,7 @@
         return household.ensureDefaultKidProfile();
       },
       { live: () => alive },
-    ).catch((error: unknown) =>
-      console.error('den: the household’s Kid profile could not be made', error),
-    );
+    ).catch(() => console.error('den: the household kid profile could not be made'));
   });
 
   // Kid chosen before the household existed: once it does and its Kid is there, the PIN chosen then becomes the
@@ -743,13 +742,11 @@
         return coordinator.switchToPersistent(kid.id!);
       })
       .then((result) => {
-        if (result.outcome === 'failed') throw result.cause;
-        if (result.outcome === 'denied')
-          throw new Error('the Kid transition was unexpectedly refused');
+        if (result.outcome === 'failed') console.warn(profileSwitchDiagnostic('kid', 'failed'));
+        else if (result.outcome === 'denied')
+          console.warn(profileSwitchDiagnostic('kid', 'denied'));
       })
-      .catch((error: unknown) =>
-        console.warn('den: the Kid chosen before the household could not be opened', error),
-      );
+      .catch(() => console.warn('den: the staged kid profile transition failed'));
   });
 
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */

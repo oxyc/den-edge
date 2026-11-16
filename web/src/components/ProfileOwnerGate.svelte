@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { profileSwitchDiagnostic } from '../lib/boundaryDiagnostics';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import Button from './Button.svelte';
   import PinInput from './PinInput.svelte';
@@ -41,7 +42,7 @@
       const result = await profiles.switchToOwner(pin);
       if (result.outcome === 'denied') denied = true;
       else if (result.outcome === 'failed') {
-        console.error('den: Owner could not be opened', result.cause);
+        console.error(profileSwitchDiagnostic('owner', 'failed'));
         failed = true;
       }
     } finally {

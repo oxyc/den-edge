@@ -1649,6 +1649,9 @@ describe('LibraryLog', () => {
     };
     const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;
     await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
+    const emptyOps = await (
+      first as unknown as { sealKept(ops: never[]): Promise<string> }
+    ).sealKept([]);
     first.close();
 
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
@@ -1666,6 +1669,16 @@ describe('LibraryLog', () => {
       new TextEncoder().encode(JSON.stringify({ rows: [title, settings] })),
     );
     data.set(`${keys.id}:runtime:pending:unreadable`, new TextEncoder().encode('{'));
+    data.set(
+      `${keys.id}:runtime:pending:empty-ops`,
+      new TextEncoder().encode(JSON.stringify({ ops: emptyOps })),
+    );
+    const privateCleanupCause = `profile:${OWNER_ID} https://private.example/cache`;
+    const deleteFromVault = vault.delete.bind(vault);
+    vault.delete = async (key) => {
+      if (key.endsWith(':log.v1')) throw new Error(privateCleanupCause);
+      await deleteFromVault(key);
+    };
     server.rewrite(
       [await seal(keys, currentRows([row(1)])[0]!), await sealedProfileDirectory()],
       'generation-2',
@@ -1679,15 +1692,83 @@ describe('LibraryLog', () => {
       await vi.waitFor(() => expect(returned.pendingActions).toBe(0));
       const diagnostics = error.mock.calls.map((call) => call.join(' '));
       const dropped = diagnostics.filter((message) => message.includes('kept work items'));
-      expect(dropped).toEqual([expect.stringContaining('activity=1, settings=1, unknown=1')]);
+      expect(dropped).toEqual([expect.stringContaining('activity=1, settings=1, unknown=2')]);
+      await vi.waitFor(() =>
+        expect(error).toHaveBeenCalledWith(
+          'den: the pre-split household cache could not be removed',
+        ),
+      );
       for (const secret of [
         '550',
         OWNER_ID,
         'https://private.example/token',
         'title:movie',
         'set:profile',
+        privateCleanupCause,
       ])
-        expect(dropped[0]).not.toContain(secret);
+        expect(error.mock.calls.flat().join(' ')).not.toContain(secret);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('durably quarantines pre-split work until a failed local deletion can be retried', async () => {
+    const server = await edge([row(1)], [], 'generation-1');
+    const { data, vault } = memoryVault();
+    let posts = 0;
+    let profiles = false;
+    const connection: typeof fetch = async (input, init = {}) => {
+      if (init?.method === 'POST') posts++;
+      const response = await server.fetchImpl(input, init);
+      if (!profiles) return response;
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '5');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;
+    await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
+
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const stale = await seal(
+      keys,
+      currentRows([{ kind: 'set', schema: 2, name: 'prefs', values: {} } as Row])[0]!,
+    );
+    const pendingKey = `${keys.id}:runtime:pending:private-stale-work`;
+    data.set(pendingKey, new TextEncoder().encode(JSON.stringify(stale)));
+    server.rewrite(
+      [await seal(keys, currentRows([row(1)])[0]!), await sealedProfileDirectory()],
+      'generation-2',
+    );
+    profiles = true;
+
+    const privateCause = `profile:${OWNER_ID} https://private.example/delete ${pendingKey}`;
+    const deleteFromVault = vault.delete.bind(vault);
+    let blockPendingDelete = true;
+    vault.delete = async (key) => {
+      if (blockPendingDelete && key === pendingKey) throw new Error(privateCause);
+      await deleteFromVault(key);
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      posts = 0;
+      await expect(log.refresh()).resolves.toBe(true);
+      expect(posts).toBe(0);
+      expect(log.pendingActions).toBe(1);
+      expect(new TextDecoder().decode(data.get(pendingKey))).toBe('{"splitDiscard":1}');
+      expect(error.mock.calls.flat().join(' ')).toContain(
+        '1 pre-split kept work items remain quarantined',
+      );
+      expect(error.mock.calls.flat().join(' ')).not.toContain(privateCause);
+
+      log.close();
+      blockPendingDelete = false;
+      posts = 0;
+      const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;
+      await reopened.refresh();
+      await vi.waitFor(() => expect(data.has(pendingKey)).toBe(false));
+      expect(reopened.pendingActions).toBe(0);
+      expect(posts).toBe(0);
+      reopened.close();
     } finally {
       error.mockRestore();
     }
