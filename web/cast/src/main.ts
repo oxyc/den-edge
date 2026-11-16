@@ -1062,14 +1062,13 @@ async function loadCast(load: LoadMessage | undefined = current): Promise<void> 
     const ownsAttempt = receiverLoadAttempt === attempt;
     if (ownsAttempt) receiverLoadAttempt = undefined;
     if (!ownsCurrent(load) || !ownsAttempt) return;
-    const replacingAcceptedLoad = attempt.replacing && playingLoad !== load;
     castStarted = false;
-    // A rejected replacement retires the receiver's previously accepted load. An older overlapping LOAD can also
-    // succeed while this exact replacement is pending. In either case the TV is playing media which no current Den
-    // load owns; stop it instead of reporting failure while silently leaving the retired picture on the TV.
+    // Every rejected LOAD sent while a receiver was already playing retires sender ownership, including a
+    // same-id/generation reload used to attach a newly staged external subtitle. An older overlapping LOAD can also
+    // succeed while this exact replacement is pending. In either case stop the TV before reporting failure instead
+    // of returning playback local while the prior or stale receiver picture continues without active ownership.
     const stoppedUnownedReceiver =
-      replacingAcceptedLoad ||
-      (receiverLandedLoad !== undefined && receiverLandedLoad !== playingLoad);
+      attempt.replacing || (receiverLandedLoad !== undefined && receiverLandedLoad !== playingLoad);
     if (stoppedUnownedReceiver) castContext?.endCurrentSession(true);
     // An initial LOAD failure leaves the Cast session for the player to decide what is tried next. A failed
     // replacement cannot: it demonstrably leaves retired media on the receiver, so that session is stopped.

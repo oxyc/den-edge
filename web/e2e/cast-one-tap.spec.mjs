@@ -640,6 +640,58 @@ test('a refused replacement stops the previously accepted receiver load', async 
   }
 });
 
+for (const [receiverName, appId] of [
+  ['default receiver', undefined],
+  ['Den receiver', DEN_APP],
+]) {
+  test(`a refused same-load external subtitle reload stops the accepted ${receiverName} picture`, async () => {
+    const { browser, page } = await open(chromium, {
+      appId,
+      sdkOptions: { holdReplacementLoads: true, report: appId ? true : undefined },
+    });
+    try {
+      await playingPast(page, 2);
+      await reveal(page);
+      await castButton(page).click();
+      await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+      const accepted = (await receiver(page, 'loads'))[0].denLoad;
+      await expect.poll(() => receiver(page, 'receiverLoad')).toEqual(accepted);
+      await page.evaluate(() => {
+        window.subtitleReloadErrors = [];
+        window.addEventListener('message', (event) => {
+          if (event.data?.type === 'den-error') window.subtitleReloadErrors.push(event.data);
+        });
+      });
+      await page.evaluate(
+        ([cast, accepted, subtitleUrl]) =>
+          document.querySelector(`iframe[src^="${cast}"]`).contentWindow.postMessage(
+            {
+              type: 'den-subtitle',
+              ...accepted,
+              language: 'sv',
+              track: { language: 'sv', name: 'Swedish', url: subtitleUrl },
+            },
+            cast,
+          ),
+        [CAST, accepted, `${CAST}/subtitle/${'a'.repeat(64)}.vtt`],
+      );
+      await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(1);
+      await expect
+        .poll(() => receiver(page, 'loads').then((loads) => loads.at(-1)?.denLoad))
+        .toEqual(accepted);
+      await frameOf(page).evaluate(() => window.releaseLoad(0, 'reject'));
+      await expect.poll(() => receiver(page, 'calls')).toContain('stop');
+      await expect.poll(() => receiver(page, 'receiverLoad')).toBeNull();
+      await expect
+        .poll(() => page.evaluate(() => window.subtitleReloadErrors))
+        .toContainEqual(expect.objectContaining({ ...accepted, type: 'den-error' }));
+      await expect.poll(() => receiver(page, 'loads')).toHaveLength(2);
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
 test('reordered same-id receiver LOADs publish only the accepted generation and reject its old diagnostics', async () => {
   const { browser, page } = await open(chromium, {
     appId: DEN_APP,
