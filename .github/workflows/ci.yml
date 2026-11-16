@@ -236,7 +236,7 @@ jobs:
       # exercises replacement of the exact same-language sidecar through the AVPlay adapter.
       - name: Supported Samsung/Tizen TV behavior
         if: ${{ !cancelled() && steps.tv_isolation.outcome != 'skipped' }}
-        run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-kid-title-handoff.spec.mjs tv-platform.spec.mjs tv-subtitle-resync.spec.mjs
+        run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-kid-title-handoff.spec.mjs tv-platform.spec.mjs tv-services-recovery.spec.mjs tv-subtitle-resync.spec.mjs
       - run: npm run test:e2e:tv-package
       # Every ordinary source change must compile and verify the exact legacy package too; the release workflow is
       # too late to discover that a shared import or unsupported syntax no longer reaches Chromium 47.
@@ -395,7 +395,7 @@ jobs:
         run: >-
           DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv --
           tv-playback.spec.mjs tv-navigation.spec.mjs tv-compatibility.spec.mjs
-          tv-retained-input.spec.mjs tv-presentation.spec.mjs
+          tv-retained-input.spec.mjs tv-presentation.spec.mjs tv-services-recovery.spec.mjs
       - name: Retain native TV failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

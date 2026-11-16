@@ -79,7 +79,7 @@
   import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
   import type { AtlasCatalog } from './lib/services';
-  import type { Service } from './settings/services';
+  import type { Service, ServiceDirectoryLoad } from './settings/services';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
@@ -2177,68 +2177,153 @@
   );
   /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
   let serviceDirectoriesAdmitted = $state(false);
-  let directoryServicesFailed = $state(false);
+  let directoryModuleAttempt = $state(0);
+  let directoryModuleState = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  let directoryModuleRetrying = $state(false);
   $effect(() => {
+    void directoryModuleAttempt;
     if (!serviceDirectoriesAdmitted || directoryServices) return;
+    directoryModuleState = 'loading';
     let current = true;
     void optionalImport(import('./settings/services')).then(
       (directory) => {
-        if (current) directoryServices = directory;
+        if (!current) return;
+        directoryServices = directory;
+        directoryModuleState = 'ready';
+        directoryModuleRetrying = false;
       },
       () => {
-        // A stale optional chunk is retried on the next full page visit; the row remains unavailable meanwhile.
-        if (current) directoryServicesFailed = true;
+        if (!current) return;
+        directoryModuleState = 'failed';
+        directoryModuleRetrying = false;
       },
     );
     return () => {
       current = false;
     };
   });
-  /** Which locale/countries have been asked for; a directory is one request per locale/country, not one per pick. */
-  const askedFor: Record<string, true> = {};
-  let directories = $state.raw<Record<string, Service[]>>({});
+  /** One owned generation per locale/country; a stale answer cannot replace its explicit retry. */
+  let directoryLoads = $state.raw<Record<string, ServiceDirectoryLoad>>({});
   const directoryKey = (language: string, country: string) => `${language}:${country}`;
-  /** Locale-owned directory requests: an old language cannot keep the replacement Services row pending. */
-  let namingByLanguage = $state.raw<Record<string, number>>({});
-  const naming = $derived(namingByLanguage[i18n.language] ?? 0);
+  let directoryRequest = 0;
+  let directoryRetry = $state(0);
+  const refreshDirectories: Record<string, true> = {};
+  let retryingDirectories = $state.raw<Record<string, true>>({});
+  let directoryOwner = untrack(() => session);
+  let directoryOwnerRevision = $state(0);
+  $effect(() => {
+    const owner = session;
+    if (owner === directoryOwner) return;
+    directoryOwner = owner;
+    directoryOwnerRevision++;
+  });
+  const currentDirectoryKeys = $derived([
+    ...new Set(
+      servicePicks.map(
+        ({ country }) => `${directoryOwnerRevision}:${directoryKey(i18n.language, country)}`,
+      ),
+    ),
+  ]);
+  /** Only the replacement language owns Home's pending/error state; old keyed generations may finish harmlessly. */
+  const naming = $derived(
+    currentDirectoryKeys.filter((key) => directoryLoads[key]?.status === 'loading').length,
+  );
+  const failedDirectories = $derived(
+    currentDirectoryKeys.filter((key) => {
+      const status = directoryLoads[key]?.status;
+      return status === 'partial' || status === 'failed';
+    }),
+  );
+  const directoryRetrying = $derived(
+    directoryModuleRetrying || currentDirectoryKeys.some((key) => retryingDirectories[key]),
+  );
   $effect(() => {
     const directory = directoryServices;
     const language = i18n.language;
+    void directoryRetry;
     if (!serviceDirectoriesAdmitted || !directory) return;
-    for (const { country } of servicePicks) {
-      const key = directoryKey(language, country);
-      if (askedFor[key]) continue;
-      askedFor[key] = true;
-      namingByLanguage = {
-        ...namingByLanguage,
-        [language]: (namingByLanguage[language] ?? 0) + 1,
+    let current = true;
+    const started: { key: string; request: number }[] = [];
+    for (const country of new Set(servicePicks.map((pick) => pick.country))) {
+      const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
+      const previous = untrack(() => directoryLoads[key]);
+      const refresh = refreshDirectories[key] === true;
+      delete refreshDirectories[key];
+      if (previous && !refresh) continue;
+      const request = ++directoryRequest;
+      started.push({ key, request });
+      directoryLoads = {
+        ...untrack(() => directoryLoads),
+        [key]: directory.beginServiceDirectoryLoad(previous, request),
       };
       void directory
-        .contentServices(session.content, country, language)
+        .contentServicesResult(session.content, country, refresh, language)
         .then(
-          (listed) => {
-            directories = { ...directories, [key]: listed };
+          (result) => {
+            if (!current) return;
+            const owned = untrack(() => directoryLoads[key]);
+            if (!owned) return;
+            directoryLoads = {
+              ...untrack(() => directoryLoads),
+              [key]: directory.completeServiceDirectoryLoad(owned, request, result),
+            };
           },
           () => {
-            // One request per country per visit includes failures. Leaving it admitted lets `naming` settle to the
-            // reserved unavailable row; a later visit gets a fresh page and asks again.
+            if (!current) return;
+            const owned = untrack(() => directoryLoads[key]);
+            if (!owned) return;
+            directoryLoads = {
+              ...untrack(() => directoryLoads),
+              [key]: directory.failServiceDirectoryLoad(owned, request),
+            };
           },
         )
         .finally(() => {
-          namingByLanguage = {
-            ...namingByLanguage,
-            [language]: Math.max(0, (namingByLanguage[language] ?? 1) - 1),
-          };
+          if (!current || !untrack(() => retryingDirectories[key])) return;
+          const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
+          retryingDirectories = rest;
         });
     }
+    return () => {
+      current = false;
+      const loads = untrack(() => directoryLoads);
+      const cancelled = new Set(
+        started
+          .filter(
+            ({ key, request }) =>
+              loads[key]?.request === request && loads[key].status === 'loading',
+          )
+          .map(({ key }) => key),
+      );
+      if (!cancelled.size) return;
+      directoryLoads = Object.fromEntries(
+        Object.entries(loads).filter(([key]) => !cancelled.has(key)),
+      );
+      retryingDirectories = Object.fromEntries(
+        Object.entries(untrack(() => retryingDirectories)).filter(([key]) => !cancelled.has(key)),
+      );
+    };
   });
+  function retryServiceDirectories() {
+    if (directoryRetrying || naming) return;
+    if (directoryModuleState === 'failed') {
+      directoryModuleRetrying = true;
+      directoryModuleAttempt++;
+      return;
+    }
+    if (!failedDirectories.length) return;
+    for (const key of failedDirectories) refreshDirectories[key] = true;
+    retryingDirectories = Object.fromEntries(failedDirectories.map((key) => [key, true]));
+    directoryRetry++;
+  }
   /** The picks their country's directory can account for, named and ordered by it. */
   const services = $derived(
     [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
       (country) =>
         homeServices?.resolvePicks(
           servicePicks,
-          directories[directoryKey(i18n.language, country)] ?? [],
+          directoryLoads[`${directoryOwnerRevision}:${directoryKey(i18n.language, country)}`]
+            ?.services ?? [],
           country,
         ) ?? [],
     ),
@@ -2254,13 +2339,13 @@
   const providerRowsReady = $derived(
     session.kid ||
       (atlasReady && (!atlas || !servicePicks.length)) ||
-      (serviceDirectoriesAdmitted && directoryServicesFailed) ||
+      (serviceDirectoriesAdmitted && directoryModuleState === 'failed') ||
       (atlasReady &&
         !!atlas &&
         serviceDirectoriesAdmitted &&
         !!directoryServices &&
         naming === 0 &&
-        servicePicks.every(({ country }) => askedFor[directoryKey(i18n.language, country)])),
+        currentDirectoryKeys.every((key) => directoryLoads[key])),
   );
   /**
    * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
@@ -3326,13 +3411,22 @@
           showServices
           {services}
           servicePending={serviceDirectoriesAdmitted
-            ? naming
+            ? directoryModuleState === 'loading' || naming
               ? servicePicks.length
               : 0
             : servicePicks.length}
-          serviceEmpty={serviceDirectoriesAdmitted && !naming && !services.length
+          serviceEmpty={serviceDirectoriesAdmitted &&
+          directoryModuleState !== 'failed' &&
+          !naming &&
+          !services.length &&
+          !failedDirectories.length
             ? 'Services unavailable'
             : undefined}
+          serviceFailure={directoryModuleState === 'failed' || failedDirectories.length
+            ? 'Services unavailable'
+            : undefined}
+          serviceRetrying={directoryRetrying}
+          onServiceRetry={retryServiceDirectories}
           onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
           onServiceIntent={primeService}
         />
@@ -3354,6 +3448,8 @@
         showServices={false}
         {services}
         servicePending={0}
+        serviceRetrying={false}
+        onServiceRetry={() => {}}
         onServiceVisible={() => {}}
         onServiceIntent={primeService}
       />

@@ -15,6 +15,9 @@
     heading = 'Services',
     pending = 0,
     empty,
+    failure,
+    retrying = false,
+    onretry,
     onintent,
     onvisible,
   }: {
@@ -27,6 +30,10 @@
     pending?: number;
     /** A settled empty directory keeps the reserved row geometry instead of shifting every later shelf upward. */
     empty?: string;
+    /** A recoverable directory failure. Its action occupies the same tile geometry as loading and empty states. */
+    failure?: string;
+    retrying?: boolean;
+    onretry?: () => void;
     /** A tile is about to be opened (`ServiceTile`): the page behind it can start loading. */
     onintent?: (service: Service, country: string) => void;
     /** Called once when this rail is close enough that its provider directories should start loading. */
@@ -34,6 +41,27 @@
   } = $props();
   const localizedHeading = $derived(capitalizeHeading(i18n.phrase(heading), i18n.language));
   let section = $state<HTMLElement>();
+  let retryButton = $state<HTMLButtonElement>();
+  let restoreRetryFocus = false;
+
+  function retry() {
+    if (retrying) return;
+    restoreRetryFocus = document.activeElement === retryButton;
+    onretry?.();
+  }
+
+  $effect(() => {
+    const busy = retrying;
+    const failed = failure;
+    const listed = services.length;
+    if (!restoreRetryFocus || busy) return;
+    const frame = requestAnimationFrame(() => {
+      if (failed) retryButton?.focus();
+      else if (listed) section?.querySelector<HTMLElement>('.tile')?.focus();
+      restoreRetryFocus = false;
+    });
+    return () => cancelAnimationFrame(frame);
+  });
 
   $effect(() => {
     const element = section;
@@ -59,7 +87,7 @@
   });
 </script>
 
-{#if services.length || pending || empty}
+{#if services.length || pending || empty || failure || retrying}
   <section class="row services-row" aria-label={localizedHeading} bind:this={section}>
     <h2>{localizedHeading}</h2>
     <div class="track">
@@ -79,10 +107,27 @@
           {/each}
         {:else if empty}
           <span class="hold empty"
-            ><span class="plate" aria-hidden="true">—</span><span>{i18n.phrase(empty)}</span></span
+            ><span class="plate" aria-hidden="true">—</span><span role="status" aria-atomic="true"
+              >{i18n.phrase(empty)}</span
+            ></span
           >
         {/if}
       {/each}
+      {#if failure || retrying}
+        <span class="hold empty recovery">
+          <button
+            class="plate retry"
+            type="button"
+            aria-label={i18n.phrase('Try again')}
+            aria-disabled={retrying}
+            bind:this={retryButton}
+            onclick={retry}>↻</button
+          >
+          <span role="status" aria-atomic="true"
+            >{i18n.phrase(retrying ? 'Trying again…' : (failure ?? 'Services unavailable'))}</span
+          >
+        </span>
+      {/if}
     </div>
   </section>
   <JustWatchCredit />
@@ -139,5 +184,29 @@
 
   .empty .plate {
     font-size: 28px;
+  }
+
+  .retry {
+    appearance: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    font-size: 28px;
+    cursor: pointer;
+  }
+
+  .retry[aria-disabled='true'] {
+    cursor: wait;
+  }
+
+  .retry:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
+  }
+
+  .hold > :last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

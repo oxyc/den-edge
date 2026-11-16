@@ -17,6 +17,9 @@
     services,
     servicePending,
     serviceEmpty,
+    serviceFailure,
+    serviceRetrying,
+    onServiceRetry,
     onServiceVisible,
     onServiceIntent,
   }: {
@@ -29,6 +32,9 @@
     services: ResolvedService[];
     servicePending: number;
     serviceEmpty?: string;
+    serviceFailure?: string;
+    serviceRetrying: boolean;
+    onServiceRetry: () => void;
     onServiceVisible: () => void;
     onServiceIntent: (service: Service, country: string) => void;
   } = $props();
@@ -39,6 +45,9 @@
     {services}
     pending={servicePending}
     empty={serviceEmpty}
+    failure={serviceFailure}
+    retrying={serviceRetrying}
+    onretry={onServiceRetry}
     onvisible={onServiceVisible}
     onintent={onServiceIntent}
   />

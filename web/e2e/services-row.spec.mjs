@@ -13,7 +13,10 @@ test('service directories are admitted only as their rail approaches the viewpor
   const reserved = await row.boundingBox();
   await row.scrollIntoViewIfNeeded();
   await expect(requests).toHaveText('1');
-  await expect(row.getByText('Services unavailable')).toBeVisible();
+  const status = row.getByRole('status');
+  const retry = row.getByRole('button', { name: 'Try again' });
+  await expect(status).toHaveText('Services unavailable');
+  await expect(retry).toBeVisible();
   const track = row.locator('.track');
   await expect(track).toHaveCSS('padding-left', '0px');
   await expect(track).toHaveCSS('padding-right', '0px');
@@ -27,9 +30,24 @@ test('service directories are admitted only as their rail approaches the viewpor
   const settled = await row.boundingBox();
   expect(settled?.height).toBe(reserved?.height);
 
+  await retry.focus();
+  await retry.click();
+  await expect(requests).toHaveText('2');
+  await expect(retry).toHaveAttribute('aria-disabled', 'true');
+  await expect(status).toHaveText('Trying again…');
+  await retry.click();
+  await expect(requests, 'an activation while the retry is live does not duplicate it').toHaveText(
+    '2',
+  );
+  expect((await row.boundingBox())?.height).toBe(reserved?.height);
+
+  await page.evaluate(() => document.querySelector('[data-resolve-retry]').click());
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeFocused();
+  expect((await row.boundingBox())?.height).toBe(reserved?.height);
+
   await page.evaluate(() => scrollTo(0, 0));
   await row.scrollIntoViewIfNeeded();
-  await expect(requests).toHaveText('1');
+  await expect(requests).toHaveText('2');
 });
 
 test('the Services rail uses the phone viewport, not the desktop presentation maximum', async ({
