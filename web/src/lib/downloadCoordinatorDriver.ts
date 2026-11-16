@@ -82,10 +82,11 @@ export class DownloadCoordinatorDriver {
   #again?: { options: DownloadDriveOptions; pass: Promise<boolean> };
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
-  /** The last digest's acknowledgement (`failures: 0`) or bounded retry schedule. */
-  #hearth?: [digest: string, failures: number, at: number];
-  /** Undefined for generic callers; null when discovery proves there is no Hearth; otherwise its exact install. */
-  #hearthAuthority?: { id: string | null };
+  /** Exact Hearth binding plus the last digest's acknowledgement (`failures: 0`) or retry schedule. */
+  #hearth: {
+    id?: string | null;
+    sent?: [digest: string, failures: number, at: number];
+  } = {};
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
@@ -93,9 +94,7 @@ export class DownloadCoordinatorDriver {
 
   /** Rebind acknowledgement and retry state to the exact discovered Hearth instance. */
   bindHearthAuthority(authority: string | null): void {
-    if (this.#hearthAuthority?.id === authority) return;
-    this.#hearthAuthority = { id: authority };
-    this.#hearth = undefined;
+    if (this.#hearth.id !== authority) this.#hearth = { id: authority };
   }
 
   run(options: DownloadDriveOptions = {}): Promise<boolean> {
@@ -162,10 +161,10 @@ export class DownloadCoordinatorDriver {
 
   /** When the scheduler should next run solely to synchronize Hearth (if downloads do not need it sooner). */
   hearthDelay(now = this.queue.now()): number | undefined {
-    if (!this.queue.effects.wanted || this.#hearthAuthority?.id === null) return undefined;
+    if (!this.queue.effects.wanted || this.#hearth.id === null) return undefined;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    const last = this.#hearth;
+    const last = this.#hearth.sent;
     if (last?.[0] === digest && last[1]) return Math.max(0, last[2] - now);
     // A fresh driver also sends one empty replacement. That clears intent retained by Hearth if the previous page or
     // worker disappeared after its local row removal but before receiving the clear response.
@@ -450,12 +449,12 @@ export class DownloadCoordinatorDriver {
   async #syncHearth(now: number): Promise<boolean> {
     const current = this.#current;
     const send = this.queue.effects.wanted;
-    const binding = this.#hearthAuthority;
-    const authority = binding?.id;
+    const binding = this.#hearth;
+    const authority = binding.id;
     if (!send || authority === null) return false;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    const last = this.#hearth;
+    const last = binding.sent;
     if (
       last?.[0] === digest &&
       (last[1] ? now < last[2] : !items.length || now - last[2] < HEARTH_EVERY)
@@ -465,20 +464,20 @@ export class DownloadCoordinatorDriver {
     try {
       statuses = await send(items, authority);
     } catch (error) {
-      if (this.#hearthAuthority !== binding) return false;
+      if (this.#hearth !== binding) return false;
       this.#retryHearth(digest, now);
       throw error;
     }
     // Discovery can rebind the same driver while the old authority's request is in flight. Its late response belongs
     // only to that old authority and must neither acknowledge nor delay the replacement's identical digest.
-    if (this.#hearthAuthority !== binding) return false;
+    if (this.#hearth !== binding) return false;
     // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. Keeping one
     // digest-scoped retry owner also means a changed (newer) intent bypasses the old intent's delay immediately.
     if (!statuses || !current() || !this.#stillHeld(now)) {
       this.#retryHearth(digest, now);
       return false;
     }
-    this.#hearth = [digest, 0, now];
+    binding.sent = [digest, 0, now];
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
@@ -492,10 +491,10 @@ export class DownloadCoordinatorDriver {
   }
 
   #retryHearth(digest: string, now: number): void {
-    const previous = this.#hearth;
+    const previous = this.#hearth.sent;
     const failures = previous?.[0] === digest ? previous[1] + 1 : 1;
     const delay = Math.min(HEARTH_EVERY, HEARTH_RETRY_MIN * 2 ** (failures - 1));
-    this.#hearth = [digest, failures, now + delay];
+    this.#hearth.sent = [digest, failures, now + delay];
   }
 
   /**
