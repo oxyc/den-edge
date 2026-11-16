@@ -182,11 +182,8 @@
         return;
       }
       if (result.outcome === 'denied' && askedPin) denied = true;
-      else if (result.outcome === 'failed') {
-        console.error(`den: the ${choice.role} profile switch failed`);
-        failed = true;
-      } else if (result.outcome === 'denied') {
-        console.error(`den: the ${choice.role} profile switch was refused`);
+      else if (result.outcome === 'failed' || result.outcome === 'denied') {
+        console.error('den: profile switch', choice.role, result.outcome);
         failed = true;
       }
     } finally {

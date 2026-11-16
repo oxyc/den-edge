@@ -741,9 +741,8 @@
         return coordinator.switchToPersistent(kid.id!);
       })
       .then((result) => {
-        if (result.outcome === 'failed') console.warn('den: the kid profile switch failed');
-        else if (result.outcome === 'denied')
-          console.warn('den: the kid profile switch was refused');
+        if (result.outcome === 'failed' || result.outcome === 'denied')
+          console.warn('den: profile switch', 'kid', result.outcome);
       })
       .catch(() => console.warn('den: the staged kid profile transition failed'));
   });

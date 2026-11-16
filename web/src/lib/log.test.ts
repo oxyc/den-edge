@@ -1628,7 +1628,7 @@ describe('LibraryLog', () => {
       const log = (await LibraryLog.open(LIBRARY_KEY, household, undefined, null, 5))!;
       await log.write(row(550));
       const diagnostic = error.mock.calls.flat().join(' ');
-      expect(diagnostic).toContain('activity=1');
+      expect(diagnostic).toContain('household refused 1 profile rows');
       expect(diagnostic).not.toContain('550');
       expect(diagnostic).not.toContain('title:movie');
     } finally {
@@ -1691,10 +1691,8 @@ describe('LibraryLog', () => {
       await expect(returned.refresh()).resolves.toBe(true);
       await vi.waitFor(() => expect(returned.pendingActions).toBe(0));
       const diagnostics = error.mock.calls.map((call) => call.join(' '));
-      const dropped = diagnostics.filter((message) => message.includes('kept work items'));
-      expect(dropped).toEqual([
-        expect.stringContaining('activity=1, settings=1, delivery=0, unknown=2'),
-      ]);
+      const dropped = diagnostics.filter((message) => message.includes('pre-split edits dropped'));
+      expect(dropped).toEqual([expect.stringContaining('unknown=1')]);
       await vi.waitFor(() =>
         expect(error).toHaveBeenCalledWith(
           'den: the pre-split household cache could not be removed',
@@ -1758,9 +1756,11 @@ describe('LibraryLog', () => {
       expect(log.pendingActions).toBe(1);
       expect(log.currentGeneration).toBe('generation-2');
       expect(new TextDecoder().decode(data.get(pendingKey))).toBe(JSON.stringify(stale));
-      expect(data.has(`${keys.id}:runtime:meta:splitAdoption`)).toBe(true);
+      expect(
+        JSON.parse(new TextDecoder().decode(data.get(`${keys.id}:runtime:meta:compacted`))),
+      ).toContain(pendingKey);
       expect(error.mock.calls.flat().join(' ')).toContain(
-        'pre-split kept work items remain quarantined until local deletion can be retried',
+        'pre-split edits remain quarantined for deletion retry',
       );
       expect(error.mock.calls.flat().join(' ')).not.toContain(privateCause);
 
@@ -1771,7 +1771,9 @@ describe('LibraryLog', () => {
       expect(reopened.settings('prefs')).toBeUndefined();
       await reopened.refresh();
       await vi.waitFor(() => expect(data.has(pendingKey)).toBe(false));
-      await vi.waitFor(() => expect(data.has(`${keys.id}:runtime:meta:splitAdoption`)).toBe(false));
+      expect(
+        JSON.parse(new TextDecoder().decode(data.get(`${keys.id}:runtime:meta:compacted`))),
+      ).toContain(pendingKey);
       expect(reopened.pendingActions).toBe(0);
       expect(posts).toBe(0);
       reopened.close();

@@ -8,7 +8,6 @@ import { householdScoped } from './householdScope';
 import { resetAssistantRows } from './libraryAssistantAuthority';
 import { PRE_V4_BACKUP_ERROR } from './libraryErrors';
 import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
-import { addBoundaryRow, boundaryCounts, boundarySummary } from './boundaryDiagnostics';
 import { libraryVault, type Vault } from './localVault';
 import { libraryLocalKey } from './libraryLocalKey';
 import { libraryGenerationVault } from './libraryRetirementLease';
@@ -450,8 +449,6 @@ export class LibraryLog {
   private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
   private readonly flushing = new Set<string>();
-  /** Pre-split work durably quarantined from replay until its local deletion succeeds. */
-  private readonly splitDiscard = new Set<string>();
   /** Told how each edit answered before it was sent came to end; the authority turns that into what the page sees. */
   onDeferred: ((delivery: DeferredDelivery) => void) | null = null;
   /**
@@ -644,15 +641,9 @@ export class LibraryLog {
     return `${this.runtimePrefix}meta:${name}`;
   }
 
-  private legacyMetaKey(name: 'observed' | 'wireMin' | 'compacted' | 'splitAdoption'): string {
+  private legacyMetaKey(name: 'observed' | 'wireMin' | 'compacted'): string {
     const part =
-      name === 'observed'
-        ? 'ObservedGeneration'
-        : name === 'wireMin'
-          ? 'WireMin'
-          : name === 'compacted'
-            ? 'Compacted'
-            : 'SplitAdoption';
+      name === 'observed' ? 'ObservedGeneration' : name === 'wireMin' ? 'WireMin' : 'Compacted';
     return `den.library${part}.${this.keys.id}`;
   }
 
@@ -704,7 +695,7 @@ export class LibraryLog {
             string,
           ],
       ),
-      ...(['observed', 'wireMin', 'compacted', 'splitAdoption'] as const).flatMap((name) => {
+      ...(['observed', 'wireMin', 'compacted'] as const).flatMap((name) => {
         const oldKey = this.legacyMetaKey(name);
         try {
           const value = this.storage?.getItem(oldKey);
@@ -757,12 +748,8 @@ export class LibraryLog {
 
   private installRuntime(stored: ReadonlyMap<string, string>): void {
     this.pending.clear();
-    this.splitDiscard.clear();
     for (const [key, value] of stored)
-      if (key.startsWith(this.pendingPrefix)) {
-        this.pending.set(key, value);
-      }
-    this.installSplitAdoption(stored.get(this.metaKey('splitAdoption')));
+      if (key.startsWith(this.pendingPrefix)) this.pending.set(key, value);
     this.observed = stored.get(this.metaKey('observed'));
     const remembered = Number(stored.get(this.metaKey('wireMin')));
     if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
@@ -783,14 +770,9 @@ export class LibraryLog {
         const { key, value } = event.data ?? {};
         if (!key?.startsWith(this.runtimePrefix)) return;
         if (key.startsWith(this.pendingPrefix)) {
-          if (value === undefined) {
-            this.pending.delete(key);
-            this.splitDiscard.delete(key);
-          } else {
-            this.pending.set(key, value);
-          }
+          if (value === undefined) this.pending.delete(key);
+          else this.pending.set(key, value);
         } else if (key === this.metaKey('observed')) this.observed = value;
-        else if (key === this.metaKey('splitAdoption')) this.installSplitAdoption(value);
         else if (key === this.metaKey('wireMin')) {
           const minimum = Number(value);
           if (Number.isInteger(minimum) && minimum > this.wireMin) {
@@ -815,27 +797,6 @@ export class LibraryLog {
       this.runtimeChannel?.postMessage({ key, value });
     } catch {
       // A later IndexedDB scan remains authoritative.
-    }
-  }
-
-  private installSplitAdoption(value: string | undefined): void {
-    if (!value) return;
-    try {
-      for (const key of JSON.parse(value) as string[])
-        if (key.startsWith(this.pendingPrefix)) this.splitDiscard.add(key);
-    } catch {
-      // A malformed barrier protects nothing; adoption writes a fresh exact barrier before changing authority.
-    }
-  }
-
-  private async clearSplitAdoption(): Promise<void> {
-    try {
-      const key = this.metaKey('splitAdoption');
-      if (this.runtimeVault) await this.runtimeVault.delete(key);
-      this.storage?.removeItem(this.legacyMetaKey('splitAdoption'));
-      this.announceRuntime(key);
-    } catch {
-      // The stale barrier names only removed random pending keys, so retaining it is safe and retryable.
     }
   }
 
@@ -882,18 +843,15 @@ export class LibraryLog {
     for (const [key, value] of found) this.pending.set(key, value);
   }
 
-  private async discard(key: string): Promise<boolean> {
+  private async discard(key: string): Promise<void> {
     const legacyKey = this.legacyPendingPrefix + key.slice(this.pendingPrefix.length);
     try {
       if (this.runtimeVault) await this.runtimeVault.delete(key);
       this.storage?.removeItem(legacyKey);
       this.pending.delete(key);
-      this.splitDiscard.delete(key);
       this.announceRuntime(key);
-      return true;
     } catch {
       // Retrying accepted work is harmless; a later scan keeps counting it.
-      return false;
     }
   }
 
@@ -1133,7 +1091,7 @@ export class LibraryLog {
     }
   }
 
-  private async rememberCompacted(keys: string[]) {
+  private async rememberCompacted(keys: string[]): Promise<boolean> {
     for (const k of keys) this.compacted.add(k);
     if (this.runtimeVault)
       try {
@@ -1143,10 +1101,12 @@ export class LibraryLog {
       } catch {
         // `putMeta` below reports the persistence failure; this visit still remembers its own keys.
       }
-    if (!(await this.putMeta('compacted', JSON.stringify([...this.compacted])))) {
-      // Storage failed after the compaction: this page still remembers them.
-      console.warn("den: the library rows removed by compaction couldn't be kept");
+    const kept = await this.putMeta('compacted', JSON.stringify([...this.compacted]));
+    if (!kept) {
+      // This page still remembers the fences when durable storage fails.
+      console.warn('den: local discard fences could not be kept');
     }
+    return kept;
   }
 
   /**
@@ -2049,7 +2009,7 @@ export class LibraryLog {
       console.warn('den: a profile-aware household needs the compound key reset');
       return { refused: options.replaceProfileDirectory ? 'unavailable' : 'profiles' };
     }
-    let unreadableRows = 0;
+    let unreadableRows = false;
     for (const { k, v, opened } of entries) {
       if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened) continue;
       // A compound household reset deliberately drops title exceptions; they never acquire successor authority.
@@ -2060,7 +2020,7 @@ export class LibraryLog {
       }
       if ('unreadable' in opened) {
         // Not attributable to a name, so not movable; §4 removes it anyway. It never blocks the move.
-        unreadableRows++;
+        unreadableRows = true;
         continue;
       }
       const row = opened.row;
@@ -2079,7 +2039,7 @@ export class LibraryLog {
         kept.push({ name: rowName(row), plaintext: (await openPlaintext(this.keys, k, v))! });
       else rows.push(row);
     }
-    if (unreadableRows) console.warn(`den: ${unreadableRows} unreadable library rows stay behind`);
+    if (unreadableRows) console.warn('den: unreadable library rows stay behind');
     // Assistant v1 §10: no drop-box key is carried, and every grant goes revoked.
     const assistant = await resetAssistantRows(rows, Date.now());
     return {
@@ -2237,7 +2197,7 @@ export class LibraryLog {
     await ensureDeferredSyncPolicy();
     const rows = new Map(moving.rows.map((row) => [rowName(row), row]));
     const kept = new Map(moving.kept.map((entry) => [entry.name, entry.plaintext]));
-    let oversized = 0;
+    let oversized = false;
     for (let round = 0; round < ROUNDS && (rows.size || kept.size); round++) {
       const writes: { name: string; row?: Row; base: number; k: string; v: string }[] = [];
       for (const [name, ours] of rows) {
@@ -2252,7 +2212,7 @@ export class LibraryLog {
           continue;
         }
         if (isDocument(row) && !encodeDocument(row, false)) {
-          oversized++;
+          oversized = true;
           rows.delete(name);
           continue;
         }
@@ -2316,8 +2276,7 @@ export class LibraryLog {
         }
       }
     }
-    if (oversized)
-      console.warn(`den: ${oversized} library rows were too large after the move merge`);
+    if (oversized) console.warn('den: library rows were too large after the move merge');
     return rows.size === 0 && kept.size === 0;
   }
 
@@ -2615,9 +2574,12 @@ export class LibraryLog {
       const page = coherentResponsePage(res, await res.json());
       if (!page) return null;
       if (log.generation && page.generation && log.generation !== page.generation) {
-        if (log.directoryCommitted) {
-          if (!(await log.adoptProfileDirectory())) return null;
-        } else if (!(await log.stageRecovery(page.generation))) return null;
+        if (
+          log.directoryCommitted
+            ? !(await log.adoptProfileDirectory())
+            : !(await log.stageRecovery(page.generation))
+        )
+          return null;
         log.memberRegistered = false;
         // Registered under the generation it now reads: under the old one den-edge refuses it.
         log.generation = page.generation;
@@ -2731,14 +2693,14 @@ export class LibraryLog {
       this.columnsIndex!.upsert(JSON.stringify(documents));
     } catch {
       // One refused document refuses its whole batch: add the rest one at a time.
-      let refused = 0;
+      let refused = false;
       for (const document of documents)
         try {
           this.columnsIndex!.upsert(JSON.stringify([document]));
         } catch {
-          refused++;
+          refused = true;
         }
-      if (refused) console.warn(`den: ${refused} documents are left out of the library's lists`);
+      if (refused) console.warn("den: documents are left out of the library's lists");
     }
   }
 
@@ -3066,9 +3028,12 @@ export class LibraryLog {
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (this.directoryCommitted) {
-              if (!(await this.adoptProfileDirectory(active))) return null;
-            } else if (!(await this.stageRecovery(page.generation, active))) return null;
+            if (
+              this.directoryCommitted
+                ? !(await this.adoptProfileDirectory(active))
+                : !(await this.stageRecovery(page.generation, active))
+            )
+              return null;
             if (!active()) return null;
             this.memberRegistered = false;
             // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -4472,20 +4437,13 @@ export class LibraryLog {
   private householdRows(rows: Row[]): Row[] {
     if (!this.profileAware) return rows;
     const kept: Row[] = [];
-    const refused = boundaryCounts();
     let refusedCount = 0;
     for (const row of rows) {
       const scoped = householdScoped(row);
       if (scoped) kept.push(scoped);
-      else {
-        refusedCount++;
-        addBoundaryRow(refused, row);
-      }
+      else refusedCount++;
     }
-    if (refusedCount)
-      console.error(
-        `den: ${refusedCount} rows belong to a profile library and were not written to the household (${boundarySummary(refused)})`,
-      );
+    if (refusedCount) console.error(`den: household refused ${refusedCount} profile rows`);
     return kept;
   }
 
@@ -4498,38 +4456,14 @@ export class LibraryLog {
    */
   private async adoptProfileDirectory(active: () => boolean = () => true): Promise<boolean> {
     if (!active()) return false;
-    await this.refreshPending();
-    if (!active()) return false;
-    const opened = new Map((await this.keptWork()).map((work) => [work.key, work]));
+    const opened = await this.keptWork();
     if (!active()) return false;
     const pending = [...this.pending.keys()];
-    if (pending.length) {
-      const barrier = JSON.stringify(pending);
-      if (
-        !(await this.putRuntime(
-          this.metaKey('splitAdoption'),
-          barrier,
-          this.legacyMetaKey('splitAdoption'),
-        ))
-      ) {
-        console.error('den: pre-split work could not be durably fenced; adoption will retry');
-        return false;
-      }
-      this.installSplitAdoption(barrier);
-      if (!active()) return false;
-    }
-    const dropped = boundaryCounts();
-    dropped[3] = pending.length - opened.size;
-    for (const work of opened.values())
-      if (work.kind === 'ops') {
-        dropped[0] += work.ops?.length ?? 0;
-        dropped[1] += work.riders?.length ?? 0;
-        if (!(work.ops?.length || work.riders?.length)) dropped[3]++;
-      } else for (const row of work.rows) addBoundaryRow(dropped, row);
+    if (pending.length && !(await this.rememberCompacted(pending))) return false;
+    if (!active()) return false;
+    const unknown = pending.length - opened.length;
     if (pending.length)
-      console.error(
-        `den: ${pending.length} kept work items from before the household split were dropped (${boundarySummary(dropped)})`,
-      );
+      console.error(`den: ${pending.length} pre-split edits dropped (unknown=${unknown})`);
     console.warn(
       `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
     );
@@ -4549,25 +4483,8 @@ export class LibraryLog {
         )
         .then(() => undefined)
         .catch(() => console.error('den: the pre-split household cache could not be removed'));
-    await this.discardSplitWork(active);
+    await this.keptWork();
     return active();
-  }
-
-  /** Retry deletion of work kept inert by the durable exact-key barrier. */
-  private async discardSplitWork(active: () => boolean = () => true): Promise<void> {
-    for (const key of [...this.splitDiscard]) {
-      if (!active()) return;
-      if (!this.pending.has(key)) {
-        this.splitDiscard.delete(key);
-        continue;
-      }
-      if (!(await this.discard(key))) continue;
-    }
-    if (this.splitDiscard.size)
-      console.error(
-        `den: ${this.splitDiscard.size} pre-split kept work items remain quarantined until local deletion can be retried`,
-      );
-    if (!this.splitDiscard.size) await this.clearSplitAdoption();
   }
 
   private async stageRecovery(
@@ -4654,20 +4571,19 @@ export class LibraryLog {
             const previous = this.entries.get(rowName(local));
             return previous ? merge(previous.row, local) : local;
           });
-          let oversized = 0;
+          let oversized = false;
           const due = this.householdRows(merged).flatMap((row) => {
             const name = rowName(row),
               previous = this.entries.get(name);
             if (this.holds(name, row)) return [];
             // A merge over the cap leaves the log's version as it stands, and this copy's extra state goes (§11).
             if (isDocument(row) && !encodeDocument(row, false)) {
-              oversized++;
+              oversized = true;
               return [];
             }
             return [{ row, name, base: previous?.seq ?? 0 }];
           });
-          if (oversized)
-            console.warn(`den: ${oversized} library rows were too large after the recovery merge`);
+          if (oversized) console.warn('den: library rows were too large after the recovery merge');
           if (!due.length) continue;
           const sealed = await Promise.all(
             due.map(async (entry) => ({ ...entry, ...(await seal(this.keys, entry.row)) })),
@@ -4762,8 +4678,13 @@ export class LibraryLog {
   private async keptWork(): Promise<KeptWork[]> {
     await this.refreshPending();
     const kept: KeptWork[] = [];
+    let failed = 0;
     for (const [key, encoded] of this.pending) {
-      if (this.splitDiscard.has(key)) continue;
+      if (this.compacted.has(key)) {
+        await this.discard(key);
+        if (this.pending.has(key)) failed++;
+        continue;
+      }
       try {
         const pending = JSON.parse(encoded) as {
           k: string;
@@ -4802,6 +4723,8 @@ export class LibraryLog {
         /* Unreadable: `replay` keeps it, and it has nothing to show. */
       }
     }
+    if (failed)
+      console.error(`den: ${failed} pre-split edits remain quarantined for deletion retry`);
     return kept;
   }
 
@@ -4869,8 +4792,6 @@ export class LibraryLog {
    */
   private async replay(active: () => boolean = () => true): Promise<boolean> {
     const projected = this.projected;
-    if (!active()) return false;
-    if (this.splitDiscard.size) await this.discardSplitWork(active);
     if (!active()) return false;
     // Kept, and sent once a read finds the log again (`refresh`).
     if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
