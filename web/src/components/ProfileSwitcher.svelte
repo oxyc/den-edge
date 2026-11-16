@@ -120,8 +120,8 @@
     if (busy || !canOfferKidCreation || !loadAddKidProfileForm) return;
     kidFormFailed = false;
     kidFormLoading = true;
-    const loaded = await loadAddKidProfileForm().catch((error: unknown) => {
-      console.error('den: Kid profile controls could not be loaded', error);
+    const loaded = await loadAddKidProfileForm().catch(() => {
+      console.error('den: kid profile controls could not be loaded');
       kidFormFailed = true;
       return null;
     });
@@ -182,11 +182,8 @@
         return;
       }
       if (result.outcome === 'denied' && askedPin) denied = true;
-      else if (result.outcome === 'failed') {
-        console.error(`den: the switch to ${choice.name} failed`, result.cause);
-        failed = true;
-      } else if (result.outcome === 'denied') {
-        console.error(`den: the switch to ${choice.name} was refused`);
+      else if (result.outcome === 'failed' || result.outcome === 'denied') {
+        console.error('den: profile switch', choice.role, result.outcome);
         failed = true;
       }
     } finally {
@@ -219,8 +216,8 @@
     let saved: boolean;
     try {
       saved = await profiles.setOwnerPin(value);
-    } catch (error) {
-      console.error('den: the Owner PIN could not be saved', error);
+    } catch {
+      console.error('den: the owner PIN could not be saved');
       saved = false;
     } finally {
       switching = false;
