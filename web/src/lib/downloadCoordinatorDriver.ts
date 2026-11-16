@@ -46,6 +46,9 @@ interface Escalation {
 const UNANSWERED_WAIT = 5 * 60_000;
 /** An unchanged wanted list is handed to Hearth again, and what it started read back, this often. */
 const HEARTH_EVERY = 5 * 60_000;
+/** A failed handoff is retried without turning the visible service cadence into a request loop. */
+const HEARTH_RETRY_MIN = 5_000;
+const HEARTH_RETRY_MAX = 5 * 60_000;
 const ANOTHER_WINDOW = 'another-window';
 const FOREIGN = 'Another device’s ticket.';
 const GONE = 'This release is no longer listed.';
@@ -82,6 +85,8 @@ export class DownloadCoordinatorDriver {
   readonly #unanswered = new Map<string, number>();
   /** The wanted list last handed to Hearth, and when. */
   #hearthSent?: { digest: string; at: number };
+  /** The current unacknowledged handoff and its bounded retry schedule. */
+  #hearthRetry?: { digest: string; failures: number; at: number };
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
@@ -132,10 +137,27 @@ export class DownloadCoordinatorDriver {
       .list()
       .filter((download) => !options.names || options.names.has(download.name));
     await this.#refresh(downloads, now, options.force ?? false);
-    if (!current() || !downloads.length) return false;
+    if (!current()) return false;
+    // A final removal still has work to do: clear Hearth's previously acknowledged non-empty list. Once that clear
+    // is acknowledged there is no reason to acquire an otherwise idle download lease.
+    if (!downloads.length && this.hearthDelay(now) !== 0) return false;
     await ensureDeferredSyncPolicy();
     if (!(await this.#holdLease(now, options.observedFor)) || !current()) return false;
     return this.#holderPass(now);
+  }
+
+  /** When the scheduler should next run solely to synchronize Hearth (if downloads do not need it sooner). */
+  hearthDelay(now = this.queue.now()): number | undefined {
+    if (!this.queue.effects.wanted) return undefined;
+    const items = wantedItems(this.queue.list());
+    const digest = JSON.stringify(items);
+    const retry = this.#hearthRetry;
+    if (retry?.digest === digest) return Math.max(0, retry.at - now);
+    const last = this.#hearthSent;
+    // A fresh driver also sends one empty replacement. That clears intent retained by Hearth if the previous page or
+    // worker disappeared after its local row removal but before receiving the clear response.
+    if (last?.digest !== digest) return 0;
+    return items.length ? Math.max(0, HEARTH_EVERY - (now - last.at)) : undefined;
   }
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
@@ -418,11 +440,26 @@ export class DownloadCoordinatorDriver {
     if (!send) return false;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
+    if (this.#hearthRetry?.digest !== digest) this.#hearthRetry = undefined;
     const last = this.#hearthSent;
     if (last?.digest === digest && (!items.length || now - last.at < HEARTH_EVERY)) return false;
+    const retry = this.#hearthRetry;
+    if (retry?.digest === digest && now < retry.at) return false;
+    let statuses: WantedStatus[] | null;
+    try {
+      statuses = await send(items);
+    } catch (error) {
+      this.#retryHearth(digest, now);
+      throw error;
+    }
+    // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. Keeping one
+    // digest-scoped retry owner also means a changed (newer) intent bypasses the old intent's delay immediately.
+    if (!statuses || !current() || !this.#stillHeld(now)) {
+      this.#retryHearth(digest, now);
+      return false;
+    }
     this.#hearthSent = { digest, at: now };
-    const statuses = await send(items);
-    if (!statuses || !current()) return false;
+    this.#hearthRetry = undefined;
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
@@ -433,6 +470,13 @@ export class DownloadCoordinatorDriver {
       wrote = (await this.#adopt(download, status, now)) || wrote;
     }
     return wrote;
+  }
+
+  #retryHearth(digest: string, now: number): void {
+    const previous = this.#hearthRetry;
+    const failures = previous?.digest === digest ? previous.failures + 1 : 1;
+    const delay = Math.min(HEARTH_RETRY_MAX, HEARTH_RETRY_MIN * 2 ** (failures - 1));
+    this.#hearthRetry = { digest, failures, at: now + delay };
   }
 
   /**

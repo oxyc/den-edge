@@ -17,6 +17,16 @@ const content = {
 } satisfies DownloadContent;
 
 describe('DownloadServiceRuntime artwork', () => {
+  it('schedules one reopen clear, but no zero-delay loop when no Hearth is configured', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({}));
+    const runtime = new DownloadServiceRuntime(testLog().log, clock, () => {}, content, fetchImpl);
+
+    expect(runtime.nextDelay(1)).toBe(0);
+    await expect(runtime.run()).resolves.toBe(false);
+    expect(fetchImpl).toHaveBeenCalledWith('/routes');
+    expect(runtime.nextDelay(1)).toBeUndefined();
+  });
+
   it('recovers exact episode artwork without exposing a row or ticket', async () => {
     const loadSeason = vi.fn(async () => [
       { number: 2, name: 'Two', stillPath: '/other.jpg' },

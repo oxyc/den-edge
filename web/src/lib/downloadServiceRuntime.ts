@@ -155,17 +155,19 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         state !== 'paused'
       );
     });
-    if (!downloads.length) return undefined;
+    const hearth = this.driver.hearthDelay(now);
     // An unasked download is due immediately only when a pass can actually ask Scout. Without a configured or
     // reachable provider, returning zero makes the authority run maintenance and this no-op again without pause.
     // Fall back to its ordinary visible cadence; a plugin-row change is then observed before the next attempt.
     if (this.#providersUnavailable) return undefined;
-    return Math.min(
+    if (!downloads.length) return hearth;
+    const downloadsDelay = Math.min(
       ...downloads.map((download) => {
         const asked = this.coordinator.asked.get(download.name);
         return asked ? Math.max(0, downloadPollDelay(asked.quiet) - (now - asked.at)) : 0;
       }),
     );
+    return hearth === undefined ? downloadsDelay : Math.min(downloadsDelay, hearth);
   }
 
   listen(listener: () => void): () => void {

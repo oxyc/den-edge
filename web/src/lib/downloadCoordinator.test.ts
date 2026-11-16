@@ -1467,6 +1467,168 @@ describe('DownloadCoordinator', () => {
     expect(queue.status(started, now).state).toBe('fetching');
   });
 
+  it('retries a failed final Hearth clear with bounded backoff, then keeps an acknowledged empty quiet', async () => {
+    const shared = testLog();
+    const handed: unknown[][] = [];
+    const answers: Array<[] | null> = [[], null, null, []];
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => ({ sources: [] }),
+        wanted: async (items) => {
+          handed.push(items);
+          return answers.length ? answers.shift()! : [];
+        },
+      },
+      { now: () => T0, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+    await queue.want(title);
+
+    await driver.run({ now: T0 + MINUTE, observedFor: 0 });
+    expect(handed.map((items) => items.length)).toEqual([1]);
+    const download = queue.get(NAME)!;
+    shared.land(removedRow(download.row, [T0 + 2 * MINUTE, 0, DEVICE]));
+
+    await driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 });
+    expect(handed.map((items) => items.length)).toEqual([1, 0]);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE)).toBe(5_000);
+
+    await driver.run({ now: T0 + 2 * MINUTE + 4_999, observedFor: 0 });
+    expect(handed).toHaveLength(2);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 4_999)).toBe(1);
+
+    await driver.run({ now: T0 + 2 * MINUTE + 5_000, observedFor: 0 });
+    expect(handed.map((items) => items.length)).toEqual([1, 0, 0]);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_000)).toBe(10_000);
+    await driver.run({ now: T0 + 2 * MINUTE + 14_999, observedFor: 0 });
+    expect(handed).toHaveLength(3);
+    await driver.run({ now: T0 + 2 * MINUTE + 15_000, observedFor: 0 });
+    expect(handed.map((items) => items.length)).toEqual([1, 0, 0, 0]);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 15_000)).toBeUndefined();
+    await driver.run({ now: T0 + 2 * MINUTE + 30_000, observedFor: 0 });
+    expect(handed).toHaveLength(4);
+  });
+
+  it('sends one empty Hearth replacement after reopen, then leaves it quiet', async () => {
+    const handed: unknown[][] = [];
+    const queue = new DownloadCoordinator(testLog().log, clock(), {
+      ...effects(),
+      wanted: async (items) => {
+        handed.push(items);
+        return [];
+      },
+    });
+    const driver = new DownloadCoordinatorDriver(queue);
+
+    expect(driver.hearthDelay(T0)).toBe(0);
+    await driver.run({ now: T0, observedFor: 120_001 });
+    expect(handed).toEqual([[]]);
+    expect(driver.hearthDelay(T0)).toBeUndefined();
+    await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
+    expect(handed).toEqual([[]]);
+  });
+
+  it('does not let a late clear from a replaced authority suppress newer wanted intent', async () => {
+    const shared = testLog();
+    const handed: unknown[][] = [];
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const sending = new Promise<void>((resolve) => (started = resolve));
+    let current = true;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => ({ sources: [] }),
+        wanted: async (items) => {
+          handed.push(items);
+          if (!items.length) {
+            started();
+            await gate;
+          }
+          return [];
+        },
+      },
+      { now: () => T0, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+    await queue.want(title);
+    await driver.run({ now: T0 + MINUTE, observedFor: 0 });
+    shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));
+
+    const clearing = driver.run({
+      now: T0 + 2 * MINUTE,
+      observedFor: 0,
+      current: () => current,
+    });
+    await sending;
+    await queue.want({ ...title, mediaId: 1400, episode: 4 });
+    current = false;
+    release();
+    await expect(clearing).resolves.toBe(false);
+
+    expect(driver.hearthDelay(T0 + 2 * MINUTE)).toBe(0);
+    await driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 });
+    expect(handed.map((items) => items.length)).toEqual([1, 0, 1]);
+  });
+
+  it('keeps a cancelled clear pending across lease replacement and sends it after reacquisition', async () => {
+    const shared = testLog();
+    const handed: unknown[][] = [];
+    const cancelled = new DOMException('cancelled', 'AbortError');
+    let cancelEmpty = true;
+    const queue = new DownloadCoordinator(
+      shared.log,
+      clock(),
+      {
+        ...effects(),
+        resolve: async () => ({ sources: [] }),
+        wanted: async (items) => {
+          handed.push(items);
+          if (!items.length && cancelEmpty) throw cancelled;
+          return [];
+        },
+      },
+      { now: () => T0, monotonicNow: () => 0 },
+    );
+    const driver = new DownloadCoordinatorDriver(queue);
+    await queue.want(title);
+    await driver.run({ now: T0 + MINUTE, observedFor: 0 });
+    shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));
+
+    await expect(driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 })).rejects.toBe(cancelled);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE)).toBe(5_000);
+
+    const lease = shared.log.settings(LEASE_ROW)!;
+    shared.land({
+      ...lease,
+      values: {
+        ...lease.values,
+        lease: { value: { strings: [TV, '2'] }, at: [T0 + 2 * MINUTE + 1, 0, TV] },
+      },
+    });
+    cancelEmpty = false;
+    await driver.run({ now: T0 + 2 * MINUTE + 5_000, observedFor: 0 });
+    expect(handed).toHaveLength(2);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_000)).toBe(0);
+
+    shared.land({
+      ...shared.log.settings(LEASE_ROW)!,
+      values: {
+        ...shared.log.settings(LEASE_ROW)!.values,
+        lease: { value: { strings: ['', '2'] }, at: [T0 + 2 * MINUTE + 5_001, 0, TV] },
+      },
+    });
+    await driver.run({ now: T0 + 2 * MINUTE + 5_001, observedFor: 120_001 });
+    expect(handed.map((items) => items.length)).toEqual([1, 0, 0]);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_001)).toBeUndefined();
+  });
+
   it('waits for a wanted episode to air before searching for it', async () => {
     const shared = testLog();
     let resolves = 0;
