@@ -65,7 +65,6 @@
     };
   });
   const directoryLoads = new SvelteMap<string, ServiceDirectoryLoad>();
-  const directoryKey = (language: string, country: string) => `${language}:${country}`;
   let directoryRequest = 0;
   let retryingDirectories = $state(0);
   let directoryOwner = $state.raw<ProfileSession>();
@@ -86,27 +85,15 @@
     retryingDirectories = 0;
   });
   const directoryView = $derived.by(() => {
-    const keys = [
-      ...new Set(
-        servicePicks.map(
-          ({ country }) => `${directoryOwnerRevision}:${directoryKey(i18n.language, country)}`,
-        ),
-      ),
-    ];
-    const naming = keys.filter((key) => directoryLoads.get(key)?.status === 'loading').length;
-    const failed = keys.filter((key) => {
-      const status = directoryLoads.get(key)?.status;
-      return status === 'partial' || status === 'failed';
+    const countries = [...new Set(servicePicks.map((pick) => pick.country))];
+    let naming = 0;
+    const failed: string[] = [];
+    const services = countries.flatMap((country) => {
+      const load = directoryLoads.get(country);
+      if (load?.status === 'loading') naming++;
+      else if (load?.status === 'partial' || load?.status === 'failed') failed.push(country);
+      return serviceResolver?.resolvePicks(servicePicks, load?.services ?? [], country) ?? [];
     });
-    const services = [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
-      (country) =>
-        serviceResolver?.resolvePicks(
-          servicePicks,
-          directoryLoads.get(`${directoryOwnerRevision}:${directoryKey(i18n.language, country)}`)
-            ?.services ?? [],
-          country,
-        ) ?? [],
-    );
     const names = Object.fromEntries(
       services.flatMap(({ service }) =>
         [service.id, ...service.variants].map((id) => [id, service.name]),
@@ -120,37 +107,38 @@
       settled:
         serviceDirectoriesAdmitted &&
         (directoryModuleFailed ||
-          (!!directoryServices && naming === 0 && keys.every((key) => directoryLoads.has(key)))),
+          (!!directoryServices &&
+            naming === 0 &&
+            countries.every((country) => directoryLoads.has(country)))),
     };
   });
-  function keepDirectoryLoad(key: string, load: ServiceDirectoryLoad) {
-    directoryLoads.set(key, load);
-  }
   function loadServiceDirectory(
     directory: typeof import('../settings/services'),
     owner: ProfileSession,
     language: InterfaceLanguage,
     country: string,
-    key: string,
     refresh: boolean,
   ) {
     const request = ++directoryRequest;
     const revision = directoryOwnerRevision;
-    const previous = directoryLoads.get(key);
+    const previous = directoryLoads.get(country);
     if (refresh) retryingDirectories++;
-    keepDirectoryLoad(key, directory.beginServiceDirectoryLoad(previous, request));
+    directoryLoads.set(country, directory.beginServiceDirectoryLoad(previous, request));
     void directory
       .contentServicesResult(owner.content, country, refresh, language)
       .then(
         (result) => {
-          const owned = directoryLoads.get(key);
-          if (!owned || owned.request !== request) return;
-          keepDirectoryLoad(key, directory.completeServiceDirectoryLoad(owned, request, result));
+          const owned = directoryLoads.get(country);
+          if (revision !== directoryOwnerRevision || !owned || owned.request !== request) return;
+          directoryLoads.set(
+            country,
+            directory.completeServiceDirectoryLoad(owned, request, result),
+          );
         },
         () => {
-          const owned = directoryLoads.get(key);
-          if (!owned || owned.request !== request) return;
-          keepDirectoryLoad(key, directory.failServiceDirectoryLoad(owned, request));
+          const owned = directoryLoads.get(country);
+          if (revision !== directoryOwnerRevision || !owned || owned.request !== request) return;
+          directoryLoads.set(country, directory.failServiceDirectoryLoad(owned, request));
         },
       )
       .finally(() => {
@@ -164,9 +152,8 @@
     const language = i18n.language;
     if (!showServices || !serviceDirectoriesAdmitted || !directory || !owner) return;
     for (const country of new Set(servicePicks.map((pick) => pick.country))) {
-      const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
-      if (directoryLoads.has(key)) continue;
-      loadServiceDirectory(directory, owner, language, country, key, false);
+      if (directoryLoads.has(country)) continue;
+      loadServiceDirectory(directory, owner, language, country, false);
     }
   });
   function retryServiceDirectories() {
@@ -177,8 +164,7 @@
     const language = i18n.language;
     const failed = new Set(directoryView.failed);
     for (const country of new Set(servicePicks.map((pick) => pick.country))) {
-      const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
-      if (failed.has(key)) loadServiceDirectory(directory, owner, language, country, key, true);
+      if (failed.has(country)) loadServiceDirectory(directory, owner, language, country, true);
     }
   }
   $effect(() => {
