@@ -186,3 +186,21 @@ it('localizes the reduced-TV download management handoff', async () => {
     expect(i18n.phrase('Couldn’t cancel that download. Try again.')).toBe(expected.cancelFailure);
   }
 });
+
+it('localizes a saved-language presentation failure without claiming the write failed', async () => {
+  const cases = [
+    ['en', 'Your language was saved, but this screen couldn’t switch languages. Try again.'],
+    [
+      'es',
+      'Idioma guardado, pero no aplicado. Inténtalo de nuevo.',
+    ],
+    ['sv', 'Språket sparades men kunde inte visas. Försök igen.'],
+  ] as const;
+
+  for (const [language, message] of cases) {
+    await setInterfaceLanguage(language);
+    expect(
+      i18n.phrase('Your language was saved, but this screen couldn’t switch languages. Try again.'),
+    ).toBe(message);
+  }
+});

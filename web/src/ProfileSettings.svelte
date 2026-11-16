@@ -3,7 +3,7 @@
   the Owner PIN, asked once per session and again after any profile switch.
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Button from './components/Button.svelte';
   import PinInput from './components/PinInput.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
@@ -18,6 +18,7 @@
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import { i18n, setInterfaceLanguage } from './lib/i18n.svelte';
   import { rememberFreshPresentationLanguage } from './lib/translationCache';
+  import { LatestMutation, type MutationClaim } from './settings/latestMutation';
 
   let {
     session,
@@ -28,7 +29,20 @@
     return value ? { ...value, interfaceLanguage: i18n.language } : undefined;
   });
   let saving = $state(false);
-  let failure = $state<string | null>(null);
+  type PreferenceChanges = Parameters<ProfilePreferences['patch']>[0];
+  type PreferenceClaim = MutationClaim<ProfileSession, PreferenceChanges>;
+  type PreferenceFailure =
+    | { kind: 'write'; authority: ProfileSession; claim: PreferenceClaim }
+    | {
+        kind: 'presentation';
+        authority: ProfileSession;
+        claim: PreferenceClaim;
+        language: NonNullable<PreferenceChanges['interfaceLanguage']>;
+      }
+    | { kind: 'policy'; authority: ProfileSession };
+  let failure = $state<PreferenceFailure | null>(null);
+  const preferenceWrites = new LatestMutation<ProfileSession, PreferenceChanges>();
+  let saveSession = untrack(() => session);
   const role = $derived(
     i18n.text(session.identity.kind === 'visitor' ? 'profile.visitor' : 'profile.kid'),
   );
@@ -39,8 +53,18 @@
   let verificationFailed = $state(false);
   let unlockAttempt = 0;
 
+  $effect.pre(() => {
+    const active = session;
+    if (active === saveSession) return;
+    saveSession = active;
+    preferenceWrites.retire();
+    failure = null;
+    saving = false;
+  });
+
   onDestroy(() => {
     unlockAttempt++;
+    preferenceWrites.retire();
   });
 
   async function unlock() {
@@ -72,30 +96,67 @@
     maximumAge: number | null;
     unknownRatings: 'allow' | 'block';
   }): Promise<boolean> {
+    const active = session;
     saving = true;
     failure = null;
     const changed = (await profiles?.setKidPolicy(policy)) ?? false;
-    if (!changed) failure = i18n.text('profile.policySaveFailed');
-    saving = false;
+    if (active === session) {
+      if (!changed) failure = { kind: 'policy', authority: active };
+      saving = false;
+    }
     return changed;
   }
 
-  function save(changes: Parameters<ProfilePreferences['patch']>[0]) {
+  async function presentLanguage(
+    claim: PreferenceClaim,
+    language: NonNullable<PreferenceChanges['interfaceLanguage']>,
+  ) {
+    if (!preferenceWrites.isCurrent(claim, session)) return;
     saving = true;
     failure = null;
-    void (session.preferences as ProfilePreferences)
-      .patch(changes)
-      .then(() => {
-        if (!changes.interfaceLanguage) return;
-        rememberFreshPresentationLanguage(changes.interfaceLanguage);
-        session.presentIn(changes.interfaceLanguage);
-        return setInterfaceLanguage(changes.interfaceLanguage);
-      })
-      .catch((error: unknown) => {
-        console.warn('den: profile preference save failed', error);
-        failure = i18n.text('profile.saveFailed');
-      })
-      .finally(() => (saving = false));
+    try {
+      rememberFreshPresentationLanguage(language);
+      claim.authority.presentIn(language);
+      await setInterfaceLanguage(language);
+    } catch (error: unknown) {
+      console.warn('den: the saved profile language could not be presented', error);
+      if (preferenceWrites.isCurrent(claim, session))
+        failure = { kind: 'presentation', authority: claim.authority, claim, language };
+    } finally {
+      if (preferenceWrites.isCurrent(claim, session)) saving = false;
+    }
+  }
+
+  async function writePreferences(changes: PreferenceChanges) {
+    const active = session;
+    const claim = preferenceWrites.begin(active, changes);
+    saving = true;
+    failure = null;
+    try {
+      await (active.preferences as ProfilePreferences).patch(claim.intent);
+    } catch (error: unknown) {
+      console.warn('den: profile preference save failed', error);
+      if (preferenceWrites.isCurrent(claim, session)) saving = false;
+      if (preferenceWrites.isCurrent(claim, session))
+        failure = { kind: 'write', authority: active, claim };
+      return;
+    }
+    if (!preferenceWrites.isCurrent(claim, session)) return;
+    if (claim.intent.interfaceLanguage)
+      await presentLanguage(claim, claim.intent.interfaceLanguage);
+    else saving = false;
+  }
+
+  function save(changes: PreferenceChanges) {
+    void writePreferences(changes);
+  }
+
+  function retryPreferences() {
+    const retry = failure;
+    if (!retry || retry.authority !== session || retry.kind === 'policy') return;
+    if (!preferenceWrites.isCurrent(retry.claim, session)) return;
+    if (retry.kind === 'write') void writePreferences(retry.claim.intent);
+    else void presentLanguage(retry.claim, retry.language);
   }
 </script>
 
@@ -151,7 +212,23 @@
         </div>
       </div>
       <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
-      {#if failure}<p class="banner bad" role="alert">{i18n.phrase(failure)}</p>{/if}
+      {#if failure?.authority === session}<div class="banner bad save-failure" role="alert">
+          <span
+            >{failure.kind === 'write'
+              ? i18n.text('profile.saveFailed')
+              : failure.kind === 'policy'
+                ? i18n.text('profile.policySaveFailed')
+                : i18n.phrase(
+                    'Your language was saved, but this screen couldn’t switch languages. Try again.',
+                  )}</span
+          >
+          {#if failure.kind !== 'policy'}<Button
+              variant="secondary"
+              label={i18n.phrase('Retry')}
+              disabled={saving}
+              onclick={retryPreferences}
+            />{/if}
+        </div>{/if}
       {#if !prefs}
         <p class="banner" role="status">{i18n.text('profile.loadingSettings')}</p>
       {:else}
@@ -255,6 +332,12 @@
   .title p,
   .banner {
     color: var(--muted);
+  }
+
+  .save-failure {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
 
   h1 {

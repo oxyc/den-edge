@@ -1390,6 +1390,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudo revocar. Inténtalo de nuevo en unos instantes.',
   'Couldn’t disconnect it. Try again in a moment.':
     'No se pudo desconectar. Inténtalo de nuevo en unos instantes.',
+  'Your language was saved, but this screen couldn’t switch languages. Try again.':
+    'Idioma guardado, pero no aplicado. Inténtalo de nuevo.',
   'Link this browser to your library, or accept an invite, to see its assistants.':
     'Vincula este navegador a tu biblioteca o acepta una invitación para ver sus asistentes.',
   'Retry cleanup': 'Reintentar limpieza',

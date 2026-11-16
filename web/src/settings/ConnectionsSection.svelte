@@ -59,6 +59,7 @@
   import { parseTVLink } from '../lib/tvLink';
   import type { LibraryJoinPresentationOwner } from '../lib/libraryJoinPresentation';
   import type { CompoundResetStartResult } from '../lib/profileKeyResetPage';
+  import { LatestMutation } from './latestMutation';
 
   let {
     link,
@@ -408,12 +409,46 @@
   void fetchSimklClientId().then((id) => (simklClientId = id));
   let simklPin = $state<SimklPin | null>(null);
   let simklNote = $state<{ text: string; bad: boolean } | null>(null);
+  let retrySimklDisconnect = $state(false);
+  let disconnectingSimkl = $state(false);
+  const simklWrites = new LatestMutation<typeof saveSimkl, null>();
   /** Said when an approval found the held list changed under it. */
   let removalsNote = $state<string | null>(null);
   let simklAttempt = 0;
   $effect(() => () => {
     simklAttempt++;
+    simklWrites.retire();
   });
+  $effect(() => {
+    if (simklConnected) return;
+    untrack(() => {
+      simklWrites.retire();
+      retrySimklDisconnect = false;
+      disconnectingSimkl = false;
+      if (simklNote?.text === 'Couldn’t disconnect it. Try again in a moment.') simklNote = null;
+    });
+  });
+
+  async function disconnectSimkl() {
+    if (disconnectingSimkl) return;
+    const writer = saveSimkl;
+    const claim = simklWrites.begin(writer, null);
+    disconnectingSimkl = true;
+    retrySimklDisconnect = false;
+    simklNote = null;
+    let saved = false;
+    try {
+      saved = await writer(claim.intent);
+    } catch (error) {
+      console.warn('den: SIMKL disconnect could not be saved', error);
+    }
+    if (!simklWrites.isCurrent(claim, saveSimkl)) return;
+    disconnectingSimkl = false;
+    if (!saved) {
+      retrySimklDisconnect = true;
+      simklNote = { text: 'Couldn’t disconnect it. Try again in a moment.', bad: true };
+    }
+  }
 
   async function connectSimkl() {
     const clientId = simklClientId;
@@ -436,13 +471,15 @@
       if (attempt !== simklAttempt) return;
       if (answer.kind === 'authorized') {
         simklPin = null;
-        if (await saveSimkl(answer.token)) simklNote = { text: 'Connected to SIMKL.', bad: false };
+        simklNote = (await saveSimkl(answer.token))
+          ? { text: 'Connected', bad: false }
+          : { text: 'Couldn’t reach the source service.', bad: true };
         return;
       }
       if (answer.kind === 'failed') {
         simklPin = null;
         simklNote = {
-          text: 'Couldn’t reach SIMKL. Check your connection and try again.',
+          text: 'Couldn’t reach the source service.',
           bad: true,
         };
         return;
@@ -1050,8 +1087,8 @@
             label="Disconnect"
             question="Disconnect SIMKL?"
             detail="Den stops syncing your watch history with it, on every device."
-            {disabled}
-            onconfirm={() => void saveSimkl(null)}
+            disabled={disabled || disconnectingSimkl}
+            onconfirm={() => void disconnectSimkl()}
           />
         </div>
       {:else if simklPin}
@@ -1076,9 +1113,20 @@
           />
         </div>
       {/if}
-      {#if simklNote}<p class="status" class:bad={simklNote.bad} role="status">
-          {simklNote.text}
+      {#if simklNote}<p
+          class="status"
+          class:bad={simklNote.bad}
+          role={simklNote.bad ? 'alert' : 'status'}
+        >
+          {i18n.phrase(simklNote.text)}
         </p>{/if}
+      {#if retrySimklDisconnect}<Button
+          variant="secondary"
+          label={disconnectingSimkl ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
+          busy={disconnectingSimkl}
+          disabled={disabled || disconnectingSimkl}
+          onclick={() => void disconnectSimkl()}
+        />{/if}
       <p class="foot">
         SIMKL (<a href="https://simkl.com" target="_blank" rel="noreferrer noopener">simkl.com</a>)
         syncs your watch history and records what you watch. {simkl

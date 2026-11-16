@@ -627,6 +627,45 @@ test('a held retired preference save cannot publish language or restore focus in
   ).toEqual([]);
 });
 
+test('a refused SIMKL disconnect stays connected and its localized Retry commits', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { images: {}, results: [] } }));
+  await page.goto(
+    `${E2E_ORIGIN}/test/settings.html?profile-tracker-authority&tracker-disconnect-fail-once`,
+  );
+
+  await page.getByRole('button', { name: /SIMKL Connected/ }).click();
+  // The locale catalog may qualify a brand for glossary review; the production row id is the stable identity.
+  const section = page.locator('#simkl-panel');
+  await page.evaluate(() => globalThis.fixtureInterfaceLanguage('es'));
+  await section.getByRole('button', { name: 'Desconectar' }).click();
+  await section.getByRole('button', { name: 'Desconectar', exact: true }).click();
+  await expect(section.getByRole('alert')).toHaveText(
+    'No se pudo desconectar. Inténtalo de nuevo en unos instantes.',
+  );
+  expect(
+    await page.evaluate(() => globalThis.fixtureTrackerAuthority.views().owner.connected),
+  ).toBe(true);
+
+  await section.getByRole('button', { name: 'Reintentar' }).click();
+  await expect(section.getByRole('alert')).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => globalThis.fixtureTrackerAuthority.views().owner.connected))
+    .toBe(false);
+  await expect
+    .poll(() => page.evaluate(() => globalThis.fixtureTrackerAuthority.commands()))
+    .toEqual({ owner: ['disconnect', 'disconnect'], replacement: [] });
+  expect(await page.evaluate(() => globalThis.fixtureTrackerAuthority.householdCommands())).toEqual(
+    [],
+  );
+});
+
 test('saving a provider key validates it in the content Worker before storing it', async ({
   page,
 }) => {

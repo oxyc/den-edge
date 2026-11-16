@@ -425,10 +425,12 @@
   }
 
   async function saveSimkl(token: string | null): Promise<boolean> {
-    return run(() =>
-      token
-        ? authority.activityModel.connectSimkl(token)
-        : authority.activityModel.disconnectSimkl(),
+    return run(
+      () =>
+        token
+          ? authority.activityModel.connectSimkl(token)
+          : authority.activityModel.disconnectSimkl(),
+      true,
     );
   }
 

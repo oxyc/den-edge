@@ -30,6 +30,7 @@
     VisitorActivityLock,
     VisitorProfileSession,
   } from '../src/lib/visitorProfileSession.svelte';
+  import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
 
   const params = new URLSearchParams(location.search);
   let ownerPin = params.get('pin') === 'none' ? null : '1234';
@@ -54,6 +55,24 @@
     { profile: string; name: string; maximumAge: number; receipt: string }
   >();
   let releaseHeldPin: ((matches: boolean) => void) | null = null;
+  let failNextPreferenceSave = false;
+  const preferenceFailureStorage: Storage = {
+    get length() {
+      return localStorage.length;
+    },
+    clear: () => localStorage.clear(),
+    getItem: (key) => localStorage.getItem(key),
+    key: (index) => localStorage.key(index),
+    removeItem: (key) => localStorage.removeItem(key),
+    setItem(key, value) {
+      if (failNextPreferenceSave && key.startsWith('den.profile.preferences.preview.v1:')) {
+        failNextPreferenceSave = false;
+        throw new Error('fixture profile preference write refused');
+      }
+      localStorage.setItem(key, value);
+    },
+  };
+  const profileStorage = params.has('preferenceRetry') ? preferenceFailureStorage : localStorage;
   if (params.has('orphan'))
     localStorage.setItem(
       'den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity',
@@ -455,6 +474,12 @@
       releaseHeldPin = null;
       resolve?.(matches);
     },
+    failNextPreferenceSave() {
+      failNextPreferenceSave = true;
+    },
+    setLanguage(language: 'en' | 'es' | 'sv') {
+      return setInterfaceLanguage(language);
+    },
     resolveHeldCreate() {
       const resolve = releaseHeldCreate;
       releaseHeldCreate = null;
@@ -501,7 +526,7 @@
       if (answer === 'enabled' || answer === 'preview')
         profiles = new ProfileModeCoordinator(
           owner,
-          localStorage,
+          profileStorage,
           window,
           visitorLock,
           params.has('realProfiles')
