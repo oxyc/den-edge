@@ -121,6 +121,33 @@ test('the lazy catalogue replaces language and owner snapshots and fences their 
   await expect(requests).toHaveText('3');
 });
 
+test('an owner replacement fences a live retry and clears its obsolete recovery state', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=retry-owner`);
+
+  const requests = page.locator('[data-requests]');
+  const state = page.locator('[data-service-state]');
+  const row = page.locator('.services-row');
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('1');
+  await row.getByRole('button', { name: 'Try again' }).click();
+  await expect(requests).toHaveText('2');
+  await expect(row.getByRole('status')).toHaveText('Trying again…');
+
+  await page.evaluate(() => globalThis.replaceServiceOwner());
+  await expect(requests).toHaveText('3');
+  await expect(state).toHaveText('new:en:true:Netflix:2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(row.getByRole('status')).toHaveCount(0);
+
+  await page.evaluate(() => document.querySelector('[data-resolve-stale-retry]').click());
+  await expect(state).toHaveText('new:en:true:Netflix:2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(requests).toHaveText('3');
+});
+
 test('a resolved duplicate-country replacement keeps the shared browser rail in place', async ({
   page,
 }) => {

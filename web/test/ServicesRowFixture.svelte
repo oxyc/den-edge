@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { ProfileSession } from '../src/lib/profileSession.svelte';
   import type { ServicePick } from '../src/lib/prefs';
-  import * as serviceResolver from '../src/lib/services';
   import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
   import type { Service, ServiceDirectoryResult } from '../src/settings/services';
   import HomeCatalogue from '../src/components/HomeCatalogue.svelte';
@@ -24,6 +23,17 @@
     series: true,
     variants: [],
   };
+  const serviceResolver = {
+    resolvePicks(picks: readonly ServicePick[], directory: readonly Service[], country: string) {
+      const here = picks.filter((pick) => pick.country === country);
+      return directory.flatMap((service) => {
+        const pick = here.find(
+          ({ id }) => service.id === id || service.variants.includes(id),
+        );
+        return pick ? [{ pick, service }] : [];
+      });
+    },
+  };
   let servicePicks = $state.raw<readonly ServicePick[]>([
     { id: netflix.id, country: 'US' },
     { id: max.id, country: 'US' },
@@ -37,6 +47,7 @@
     ];
 
   let retryResolve: ((result: ServiceDirectoryResult) => void) | undefined;
+  let staleRetryResolve: ((result: ServiceDirectoryResult) => void) | undefined;
   let outstandingResolve: ((result: ServiceDirectoryResult) => void) | undefined;
   let staleResolve: ((result: ServiceDirectoryResult) => void) | undefined;
   const held = (save: (resolve: (result: ServiceDirectoryResult) => void) => void) =>
@@ -59,6 +70,13 @@
             ],
             complete: true,
           };
+        }
+        if (result === 'retry-owner') {
+          if (tag === 'first') {
+            if (requests === 1) throw new Error('unavailable');
+            return held((resolve) => (staleRetryResolve = resolve));
+          }
+          return { services: [netflix, max], complete: true };
         }
         if (result === 'resolved' || result === 'replacement')
           return { services: [netflix, max], complete: true };
@@ -112,6 +130,10 @@
     staleResolve?.({ services: [max], complete: true });
     staleResolve = undefined;
   }
+  function resolveStaleRetry() {
+    staleRetryResolve?.({ services: [max], complete: true });
+    staleRetryResolve = undefined;
+  }
 </script>
 
 <p data-requests>{requests}</p>
@@ -119,6 +141,7 @@
 <button data-resolve-retry hidden onclick={resolveRetry}>Resolve retry</button>
 <button data-resolve-outstanding hidden onclick={resolveOutstanding}>Resolve outstanding</button>
 <button data-resolve-stale hidden onclick={resolveStale}>Resolve stale</button>
+<button data-resolve-stale-retry hidden onclick={resolveStaleRetry}>Resolve stale retry</button>
 <div aria-hidden="true" style="height: 2400px"></div>
 <HomeCatalogue
   rows={[]}

@@ -32,7 +32,7 @@
     showServices: boolean;
     serviceSession?: ProfileSession;
     servicePicks?: readonly ServicePick[];
-    serviceResolver?: typeof import('../lib/services') | null;
+    serviceResolver?: Pick<typeof import('../lib/services'), 'resolvePicks'> | null;
     onServiceState?: (state: {
       owner: ProfileSession;
       language: string;
@@ -69,9 +69,7 @@
   let directoryLoads = $state.raw<Record<string, ServiceDirectoryLoad>>({});
   const directoryKey = (language: string, country: string) => `${language}:${country}`;
   let directoryRequest = 0;
-  let directoryRetry = $state(0);
-  const refreshDirectories: Record<string, true> = {};
-  let retryingDirectories = $state.raw<Record<string, true>>({});
+  let retryingDirectories = $state.raw<Record<string, number>>({});
   let directoryOwner = $state.raw<ProfileSession | undefined>();
   let directoryOwnerRevision = $state(0);
   $effect(() => {
@@ -97,13 +95,54 @@
     }),
   );
   const directoryRetrying = $derived(currentDirectoryKeys.some((key) => retryingDirectories[key]));
+  function loadServiceDirectory(
+    directory: typeof import('../settings/services'),
+    owner: ProfileSession,
+    language: string,
+    country: string,
+    key: string,
+    refresh: boolean,
+  ) {
+    const request = ++directoryRequest;
+    const previous = untrack(() => directoryLoads[key]);
+    if (refresh) {
+      retryingDirectories = { ...untrack(() => retryingDirectories), [key]: request };
+    }
+    directoryLoads = {
+      ...untrack(() => directoryLoads),
+      [key]: directory.beginServiceDirectoryLoad(previous, request),
+    };
+    void directory
+      .contentServicesResult(owner.content, country, refresh, language)
+      .then(
+        (result) => {
+          const owned = untrack(() => directoryLoads[key]);
+          if (!owned || owned.request !== request) return;
+          directoryLoads = {
+            ...untrack(() => directoryLoads),
+            [key]: directory.completeServiceDirectoryLoad(owned, request, result),
+          };
+        },
+        () => {
+          const owned = untrack(() => directoryLoads[key]);
+          if (!owned || owned.request !== request) return;
+          directoryLoads = {
+            ...untrack(() => directoryLoads),
+            [key]: directory.failServiceDirectoryLoad(owned, request),
+          };
+        },
+      )
+      .finally(() => {
+        if (untrack(() => retryingDirectories[key]) !== request) return;
+        const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
+        retryingDirectories = rest;
+      });
+  }
   $effect(() => {
     const directory = directoryServices;
     const owner = serviceSession;
     const language = i18n.language;
-    void directoryRetry;
     if (!showServices || !serviceDirectoriesAdmitted || !directory || !owner) return;
-    let current = true;
     const activeKeys = new Set(currentDirectoryKeys);
     const loads = untrack(() => directoryLoads);
     if (Object.keys(loads).some((key) => !activeKeys.has(key))) {
@@ -120,51 +159,21 @@
     for (const country of new Set(servicePicks.map((pick) => pick.country))) {
       const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
       const previous = untrack(() => directoryLoads[key]);
-      const refresh = refreshDirectories[key] === true;
-      delete refreshDirectories[key];
-      if (previous && !refresh) continue;
-      const request = ++directoryRequest;
-      directoryLoads = {
-        ...untrack(() => directoryLoads),
-        [key]: directory.beginServiceDirectoryLoad(previous, request),
-      };
-      void directory
-        .contentServicesResult(owner.content, country, refresh, language)
-        .then(
-          (result) => {
-            if (!current) return;
-            const owned = untrack(() => directoryLoads[key]);
-            if (!owned) return;
-            directoryLoads = {
-              ...untrack(() => directoryLoads),
-              [key]: directory.completeServiceDirectoryLoad(owned, request, result),
-            };
-          },
-          () => {
-            if (!current) return;
-            const owned = untrack(() => directoryLoads[key]);
-            if (!owned) return;
-            directoryLoads = {
-              ...untrack(() => directoryLoads),
-              [key]: directory.failServiceDirectoryLoad(owned, request),
-            };
-          },
-        )
-        .finally(() => {
-          if (!current) return;
-          if (untrack(() => retryingDirectories[key])) {
-            const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
-            retryingDirectories = rest;
-          }
-        });
+      if (previous) continue;
+      loadServiceDirectory(directory, owner, language, country, key, false);
     }
-    return () => (current = false);
   });
   function retryServiceDirectories() {
     if (directoryRetrying || !failedDirectories.length) return;
-    for (const key of failedDirectories) refreshDirectories[key] = true;
-    retryingDirectories = Object.fromEntries(failedDirectories.map((key) => [key, true]));
-    directoryRetry++;
+    const directory = directoryServices;
+    const owner = serviceSession;
+    if (!directory || !owner) return;
+    const language = i18n.language;
+    const failed = new Set(failedDirectories);
+    for (const country of new Set(servicePicks.map((pick) => pick.country))) {
+      const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
+      if (failed.has(key)) loadServiceDirectory(directory, owner, language, country, key, true);
+    }
   }
   const services = $derived(
     [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
