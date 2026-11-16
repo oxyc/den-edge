@@ -91,6 +91,25 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Broader profile-lifecycle availability (#544) was measured on matched production builds at base `1fdda1db` and
+  production head `572d327d`. Ordinary Browser startup moves 206,577 → 206,567 gzip bytes (-10), while its
+  complete JS/CSS graph moves 895,308 → 895,653 (+345). Independently lazy Spanish/Swedish catalogs move
+  50,827 → 51,060 (+233), leaving the non-translation graph +112. LG/webOS startup moves 241,263 → 241,247
+  (-16), complete 994,580 → 994,924 (+344), translations +233 and non-translation graph +111. Supported
+  Samsung/Tizen startup moves 241,885 → 241,880 (-5), complete 1,315,013 → 1,315,376 (+363), translations
+  +233 and non-translation graph +130. Reduced Tizen 3 startup moves 193,393 → 193,391 (-2), complete
+  2,392,118 → 2,392,448 (+330), translations 50,922 → 51,151 (+229) and non-translation graph +101.
+  Before retaining these deltas, the initial eager keyed English messages were removed: Browser and modern TV now
+  consolidate the notice in the existing lazy `ContentSection` and existing independently lazy locale chunks, while
+  reduced Tizen 3 reuses its already separate Settings route. Another dynamic import would add a request to render
+  one paragraph and cannot reduce the complete graph; a further split for the old Tizen 3 engine would likewise add
+  a request to its small reduced route without removing the route or its truthful viewer-only state. The change adds
+  no dependency, network request, task, listener, timer, cache, persistence or background work. Clean base already
+  exceeds the fixed Browser startup allowance by 28 bytes (10,181 versus 10,153); this change improves startup by
+  10 bytes but remains 18 over, with recalibration owned by #1282 rather than absorbed here. No budget is changed:
+  the Browser complete non-translation ceiling retains 3,437 bytes, modern translations retain 140 bytes and the
+  reduced-Tizen translation ceiling retains 49 bytes.
+
 - Exact profile authority and truthful tracker capability (#534) were measured on matched production builds at
   base `87c470e9` and production/test head `4027875e`. Ordinary Browser startup moves 206,566 → 206,545 gzip
   bytes (-21), while the complete graph moves 894,656 → 895,131 (+475). Independently lazy Spanish/Swedish
