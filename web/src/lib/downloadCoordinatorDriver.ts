@@ -83,10 +83,8 @@ export class DownloadCoordinatorDriver {
   #again?: { options: DownloadDriveOptions; pass: Promise<boolean> };
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
-  /** The wanted list last handed to Hearth, and when. */
-  #hearthSent?: { digest: string; at: number };
-  /** The current unacknowledged handoff and its bounded retry schedule. */
-  #hearthRetry?: { digest: string; failures: number; at: number };
+  /** The last digest's acknowledgement (`failures: 0`) or bounded retry schedule. */
+  #hearth?: { digest: string; failures: number; at: number };
   /** Undefined for generic callers; null when discovery proves there is no Hearth; otherwise its exact install. */
   #hearthAuthority: string | null | undefined;
   #hearthAuthorityEpoch = 0;
@@ -100,8 +98,7 @@ export class DownloadCoordinatorDriver {
     if (this.#hearthAuthority === authority) return;
     this.#hearthAuthority = authority;
     this.#hearthAuthorityEpoch++;
-    this.#hearthSent = undefined;
-    this.#hearthRetry = undefined;
+    this.#hearth = undefined;
   }
 
   run(options: DownloadDriveOptions = {}): Promise<boolean> {
@@ -171,9 +168,8 @@ export class DownloadCoordinatorDriver {
     if (!this.queue.effects.wanted || this.#hearthAuthority === null) return undefined;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    const retry = this.#hearthRetry;
-    if (retry?.digest === digest) return Math.max(0, retry.at - now);
-    const last = this.#hearthSent;
+    const last = this.#hearth;
+    if (last?.digest === digest && last.failures) return Math.max(0, last.at - now);
     // A fresh driver also sends one empty replacement. That clears intent retained by Hearth if the previous page or
     // worker disappeared after its local row removal but before receiving the clear response.
     if (last?.digest !== digest) return 0;
@@ -462,11 +458,12 @@ export class DownloadCoordinatorDriver {
     const authorityEpoch = this.#hearthAuthorityEpoch;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    if (this.#hearthRetry?.digest !== digest) this.#hearthRetry = undefined;
-    const last = this.#hearthSent;
-    if (last?.digest === digest && (!items.length || now - last.at < HEARTH_EVERY)) return false;
-    const retry = this.#hearthRetry;
-    if (retry?.digest === digest && now < retry.at) return false;
+    const last = this.#hearth;
+    if (
+      last?.digest === digest &&
+      (last.failures ? now < last.at : !items.length || now - last.at < HEARTH_EVERY)
+    )
+      return false;
     let statuses: WantedStatus[] | null;
     try {
       statuses = await send(items, authority);
@@ -484,8 +481,7 @@ export class DownloadCoordinatorDriver {
       this.#retryHearth(digest, now);
       return false;
     }
-    this.#hearthSent = { digest, at: now };
-    this.#hearthRetry = undefined;
+    this.#hearth = { digest, at: now, failures: 0 };
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
@@ -499,10 +495,10 @@ export class DownloadCoordinatorDriver {
   }
 
   #retryHearth(digest: string, now: number): void {
-    const previous = this.#hearthRetry;
+    const previous = this.#hearth;
     const failures = previous?.digest === digest ? previous.failures + 1 : 1;
     const delay = Math.min(HEARTH_RETRY_MAX, HEARTH_RETRY_MIN * 2 ** (failures - 1));
-    this.#hearthRetry = { digest, failures, at: now + delay };
+    this.#hearth = { digest, failures, at: now + delay };
   }
 
   /**
