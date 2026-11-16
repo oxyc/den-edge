@@ -3198,6 +3198,15 @@
       onseen={setSeen}
     />
   {/if}
+{:else if session.kid && !facet && discovered.atlasUnreachable}
+  <!-- Kid discovery deliberately has no saved-content fallback. Once live Atlas discovery has conclusively failed,
+       replace the indefinite shelf load with the same retry authority People and service pages use. -->
+  <section class="library-failure" role="alert" aria-label={i18n.text('nav.home')}>
+    <p class="note">{i18n.phrase('Den’s server can’t be reached right now.')}</p>
+    <button type="button" class="retry" onclick={() => discovered.retry()}>
+      {i18n.phrase('Try again')}
+    </button>
+  </section>
 {:else}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   <Billboard

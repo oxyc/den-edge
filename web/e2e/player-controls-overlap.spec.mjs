@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { tapPhoneControl } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const release = {
@@ -289,15 +290,35 @@ for (const [engine, browserType] of engines) {
         // The phone gets what the desktop gets: play from the beginning (among the options), and Den's own fullscreen.
         await expect(page.getByRole('button', { name: 'Enter fullscreen' })).toBeVisible();
         await showControls(page);
-        await page.getByRole('button', { name: 'More playback options' }).tap();
+        const more = page.getByRole('button', { name: 'More playback options' });
+        // Visible means usable: the custom control, not WebKit's video layer underneath it, owns its centre.
+        expect(
+          await more.evaluate((button) => {
+            const box = button.getBoundingClientRect();
+            const target = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+            return target === button || button.contains(target);
+          }),
+        ).toBe(true);
+        await more.tap();
         await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toBeVisible();
         // A tap outside the sheet, which covers the dock, closes it.
         const title = await page.locator('.player header b').boundingBox();
         await page.touchscreen.tap(title.x + title.width / 2, title.y + title.height / 2);
         await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
         await expect(page.getByTestId('player-close-count')).toHaveText('0');
-
+        // Preserve the original timing assertion before exercising an additional input path: on a loaded runner the
+        // ten-second countdown can otherwise finish while the keyboard menu interaction is still being scheduled.
         await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
+        expect(await overlaps(page)).toEqual([]);
+
+        // The same trigger remains operable without a pointer (keyboard here, TV remote Select through ActionMenu's
+        // shared native button path on the TV-specific player menus).
+        await more.focus();
+        await page.keyboard.press('Enter');
+        await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
+
         expect(await overlaps(page)).toEqual([]);
       } finally {
         await browser.close();
@@ -324,6 +345,62 @@ for (const [engine, browserType] of engines) {
       }
     });
   }
+
+  test(`the phone options retry only a stale pre-pointer hide (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const page = await touchPage(browser, browserType, { width: 390, height: 844 });
+      await openPlaying(page);
+      await showControls(page);
+      const player = page.locator('.player');
+      const more = page.getByRole('button', { name: 'More playback options' });
+      let attempts = 0;
+      await tapPhoneControl(page, more, {
+        tap: async () => {
+          attempts++;
+          if (attempts === 1) {
+            await tapPicture(page);
+            await expect(player).toHaveClass(/web-controls-hidden/);
+            throw new Error('stale controls deadline');
+          }
+          await more.tap();
+        },
+      });
+      expect(attempts).toBe(2);
+      await expect(page.getByRole('menu', { name: 'More playback options' })).toBeVisible();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`the phone options do not retry a failure after pointerdown (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const page = await touchPage(browser, browserType, { width: 390, height: 844 });
+      await openPlaying(page);
+      await showControls(page);
+      const player = page.locator('.player');
+      const more = page.getByRole('button', { name: 'More playback options' });
+      let attempts = 0;
+      await expect(
+        tapPhoneControl(page, more, {
+          tap: async () => {
+            attempts++;
+            await more.dispatchEvent('pointerdown', { pointerType: 'touch', bubbles: true });
+            await tapPicture(page);
+            await expect(player).toHaveClass(/web-controls-hidden/);
+            throw new Error('received pointer failure');
+          },
+        }),
+      ).rejects.toThrow('received pointer failure');
+      expect(attempts).toBe(1);
+      await expect(page.getByRole('menu', { name: 'More playback options' })).toHaveCount(0);
+    } finally {
+      await browser.close();
+    }
+  });
 
   // A tap on the picture shows the controls, a second hides them, and neither pauses; untouched, they hide again.
   test(`a tap shows or hides the controls and never pauses (${engine})`, async () => {

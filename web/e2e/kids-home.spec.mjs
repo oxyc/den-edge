@@ -21,17 +21,22 @@ const named = (id) => NAMES[id] ?? 'Dinosaur Day';
  * world leads with a series (Moominvalley) ahead of a film (Moomin Magic). Returns the atlas requests and the
  * recommendation requests seen, which a Kid must never make.
  */
-async function kidsAtlas(page) {
+async function kidsAtlas(page, { online = true } = {}) {
   await guardNetwork(page);
   const atlasRequests = [];
   const airingRequests = [];
   const recommendations = [];
+  let manifestRequests = 0;
+  let atlasOnline = online;
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/metadata/title/query', (route) => route.fulfill({ json: { entries: [] } }));
   await page.route('**/atlas/**', (route) => {
     const url = new URL(route.request().url());
-    if (url.pathname.endsWith('/manifest.json'))
+    if (url.pathname.endsWith('/manifest.json')) {
+      manifestRequests++;
+      if (!atlasOnline) return route.abort('failed');
       return route.fulfill({ json: { id: 'com.den.atlas', catalogs: [] } });
+    }
     // Release dates are public schedule data, one cached answer per series for everyone (`airing.ts`): they carry no
     // profile policy, and are asked only for series this profile already follows.
     if (/\/atlas\/airing\/tv\/\d+$/.test(url.pathname)) {
@@ -131,8 +136,38 @@ async function kidsAtlas(page) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"/>',
     }),
   );
-  return { atlasRequests, airingRequests, recommendations };
+  return {
+    atlasRequests,
+    airingRequests,
+    recommendations,
+    manifestRequests: () => manifestRequests,
+    setAtlasOnline: (value) => (atlasOnline = value),
+  };
 }
+
+test('Kid Home names an unreachable Atlas and Retry recovers without a reload', async ({
+  page,
+}) => {
+  const { manifestRequests, setAtlasOnline } = await kidsAtlas(page, { online: false });
+  await page.goto(`${E2E_ORIGIN}/test/library.html?kid&populated`);
+
+  const unavailable = page.getByRole('alert').filter({
+    hasText: 'Den’s server can’t be reached right now.',
+  });
+  await expect(unavailable).toBeVisible();
+  await expect(page.getByText('Loading your shelves', { exact: true })).toHaveCount(0);
+  expect(manifestRequests()).toBe(1);
+
+  setAtlasOnline(true);
+  await unavailable.getByRole('button', { name: 'Try again' }).click();
+
+  await expect(unavailable).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Welcome to Moominvalley' })).toBeVisible();
+  // Retry owns one new discovery probe. Once Atlas is configured, Home independently reads the same manifest for
+  // its optional service-catalog metadata; its lazy import may settle before or after the Kid row paints.
+  expect(manifestRequests()).toBeGreaterThanOrEqual(2);
+  expect(manifestRequests()).toBeLessThanOrEqual(3);
+});
 
 test('Kid Home uses its child-facing catalogue and billboard under the Kid policy', async ({
   page,

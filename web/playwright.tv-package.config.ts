@@ -19,7 +19,7 @@ export default defineConfig({
   webServer: {
     // Replacing the browser webServer must preserve its upstream isolation guard for build and preview.
     env: { DEN_E2E: '1' },
-    command: `DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den-tv-api.example.invalid DEN_TV_OUT_DIR=${output} DEN_TV_E2E=1 npm run build:tv:tizen && E2E_PORT=${E2E_PORT} DEN_TV_OUT_DIR=${output} node scripts/tv-static-preview.mjs`,
+    command: `DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://den-tv-api.example.invalid DEN_TV_SERVICE_ORIGIN=https://den-tv-service.example.invalid DEN_TV_OUT_DIR=${output} DEN_TV_E2E=1 npm run build:tv:tizen && E2E_PORT=${E2E_PORT} DEN_TV_OUT_DIR=${output} node scripts/tv-static-preview.mjs`,
     url: `${E2E_ORIGIN}/package/index.html`,
     reuseExistingServer: false,
     timeout: 120_000,
