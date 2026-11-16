@@ -1,6 +1,11 @@
 import type { Row } from './wire';
 
-export type BoundaryCounts = [activity: number, settings: number, delivery: number, unknown: number];
+export type BoundaryCounts = [
+  activity: number,
+  settings: number,
+  delivery: number,
+  unknown: number,
+];
 
 export const boundaryCounts = (): BoundaryCounts => [0, 0, 0, 0];
 
