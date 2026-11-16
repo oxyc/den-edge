@@ -58,10 +58,16 @@ function syncPolicyModule(kind: PolicyModule): Promise<WebAssembly.Module> {
   startupMarkOnce(`${label} compile started`);
   const wasm = kind === 'startup' ? STARTUP_WASM : DEFERRED_WASM;
   let response: Response | undefined;
-  const request = fetch(wasm, { signal: AbortSignal.timeout(15_000) }).then((value) => {
-    response = value;
-    return value;
-  });
+  const fetched = fetch(wasm, { signal: AbortSignal.timeout(15_000) });
+  // This evidence exists for the WebKit E2E investigation only. Keeping it out of release graphs avoids making
+  // every successful startup carry a reporter that can only be read by the failing Playwright assertion.
+  const request =
+    kind === 'deferred' && import.meta.env.DEN_E2E
+      ? fetched.then((value) => {
+          response = value;
+          return value;
+        })
+      : fetched;
   const started = WebAssembly.compileStreaming(request)
     .then((module) => {
       startupMarkOnce(`${label} compiled`);
@@ -69,7 +75,8 @@ function syncPolicyModule(kind: PolicyModule): Promise<WebAssembly.Module> {
     })
     .catch((error: unknown) => {
       delete compiling[kind];
-      if (kind === 'deferred') reportDeferredWasmFailure(wasm, response, error);
+      if (kind === 'deferred' && import.meta.env.DEN_E2E)
+        reportDeferredWasmFailure(wasm, response, error);
       throw error;
     });
   compiling[kind] = started;
