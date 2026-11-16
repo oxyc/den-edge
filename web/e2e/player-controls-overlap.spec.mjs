@@ -309,6 +309,7 @@ for (const [engine, browserType] of engines) {
         // Preserve the original timing assertion before exercising an additional input path: on a loaded runner the
         // ten-second countdown can otherwise finish while the keyboard menu interaction is still being scheduled.
         await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
+        expect(await overlaps(page)).toEqual([]);
 
         // The same trigger remains operable without a pointer (keyboard here, TV remote Select through ActionMenu's
         // shared native button path on the TV-specific player menus).
