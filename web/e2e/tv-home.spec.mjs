@@ -11,6 +11,39 @@ if (soak && (!Number.isFinite(soakMinutes) || soakMinutes <= 0 || soakMinutes > 
 // and the sample series; the separate restoration regression tests retain their normal traces.
 test.use({ trace: 'off', video: 'off' });
 
+async function homeRowGeometry(page, targetName) {
+  return page.locator('[data-route-page][data-active="true"]').evaluate((root, name) => {
+    const sections = [...root.querySelectorAll('section.row')];
+    const target = sections.find((section) => section.getAttribute('aria-label') === name);
+    if (!target) return { fonts: document.fonts?.status ?? 'unsupported', rows: [] };
+    const targetTop = target.getBoundingClientRect().top + scrollY;
+    return {
+      fonts: document.fonts?.status ?? 'unsupported',
+      rows: sections
+        .map((section) => {
+          const wrapper = section.closest('.row-window, .windowed') ?? section;
+          const box = section.getBoundingClientRect();
+          const style = getComputedStyle(section);
+          return {
+            id:
+              wrapper.getAttribute('data-row-id') ??
+              section.getAttribute('aria-label') ??
+              section.querySelector('h2')?.textContent?.trim() ??
+              'unnamed',
+            state:
+              wrapper.getAttribute('data-layout-state') ??
+              (wrapper.getAttribute('aria-busy') === 'true' ? 'pending' : 'settled'),
+            top: box.top + scrollY,
+            height: box.height,
+            marginTop: style.marginTop,
+            marginBottom: style.marginBottom,
+          };
+        })
+        .filter((row) => row.top <= targetTop),
+    };
+  }, targetName);
+}
+
 test(
   soak
     ? 'TV Home sustained remote browsing @soak'
@@ -80,18 +113,32 @@ test(
     await expect(hero).toHaveAttribute('data-loading', 'true');
     const shelfTrack = page.getByRole('region', { name: 'Mind-Bending' }).locator('.track');
     await expect(shelfTrack).toBeAttached({ timeout: 30_000 });
-    const beforeRecommendation = await Promise.all([
-      hero.evaluate((node) => node.getBoundingClientRect().height),
-      shelfTrack.evaluate((node) => node.getBoundingClientRect().top + scrollY),
-    ]);
-    expect(beforeRecommendation[0]).toBeGreaterThan(700);
+    // A row merely being attached does not mean the asynchronous rows above it have chosen their final geometry.
+    // Wait on their owned readiness (and the TV face), then retain every row's exact box in the equality failure so
+    // a genuine shift names its source rather than looking like a billboard change.
+    await expect
+      .poll(async () => {
+        const geometry = await homeRowGeometry(page, 'Mind-Bending');
+        return {
+          fonts: geometry.fonts,
+          pending: geometry.rows.filter((row) => row.state === 'pending').map((row) => row.id),
+        };
+      })
+      .toEqual({ fonts: 'loaded', pending: [] });
+    const beforeRecommendation = {
+      heroHeight: await hero.evaluate((node) => node.getBoundingClientRect().height),
+      targetTop: await shelfTrack.evaluate((node) => node.getBoundingClientRect().top + scrollY),
+      geometry: await homeRowGeometry(page, 'Mind-Bending'),
+    };
+    expect(beforeRecommendation.heroHeight).toBeGreaterThan(700);
     releaseRecommendations();
     await expect(hero).toContainText('Movie 1002', { timeout: 30_000 });
     await expect(hero).not.toHaveAttribute('data-loading', 'true');
-    const afterRecommendation = await Promise.all([
-      hero.evaluate((node) => node.getBoundingClientRect().height),
-      shelfTrack.evaluate((node) => node.getBoundingClientRect().top + scrollY),
-    ]);
+    const afterRecommendation = {
+      heroHeight: await hero.evaluate((node) => node.getBoundingClientRect().height),
+      targetTop: await shelfTrack.evaluate((node) => node.getBoundingClientRect().top + scrollY),
+      geometry: await homeRowGeometry(page, 'Mind-Bending'),
+    };
     expect(afterRecommendation).toEqual(beforeRecommendation);
     await expect(hero.getByRole('heading', { name: 'Movie 1002' })).toBeVisible();
     await expect(hero.locator('.expand')).toHaveCount(0);

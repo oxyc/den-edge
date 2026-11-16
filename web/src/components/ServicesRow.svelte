@@ -88,7 +88,12 @@
 </script>
 
 {#if services.length || pending || empty || failure || retrying}
-  <section class="row services-row" aria-label={localizedHeading} bind:this={section}>
+  <section
+    class="row services-row"
+    aria-label={localizedHeading}
+    data-layout-state={pending || retrying ? 'pending' : 'settled'}
+    bind:this={section}
+  >
     <h2>{localizedHeading}</h2>
     <div class="track">
       {#each services as { pick, service } (`${service.id}@${pick.country}`)}
@@ -166,7 +171,16 @@
     display: grid;
     width: var(--tile-w);
     gap: 8px;
-    font-size: 14px;
+
+    /* This is the exact name line that replaces it. TV promotes service names to ten-foot type, so retaining the
+       browser's 14px fallback here let a provider result grow the rail after lower shelves had taken their place. */
+    font-size: var(--service-name-size, 14px);
+  }
+
+  .hold > :last-child {
+    /* ServiceTile's name and optional country share one line. The unavailable copy must obey the same vertical
+       geometry, while retaining its complete localized message instead of clipping it to a service tile. */
+    white-space: nowrap;
   }
 
   .plate {
@@ -179,10 +193,14 @@
   }
 
   .empty {
+    width: max-content;
+    min-width: var(--tile-w);
+    justify-items: start;
     color: var(--muted);
   }
 
   .empty .plate {
+    width: var(--tile-w);
     font-size: 28px;
   }
 
@@ -202,11 +220,5 @@
   .retry:focus-visible {
     outline: var(--ring-width) solid var(--focus-ring);
     outline-offset: calc(-1 * var(--ring-width));
-  }
-
-  .hold > :last-child {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

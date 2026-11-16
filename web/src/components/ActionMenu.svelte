@@ -234,6 +234,7 @@
   function position() {
     const positioned = menu;
     if (!positioned) return;
+    positioned.style.removeProperty('max-height');
     if (mobile) {
       positioned.style.removeProperty('left');
       positioned.style.removeProperty('top');
@@ -243,9 +244,12 @@
       vh = window.innerHeight;
     // Before its first showing it is not laid out, so a representative size stands in for the real one — close
     // enough to decide which side of the viewport it has to flip away from. Once shown, its own size is used:
-    // items with a second line are taller than the estimate.
-    const width = positioned.offsetWidth || 240,
-      height = positioned.offsetHeight || shownItems.length * 44 + 16;
+    // items with a second line are taller than the estimate. `scrollHeight` is the whole list, not the part a
+    // previous cap left visible; it leaves out the border, which the border-box cap below counts.
+    const width = positioned.offsetWidth || 240;
+    let height = positioned.scrollHeight
+      ? positioned.scrollHeight + positioned.offsetHeight - positioned.clientHeight
+      : shownItems.length * 44 + 16;
     let x: number, y: number;
     if (coords) {
       x = coords.x;
@@ -253,8 +257,18 @@
     } else {
       const rect = trigger.getBoundingClientRect();
       x = rect.right - width;
-      y = rect.bottom + 6;
-      if (y + height > vh) y = rect.top - height - 6;
+      const below = vh - rect.bottom - 6 - 8,
+        above = rect.top - 6 - 8;
+      // A list taller than the room on either side scrolls within the larger one, rather than being pushed back
+      // over its own trigger: measured on the player in a 675px-tall window, a 4K remux's seventeen audio tracks
+      // flipped above the dock and, clamped to the viewport, covered the button that opened it and the dock. The
+      // cap is the room on that side, not this list's height, so a menu that pages to a longer list (the player's
+      // options) can still grow into it.
+      const flip = height > below && above > below;
+      const room = flip ? above : below;
+      height = Math.min(height, room);
+      y = flip ? rect.top - 6 - height : rect.bottom + 6;
+      positioned.style.maxHeight = `${room}px`;
     }
     x = Math.min(Math.max(8, x), Math.max(8, vw - width - 8));
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
@@ -656,6 +670,9 @@
     position: fixed;
     inset: auto;
     z-index: 50;
+
+    /* `position` caps the height in border-box pixels: the room beside its trigger includes the padding and border. */
+    box-sizing: border-box;
     width: max-content;
     min-width: 220px;
     max-width: min(320px, 90vw);

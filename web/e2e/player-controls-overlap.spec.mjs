@@ -17,7 +17,13 @@ const release = {
 };
 const FINE_POINTER = '(any-hover: hover) and (any-pointer: fine)';
 
-async function mockPlayer(page) {
+// Two tracks, so the audio picker is in the bar on every layout.
+const TWO_TRACKS = [
+  { language: 'eng', name: null, channels: 2, commentary: false },
+  { language: 'swe', name: null, channels: 2, commentary: false },
+];
+
+async function mockPlayer(page, audioTracks = TWO_TRACKS) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -36,11 +42,7 @@ async function mockPlayer(page) {
         release,
         video: { codec: 'h264', transcoded: false },
         audioTrack: 0,
-        // Two tracks, so the audio picker is in the bar on every layout.
-        audioTracks: [
-          { language: 'eng', name: null, channels: 2, commentary: false },
-          { language: 'swe', name: null, channels: 2, commentary: false },
-        ],
+        audioTracks,
       },
     }),
   );
@@ -95,8 +97,8 @@ async function launch(browserType) {
   );
 }
 
-async function openPlaying(page, query = '') {
-  await mockPlayer(page);
+async function openPlaying(page, query = '', audioTracks = TWO_TRACKS) {
+  await mockPlayer(page, audioTracks);
   await page.goto(`${ORIGIN}/test/player.html${query}`);
   const video = page.locator('.player video');
   await expect
@@ -216,6 +218,55 @@ for (const [engine, browserType] of engines) {
       }
     });
   }
+
+  // What a mouse brings up over the bar: the dock's tooltips sit above the timeline rather than on it, and a list too
+  // long for the window scrolls above its button instead of covering the dock. A real 4K remux carried seventeen
+  // audio tracks; this page's unstyled rows are short, so it takes more than any engine fits in the window here.
+  test(`a mouse's tooltips and a long audio list leave the timeline and the dock clear (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 675 } });
+      const page = await context.newPage();
+      const tracks = Array.from({ length: 120 }, (_, i) => ({
+        language: i % 2 ? 'swe' : 'eng',
+        name: `Track ${i + 1}`,
+        channels: 6,
+        commentary: false,
+      }));
+      await openPlaying(page, '', tracks);
+      await page.mouse.move(720, 300);
+      await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
+
+      const tips = await page.evaluate(() => {
+        const track = document.querySelector('.player .web-track').getBoundingClientRect();
+        return [...document.querySelectorAll('.player .web-dock [data-tip]')]
+          .filter((element) => element.getBoundingClientRect().width > 0)
+          .flatMap((element) => {
+            const tip = getComputedStyle(element, '::after');
+            if (tip.content === 'none') return [];
+            // Each control is its tip's containing block, so its bottom edge is measured from the control's.
+            const bottom = element.getBoundingClientRect().bottom - parseFloat(tip.bottom);
+            return bottom > track.top
+              ? [`${element.dataset.tip} reaches ${bottom} > ${track.top}`]
+              : [];
+          });
+      });
+      expect(tips).toEqual([]);
+
+      const trigger = page.locator('.player .web-audio-subtitles');
+      await trigger.click();
+      const menu = page.locator('.menu:popover-open');
+      await expect(menu).toBeVisible();
+      const [list, button] = await Promise.all([menu.boundingBox(), trigger.boundingBox()]);
+      expect(list.y + list.height).toBeLessThanOrEqual(button.y);
+      expect(await menu.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
+        true,
+      );
+    } finally {
+      await browser.close();
+    }
+  });
 
   // A touch-only phone, upright and on its side: Den's transport and no native controls, nothing over anything, and
   // every control a 44px target, also while the next episode counts down.

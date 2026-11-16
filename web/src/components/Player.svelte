@@ -7864,6 +7864,12 @@
     /* The timeline and the dock together: what floats above them (Skip, up next) sits this far up. */
     --web-bar: 68px;
     --web-remote: 0px;
+
+    /* The timeline's pointer target, which the dock's tooltips clear (a finger's is 44px). */
+    --web-track-target: 24px;
+
+    /* Room above the timeline for the dock's tooltips (28px and a 6px gap): Skip floats clear of them. */
+    --web-tips: 34px;
     --web-glass: var(--glass-bg, rgb(28 28 34 / 0.62));
     --web-glass-edge: var(--glass-edge, rgb(255 255 255 / 0.13));
     --web-glass-blur: var(--glass-blur, blur(24px) saturate(160%));
@@ -7874,6 +7880,10 @@
 
   .web-touch-player {
     --web-bar: 88px;
+    --web-tips: 0px;
+
+    /* A finger's timeline: a 44px target, the times at its two ends. */
+    --web-track-target: 44px;
   }
 
   .web-custom-player > .stage {
@@ -8119,6 +8129,20 @@
     transition-delay: 500ms;
   }
 
+  /* The dock's tips clear the timeline right above it instead of covering the playhead. */
+  .web-custom-player:not(.web-touch-player) .web-dock [data-tip]::after {
+    bottom: calc(100% + var(--web-track-target) + 6px);
+  }
+
+  /* A labelled control already says its name; a tip only for its key. */
+  @media (width >= 40rem) {
+    .web-custom-player:not(.web-touch-player)
+      .web-dock
+      [data-tip]:not([data-key]):has(.web-label)::after {
+      content: none;
+    }
+  }
+
   .web-custom-player:not(.web-touch-player) .web-top [data-tip]::after {
     top: calc(100% + 6px);
     bottom: auto;
@@ -8297,7 +8321,9 @@
   .web-floating {
     position: absolute;
     right: var(--player-side);
-    bottom: calc(var(--web-bar) + var(--web-remote) + var(--player-bottom) + 12px);
+    bottom: calc(
+      var(--web-bar) + var(--web-remote) + var(--web-tips) + var(--player-bottom) + 12px
+    );
     left: var(--player-side);
     z-index: 6;
     display: flex;
@@ -8462,7 +8488,7 @@
 
     grid-area: track;
     width: 100%;
-    height: 24px;
+    height: var(--web-track-target, 24px);
     margin: 0;
     padding: 0;
     border: 0;
@@ -8519,11 +8545,6 @@
     border: 0;
     border-radius: 50%;
     background: #fff;
-  }
-
-  /* A finger's timeline: a 44px target, the times at its two ends. */
-  .web-touch-player .web-track {
-    height: 44px;
   }
 
   /* Held, the track thickens and the thumb grows; a mouse hovering thickens it too (below). */
@@ -8882,6 +8903,7 @@
     .web-custom-player {
       --web-bar: 104px;
       --web-remote: 72px;
+      --web-track-target: 44px;
     }
 
     .web-custom-player .web-centre {
@@ -8911,10 +8933,6 @@
 
     .web-custom-player :global(.web-labelled) {
       padding: 0;
-    }
-
-    .web-custom-player .web-track {
-      height: 44px;
     }
 
     .web-custom-player .web-elapsed,

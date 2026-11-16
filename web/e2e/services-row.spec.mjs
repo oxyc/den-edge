@@ -65,3 +65,25 @@ test('the Services rail uses the phone viewport, not the desktop presentation ma
   expect(box.width).toBeLessThanOrEqual(390);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
+
+test('a resolved duplicate-country replacement keeps the shared browser rail in place', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=replacement`);
+
+  const row = page.getByRole('region', { name: 'Services' });
+  await page.evaluate(() => document.fonts.ready);
+  const reserved = await row.boundingBox();
+  await row.scrollIntoViewIfNeeded();
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  const resolved = await row.boundingBox();
+  await page.evaluate(() => globalThis.replaceServicesWithDuplicate());
+  await expect(row.getByRole('link', { name: 'Netflix, US' })).toBeVisible();
+  await expect(row.getByRole('link', { name: 'Netflix, FI' })).toBeVisible();
+  const replaced = await row.boundingBox();
+
+  expect(resolved?.height).toBe(reserved?.height);
+  expect(replaced?.height).toBe(reserved?.height);
+  await expect(row.locator('.country')).toHaveText(['US', 'FI']);
+});

@@ -48,7 +48,7 @@ jobs:
           DEN_TV_OLD_ENGINE_LIMITS: "1"
           DEN_TV_PLATFORM: tizen
           DEN_TV_TEST_ENGINE: webkit
-        run: npm run test:e2e:tv -- tv-services-recovery.spec.mjs
+        run: npm run test:e2e:tv -- tv-services-row.spec.mjs
       - name: Run the big-library journeys at phone-speed CPU
         id: budgets
         continue-on-error: true

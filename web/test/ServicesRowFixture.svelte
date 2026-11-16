@@ -1,19 +1,49 @@
 <script lang="ts">
-  import ServicesRow from '../src/components/ServicesRow.svelte';
   import type { ResolvedService } from '../src/lib/services';
+  import ServicesRow from '../src/components/ServicesRow.svelte';
 
+  const result = new URL(location.href).searchParams.get('result') ?? 'unavailable';
   let requests = $state(0);
   let admitted = $state(false);
-  let failed = $state(false);
   let retrying = $state(false);
-  let services = $state<ResolvedService[]>([]);
+  let settled = $state(false);
+  let services = $state.raw<ResolvedService[]>([]);
+  const netflix = {
+    id: 8,
+    name: 'Netflix',
+    priority: 1,
+    movies: true,
+    series: true,
+    variants: [],
+  };
+  const max = {
+    id: 1899,
+    name: 'Max',
+    priority: 2,
+    movies: true,
+    series: true,
+    variants: [],
+  };
+  const ordinary: ResolvedService[] = [
+    { pick: { id: netflix.id, country: 'US' }, service: netflix },
+    { pick: { id: max.id, country: 'US' }, service: max },
+  ];
+  const duplicate: ResolvedService[] = [
+    { pick: { id: netflix.id, country: 'US' }, service: netflix },
+    { pick: { id: netflix.id, country: 'FI' }, service: netflix },
+  ];
+  (window as unknown as { replaceServicesWithDuplicate: () => void }).replaceServicesWithDuplicate =
+    () => (services = duplicate);
 
   function admit() {
     if (admitted) return;
     admitted = true;
     requests++;
-    // Model a provider refusal: the per-visit admission stays set while the reserved row settles empty.
-    queueMicrotask(() => (failed = true));
+    queueMicrotask(() => {
+      if (result === 'resolved' || result === 'replacement') services = ordinary;
+      else if (result === 'duplicate') services = duplicate;
+      settled = true;
+    });
   }
 
   function retry() {
@@ -23,20 +53,7 @@
   }
 
   function resolveRetry() {
-    services = [
-      {
-        pick: { id: 8, country: 'FI' },
-        service: {
-          id: 8,
-          name: 'Netflix',
-          priority: 1,
-          movies: true,
-          series: true,
-          variants: [],
-        },
-      },
-    ];
-    failed = false;
+    services = ordinary;
     retrying = false;
   }
 </script>
@@ -46,8 +63,8 @@
 <div aria-hidden="true" style="height: 2400px"></div>
 <ServicesRow
   {services}
-  pending={!admitted || !failed ? 2 : 0}
-  failure={failed ? 'Services unavailable' : undefined}
+  pending={settled ? 0 : 2}
+  failure={settled && services.length === 0 ? 'Services unavailable' : undefined}
   {retrying}
   onretry={retry}
   onvisible={admit}
