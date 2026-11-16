@@ -1615,6 +1615,84 @@ describe('LibraryLog', () => {
     for (const request of requests) expect(request.headers).toMatchObject({ 'x-den-wire': '5' });
   });
 
+  it('refuses profile-scoped household writes without logging row identities', async () => {
+    const server = await edge([row(1)]);
+    const household: typeof fetch = async (input, init = {}) => {
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '5');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, household, undefined, null, 5))!;
+      await log.write(row(550));
+      const diagnostic = error.mock.calls.flat().join(' ');
+      expect(diagnostic).toContain('activity=1');
+      expect(diagnostic).not.toContain('550');
+      expect(diagnostic).not.toContain('title:movie');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('drops pre-split kept work with one bounded aggregate diagnostic', async () => {
+    const server = await edge([row(1)], [], 'generation-1');
+    const { data, vault } = memoryVault();
+    let profiles = false;
+    const connection: typeof fetch = async (input, init) => {
+      const response = await server.fetchImpl(input, init);
+      if (!profiles) return response;
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '5');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;
+    await vi.waitFor(() => expect(keptFacts(data)).toBe(true));
+    first.close();
+
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const title = await seal(keys, currentRows([row(550)])[0]!);
+    const settings = await seal(keys, {
+      kind: 'set',
+      schema: 2,
+      name: `profile:${OWNER_ID}`,
+      values: {
+        token: { value: { string: 'https://private.example/token' }, at: at(1) },
+      },
+    });
+    data.set(
+      `${keys.id}:runtime:pending:private`,
+      new TextEncoder().encode(JSON.stringify({ rows: [title, settings] })),
+    );
+    data.set(`${keys.id}:runtime:pending:unreadable`, new TextEncoder().encode('{'));
+    server.rewrite(
+      [await seal(keys, currentRows([row(1)])[0]!), await sealedProfileDirectory()],
+      'generation-2',
+    );
+    profiles = true;
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const returned = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;
+      await expect(returned.refresh()).resolves.toBe(true);
+      await vi.waitFor(() => expect(returned.pendingActions).toBe(0));
+      const diagnostics = error.mock.calls.map((call) => call.join(' '));
+      const dropped = diagnostics.filter((message) => message.includes('kept work items'));
+      expect(dropped).toEqual([expect.stringContaining('activity=1, settings=1, unknown=1')]);
+      for (const secret of [
+        '550',
+        OWNER_ID,
+        'https://private.example/token',
+        'title:movie',
+        'set:profile',
+      ])
+        expect(dropped[0]).not.toContain(secret);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('keeps a settings-style row across a generation or rewrite refusal', async () => {
     const server = await edge([row(1)]);
     const { storage } = memoryStorage();
