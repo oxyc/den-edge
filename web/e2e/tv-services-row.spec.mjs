@@ -65,6 +65,37 @@ test('TV Services retry is focus-stable, bounded, and keeps the reserved height'
   expect(await geometry(row)).toEqual(reserved);
 });
 
+test('TV Services retries the same failed directory chunk in place', async ({ page }) => {
+  let refused = false;
+  await page.route('**/assets/services-*.js', (route) => {
+    if (refused) return route.continue();
+    refused = true;
+    return route.abort('connectionfailed');
+  });
+  const { row, reserved } = await pendingRow(page, '?result=module-retry');
+  const requests = page.locator('[data-requests]');
+
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('1');
+  await expect(row.getByRole('status')).toHaveText('Services unavailable');
+  await row.getByRole('button', { name: 'Try again' }).click();
+  await expect(requests).toHaveText('2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  expect(await geometry(row)).toEqual(reserved);
+});
+
+test('TV Services keeps a useful partial directory visible during retry', async ({ page }) => {
+  const { row, reserved } = await pendingRow(page, '?result=partial');
+
+  await row.scrollIntoViewIfNeeded();
+  const netflix = row.getByRole('link', { name: 'Netflix' });
+  await expect(netflix).toBeVisible();
+  await row.getByRole('button', { name: 'Try again' }).click();
+  await expect(netflix).toBeVisible();
+  await expect(row.getByRole('status')).toHaveText('Trying again…');
+  expect(await geometry(row)).toEqual(reserved);
+});
+
 test('TV Services keeps its reserved height when provider names resolve', async ({ page }) => {
   const { row, reserved, labelFont } = await pendingRow(page, '?result=resolved');
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ResolvedService } from '../src/lib/services';
+  import { optionalImport } from '../src/lib/keyboardNavigation';
   import ServicesRow from '../src/components/ServicesRow.svelte';
 
   const result = new URL(location.href).searchParams.get('result') ?? 'unavailable';
@@ -7,6 +8,7 @@
   let admitted = $state(false);
   let retrying = $state(false);
   let settled = $state(false);
+  let failed = $state(false);
   let services = $state.raw<ResolvedService[]>([]);
   const netflix = {
     id: 8,
@@ -35,13 +37,35 @@
   (window as unknown as { replaceServicesWithDuplicate: () => void }).replaceServicesWithDuplicate =
     () => (services = duplicate);
 
+  async function loadDirectoryModule() {
+    requests++;
+    try {
+      await optionalImport(import('../src/settings/services'));
+      services = ordinary;
+      failed = false;
+    } catch {
+      failed = true;
+    } finally {
+      settled = true;
+      retrying = false;
+    }
+  }
+
   function admit() {
     if (admitted) return;
     admitted = true;
+    if (result === 'module-retry') {
+      void loadDirectoryModule();
+      return;
+    }
     requests++;
     queueMicrotask(() => {
       if (result === 'resolved' || result === 'replacement') services = ordinary;
       else if (result === 'duplicate') services = duplicate;
+      else if (result === 'partial') {
+        services = ordinary.slice(0, 1);
+        failed = true;
+      } else failed = true;
       settled = true;
     });
   }
@@ -49,11 +73,16 @@
   function retry() {
     if (retrying) return;
     retrying = true;
+    if (result === 'module-retry') {
+      void loadDirectoryModule();
+      return;
+    }
     requests++;
   }
 
   function resolveRetry() {
     services = ordinary;
+    failed = false;
     retrying = false;
   }
 </script>
@@ -64,7 +93,7 @@
 <ServicesRow
   {services}
   pending={settled ? 0 : 2}
-  failure={settled && services.length === 0 ? 'Services unavailable' : undefined}
+  failure={failed ? 'Services unavailable' : undefined}
   {retrying}
   onretry={retry}
   onvisible={admit}
