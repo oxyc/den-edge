@@ -2671,7 +2671,7 @@ mod tests {
         assert_eq!(maximal_fields, published_fields);
         let report: FailureReport = serde_json::from_value(fixture.maximal_report).unwrap();
         assert_eq!(fixture.maximal_service_tag_bytes, 429);
-        assert_eq!(report.tag().as_bytes().len(), fixture.maximal_service_tag_bytes);
+        assert_eq!(report.tag().len(), fixture.maximal_service_tag_bytes);
     }
 
     #[tokio::test]
