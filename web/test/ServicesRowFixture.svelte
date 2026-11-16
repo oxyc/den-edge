@@ -8,6 +8,7 @@
   let admitted = $state(false);
   let retrying = $state(false);
   let settled = $state(false);
+  let outstanding = $state(false);
   let failed = $state(false);
   let services = $state.raw<ResolvedService[]>([]);
   const netflix = {
@@ -62,7 +63,12 @@
     queueMicrotask(() => {
       if (result === 'resolved' || result === 'replacement') services = ordinary;
       else if (result === 'duplicate') services = duplicate;
-      else if (result === 'partial') {
+      else if (result === 'staggered') {
+        requests++;
+        services = ordinary.slice(0, 1);
+        failed = true;
+        outstanding = true;
+      } else if (result === 'partial') {
         services = ordinary.slice(0, 1);
         failed = true;
       } else failed = true;
@@ -81,16 +87,23 @@
     failed = false;
     retrying = false;
   }
+
+  function resolveOutstanding() {
+    outstanding = false;
+  }
 </script>
 
 <p data-requests>{requests}</p>
 <button data-resolve-retry hidden onclick={resolveRetry}>Resolve retry</button>
+<button data-resolve-outstanding hidden onclick={resolveOutstanding}>Resolve outstanding</button>
 <div aria-hidden="true" style="height: 2400px"></div>
 <ServicesRow
   {services}
-  pending={settled ? 0 : 2}
+  pending={outstanding ? 1 : settled ? 0 : 2}
   empty={failed && result === 'module-failure' ? 'Services unavailable' : undefined}
-  failure={failed && result !== 'module-failure' ? 'Services unavailable' : undefined}
+  failure={failed && !outstanding && result !== 'module-failure'
+    ? 'Services unavailable'
+    : undefined}
   {retrying}
   onretry={retry}
   onvisible={admit}

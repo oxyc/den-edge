@@ -2300,7 +2300,7 @@
     };
   });
   function retryServiceDirectories() {
-    if (directoryRetrying || naming) return;
+    if (directoryRetrying) return;
     if (!failedDirectories.length) return;
     for (const key of failedDirectories) refreshDirectories[key] = true;
     retryingDirectories = Object.fromEntries(failedDirectories.map((key) => [key, true]));
@@ -3411,7 +3411,7 @@
           (directoryModuleState === 'failed' || !failedDirectories.length)
             ? 'Services unavailable'
             : undefined}
-          serviceFailure={failedDirectories.length ? 'Services unavailable' : undefined}
+          serviceFailure={!naming && failedDirectories.length ? 'Services unavailable' : undefined}
           serviceRetrying={directoryRetrying}
           onServiceRetry={retryServiceDirectories}
           onServiceVisible={() => (serviceDirectoriesAdmitted = true)}

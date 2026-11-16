@@ -33,9 +33,10 @@ test('service directories are admitted only as their rail approaches the viewpor
   await retry.focus();
   await retry.click();
   await expect(requests).toHaveText('2');
+  await expect(retry).toBeFocused();
   await expect(retry).toHaveAttribute('aria-disabled', 'true');
   await expect(status).toHaveText('Trying again…');
-  await retry.click();
+  await page.keyboard.press('Enter');
   await expect(requests, 'an activation while the retry is live does not duplicate it').toHaveText(
     '2',
   );
@@ -64,6 +65,33 @@ test('the Services rail uses the phone viewport, not the desktop presentation ma
   expect(box.right ?? box.x + box.width).toBeLessThanOrEqual(390);
   expect(box.width).toBeLessThanOrEqual(390);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test('a failed country waits for another country before offering a bounded retry', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=staggered`);
+
+  const requests = page.locator('[data-requests]');
+  const row = page.getByRole('region', { name: 'Services' });
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(row.getByRole('status')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+
+  await page.evaluate(() => document.querySelector('[data-resolve-outstanding]').click());
+  const status = row.getByRole('status');
+  const retry = row.getByRole('button', { name: 'Try again' });
+  await expect(status).toHaveText('Services unavailable');
+  await retry.focus();
+  await retry.click();
+  await expect(retry).toBeFocused();
+  await expect(retry).toHaveAttribute('aria-disabled', 'true');
+  await expect(status).toHaveText('Trying again…');
+  await expect(requests).toHaveText('3');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
 });
 
 test('a resolved duplicate-country replacement keeps the shared browser rail in place', async ({
