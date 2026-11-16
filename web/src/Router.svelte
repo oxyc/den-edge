@@ -363,6 +363,65 @@
         await tick();
         if (ticket !== revision) return;
         window.scrollTo({ left: current.x, top: current.y, behavior: 'instant' });
+        if (
+          import.meta.env.DEN_E2E &&
+          (window as Window & { __denScrollRestoreDiagnostics?: boolean })
+            .__denScrollRestoreDiagnostics
+        ) {
+          // Preserve the landing and its limit before the diagnostic makes any layout-dependent geometry reads.
+          const resulting = { x: window.scrollX, y: window.scrollY };
+          const scrollRoot = document.scrollingElement ?? document.documentElement;
+          const max = {
+            x: Math.max(0, scrollRoot.scrollWidth - scrollRoot.clientWidth),
+            y: Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight),
+          };
+          const activePage = document.querySelector<HTMLElement>(
+            '[data-route-page][data-active="true"]',
+          );
+          const pageRect = activePage?.getBoundingClientRect();
+          const target = window as Window & { __denScrollRestoreTimeline?: unknown[] };
+          const timeline = (target.__denScrollRestoreTimeline ??= []);
+          timeline.push({
+            at: performance.now(),
+            route: address(),
+            requested: { x: current.x, y: current.y },
+            resulting,
+            max,
+            routePage: activePage
+              ? {
+                  height: pageRect?.height ?? 0,
+                  scrollHeight: activePage.scrollHeight,
+                  clientHeight: activePage.clientHeight,
+                }
+              : null,
+            rows: Array.from(activePage?.querySelectorAll<HTMLElement>('[data-row-id]') ?? []).map(
+              (row) => {
+                const rect = row.getBoundingClientRect();
+                const style = getComputedStyle(row);
+                return {
+                  id: row.dataset.rowId ?? null,
+                  layoutState: row.dataset.layoutState ?? null,
+                  geometry: {
+                    top: rect.top,
+                    bottom: rect.bottom,
+                    width: rect.width,
+                    height: rect.height,
+                  },
+                  placement: {
+                    placed: row.classList.contains('placed'),
+                    near: row.classList.contains('near'),
+                  },
+                  containment: {
+                    contentVisibility: style.contentVisibility,
+                    contain: style.contain,
+                    containIntrinsicSize: style.containIntrinsicSize,
+                  },
+                };
+              },
+            ),
+          });
+          if (timeline.length > 32) timeline.splice(0, timeline.length - 32);
+        }
         holdScroll(current.x, current.y, gliding);
         // Flush RoutePage's nested-scroll restoration before the new snapshot is captured.
         await tick();

@@ -640,11 +640,15 @@ export function contentWatched(
   return record?.status === 'watched';
 }
 
-/** The next episode in season order (Specials last), or none past the end — SeriesProgress.episode(after:). */
-export function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
-  const seasons = [...shape.counts.entries()].sort(
+/** A series' seasons with their episode counts, in watching order: Specials last. */
+const seasonsInOrder = (shape: Shape) =>
+  [...shape.counts.entries()].sort(
     ([a], [b]) => (a === 0 ? Infinity : a) - (b === 0 ? Infinity : b),
   );
+
+/** The next episode in season order (Specials last), or none past the end — SeriesProgress.episode(after:). */
+export function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
+  const seasons = seasonsInOrder(shape);
   const index = seasons.findIndex(([season]) => season === at.season);
   if (index < 0) return undefined;
   if (at.episode < (seasons[index]?.[1] ?? 0))
@@ -662,6 +666,24 @@ export function isAired(
     at.season < lastAired.season ||
     (at.season === lastAired.season && at.episode <= lastAired.episode)
   );
+}
+
+/** Each season with episodes, Specials last, and how many of them have aired through `lastAired`. */
+export function airedSeasons(
+  shape: Shape,
+  lastAired: Shape['lastAired'],
+): { number: number; aired: number }[] {
+  return seasonsInOrder(shape)
+    .filter(([, count]) => count > 0)
+    .map(([number, count]) => ({
+      number,
+      aired:
+        !lastAired || lastAired.season <= 0 || number < lastAired.season
+          ? count
+          : number === lastAired.season
+            ? Math.min(count, lastAired.episode)
+            : 0,
+    }));
 }
 
 type ContinueDecision = (request: Record<string, unknown>) => ContinueAnswer;

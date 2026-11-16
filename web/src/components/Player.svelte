@@ -6,7 +6,7 @@
      The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
-  import { withAiring } from '../lib/airing';
+  import { withAiring, type AiredEpisode } from '../lib/airing';
   import { airingStore } from '../lib/airing.svelte';
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
@@ -131,6 +131,7 @@
     type SubtitleResyncNotice,
   } from '../lib/subtitleResyncNotice';
   import type { MenuItem } from '../lib/titleActions';
+  import { airDate, cleanedOverview } from '../lib/detailPresentation';
   import {
     activeAt,
     canAutoSkip,
@@ -208,6 +209,9 @@
     playbackReceiptHandoffAsOwner,
     onplaybackreceipthandoff,
     onnext,
+    seasons,
+    episodeProgress,
+    onepisode,
     onclose,
     oncontrols,
   }: {
@@ -262,6 +266,12 @@
     /** Leaves playback only after handing terminal progress to the host's durable recovery surface. */
     onplaybackreceipthandoff: () => void;
     onnext?: () => void;
+    /** The series' seasons, Specials last, and how many of each have aired: what the Episodes list offers. */
+    seasons?: readonly { number: number; aired: number }[];
+    /** How much of an episode this profile has watched, 0 to 1. */
+    episodeProgress?: (season: number, episode: number) => number;
+    /** Another episode of this series, played in this player as Next plays the following one. */
+    onepisode?: (at: { season: number; episode: number }) => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
     oncontrols?: (
@@ -1204,6 +1214,30 @@
       .filter(Boolean)
       .join(' · '),
   );
+  /**
+   * A season's episodes through the already-open content service, dated as the title page's list dates them: atlas's
+   * release day where atlas has one. Null when they could not be had; never settles once `signal` has aborted.
+   */
+  function seasonEpisodes(picked: number, signal: AbortSignal): Promise<AiredEpisode[] | null> {
+    return new Promise((resolve) => {
+      void content
+        .query({ kind: 'season', title: { type: 'tv', id: title.id }, season: picked }, signal)
+        .then(({ episodes }) =>
+          episodes.state === 'ready'
+            ? withAiring(
+                episodes.value,
+                picked,
+                untrack(() => airingStore(content).get(title.id)),
+              )
+            : null,
+        )
+        .catch(() => null)
+        .then((listed) => {
+          if (!signal.aborted) resolve(listed);
+        });
+    });
+  }
+
   // tvOS resolves episode metadata after playback has begun. Do the same through the already-open content service:
   // it enriches the transport and Down panel without joining the source/session critical path.
   $effect(() => {
@@ -1217,28 +1251,68 @@
     )
       return;
     const controller = new AbortController();
-    void content
-      .query(
-        { kind: 'season', title: { type: 'tv', id: title.id }, season: pickedSeason },
-        controller.signal,
-      )
-      .then(({ episodes }) => {
-        if (controller.signal.aborted) return;
-        // Dated as the episode list dates it: atlas's release day where atlas has one.
-        tvEpisode =
-          episodes.state === 'ready'
-            ? (withAiring(
-                episodes.value,
-                pickedSeason,
-                untrack(() => airingStore(content).get(title.id)),
-              ).find((item) => item.number === pickedEpisode) ?? null)
-            : null;
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) tvEpisode = null;
-      });
+    void seasonEpisodes(pickedSeason, controller.signal).then(
+      (listed) => (tvEpisode = listed?.find((item) => item.number === pickedEpisode) ?? null),
+    );
     return () => controller.abort();
   });
+  /** The season the Episodes list shows: the one playing, until another is picked there. */
+  let listedSeason = $state<number>();
+  const shownSeason = $derived(listedSeason ?? season);
+  /** Its episodes; undefined while they are asked for, null when they could not be had. */
+  let listedEpisodes = $state.raw<AiredEpisode[] | null>();
+  const listsEpisodes = $derived(
+    webTransport && !!onepisode && title.type === 'tv' && !!seasons?.length,
+  );
+  const hasSession = $derived(!!session);
+  // Asked once playback has its session, off the start's critical path, and again for a season picked in the list.
+  $effect(() => {
+    const picked = shownSeason;
+    listedEpisodes = undefined;
+    if (!listsEpisodes || !hasSession || picked === undefined) return;
+    const controller = new AbortController();
+    void seasonEpisodes(picked, controller.signal).then((listed) => (listedEpisodes = listed));
+    return () => controller.abort();
+  });
+  /** The list's rows: each episode with its menu item, a link to play it, or inert until it has aired. */
+  const episodeRows = $derived.by(() => {
+    const picked = shownSeason;
+    const aired = seasons?.find((item) => item.number === picked)?.aired ?? 0;
+    return (listedEpisodes ?? []).map((item) => {
+      const at = { season: picked!, episode: item.number };
+      const current = picked === season && item.number === episode;
+      const menuItem: MenuItem =
+        item.number > aired
+          ? {
+              kind: 'item',
+              key: `${picked}:${item.number}`,
+              label: item.name,
+              onselect: NO_ACTION,
+              disabled: true,
+            }
+          : {
+              kind: 'link',
+              key: `${picked}:${item.number}`,
+              label: item.name,
+              href: titleHref({ ...title, ...at, play: true }),
+              onselect: () => {
+                if (current) return;
+                // As Next does: the countdown cannot also advance once another episode is asked for.
+                stay();
+                onepisode?.(at);
+              },
+            };
+      return {
+        episode: item,
+        menuItem,
+        current,
+        progress: episodeProgress?.(at.season, at.episode) ?? 0,
+      };
+    });
+  });
+  const seasonLabel = (number: number) =>
+    number === 0 ? i18n.phrase('Specials') : `${i18n.phrase('Season')} ${number}`;
+
   // The page under the player is not on screen while it plays (its `active` is off), so it names the tab no more:
   // the player does, as the title's page would.
   nameTab(() => named(heading, season === undefined ? title.year : undefined));
@@ -5260,7 +5334,15 @@
     releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
     clearTransition();
-    showTransition('Starting next…');
+    // Named, not "next": one picked from the Episodes list may be any episode of the series.
+    showTransition(
+      at.season === undefined || at.episode === undefined
+        ? 'Starting next…'
+        : i18n.format('player.startingEpisode', 'Starting S{season} · E{episode}…', {
+            season: at.season,
+            episode: at.episode,
+          }),
+    );
     switchCount = 0;
     lastSwitchReason = undefined;
     degraded = false;
@@ -5740,18 +5822,14 @@
   }
 
   /**
-   * Into a row's page, or back out of it (`label` null): the options stay open — a popover keeps its bottom edge where
-   * it was, above its button, as it grows or shrinks — and focus goes to the page's first row or, coming back, to the
-   * row that opened it.
+   * Into a row's page, or back out of it (`label` null): the options stay open — `ActionMenu` places them again at
+   * their new size — and focus goes to the page's first row or, coming back, to the row that opened it.
    */
   async function showOptionsPage(label: string | null) {
     const from = optionsPage;
     const menu = document.querySelector<HTMLElement>('.menu:popover-open:has(.options-rows)');
-    const bottom = menu?.getBoundingClientRect().bottom;
     optionsPage = label;
     await renderTick();
-    if (menu && bottom !== undefined && !menu.classList.contains('sheet'))
-      menu.style.top = `${Math.max(8, bottom - menu.offsetHeight)}px`;
     const rows = Array.from(
       menu?.querySelectorAll<HTMLElement>(
         '.options-rows [role^="menuitem"]:not([aria-disabled="true"])',
@@ -7047,6 +7125,25 @@
               >{@render nextIcon()}<span class="web-label">Next episode</span></a
             >
           {/if}
+          {#if session && listsEpisodes}
+            <span class="web-tip" data-tip={i18n.phrase('Episodes')}>
+              <ActionMenu
+                label="Episodes"
+                heading={shownSeason === undefined ? 'Episodes' : seasonLabel(shownSeason)}
+                rows={episodeList}
+                triggerClass="web-glyph web-labelled web-episodes"
+                sheetQuery={PHONE_SHEET}
+                onclose={() => {
+                  listedSeason = undefined;
+                  scheduleWebControls();
+                }}
+                items={() => episodeRows.map((row) => row.menuItem)}
+              >
+                {#snippet glyph()}{@render episodesIcon()}<span class="web-label">Episodes</span
+                  >{/snippet}
+              </ActionMenu>
+            </span>
+          {/if}
         </div>
         <div class="web-dock-group">
           {#if transport && !castView}
@@ -7230,6 +7327,92 @@
     {/if}
     <span class="options-chip">{playbackSource}</span>
   </div>
+{/snippet}
+
+<!-- The series under what is playing: its seasons as a row of chips, which change the list in place, then each episode
+     with its still, how much of it is watched, and its synopsis cut to two lines. The one playing is marked and
+     focused first; one not yet aired is listed and cannot be played. -->
+{#snippet episodeList(_: MenuItem[], run: (item: MenuItem, event: MouseEvent) => void)}
+  <div class="episode-list" role="none">
+    {#if seasons && seasons.length > 1}
+      <div class="episode-seasons" role="group" aria-label={i18n.phrase('Season')}>
+        {#each seasons as item (item.number)}
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={item.number === shownSeason}
+            aria-label={seasonLabel(item.number)}
+            class="episode-season"
+            onclick={() => (listedSeason = item.number)}
+            >{item.number === 0 ? i18n.phrase('Specials') : item.number}</button
+          >
+        {/each}
+      </div>
+    {/if}
+    {#if listedEpisodes === null}
+      <p class="episode-note">{i18n.phrase('Couldn’t load this season from TMDB.')}</p>
+    {:else if listedEpisodes === undefined}
+      <p class="episode-note" aria-busy="true">{i18n.phrase('Loading episodes')}</p>
+    {/if}
+    {#each episodeRows as row (row.menuItem.key)}
+      {@const { episode: item, menuItem, current, progress } = row}
+      {@const meta = [
+        current ? i18n.phrase('Now playing') : undefined,
+        menuItem.disabled ? airDate(item.airDate) || i18n.phrase('Upcoming') : undefined,
+        !current && progress >= WATCHED ? i18n.phrase('Watched') : undefined,
+        item.runtime ? `${item.runtime} min` : undefined,
+      ].filter(Boolean)}
+      <!-- An explicit link or button rather than `<svelte:element>`: its runtime would join the shared startup chunk
+           every page loads, for a list that only exists inside the player. -->
+      {#snippet rowContent()}
+        <span class="episode-still">
+          {#if item.stillPath}<img
+              class="episode-image"
+              src={`https://image.tmdb.org/t/p/w300${item.stillPath}`}
+              alt=""
+              loading="lazy"
+            />{/if}
+          {#if progress > 0 && progress < WATCHED}<span
+              class="episode-progress"
+              style:--episode-progress={`${progress * 100}%`}
+            ></span>{/if}
+        </span>
+        <span class="episode-text">
+          <b>{item.number}. {item.name}</b>
+          {#if meta.length}<small>{meta.join(' · ')}</small>{/if}
+          {#if item.overview}<span class="episode-overview">{cleanedOverview(item)}</span>{/if}
+        </span>
+      {/snippet}
+      {#if menuItem.kind === 'link'}
+        <a
+          href={menuItem.href}
+          role="menuitem"
+          tabindex="0"
+          class="item episode-row"
+          aria-current={current || undefined}
+          onclick={(event: MouseEvent) => run(menuItem, event)}>{@render rowContent()}</a
+        >
+      {:else}
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="0"
+          class="item episode-row"
+          aria-current={current || undefined}
+          aria-disabled={menuItem.disabled || undefined}
+          onclick={(event: MouseEvent) => run(menuItem, event)}>{@render rowContent()}</button
+        >
+      {/if}
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet episodesIcon()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <rect x="3" y="4.5" width="7" height="5" rx="1.2" />
+    <rect x="3" y="14.5" width="7" height="5" rx="1.2" />
+    <path d="M13 6h8M13 8.5h5M13 16h8M13 18.5h5" />
+  </svg>
 {/snippet}
 
 {#snippet pipIcon()}
@@ -8790,6 +8973,156 @@
     content: '‹';
     margin-right: 8px;
     color: var(--muted, rgb(255 255 255 / 0.6));
+  }
+
+  /* Episodes: wider than the options, since each row carries a still and two lines of synopsis. Its season chips stay
+     at the top while the episodes scroll under them. */
+  :global(div.menu:not(.sheet):has(.episode-list)) {
+    width: 420px;
+    max-width: calc(100vw - 16px);
+    max-height: min(600px, calc(100dvh - 16px));
+  }
+
+  :global(div.menu.sheet:has(.episode-list)) {
+    max-height: 72dvh;
+  }
+
+  .episode-seasons {
+    position: sticky;
+    top: -6px;
+    z-index: 1;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    margin: -6px -6px 6px;
+    padding: 8px 8px 6px;
+    background: #222228;
+    scrollbar-width: none;
+  }
+
+  .episode-season {
+    flex: none;
+    min-width: 34px;
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--line, rgb(255 255 255 / 0.14));
+    border-radius: 999px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+
+  .episode-season:hover,
+  .episode-season:focus-visible {
+    background: #fff2;
+  }
+
+  .episode-season:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: -2px;
+  }
+
+  .episode-season[aria-checked='true'] {
+    border-color: transparent;
+    background: #fff;
+    color: #111;
+    font-weight: 600;
+  }
+
+  .episode-note {
+    margin: 10px;
+    color: var(--muted, rgb(255 255 255 / 0.6));
+    font-size: 13px;
+  }
+
+  .episode-row {
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    width: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-decoration: none;
+  }
+
+  .episode-row[aria-current='true'] {
+    background: rgb(91 141 239 / 0.16);
+  }
+
+  .episode-still {
+    position: relative;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    border-radius: 6px;
+    background: rgb(255 255 255 / 0.08);
+  }
+
+  .episode-image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .episode-row[aria-disabled='true'] :is(.episode-image, .episode-text) {
+    opacity: 0.5;
+  }
+
+  /* How much of it is watched, along the still's foot as on the title page. */
+  .episode-progress {
+    position: absolute;
+    inset: auto 0 0;
+    height: 3px;
+    background: rgb(255 255 255 / 0.3);
+  }
+
+  .episode-progress::after {
+    content: '';
+    display: block;
+    width: var(--episode-progress);
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .episode-text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .episode-text b {
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .episode-text small,
+  .episode-overview {
+    color: var(--muted, rgb(255 255 255 / 0.6));
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  .episode-row[aria-current='true'] small {
+    color: var(--accent);
+  }
+
+  .episode-overview {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    line-height: 1.35;
   }
 
   .item-value {

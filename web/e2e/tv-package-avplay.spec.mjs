@@ -3,6 +3,7 @@ import { AVPLAY_FIXTURE_SCRIPT, callsNamed, chooseSubtitle, remoteKey } from './
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const API = 'https://den-tv-api.example.invalid';
+const SERVICE = 'https://den-tv-service.example.invalid';
 const cors = {
   'access-control-allow-origin': E2E_ORIGIN,
   'access-control-allow-headers': '*',
@@ -24,7 +25,7 @@ const playbackSession = {
 
 async function routePackageAvplay(page) {
   const sdkRequests = [];
-  const apiRequests = [];
+  const denRequests = [];
   const ended = [];
   await page.route(
     (url) => url.pathname.endsWith('/$WEBAPIS/webapis/webapis.js'),
@@ -33,10 +34,11 @@ async function routePackageAvplay(page) {
       return route.fulfill({ contentType: 'text/javascript', body: AVPLAY_FIXTURE_SCRIPT });
     },
   );
-  await page.route(`${API}/**`, (route) => {
+  const handle = (route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
-    apiRequests.push(`${request.method()} ${path}`);
+    const url = new URL(request.url());
+    const path = url.pathname;
+    denRequests.push(`${url.origin} ${request.method()} ${path}`);
     if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
     if (path === '/tmdb/3/movie/42/external_ids')
       return route.fulfill({ headers: cors, json: { imdb_id: 'tt42' } });
@@ -52,8 +54,10 @@ async function routePackageAvplay(page) {
     }
     if (request.method() === 'POST') return route.fulfill({ status: 204, headers: cors });
     return route.fulfill({ status: 404, headers: cors, json: { error: 'not_found' } });
-  });
-  return { apiRequests, ended, sdkRequests };
+  };
+  await page.route(`${API}/**`, handle);
+  await page.route(`${SERVICE}/**`, handle);
+  return { denRequests, ended, sdkRequests };
 }
 
 test('packaged Tizen loads the Samsung bridge before the app and plays through AVPlay under CSP', async ({
@@ -79,9 +83,9 @@ test('packaged Tizen loads the Samsung bridge before the app and plays through A
   await expect.poll(() => callsNamed(page, 'prepareAsync')).toHaveLength(1);
   await expect.poll(() => video.evaluate((element) => element.currentTime)).toBeGreaterThan(12);
   expect((await callsNamed(page, 'open'))[0]?.[1]).toBe(
-    `${API}/direct/s/packaged-avplay-1/sig/master.m3u8`,
+    `${SERVICE}/direct/s/packaged-avplay-1/sig/master.m3u8`,
   );
-  expect(routed.apiRequests).toContain('POST /direct/session');
+  expect(routed.denRequests).toContain(`${SERVICE} POST /direct/session`);
 
   expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
   await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);

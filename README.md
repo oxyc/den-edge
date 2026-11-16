@@ -264,7 +264,7 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 
 ### Client failure diagnostics
 
-During friends-and-family testing, Web, webOS and Tizen send privacy-minimized terminal failures to
+During friends-and-family testing, Web, packaged TVs and native Apple clients send privacy-minimized terminal failures to
 `POST /diagnostics/failure` without a consent prompt. The route uses the ordinary request log: enable
 `LOG_REQUESTS=1`, then query by client correlation with, for example,
 `journalctl -u den-edge --since today | rg 'failure=.*correlation:0123456789abcdef'`. `rid=` on the same line is
@@ -274,9 +274,18 @@ separate diagnostics file.
 The body is capped at 2 KiB and strictly rejects unknown fields. The in-memory client queue holds at most 16
 reports for five minutes, tries each delivery at most twice, and sends at most 20 requests a minute; den-edge
 independently accepts at most 20 reports a minute per address and logs an identical failure fingerprint at most
-once a minute. A maximal allowlisted `failure=` tag is 391 ASCII bytes, so application log text is bounded
+once a minute. A maximal allowlisted `failure=` tag is 429 ASCII bytes, so application log text is bounded
 to roughly 10 KiB/minute per continuously failing address before journal metadata/compression. Actual retained
 bytes depend on the host's journald policy and must be measured there.
+
+[`contracts/failure-report-schema-v2.json`](contracts/failure-report-schema-v2.json) is the versioned, machine-readable
+contract for the accepted fields, closed enums and maximal service tag. Edge's Rust test consumes that file.
+Cross-repository consumers copy the artifact from a reviewed, pinned den-edge commit and keep its filename and
+contents unchanged; their contract test must compare their own wire types with every list and reconstruct the
+published maximum. A backward-compatible field or enum addition updates v2 in the same Edge change as the decoder;
+an incompatible wire change publishes a new versioned file while the old decoder contract remains accepted for the
+coordinated client rollout. This gives consumer updates a stable path without making a runtime request or bundling
+the fixture in an app.
 
 Retention is therefore exactly the service journal's retention, not an additional Den policy. On the standard
 volatile journal it expires on normal rotation/reboot. Operators can inspect the active bound with

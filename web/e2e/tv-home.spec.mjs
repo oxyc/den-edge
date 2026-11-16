@@ -16,30 +16,30 @@ async function homeRowGeometry(page, targetName) {
     const sections = [...root.querySelectorAll('section.row')];
     const target = sections.find((section) => section.getAttribute('aria-label') === name);
     if (!target) return { fonts: document.fonts?.status ?? 'unsupported', rows: [] };
-    const targetTop = target.getBoundingClientRect().top + scrollY;
     return {
       fonts: document.fonts?.status ?? 'unsupported',
-      rows: sections
-        .map((section) => {
-          const wrapper = section.closest('.row-window, .windowed') ?? section;
-          const box = section.getBoundingClientRect();
-          const style = getComputedStyle(section);
-          return {
-            id:
-              wrapper.getAttribute('data-row-id') ??
-              section.getAttribute('aria-label') ??
-              section.querySelector('h2')?.textContent?.trim() ??
-              'unnamed',
-            state:
-              wrapper.getAttribute('data-layout-state') ??
-              (wrapper.getAttribute('aria-busy') === 'true' ? 'pending' : 'settled'),
-            top: box.top + scrollY,
-            height: box.height,
-            marginTop: style.marginTop,
-            marginBottom: style.marginBottom,
-          };
-        })
-        .filter((row) => row.top <= targetTop),
+      // The rows that can move the target are the ones before it in document order. Filtering by `top` instead
+      // admits any later row that is not in layout yet (`display: none` while it loads reports top 0) and drops it
+      // again once it is, so the list changes with how far Home has progressively mounted, not with its geometry.
+      rows: sections.slice(0, sections.indexOf(target) + 1).map((section) => {
+        const wrapper = section.closest('.row-window, .windowed') ?? section;
+        const box = section.getBoundingClientRect();
+        const style = getComputedStyle(section);
+        return {
+          id:
+            wrapper.getAttribute('data-row-id') ??
+            section.getAttribute('aria-label') ??
+            section.querySelector('h2')?.textContent?.trim() ??
+            'unnamed',
+          state:
+            wrapper.getAttribute('data-layout-state') ??
+            (wrapper.getAttribute('aria-busy') === 'true' ? 'pending' : 'settled'),
+          top: box.top + scrollY,
+          height: box.height,
+          marginTop: style.marginTop,
+          marginBottom: style.marginBottom,
+        };
+      }),
     };
   }, targetName);
 }
