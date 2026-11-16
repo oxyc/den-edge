@@ -3202,7 +3202,7 @@
 {:else if session.kid && !facet && discovered.atlasUnreachable}
   <!-- Kid discovery deliberately has no saved-content fallback. Once live Atlas discovery has conclusively failed,
        replace the indefinite shelf load with the same retry authority People and service pages use. -->
-  <section class="kid-home-unreachable" aria-label="Home">
+  <section class="kid-home-unreachable" aria-label={i18n.text('nav.home')}>
     <ServerUnreachable onretry={() => discovered.retry()} />
   </section>
 {:else}

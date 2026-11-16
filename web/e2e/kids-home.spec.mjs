@@ -26,12 +26,14 @@ async function kidsAtlas(page, { online = true } = {}) {
   const atlasRequests = [];
   const airingRequests = [];
   const recommendations = [];
+  let manifestRequests = 0;
   let atlasOnline = online;
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await page.route('**/metadata/title/query', (route) => route.fulfill({ json: { entries: [] } }));
   await page.route('**/atlas/**', (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith('/manifest.json')) {
+      manifestRequests++;
       if (!atlasOnline) return route.abort('failed');
       return route.fulfill({ json: { id: 'com.den.atlas', catalogs: [] } });
     }
@@ -138,6 +140,7 @@ async function kidsAtlas(page, { online = true } = {}) {
     atlasRequests,
     airingRequests,
     recommendations,
+    manifestRequests: () => manifestRequests,
     setAtlasOnline: (value) => (atlasOnline = value),
   };
 }
@@ -145,7 +148,7 @@ async function kidsAtlas(page, { online = true } = {}) {
 test('Kid Home names an unreachable Atlas and Retry recovers without a reload', async ({
   page,
 }) => {
-  const { setAtlasOnline } = await kidsAtlas(page, { online: false });
+  const { manifestRequests, setAtlasOnline } = await kidsAtlas(page, { online: false });
   await page.goto(`${E2E_ORIGIN}/test/library.html?kid&populated`);
 
   const unavailable = page.getByRole('alert').filter({
@@ -153,12 +156,14 @@ test('Kid Home names an unreachable Atlas and Retry recovers without a reload', 
   });
   await expect(unavailable).toBeVisible();
   await expect(page.getByText('Loading your shelves', { exact: true })).toHaveCount(0);
+  expect(manifestRequests()).toBe(1);
 
   setAtlasOnline(true);
   await unavailable.getByRole('button', { name: 'Try again' }).click();
 
   await expect(unavailable).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Welcome to Moominvalley' })).toBeVisible();
+  expect(manifestRequests()).toBe(2);
 });
 
 test('Kid Home uses its child-facing catalogue and billboard under the Kid policy', async ({
