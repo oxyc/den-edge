@@ -84,9 +84,10 @@ test('TV Services does not advertise recovery for a retained failed directory ch
   expect(refused, 'the first request for the lazy Services module was refused').toBe(true);
   await expect(row.getByRole('status')).toHaveText('Services unavailable');
   await expect(row.getByRole('button', { name: 'Try again' })).toHaveCount(0);
-  await expect(requests, 'the retained failed import is not offered as an in-page retry').toHaveText(
-    '1',
-  );
+  await expect(
+    requests,
+    'the retained failed import is not offered as an in-page retry',
+  ).toHaveText('1');
   expect(await geometry(row)).toEqual(reserved);
 });
 
