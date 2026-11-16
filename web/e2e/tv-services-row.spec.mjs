@@ -67,7 +67,9 @@ test('TV Services retry is focus-stable, bounded, and keeps the reserved height'
 
 test('TV Services retries the same failed directory chunk in place', async ({ page }) => {
   let refused = false;
-  await page.route('**/assets/services-*.js', (route) => {
+  // `services-row-*.js` is this fixture's entry. Refuse only the lazy settings module whose retry behavior the
+  // production Library depends on; aborting the entry would prove nothing about a repeated dynamic import.
+  await page.route(/\/assets\/services-(?!row-)[^/]+\.js(?:\?.*)?$/, (route) => {
     if (refused) return route.continue();
     refused = true;
     return route.abort('connectionfailed');
@@ -77,6 +79,7 @@ test('TV Services retries the same failed directory chunk in place', async ({ pa
 
   await row.scrollIntoViewIfNeeded();
   await expect(requests).toHaveText('1');
+  expect(refused, 'the first request for the lazy Services module was refused').toBe(true);
   await expect(row.getByRole('status')).toHaveText('Services unavailable');
   await row.getByRole('button', { name: 'Try again' }).click();
   await expect(requests).toHaveText('2');
