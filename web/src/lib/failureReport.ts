@@ -87,9 +87,6 @@ export const FAILURE_DEDUPE_MS = 60_000;
 export const FAILURE_ATTEMPTS_MAX = 2;
 export const FAILURE_REQUESTS_PER_MINUTE = 20;
 export const FAILURE_BODY_MAX = 2048;
-const RETRY_MS = 5_000;
-const REQUEST_MS = 8_000;
-
 type OnlineTarget = Pick<Window, 'addEventListener' | 'removeEventListener'>;
 
 export interface FailureReporterOptions {
@@ -106,10 +103,6 @@ function randomCorrelation(): string {
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function endpoint(): string {
-  return `${__DEN_TV_API_ORIGIN__}/diagnostics/failure`;
 }
 
 function fingerprint(report: ClientFailure): string {
@@ -177,12 +170,6 @@ const MODULES: readonly FailureModule[] = [
   'other',
 ];
 
-function correlation(value: string): boolean {
-  return (
-    /^[0-9a-f]{16,64}$/.test(value) || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value)
-  );
-}
-
 /** Copy only the wire allowlist. This runtime boundary protects against an `unknown` value or a future caller
  * accidentally spreading a response, URL, console argument or identifier into the typed API. */
 function wireFailure(input: ClientFailure, makeCorrelation: () => string): WireFailure | undefined {
@@ -193,7 +180,8 @@ function wireFailure(input: ClientFailure, makeCorrelation: () => string): WireF
   )
     return undefined;
   const id = input.correlation ?? makeCorrelation();
-  if (!correlation(id)) return undefined;
+  if (!/^(?:[0-9a-f]{16,64}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.test(id))
+    return undefined;
   const report: WireFailure = {
     platform: currentClientPlatform(),
     operation: input.operation,
@@ -363,10 +351,10 @@ export class FailureReporter {
           generation: item.report.generation,
           value: controller,
         };
-        const timeout = this.#setTimer(() => controller.abort(), REQUEST_MS);
+        const timeout = this.#setTimer(() => controller.abort(), 8_000);
         let retry = false;
         try {
-          const response = await this.#fetch(endpoint(), {
+          const response = await this.#fetch(`${__DEN_TV_API_ORIGIN__}/diagnostics/failure`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(item.report),
@@ -383,7 +371,7 @@ export class FailureReporter {
         if (this.#queue[0] === item) this.#queue.shift();
         if (retry && item.attempts < FAILURE_ATTEMPTS_MAX && !this.#stale(item)) {
           this.#queue.unshift(item);
-          this.#scheduleRetry(RETRY_MS);
+          this.#scheduleRetry(5_000);
           break;
         }
       }
