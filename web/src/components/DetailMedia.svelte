@@ -523,7 +523,12 @@
         engine.loadSource(master);
         engine.attachMedia(player);
       },
-      () => nextTrailer(),
+      () => {
+        live = false;
+        engine?.destroy();
+        engine = undefined;
+        nextTrailer();
+      },
       () => live,
     );
     return () => {
@@ -644,7 +649,7 @@
       playback = next;
       forced = false;
       failed = !next;
-      if (!next) reportTrailerEngineFailure('candidates_exhausted');
+      if (!next && active) reportTrailerEngineFailure('candidates_exhausted');
     }
     if (advancing === owner) advancing = null;
   }

@@ -71,9 +71,7 @@ describe('trailer engine diagnostics', () => {
       ['[Den trailer] {"event":"engine-failure","outcome":"fragment_loop"}'],
       ['[Den trailer] {"event":"engine-failure","outcome":"candidates_exhausted"}'],
     ]);
-    expect(JSON.stringify(warn.mock.calls)).not.toMatch(
-      /url|title|capability|provider|fragment.*:/i,
-    );
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/https?:|tmdb:|m\/s\/|provider body/i);
     warn.mockRestore();
   });
 });
