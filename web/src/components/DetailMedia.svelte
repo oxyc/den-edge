@@ -499,7 +499,6 @@
         if (allowed) void player.play().catch(() => {});
       });
       engine.once(Hls.Events.FRAG_BUFFERED, () => {
-        if (!live) return;
         // The opening rung was ours; every one after it is the line's to choose. `loadLevel`, not `nextLevel`:
         // that asks for a switch, which throws away what is buffered ahead and fetches it again. Asked on every
         // buffered fragment, it never ended: one segment fetched 830 times in four seconds.
@@ -510,7 +509,6 @@
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A count the handler reads, never rendered.
       const loads = new Map<string, number>();
       engine.on(Hls.Events.FRAG_LOADING, (_event, { frag }) => {
-        if (!live) return;
         const key = `${frag.type}:${frag.level}:${frag.sn}`;
         const count = (loads.get(key) ?? 0) + 1;
         loads.set(key, count);
