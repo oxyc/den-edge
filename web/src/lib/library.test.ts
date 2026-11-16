@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { blankTitle, RESUME_FLOOR, WATCHED } from './actions';
 import {
+  airedSeasons,
   applyLog,
   applyLogInSlices,
   continueAiring,
@@ -804,5 +805,36 @@ describe('a caught-up series waiting for its next episode', () => {
     const projector = new ContinueProjector();
     projector.project(compact);
     expect(projector.dismissed()).toEqual([{ type: 'tv', id: 9 }]);
+  });
+});
+
+describe('airedSeasons', () => {
+  const shape = {
+    counts: new Map([
+      [0, 2],
+      [1, 8],
+      [2, 10],
+      [3, 0],
+    ]),
+  };
+
+  it('lists seasons with episodes, Specials last, each as far as it has aired', () => {
+    expect(airedSeasons(shape, { season: 2, episode: 4 })).toEqual([
+      { number: 1, aired: 8 },
+      { number: 2, aired: 4 },
+      { number: 0, aired: 2 },
+    ]);
+  });
+
+  it('counts every episode aired when nothing says otherwise', () => {
+    expect(airedSeasons(shape, undefined).map(({ aired }) => aired)).toEqual([8, 10, 2]);
+  });
+
+  it('counts a season after the last aired one as not aired at all', () => {
+    expect(airedSeasons(shape, { season: 1, episode: 3 })).toEqual([
+      { number: 1, aired: 3 },
+      { number: 2, aired: 0 },
+      { number: 0, aired: 2 },
+    ]);
   });
 });

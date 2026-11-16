@@ -181,7 +181,7 @@ async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [
   await page.route('**/tmdb/3/*/*/external_ids', (r) =>
     r.fulfill({ json: { imdb_id: 'tt0002002' } }),
   );
-  const asked = { playback: [], media: [] };
+  const asked = { playback: [], playbackKeys: [], media: [] };
   await page.route('https://image.tmdb.org/**', (r) => r.fulfill({ status: 404, body: '' }));
   // Casting is offered from a page on a direct den-remux route, as at home: Den Remux there answers its health.
   await page.route('**/routes', (r) =>
@@ -204,6 +204,7 @@ async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [
     if (path === `${HEARTH.base}/playback`) {
       const body = request.postDataJSON();
       asked.playback.push(body);
+      asked.playbackKeys.push(request.headers()['idempotency-key']);
       return r.fulfill({ json: answer(body) });
     }
     return r.fulfill({ status: 404, json: { error: 'not_found' } });
@@ -211,8 +212,10 @@ async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [
   // Visitor activity has no profile library whose service configuration can replace the fixture's explicit Scout
   // endpoint. Exercise the same managed playback answer there instead of letting it escape the network guard.
   await page.route(`${ORIGIN}/den/fixture/playback`, (r) => {
-    const body = r.request().postDataJSON();
+    const request = r.request();
+    const body = request.postDataJSON();
     asked.playback.push(body);
+    asked.playbackKeys.push(request.headers()['idempotency-key']);
     return r.fulfill({ json: answer(body) });
   });
   await page.route(`${ORIGIN}/den/fixture/subtitles/**`, (r) =>
@@ -261,6 +264,13 @@ async function open(browserType, { cast, answer = torboxAnswer, libraryQuery = [
 
 const player = (page) => page.locator('.player');
 const pageVideo = (page) => page.locator('.player video');
+
+/** One intentional Hearth operation: transport replays reuse their idempotency key. */
+const playbackOperations = (asked) =>
+  asked.playback.filter((_, index) => {
+    const key = asked.playbackKeys[index];
+    return index === 0 || !key || key !== asked.playbackKeys[index - 1];
+  });
 
 /** The page's video playing past `seconds`. */
 async function playingPast(page, seconds) {
@@ -441,7 +451,14 @@ test('closing the player and playing another title opens a fresh player', async 
     await expect(player(page)).toHaveAttribute('aria-label', `Film ${FILM}`);
     await expect(page).toHaveURL(`${ORIGIN}/movie/${FILM}-film-${FILM}?play=1`);
     await playingPast(page, 1);
-    expect(asked.playback.map(itemOf)).toEqual(['e1', 'film']);
+    const operations = playbackOperations(asked);
+    const items = operations.map(itemOf);
+    if (items.length === 3) {
+      // A loaded browser can spend the no-frame watchdog before its first frame. TorBox is then intentionally
+      // refreshed once; unlike a duplicate Play, that recovery is direct-only and has its own operation key.
+      expect(items).toEqual(['e1', 'e1', 'film']);
+      expect(operations[1]).toMatchObject({ directOnly: true });
+    } else expect(items).toEqual(['e1', 'film']);
     expect(
       await page.evaluate(() => document.querySelector('.player video') === window.__seriesVideo),
     ).toBe(false);

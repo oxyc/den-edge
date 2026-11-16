@@ -28,6 +28,9 @@ export default defineConfig({
     // Replacing the browser webServer must preserve its upstream isolation guard for build and preview.
     env: {
       DEN_E2E: '1',
+      // The production TV build embeds the browser origin used by supported-browser handoffs. Keep the fixture
+      // explicit: without it, Vite falls back to this loopback preview and no longer exercises that destination.
+      DEN_TV_WEB_ORIGIN: 'https://household.example',
       // Keep server evidence beside, not inside, the test outputDir Playwright clears at startup.
       // Existing TV failure artifact uploads retain it along with browser traces.
       DEN_TV_PREVIEW_DIAGNOSTICS: `test-results-tv/preview-${platform}-${E2E_PORT}-${engine}.jsonl`,

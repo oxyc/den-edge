@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { tapPhoneControl } from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const release = {
@@ -17,7 +18,13 @@ const release = {
 };
 const FINE_POINTER = '(any-hover: hover) and (any-pointer: fine)';
 
-async function mockPlayer(page) {
+// Two tracks, so the audio picker is in the bar on every layout.
+const TWO_TRACKS = [
+  { language: 'eng', name: null, channels: 2, commentary: false },
+  { language: 'swe', name: null, channels: 2, commentary: false },
+];
+
+async function mockPlayer(page, audioTracks = TWO_TRACKS) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
@@ -36,11 +43,7 @@ async function mockPlayer(page) {
         release,
         video: { codec: 'h264', transcoded: false },
         audioTrack: 0,
-        // Two tracks, so the audio picker is in the bar on every layout.
-        audioTracks: [
-          { language: 'eng', name: null, channels: 2, commentary: false },
-          { language: 'swe', name: null, channels: 2, commentary: false },
-        ],
+        audioTracks,
       },
     }),
   );
@@ -95,8 +98,8 @@ async function launch(browserType) {
   );
 }
 
-async function openPlaying(page, query = '') {
-  await mockPlayer(page);
+async function openPlaying(page, query = '', audioTracks = TWO_TRACKS) {
+  await mockPlayer(page, audioTracks);
   await page.goto(`${ORIGIN}/test/player.html${query}`);
   const video = page.locator('.player video');
   await expect
@@ -217,6 +220,55 @@ for (const [engine, browserType] of engines) {
     });
   }
 
+  // What a mouse brings up over the bar: the dock's tooltips sit above the timeline rather than on it, and a list too
+  // long for the window scrolls above its button instead of covering the dock. A real 4K remux carried seventeen
+  // audio tracks; this page's unstyled rows are short, so it takes more than any engine fits in the window here.
+  test(`a mouse's tooltips and a long audio list leave the timeline and the dock clear (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 675 } });
+      const page = await context.newPage();
+      const tracks = Array.from({ length: 120 }, (_, i) => ({
+        language: i % 2 ? 'swe' : 'eng',
+        name: `Track ${i + 1}`,
+        channels: 6,
+        commentary: false,
+      }));
+      await openPlaying(page, '', tracks);
+      await page.mouse.move(720, 300);
+      await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
+
+      const tips = await page.evaluate(() => {
+        const track = document.querySelector('.player .web-track').getBoundingClientRect();
+        return [...document.querySelectorAll('.player .web-dock [data-tip]')]
+          .filter((element) => element.getBoundingClientRect().width > 0)
+          .flatMap((element) => {
+            const tip = getComputedStyle(element, '::after');
+            if (tip.content === 'none') return [];
+            // Each control is its tip's containing block, so its bottom edge is measured from the control's.
+            const bottom = element.getBoundingClientRect().bottom - parseFloat(tip.bottom);
+            return bottom > track.top
+              ? [`${element.dataset.tip} reaches ${bottom} > ${track.top}`]
+              : [];
+          });
+      });
+      expect(tips).toEqual([]);
+
+      const trigger = page.locator('.player .web-audio-subtitles');
+      await trigger.click();
+      const menu = page.locator('.menu:popover-open');
+      await expect(menu).toBeVisible();
+      const [list, button] = await Promise.all([menu.boundingBox(), trigger.boundingBox()]);
+      expect(list.y + list.height).toBeLessThanOrEqual(button.y);
+      expect(await menu.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
+        true,
+      );
+    } finally {
+      await browser.close();
+    }
+  });
+
   // A touch-only phone, upright and on its side: Den's transport and no native controls, nothing over anything, and
   // every control a 44px target, also while the next episode counts down.
   for (const viewport of [
@@ -238,15 +290,35 @@ for (const [engine, browserType] of engines) {
         // The phone gets what the desktop gets: play from the beginning (among the options), and Den's own fullscreen.
         await expect(page.getByRole('button', { name: 'Enter fullscreen' })).toBeVisible();
         await showControls(page);
-        await page.getByRole('button', { name: 'More playback options' }).tap();
+        const more = page.getByRole('button', { name: 'More playback options' });
+        // Visible means usable: the custom control, not WebKit's video layer underneath it, owns its centre.
+        expect(
+          await more.evaluate((button) => {
+            const box = button.getBoundingClientRect();
+            const target = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+            return target === button || button.contains(target);
+          }),
+        ).toBe(true);
+        await more.tap();
         await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toBeVisible();
         // A tap outside the sheet, which covers the dock, closes it.
         const title = await page.locator('.player header b').boundingBox();
         await page.touchscreen.tap(title.x + title.width / 2, title.y + title.height / 2);
         await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
         await expect(page.getByTestId('player-close-count')).toHaveText('0');
-
+        // Preserve the original timing assertion before exercising an additional input path: on a loaded runner the
+        // ten-second countdown can otherwise finish while the keyboard menu interaction is still being scheduled.
         await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
+        expect(await overlaps(page)).toEqual([]);
+
+        // The same trigger remains operable without a pointer (keyboard here, TV remote Select through ActionMenu's
+        // shared native button path on the TV-specific player menus).
+        await more.focus();
+        await page.keyboard.press('Enter');
+        await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
+
         expect(await overlaps(page)).toEqual([]);
       } finally {
         await browser.close();
@@ -273,6 +345,62 @@ for (const [engine, browserType] of engines) {
       }
     });
   }
+
+  test(`the phone options retry only a stale pre-pointer hide (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const page = await touchPage(browser, browserType, { width: 390, height: 844 });
+      await openPlaying(page);
+      await showControls(page);
+      const player = page.locator('.player');
+      const more = page.getByRole('button', { name: 'More playback options' });
+      let attempts = 0;
+      await tapPhoneControl(page, more, {
+        tap: async () => {
+          attempts++;
+          if (attempts === 1) {
+            await tapPicture(page);
+            await expect(player).toHaveClass(/web-controls-hidden/);
+            throw new Error('stale controls deadline');
+          }
+          await more.tap();
+        },
+      });
+      expect(attempts).toBe(2);
+      await expect(page.getByRole('menu', { name: 'More playback options' })).toBeVisible();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`the phone options do not retry a failure after pointerdown (${engine})`, async () => {
+    test.skip(!existsSync(browserType.executablePath()), `${engine} is not installed here`);
+    const browser = await launch(browserType);
+    try {
+      const page = await touchPage(browser, browserType, { width: 390, height: 844 });
+      await openPlaying(page);
+      await showControls(page);
+      const player = page.locator('.player');
+      const more = page.getByRole('button', { name: 'More playback options' });
+      let attempts = 0;
+      await expect(
+        tapPhoneControl(page, more, {
+          tap: async () => {
+            attempts++;
+            await more.dispatchEvent('pointerdown', { pointerType: 'touch', bubbles: true });
+            await tapPicture(page);
+            await expect(player).toHaveClass(/web-controls-hidden/);
+            throw new Error('received pointer failure');
+          },
+        }),
+      ).rejects.toThrow('received pointer failure');
+      expect(attempts).toBe(1);
+      await expect(page.getByRole('menu', { name: 'More playback options' })).toHaveCount(0);
+    } finally {
+      await browser.close();
+    }
+  });
 
   // A tap on the picture shows the controls, a second hides them, and neither pauses; untouched, they hide again.
   test(`a tap shows or hides the controls and never pauses (${engine})`, async () => {

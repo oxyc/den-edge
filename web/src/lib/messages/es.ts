@@ -76,6 +76,7 @@ export const messages = {
   'common.play': 'Reproducir',
   'common.resume': 'Reanudar',
   'common.close': 'Cerrar',
+  'player.autoplayBlocked': 'Selecciona Reproducir en el vídeo para continuar.',
   'player.subtitleTiming': 'Sincronización de subtítulos',
   'player.subtitleEarlier': 'Anterior',
   'player.subtitleLater': 'Más tarde',

@@ -26,6 +26,7 @@ export const parameters = {
   'notice.removedComingUp': '“{value}” togs bort från På väg',
   'notice.setReaction': 'Ställ in “{title}” på {reaction}',
   'player.playNextEpisode': 'Spela nästa · S{season} · A{episode}',
+  'player.startingEpisode': 'Startar S{season} · A{episode}…',
   'episode.play': 'Spela avsnitt {number}: {name}',
   'episode.upcoming': 'Avsnitt {number}: {name}. Sänds {date}',
   'episode.outOn': 'Ute {date} på {service}',

@@ -27,19 +27,38 @@ interface ReceiverGlobals {
 
 /** The fields of Google's player events this page reports. */
 interface PlayerEvent {
-  mediaStatus?: { playerState?: string; idleReason?: string };
+  mediaStatus?: {
+    playerState?: string;
+    idleReason?: string;
+    media?: { customData?: unknown };
+  };
   detailedErrorCode?: number;
   reason?: string;
   error?: { message?: string; code?: number; shakaErrorCode?: number } | string;
   isBuffering?: boolean;
   requestData?: {
+    customData?: unknown;
     media?: {
+      customData?: unknown;
       contentType?: string;
       hlsSegmentFormat?: string;
       hlsVideoSegmentFormat?: string;
       streamType?: string;
     };
   };
+}
+
+interface ReceiverLoad {
+  id: string;
+  generation: number;
+}
+
+function receiverLoad(value: unknown): ReceiverLoad | undefined {
+  const candidate = (value as { denLoad?: unknown } | null)?.denLoad as
+    { id?: unknown; generation?: unknown } | undefined;
+  return typeof candidate?.id === 'string' && Number.isInteger(candidate.generation)
+    ? { id: candidate.id, generation: candidate.generation as number }
+    : undefined;
 }
 
 const framework = (window as unknown as { cast?: ReceiverGlobals }).cast?.framework;
@@ -62,9 +81,27 @@ context.addCustomMessageListener(RECEIVER_NAMESPACE, (event) => {
  * What the TV's player did, sent to every connected sender, whose console prints it (`[Den receiver]`): the receiver's
  * own console is out of reach on a Chromecast, and a LOAD that never plays says nothing to the sender otherwise.
  */
-function tellSenders(event: string, detail: Record<string, unknown>): void {
-  const message = { type: 'den-receiver-event', event, ...detail };
-  console.info(`[Den receiver] ${JSON.stringify(message)}`);
+let activeLoad: ReceiverLoad | undefined;
+const ACTIVE_LOAD = Symbol('active receiver load');
+function loadFor(event: PlayerEvent): ReceiverLoad | undefined {
+  return (
+    receiverLoad(event.requestData?.customData) ??
+    receiverLoad(event.requestData?.media?.customData) ??
+    receiverLoad(event.mediaStatus?.media?.customData)
+  );
+}
+
+function tellSenders(
+  event: string,
+  detail: Record<string, unknown>,
+  load: ReceiverLoad | undefined | typeof ACTIVE_LOAD,
+): void {
+  const reportedLoad = load === ACTIVE_LOAD ? activeLoad : load;
+  const message = { type: 'den-receiver-event', event, ...reportedLoad, ...detail };
+  // `id` is the signed playlist capability. It belongs on Den's private sender/receiver wire for exact ownership,
+  // never in a console a viewer may copy into a report.
+  const { id: _privateLoadId, ...diagnostic } = message;
+  console.info(`[Den receiver] ${JSON.stringify(diagnostic)}`);
   try {
     // No sender id: every sender connected to this receiver hears it.
     context.sendCustomMessage(RECEIVER_NAMESPACE, undefined as unknown as string, message);
@@ -83,38 +120,55 @@ player.addEventListener(EventType.MEDIA_STATUS, (event) => {
   document.documentElement.dataset.state = state === 'IDLE' ? 'idle' : 'playing';
   if (state === reportedState) return;
   reportedState = state;
-  tellSenders('state', { state, idleReason: event.mediaStatus?.idleReason ?? null });
+  tellSenders(
+    'state',
+    { state, idleReason: event.mediaStatus?.idleReason ?? null },
+    loadFor(event),
+  );
 });
 player.addEventListener(EventType.REQUEST_LOAD, (event) => {
+  activeLoad = loadFor(event);
   const media = event.requestData?.media;
-  tellSenders('load', {
-    contentType: media?.contentType ?? null,
-    hlsSegmentFormat: media?.hlsSegmentFormat ?? null,
-    hlsVideoSegmentFormat: media?.hlsVideoSegmentFormat ?? null,
-    streamType: media?.streamType ?? null,
-  });
+  tellSenders(
+    'load',
+    {
+      contentType: media?.contentType ?? null,
+      hlsSegmentFormat: media?.hlsSegmentFormat ?? null,
+      hlsVideoSegmentFormat: media?.hlsVideoSegmentFormat ?? null,
+      streamType: media?.streamType ?? null,
+    },
+    activeLoad,
+  );
 });
 player.addEventListener(EventType.BUFFERING, (event) =>
-  tellSenders('buffering', { buffering: event.isBuffering ?? null }),
+  tellSenders('buffering', { buffering: event.isBuffering ?? null }, loadFor(event)),
 );
 player.addEventListener(EventType.ERROR, (event) =>
-  tellSenders('error', {
-    detailedErrorCode: event.detailedErrorCode ?? null,
-    reason: event.reason ?? null,
-    error:
-      typeof event.error === 'string'
-        ? event.error
-        : event.error
-          ? {
-              message: event.error.message ?? null,
-              code: event.error.code ?? null,
-              shakaErrorCode: event.error.shakaErrorCode ?? null,
-            }
-          : null,
-  }),
+  tellSenders(
+    'error',
+    {
+      detailedErrorCode: event.detailedErrorCode ?? null,
+      reason: event.reason ?? null,
+      error:
+        typeof event.error === 'string'
+          ? event.error
+          : event.error
+            ? {
+                message: event.error.message ?? null,
+                code: event.error.code ?? null,
+                shakaErrorCode: event.error.shakaErrorCode ?? null,
+              }
+            : null,
+    },
+    loadFor(event),
+  ),
 );
 addEventListener('securitypolicyviolation', (event) =>
-  tellSenders('blocked', { directive: event.violatedDirective, url: event.blockedURI }),
+  tellSenders(
+    'blocked',
+    { directive: event.violatedDirective, url: event.blockedURI },
+    ACTIVE_LOAD,
+  ),
 );
 
 context.start({ customNamespaces: { [RECEIVER_NAMESPACE]: framework.system.MessageType.JSON } });

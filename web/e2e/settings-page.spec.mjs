@@ -367,7 +367,18 @@ test('retained Settings replaces every household view and sends its next mutatio
   // Retry replaces the failed selector in place: there is still only one live connections subscription.
   await page.evaluate(() => globalThis.fixtureSettingsAuthority.failConnections());
   await expect(page.getByText('Couldn’t load your settings.')).toBeVisible();
+  const playbackInputs = page.locator('#playback select, #playback input');
+  await expect(playbackInputs).toHaveCount(6);
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => input.disabled)))
+    .toBe(true);
+  await expect(
+    page.locator('#content, #connections, #sharing, #assistants, #import, #advanced'),
+  ).toHaveCount(0);
   await page.getByRole('button', { name: 'Try again' }).click();
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => !input.disabled)))
+    .toBe(true);
   devices = await openDevices();
   await expect(devices).toContainText('Living Room TV');
   let subscriptions = await page.evaluate(() =>
@@ -481,6 +492,139 @@ test('profile Owner tracker state and mutations use activity authority, never th
     owner: 0,
     replacement: 1,
   });
+});
+
+test('a held profile replacement disables every Playback input and never crosses preference authority', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { images: {}, results: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?playback-authority-replacement`);
+
+  const playbackInputs = page.locator('#playback select, #playback input');
+  const source = page.locator('#playback-source-policy select');
+  await expect(playbackInputs).toHaveCount(6);
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => !input.disabled)))
+    .toBe(true);
+  await expect(source).toHaveValue('remember');
+
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.replacePlaybackHeld());
+  await expect(page.locator('.settings-load[role="status"]')).toBeVisible();
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => input.disabled)))
+    .toBe(true);
+  await expect(
+    page.locator('#content, #connections, #sharing, #assistants, #import, #advanced'),
+  ).toHaveCount(0);
+
+  // Exercise the command guard directly: even a synthetic queued change event at the prop replacement boundary
+  // cannot write either the retired profile preferences or the replacement while its authority is still loading.
+  await source.evaluate((select) => {
+    select.value = 'best';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(
+    await page.evaluate(() => globalThis.fixtureSettingsAuthority.preferenceCommands()),
+  ).toEqual({ primary: [], replacement: [] });
+
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.releasePlaybackReplacement());
+  await expect(page.locator('.settings-load')).toHaveCount(0);
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => !input.disabled)))
+    .toBe(true);
+  await source.selectOption('best');
+  await expect
+    .poll(() => page.evaluate(() => globalThis.fixtureSettingsAuthority.preferenceCommands()))
+    .toEqual({ primary: [], replacement: ['best'] });
+});
+
+test('a retained profile-policy failure disables Playback and retries its exact activity service', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { images: {}, results: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?playback-authority-replacement`);
+
+  const playbackInputs = page.locator('#playback select, #playback input');
+  const source = page.locator('#playback-source-policy select');
+  await expect(playbackInputs).toHaveCount(6);
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => !input.disabled)))
+    .toBe(true);
+  await expect(source).toHaveValue('remember');
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.setPresentationLanguage('sv'));
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.failPreferenceSettings());
+
+  const alert = page.locator('.settings-load[role="alert"]');
+  await expect(alert).toContainText('Det gick inte att ladda dina inställningar.');
+  await expect(alert.getByRole('button', { name: 'Försök igen' })).toBeVisible();
+  // The failed root deliberately retains its last value; it remains visible for continuity but never actionable.
+  await expect(source).toHaveValue('remember');
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => input.disabled)))
+    .toBe(true);
+  await expect(
+    page.locator('#content, #connections, #sharing, #assistants, #import, #advanced'),
+  ).toHaveCount(0);
+
+  await alert.getByRole('button', { name: 'Försök igen' }).click();
+  await expect(alert).toHaveCount(0);
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => !input.disabled)))
+    .toBe(true);
+  await expect(
+    page.locator('#content, #connections, #sharing, #assistants, #import, #advanced'),
+  ).toHaveCount(6);
+});
+
+test('a held retired preference save cannot publish language or restore focus into its replacement', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.route('**/lib/*/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
+  await page.route('**/config', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => route.fulfill({ json: { images: {}, results: [] } }));
+  await page.goto(`${E2E_ORIGIN}/test/settings.html?playback-authority-replacement`);
+
+  const language = page.locator('#interface-language select');
+  const replacementFocus = page.locator('#playback-source-policy select');
+  const documentLanguage = await page.locator('html').getAttribute('lang');
+  await expect(language).toBeEnabled();
+  await language.focus();
+  // Establish keyboard modality before the save captures its focus origin; otherwise there is intentionally no
+  // restore candidate and the stale-finally assertion would not exercise the authority fence.
+  await language.dispatchEvent('keydown', { key: 'Enter' });
+  await language.selectOption('sv');
+  await expect
+    .poll(() => page.evaluate(() => globalThis.fixtureSettingsAuthority.preferencePatchStarted()))
+    .toBe(true);
+
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.replacePlaybackHeld());
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.releasePlaybackReplacement());
+  await expect(page.locator('.settings-load')).toHaveCount(0);
+  await replacementFocus.focus();
+  await expect(replacementFocus).toBeFocused();
+
+  await page.evaluate(() => globalThis.fixtureSettingsAuthority.releasePreferencePatch());
+  await expect
+    .poll(() => page.evaluate(() => globalThis.fixtureSettingsAuthority.preferenceCommands()))
+    .toEqual({ primary: ['language:sv'], replacement: [] });
+  await expect(replacementFocus).toBeFocused();
+  expect(await page.locator('html').getAttribute('lang')).toBe(documentLanguage);
+  expect(
+    await page.evaluate(() => globalThis.fixtureSettingsAuthority.presentationLanguages()),
+  ).toEqual([]);
 });
 
 test('saving a provider key validates it in the content Worker before storing it', async ({

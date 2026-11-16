@@ -116,7 +116,14 @@ test.beforeEach(() => {
   dropping = () => false;
 });
 
-async function open({ grants = [], managed } = {}) {
+async function open({
+  grants = [],
+  managed,
+  blockAutoplay = false,
+  holdCastLan = false,
+  trackLocalEvents = false,
+} = {}) {
+  const lanGates = [];
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: [
@@ -131,6 +138,40 @@ async function open({ grants = [], managed } = {}) {
     viewport: { width: 1280, height: 800 },
     ignoreHTTPSErrors: true,
   });
+  if (trackLocalEvents)
+    await context.addInitScript((castOrigin) => {
+      if (location.origin !== castOrigin) return;
+      window.__denLocalListeners = { loadedmetadata: [], timeupdate: [], ended: [], error: [] };
+      const add = HTMLMediaElement.prototype.addEventListener;
+      HTMLMediaElement.prototype.addEventListener = function (type, listener, options) {
+        if (this.tagName === 'VIDEO' && type in window.__denLocalListeners)
+          window.__denLocalListeners[type].push(listener);
+        return add.call(this, type, listener, options);
+      };
+    }, CAST);
+  if (blockAutoplay)
+    await context.addInitScript(
+      ({ castOrigin, blockAutoplay }) => {
+        if (location.origin !== castOrigin) return;
+        const play = HTMLMediaElement.prototype.play;
+        let blocked = 0;
+        window.__denPlayActivation = [];
+        HTMLMediaElement.prototype.play = function () {
+          window.__denPlayActivation.push(navigator.userActivation?.isActive ?? null);
+          if (blockAutoplay === 'held' && blocked++ === 0)
+            return new Promise((_resolve, reject) => {
+              window.__rejectHeldPlay = reject;
+            });
+          if (blocked++ === 0 || (blockAutoplay === 'repeat' && blocked === 2)) {
+            return Promise.reject(new DOMException('Autoplay is blocked', 'NotAllowedError'));
+          }
+          if (blockAutoplay === 'error')
+            return Promise.reject(new DOMException('Playback failed', 'NotSupportedError'));
+          return play.call(this);
+        };
+      },
+      { castOrigin: CAST, blockAutoplay },
+    );
   const page = await context.newPage();
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
@@ -147,6 +188,7 @@ async function open({ grants = [], managed } = {}) {
         audioTrack: 0,
         audioTracks: [],
         publicBase: MEDIA,
+        ...(holdCastLan ? { lanBase: 'https://lan.test:8449' } : {}),
         castOrigin: CAST,
       },
     }),
@@ -183,7 +225,18 @@ async function open({ grants = [], managed } = {}) {
   });
   await context.route(`${MEDIA}/**`, (r) => r.continue());
   // Away from home: the home-network address the session names does not answer.
-  await context.route('https://lan.test:8449/**', (r) => r.abort('addressunreachable'));
+  await context.route('https://lan.test:8449/**', (r) => {
+    if (holdCastLan && r.request().frame()?.url().startsWith(CAST)) {
+      let release;
+      const released = new Promise((resolve) => (release = resolve));
+      lanGates.push({
+        succeed: () => release(r.fulfill({ status: 204 })),
+        fail: () => release(r.abort('addressunreachable')),
+      });
+      return released;
+    }
+    return r.abort('addressunreachable');
+  });
   await context.route(`${CAST}/**`, async (r) => {
     const path = new URL(r.request().url()).pathname;
     const file = path === '/' ? 'index.html' : path.slice(1);
@@ -201,7 +254,7 @@ async function open({ grants = [], managed } = {}) {
   await page.goto(
     `${ORIGIN}/test/player.html?remux=/remux${managed ? '&playback=/den/config/playback' : ''}`,
   );
-  return { browser, page };
+  return { browser, page, lanGates };
 }
 
 /** The cast page's video, once it is past `seconds`. */
@@ -299,6 +352,202 @@ test('a Hearth session on the public address plays in the real cast page on its 
       lanOffered: true,
       endReason: 'user_exit',
     });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a blocked cast-page autoplay asks for another tap without rejecting the release', async () => {
+  const managed = [];
+  const { browser, page } = await open({ managed, blockAutoplay: true });
+  try {
+    const notice = 'Select Play on the video to continue.';
+    await expect(page.getByRole('status').filter({ hasText: notice })).toBeVisible();
+    await expect(page.getByText('This browser couldn’t play this release.')).toHaveCount(0);
+    expect(managed).toHaveLength(1);
+
+    const frame = page.frameLocator('iframe[title="Den Cast player"]');
+    await frame.getByRole('button', { name: 'Play', exact: true }).click();
+    await playingPast(page, 1);
+    await expect(page.getByText(notice)).toHaveCount(0);
+    expect(managed).toHaveLength(1);
+    expect(await frame.locator('body').evaluate(() => window.__denPlayActivation.at(-1))).toBe(
+      true,
+    );
+
+    // The same playlist URL is not enough authority: a delayed refusal from an older load generation is ignored.
+    await page
+      .frameLocator('iframe[title="Den Cast player"]')
+      .locator('video')
+      .evaluate((_video, message) => window.parent.postMessage(message, message.parentOrigin), {
+        type: 'den-autoplay-blocked',
+        id: `${MEDIA}${PATH}/master.m3u8`,
+        generation: -1,
+        parentOrigin: ORIGIN,
+      });
+    await expect(page.getByText(notice)).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a repeated autoplay refusal keeps the cast-frame recovery available', async () => {
+  const managed = [];
+  const { browser, page } = await open({ managed, blockAutoplay: 'repeat' });
+  try {
+    const play = page
+      .frameLocator('iframe[title="Den Cast player"]')
+      .getByRole('button', { name: 'Play', exact: true });
+    await expect(play).toBeVisible();
+    await play.click();
+    await expect(play).toBeVisible();
+    expect(managed).toHaveLength(1);
+    await play.click();
+    await playingPast(page, 1);
+    expect(managed).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a held old load cannot publish under a same-id replacement generation', async () => {
+  const { browser, page } = await open({ blockAutoplay: 'held' });
+  try {
+    const frame = page.frameLocator('iframe[title="Den Cast player"]');
+    await expect
+      .poll(() => frame.locator('body').evaluate(() => !!window.__rejectHeldPlay))
+      .toBe(true);
+    await page.locator('iframe[title="Den Cast player"]').evaluate(
+      (iframe, replacement) => {
+        iframe.contentWindow.postMessage(replacement, replacement.castOrigin);
+      },
+      {
+        type: 'den-load',
+        id: `${MEDIA}${PATH}/master.m3u8`,
+        generation: 2,
+        castOrigin: CAST,
+        media: {
+          url: `${MEDIA}${PATH}/master.m3u8`,
+          mode: 'browser',
+          title: 'Replacement',
+        },
+      },
+    );
+    await frame
+      .locator('body')
+      .evaluate(() =>
+        window.__rejectHeldPlay(new DOMException('Autoplay is blocked', 'NotAllowedError')),
+      );
+    await expect(frame.getByRole('button', { name: 'Play', exact: true })).toBeHidden();
+    // A reset sent for the replaced generation cannot tear down the replacement that reused its playlist URL.
+    await page
+      .locator('iframe[title="Den Cast player"]')
+      .evaluate((iframe, reset) => iframe.contentWindow.postMessage(reset, reset.castOrigin), {
+        type: 'den-reset',
+        id: `${MEDIA}${PATH}/master.m3u8`,
+        generation: 1,
+        castOrigin: CAST,
+      });
+    await playingPast(page, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an old LAN proof cannot bless a same-id replacement generation', async () => {
+  const { browser, page, lanGates } = await open({ holdCastLan: true });
+  try {
+    const load = (generation, title) => ({
+      type: 'den-load',
+      id: `${MEDIA}${PATH}/master.m3u8`,
+      generation,
+      castOrigin: CAST,
+      media: {
+        url: `${MEDIA}${PATH}/master.m3u8`,
+        lanUrl: `https://lan.test:8449${PATH}/master.m3u8`,
+        mode: 'browser',
+        title,
+      },
+    });
+    // The parent intentionally omits the LAN address after its own probe has failed. Send an exact old generation
+    // that does offer it so this test owns the two overlapping cast-document probes it is fencing.
+    await page
+      .locator('iframe[title="Den Cast player"]')
+      .evaluate(
+        (iframe, old) => iframe.contentWindow.postMessage(old, old.castOrigin),
+        load(2, 'Old'),
+      );
+    await expect.poll(() => lanGates.length).toBe(1);
+    await page
+      .locator('iframe[title="Den Cast player"]')
+      .evaluate(
+        (iframe, replacement) =>
+          iframe.contentWindow.postMessage(replacement, replacement.castOrigin),
+        load(3, 'Replacement'),
+      );
+    await expect.poll(() => lanGates.length).toBe(2);
+    const publicPlaylist = page.waitForRequest(
+      (request) => request.url() === `${MEDIA}${PATH}/master.m3u8`,
+    );
+    lanGates[0].succeed();
+    await page.waitForTimeout(0);
+    lanGates[1].fail();
+    await publicPlaylist;
+    await playingPast(page, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('queued local media events from an old same-id generation cannot mutate its replacement', async () => {
+  const { browser, page } = await open({ trackLocalEvents: true });
+  try {
+    await playingPast(page, 1);
+    const frame = page.frameLocator('iframe[title="Den Cast player"]');
+    await page
+      .locator('iframe[title="Den Cast player"]')
+      .evaluate(
+        (iframe, replacement) =>
+          iframe.contentWindow.postMessage(replacement, replacement.castOrigin),
+        {
+          type: 'den-load',
+          id: `${MEDIA}${PATH}/master.m3u8`,
+          generation: 2,
+          castOrigin: CAST,
+          media: {
+            url: `${MEDIA}${PATH}/master.m3u8`,
+            mode: 'browser',
+            title: 'Replacement',
+          },
+        },
+      );
+    await playingPast(page, 1);
+    await frame.locator('video').evaluate((video) => {
+      for (const type of ['timeupdate', 'ended', 'error']) {
+        const old = window.__denLocalListeners[type][0];
+        old.call(video, new Event(type));
+      }
+    });
+    await playingPast(page, 1);
+    await expect(page.getByText('This browser couldn’t play this release.')).toHaveCount(0);
+    expect(heard.reports.filter((report) => !report.stats)).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a non-autoplay retry failure leaves recovery and reports through the existing failure path', async () => {
+  const { browser, page } = await open({ blockAutoplay: 'error' });
+  try {
+    const frame = page.frameLocator('iframe[title="Den Cast player"]');
+    const play = frame.getByRole('button', { name: 'Play', exact: true });
+    await expect(play).toBeVisible();
+    await play.click();
+    await expect(play).toBeHidden();
+    await expect(page.getByText('Select Play on the video to continue.')).toHaveCount(0);
+    await expect
+      .poll(() => heard.reports.map((report) => report.message))
+      .toContain('Playback failed');
   } finally {
     await browser.close();
   }

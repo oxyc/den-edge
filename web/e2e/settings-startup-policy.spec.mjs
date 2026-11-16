@@ -60,9 +60,24 @@ test('a saved language and Automatic subtitles read correctly before deferred po
   await page.route('**/den_core_deferred_bg.wasm', () => {});
   // What the page draws now comes from this browser's own copy; a pull may wait on deferred policy, so none is awaited.
   await page.reload();
-  await expect(page.locator('#subtitle-language select')).toHaveValue('__automatic', {
+  const startupSubtitles = page.locator('#subtitle-language select');
+  const startupLanguage = page.locator('#interface-language select');
+  const loading = page.locator('.settings-load[role="status"]');
+  await expect(loading).toBeVisible({ timeout: 30_000 });
+  await expect(loading).toHaveText('Läser in dina inställningar...');
+  const playbackInputs = page.locator('#playback select, #playback input');
+  await expect(playbackInputs).toHaveCount(6);
+  await expect
+    .poll(() => playbackInputs.evaluateAll((inputs) => inputs.every((input) => input.disabled)))
+    .toBe(true);
+  await expect(
+    page.locator('#content, #connections, #sharing, #assistants, #import, #advanced'),
+  ).toHaveCount(0);
+  await expect(startupSubtitles).toHaveValue('__automatic', {
     timeout: 30_000,
   });
-  await expect(page.locator('#interface-language select')).toHaveValue('sv');
+  await expect(startupSubtitles).toBeDisabled();
+  await expect(startupLanguage).toHaveValue('sv');
+  await expect(startupLanguage).toBeDisabled();
   await expect(page.locator('html')).toHaveAttribute('lang', 'sv');
 });

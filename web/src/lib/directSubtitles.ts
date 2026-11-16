@@ -1,6 +1,9 @@
 // External subtitles for a managed HLS URL. Hearth deliberately leaves TorBox's media playlist untouched, so the
 // browser asks the same configured combined Den addon for its ordinary candidates and lazily owns chosen blob URLs.
 
+import { i18n } from './i18n.svelte';
+import { interfaceLocale } from './interfaceLanguage';
+import { languageName } from './languageName';
 import type { Session } from './remux';
 import { serviceOrigin } from './runtimeUrl';
 
@@ -43,21 +46,12 @@ function language(value: unknown): string | null {
 
 /** A candidate's language, named consistently with the rest of Den. */
 function subtitleName(code: string): string {
-  let language = code;
-  try {
-    language =
-      new Intl.DisplayNames([globalThis.navigator?.language ?? 'en'], { type: 'language' }).of(
-        code,
-      ) ?? code;
-  } catch {
-    // An engine without `Intl.DisplayNames` names the code itself.
-  }
-  return language;
+  return languageName(code) ?? code;
 }
 
 function compactCount(value: number): string {
   try {
-    return new Intl.NumberFormat(globalThis.navigator?.language ?? 'en', {
+    return new Intl.NumberFormat(interfaceLocale(i18n.language), {
       notation: 'compact',
       maximumFractionDigits: 1,
     }).format(value);

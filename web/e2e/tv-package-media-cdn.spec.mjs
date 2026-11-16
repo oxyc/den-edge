@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const API = 'https://den-tv-api.example.invalid';
+const SERVICE = 'https://den-tv-service.example.invalid';
 const MEDIA = 'https://den-tv-media.example.invalid';
 const media = new URL('./media/hls/', import.meta.url);
 const cors = {
@@ -21,7 +22,7 @@ test('packaged HLS can use a distinct media CDN without leaking library headers'
 }) => {
   const mediaRequests = [];
   const mediaControlRequests = [];
-  const apiRequests = [];
+  const serviceRequests = [];
   const ended = [];
   const violations = [];
   const pageErrors = [];
@@ -34,11 +35,11 @@ test('packaged HLS can use a distinct media CDN without leaking library headers'
   page.on('request', (request) => {
     if (request.url().startsWith(`${MEDIA}/`))
       mediaRequests.push({ url: request.url(), headers: request.headers() });
-    if (request.url().startsWith(`${API}/`))
-      apiRequests.push({ url: request.url(), headers: request.headers() });
+    if (request.url().startsWith(`${SERVICE}/`))
+      serviceRequests.push({ url: request.url(), headers: request.headers() });
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  await page.route(`${API}/**`, async (route) => {
+  const handle = async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
@@ -61,9 +62,9 @@ test('packaged HLS can use a distinct media CDN without leaking library headers'
             duration: 60,
             audioTrack: 0,
             audioTracks: [],
-            endUrl: `${API}/den/~deadbeef/playback`,
-            heartbeatUrl: `${API}/den/~deadbeef/playback/heartbeat`,
-            reportUrl: `${API}/den/~deadbeef/playback/report`,
+            endUrl: `${SERVICE}/den/~deadbeef/playback`,
+            heartbeatUrl: `${SERVICE}/den/~deadbeef/playback/heartbeat`,
+            reportUrl: `${SERVICE}/den/~deadbeef/playback/report`,
           },
         },
       });
@@ -73,7 +74,9 @@ test('packaged HLS can use a distinct media CDN without leaking library headers'
     }
     if (path.startsWith('/playback/')) return route.fulfill({ status: 204, headers: cors });
     return route.fulfill({ status: 204, headers: cors });
-  });
+  };
+  await page.route(`${API}/**`, handle);
+  await page.route(`${SERVICE}/**`, handle);
   await page.route(`${MEDIA}/**`, async (route) => {
     if (route.request().method() !== 'GET') {
       mediaControlRequests.push({ url: route.request().url(), method: route.request().method() });
@@ -116,7 +119,9 @@ test('packaged HLS can use a distinct media CDN without leaking library headers'
   expect(mediaRequests.some(({ url }) => /\/hls\/seg\d+\.m4s$/.test(url))).toBe(true);
   expect(mediaControlRequests).toEqual([]);
   expect(
-    apiRequests.find(({ url }) => url.endsWith('/den/~deadbeef/playback'))?.headers['x-den-grant'],
+    serviceRequests.find(({ url }) => url.endsWith('/den/~deadbeef/playback'))?.headers[
+      'x-den-grant'
+    ],
   ).toBe('deadbeef:fixture-secret');
   expect(
     mediaRequests.every(

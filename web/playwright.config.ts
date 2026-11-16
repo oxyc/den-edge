@@ -60,6 +60,7 @@ export default defineConfig({
     'keyboard-enhancement.spec.mjs',
     'big-library-budgets.spec.mjs',
     'big-library-first-open.spec.mjs',
+    'big-library-retained-pull.spec.mjs',
     'big-library-edit.spec.mjs',
     'big-library-airing.spec.mjs',
     'big-library-shared-worker.spec.mjs',

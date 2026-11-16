@@ -32,6 +32,35 @@ video {
   object-fit: contain;
 }
 
+/* WebKit can require a gesture in this cross-origin media document; the parent page cannot delegate one. */
+.play-local {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  min-width: 7rem;
+  min-height: 3rem;
+  padding: 0.65rem 1.1rem;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 999px;
+  background: rgb(28 28 34 / 0.9);
+  color: #fff;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.play-local[hidden] {
+  display: none;
+}
+
+.play-local:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
 /* Clear of the Cast button in the corner beside it. */
 .overlay {
   position: absolute;

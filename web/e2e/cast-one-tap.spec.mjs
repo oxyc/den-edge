@@ -64,12 +64,16 @@ const sdk = ({
   connect = 'ok',
   connectMs = 300,
   interrupt = false,
+  holdReplacementLoads = false,
   refuse = false,
   report,
 } = {}) => `
   window.loads = [];
   window.calls = [];
   window.states = [];
+  window.heldLoads = [];
+  window.receiverLoad = null;
+  window.releaseLoad = (index, outcome = 'resolve') => window.heldLoads[index]?.(outcome);
   window.chrome = window.chrome || {};
   window.chrome.cast = {
     AutoJoinPolicy: { PAGE_SCOPED: 'page_scoped' },
@@ -126,6 +130,7 @@ const sdk = ({
       window.calls.push(stop ? 'stop' : 'leave');
       session = null;
       loaded = false;
+      window.receiverLoad = null;
       player.isConnected = false;
       fire('sessionstatechanged', { sessionState: 'SESSION_ENDED' });
       setState(present ? 'NOT_CONNECTED' : 'NO_DEVICES_AVAILABLE');
@@ -142,8 +147,18 @@ const sdk = ({
         }
         session = {
           loadMedia(request) {
-            window.loads.push({ url: request.media.contentId, currentTime: request.currentTime });
+            const denLoad = request.customData?.denLoad;
+            window.loads.push({ url: request.media.contentId, currentTime: request.currentTime, denLoad });
             if (${refuse}) return Promise.reject('load_failed');
+            if (${holdReplacementLoads} && loaded)
+              return new Promise((resolve, reject) => window.heldLoads.push((outcome) => {
+                if (outcome === 'reject') return reject('load_failed');
+                loaded = true;
+                window.receiverLoad = denLoad;
+                player.currentTime = request.currentTime || 0;
+                player.isPaused = false;
+                resolve();
+              }));
             if (${interrupt} && loaded)
               return new Promise((resolve) => setTimeout(() => {
                 player.playerState = 'PLAYING';
@@ -152,20 +167,25 @@ const sdk = ({
                 player.playerState = 'IDLE';
                 changes.forEach((fn) => fn());
                 idleReason = null;
-                setTimeout(resolve, 100);
+                setTimeout(() => {
+                  window.receiverLoad = denLoad;
+                  resolve();
+                }, 100);
               }, 100));
             loaded = true;
+            window.receiverLoad = denLoad;
             player.currentTime = request.currentTime || 0;
             player.isPaused = false;
             if (${JSON.stringify(report ?? null)} === 'fails')
               setTimeout(() => {
                 this.receiverSays({
                   type: 'den-receiver-event', event: 'error', detailedErrorCode: 104, reason: null,
+                  ...denLoad,
                   error: { message: null, code: null, shakaErrorCode: 3014 },
                 });
                 player.playerState = 'IDLE';
                 changes.forEach((fn) => fn());
-                this.receiverSays({ type: 'den-receiver-event', event: 'state', state: 'IDLE', idleReason: 'ERROR' });
+                this.receiverSays({ type: 'den-receiver-event', event: 'state', ...denLoad, state: 'IDLE', idleReason: 'ERROR' });
               }, 1000);
             return Promise.resolve();
           },
@@ -180,6 +200,7 @@ const sdk = ({
           session.addMessageListener = (ns, fn) => { (heard[ns] = heard[ns] || []).push(fn); };
           session.receiverSays = (message) =>
             (heard['urn:x-cast:fi.oxy.den'] || []).forEach((fn) => fn('urn:x-cast:fi.oxy.den', JSON.stringify(message)));
+          window.receiverSays = (message) => session.receiverSays(message);
           session.removeMessageListener = (ns, fn) => { heard[ns] = (heard[ns] || []).filter((f) => f !== fn); };
           session.sendMessage = (ns, message) => {
             window.sent.push({ ns, message });
@@ -346,7 +367,8 @@ async function open(
 const castFrame = (page) => page.frameLocator(`iframe[src^="${CAST}"]`);
 const castButton = (page) => castFrame(page).locator('#cast');
 const frameOf = (page) => page.frames().find((frame) => frame.url().startsWith(CAST));
-const receiver = (page, what) => frameOf(page)?.evaluate((key) => window[key] ?? [], what) ?? [];
+const receiver = (page, what) =>
+  frameOf(page)?.evaluate((key) => (key in window ? window[key] : []), what) ?? [];
 
 async function playingPast(page, seconds) {
   await page.waitForFunction(
@@ -564,6 +586,7 @@ test('a replacement LOAD on the receiver never ends the Cast session', async () 
           {
             type: 'den-load',
             id: `${url}&replacement`,
+            generation: 99,
             media: { url: `${url}&replacement`, mode: 'cast', title: 'Fixture', external: true },
           },
           cast,
@@ -576,6 +599,282 @@ test('a replacement LOAD on the receiver never ends the Cast session', async () 
       expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
     );
     await expect(page.locator('.player video')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a refused replacement stops the previously accepted receiver load', async () => {
+  const { browser, page } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { holdReplacementLoads: true, report: true },
+  });
+  try {
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+    const accepted = (await receiver(page, 'loads'))[0].denLoad;
+    await expect.poll(() => receiver(page, 'receiverLoad')).toEqual(accepted);
+    const replacement = { id: accepted.id, generation: accepted.generation + 1 };
+    await page.evaluate(
+      ([cast, url, replacement]) =>
+        document.querySelector(`iframe[src^="${cast}"]`).contentWindow.postMessage(
+          {
+            type: 'den-load',
+            ...replacement,
+            media: { url, mode: 'cast', title: 'Refused replacement', external: true },
+          },
+          cast,
+        ),
+      [CAST, TORBOX, replacement],
+    );
+    await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(1);
+    // The accepted load is retired as soon as this exact replacement becomes current. If the replacement is refused,
+    // leaving that old picture on the TV would make it visible with no live Den authority or event owner.
+    await frameOf(page).evaluate(() => window.releaseLoad(0, 'reject'));
+    await expect.poll(() => receiver(page, 'calls')).toContain('stop');
+    await expect.poll(() => receiver(page, 'receiverLoad')).toBeNull();
+  } finally {
+    await browser.close();
+  }
+});
+
+for (const [receiverName, appId] of [
+  ['default receiver', undefined],
+  ['Den receiver', DEN_APP],
+]) {
+  test(`a refused same-load external subtitle reload stops the accepted ${receiverName} picture`, async () => {
+    const { browser, page } = await open(chromium, {
+      appId,
+      sdkOptions: { holdReplacementLoads: true, report: appId ? true : undefined },
+    });
+    try {
+      await playingPast(page, 2);
+      await reveal(page);
+      await castButton(page).click();
+      await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+      const accepted = (await receiver(page, 'loads'))[0].denLoad;
+      await expect.poll(() => receiver(page, 'receiverLoad')).toEqual(accepted);
+      await page.evaluate(() => {
+        window.subtitleReloadErrors = [];
+        window.addEventListener('message', (event) => {
+          if (event.data?.type === 'den-error') window.subtitleReloadErrors.push(event.data);
+        });
+      });
+      await page.evaluate(
+        ([cast, accepted, subtitleUrl]) =>
+          document.querySelector(`iframe[src^="${cast}"]`).contentWindow.postMessage(
+            {
+              type: 'den-subtitle',
+              ...accepted,
+              language: 'sv',
+              track: { language: 'sv', name: 'Swedish', url: subtitleUrl },
+            },
+            cast,
+          ),
+        [CAST, accepted, `${CAST}/subtitle/${'a'.repeat(64)}.vtt`],
+      );
+      await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(1);
+      await expect
+        .poll(() => receiver(page, 'loads').then((loads) => loads.at(-1)?.denLoad))
+        .toEqual(accepted);
+      await frameOf(page).evaluate(() => window.releaseLoad(0, 'reject'));
+      await expect.poll(() => receiver(page, 'calls')).toContain('stop');
+      await expect.poll(() => receiver(page, 'receiverLoad')).toBeNull();
+      await expect
+        .poll(() => page.evaluate(() => window.subtitleReloadErrors))
+        .toContainEqual(expect.objectContaining({ ...accepted, type: 'den-error' }));
+      await expect.poll(() => receiver(page, 'loads')).toHaveLength(2);
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+test('reordered same-id receiver LOADs publish only the accepted generation and reject its old diagnostics', async () => {
+  const { browser, page } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { holdReplacementLoads: true, report: true },
+  });
+  try {
+    const receiverLogs = [];
+    page.on('console', (message) => {
+      if (message.text().startsWith('[Den receiver]')) receiverLogs.push(message.text());
+    });
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+    const accepted = (await receiver(page, 'loads'))[0].denLoad;
+    await page.evaluate(
+      ([cast, url, accepted]) => {
+        const frame = document.querySelector(`iframe[src^="${cast}"]`);
+        for (const generation of [accepted.generation - 1, accepted.generation])
+          frame.contentWindow.postMessage(
+            {
+              type: 'den-load',
+              id: url,
+              generation,
+              media: { url, mode: 'cast', title: `Fixture ${generation}`, external: true },
+            },
+            cast,
+          );
+      },
+      [CAST, TORBOX, accepted],
+    );
+    await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(2);
+    await frameOf(page).evaluate(() => window.releaseLoad(1));
+    await expect.poll(() => receiver(page, 'loads').then((loads) => loads.length)).toBe(3);
+    await frameOf(page).evaluate(() => window.releaseLoad(0));
+    // The stale LOAD may have landed last on the receiver, so the accepted generation is deliberately reasserted.
+    await expect.poll(() => receiver(page, 'loads').then((loads) => loads.length)).toBe(4);
+    await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(3);
+    await frameOf(page).evaluate(() => window.releaseLoad(2));
+    await expect
+      .poll(() => receiver(page, 'loads').then((loads) => loads.at(-1)?.denLoad))
+      .toEqual(accepted);
+
+    await page.evaluate(() => {
+      window.staleReceiverErrors = [];
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'den-receiver-error') window.staleReceiverErrors.push(event.data);
+      });
+    });
+    await frameOf(page).evaluate(
+      ([id, generation]) => {
+        window.receiverSays({
+          type: 'den-receiver-event',
+          event: 'error',
+          id,
+          generation,
+          detailedErrorCode: 999,
+          error: { shakaErrorCode: 999 },
+        });
+      },
+      [TORBOX, accepted.generation - 1],
+    );
+    await frameOf(page).evaluate(() => {
+      window.receiverSays({
+        type: 'den-receiver-event',
+        event: 'error',
+        detailedErrorCode: 998,
+        error: { shakaErrorCode: 998 },
+      });
+      window.receiverSays({
+        type: 'den-receiver-event',
+        event: 'state',
+        state: 'IDLE',
+        idleReason: 'ERROR',
+      });
+    });
+    await expect.poll(() => page.evaluate(() => window.staleReceiverErrors)).toEqual([]);
+    expect(receiverLogs.some((line) => line.includes('"detailedErrorCode":999'))).toBe(true);
+    expect(receiverLogs.every((line) => !line.includes(TORBOX))).toBe(true);
+    await expect(page.locator('.player video')).toHaveCount(0);
+    expect(await receiver(page, 'calls')).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a refused replacement stops a stale overlapping LOAD which landed on the receiver', async () => {
+  const { browser, page } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { holdReplacementLoads: true, report: true },
+  });
+  try {
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+    const accepted = (await receiver(page, 'loads'))[0].denLoad;
+    await page.evaluate(() => {
+      window.overlapErrors = [];
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'den-error') window.overlapErrors.push(event.data);
+      });
+    });
+    await page.evaluate(
+      ([cast, url, accepted]) => {
+        const frame = document.querySelector(`iframe[src^="${cast}"]`);
+        for (const generation of [accepted.generation - 1, accepted.generation])
+          frame.contentWindow.postMessage(
+            {
+              type: 'den-load',
+              id: url,
+              generation,
+              media: { url, mode: 'cast', title: `Fixture ${generation}`, external: true },
+            },
+            cast,
+          );
+      },
+      [CAST, TORBOX, accepted],
+    );
+    await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(2);
+    await frameOf(page).evaluate(() => window.releaseLoad(0));
+    await expect
+      .poll(() => receiver(page, 'receiverLoad'))
+      .toEqual({
+        id: TORBOX,
+        generation: accepted.generation - 1,
+      });
+    await frameOf(page).evaluate(() => window.releaseLoad(1, 'reject'));
+    await expect.poll(() => receiver(page, 'calls')).toContain('stop');
+    await expect.poll(() => receiver(page, 'receiverLoad')).toBeNull();
+    await expect
+      .poll(() => page.evaluate(() => window.overlapErrors))
+      .toContainEqual(expect.objectContaining({ ...accepted, type: 'den-error' }));
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a stale LOAD landing after the current replacement refused is stopped without retrying it', async () => {
+  const { browser, page } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { holdReplacementLoads: true, report: true },
+  });
+  try {
+    await playingPast(page, 2);
+    await reveal(page);
+    await castButton(page).click();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(1);
+    const accepted = (await receiver(page, 'loads'))[0].denLoad;
+    const replacement = { id: accepted.id, generation: accepted.generation + 2 };
+    await page.evaluate(() => {
+      window.overlapErrors = [];
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'den-error') window.overlapErrors.push(event.data);
+      });
+    });
+    await page.evaluate(
+      ([cast, url, replacement]) => {
+        const frame = document.querySelector(`iframe[src^="${cast}"]`);
+        for (const generation of [replacement.generation - 1, replacement.generation])
+          frame.contentWindow.postMessage(
+            {
+              type: 'den-load',
+              id: url,
+              generation,
+              media: { url, mode: 'cast', title: `Fixture ${generation}`, external: true },
+            },
+            cast,
+          );
+      },
+      [CAST, TORBOX, replacement],
+    );
+    await expect.poll(() => receiver(page, 'heldLoads').then((loads) => loads.length)).toBe(2);
+    await frameOf(page).evaluate(() => window.releaseLoad(1, 'reject'));
+    await expect
+      .poll(() => page.evaluate(() => window.overlapErrors))
+      .toContainEqual(expect.objectContaining({ ...replacement, type: 'den-error' }));
+    await frameOf(page).evaluate(() => window.releaseLoad(0));
+    await expect.poll(() => receiver(page, 'calls')).toContain('stop');
+    await expect.poll(() => receiver(page, 'receiverLoad')).toBeNull();
+    await expect.poll(() => receiver(page, 'loads')).toHaveLength(3);
   } finally {
     await browser.close();
   }
@@ -605,6 +904,31 @@ test('a TorBox stream the receiver won’t load is retried once as TorBox, named
       expect.arrayContaining([expect.stringMatching(/^(stop|leave)$/)]),
     );
     await playingPast(page, 0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a receiver error from a stale same-id generation is excluded from cast diagnostics', async () => {
+  const { browser, page, asked } = await open(chromium, {
+    appId: DEN_APP,
+    sdkOptions: { report: true },
+  });
+  try {
+    await castOnce(page, asked);
+    await frameOf(page).evaluate(
+      ([origin, id]) =>
+        window.parent.postMessage(
+          { type: 'den-receiver-error', id, generation: -1, code: 999, shaka: 999 },
+          origin,
+        ),
+      [ORIGIN, TORBOX],
+    );
+    await reveal(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+    await expect.poll(() => asked.castReports).toHaveLength(1);
+    expect(asked.castReports[0]).not.toHaveProperty('rxError');
+    expect(asked.castReports[0]).not.toHaveProperty('rxShaka');
   } finally {
     await browser.close();
   }

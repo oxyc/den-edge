@@ -59,13 +59,13 @@ const castPage = (mode, discoveryDelay = 0, ready = true) => `<!doctype html>
     if (${mode === 'none'})
       state('NO_DEVICES_AVAILABLE');
     else if (${mode === 'direct-fail'} && message.media.external)
-      setTimeout(() => parent.postMessage({ type: 'den-error', id: message.id, message: 'Chromecast could not load this release' }, event.origin), 250);
+      setTimeout(() => parent.postMessage({ type: 'den-error', id: message.id, generation: message.generation, message: 'Chromecast could not load this release' }, event.origin), 250);
     else if (${mode === 'direct-fail'})
-      parent.postMessage({ type: 'den-cast', id: message.id, state: 'playing' }, event.origin);
+      parent.postMessage({ type: 'den-cast', id: message.id, generation: message.generation, state: 'playing' }, event.origin);
     else if (${mode === 'receiver'})
-      parent.postMessage({ type: 'den-error', id: message.id, message: 'hls.js networkError manifestLoadError' }, event.origin);
+      parent.postMessage({ type: 'den-error', id: message.id, generation: message.generation, message: 'hls.js networkError manifestLoadError' }, event.origin);
     else if (${mode === 'playing'})
-      parent.postMessage({ type: 'den-cast', id: message.id, state: 'playing' }, event.origin);
+      parent.postMessage({ type: 'den-cast', id: message.id, generation: message.generation, state: 'playing' }, event.origin);
   });
   if (${ready}) parent.postMessage({ type: 'den-ready', generation: -1 }, '*');
 </script>`;

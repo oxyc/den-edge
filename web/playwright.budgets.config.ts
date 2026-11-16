@@ -20,6 +20,7 @@ export default defineConfig({
   testMatch: [
     'big-library-budgets.spec.mjs',
     'big-library-first-open.spec.mjs',
+    'big-library-retained-pull.spec.mjs',
     'big-library-edit.spec.mjs',
     'big-library-airing.spec.mjs',
   ],

@@ -139,7 +139,8 @@ test('the real Cast document ignores media until its own handshake and replays c
       r.fulfill({
         contentType: 'text/html',
         body: `<!doctype html><script>
-          const media = (title, time) => ({ type: 'den-load', id: title, media: {
+          const media = (title, time) => ({ type: 'den-load', id: title,
+            generation: title === 'current' ? 2 : 1, media: {
             url: 'https://media.test/remux/s/${'a'.repeat(22)}/${'b'.repeat(22)}/master.m3u8',
             mode: 'browser', title, currentTime: time, terminal: false, external: false
           }});

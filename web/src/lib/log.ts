@@ -460,6 +460,17 @@ export class LibraryLog {
   private dirty = false;
   private saving: Promise<void> = Promise.resolve();
   private writes: Promise<unknown> = Promise.resolve();
+  /**
+   * The cached open's already-started first pull. Reading may overlap retained-work projection, but only a foreground
+   * refresh adopts it: an unopened/superseded service must never publish the read or replay this device's work.
+   */
+  private openingPass?: {
+    result: Promise<{ changed: boolean; reachedHead: boolean }>;
+    adopt: () => void;
+    cancel: () => void;
+  };
+  /** Cached restore side work shares one revocable lifetime, including membership and the adopted first pull. */
+  private cachedAuthority?: { cancel: () => void };
   private head = 0;
   private generation?: string;
   /** `observedGeneration` as this page set it. */
@@ -869,6 +880,10 @@ export class LibraryLog {
 
   /** Release runtime-only resources when a service authority gives up this log. */
   close(): void {
+    this.openingPass?.cancel();
+    this.openingPass = undefined;
+    this.cachedAuthority?.cancel();
+    this.cachedAuthority = undefined;
     this.runtimeChannel?.close();
     this.runtimeChannel = undefined;
     // den-core's memory is not the garbage collector's: a read after closing builds the index again.
@@ -2416,20 +2431,87 @@ export class LibraryLog {
       // before it drops its kept copy, so in this order the edit is found in one or the other; read the other way
       // round, an open between the two finds it in neither.
       const kept = await log.keptWork();
+      const hasRetainedWork = log.pendingActions > 0;
       if (await log.restoreFacts(factManifest.generation, factManifest.head)) {
-        // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
-        // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
-        // follows at once, sends the work kept here.
+        let active = true;
+        let openingResponse: Response | undefined;
+        const cachedRequest = new AbortController();
+        const cancelCachedAuthority = () => {
+          if (!active) return;
+          active = false;
+          cachedRequest.abort(new DOMException('Cached open was superseded', 'AbortError'));
+          void openingResponse?.body?.cancel().catch(() => undefined);
+        };
+        log.cachedAuthority = { cancel: cancelCachedAuthority };
+        // Shown without waiting for den-edge: an unanswered request once kept this copy off the screen. A membership
+        // not yet registered is registered beside it, and claimed once den-edge has it. Registration shares this
+        // cached authority: a delayed response from a closed/replaced instance cannot claim global relay authority.
         if (log.memberRegistered) useLibraryCredential(keys);
         else
-          void log.registerMember().then(() => {
-            if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
-          });
+          void log
+            .registerMember(() => active, cachedRequest.signal)
+            .then(() => {
+              if (active && log.memberRegistered && !log.refused) useLibraryCredential(keys);
+            });
         log.fromCache = true;
         log.projectJournal();
+        let overlay: { publish: () => void; refuse: () => void } | undefined;
+        if (hasRetainedWork) {
+          let settleOverlay!: (projected: boolean) => void;
+          let overlaySettled = false;
+          const overlayReady = new Promise<boolean>((resolve) => (settleOverlay = resolve));
+          const settleProjection = (value: boolean) => {
+            if (overlaySettled) return;
+            overlaySettled = true;
+            settleOverlay(value);
+          };
+          overlay = {
+            publish: () => settleProjection(true),
+            refuse: () => settleProjection(false),
+          };
+          let settleAdoption!: (adopted: boolean) => void;
+          let settled = false;
+          const adopted = new Promise<boolean>((resolve) => (settleAdoption = resolve));
+          const settle = (value: boolean) => {
+            if (settled) return;
+            settled = true;
+            settleAdoption(value);
+          };
+          // Start the first request before mutation policy is ready. Its response cannot update protocol, facts,
+          // cursors, visible state, or retained delivery until both the complete overlay is projected and the
+          // foreground scheduler adopts this exact pass. Closing a speculative/superseded service aborts the request.
+          const result = log.pass({
+            ready: Promise.all([overlayReady, adopted]).then(
+              ([projected, foreground]) => projected && foreground,
+            ),
+            signal: cachedRequest.signal,
+            active: () => active,
+            response: (value) => (openingResponse = value),
+          });
+          log.openingPass = {
+            result,
+            adopt: () => settle(true),
+            cancel: () => {
+              settle(false);
+              cancelCachedAuthority();
+            },
+          };
+          void result.catch(() => undefined);
+        }
         // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
-        if (kept.length) await ensureDeferredSyncPolicy();
-        for (const work of kept) log.projectWork(work);
+        // Rows already carry their complete merge semantics, so do not put the deferred mutation evaluator on this
+        // return-visit boundary unless retained semantic ops actually need it. Keep the original work order atomic:
+        // exposing a cached log before every retained op is drawn would briefly show stale library state.
+        try {
+          if (kept.some((work) => work.kind === 'ops')) await ensureDeferredSyncPolicy();
+          for (const work of kept) log.projectWork(work);
+          overlay?.publish();
+        } catch (error) {
+          overlay?.refuse();
+          log.openingPass?.cancel();
+          log.openingPass = undefined;
+          throw error;
+        }
         return log;
       }
     }
@@ -2692,13 +2774,25 @@ export class LibraryLog {
    * A stored row read as library v4 reads one (§4), keeping track of what can't be: an unreadable row by its `k`, to
    * be removed (`compact`); a newer framing or format, which stops this build writing. Null for a row not read.
    */
-  private async readEntry(entry: {
-    k: string;
-    v: string;
-  }): Promise<
+  private async readEntry(
+    entry: {
+      k: string;
+      v: string;
+    },
+    active: () => boolean = () => true,
+  ): Promise<
     Row | ProfileDirectoryDocument | KidTitleApprovalsDocument | InvalidProfileDirectory | null
   > {
     const opened = await openEntry(this.keys, entry.k, entry.v);
+    if (!active()) return null;
+    return this.acceptOpenedEntry(entry, opened);
+  }
+
+  /** Apply one already-opened row synchronously, so an opening page commits no prefix across a crypto await. */
+  private acceptOpenedEntry(
+    entry: { k: string },
+    opened: Awaited<ReturnType<typeof openEntry>>,
+  ): Row | ProfileDirectoryDocument | KidTitleApprovalsDocument | InvalidProfileDirectory | null {
     this.unreadable.delete(entry.k);
     this.newerFraming.delete(entry.k);
     if ('unreadable' in opened) {
@@ -2809,6 +2903,15 @@ export class LibraryLog {
    * new is false, so what is built from the library is not rebuilt on every 30-second refresh.
    */
   async refresh(waitSeconds = 0, stopWaiting?: AbortSignal): Promise<boolean> {
+    const opening = this.openingPass;
+    if (opening) {
+      opening.adopt();
+      try {
+        return (await opening.result).changed;
+      } finally {
+        if (this.openingPass === opening) this.openingPass = undefined;
+      }
+    }
     if (waitSeconds > 0) await this.awaitChange(waitSeconds, stopWaiting);
     return (await this.pass()).changed;
   }
@@ -2836,24 +2939,48 @@ export class LibraryLog {
   }
 
   /** One `refresh` pass: whether it changed what this browser holds, and whether it read the log to its head. */
-  private async pass(): Promise<{ changed: boolean; reachedHead: boolean }> {
+  private async pass(opening?: {
+    ready: Promise<boolean>;
+    signal: AbortSignal;
+    active: () => boolean;
+    response: (value: Response) => void;
+  }): Promise<{ changed: boolean; reachedHead: boolean }> {
     // Nothing else writes a library kept only here but another tab, whose rows each save takes up (`takeKept`).
     if (this.offline) return { changed: false, reachedHead: false };
     const generationsBefore = this.generationChanges;
+    const active = () => opening?.active() ?? true;
     // Null when den-edge couldn't be read (a page, or the rest of them); `unreported` keeps what the pages read did.
     // `missing` when den-edge holds no log for this library: nothing was read to a head.
     const run = this.writes.then(async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
+          if (!active()) return null;
           const res = await this.send(
             `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
-            { headers: this.headers() },
+            { headers: this.headers(), ...(opening ? { signal: opening.signal } : {}) },
+            // An opening response belongs to no foreground authority yet. Observe its protocol minimum only after
+            // the same adoption barrier as its rows, generation and cursor.
+            opening === undefined,
           );
+          opening?.response(res);
+          // A cached opening read may finish before its retained overlay or foreground owner exists. Do not mutate
+          // any visible/log authority from that response until both boundaries accept it. A superseded open cancels
+          // the body here, before generation, rows, cursors, projection or replay can escape its private request.
+          if (opening && (!(await opening.ready) || !opening.active())) {
+            await res.body?.cancel();
+            return null;
+          }
+          // Consume an adopted opening body before observing even its headers. `close()` can revoke authority while
+          // that body is held and cancel it; no protocol or row state has escaped at that point.
+          const openingBody = opening ? await res.json().catch(() => undefined) : undefined;
+          if (!active()) return null;
+          if (opening && !res.ok && !(await this.observeProtocol(res, active))) return null;
           if (res.status === 410) this.moved = true;
           if (res.status === 404) {
             // Only the first 404 has rows den-edge acknowledged to put back; an empty relay answers it every time.
             const staged = [...this.entries.values()].some((entry) => entry.seq > 0);
-            if (!(await this.stageRecovery())) return null;
+            if (!(await this.stageRecovery(undefined, active))) return null;
+            if (!active()) return null;
             this.memberRegistered = false;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
@@ -2866,24 +2993,39 @@ export class LibraryLog {
           if (!res.ok) return null;
           // The log is here again (or always was): a refused start is over, and the membership stands again.
           if (this.refused || !hasLibraryCredential()) {
-            this.refused = false;
             // Register before exposing the proof to relayed requests.
-            await this.registerMember();
+            await this.registerMember(active, opening?.signal);
+            if (!active()) return null;
+            this.refused = false;
             useLibraryCredential(this.keys);
           }
-          const page = coherentResponsePage(res, await res.json());
+          const page = coherentResponsePage(res, opening ? openingBody : await res.json());
           if (!page) return null;
+          // Decrypt the whole opening page before committing any of it. A close during crypto work therefore leaves
+          // protocol, rows, facts and cursors at the cached authority instead of publishing a page prefix.
+          let stagedEntries: Array<Awaited<ReturnType<typeof openEntry>>> | undefined;
+          if (opening) {
+            stagedEntries = [];
+            for (const entry of page.entries) {
+              stagedEntries.push(await openEntry(this.keys, entry.k, entry.v));
+              if (!active()) return null;
+            }
+          }
+          if (!active()) return null;
+          if (opening && !(await this.observeProtocol(res, active))) return null;
           if (
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (this.directoryCommitted) await this.adoptProfileDirectory();
-            else if (!(await this.stageRecovery(page.generation))) return null;
+            if (this.directoryCommitted) await this.adoptProfileDirectory(active);
+            else if (!(await this.stageRecovery(page.generation, active))) return null;
+            if (!active()) return null;
             this.memberRegistered = false;
             // Registered under the generation it now reads: under the old one den-edge refuses it.
             this.generation = page.generation;
             this.writeGeneration = undefined;
-            await this.registerMember();
+            await this.registerMember(active, opening?.signal);
+            if (!active()) return null;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             this.resetProfileDirectory();
@@ -2902,9 +3044,12 @@ export class LibraryLog {
           this.writeGeneration = undefined;
           const factEntries: LibraryFactEntry[] = [];
           let factProfileTopology = false;
-          for (const entry of page.entries) {
+          for (const [index, entry] of page.entries.entries()) {
             // Unreadable rows are skipped individually, as on initial open.
-            const row = await this.readEntry(entry);
+            const row = stagedEntries
+              ? this.acceptOpenedEntry(entry, stagedEntries[index]!)
+              : await this.readEntry(entry, active);
+            if (!active()) return null;
             if (!row) {
               factEntries.push({ k: entry.k, seq: entry.seq, value: entry.v, row: null });
               continue;
@@ -2950,7 +3095,9 @@ export class LibraryLog {
             factEntries,
             !page.more || page.entries.length === 0,
             factProfileTopology,
+            active,
           );
+          if (!active()) return null;
           // The finished views' marker names the head: a pass that reads back only this browser's own writes changes no
           // row, and without this the marker stayed behind them.
           if (head !== this.head) this.dirty = true;
@@ -2964,6 +3111,7 @@ export class LibraryLog {
     this.writes = run.catch(() => null);
     const read = await run;
     if (read === null) return { changed: false, reachedHead: false };
+    if (opening && !opening.active()) return { changed: false, reachedHead: false };
     // A generation change in this pass is read from zero, but its write-back (`replay`, below) has yet to land: a
     // reader that must act on a current row waits for the next pass (recovery-code §7).
     const reachedHead = read === 'head' && this.generationChanges === generationsBefore;
@@ -2972,7 +3120,7 @@ export class LibraryLog {
     this.persist();
     // Rows that arrived may carry actions to project; with none, the projections already stand.
     if (changed) this.projectJournal();
-    return { changed: (await this.replay()) || changed, reachedHead };
+    return { changed: (await this.replay(opening?.active)) || changed, reachedHead };
   }
 
   /**
@@ -3351,9 +3499,10 @@ export class LibraryLog {
     entries: readonly LibraryFactEntry[],
     complete: boolean,
     profileTopology = false,
+    active: () => boolean = () => true,
   ): Promise<void> {
     this.saving = this.saving.then(() =>
-      this.commitFacts(generation, head, entries, complete, profileTopology),
+      this.commitFacts(generation, head, entries, complete, profileTopology, active),
     );
     return this.saving;
   }
@@ -3364,8 +3513,9 @@ export class LibraryLog {
     entries: readonly LibraryFactEntry[],
     complete: boolean,
     profileTopology: boolean,
+    active: () => boolean = () => true,
   ): Promise<void> {
-    if (!this.factStore || !generation) return;
+    if (!this.factStore || !generation || !active()) return;
     try {
       const batchSize = 64;
       if (!entries.length) {
@@ -3373,6 +3523,7 @@ export class LibraryLog {
         return;
       }
       for (let offset = 0; offset < entries.length; offset += batchSize) {
+        if (!active()) return;
         const batch = entries.slice(offset, offset + batchSize);
         const last = offset + batch.length === entries.length;
         await this.factStore.commitBatch(
@@ -3382,6 +3533,7 @@ export class LibraryLog {
           complete && last,
           { profileTopology },
         );
+        if (!active()) return;
       }
     } catch (error) {
       console.warn('den: incremental library facts could not be kept', error);
@@ -4072,40 +4224,60 @@ export class LibraryLog {
     const controller = new AbortController();
     const timedOut = () => new DOMException('den-edge stopped answering', 'TimeoutError');
     const deadline = setTimeout(() => controller.abort(timedOut()), answerMs);
-    const stop = () => controller.abort(init.signal?.reason);
-    init.signal?.addEventListener('abort', stop, { once: true });
+    const transport = { reader: undefined as ReadableStreamDefaultReader<Uint8Array> | undefined };
+    const detach = () => init.signal?.removeEventListener('abort', stop);
+    const stop = () => {
+      const reason = init.signal?.reason;
+      controller.abort(reason);
+      void transport.reader?.cancel(reason).catch(() => undefined);
+    };
+    if (init.signal?.aborted) stop();
+    else init.signal?.addEventListener('abort', stop, { once: true });
     let res: Response;
     try {
       res = await this.fetchImpl(path, { ...init, signal: controller.signal });
+    } catch (error) {
+      detach();
+      throw error;
     } finally {
       clearTimeout(deadline);
-      init.signal?.removeEventListener('abort', stop);
     }
     // Candidate profile libraries remain wire 4. Their headers must never change the household log's wire state.
     if (observeHousehold) await this.observeProtocol(res);
-    if (!res.body) return res;
-    const reader = res.body.getReader();
+    if (!res.body) {
+      detach();
+      return res;
+    }
+    const responseReader = res.body.getReader();
+    transport.reader = responseReader;
+    if (init.signal?.aborted) stop();
     const body = new ReadableStream<Uint8Array>({
       async pull(stream) {
         let stall: ReturnType<typeof setTimeout> | undefined;
         try {
           const next = await Promise.race([
-            reader.read(),
+            responseReader.read(),
             new Promise<never>((_, reject) => {
               stall = setTimeout(() => reject(timedOut()), REQUEST_MS);
             }),
           ]);
-          if (next.done) stream.close();
-          else stream.enqueue(next.value);
+          if (next.done) {
+            detach();
+            stream.close();
+          } else stream.enqueue(next.value);
         } catch (error) {
+          detach();
           controller.abort(error);
-          void reader.cancel(error).catch(() => undefined);
+          void responseReader.cancel(error).catch(() => undefined);
           stream.error(error);
         } finally {
           clearTimeout(stall);
         }
       },
-      cancel: (reason) => reader.cancel(reason),
+      cancel: (reason) => {
+        detach();
+        return responseReader.cancel(reason);
+      },
     });
     return new Response(body, {
       status: res.status,
@@ -4122,47 +4294,66 @@ export class LibraryLog {
     };
   }
 
-  private async observeProtocol(res: Response): Promise<void> {
+  private async observeProtocol(
+    res: Response,
+    active: () => boolean = () => true,
+  ): Promise<boolean> {
     const minimum = Number(res.headers.get('x-den-wire-min'));
-    if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return;
+    if (!active()) return false;
+    if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return true;
     this.wireMin = minimum;
     if (minimum > this.instanceWire) this.upgradeRequired = minimum;
     // The in-memory monotonic fence already stands for this visit; persistence is an optimization for the next.
     await this.putMeta('wireMin', String(minimum));
+    return active();
   }
 
   /** Register this browser's membership, once at a time: a cached open starts it while `refresh` may ask too. */
-  private registerMember(): Promise<void> {
+  private registerMember(active: () => boolean = () => true, signal?: AbortSignal): Promise<void> {
     if (this.memberRegistered || this.offline) return Promise.resolve();
-    return (this.registering ??= this.putMember().finally(() => (this.registering = undefined)));
+    return (this.registering ??= this.putMember(active, signal).finally(
+      () => (this.registering = undefined),
+    ));
   }
 
-  private async putMember(): Promise<void> {
-    const put = (generation?: string) =>
-      this.send(`/lib/${this.keys.id}/member`, {
-        method: 'PUT',
-        headers: {
-          ...this.headers(),
-          ...(generation ? { 'x-den-generation': generation } : {}),
-          'x-den-library-member': `${this.keys.id}:${this.keys.member}`,
+  private async putMember(active: () => boolean, signal?: AbortSignal): Promise<void> {
+    const put = async (generation?: string) => {
+      if (!active() || signal?.aborted)
+        throw (
+          signal?.reason ?? new DOMException('Membership authority was superseded', 'AbortError')
+        );
+      const response = await this.send(
+        `/lib/${this.keys.id}/member`,
+        {
+          method: 'PUT',
+          ...(signal ? { signal } : {}),
+          headers: {
+            ...this.headers(),
+            ...(generation ? { 'x-den-generation': generation } : {}),
+            'x-den-library-member': `${this.keys.id}:${this.keys.member}`,
+          },
         },
-      });
+        false,
+      );
+      if (active()) await this.observeProtocol(response, active);
+      return response;
+    };
     try {
       let registered = this.writeGeneration ?? this.generation;
       let res = await put();
+      if (!active()) return;
       // Registered under a generation this browser has not read yet (a cached open, or a change since): once more
       // under the one den-edge names. Only the registration takes it; reads and writes still find the change.
       const current = res.headers.get('x-den-generation');
-      if (
-        res.status === 409 &&
-        (await errorCode(res)) === 'generation_changed' &&
-        current &&
-        current !== registered
-      ) {
+      const changed = res.status === 409 ? await errorCode(res) : undefined;
+      if (!active() || signal?.aborted) return;
+      if (changed === 'generation_changed' && current && current !== registered) {
         registered = current;
         res = await put(current);
+        if (!active()) return;
       }
       if (res.ok) {
+        if (!active()) return;
         this.memberRegistered = true;
         // Remembered for the next visit, which opens without registering again; a failure only costs it that.
         if (registered)
@@ -4174,6 +4365,7 @@ export class LibraryLog {
           `den: den-edge did not register this browser's membership (${res.status} ${(await errorCode(res)) ?? ''})`,
         );
     } catch (error) {
+      if (!active()) return;
       // Sync and playback remain usable; a later write/open retries registration.
       console.warn("den: this browser's membership could not be registered", error);
     }
@@ -4250,7 +4442,8 @@ export class LibraryLog {
    * preferences and keys) into the household, which every profile reads. Kept edits are not routed to a profile
    * library from here: this log has none, so they are dropped and named.
    */
-  private async adoptProfileDirectory(): Promise<void> {
+  private async adoptProfileDirectory(active: () => boolean = () => true): Promise<void> {
+    if (!active()) return;
     console.warn(
       `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
     );
@@ -4276,8 +4469,11 @@ export class LibraryLog {
           ),
         );
     await this.refreshPending();
+    if (!active()) return;
     const opened = new Map((await this.keptWork()).map((work) => [work.key, work]));
+    if (!active()) return;
     for (const key of [...this.pending.keys()]) {
+      if (!active()) return;
       const work = opened.get(key);
       const names = !work
         ? 'unreadable'
@@ -4288,10 +4484,15 @@ export class LibraryLog {
         `den: ${work?.kind ?? 'kept'} work kept for the household from before its split is dropped (${names})`,
       );
       await this.discard(key);
+      if (!active()) return;
     }
   }
 
-  private async stageRecovery(generation?: string): Promise<boolean> {
+  private async stageRecovery(
+    generation?: string,
+    active: () => boolean = () => true,
+  ): Promise<boolean> {
+    if (!active()) return false;
     const rows = [...this.entries.values()]
       .filter((entry) => entry.seq > 0)
       .map((entry) => entry.row);
@@ -4310,7 +4511,12 @@ export class LibraryLog {
           ))
         )
           return false;
+        if (!active()) {
+          await this.discard(key);
+          return false;
+        }
       }
+      if (!active()) return false;
       const retained = new Map((this.recoveryRows ?? []).map((row) => [rowName(row), row]));
       for (const row of rows) {
         const previous = retained.get(rowName(row));
@@ -4576,17 +4782,18 @@ export class LibraryLog {
    * Send the work kept in this browser (`pendingPrefix`). True when some of it reached den-edge, or when drawing it
    * changed a row here even though it could not be sent (kept by another tab, or den-edge failed the batch).
    */
-  private async replay(): Promise<boolean> {
+  private async replay(active: () => boolean = () => true): Promise<boolean> {
     const projected = this.projected;
+    if (!active()) return false;
     // Kept, and sent once a read finds the log again (`refresh`).
     if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
-      return this.projectKeptChanged(projected);
+      return this.projectKeptChanged(projected, active);
     // A migration holds the household (`migrationLockedAt`): kept work waits a minute between probes, where the
     // 30-second refresh would otherwise send every piece of it again each time.
     if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
-      return this.projectKeptChanged(projected);
+      return this.projectKeptChanged(projected, active);
     // den-edge's write budget for this library is spent: kept work goes again once the `Retry-After` has passed.
-    if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected);
+    if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected, active);
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;
     const waiting = this.pendingActions;
@@ -4594,8 +4801,11 @@ export class LibraryLog {
     const kept = (await this.keptWork()).sort(
       (a, b) => Number(a.kind === 'restore') - Number(b.kind === 'restore'),
     );
+    if (!active()) return false;
     if (kept.length) await ensureDeferredSyncPolicy();
+    if (!active()) return false;
     for (const work of kept) {
+      if (!active()) return false;
       const { key, kind } = work;
       // Sent by a send that ended since it was read.
       if (this.flushing.has(key) || !this.pending.has(key)) continue;
@@ -4616,8 +4826,16 @@ export class LibraryLog {
       }
       // Every tab's Worker replays the same kept recovery: one sends it, and the others find it gone.
       const release = kind === 'restore' ? await this.holdRestore() : undefined;
+      if (!active()) {
+        release?.();
+        return false;
+      }
       if (release) {
         await this.refreshPending();
+        if (!active()) {
+          release();
+          return false;
+        }
         if (!this.pending.has(key)) {
           release();
           continue;
@@ -4625,6 +4843,7 @@ export class LibraryLog {
       }
       this.flushing.add(key);
       try {
+        if (!active()) return false;
         const { restore, ops } = this.v4Work(work);
         const riders = work.riders ?? [];
         for (const row of [...restore, ...riders]) this.project(row);
@@ -4646,6 +4865,7 @@ export class LibraryLog {
       }
     }
     if (
+      active() &&
       !this.runtimeAvailable &&
       this.recoveryRows &&
       Date.now() - (this.rejected.get(this.pendingPrefix + 'recovery') ?? 0) >= RECHECK_MS
@@ -4678,9 +4898,13 @@ export class LibraryLog {
   }
 
   /** Kept work not sent now is still drawn; true when that changed a row since `projected`. */
-  private async projectKeptChanged(projected: number): Promise<boolean> {
-    await this.projectKept();
-    return this.projected !== projected;
+  private async projectKeptChanged(projected: number, active: () => boolean): Promise<boolean> {
+    const kept = await this.keptWork();
+    if (!active()) return false;
+    if (kept.length) await ensureDeferredSyncPolicy();
+    if (!active()) return false;
+    for (const work of kept) this.projectWork(work);
+    return active() && this.projected !== projected;
   }
 }
 

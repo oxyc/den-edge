@@ -305,6 +305,8 @@
   class:placed
   class:near={gatesPlacement && rowNear}
   class:gone={done && !pager.failed && visible.length === 0}
+  data-row-id={row.id}
+  data-layout-state={pager.failed ? 'error' : pager.page === 0 ? 'pending' : 'settled'}
 >
   <PosterRow
     heading={localizedHeading}

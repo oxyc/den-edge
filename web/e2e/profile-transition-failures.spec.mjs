@@ -257,16 +257,31 @@ test('real Worker/Vault creates an additional Kid only after Owner PIN proof and
   await page.getByRole('button', { name: 'Try setup again' }).click();
   await page.getByLabel('Kid name').fill('Sam');
   await page.getByLabel('Maximum age').fill('8');
-  const before = [...edge.libraries].map(([id, library]) => [id, library.head]);
+  const beforeLibraries = [...edge.libraries.keys()];
 
   await page.getByLabel('Owner PIN').fill('0000');
   await expect(page.getByRole('alert')).toHaveText('That PIN didn’t match.');
-  expect([...edge.libraries].map(([id, library]) => [id, library.head])).toEqual(before);
+  // A task is also a synchronization boundary and may flush an encrypted household row already queued by profile
+  // setup. A whole-library head is therefore not evidence that this denied operation created anything. Assert the
+  // creation-specific durable outcomes: the attempt reached the real Worker, but no profile library, choice or
+  // acknowledgement exists before valid Owner proof.
+  expect([...edge.libraries.keys()]).toEqual(beforeLibraries);
+  await expect(dialog.getByRole('button', { name: 'Use Sam' })).toHaveCount(0);
+  expect(
+    await page.evaluate(() =>
+      window.denProfileTaskOperations.filter(({ kind }) => kind === 'profile.create'),
+    ),
+  ).toHaveLength(1);
+  expect(
+    await page.evaluate(() =>
+      window.denProfileTaskOperations.some(({ kind }) => kind === 'profile.create.ack'),
+    ),
+  ).toBe(false);
 
   await page.evaluate(() => (window.denProfileTaskFault = 'lose-create-reply'));
   await page.getByLabel('Owner PIN').fill('1234');
   await expect.poll(() => page.evaluate(() => window.denProfileWorkerLostReplies)).toBe(1);
-  expect(edge.libraries.size).toBe(before.length + 1);
+  expect(edge.libraries.size).toBe(beforeLibraries.length + 1);
   const createOperations = await page.evaluate(() =>
     window.denProfileTaskOperations.filter(({ kind }) => kind === 'profile.create'),
   );
@@ -302,7 +317,7 @@ test('real Worker/Vault creates an additional Kid only after Owner PIN proof and
   const sam = dialog.getByRole('button', { name: 'Use Sam' });
   await expect(sam).toBeVisible({ timeout: 30_000 });
   await expect(sam).toBeFocused();
-  expect(edge.libraries.size).toBe(before.length + 1);
+  expect(edge.libraries.size).toBe(beforeLibraries.length + 1);
 
   await expect
     .poll(() =>

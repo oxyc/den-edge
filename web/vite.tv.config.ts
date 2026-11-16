@@ -520,6 +520,7 @@ export default mergeConfig(
                 'test/detail-parity.html',
                 'test/profile-mode.html',
                 'test/detail-a11y.html',
+                'test/services-row.html',
               ],
             },
           }

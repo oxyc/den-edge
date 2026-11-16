@@ -203,6 +203,26 @@ describe('directSubtitles', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3);
   });
 
+  it('names candidates and counts in the interface language, not the browser’s', async () => {
+    vi.stubGlobal('navigator', { language: 'fi-FI', languages: ['fi-FI'], userAgent: 'test' });
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        subtitles: [
+          { lang: 'en', release: 'Film', downloads: 12_400, url: '/den/~a1b2c3d4/subtitle/1.srt' },
+        ],
+      }),
+    );
+    const found = await directSubtitles(
+      '/den/~a1b2c3d4/playback',
+      { imdb: 'tt0111161', subtitleLanguages: ['en'] },
+      release,
+      fetchImpl,
+    );
+    expect(found?.subtitles).toMatchObject([
+      { name: 'English', description: 'OpenSubtitles · Film · 12.4K downloads' },
+    ]);
+  });
+
   it('cancels a subtitle body as soon as streaming crosses the 2 MiB ceiling', async () => {
     const cancel = vi.fn();
     const oversized = new ReadableStream<Uint8Array>({
