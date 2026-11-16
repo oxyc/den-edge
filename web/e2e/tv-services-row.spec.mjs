@@ -65,25 +65,28 @@ test('TV Services retry is focus-stable, bounded, and keeps the reserved height'
   expect(await geometry(row)).toEqual(reserved);
 });
 
-test('TV Services retries the same failed directory chunk in place', async ({ page }) => {
+test('TV Services does not advertise recovery for a retained failed directory chunk', async ({
+  page,
+}) => {
   let refused = false;
-  // `services-row-*.js` is this fixture's entry. Refuse only the lazy settings module whose retry behavior the
-  // production Library depends on; aborting the entry would prove nothing about a repeated dynamic import.
+  // `services-row-*.js` is this fixture's entry. Refuse only the lazy settings module; aborting the entry would
+  // prove nothing about the production Library's truthful disposition of an unrecoverable module failure.
   await page.route(/\/assets\/services-(?!row-)[^/]+\.js(?:\?.*)?$/, (route) => {
     if (refused) return route.continue();
     refused = true;
     return route.abort('connectionfailed');
   });
-  const { row, reserved } = await pendingRow(page, '?result=module-retry');
+  const { row, reserved } = await pendingRow(page, '?result=module-failure');
   const requests = page.locator('[data-requests]');
 
   await row.scrollIntoViewIfNeeded();
   await expect(requests).toHaveText('1');
   expect(refused, 'the first request for the lazy Services module was refused').toBe(true);
   await expect(row.getByRole('status')).toHaveText('Services unavailable');
-  await row.getByRole('button', { name: 'Try again' }).click();
-  await expect(requests).toHaveText('2');
-  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+  await expect(requests, 'the retained failed import is not offered as an in-page retry').toHaveText(
+    '1',
+  );
   expect(await geometry(row)).toEqual(reserved);
 });
 

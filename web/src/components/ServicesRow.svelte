@@ -206,6 +206,7 @@
 
   .retry {
     appearance: none;
+
     /* Reduced Tizen gives buttons border-box sizing while the reserved span plate is content-box. Keep the same
        two-border geometry instead of shrinking the settled/retrying row by 2px when the placeholder is replaced. */
     box-sizing: content-box;

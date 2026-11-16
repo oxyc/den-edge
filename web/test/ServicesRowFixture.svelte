@@ -54,7 +54,7 @@
   function admit() {
     if (admitted) return;
     admitted = true;
-    if (result === 'module-retry') {
+    if (result === 'module-failure') {
       void loadDirectoryModule();
       return;
     }
@@ -73,10 +73,6 @@
   function retry() {
     if (retrying) return;
     retrying = true;
-    if (result === 'module-retry') {
-      void loadDirectoryModule();
-      return;
-    }
     requests++;
   }
 
@@ -93,7 +89,8 @@
 <ServicesRow
   {services}
   pending={settled ? 0 : 2}
-  failure={failed ? 'Services unavailable' : undefined}
+  empty={failed && result === 'module-failure' ? 'Services unavailable' : undefined}
+  failure={failed && result !== 'module-failure' ? 'Services unavailable' : undefined}
   {retrying}
   onretry={retry}
   onvisible={admit}

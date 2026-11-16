@@ -2177,11 +2177,8 @@
   );
   /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
   let serviceDirectoriesAdmitted = $state(false);
-  let directoryModuleAttempt = $state(0);
   let directoryModuleState = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
-  let directoryModuleRetrying = $state(false);
   $effect(() => {
-    void directoryModuleAttempt;
     if (!serviceDirectoriesAdmitted || directoryServices) return;
     directoryModuleState = 'loading';
     let current = true;
@@ -2194,7 +2191,6 @@
       () => {
         if (!current) return;
         directoryModuleState = 'failed';
-        directoryModuleRetrying = false;
       },
     );
     return () => {
@@ -2233,9 +2229,7 @@
       return status === 'partial' || status === 'failed';
     }),
   );
-  const directoryRetrying = $derived(
-    directoryModuleRetrying || currentDirectoryKeys.some((key) => retryingDirectories[key]),
-  );
+  const directoryRetrying = $derived(currentDirectoryKeys.some((key) => retryingDirectories[key]));
   $effect(() => {
     const directory = directoryServices;
     const language = i18n.language;
@@ -2283,14 +2277,6 @@
             const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
             retryingDirectories = rest;
           }
-          if (
-            untrack(() => directoryModuleRetrying) &&
-            untrack(() => currentDirectoryKeys).every((currentKey) => {
-              const status = untrack(() => directoryLoads[currentKey]?.status);
-              return status && status !== 'loading';
-            })
-          )
-            directoryModuleRetrying = false;
         });
     }
     return () => {
@@ -2315,11 +2301,6 @@
   });
   function retryServiceDirectories() {
     if (directoryRetrying || naming) return;
-    if (directoryModuleState === 'failed') {
-      directoryModuleRetrying = true;
-      directoryModuleAttempt++;
-      return;
-    }
     if (!failedDirectories.length) return;
     for (const key of failedDirectories) refreshDirectories[key] = true;
     retryingDirectories = Object.fromEntries(failedDirectories.map((key) => [key, true]));
@@ -3425,15 +3406,12 @@
               : 0
             : servicePicks.length}
           serviceEmpty={serviceDirectoriesAdmitted &&
-          directoryModuleState !== 'failed' &&
           !naming &&
           !services.length &&
-          !failedDirectories.length
+          (directoryModuleState === 'failed' || !failedDirectories.length)
             ? 'Services unavailable'
             : undefined}
-          serviceFailure={directoryModuleState === 'failed' || failedDirectories.length
-            ? 'Services unavailable'
-            : undefined}
+          serviceFailure={failedDirectories.length ? 'Services unavailable' : undefined}
           serviceRetrying={directoryRetrying}
           onServiceRetry={retryServiceDirectories}
           onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
