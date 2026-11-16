@@ -1615,18 +1615,18 @@ describe('DownloadCoordinator', () => {
     cancelEmpty = false;
     await driver.run({ now: T0 + 2 * MINUTE + 5_000, observedFor: 0 });
     expect(handed).toHaveLength(2);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_000)).toBe(0);
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_000)).toBe(10_000);
 
     shared.land({
       ...shared.log.settings(LEASE_ROW)!,
       values: {
         ...shared.log.settings(LEASE_ROW)!.values,
-        lease: { value: { strings: ['', '2'] }, at: [T0 + 2 * MINUTE + 5_001, 0, TV] },
+        lease: { value: { strings: ['', '2'] }, at: [T0 + 2 * MINUTE + 15_000, 0, TV] },
       },
     });
-    await driver.run({ now: T0 + 2 * MINUTE + 5_001, observedFor: 120_001 });
+    await driver.run({ now: T0 + 2 * MINUTE + 15_000, observedFor: 120_001 });
     expect(handed.map((items) => items.length)).toEqual([1, 0, 0]);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_001)).toBeUndefined();
+    expect(driver.hearthDelay(T0 + 2 * MINUTE + 15_000)).toBeUndefined();
   });
 
   it('waits for a wanted episode to air before searching for it', async () => {

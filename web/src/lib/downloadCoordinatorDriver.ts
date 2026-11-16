@@ -140,9 +140,17 @@ export class DownloadCoordinatorDriver {
     if (!current()) return false;
     // A final removal still has work to do: clear Hearth's previously acknowledged non-empty list. Once that clear
     // is acknowledged there is no reason to acquire an otherwise idle download lease.
-    if (!downloads.length && this.hearthDelay(now) !== 0) return false;
+    const hearthOnly = !downloads.length;
+    if (hearthOnly && this.hearthDelay(now) !== 0) return false;
     await ensureDeferredSyncPolicy();
-    if (!(await this.#holdLease(now, options.observedFor)) || !current()) return false;
+    if (!(await this.#holdLease(now, options.observedFor))) {
+      // Lease contention must not leave a due empty replacement at delay zero. It participates in the same single,
+      // bounded retry owner as a failed request and is bypassed immediately if the wanted digest changes.
+      if (hearthOnly && current())
+        this.#retryHearth(JSON.stringify(wantedItems(this.queue.list())), now);
+      return false;
+    }
+    if (!current()) return false;
     return this.#holderPass(now);
   }
 
