@@ -163,7 +163,10 @@ test('Kid Home names an unreachable Atlas and Retry recovers without a reload', 
 
   await expect(unavailable).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Welcome to Moominvalley' })).toBeVisible();
-  expect(manifestRequests()).toBe(2);
+  // Retry owns one new discovery probe. Once Atlas is configured, Home independently reads the same manifest for
+  // its optional service-catalog metadata; its lazy import may settle before or after the Kid row paints.
+  expect(manifestRequests()).toBeGreaterThanOrEqual(2);
+  expect(manifestRequests()).toBeLessThanOrEqual(3);
 });
 
 test('Kid Home uses its child-facing catalogue and billboard under the Kid policy', async ({
