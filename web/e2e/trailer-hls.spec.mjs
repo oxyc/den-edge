@@ -99,6 +99,8 @@ test('a retained hls.js trailer stops inactive work and reactivates without adva
             .replaceAll('high/', '/reel/hls-fixture/high/'),
         });
       const file = path.split('/').pop();
+      // Keep fragment work observable instead of letting Chromium fill its whole forward buffer before inactivity.
+      if (file.endsWith('.m4s')) await new Promise((resolve) => setTimeout(resolve, 400));
       return r.fulfill({
         contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
         body: await readFile(new URL(file, hls)),
@@ -113,6 +115,11 @@ test('a retained hls.js trailer stops inactive work and reactivates without adva
   const fragments = [...asked].filter(([path]) => path.endsWith('.m4s'));
   expect(fragments.length).toBeGreaterThan(0);
   expect(fragments.filter(([, n]) => n > 1)).toEqual([]);
+  const beforeActiveWindow = [...asked.values()].reduce((sum, count) => sum + count, 0);
+  await page.waitForTimeout(500);
+  expect([...asked.values()].reduce((sum, count) => sum + count, 0)).toBeGreaterThan(
+    beforeActiveWindow,
+  );
 
   await page.evaluate(() =>
     document.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
