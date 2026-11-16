@@ -197,6 +197,8 @@ test('on a split household an assistant connects to the household and reads and 
     const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
     await watchlist.click();
     await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
+    // Pressed is optimistic. Let Owner's command and view settle before consent can publish its first snapshot.
+    await expect(watchlist).not.toHaveAttribute('data-saving', 'true');
 
     const before = edge.libraryRequests.length;
     await allowAssistant(page);
