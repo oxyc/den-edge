@@ -7,12 +7,12 @@ const geometry = (row) =>
     return { top: box.top + scrollY, height: box.height };
   });
 
-async function pendingRow(page, query = '', beforeAdmission) {
+async function pendingRow(page, query = '', beforeNavigation) {
+  await beforeNavigation?.();
   await page.goto(`${E2E_ORIGIN}/test/services-row.html${query}`);
   const row = page.locator('.services-row');
   await page.evaluate(() => document.fonts.ready);
   await expect(row).toHaveAttribute('data-layout-state', 'pending');
-  await beforeAdmission?.();
   const label = row.locator('.hold > :last-child').first();
   return {
     row,
@@ -71,8 +71,8 @@ test('TV Services does not advertise recovery for a retained failed directory ch
 }) => {
   let refused = false;
   const { row, reserved } = await pendingRow(page, '?result=module-failure', () =>
-    // Install the fault only after the fixture and its static service resolver have mounted. The next matching
-    // request is HomeCatalogue's near-viewport settings module, which is the retained import under test.
+    // The fixture resolver is local and the entry chunk is excluded below, so this can be installed before
+    // navigation without eagerly loading the settings module that HomeCatalogue must retain after failure.
     page.route(/\/assets\/services-(?!row-)[^/]+\.js(?:\?.*)?$/, (route) => {
       if (refused) return route.continue();
       refused = true;
