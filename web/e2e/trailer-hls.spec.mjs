@@ -18,7 +18,9 @@ const master = [
   '',
 ].join('\n');
 
-test('a trailer played through hls.js fetches each fragment once', async ({ page }) => {
+test('a retained hls.js trailer stops inactive work and reactivates without advancing', async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await guardNetwork(page);
   await routeTmdb(page, (r) =>
@@ -38,8 +40,10 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"/>',
     }),
   );
-  await page.route('**/reel/fixture/prepare/**', (r) =>
-    r.fulfill({
+  let prepares = 0;
+  await page.route('**/reel/fixture/prepare/**', (r) => {
+    prepares++;
+    return r.fulfill({
       json: {
         v: 2,
         meta: { links: [{ planUrl }] },
@@ -59,8 +63,8 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
           ],
         },
       },
-    }),
-  );
+    });
+  });
   await page.route('**/reel/transport', (r) =>
     r.fulfill({
       json: {
@@ -71,6 +75,11 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
     }),
   );
   const asked = new Map();
+  const warnings = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning' && message.text().includes('hls.js'))
+      warnings.push(message.text());
+  });
   await page.route(
     (url) => {
       const request = `${url.pathname}${url.search}`;
@@ -104,4 +113,25 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
   const fragments = [...asked].filter(([path]) => path.endsWith('.m4s'));
   expect(fragments.length).toBeGreaterThan(0);
   expect(fragments.filter(([, n]) => n > 1)).toEqual([]);
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
+  );
+  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+  // Let requests already admitted by the network stack settle; no playlist or fragment work may begin after this.
+  await page.waitForTimeout(250);
+  const inactive = [...asked];
+  await page.waitForTimeout(1500);
+  expect([...asked]).toEqual(inactive);
+
+  const beforeReactivate = [...asked.values()].reduce((sum, count) => sum + count, 0);
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
+  );
+  await expect
+    .poll(() => [...asked.values()].reduce((sum, count) => sum + count, 0))
+    .toBeGreaterThan(beforeReactivate);
+  await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15000 });
+  expect(prepares).toBe(1);
+  expect(warnings).toEqual([]);
 });

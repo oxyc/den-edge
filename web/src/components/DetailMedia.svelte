@@ -308,6 +308,8 @@
       !ended &&
       !failed,
   );
+  /** The hls.js engine is an ownership resource, not retained page state. */
+  const ownedManaged = $derived(allowed ? managed : null);
 
   onMount(() => {
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -454,7 +456,7 @@
   // the bare element uses, so the two player paths cannot disagree about fallback order.
   $effect(() => {
     const player = video;
-    const master = managed;
+    const master = ownedManaged;
     if (__DEN_TV_LEGACY_JS_CORE__ || !player || !master) return;
     let live = true;
     let engine: Hls | undefined;
@@ -487,6 +489,7 @@
       // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
       // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
       engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (!live) return;
         const levels = engine?.levels ?? [];
         const best = levels.reduce(
           (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
@@ -498,6 +501,7 @@
         if (allowed) void player.play().catch(() => {});
       });
       engine.once(Hls.Events.FRAG_BUFFERED, () => {
+        if (!live) return;
         // The opening rung was ours; every one after it is the line's to choose. `loadLevel`, not `nextLevel`:
         // that asks for a switch, which throws away what is buffered ahead and fetches it again. Asked on every
         // buffered fragment, it never ended: one segment fetched 830 times in four seconds.
@@ -508,6 +512,7 @@
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A count the handler reads, never rendered.
       const loads = new Map<string, number>();
       engine.on(Hls.Events.FRAG_LOADING, (_event, { frag }) => {
+        if (!live) return;
         const key = `${frag.type}:${frag.level}:${frag.sn}`;
         const count = (loads.get(key) ?? 0) + 1;
         loads.set(key, count);
@@ -522,11 +527,17 @@
     });
     // hls.js is its own chunk, fetched only now; one that never comes is a master that will not play.
     void starting.catch((error: unknown) => {
+      // Losing the retained page's ownership while the lazy chunk resolves is ordinary teardown, not a failed
+      // trailer. It must not advance the cursor or emit a diagnostic for the inactive generation.
+      if (!live) return;
       console.warn('hls.js could not be started for the trailer.', error);
-      if (live) nextTrailer();
+      nextTrailer();
     });
     return () => {
       live = false;
+      // Preserve the retained page's visible position before destroy detaches MediaSource and releases its buffers.
+      // A source replacement while still allowed is a real cursor transition and must not keep the old frame.
+      if (!allowed && managed === master) keepFrame(player);
       engine?.destroy();
     };
   });
