@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { reportTrailerEngineFailure, startTrailerEngine } from './trailerEngineDiagnostics';
+import {
+  MOST_TRAILER_FRAGMENT_LOADS,
+  reportTrailerCandidatesExhausted,
+  startTrailerEngine,
+  trailerEngineFailureHandlers,
+} from './trailerEngineDiagnostics';
 
 describe('trailer engine diagnostics', () => {
   it('bounds a rejected dynamic import without forwarding its URL or stack', async () => {
@@ -59,19 +64,79 @@ describe('trailer engine diagnostics', () => {
     warn.mockRestore();
   });
 
-  it('keeps fatal, fragment-loop and candidate-exhaustion diagnostics closed', () => {
+  it('keeps nonfatal events silent and makes fatal fallback closed and one-shot', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let current = true;
+    const stop = vi.fn();
+    const advance = vi.fn();
+    const handlers = trailerEngineFailureHandlers({
+      current: () => current,
+      retire: () => {
+        current = false;
+      },
+      stop,
+      advance,
+    });
 
-    reportTrailerEngineFailure('fatal_error');
-    reportTrailerEngineFailure('fragment_loop');
-    reportTrailerEngineFailure('candidates_exhausted');
+    handlers.error('error', { fatal: false });
+    expect(warn).not.toHaveBeenCalled();
+    expect(advance).not.toHaveBeenCalled();
+
+    handlers.error('error', { fatal: true });
+    handlers.error('duplicate', { fatal: true });
 
     expect(warn.mock.calls).toEqual([
       ['[Den trailer] {"event":"engine-failure","outcome":"fatal_error"}'],
+    ]);
+    expect(stop).not.toHaveBeenCalled();
+    expect(advance).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('stops and advances only after the same fragment exceeds its retry allowance', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let current = true;
+    const stop = vi.fn();
+    const advance = vi.fn();
+    const handlers = trailerEngineFailureHandlers({
+      current: () => current,
+      retire: () => {
+        current = false;
+      },
+      stop,
+      advance,
+    });
+    const sentinel = { frag: { type: 'main-private', level: 7349281, sn: 'capability-secret' } };
+
+    for (let count = 0; count < MOST_TRAILER_FRAGMENT_LOADS; count += 1)
+      handlers.fragmentLoading('loading', sentinel);
+    expect(warn).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(advance).not.toHaveBeenCalled();
+
+    handlers.fragmentLoading('loading', sentinel);
+    handlers.fragmentLoading('duplicate', sentinel);
+
+    expect(warn.mock.calls).toEqual([
       ['[Den trailer] {"event":"engine-failure","outcome":"fragment_loop"}'],
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/main-private|7349281|capability-secret/);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(advance).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('reports candidate exhaustion only for the current active surface', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    reportTrailerCandidatesExhausted(false, true);
+    reportTrailerCandidatesExhausted(true, false);
+    expect(warn).not.toHaveBeenCalled();
+
+    reportTrailerCandidatesExhausted(true, true);
+    expect(warn.mock.calls).toEqual([
       ['[Den trailer] {"event":"engine-failure","outcome":"candidates_exhausted"}'],
     ]);
-    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/https?:|tmdb:|m\/s\/|provider body/i);
     warn.mockRestore();
   });
 });

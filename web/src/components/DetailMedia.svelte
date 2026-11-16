@@ -16,7 +16,11 @@
   import type { Routes } from '../lib/routes';
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { nativeHlsFirst } from '../lib/detailTrailerSources';
-  import { reportTrailerEngineFailure, startTrailerEngine } from '../lib/trailerEngineDiagnostics';
+  import {
+    reportTrailerCandidatesExhausted,
+    startTrailerEngine,
+    trailerEngineFailureHandlers,
+  } from '../lib/trailerEngineDiagnostics';
   let {
     type,
     tmdbId,
@@ -447,9 +451,6 @@
 
   onDestroy(() => cursor?.close());
 
-  /** How often one fragment may be fetched before the engine is taken for looping (see `FRAG_LOADING` below). */
-  const MOST_FRAGMENT_LOADS = 4;
-
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
   // `src`, and is torn down with the typed source it was given. A fatal error advances the same cursor
   // the bare element uses, so the two player paths cannot disagree about fallback order.
@@ -479,13 +480,15 @@
           abrEwmaDefaultEstimate: 5_000_000,
           testBandwidth: false,
         });
-        engine.on(Hls.Events.ERROR, (_event, data) => {
-          // Once per engine: a fatal error can be followed by another, and each would step again.
-          if (!data.fatal || !live) return;
-          live = false;
-          reportTrailerEngineFailure('fatal_error');
-          nextTrailer();
+        const failures = trailerEngineFailureHandlers({
+          current: () => live,
+          retire: () => {
+            live = false;
+          },
+          stop: () => engine?.stopLoad(),
+          advance: () => nextTrailer(),
         });
+        engine.on(Hls.Events.ERROR, failures.error);
         // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
         // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
         // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
@@ -508,18 +511,7 @@
         });
         // And whatever else might start one: a fragment asked for again and again is a loop, not a recovery. hls.js
         // retrying a failed fragment asks a few times; past that the trailer is given up for the next one.
-        // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A count the handler reads, never rendered.
-        const loads = new Map<string, number>();
-        engine.on(Hls.Events.FRAG_LOADING, (_event, { frag }) => {
-          const key = `${frag.type}:${frag.level}:${frag.sn}`;
-          const count = (loads.get(key) ?? 0) + 1;
-          loads.set(key, count);
-          if (count <= MOST_FRAGMENT_LOADS || !live) return;
-          live = false;
-          reportTrailerEngineFailure('fragment_loop');
-          engine?.stopLoad();
-          nextTrailer();
-        });
+        engine.on(Hls.Events.FRAG_LOADING, failures.fragmentLoading);
         engine.loadSource(master);
         engine.attachMedia(player);
       },
@@ -649,7 +641,7 @@
       playback = next;
       forced = false;
       failed = !next;
-      if (!next && active) reportTrailerEngineFailure('candidates_exhausted');
+      if (!next) reportTrailerCandidatesExhausted(cursor === owner, active);
     }
     if (advancing === owner) advancing = null;
   }
