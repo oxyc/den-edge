@@ -306,6 +306,9 @@ for (const [engine, browserType] of engines) {
         await page.touchscreen.tap(title.x + title.width / 2, title.y + title.height / 2);
         await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
         await expect(page.getByTestId('player-close-count')).toHaveText('0');
+        // Preserve the original timing assertion before exercising an additional input path: on a loaded runner the
+        // ten-second countdown can otherwise finish while the keyboard menu interaction is still being scheduled.
+        await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
 
         // The same trigger remains operable without a pointer (keyboard here, TV remote Select through ActionMenu's
         // shared native button path on the TV-specific player menus).
@@ -315,7 +318,6 @@ for (const [engine, browserType] of engines) {
         await page.keyboard.press('Escape');
         await expect(page.getByRole('menuitem', { name: 'Play from beginning' })).toHaveCount(0);
 
-        await expect(page.getByRole('button', { name: 'Stay' })).toBeVisible({ timeout: 30_000 });
         expect(await overlaps(page)).toEqual([]);
       } finally {
         await browser.close();
