@@ -7,7 +7,7 @@ const API = 'https://den-tv-api.example.invalid';
 const SERVICE = 'https://den-tv-service.example.invalid';
 const ENTRY = `${E2E_ORIGIN}/package/index.html`;
 
-async function packaged(page, edge, sourceFailures) {
+async function packaged(page, edge, sourceFailures, misroutedFailureReports = []) {
   await page.addInitScript(() => {
     globalThis.__tvPolicyViolations = [];
     document.addEventListener('securitypolicyviolation', (event) => {
@@ -43,6 +43,12 @@ async function packaged(page, edge, sourceFailures) {
   await routeGuestEdge(fixturePage, edge, { api: API, service: SERVICE });
   if (sourceFailures)
     await page.route('**/diagnostics/failure', async (route) => {
+      const origin = new URL(route.request().url()).origin;
+      if (origin !== API) {
+        misroutedFailureReports.push(route.request().url());
+        await route.abort('blockedbyclient');
+        return;
+      }
       if (route.request().method() === 'POST') sourceFailures.push(route.request().postDataJSON());
       await route.fulfill({
         status: 204,
@@ -65,6 +71,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   const leakedCredentials = [];
   const misrouted = [];
   const sourceFailures = [];
+  const misroutedFailureReports = [];
   const observeCredentials = (page) =>
     page.on('request', (request) => {
       const headers = request.headers();
@@ -79,7 +86,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
           url.pathname,
         );
       const devicePath =
-        /^\/(?:pair|inbox|lib|recovery|config|health|routes|grant|oauth|playback|sync|mcp|link|version)(?:\/|$)/.test(
+        /^\/(?:pair|inbox|lib|recovery|config|health|routes|grant|oauth|playback|diagnostics|sync|mcp|link|version)(?:\/|$)/.test(
           url.pathname,
         );
       if ((url.origin === API && servicePath) || (url.origin === SERVICE && devicePath))
@@ -90,7 +97,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     if (response.url().startsWith(E2E_ORIGIN) && response.status() >= 400)
       localFailures.push(response.url());
   });
-  await packaged(host, edge, sourceFailures);
+  await packaged(host, edge, sourceFailures, misroutedFailureReports);
   await host.goto(`${ENTRY}#/movie/1002`);
   if (process.env.DEN_TV_OLD_ENGINE_LIMITS === '1') {
     expect(await host.evaluate(() => globalThis.__denOldEngineLimits)).toEqual({
@@ -134,7 +141,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
   try {
     const tv = await context.newPage();
     observeCredentials(tv);
-    await packaged(tv, edge, sourceFailures);
+    await packaged(tv, edge, sourceFailures, misroutedFailureReports);
     await tv.goto(ENTRY);
     await tv.getByLabel('Link code, twelve characters').fill(code);
     await tv.getByLabel('This device’s name').fill('Samsung package');
@@ -168,6 +175,7 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
     expect(localFailures).toEqual([]);
     expect(leakedCredentials).toEqual([]);
     expect(misrouted).toEqual([]);
+    expect(misroutedFailureReports).toEqual([]);
     await expect.poll(() => sourceFailures.length).toBeGreaterThan(0);
     for (const report of sourceFailures) {
       expect(report).toMatchObject({

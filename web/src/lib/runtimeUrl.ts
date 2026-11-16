@@ -21,9 +21,12 @@ export function appHistoryUrl(path: string | URL): string {
 
 /** Only Den API paths move to the configured server. Assets and arbitrary external URLs never do. */
 const API_PATH =
-  /^\/(?:pair|inbox|lib|recovery|config|health|routes|scout|tmdb|metadata|grant|oauth|capabilities|playback|den|ratings|warnings|skipdb|subs|subtitles|sync|mcp|link|version|atlas|reel|remux|direct|assistant)(?:\/|$)/;
+  /^\/(?:pair|inbox|lib|recovery|config|health|routes|scout|tmdb|metadata|grant|oauth|capabilities|playback|diagnostics|den|ratings|warnings|skipdb|subs|subtitles|sync|mcp|link|version|atlas|reel|remux|direct|assistant)(?:\/|$)/;
 const SERVICE_PATH =
   /^\/(?:capabilities|scout|tmdb|metadata|den|ratings|warnings|skipdb|subs|subtitles|atlas|reel|remux|direct)(?:\/|$)/;
+
+/** Whether a same-package path belongs on the configured device API face. */
+export const isDeviceApiPath = (pathname: string): boolean => API_PATH.test(pathname);
 
 export function apiOrigin(): string {
   return __DEN_TV_API_ORIGIN__ || (globalThis.location?.origin ?? '');
@@ -42,7 +45,7 @@ export function apiUrl(href: string): string {
     if (
       url.protocol !== here.protocol ||
       url.origin !== here.origin ||
-      !API_PATH.test(url.pathname)
+      !isDeviceApiPath(url.pathname)
     )
       return href;
     const target = SERVICE_PATH.test(url.pathname) ? serviceOrigin() : apiOrigin();
