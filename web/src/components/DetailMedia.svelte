@@ -16,11 +16,7 @@
   import type { Routes } from '../lib/routes';
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { nativeHlsFirst } from '../lib/detailTrailerSources';
-  import {
-    reportTrailerEngineFailure,
-    startTrailerEngine,
-    trailerEngineFailureHandlers,
-  } from '../lib/trailerEngineDiagnostics';
+  import { reportTrailerEngineFailure } from '../lib/trailerEngineDiagnostics';
   let {
     type,
     tmdbId,
@@ -451,6 +447,9 @@
 
   onDestroy(() => cursor?.close());
 
+  /** How often one fragment may be fetched before the engine is taken for looping (see `FRAG_LOADING` below). */
+  const MOST_FRAGMENT_LOADS = 4;
+
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
   // `src`, and is torn down with the typed source it was given. A fatal error advances the same cursor
   // the bare element uses, so the two player paths cannot disagree about fallback order.
@@ -460,69 +459,73 @@
     if (__DEN_TV_LEGACY_JS_CORE__ || !player || !master) return;
     let live = true;
     let engine: Hls | undefined;
-    void startTrailerEngine(
-      loadHls,
-      ({ default: Hls }) => {
-        if (!Hls.isSupported()) {
-          nextTrailer();
-          return;
-        }
-        // The membership claim travels on hls.js's own requests too, or a paired household counts as a
-        // guest against the relay's guest budget — on its own box, from its own sofa.
-        // Open near the top of the ladder instead of climbing to it. hls.js assumes 500 kbps until it has
-        // measured a fragment, and `testBandwidth` makes it start lower still to take that measurement —
-        // which on a ninety-second trailer spends the part anyone actually watches at the bottom of a
-        // ladder that reaches 1080p. The estimate is the home connection these are served over; ABR still
-        // measures every fragment and drops if the line cannot hold it.
-        engine = new Hls({
-          enableWorker: false,
-          xhrSetup: memberXhrSetup,
-          abrEwmaDefaultEstimate: 5_000_000,
-          testBandwidth: false,
-        });
-        const [engineError, fragmentLoading] = trailerEngineFailureHandlers(
-          () => live,
-          () => {
-            live = false;
-          },
-          () => engine?.stopLoad(),
-          () => nextTrailer(),
-        );
-        engine.on(Hls.Events.ERROR, engineError);
-        // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
-        // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
-        // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
-        engine.on(Hls.Events.MANIFEST_PARSED, () => {
-          const levels = engine?.levels ?? [];
-          const best = levels.reduce(
-            (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
-            0,
-          );
-          if (engine && levels.length > 1) engine.nextLevel = best;
-          // The element is mounted with no `src`, so the effect that starts playback has already run and
-          // found nothing to play. Autoplay begins here, once there is something to begin.
-          if (allowed) void player.play().catch(() => {});
-        });
-        engine.once(Hls.Events.FRAG_BUFFERED, () => {
-          // The opening rung was ours; every one after it is the line's to choose. `loadLevel`, not `nextLevel`:
-          // that asks for a switch, which throws away what is buffered ahead and fetches it again. Asked on every
-          // buffered fragment, it never ended: one segment fetched 830 times in four seconds.
-          if (engine) engine.loadLevel = -1;
-        });
-        // And whatever else might start one: a fragment asked for again and again is a loop, not a recovery. hls.js
-        // retrying a failed fragment asks a few times; past that the trailer is given up for the next one.
-        engine.on(Hls.Events.FRAG_LOADING, fragmentLoading);
-        engine.loadSource(master);
-        engine.attachMedia(player);
-      },
-      () => {
-        live = false;
-        engine?.destroy();
-        engine = undefined;
+    const starting = loadHls().then(({ default: Hls }) => {
+      if (!live) return;
+      if (!Hls.isSupported()) {
         nextTrailer();
-      },
-      () => live,
-    );
+        return;
+      }
+      // The membership claim travels on hls.js's own requests too, or a paired household counts as a
+      // guest against the relay's guest budget — on its own box, from its own sofa.
+      // Open near the top of the ladder instead of climbing to it. hls.js assumes 500 kbps until it has
+      // measured a fragment, and `testBandwidth` makes it start lower still to take that measurement —
+      // which on a ninety-second trailer spends the part anyone actually watches at the bottom of a
+      // ladder that reaches 1080p. The estimate is the home connection these are served over; ABR still
+      // measures every fragment and drops if the line cannot hold it.
+      engine = new Hls({
+        enableWorker: false,
+        xhrSetup: memberXhrSetup,
+        abrEwmaDefaultEstimate: 5_000_000,
+        testBandwidth: false,
+      });
+      engine.on(Hls.Events.ERROR, (_event, data) => {
+        if (!data.fatal || !live) return;
+        live = false;
+        reportTrailerEngineFailure('fatal');
+        nextTrailer();
+      });
+      // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
+      // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
+      // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
+      engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        const levels = engine?.levels ?? [];
+        const best = levels.reduce(
+          (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
+          0,
+        );
+        if (engine && levels.length > 1) engine.nextLevel = best;
+        // The element is mounted with no `src`, so the effect that starts playback has already run and
+        // found nothing to play. Autoplay begins here, once there is something to begin.
+        if (allowed) void player.play().catch(() => {});
+      });
+      engine.once(Hls.Events.FRAG_BUFFERED, () => {
+        // The opening rung was ours; every one after it is the line's to choose. `loadLevel`, not `nextLevel`:
+        // that asks for a switch, which throws away what is buffered ahead and fetches it again. Asked on every
+        // buffered fragment, it never ended: one segment fetched 830 times in four seconds.
+        if (engine) engine.loadLevel = -1;
+      });
+      // And whatever else might start one: a fragment asked for again and again is a loop, not a recovery. hls.js
+      // retrying a failed fragment asks a few times; past that the trailer is given up for the next one.
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A count the handler reads, never rendered.
+      const loads = new Map<string, number>();
+      engine.on(Hls.Events.FRAG_LOADING, (_event, { frag }) => {
+        const key = `${frag.type}:${frag.level}:${frag.sn}`;
+        const count = (loads.get(key) ?? 0) + 1;
+        loads.set(key, count);
+        if (count <= MOST_FRAGMENT_LOADS || !live) return;
+        live = false;
+        reportTrailerEngineFailure('fragment_loop');
+        engine?.stopLoad();
+        nextTrailer();
+      });
+      engine.loadSource(master);
+      engine.attachMedia(player);
+    });
+    void starting.catch((error: unknown) => {
+      if (!live) return;
+      reportTrailerEngineFailure('startup', error);
+      nextTrailer();
+    });
     return () => {
       live = false;
       engine?.destroy();
@@ -641,7 +644,7 @@
       playback = next;
       forced = false;
       failed = !next;
-      if (!next && active) reportTrailerEngineFailure('candidates_exhausted');
+      if (!next && active) reportTrailerEngineFailure('exhausted');
     }
     if (advancing === owner) advancing = null;
   }

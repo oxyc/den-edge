@@ -1,138 +1,50 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  MOST_TRAILER_FRAGMENT_LOADS,
-  reportTrailerEngineFailure,
-  startTrailerEngine,
-  trailerEngineFailureHandlers,
-} from './trailerEngineDiagnostics';
+import { reportTrailerEngineFailure } from './trailerEngineDiagnostics';
 
 describe('trailer engine diagnostics', () => {
-  it('bounds a rejected dynamic import without forwarding its URL or stack', async () => {
+  it('bounds a rejected dynamic import without forwarding its URL or stack', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const advance = vi.fn();
     const sentinel = new TypeError('https://provider.invalid/reel/private-capability.m3u8');
     sentinel.stack = 'private response body and title tmdb:7349281';
 
-    await startTrailerEngine(() => Promise.reject(sentinel), vi.fn(), advance);
+    reportTrailerEngineFailure('startup', sentinel);
 
-    expect(advance).toHaveBeenCalledOnce();
-    expect(warn.mock.calls).toEqual([
-      [
-        '[Den trailer] {"event":"engine-failure","outcome":"module_load_failed","errorClass":"type_error"}',
-      ],
-    ]);
+    expect(warn.mock.calls).toEqual([['den: trailer engine failure', 'startup', 'type_error']]);
     expect(JSON.stringify(warn.mock.calls)).not.toMatch(
       /provider|capability|m3u8|response body|7349281/,
     );
     warn.mockRestore();
   });
 
-  it('bounds synchronous engine startup rejection separately from module loading', async () => {
+  it('bounds a non-TypeError engine startup rejection', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const advance = vi.fn();
     const sentinel = new Error('chunk URL https://d.oxy.fi/assets/hls-private.js');
 
-    await startTrailerEngine(
-      async () => ({ default: 'loaded' }),
-      () => {
-        throw sentinel;
-      },
-      advance,
-    );
+    reportTrailerEngineFailure('startup', sentinel);
 
-    expect(advance).toHaveBeenCalledOnce();
-    expect(warn.mock.calls).toEqual([
-      ['[Den trailer] {"event":"engine-failure","outcome":"startup_failed","errorClass":"error"}'],
-    ]);
+    expect(warn.mock.calls).toEqual([['den: trailer engine failure', 'startup', 'exception']]);
     expect(JSON.stringify(warn.mock.calls)).not.toMatch(/chunk URL|hls-private|d\.oxy\.fi/);
     warn.mockRestore();
   });
 
-  it('stays silent when teardown owns a late module rejection', async () => {
+  it('keeps terminal HLS outcomes closed', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const advance = vi.fn();
-
-    await startTrailerEngine(
-      () => Promise.reject(new Error('late private sentinel')),
-      vi.fn(),
-      advance,
-      () => false,
-    );
-
-    expect(advance).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it('keeps nonfatal events silent and makes fatal fallback closed and one-shot', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    let current = true;
-    const stop = vi.fn();
-    const advance = vi.fn();
-    const [error] = trailerEngineFailureHandlers(
-      () => current,
-      () => {
-        current = false;
-      },
-      stop,
-      advance,
-    );
-
-    error('error', { fatal: false });
-    expect(warn).not.toHaveBeenCalled();
-    expect(advance).not.toHaveBeenCalled();
-
-    error('error', { fatal: true });
-    error('duplicate', { fatal: true });
+    reportTrailerEngineFailure('fatal');
+    reportTrailerEngineFailure('fragment_loop');
 
     expect(warn.mock.calls).toEqual([
-      ['[Den trailer] {"event":"engine-failure","outcome":"fatal_error"}'],
-    ]);
-    expect(stop).not.toHaveBeenCalled();
-    expect(advance).toHaveBeenCalledOnce();
-    warn.mockRestore();
-  });
-
-  it('stops and advances only after the same fragment exceeds its retry allowance', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    let current = true;
-    const stop = vi.fn();
-    const advance = vi.fn();
-    const [, fragmentLoading] = trailerEngineFailureHandlers(
-      () => current,
-      () => {
-        current = false;
-      },
-      stop,
-      advance,
-    );
-    const sentinel = { frag: { type: 'main-private', level: 7349281, sn: 'capability-secret' } };
-
-    for (let count = 0; count < MOST_TRAILER_FRAGMENT_LOADS; count += 1)
-      fragmentLoading('loading', sentinel);
-    expect(warn).not.toHaveBeenCalled();
-    expect(stop).not.toHaveBeenCalled();
-    expect(advance).not.toHaveBeenCalled();
-
-    fragmentLoading('loading', sentinel);
-    fragmentLoading('duplicate', sentinel);
-
-    expect(warn.mock.calls).toEqual([
-      ['[Den trailer] {"event":"engine-failure","outcome":"fragment_loop"}'],
+      ['den: trailer engine failure', 'fatal', 'none'],
+      ['den: trailer engine failure', 'fragment_loop', 'none'],
     ]);
     expect(JSON.stringify(warn.mock.calls)).not.toMatch(/main-private|7349281|capability-secret/);
-    expect(stop).toHaveBeenCalledOnce();
-    expect(advance).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
 
   it('reports candidate exhaustion without candidate identity', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    reportTrailerEngineFailure('candidates_exhausted');
-    expect(warn.mock.calls).toEqual([
-      ['[Den trailer] {"event":"engine-failure","outcome":"candidates_exhausted"}'],
-    ]);
+    reportTrailerEngineFailure('exhausted');
+    expect(warn.mock.calls).toEqual([['den: trailer engine failure', 'exhausted', 'none']]);
     warn.mockRestore();
   });
 });
