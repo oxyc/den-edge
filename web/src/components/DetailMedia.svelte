@@ -17,7 +17,7 @@
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { nativeHlsFirst } from '../lib/detailTrailerSources';
   import {
-    reportTrailerCandidatesExhausted,
+    reportTrailerEngineFailure,
     startTrailerEngine,
     trailerEngineFailureHandlers,
   } from '../lib/trailerEngineDiagnostics';
@@ -641,7 +641,7 @@
       playback = next;
       forced = false;
       failed = !next;
-      if (!next) reportTrailerCandidatesExhausted(cursor === owner, active);
+      if (!next && active) reportTrailerEngineFailure('candidates_exhausted');
     }
     if (advancing === owner) advancing = null;
   }

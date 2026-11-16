@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   MOST_TRAILER_FRAGMENT_LOADS,
-  reportTrailerCandidatesExhausted,
+  reportTrailerEngineFailure,
   startTrailerEngine,
   trailerEngineFailureHandlers,
 } from './trailerEngineDiagnostics';
@@ -126,14 +126,10 @@ describe('trailer engine diagnostics', () => {
     warn.mockRestore();
   });
 
-  it('reports candidate exhaustion only for the current active surface', () => {
+  it('reports candidate exhaustion without candidate identity', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    reportTrailerCandidatesExhausted(false, true);
-    reportTrailerCandidatesExhausted(true, false);
-    expect(warn).not.toHaveBeenCalled();
-
-    reportTrailerCandidatesExhausted(true, true);
+    reportTrailerEngineFailure('candidates_exhausted');
     expect(warn.mock.calls).toEqual([
       ['[Den trailer] {"event":"engine-failure","outcome":"candidates_exhausted"}'],
     ]);

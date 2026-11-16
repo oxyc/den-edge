@@ -19,13 +19,8 @@ function errorClass(error: unknown): TrailerEngineErrorClass {
 
 /** Emit one bounded diagnostic without forwarding hls.js, browser or transport payloads. */
 export function reportTrailerEngineFailure(outcome: TrailerEngineOutcome, error?: unknown): void {
-  console.warn(
-    `[Den trailer] ${JSON.stringify({
-      event: 'engine-failure',
-      outcome,
-      ...(error === undefined ? {} : { errorClass: errorClass(error) }),
-    })}`,
-  );
+  const classified = error === undefined ? '' : `,"errorClass":"${errorClass(error)}"`;
+  console.warn(`[Den trailer] {"event":"engine-failure","outcome":"${outcome}"${classified}}`);
 }
 
 interface TrailerEngineFailureOwner {
@@ -75,11 +70,6 @@ export function trailerEngineFailureHandlers(owner: TrailerEngineFailureOwner): 
       if (count > MOST_TRAILER_FRAGMENT_LOADS) fail('fragment_loop', true);
     },
   };
-}
-
-/** Report only exhaustion still owned by the current active surface. */
-export function reportTrailerCandidatesExhausted(current: boolean, active: boolean): void {
-  if (current && active) reportTrailerEngineFailure('candidates_exhausted');
 }
 
 /**
