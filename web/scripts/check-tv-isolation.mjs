@@ -179,13 +179,7 @@ if (process.argv.includes('--capture')) {
   // instead of covering it) puts the initial graph at 10,300 bytes over the baseline in CI: ActionMenu is in the
   // `actions` chunk the poster menus load at startup. Allow the next 128-byte boundary and the smallest five-decimal
   // factor that reaches it, retaining 68 bytes.
-  // Services directory failure/retry ownership adds 441 gzip bytes to startup and 888 bytes to the complete graph
-  // on matched current-main/head builds (206,704 -> 207,145 and 897,306 -> 898,194). Provider fetching and row
-  // presentation stay in the existing services/HomeCatalogue lazy chunks; only the per-session/language request
-  // generations and stale-result fence remain in Library, where another boundary would duplicate authority or add
-  // a request before the already lazy directory can load. Raise the startup ceiling to the next 128-byte boundary
-  // above the measured delta, retaining 131 bytes for gzip variance; the total ceiling retains 944 bytes.
-  if (initialDelta > Math.min(10880, Math.floor(baseline.initialGzip * 0.0554)))
+  if (initialDelta > Math.min(10368, Math.floor(baseline.initialGzip * 0.0528)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the

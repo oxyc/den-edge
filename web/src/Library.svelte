@@ -60,7 +60,7 @@
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
   import { lastPromiseCache } from './lib/lastPromiseCache';
-  import { isHidden } from './lib/prefs';
+  import { isHidden, type ServicePick } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
   import { openProfileSwitcher } from './lib/profileSwitcherControl';
@@ -79,7 +79,7 @@
   import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
   import type { AtlasCatalog } from './lib/services';
-  import type { Service, ServiceDirectoryLoad } from './settings/services';
+  import type { Service } from './settings/services';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
@@ -210,7 +210,6 @@
   let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
   let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
   let homeServicesSettled = $state(false);
-  let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
   let HomeCatalogue = $state.raw<typeof import('./components/HomeCatalogue.svelte').default | null>(
     null,
   );
@@ -2175,148 +2174,23 @@
   const servicePicks = $derived(
     prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
   );
-  /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
-  let serviceDirectoriesAdmitted = $state(false);
-  let directoryModuleState = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
-  $effect(() => {
-    if (!serviceDirectoriesAdmitted || directoryServices) return;
-    directoryModuleState = 'loading';
-    let current = true;
-    void optionalImport(import('./settings/services')).then(
-      (directory) => {
-        if (!current) return;
-        directoryServices = directory;
-        directoryModuleState = 'ready';
-      },
-      () => {
-        if (!current) return;
-        directoryModuleState = 'failed';
-      },
-    );
-    return () => {
-      current = false;
-    };
-  });
-  /** One owned generation per locale/country; a stale answer cannot replace its explicit retry. */
-  let directoryLoads = $state.raw<Record<string, ServiceDirectoryLoad>>({});
-  const directoryKey = (language: string, country: string) => `${language}:${country}`;
-  let directoryRequest = 0;
-  let directoryRetry = $state(0);
-  const refreshDirectories: Record<string, true> = {};
-  let retryingDirectories = $state.raw<Record<string, true>>({});
-  let directoryOwner = untrack(() => session);
-  let directoryOwnerRevision = $state(0);
-  $effect(() => {
-    const owner = session;
-    if (owner === directoryOwner) return;
-    directoryOwner = owner;
-    directoryOwnerRevision++;
-  });
-  const currentDirectoryKeys = $derived([
-    ...new Set(
-      servicePicks.map(
-        ({ country }) => `${directoryOwnerRevision}:${directoryKey(i18n.language, country)}`,
-      ),
-    ),
-  ]);
-  /** Only the replacement language owns Home's pending/error state; old keyed generations may finish harmlessly. */
-  const naming = $derived(
-    currentDirectoryKeys.filter((key) => directoryLoads[key]?.status === 'loading').length,
-  );
-  const failedDirectories = $derived(
-    currentDirectoryKeys.filter((key) => {
-      const status = directoryLoads[key]?.status;
-      return status === 'partial' || status === 'failed';
-    }),
-  );
-  const directoryRetrying = $derived(currentDirectoryKeys.some((key) => retryingDirectories[key]));
-  $effect(() => {
-    const directory = directoryServices;
-    const language = i18n.language;
-    void directoryRetry;
-    if (!serviceDirectoriesAdmitted || !directory) return;
-    let current = true;
-    const started: { key: string; request: number }[] = [];
-    for (const country of new Set(servicePicks.map((pick) => pick.country))) {
-      const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
-      const previous = untrack(() => directoryLoads[key]);
-      const refresh = refreshDirectories[key] === true;
-      delete refreshDirectories[key];
-      if (previous && !refresh) continue;
-      const request = ++directoryRequest;
-      started.push({ key, request });
-      directoryLoads = {
-        ...untrack(() => directoryLoads),
-        [key]: directory.beginServiceDirectoryLoad(previous, request),
-      };
-      void directory
-        .contentServicesResult(session.content, country, refresh, language)
-        .then(
-          (result) => {
-            if (!current) return;
-            const owned = untrack(() => directoryLoads[key]);
-            if (!owned) return;
-            directoryLoads = {
-              ...untrack(() => directoryLoads),
-              [key]: directory.completeServiceDirectoryLoad(owned, request, result),
-            };
-          },
-          () => {
-            if (!current) return;
-            const owned = untrack(() => directoryLoads[key]);
-            if (!owned) return;
-            directoryLoads = {
-              ...untrack(() => directoryLoads),
-              [key]: directory.failServiceDirectoryLoad(owned, request),
-            };
-          },
-        )
-        .finally(() => {
-          if (!current) return;
-          if (untrack(() => retryingDirectories[key])) {
-            const { [key]: _finished, ...rest } = untrack(() => retryingDirectories);
-            retryingDirectories = rest;
-          }
-        });
-    }
-    return () => {
-      current = false;
-      const loads = untrack(() => directoryLoads);
-      const cancelled = new Set(
-        started
-          .filter(
-            ({ key, request }) =>
-              loads[key]?.request === request && loads[key].status === 'loading',
-          )
-          .map(({ key }) => key),
-      );
-      if (!cancelled.size) return;
-      directoryLoads = Object.fromEntries(
-        Object.entries(loads).filter(([key]) => !cancelled.has(key)),
-      );
-      retryingDirectories = Object.fromEntries(
-        Object.entries(untrack(() => retryingDirectories)).filter(([key]) => !cancelled.has(key)),
-      );
-    };
-  });
-  function retryServiceDirectories() {
-    if (directoryRetrying) return;
-    if (!failedDirectories.length) return;
-    for (const key of failedDirectories) refreshDirectories[key] = true;
-    retryingDirectories = Object.fromEntries(failedDirectories.map((key) => [key, true]));
-    directoryRetry++;
+  type HomeServiceState = {
+    owner: ProfileSession;
+    language: string;
+    picks: readonly ServicePick[];
+    names: Record<number, string>;
+    settled: boolean;
+  };
+  let homeServiceState = $state.raw<HomeServiceState | null>(null);
+  function acceptHomeServiceState(state: HomeServiceState) {
+    homeServiceState = state;
   }
-  /** The picks their country's directory can account for, named and ordered by it. */
-  const services = $derived(
-    [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
-      (country) =>
-        homeServices?.resolvePicks(
-          servicePicks,
-          directoryLoads[`${directoryOwnerRevision}:${directoryKey(i18n.language, country)}`]
-            ?.services ?? [],
-          country,
-        ) ?? [],
-    ),
+  const currentHomeServiceState = $derived(
+    homeServiceState?.owner === session &&
+      homeServiceState.language === i18n.language &&
+      homeServiceState.picks === servicePicks
+      ? homeServiceState
+      : null,
   );
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
   // Atlas row ids join it below only when their provider captions are final.
@@ -2329,26 +2203,14 @@
   const providerRowsReady = $derived(
     session.kid ||
       (atlasReady && (!atlas || !servicePicks.length)) ||
-      (serviceDirectoriesAdmitted && directoryModuleState === 'failed') ||
-      (atlasReady &&
-        !!atlas &&
-        serviceDirectoriesAdmitted &&
-        !!directoryServices &&
-        naming === 0 &&
-        currentDirectoryKeys.every((key) => directoryLoads[key])),
+      (atlasReady && !!atlas && currentHomeServiceState?.settled === true),
   );
   /**
    * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
    * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
    * A visitor has no directory and so no names: their cards say when a title lands, not where.
    */
-  const serviceNames: Record<number, string> = $derived(
-    Object.fromEntries(
-      services.flatMap(({ service }) =>
-        [service.id, ...service.variants].map((id) => [id, service.name]),
-      ),
-    ),
-  );
+  const serviceNames: Record<number, string> = $derived(currentHomeServiceState?.names ?? {});
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
@@ -3399,22 +3261,10 @@
           browseReady={homeBrowseReady}
           browseIdentity="home"
           showServices
-          {services}
-          servicePending={serviceDirectoriesAdmitted
-            ? directoryModuleState === 'loading' || naming
-              ? servicePicks.length
-              : 0
-            : servicePicks.length}
-          serviceEmpty={serviceDirectoriesAdmitted &&
-          !naming &&
-          !services.length &&
-          (directoryModuleState === 'failed' || !failedDirectories.length)
-            ? 'Services unavailable'
-            : undefined}
-          serviceFailure={!naming && failedDirectories.length ? 'Services unavailable' : undefined}
-          serviceRetrying={directoryRetrying}
-          onServiceRetry={retryServiceDirectories}
-          onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
+          serviceSession={session}
+          {servicePicks}
+          serviceResolver={homeServices}
+          onServiceState={acceptHomeServiceState}
           onServiceIntent={primeService}
         />
       {:else}
@@ -3433,11 +3283,6 @@
         browseReady
         browseIdentity={facet}
         showServices={false}
-        {services}
-        servicePending={0}
-        serviceRetrying={false}
-        onServiceRetry={() => {}}
-        onServiceVisible={() => {}}
         onServiceIntent={primeService}
       />
     {/if}
