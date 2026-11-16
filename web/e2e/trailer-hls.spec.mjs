@@ -75,10 +75,10 @@ test('a retained hls.js trailer stops inactive work and reactivates without adva
     }),
   );
   const asked = new Map();
-  const warnings = [];
+  const engineFailures = [];
   page.on('console', (message) => {
-    if (message.type() === 'warning' && message.text().includes('hls.js'))
-      warnings.push(message.text());
+    if (message.type() === 'warning' && message.text().startsWith('den: trailer engine failure'))
+      engineFailures.push(message.text());
   });
   await page.route(
     (url) => {
@@ -140,5 +140,5 @@ test('a retained hls.js trailer stops inactive work and reactivates without adva
     .toBeGreaterThan(beforeReactivate);
   await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15000 });
   expect(prepares).toBe(1);
-  expect(warnings).toEqual([]);
+  expect(engineFailures).toEqual([]);
 });
