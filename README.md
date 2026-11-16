@@ -359,7 +359,8 @@ npm run rehearse:release    # replace a served build and verify the first cached
 ```
 
 Each command runs a real `den-edge` binary and built Web app against a disposable temporary directory, prints PASS/FAIL
-per check, and removes that directory unless `REHEARSE_KEEP=1`. `REHEARSE_DIST` selects another built app for the
+per check, and removes that directory after a successful run unless `REHEARSE_KEEP=1`; failed checks preserve it for
+diagnosis. `REHEARSE_DIST` selects another built app for the
 household and join rehearsals; `--headed` shows their browser. `rehearse:household` accepts `--only=<scenario>`, while
 `rehearse:join` accepts `REHEARSE_ONLY=<scenario>` and `REHEARSE_REPEAT=<count>`. See each script's opening comment for
 the exact current contract. These commands must not enable `PROFILE_MIGRATION_ENABLED`,
