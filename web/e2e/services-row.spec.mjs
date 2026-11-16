@@ -94,6 +94,32 @@ test('a failed country waits for another country before offering a bounded retry
   await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
 });
 
+test('the lazy catalogue replaces language and owner snapshots and fences their stale answer', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=stale-owner`);
+
+  const requests = page.locator('[data-requests]');
+  const state = page.locator('[data-service-state]');
+  const row = page.getByRole('region', { name: 'Services' });
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('1');
+
+  await page.evaluate(() => globalThis.replaceServiceLanguage());
+  await expect(requests).toHaveText('2');
+  await expect(state).toHaveText('old:sv:true:Netflix SV:1');
+  await expect(row.getByRole('link', { name: 'Netflix SV' })).toBeVisible();
+
+  await page.evaluate(() => globalThis.replaceServiceOwner());
+  await expect(requests).toHaveText('3');
+  await expect(state).toHaveText('new:sv:true:Netflix SV:1');
+  await page.evaluate(() => document.querySelector('[data-resolve-stale]').click());
+  await expect(state).toHaveText('new:sv:true:Netflix SV:1');
+  await expect(row.getByRole('link', { name: 'Netflix SV' })).toBeVisible();
+  await expect(requests).toHaveText('3');
+});
+
 test('a resolved duplicate-country replacement keeps the shared browser rail in place', async ({
   page,
 }) => {
@@ -109,6 +135,7 @@ test('a resolved duplicate-country replacement keeps the shared browser rail in 
   await page.evaluate(() => globalThis.replaceServicesWithDuplicate());
   await expect(row.getByRole('link', { name: 'Netflix, US' })).toBeVisible();
   await expect(row.getByRole('link', { name: 'Netflix, FI' })).toBeVisible();
+  await expect(page.locator('[data-service-state]')).toHaveText('first:en:true:Netflix:2');
   const replaced = await row.boundingBox();
 
   expect(resolved?.height).toBe(reserved?.height);

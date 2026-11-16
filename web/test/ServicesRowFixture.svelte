@@ -1,17 +1,14 @@
 <script lang="ts">
-  import type { ResolvedService } from '../src/lib/services';
-  import { optionalImport } from '../src/lib/keyboardNavigation';
-  import ServicesRow from '../src/components/ServicesRow.svelte';
+  import type { ProfileSession } from '../src/lib/profileSession.svelte';
+  import type { ServicePick } from '../src/lib/prefs';
+  import * as serviceResolver from '../src/lib/services';
+  import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
+  import type { Service, ServiceDirectoryResult } from '../src/settings/services';
+  import HomeCatalogue from '../src/components/HomeCatalogue.svelte';
 
   const result = new URL(location.href).searchParams.get('result') ?? 'unavailable';
   let requests = $state(0);
-  let admitted = $state(false);
-  let retrying = $state(false);
-  let settled = $state(false);
-  let outstanding = $state(false);
-  let failed = $state(false);
-  let services = $state.raw<ResolvedService[]>([]);
-  const netflix = {
+  const netflix: Service = {
     id: 8,
     name: 'Netflix',
     priority: 1,
@@ -19,7 +16,7 @@
     series: true,
     variants: [],
   };
-  const max = {
+  const max: Service = {
     id: 1899,
     name: 'Max',
     priority: 2,
@@ -27,84 +24,111 @@
     series: true,
     variants: [],
   };
-  const ordinary: ResolvedService[] = [
-    { pick: { id: netflix.id, country: 'US' }, service: netflix },
-    { pick: { id: max.id, country: 'US' }, service: max },
-  ];
-  const duplicate: ResolvedService[] = [
-    { pick: { id: netflix.id, country: 'US' }, service: netflix },
-    { pick: { id: netflix.id, country: 'FI' }, service: netflix },
-  ];
-  (window as unknown as { replaceServicesWithDuplicate: () => void }).replaceServicesWithDuplicate =
-    () => (services = duplicate);
+  let servicePicks = $state.raw<readonly ServicePick[]>([
+    { id: netflix.id, country: 'US' },
+    { id: max.id, country: 'US' },
+  ]);
+  if (result === 'replacement' || result === 'stale-owner')
+    servicePicks = [{ id: netflix.id, country: 'US' }];
+  if (result === 'staggered')
+    servicePicks = [
+      { id: netflix.id, country: 'US' },
+      { id: max.id, country: 'FI' },
+    ];
 
-  async function loadDirectoryModule() {
-    requests++;
-    try {
-      await optionalImport(import('../src/settings/services'));
-      services = ordinary;
-      failed = false;
-    } catch {
-      failed = true;
-    } finally {
-      settled = true;
-      retrying = false;
-    }
-  }
+  let retryResolve: ((result: ServiceDirectoryResult) => void) | undefined;
+  let outstandingResolve: ((result: ServiceDirectoryResult) => void) | undefined;
+  let staleResolve: ((result: ServiceDirectoryResult) => void) | undefined;
+  const held = (save: (resolve: (result: ServiceDirectoryResult) => void) => void) =>
+    new Promise<ServiceDirectoryResult>((resolve) => save(resolve));
 
-  function admit() {
-    if (admitted) return;
-    admitted = true;
-    if (result === 'module-failure') {
-      void loadDirectoryModule();
-      return;
-    }
-    requests++;
-    queueMicrotask(() => {
-      if (result === 'resolved' || result === 'replacement') services = ordinary;
-      else if (result === 'duplicate') services = duplicate;
-      else if (result === 'staggered') {
+  function session(tag: string): ProfileSession {
+    const content = {
+      query: async (request: { kind: string; region?: string; interfaceLanguage?: string }) => {
+        if (request.kind !== 'service.directory') throw new Error(`Unexpected ${request.kind}`);
         requests++;
-        services = ordinary.slice(0, 1);
-        failed = true;
-        outstanding = true;
-      } else if (result === 'partial') {
-        services = ordinary.slice(0, 1);
-        failed = true;
-      } else failed = true;
-      settled = true;
-    });
+        if (result === 'stale-owner') {
+          if (tag === 'old' && !request.interfaceLanguage)
+            return held((resolve) => (staleResolve = resolve));
+          return {
+            services: [
+              {
+                ...netflix,
+                name: request.interfaceLanguage === 'sv' ? 'Netflix SV' : 'Netflix new',
+              },
+            ],
+            complete: true,
+          };
+        }
+        if (result === 'resolved' || result === 'replacement')
+          return { services: [netflix, max], complete: true };
+        if (result === 'duplicate') return { services: [netflix], complete: true };
+        if (result === 'staggered') {
+          if (request.region === 'FI') return held((resolve) => (outstandingResolve = resolve));
+          if (requests === 1) return { services: [netflix], complete: false };
+          return held((resolve) => (retryResolve = resolve));
+        }
+        if (result === 'partial' && requests === 1) return { services: [netflix], complete: false };
+        if (requests === 1) throw new Error('unavailable');
+        return held((resolve) => (retryResolve = resolve));
+      },
+    };
+    return { content, fixtureTag: tag } as unknown as ProfileSession;
   }
 
-  function retry() {
-    if (retrying) return;
-    retrying = true;
-    requests++;
+  let serviceSession = $state.raw(session(result === 'stale-owner' ? 'old' : 'first'));
+  let published = $state('none');
+  function publish(state: {
+    owner: ProfileSession;
+    language: string;
+    settled: boolean;
+    names: Record<number, string>;
+    picks: readonly ServicePick[];
+  }) {
+    const tag = (state.owner as unknown as { fixtureTag: string }).fixtureTag;
+    published = `${tag}:${state.language}:${state.settled}:${state.names[netflix.id] ?? '-'}:${state.picks.length}`;
   }
+
+  (window as unknown as { replaceServicesWithDuplicate: () => void }).replaceServicesWithDuplicate =
+    () =>
+      (servicePicks = [
+        { id: netflix.id, country: 'US' },
+        { id: netflix.id, country: 'FI' },
+      ]);
+  (window as unknown as { replaceServiceOwner: () => void }).replaceServiceOwner = () =>
+    (serviceSession = session('new'));
+  (window as unknown as { replaceServiceLanguage: () => Promise<void> }).replaceServiceLanguage =
+    () => setInterfaceLanguage('sv');
 
   function resolveRetry() {
-    services = ordinary;
-    failed = false;
-    retrying = false;
+    retryResolve?.({ services: [netflix, max], complete: true });
+    retryResolve = undefined;
   }
-
   function resolveOutstanding() {
-    outstanding = false;
+    outstandingResolve?.({ services: [max], complete: true });
+    outstandingResolve = undefined;
+  }
+  function resolveStale() {
+    staleResolve?.({ services: [max], complete: true });
+    staleResolve = undefined;
   }
 </script>
 
 <p data-requests>{requests}</p>
+<p data-service-state>{published}</p>
 <button data-resolve-retry hidden onclick={resolveRetry}>Resolve retry</button>
 <button data-resolve-outstanding hidden onclick={resolveOutstanding}>Resolve outstanding</button>
+<button data-resolve-stale hidden onclick={resolveStale}>Resolve stale</button>
 <div aria-hidden="true" style="height: 2400px"></div>
-<ServicesRow
-  {services}
-  pending={outstanding ? 1 : settled ? 0 : 2}
-  empty={failed && result === 'module-failure' ? 'Services unavailable' : undefined}
-  failure={failed && !outstanding && result !== 'module-failure'
-    ? 'Services unavailable'
-    : undefined}
-  {retrying}
-  onretry={retry}
-  onvisible={admit}
+<HomeCatalogue
+  rows={[]}
+  shown={() => true}
+  browseReady={false}
+  browseIdentity="fixture"
+  showServices
+  {serviceSession}
+  {servicePicks}
+  {serviceResolver}
+  onServiceState={publish}
+  onServiceIntent={() => {}}
 />
