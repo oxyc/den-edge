@@ -2483,6 +2483,22 @@ mod tests {
             .expect("the published failure-report fixture must remain valid")
     }
 
+    /// One declaration both exhaustively matches the Rust enum and produces the fixture's wire-value projection.
+    /// Adding a decoder variant cannot compile until its public schema value is added to the same invocation.
+    macro_rules! failure_schema_values {
+        ($enum:ty; $($variant:path => $wire:literal),+ $(,)?) => {{
+            fn wire_value(value: $enum) -> &'static str {
+                match value {
+                    $($variant => $wire,)+
+                }
+            }
+            [$({
+                assert_eq!($variant.as_str(), $wire);
+                wire_value($variant)
+            }),+]
+        }};
+    }
+
     fn performance_event() -> serde_json::Value {
         serde_json::json!({
             "platform": "web", "journey": "navigation", "stage": "stalls", "route": "home",
@@ -2575,71 +2591,105 @@ mod tests {
                 "priorList",
             ]
         );
-        assert_eq!(fixture.platforms, ["web", "ios", "ipados", "webos", "tizen", "android_tv", "apple_tv"]);
+        assert_eq!(
+            fixture.platforms,
+            failure_schema_values!(ClientPlatform;
+                ClientPlatform::Web => "web",
+                ClientPlatform::Ios => "ios",
+                ClientPlatform::Ipados => "ipados",
+                ClientPlatform::Webos => "webos",
+                ClientPlatform::Tizen => "tizen",
+                ClientPlatform::AndroidTv => "android_tv",
+                ClientPlatform::AppleTv => "apple_tv",
+            )
+        );
         assert_eq!(
             fixture.operations,
-            [
-                "playback",
-                "session",
-                "receipt",
-                "authority",
-                "persistence",
-                "recovery",
-                "uncaught",
-                "navigation",
-                "cast",
-                "source_lookup",
-            ]
+            failure_schema_values!(FailureOperation;
+                FailureOperation::Playback => "playback",
+                FailureOperation::Session => "session",
+                FailureOperation::Receipt => "receipt",
+                FailureOperation::Authority => "authority",
+                FailureOperation::Persistence => "persistence",
+                FailureOperation::Recovery => "recovery",
+                FailureOperation::Uncaught => "uncaught",
+                FailureOperation::Navigation => "navigation",
+                FailureOperation::Cast => "cast",
+                FailureOperation::SourceLookup => "source_lookup",
+            )
         );
         assert_eq!(
             fixture.kinds,
-            [
-                "transport",
-                "http",
-                "timeout",
-                "protocol",
-                "storage",
-                "authority",
-                "cancelled",
-                "uncaught",
-                "other",
-            ]
+            failure_schema_values!(FailureKind;
+                FailureKind::Transport => "transport",
+                FailureKind::Http => "http",
+                FailureKind::Timeout => "timeout",
+                FailureKind::Protocol => "protocol",
+                FailureKind::Storage => "storage",
+                FailureKind::Authority => "authority",
+                FailureKind::Cancelled => "cancelled",
+                FailureKind::Uncaught => "uncaught",
+                FailureKind::Other => "other",
+            )
         );
-        assert_eq!(fixture.outcomes, ["terminal", "recovered", "retry_exhausted"]);
-        assert_eq!(fixture.duration_buckets, ["fast", "slow", "deadline"]);
+        assert_eq!(
+            fixture.outcomes,
+            failure_schema_values!(FailureOutcome;
+                FailureOutcome::Terminal => "terminal",
+                FailureOutcome::Recovered => "recovered",
+                FailureOutcome::RetryExhausted => "retry_exhausted",
+            )
+        );
+        assert_eq!(
+            fixture.duration_buckets,
+            failure_schema_values!(FailureDurationBucket;
+                FailureDurationBucket::Fast => "fast",
+                FailureDurationBucket::Slow => "slow",
+                FailureDurationBucket::Deadline => "deadline",
+            )
+        );
         assert_eq!(
             fixture.routes,
-            [
-                "page",
-                "remux_session",
-                "remux_grant",
-                "cast_config",
-                "cast_receiver",
-                "receipt_drain",
-                "receipt_apply",
-                "receipt_ack",
-                "content_service",
-            ]
+            failure_schema_values!(FailureRoute;
+                FailureRoute::Page => "page",
+                FailureRoute::RemuxSession => "remux_session",
+                FailureRoute::RemuxGrant => "remux_grant",
+                FailureRoute::CastConfig => "cast_config",
+                FailureRoute::CastReceiver => "cast_receiver",
+                FailureRoute::ReceiptDrain => "receipt_drain",
+                FailureRoute::ReceiptApply => "receipt_apply",
+                FailureRoute::ReceiptAck => "receipt_ack",
+                FailureRoute::ContentService => "content_service",
+            )
         );
         assert_eq!(
             fixture.error_classes,
-            [
-                "type_error",
-                "reference_error",
-                "range_error",
-                "syntax_error",
-                "dom_exception",
-                "network_error",
-                "abort_error",
-                "media_error",
-                "decode_error",
-                "quota_error",
-                "unknown",
-            ]
+            failure_schema_values!(FailureErrorClass;
+                FailureErrorClass::TypeError => "type_error",
+                FailureErrorClass::ReferenceError => "reference_error",
+                FailureErrorClass::RangeError => "range_error",
+                FailureErrorClass::SyntaxError => "syntax_error",
+                FailureErrorClass::DomException => "dom_exception",
+                FailureErrorClass::NetworkError => "network_error",
+                FailureErrorClass::AbortError => "abort_error",
+                FailureErrorClass::MediaError => "media_error",
+                FailureErrorClass::DecodeError => "decode_error",
+                FailureErrorClass::QuotaError => "quota_error",
+                FailureErrorClass::Unknown => "unknown",
+            )
         );
         assert_eq!(
             fixture.modules,
-            ["app", "player", "billboard", "row", "settings", "cast", "router", "other"]
+            failure_schema_values!(Module;
+                Module::App => "app",
+                Module::Player => "player",
+                Module::Billboard => "billboard",
+                Module::Row => "row",
+                Module::Settings => "settings",
+                Module::Cast => "cast",
+                Module::Router => "router",
+                Module::Other => "other",
+            )
         );
 
         let accepts_every = |field: &str, values: &[String]| {
@@ -2670,6 +2720,26 @@ mod tests {
             fixture.fields.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
         assert_eq!(maximal_fields, published_fields);
         let report: FailureReport = serde_json::from_value(fixture.maximal_report).unwrap();
+        // Keep the field projection compile-exhaustive too: an added decoder field must update the artifact and
+        // this no-rest pattern before the contract test compiles again.
+        let FailureReport {
+            platform: _,
+            operation: _,
+            kind: _,
+            outcome: _,
+            correlation: _,
+            release: _,
+            route: _,
+            status: _,
+            generation: _,
+            attempt: _,
+            error_class: _,
+            module: _,
+            frame: _,
+            uncaught: _,
+            duration_bucket: _,
+            prior_list: _,
+        } = &report;
         assert_eq!(fixture.maximal_service_tag_bytes, 429);
         assert_eq!(report.tag().len(), fixture.maximal_service_tag_bytes);
     }
