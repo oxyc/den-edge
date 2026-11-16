@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import {
-  addBoundaryCount,
-  addBoundaryRow,
-  boundaryCounts,
-  boundarySummary,
-  profileSwitchDiagnostic,
-} from './boundaryDiagnostics';
+import { addBoundaryRow, boundaryCounts, boundarySummary } from './boundaryDiagnostics';
 import type { Row } from './wire';
 
 describe('split-household boundary diagnostics', () => {
@@ -26,7 +20,7 @@ describe('split-household boundary diagnostics', () => {
     ] as unknown as Row[];
     const counts = boundaryCounts();
     for (const row of rows) addBoundaryRow(counts, row);
-    addBoundaryCount(counts, 'unknown'); // unreadable kept work
+    counts[3]++; // unreadable kept work
 
     const diagnostic = boundarySummary(counts);
     expect(diagnostic).toBe('activity=3, settings=1, delivery=1, unknown=2');
@@ -50,15 +44,7 @@ describe('split-household boundary diagnostics', () => {
         title: { type: 'movie', id: index + 1 },
       } as Row);
 
-    expect(boundarySummary(counts)).toBe('activity=10000');
-  });
-
-  it('describes profile switch failures with bounded role and outcome vocabulary', () => {
-    const failed = profileSwitchDiagnostic('kid', 'failed');
-    const denied = profileSwitchDiagnostic('kid', 'denied');
-
-    expect(failed).toBe('den: the kid profile switch failed');
-    expect(denied).toBe('den: the kid profile switch was refused');
+    expect(boundarySummary(counts)).toBe('activity=10000, settings=0, delivery=0, unknown=0');
   });
 
   it('keeps production profile transition call sites from forwarding names or caught causes', () => {
@@ -74,20 +60,20 @@ describe('split-household boundary diagnostics', () => {
     const log = readFileSync(new URL('./log.ts', import.meta.url), 'utf8');
 
     const switchBody = switcher.match(/async function switchTo[\s\S]*?async function setPin/)?.[0];
-    expect(switchBody).toContain("profileSwitchDiagnostic(choice.role, 'failed')");
-    expect(switchBody).toContain("profileSwitchDiagnostic(choice.role, 'denied')");
+    expect(switchBody).toContain('den: the ${choice.role} profile switch failed');
+    expect(switchBody).toContain('den: the ${choice.role} profile switch was refused');
     expect(switchBody).not.toContain('choice.name');
     expect(switchBody).not.toContain('result.cause');
     expect(switcher).not.toMatch(/profile controls could not be loaded'\s*,/);
     expect(switcher).not.toMatch(/Owner PIN could not be saved'\s*,/);
 
     const ownerBody = ownerGate.match(/async function establishOwner[\s\S]*?<\/script>/)?.[0];
-    expect(ownerBody).toContain("profileSwitchDiagnostic('owner', 'failed')");
+    expect(ownerBody).toContain('den: the owner profile switch failed');
     expect(ownerBody).not.toContain('result.cause');
 
     const staged = routed.match(/let kidAfterHousehold[\s\S]*?RENEW_EVERY_MS/)?.[0];
-    expect(staged).toContain("profileSwitchDiagnostic('kid', 'failed')");
-    expect(staged).toContain("profileSwitchDiagnostic('kid', 'denied')");
+    expect(staged).toContain('den: the kid profile switch failed');
+    expect(staged).toContain('den: the kid profile switch was refused');
     expect(staged).not.toContain('result.cause');
     expect(staged).not.toMatch(/console\.(?:warn|error)\([^\n]*,\s*error/);
 

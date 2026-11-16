@@ -1692,7 +1692,9 @@ describe('LibraryLog', () => {
       await vi.waitFor(() => expect(returned.pendingActions).toBe(0));
       const diagnostics = error.mock.calls.map((call) => call.join(' '));
       const dropped = diagnostics.filter((message) => message.includes('kept work items'));
-      expect(dropped).toEqual([expect.stringContaining('activity=1, settings=1, unknown=2')]);
+      expect(dropped).toEqual([
+        expect.stringContaining('activity=1, settings=1, delivery=0, unknown=2'),
+      ]);
       await vi.waitFor(() =>
         expect(error).toHaveBeenCalledWith(
           'den: the pre-split household cache could not be removed',
@@ -1712,7 +1714,7 @@ describe('LibraryLog', () => {
     }
   });
 
-  it('does not advance or replay when both pre-split quarantine and deletion fail', async () => {
+  it('keeps pre-split work inert across a failed deletion and reopen', async () => {
     const server = await edge([row(1)], [], 'generation-1');
     const { data, vault } = memoryVault();
     let posts = 0;
@@ -1742,14 +1744,8 @@ describe('LibraryLog', () => {
     profiles = true;
 
     const privateCause = `profile:${OWNER_ID} https://private.example/delete ${pendingKey}`;
-    const putInVault = vault.put.bind(vault);
     const deleteFromVault = vault.delete.bind(vault);
-    let blockPendingWrite = true;
     let blockPendingDelete = true;
-    vault.put = async (key, value) => {
-      if (blockPendingWrite && key === pendingKey) throw new Error(privateCause);
-      await putInVault(key, value);
-    };
     vault.delete = async (key) => {
       if (blockPendingDelete && key === pendingKey) throw new Error(privateCause);
       await deleteFromVault(key);
@@ -1757,19 +1753,18 @@ describe('LibraryLog', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       posts = 0;
-      await expect(log.refresh()).resolves.toBe(false);
+      await expect(log.refresh()).resolves.toBe(true);
       expect(posts).toBe(0);
       expect(log.pendingActions).toBe(1);
-      expect(log.currentGeneration).toBe('generation-1');
+      expect(log.currentGeneration).toBe('generation-2');
       expect(new TextDecoder().decode(data.get(pendingKey))).toBe(JSON.stringify(stale));
       expect(data.has(`${keys.id}:runtime:meta:splitAdoption`)).toBe(true);
       expect(error.mock.calls.flat().join(' ')).toContain(
-        'pre-split work could not be durably quarantined; adoption will retry',
+        'pre-split kept work items remain quarantined until local deletion can be retried',
       );
       expect(error.mock.calls.flat().join(' ')).not.toContain(privateCause);
 
       log.close();
-      blockPendingWrite = false;
       blockPendingDelete = false;
       posts = 0;
       const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;

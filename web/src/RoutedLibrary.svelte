@@ -16,7 +16,6 @@
   import { createWorkerServiceSession } from './lib/libraryServiceFactory';
   import { releaseEarlyLibraryWorkers } from './lib/libraryWorkerStart';
   import { LibraryServiceError } from './lib/libraryServiceClient';
-  import { profileSwitchDiagnostic } from './lib/boundaryDiagnostics';
   import { untilServiceSettles } from './lib/serviceSettles';
   import { LibraryModel, type LibraryModelLease } from './lib/libraryModel.svelte';
   import { startGuestLibrary, startingGrant } from './lib/guestLibrary';
@@ -742,9 +741,9 @@
         return coordinator.switchToPersistent(kid.id!);
       })
       .then((result) => {
-        if (result.outcome === 'failed') console.warn(profileSwitchDiagnostic('kid', 'failed'));
+        if (result.outcome === 'failed') console.warn('den: the kid profile switch failed');
         else if (result.outcome === 'denied')
-          console.warn(profileSwitchDiagnostic('kid', 'denied'));
+          console.warn('den: the kid profile switch was refused');
       })
       .catch(() => console.warn('den: the staged kid profile transition failed'));
   });

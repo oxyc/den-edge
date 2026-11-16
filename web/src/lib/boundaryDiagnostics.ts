@@ -1,18 +1,8 @@
 import type { Row } from './wire';
 
-export type BoundaryClass = 'activity' | 'settings' | 'delivery' | 'unknown';
-export type BoundaryCounts = Record<BoundaryClass, number>;
+export type BoundaryCounts = [activity: number, settings: number, delivery: number, unknown: number];
 
-export const boundaryCounts = (): BoundaryCounts => ({
-  activity: 0,
-  settings: 0,
-  delivery: 0,
-  unknown: 0,
-});
-
-export function addBoundaryCount(counts: BoundaryCounts, kind: BoundaryClass, amount = 1): void {
-  counts[kind] += amount;
-}
+export const boundaryCounts = (): BoundaryCounts => [0, 0, 0, 0];
 
 /** Count a refused/dropped row without deriving or retaining its identity. */
 export function addBoundaryRow(counts: BoundaryCounts, row: Pick<Row, 'kind'>): void {
@@ -21,31 +11,20 @@ export function addBoundaryRow(counts: BoundaryCounts, row: Pick<Row, 'kind'>): 
     case 'ep':
     case 'title':
     case 'season':
-      counts.activity++;
+      counts[0]++;
       break;
     case 'set':
-      counts.settings++;
+      counts[1]++;
       break;
     case 'delivery':
-      counts.delivery++;
+      counts[2]++;
       break;
     default:
-      counts.unknown++;
+      counts[3]++;
   }
 }
 
 /** Fixed vocabulary and fixed category count: no row/profile identity can enter this diagnostic. */
 export function boundarySummary(counts: BoundaryCounts): string {
-  return (Object.entries(counts) as [BoundaryClass, number][])
-    .filter(([, count]) => count > 0)
-    .map(([kind, count]) => `${kind}=${count}`)
-    .join(', ');
-}
-
-/** Describe a profile switch failure using fixed vocabulary, never its chosen name or raw cause. */
-export function profileSwitchDiagnostic(
-  role: 'owner' | 'kid' | 'visitor',
-  outcome: 'failed' | 'denied',
-): string {
-  return `den: the ${role} profile switch ${outcome === 'failed' ? 'failed' : 'was refused'}`;
+  return `activity=${counts[0]}, settings=${counts[1]}, delivery=${counts[2]}, unknown=${counts[3]}`;
 }

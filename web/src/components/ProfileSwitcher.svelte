@@ -1,6 +1,5 @@
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
-  import { profileSwitchDiagnostic } from '../lib/boundaryDiagnostics';
   import { flushSync, onMount, tick } from 'svelte';
   import type { ProfileChoice, ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { onProfileSwitcherRequest } from '../lib/profileSwitcherControl';
@@ -184,10 +183,10 @@
       }
       if (result.outcome === 'denied' && askedPin) denied = true;
       else if (result.outcome === 'failed') {
-        console.error(profileSwitchDiagnostic(choice.role, 'failed'));
+        console.error(`den: the ${choice.role} profile switch failed`);
         failed = true;
       } else if (result.outcome === 'denied') {
-        console.error(profileSwitchDiagnostic(choice.role, 'denied'));
+        console.error(`den: the ${choice.role} profile switch was refused`);
         failed = true;
       }
     } finally {
