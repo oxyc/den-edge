@@ -2460,6 +2460,29 @@ mod tests {
     use super::*;
     use crate::handler::tests::{body_json, Harness};
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct FailureSchemaFixture {
+        version: u8,
+        source: String,
+        fields: Vec<String>,
+        platforms: Vec<String>,
+        operations: Vec<String>,
+        kinds: Vec<String>,
+        outcomes: Vec<String>,
+        duration_buckets: Vec<String>,
+        routes: Vec<String>,
+        error_classes: Vec<String>,
+        modules: Vec<String>,
+        maximal_report: serde_json::Value,
+        maximal_service_tag_bytes: usize,
+    }
+
+    fn failure_schema() -> FailureSchemaFixture {
+        serde_json::from_str(include_str!("../contracts/failure-report-schema-v2.json"))
+            .expect("the published failure-report fixture must remain valid")
+    }
+
     fn performance_event() -> serde_json::Value {
         serde_json::json!({
             "platform": "web", "journey": "navigation", "stage": "stalls", "route": "home",
@@ -2527,25 +2550,128 @@ mod tests {
     }
 
     #[test]
-    fn a_maximal_failure_tag_has_a_fixed_retention_cost() {
-        let report: FailureReport = serde_json::from_value(serde_json::json!({
-            "platform": "android_tv",
-            "operation": "persistence",
-            "kind": "cancelled",
-            "outcome": "retry_exhausted",
-            "correlation": "f".repeat(64),
-            "release": "a".repeat(64),
-            "route": "content_service",
-            "status": 599,
-            "generation": u32::MAX,
-            "attempt": u8::MAX,
-            "errorClass": "reference_error",
-            "module": "billboard",
-            "frame": format!("A{}", "a".repeat(31)),
-            "uncaught": true,
-        }))
-        .unwrap();
-        assert_eq!(report.tag().len(), 391);
+    fn the_published_failure_schema_matches_the_decoder_and_maximal_retention_cost() {
+        let fixture = failure_schema();
+        assert_eq!(fixture.version, 2);
+        assert_eq!(fixture.source, "oxyc/den-edge:contracts/failure-report-schema-v2.json");
+        assert_eq!(
+            fixture.fields,
+            [
+                "platform",
+                "operation",
+                "kind",
+                "outcome",
+                "correlation",
+                "release",
+                "route",
+                "status",
+                "generation",
+                "attempt",
+                "errorClass",
+                "module",
+                "frame",
+                "uncaught",
+                "durationBucket",
+                "priorList",
+            ]
+        );
+        assert_eq!(fixture.platforms, ["web", "ios", "ipados", "webos", "tizen", "android_tv", "apple_tv"]);
+        assert_eq!(
+            fixture.operations,
+            [
+                "playback",
+                "session",
+                "receipt",
+                "authority",
+                "persistence",
+                "recovery",
+                "uncaught",
+                "navigation",
+                "cast",
+                "source_lookup",
+            ]
+        );
+        assert_eq!(
+            fixture.kinds,
+            [
+                "transport",
+                "http",
+                "timeout",
+                "protocol",
+                "storage",
+                "authority",
+                "cancelled",
+                "uncaught",
+                "other",
+            ]
+        );
+        assert_eq!(fixture.outcomes, ["terminal", "recovered", "retry_exhausted"]);
+        assert_eq!(fixture.duration_buckets, ["fast", "slow", "deadline"]);
+        assert_eq!(
+            fixture.routes,
+            [
+                "page",
+                "remux_session",
+                "remux_grant",
+                "cast_config",
+                "cast_receiver",
+                "receipt_drain",
+                "receipt_apply",
+                "receipt_ack",
+                "content_service",
+            ]
+        );
+        assert_eq!(
+            fixture.error_classes,
+            [
+                "type_error",
+                "reference_error",
+                "range_error",
+                "syntax_error",
+                "dom_exception",
+                "network_error",
+                "abort_error",
+                "media_error",
+                "decode_error",
+                "quota_error",
+                "unknown",
+            ]
+        );
+        assert_eq!(
+            fixture.modules,
+            ["app", "player", "billboard", "row", "settings", "cast", "router", "other"]
+        );
+
+        let accepts_every = |field: &str, values: &[String]| {
+            for value in values {
+                let mut report = fixture.maximal_report.clone();
+                report.as_object_mut().unwrap().insert(field.to_owned(), serde_json::json!(value));
+                serde_json::from_value::<FailureReport>(report)
+                    .unwrap_or_else(|_| panic!("decoder refused published {field} value {value}"));
+            }
+        };
+        accepts_every("platform", &fixture.platforms);
+        accepts_every("operation", &fixture.operations);
+        accepts_every("kind", &fixture.kinds);
+        accepts_every("outcome", &fixture.outcomes);
+        accepts_every("durationBucket", &fixture.duration_buckets);
+        accepts_every("route", &fixture.routes);
+        accepts_every("errorClass", &fixture.error_classes);
+        accepts_every("module", &fixture.modules);
+
+        let maximal_fields = fixture
+            .maximal_report
+            .as_object()
+            .expect("maximalReport must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let published_fields =
+            fixture.fields.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
+        assert_eq!(maximal_fields, published_fields);
+        let report: FailureReport = serde_json::from_value(fixture.maximal_report).unwrap();
+        assert_eq!(fixture.maximal_service_tag_bytes, 429);
+        assert_eq!(report.tag().as_bytes().len(), fixture.maximal_service_tag_bytes);
     }
 
     #[tokio::test]
