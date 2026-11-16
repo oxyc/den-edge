@@ -7,7 +7,7 @@ const API = 'https://den-tv-api.example.invalid';
 const SERVICE = 'https://den-tv-service.example.invalid';
 const ENTRY = `${E2E_ORIGIN}/package/index.html`;
 
-async function packaged(page, edge, sourceFailures, misroutedFailureReports = []) {
+async function packaged(page, edge, sourceFailures = [], misroutedFailureReports = []) {
   await page.addInitScript(() => {
     globalThis.__tvPolicyViolations = [];
     document.addEventListener('securitypolicyviolation', (event) => {
@@ -41,24 +41,23 @@ async function packaged(page, edge, sourceFailures, misroutedFailureReports = []
       ),
   };
   await routeGuestEdge(fixturePage, edge, { api: API, service: SERVICE });
-  if (sourceFailures)
-    await page.route('**/diagnostics/failure', async (route) => {
-      const origin = new URL(route.request().url()).origin;
-      if (origin !== API) {
-        misroutedFailureReports.push(route.request().url());
-        await route.abort('blockedbyclient');
-        return;
-      }
-      if (route.request().method() === 'POST') sourceFailures.push(route.request().postDataJSON());
-      await route.fulfill({
-        status: 204,
-        headers: {
-          'access-control-allow-origin': E2E_ORIGIN,
-          'access-control-allow-methods': 'POST, OPTIONS',
-          'access-control-allow-headers': 'content-type',
-        },
-      });
+  await page.route('**/diagnostics/failure', async (route) => {
+    const origin = new URL(route.request().url()).origin;
+    if (origin !== API) {
+      misroutedFailureReports.push(route.request().url());
+      await route.abort('blockedbyclient');
+      return;
+    }
+    if (route.request().method() === 'POST') sourceFailures.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 204,
+      headers: {
+        'access-control-allow-origin': E2E_ORIGIN,
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': 'content-type',
+      },
     });
+  });
   await page.route(`${E2E_ORIGIN}/package/**`, (route) => route.continue());
 }
 
