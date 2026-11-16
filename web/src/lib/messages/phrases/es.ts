@@ -701,6 +701,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Not now': 'Ahora no',
   'Not responding': 'No responder',
   'Not set': 'No establecido',
+  'Now playing': 'Reproduciendo ahora',
   Nothing: 'nada',
   'Nothing here yet. Add titles to your watchlist from their page, and what you watch on the TV or here shows up as you go.':
     'Nada aquí todavía. Agregue títulos a su lista de seguimiento desde su página y lo que vea en el televisor o aquí aparecerá a medida que avanza.',
@@ -1022,6 +1023,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Sources were checked recently, so these are the previous results. Try again shortly.':
     'Las fuentes se comprobaron recientemente, por lo que estos son los resultados anteriores. Inténtalo de nuevo en breve.',
   Spanish: 'español',
+  Specials: 'Especiales',
   'Spanish-language Thriller': 'Thriller en español',
   Spoiler: 'spoiler',
   'Spy & Espionage': 'Espionaje y espionaje',

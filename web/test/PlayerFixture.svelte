@@ -55,6 +55,11 @@
   // Which episode is next, so the dock's next-episode button has somewhere to go.
   const nextEpisode = query.has('nextEpisode') ? { season: 1, episode: 2 } : undefined;
   const reel = query.has('reel');
+  // `?episodes`: S1 · E1 of a series with two seasons, the second aired through E1, and S1 · E2 half watched. Picking
+  // an episode plays it in this player, as the app's advance does.
+  const listsEpisodes = query.has('episodes');
+  let playingAt = $state(listsEpisodes ? { season: 1, episode: 1 } : {});
+  let picked = $state<string[]>([]);
   // A guest's page names its host's install as its own (`/den/~<gid>`), as the app does for a grant.
   const scoutInstall = query.get('scout') ?? 'http://scout.test/config';
   // That guest holds the grant (`<gid>:<secret>`), as the app's GuestGrants hands it to the relay.
@@ -106,6 +111,8 @@
 {:else if open}
   <Player
     {title}
+    season={playingAt.season}
+    episode={playingAt.episode}
     {content}
     scout={{ install: scoutInstall, base: '/scout/config' }}
     releaseAuthority={[
@@ -155,6 +162,20 @@
       open = false;
     }}
     onnext={hasNext ? () => (nextCount += 1) : undefined}
+    seasons={listsEpisodes
+      ? [
+          { number: 1, aired: 3 },
+          { number: 2, aired: 1 },
+          { number: 0, aired: 1 },
+        ]
+      : undefined}
+    episodeProgress={(season, episode) => (season === 1 && episode === 2 ? 0.5 : 0)}
+    onepisode={listsEpisodes
+      ? (at) => {
+          picked = [...picked, `S${at.season}E${at.episode}`];
+          playingAt = at;
+        }
+      : undefined}
   />
 {/if}
 {#if startsClosed}
@@ -173,6 +194,7 @@
 <output data-testid="player-close-count" hidden>{closeCount}</output>
 <output data-testid="receipt-settings-count" hidden>{receiptSettingsCount}</output>
 <output data-testid="player-next-count" hidden>{nextCount}</output>
+<output data-testid="player-picked-episodes" hidden>{picked.join(',')}</output>
 <output data-testid="player-progress-writes" hidden>{progressWrites}</output>
 
 {#if progress}

@@ -683,6 +683,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Not now': 'Inte nu',
   'Not responding': 'Svarar inte',
   'Not set': 'Inte inställt',
+  'Now playing': 'Spelas nu',
   Nothing: 'Ingenting',
   'Nothing here yet. Add titles to your watchlist from their page, and what you watch on the TV or here shows up as you go.':
     'Inget här ännu. Lägg till titlar till din bevakningslista från deras sida, och det du tittar på på TV:n eller här dyker upp när du går.',
@@ -1005,6 +1006,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Sources were checked recently, so these are the previous results. Try again shortly.':
     'Källorna kontrollerades nyligen, så detta är de tidigare resultaten. Försök igen om en stund.',
   Spanish: 'spanska',
+  Specials: 'Specialavsnitt',
   'Spanish-language Thriller': 'Spanskspråkig thriller',
   Spoiler: 'Spoiler',
   'Spy & Espionage': 'Spion & Spionage',

@@ -179,7 +179,13 @@ if (process.argv.includes('--capture')) {
   // instead of covering it) puts the initial graph at 10,300 bytes over the baseline in CI: ActionMenu is in the
   // `actions` chunk the poster menus load at startup. Allow the next 128-byte boundary and the smallest five-decimal
   // factor that reaches it, retaining 68 bytes.
-  if (initialDelta > Math.min(10368, Math.floor(baseline.initialGzip * 0.0528)))
+  // The player's Episodes list adds 317 gzip bytes at startup on matched main/head builds (10,308 -> 10,625): ActionMenu
+  // placing an open menu again when its rows change size and opening on the row marked current (+123 in `actions`),
+  // and the series' aired seasons Library hands the player (+190). The list itself stays in the lazy Player chunk;
+  // its rows are a plain link or button because `<svelte:element>` pulled 1,640 bytes of runtime into the shared
+  // startup chunk. Allow the next 128-byte boundary and the smallest five-decimal factor that reaches it, retaining
+  // 127 bytes.
+  if (initialDelta > Math.min(10752, Math.floor(baseline.initialGzip * 0.05475)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -396,5 +402,9 @@ if (process.argv.includes('--capture')) {
   // Exact clean current main independently measures 121,434 here, 3,802 above its committed 117,632 ceiling; #1282
   // owns the reproducibility defect. Recalibrate clean main separately to 121,472 (38-byte margin), then account for
   // #530's matched +756-byte non-translation delta. Allow the smallest 128-byte boundary, retaining 50 bytes.
-  if (coreTotalDelta > 122240) throw new Error('Browser total JS/CSS budget exceeded');
+  // The player's Episodes list adds 1,945 gzip bytes to the complete non-translation graph on matched main/head builds
+  // (120,408 -> 122,353), nearly all in the lazy Player chunk: the list, its season reader and its styles. CI measured
+  // the same head at 122,509 (#1282's run-to-run variance), so allow the boundary above CI's figure plus one more,
+  // retaining 115 bytes there.
+  if (coreTotalDelta > 122624) throw new Error('Browser total JS/CSS budget exceeded');
 }

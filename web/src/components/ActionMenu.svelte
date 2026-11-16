@@ -139,7 +139,17 @@
     window.addEventListener('wheel', outsideScrollGesture, { capture: true, passive: true });
     window.addEventListener('touchmove', outsideScrollGesture, { capture: true, passive: true });
     window.addEventListener('keydown', outsideScrollGesture, true);
+    // A menu whose rows change while it is open (a page of the player's options, another season of episodes) is placed
+    // again at its new size, so one above its trigger keeps its foot there rather than its old top.
+    const resized =
+      __DEN_TV__ || typeof ResizeObserver === 'undefined'
+        ? undefined
+        : new ResizeObserver(() => {
+            if (showing()) position();
+          });
+    if (menu) resized?.observe(menu);
     return () => {
+      resized?.disconnect();
       query?.removeEventListener('change', update);
       document.removeEventListener('pointerdown', outsidePointerDown, true);
       document.removeEventListener('click', outsideClick, true);
@@ -247,9 +257,14 @@
     // items with a second line are taller than the estimate. `scrollHeight` is the whole list, not the part a
     // previous cap left visible; it leaves out the border, which the border-box cap below counts.
     const width = positioned.offsetWidth || 240;
-    let height = positioned.scrollHeight
-      ? positioned.scrollHeight + positioned.offsetHeight - positioned.clientHeight
-      : shownItems.length * 44 + 16;
+    // The stylesheet's own cap (a caller's compact list), read before the room beside the trigger is written over it.
+    const cap = parseFloat(getComputedStyle(positioned).maxHeight) || Infinity;
+    let height = Math.min(
+      cap,
+      positioned.scrollHeight
+        ? positioned.scrollHeight + positioned.offsetHeight - positioned.clientHeight
+        : shownItems.length * 44 + 16,
+    );
     let x: number, y: number;
     if (coords) {
       x = coords.x;
@@ -268,7 +283,7 @@
       const room = flip ? above : below;
       height = Math.min(height, room);
       y = flip ? rect.top - 6 - height : rect.bottom + 6;
-      positioned.style.maxHeight = `${room}px`;
+      positioned.style.maxHeight = `${Math.min(room, cap)}px`;
     }
     x = Math.min(Math.max(8, x), Math.max(8, vw - width - 8));
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
@@ -285,7 +300,9 @@
       // `showModal()` and its open event do not focus consistently across TV engines. Supply the missing initial
       // focus on the next frame, but never steal back a later choice when a fast remote press has already moved
       // within the menu during that frame.
-      if (!enabled.includes(document.activeElement as HTMLButtonElement)) enabled[0]?.focus();
+      // A menu that marks where its viewer is (the episode playing) opens there rather than at its top.
+      if (!enabled.includes(document.activeElement as HTMLButtonElement))
+        (enabled.find((el) => el.getAttribute('aria-current') === 'true') ?? enabled[0])?.focus();
     });
   }
 
