@@ -2,7 +2,6 @@
 // after the first failure: ordinary startup, playback and navigation pay no listener, timer or queue cost.
 
 import { currentClientPlatform } from './clientPlatform';
-import { apiUrl } from './runtimeUrl';
 
 export type FailureOperation =
   | 'playback'
@@ -110,7 +109,7 @@ function randomCorrelation(): string {
 }
 
 function endpoint(): string {
-  return __DEN_TV_API_ORIGIN__ ? apiUrl('/diagnostics/failure') : '/diagnostics/failure';
+  return `${__DEN_TV_API_ORIGIN__}/diagnostics/failure`;
 }
 
 function fingerprint(report: ClientFailure): string {
