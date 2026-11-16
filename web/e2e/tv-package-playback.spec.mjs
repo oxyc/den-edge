@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 
 const API = 'https://den-tv-api.example.invalid';
+const SERVICE = 'https://den-tv-service.example.invalid';
 const media = new URL('./media/hls/', import.meta.url);
 const session = {
   sid: 'packaged-tv1',
@@ -22,15 +23,26 @@ const cors = {
 
 async function routePackagedPlayback(page, { holdPlayback = false } = {}) {
   const requests = [];
+  const misrouted = [];
   const ended = [];
   let releasePlayback = () => {};
   const playbackGate = holdPlayback
     ? new Promise((resolve) => (releasePlayback = resolve))
     : Promise.resolve();
-  await page.route(`${API}/**`, async (route) => {
+  const handle = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    requests.push(`${request.method()} ${url.pathname}`);
+    requests.push(`${url.origin} ${request.method()} ${url.pathname}`);
+    const servicePath =
+      /^\/(?:capabilities|scout|tmdb|metadata|den|ratings|warnings|skipdb|subs|subtitles|atlas|reel|remux|direct)(?:\/|$)/.test(
+        url.pathname,
+      );
+    const devicePath =
+      /^\/(?:pair|inbox|lib|recovery|config|health|routes|grant|oauth|playback|sync|mcp|link|version)(?:\/|$)/.test(
+        url.pathname,
+      );
+    if ((url.origin === API && servicePath) || (url.origin === SERVICE && devicePath))
+      misrouted.push(request.url());
     if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
     if (/^\/tmdb\/3\/movie\/42\/external_ids$/.test(url.pathname))
       return route.fulfill({ headers: cors, json: { imdb_id: 'tt42' } });
@@ -76,8 +88,10 @@ async function routePackagedPlayback(page, { holdPlayback = false } = {}) {
       });
     }
     return route.fulfill({ status: 404, headers: cors, json: { error: 'not_found' } });
-  });
-  return { ended, requests, releasePlayback };
+  };
+  await page.route(`${API}/**`, handle);
+  await page.route(`${SERVICE}/**`, handle);
+  return { ended, misrouted, requests, releasePlayback };
 }
 
 async function remoteKey(page, key, keyCode) {
@@ -104,7 +118,9 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
     if (new URL(request.url()).pathname.endsWith('/test/receipt-ready'))
       receiptRequests.push(request.url());
   });
-  const { releasePlayback } = await routePackagedPlayback(page, { holdPlayback: true });
+  const { misrouted, releasePlayback } = await routePackagedPlayback(page, {
+    holdPlayback: true,
+  });
   await page.goto('/package/test/player.html?playback=managed&receiptBoundary=1');
 
   await expect(
@@ -129,26 +145,28 @@ test('Tizen 3 skips unsupported receipt work and offers its focusable linking re
   await expect(page.getByTestId('receipt-settings-count')).toHaveText('1');
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
   expect(receiptRequests).toEqual([]);
+  expect(misrouted).toEqual([]);
 });
 
-test('packaged Tizen plays cross-origin HLS, resumes and ends only through the API origin', async ({
+test('packaged Tizen plays cross-origin HLS, resumes and ends through the service origin', async ({
   page,
 }) => {
   test.skip(
     process.env.DEN_TIZEN_VERSION === '3.0',
     'the Tizen 3 viewer intentionally ships no HLS/MSE path',
   );
-  const packageApiRequests = [];
+  const escapedDenRequests = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
     if (
       url.pathname.startsWith('/package/') === false &&
       url.origin !== API &&
+      url.origin !== SERVICE &&
       /\/(?:tmdb|config|skipdb|direct|playback|remux)(?:\/|$)/.test(url.pathname)
     )
-      packageApiRequests.push(request.url());
+      escapedDenRequests.push(request.url());
   });
-  const { ended, requests } = await routePackagedPlayback(page);
+  const { ended, misrouted, requests } = await routePackagedPlayback(page);
   await page.goto('/package/test/player.html?resume=12');
   const video = page.locator('.player video');
   await expect
@@ -159,14 +177,17 @@ test('packaged Tizen plays cross-origin HLS, resumes and ends only through the A
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(resumedAt + 0.5);
 
-  expect(requests).toContain('POST /direct/session');
-  expect(requests).toContain('GET /direct/s/packaged-tv1/sig/master.m3u8');
+  expect(requests).toContain(`${SERVICE} POST /direct/session`);
+  expect(requests).toContain(`${SERVICE} GET /direct/s/packaged-tv1/sig/master.m3u8`);
   expect(
-    requests.some((request) =>
-      /GET \/direct\/s\/packaged-tv1\/sig\/.+\.(?:mp4|m4s)$/.test(request),
+    requests.some(
+      (request) =>
+        request.startsWith(`${SERVICE} GET /direct/s/packaged-tv1/sig/`) &&
+        /\.(?:mp4|m4s)$/.test(request),
     ),
   ).toBe(true);
-  expect(packageApiRequests).toEqual([]);
+  expect(escapedDenRequests).toEqual([]);
+  expect(misrouted).toEqual([]);
 
   expect(await remoteKey(page, 'Unidentified', 461)).toBe(true);
   await expect(video).toHaveCount(0);
@@ -174,7 +195,7 @@ test('packaged Tizen plays cross-origin HLS, resumes and ends only through the A
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
 });
 
-test('packaged managed playback resolves a relative media capability against the API', async ({
+test('packaged managed playback routes its relative media capability through the service origin', async ({
   page,
 }) => {
   test.skip(
@@ -184,10 +205,10 @@ test('packaged managed playback resolves a relative media capability against the
   const misrouted = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
-    if (url.origin !== API && /^\/(?:den|direct)(?:\/|$)/.test(url.pathname))
+    if (url.origin !== SERVICE && /^\/(?:den|direct)(?:\/|$)/.test(url.pathname))
       misrouted.push(request.url());
   });
-  const { requests } = await routePackagedPlayback(page);
+  const { misrouted: classifiedElsewhere, requests } = await routePackagedPlayback(page);
   await page.goto('/package/test/player.html?playback=managed&resume=12');
   const video = page.locator('.player video');
   await expect
@@ -198,27 +219,30 @@ test('packaged managed playback resolves a relative media capability against the
     .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
     .toBeGreaterThan(resumedAt + 0.5);
 
-  expect(requests).toContain('POST /den/config/playback');
-  expect(requests).toContain('GET /direct/s/packaged-tv1/sig/master.m3u8');
+  expect(requests).toContain(`${SERVICE} POST /den/config/playback`);
+  expect(requests).toContain(`${SERVICE} GET /direct/s/packaged-tv1/sig/master.m3u8`);
   expect(misrouted).toEqual([]);
+  expect(classifiedElsewhere).toEqual([]);
   expect(await remoteKey(page, 'Unidentified', 461)).toBe(true);
   await expect(video).toHaveCount(0);
   await expect(page.getByTestId('player-close-count')).toHaveText('1');
 });
 
-test('packaged Reel publishes its relative relay capability on the API origin', async ({
+test('packaged Reel publishes its relative relay capability on the service origin', async ({
   page,
 }) => {
   const misrouted = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
-    if (url.origin !== API && /^\/reel(?:\/|$)/.test(url.pathname)) misrouted.push(request.url());
+    if (url.origin !== SERVICE && /^\/reel(?:\/|$)/.test(url.pathname))
+      misrouted.push(request.url());
   });
-  const { requests } = await routePackagedPlayback(page);
+  const { misrouted: classifiedElsewhere, requests } = await routePackagedPlayback(page);
   await page.goto('/package/test/player.html?reel=1');
 
   const capability = `m/s/${'a'.repeat(40)}?s=${'b'.repeat(24)}`;
-  await expect(page.getByTestId('reel-media-url')).toHaveText(`${API}/reel/${capability}`);
-  expect(requests).toContain('POST /reel/transport');
+  await expect(page.getByTestId('reel-media-url')).toHaveText(`${SERVICE}/reel/${capability}`);
+  expect(requests).toContain(`${SERVICE} POST /reel/transport`);
   expect(misrouted).toEqual([]);
+  expect(classifiedElsewhere).toEqual([]);
 });

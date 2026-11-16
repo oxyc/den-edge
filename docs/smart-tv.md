@@ -559,7 +559,7 @@ for a device memory soak. Diagnostics also catch synchronous IndexedDB write ref
 inside their callback, so the check reports failure without an uncaught storage error
 and can be retried after storage becomes available.
 
-Samsung AVPlay opens relative playback URLs at the configured API origin, waits for
+Samsung AVPlay opens relative playback URLs at their route-classified Den origin, waits for
 resume seeking before Play, and fences callbacks after teardown. SDK error details can
 contain signed URLs: only recognized platform error enums reach diagnostics/reports.
 External WebVTT uses browser cue parsing and an overlay synchronized to the AVPlay clock.
