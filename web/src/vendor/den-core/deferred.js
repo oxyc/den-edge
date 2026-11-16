@@ -36,15 +36,13 @@ function reportDeferredWasmFailure(wasm, response, error) {
 export function initializeDeferred(input) {
   if (initialized) return Promise.resolve();
   if (!pending) {
-    let wasm;
     let response;
     const fallback = input === undefined;
     const source =
       input ??
-      fetch(
-        (wasm = new URL('./generated/den_core_deferred_bg.wasm', import.meta.url)),
-        { signal: AbortSignal.timeout(15000) },
-      );
+      fetch(new URL('./generated/den_core_deferred_bg.wasm', import.meta.url), {
+        signal: AbortSignal.timeout(15000),
+      });
     const observed =
       fallback && import.meta.env.DEN_E2E
         ? source.then((value) => {
@@ -59,7 +57,11 @@ export function initializeDeferred(input) {
       .catch((error) => {
         pending = undefined;
         if (fallback && import.meta.env.DEN_E2E)
-          reportDeferredWasmFailure(wasm, response, error);
+          reportDeferredWasmFailure(
+            new URL('./generated/den_core_deferred_bg.wasm', import.meta.url),
+            response,
+            error,
+          );
         throw error;
       });
   }
