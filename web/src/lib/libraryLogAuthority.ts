@@ -1887,9 +1887,9 @@ export class LibraryLogAuthority {
     if (held && held.version === version && now >= held.at && now < held.until) return held.home;
     const until = this.#log.currentSummary(now).reconsiderAt;
     const foldedAt = performance.now();
-    // den-core's whole-library fold over the documents it holds; the downloads are settings rows.
+    // den-core's whole-library fold over the documents it holds. Downloads have their own live selection authority.
     const columns = this.#log.columns();
-    const home = homeFromColumns(columns, now, readDownloads(this.#log.storedRows()));
+    const home = homeFromColumns(columns, now);
     noteLibraryFold(columns.len(), performance.now() - foldedAt, __DEN_TV_LEGACY_JS_CORE__);
     this.#projection = { version, at: now, until, home };
     return home;
