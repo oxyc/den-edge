@@ -70,8 +70,8 @@
     country: string,
     refresh: boolean,
     run: number,
+    previous: Service[] = [],
   ) {
-    const previous = directoryLoads[country]?.services ?? [];
     return directory.contentServicesResult(owner.content, country, refresh, language).then(
       (result) =>
         setDirectory(run, country, {
@@ -108,7 +108,9 @@
     const run = directoryGeneration;
     directoryRetrying = true;
     void Promise.all(
-      failed.map(([country]) => loadDirectory(directory, owner, i18n.language, country, true, run)),
+      failed.map(([country, load]) =>
+        loadDirectory(directory, owner, i18n.language, country, true, run, load.services),
+      ),
     ).finally(() => {
       if (run === directoryGeneration) directoryRetrying = false;
     });
