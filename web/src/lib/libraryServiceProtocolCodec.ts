@@ -2104,7 +2104,10 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       boundedText(candidate.filename, 4_096) &&
       optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
       optional(candidate.cached, bool) &&
-      optional(candidate.seeders, (item): item is number => integer(item) && item >= 0) &&
+      optional(
+        candidate.seeders,
+        (item): item is number => integer(item) && item >= 0 && item <= 1_000_000,
+      ) &&
       optional(candidate.packSizeBytes, (item): item is number => integer(item) && item > 0) &&
       list(candidate.badges, (item): item is string => boundedText(item, 256), 32) &&
       list(candidate.languages, (item): item is string => boundedText(item, 64), 64) &&

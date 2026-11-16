@@ -31,11 +31,17 @@ export interface TitleSource {
 /** The releases as `rank_releases` takes them: scout's attributes, with each one's identity and file name (a
  *  download's pick sinks an AVI or XviD file by its name, which scout reads no codec from). */
 export const rankable = (sources: TitleSource[]) =>
-  sources.map((source) => ({
-    ...source.attributes,
-    identity: source.identity,
-    filename: source.filename,
-  }));
+  sources.map((source) => {
+    const result: Record<string, unknown> = { ...source.attributes };
+    delete result.sizeBytes;
+    delete result.packSizeBytes;
+    delete result.seeders;
+    if (source.size !== undefined) result.sizeBytes = source.size;
+    if (source.seeders !== undefined) result.seeders = source.seeders;
+    result.identity = source.identity;
+    result.filename = source.filename;
+    return result;
+  });
 
 /** Whether `addon` is the combined Den addon, asked under `/den` rather than Scout's `/scout`. */
 const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
@@ -99,10 +105,9 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         url,
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
-        seeders: Number.isFinite(a.seeders) && a.seeders >= 0 ? a.seeders : undefined,
-        size: Number.isFinite(a.sizeBytes) && a.sizeBytes > 0 ? a.sizeBytes : undefined,
-        packSize:
-          Number.isFinite(a.packSizeBytes) && a.packSizeBytes > 0 ? a.packSizeBytes : undefined,
+        seeders: boundedInteger(a.seeders, 0, 1_000_000),
+        size: positiveSafeInteger(a.sizeBytes),
+        packSize: positiveSafeInteger(a.packSizeBytes),
         badges: [
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',
@@ -120,6 +125,14 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
     ];
   });
 }
+
+const positiveSafeInteger = (value: unknown): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
+
+const boundedInteger = (value: unknown, minimum: number, maximum: number): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum
+    ? (value as number)
+    : undefined;
 
 export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 

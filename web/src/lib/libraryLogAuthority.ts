@@ -234,8 +234,14 @@ const publicRelease = (
 const providerText = (value: unknown, max: number): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value.slice(0, max) : undefined;
 
-const providerInteger = (value: unknown, positive = false): number | undefined =>
-  Number.isSafeInteger(value) && (value as number) >= (positive ? 1 : 0)
+const providerInteger = (
+  value: unknown,
+  positive = false,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | undefined =>
+  Number.isSafeInteger(value) &&
+  (value as number) >= (positive ? 1 : 0) &&
+  (value as number) <= maximum
     ? (value as number)
     : undefined;
 
@@ -258,7 +264,7 @@ const providerSource = (value: unknown): DownloadSourceOption | null => {
   if (!identity || !filename) return null;
   const label = providerText(source.label, 4_096) ?? filename;
   const sizeBytes = providerInteger(source.size, true);
-  const seeders = providerInteger(source.seeders);
+  const seeders = providerInteger(source.seeders, false, 1_000_000);
   const packSizeBytes = providerInteger(source.packSize, true);
   return {
     identity,

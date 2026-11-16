@@ -2767,7 +2767,7 @@ describe('LibraryLogAuthority', () => {
       url: '/scout/p/malformed',
       size: Number.POSITIVE_INFINITY,
       cached: 'yes',
-      seeders: 1.5,
+      seeders: 1_000_001,
       packSize: Number.MAX_SAFE_INTEGER + 1,
       badges: [...Array.from({ length: 40 }, () => 'b'.repeat(300)), '', 4],
       languages: [...Array.from({ length: 70 }, () => 'language'.repeat(20)), '', null],
