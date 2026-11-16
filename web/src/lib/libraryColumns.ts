@@ -4,7 +4,6 @@
 // the web reads.
 
 import type { ColumnsAnswer, LibraryColumns } from '../vendor/den-core/startup.js';
-import type { Download } from './downloadRows';
 import type { HomeLibraryView } from './homeLibraryView';
 import type { Library, LibraryRecord, Mark, MediaType, Standing } from './library';
 import type { HistoryItem } from './libraryServiceProtocol';
@@ -45,11 +44,7 @@ const some = (x: number) => (Number.isNaN(x) ? undefined : x);
 const flag = (x: number) => (Number.isNaN(x) ? undefined : x === 1);
 
 /** Home's library inputs (`HomeLibraryView`), from den-core's `home`. */
-export function homeFromColumns(
-  columns: LibraryColumns,
-  now: number,
-  downloads: Download[] = [],
-): HomeLibraryView {
+export function homeFromColumns(columns: LibraryColumns, now: number): HomeLibraryView {
   return read(columns.home(now), (r) => {
     const [status, progress, progressAt, seconds, playing, by, addedAt] = [
       r.s('records.status'),
@@ -126,7 +121,6 @@ export function homeFromColumns(
       shelfRefs: r.keys('shelf'),
       requiredShapeRefs: r.keys('required'),
       continueLibrary,
-      downloads,
     };
   });
 }
