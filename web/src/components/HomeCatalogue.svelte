@@ -6,6 +6,7 @@
   import type { Title } from '../lib/library';
   import type { ProfileSession } from '../lib/profileSession.svelte';
   import type { ServicePick } from '../lib/prefs';
+  import type { InterfaceLanguage } from '../lib/interfaceLanguage';
   import { i18n } from '../lib/i18n.svelte';
   import { optionalImport } from '../lib/keyboardNavigation';
   import type { Service, ServiceDirectoryLoad } from '../settings/services';
@@ -98,7 +99,7 @@
   function loadServiceDirectory(
     directory: typeof import('../settings/services'),
     owner: ProfileSession,
-    language: string,
+    language: InterfaceLanguage,
     country: string,
     key: string,
     refresh: boolean,
