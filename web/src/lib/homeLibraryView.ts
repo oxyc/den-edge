@@ -1,7 +1,7 @@
 // The fixed library data Home consumes without receiving the full projection graph. Display metadata arrives from
 // TMDB later. Continue Watching keeps only the policy inputs that can still be affected by those late TV shapes.
 
-import { deviceName, readDownloads, type Download } from './downloadRows';
+import { deviceName } from './downloadRows';
 import { compareHistoryTitleKeys } from './history';
 import {
   ContinueSummaries,
@@ -36,8 +36,6 @@ export interface HomeLibraryView {
   requiredShapeRefs: string[];
   /** Exact Continue policy input with episode history reduced to at most two marks per series. */
   continueLibrary: Library;
-  /** Download rows Home may draw, without asking the log to project every library document again. */
-  downloads: Download[];
 }
 
 function activeTitleRows(rows: Row[]): TitleRow[] {
@@ -89,7 +87,6 @@ const unique = (keys: string[]) => [...new Set(keys)];
 export function selectHomeLibraryViewFromFold(
   library: Library,
   titles: TitleRow[],
-  downloads: Download[] = [],
 ): HomeLibraryView {
   const reactions = new Map<string, TitleRow['reaction']['value']>();
   for (const row of titles) reactions.set(titleKey(row.title), row.reaction.value);
@@ -158,7 +155,6 @@ export function selectHomeLibraryViewFromFold(
       .filter((key) => key.startsWith('tv:') && shaped.has(key))
       .sort((left, right) => (watchedAt.get(right) ?? 0) - (watchedAt.get(left) ?? 0)),
     continueLibrary: compactContinueLibrary(library),
-    downloads,
   };
 }
 
@@ -208,5 +204,5 @@ export function continueItems(
 }
 
 export function selectHomeLibraryView(library: Library, rows: Row[]): HomeLibraryView {
-  return selectHomeLibraryViewFromFold(library, activeTitleRows(rows), readDownloads(rows));
+  return selectHomeLibraryViewFromFold(library, activeTitleRows(rows));
 }

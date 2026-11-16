@@ -16,6 +16,7 @@
   import type { Routes } from '../lib/routes';
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { nativeHlsFirst } from '../lib/detailTrailerSources';
+  import { reportTrailerEngineFailure } from '../lib/trailerEngineDiagnostics';
   let {
     type,
     tmdbId,
@@ -480,9 +481,9 @@
         testBandwidth: false,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
-        // Once per engine: a fatal error can be followed by another, and each would step again.
         if (!data.fatal || !live) return;
         live = false;
+        reportTrailerEngineFailure('fatal');
         nextTrailer();
       });
       // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
@@ -518,19 +519,18 @@
         loads.set(key, count);
         if (count <= MOST_FRAGMENT_LOADS || !live) return;
         live = false;
-        console.warn('hls.js kept fetching one fragment; the trailer is given up.', key);
+        reportTrailerEngineFailure('fragment_loop');
         engine?.stopLoad();
         nextTrailer();
       });
       engine.loadSource(master);
       engine.attachMedia(player);
     });
-    // hls.js is its own chunk, fetched only now; one that never comes is a master that will not play.
     void starting.catch((error: unknown) => {
       // Losing the retained page's ownership while the lazy chunk resolves is ordinary teardown, not a failed
       // trailer. It must not advance the cursor or emit a diagnostic for the inactive generation.
       if (!live) return;
-      console.warn('hls.js could not be started for the trailer.', error);
+      reportTrailerEngineFailure('startup', error);
       nextTrailer();
     });
     return () => {
@@ -654,6 +654,7 @@
       playback = next;
       forced = false;
       failed = !next;
+      if (!next && active) reportTrailerEngineFailure('exhausted');
     }
     if (advancing === owner) advancing = null;
   }
