@@ -266,9 +266,10 @@ async function lowerTizen3Syntax(code: string, fileName: string, compact = false
     inputSourceMap: compact ? undefined : (structuralResult?.map ?? undefined),
     presets: [[presetEnv, { targets: { chrome: '47' }, modules: false }]],
   });
-  // Babel legitimately returns an empty string for an empty generated chunk. Only a missing result is a
-  // transform failure; rejecting empty output makes Rolldown placeholder chunks fail the reduced-TV build.
-  if (result?.code == null) throw new Error(`Babel produced no Tizen 3 output for ${fileName}`);
+  // Babel legitimately returns an empty string for an empty generated chunk. A missing result, or losing a
+  // non-empty input across either pass, is still a transform failure and must not ship as a silent blank chunk.
+  if (result?.code == null || (code.trim().length > 0 && result.code.length === 0))
+    throw new Error(`Babel produced no Tizen 3 output for ${fileName}`);
   return { code: result.code, map: result.map ?? null };
 }
 
