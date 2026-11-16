@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ProfileSession } from '../src/lib/profileSession.svelte';
   import type { ServicePick } from '../src/lib/prefs';
-  import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
+  import { i18n, setInterfaceLanguage } from '../src/lib/i18n.svelte';
   import type { Service, ServiceDirectoryResult } from '../src/settings/services';
   import HomeCatalogue from '../src/components/HomeCatalogue.svelte';
 
@@ -22,15 +22,6 @@
     movies: true,
     series: true,
     variants: [],
-  };
-  const serviceResolver = {
-    resolvePicks(picks: readonly ServicePick[], directory: readonly Service[], country: string) {
-      const here = picks.filter((pick) => pick.country === country);
-      return directory.flatMap((service) => {
-        const pick = here.find(({ id }) => service.id === id || service.variants.includes(id));
-        return pick ? [{ pick, service }] : [];
-      });
-    },
   };
   let servicePicks = $state.raw<readonly ServicePick[]>([
     { id: netflix.id, country: 'US' },
@@ -104,6 +95,16 @@
     const tag = (state.owner as unknown as { fixtureTag: string }).fixtureTag;
     published = `${tag}:${state.language}:${state.settled}:${state.names[netflix.id] ?? '-'}:${state.picks.length}`;
   }
+  function serviceRows(names: Record<number, string>, settled: boolean) {
+    publish({
+      owner: serviceSession,
+      language: i18n.language,
+      picks: servicePicks,
+      names,
+      settled,
+    });
+    return [];
+  }
 
   (window as unknown as { replaceServicesWithDuplicate: () => void }).replaceServicesWithDuplicate =
     () =>
@@ -149,7 +150,6 @@
   showServices
   {serviceSession}
   {servicePicks}
-  {serviceResolver}
-  onServiceState={publish}
+  {serviceRows}
   onServiceIntent={() => {}}
 />

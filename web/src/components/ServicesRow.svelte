@@ -15,8 +15,7 @@
     heading = 'Services',
     pending = 0,
     empty,
-    failure,
-    retrying = false,
+    recovery,
     onretry,
     onintent,
     onvisible,
@@ -31,8 +30,7 @@
     /** A settled empty directory keeps the reserved row geometry instead of shifting every later shelf upward. */
     empty?: string;
     /** A recoverable directory failure. Its action occupies the same tile geometry as loading and empty states. */
-    failure?: string;
-    retrying?: boolean;
+    recovery?: 'failed' | 'retrying';
     onretry?: () => void;
     /** A tile is about to be opened (`ServiceTile`): the page behind it can start loading. */
     onintent?: (service: Service, country: string) => void;
@@ -45,19 +43,15 @@
   let restoreRetryFocus = false;
 
   function retry() {
-    if (retrying) return;
     restoreRetryFocus = document.activeElement === retryButton;
     onretry?.();
   }
 
   $effect(() => {
-    const busy = retrying;
-    const failed = failure;
-    const listed = services.length;
-    if (!restoreRetryFocus || busy) return;
+    const state = recovery;
+    if (!restoreRetryFocus || state === 'retrying') return;
     const frame = requestAnimationFrame(() => {
-      if (failed) retryButton?.focus();
-      else if (listed) section?.querySelector<HTMLElement>('.tile')?.focus();
+      (state === 'failed' ? retryButton : section?.querySelector<HTMLElement>('.tile'))?.focus();
       restoreRetryFocus = false;
     });
     return () => cancelAnimationFrame(frame);
@@ -87,11 +81,11 @@
   });
 </script>
 
-{#if services.length || pending || empty || failure || retrying}
+{#if services.length || pending || empty || recovery}
   <section
     class="row services-row"
     aria-label={localizedHeading}
-    data-layout-state={pending || retrying ? 'pending' : 'settled'}
+    data-layout-state={pending || recovery === 'retrying' ? 'pending' : 'settled'}
     bind:this={section}
   >
     <h2>{localizedHeading}</h2>
@@ -118,18 +112,18 @@
           >
         {/if}
       {/each}
-      {#if failure || retrying}
+      {#if recovery}
         <span class="hold empty recovery">
           <button
             class="plate retry"
             type="button"
             aria-label={i18n.phrase('Try again')}
-            aria-disabled={retrying}
+            aria-disabled={recovery === 'retrying'}
             bind:this={retryButton}
             onclick={retry}>↻</button
           >
           <span role="status" aria-atomic="true"
-            >{i18n.phrase(retrying ? 'Trying again…' : (failure ?? 'Services unavailable'))}</span
+            >{i18n.phrase(recovery === 'retrying' ? 'Trying again…' : 'Services unavailable')}</span
           >
         </span>
       {/if}

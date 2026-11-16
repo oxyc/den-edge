@@ -62,7 +62,7 @@
   import { nameLibraryTitles, promoteLibraryTitle } from './lib/libraryNaming';
   import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
   import { lastPromiseCache } from './lib/lastPromiseCache';
-  import { isHidden, type ServicePick } from './lib/prefs';
+  import { isHidden } from './lib/prefs';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
   import { openProfileSwitcher } from './lib/profileSwitcherControl';
@@ -2101,19 +2101,26 @@
     };
   });
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
-  const radar = (only?: 'movie' | 'tv') => {
+  const radar = (
+    only?: 'movie' | 'tv',
+    names: Record<number, string> = {},
+    ready = route.page !== 'library',
+  ) => {
     const content = session.content;
     // Home publishes its ordinary TMDB/recipe rows without waiting for provider discovery. Its provider rows join
     // only once their captions are final; direct Movies/Series routes retain their existing eager behavior.
-    return atlas && homeServices && (route.page !== 'library' || providerRowsReady)
+    return atlas && homeServices && ready
       ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
-          names: serviceNames,
+          names,
           content,
         })
       : [];
   };
-  const rows = $derived.by(() => {
+  function catalogueRows(
+    serviceNames: Record<number, string> = {},
+    providerRowsReady = route.page !== 'library',
+  ) {
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
     const filter = atlas
@@ -2158,7 +2165,7 @@
       atlas: filter,
     });
     const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
-    const pooled = radar();
+    const pooled = radar(undefined, serviceNames, providerRowsReady);
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
     const spine =
       arrivals && homeServices
@@ -2178,31 +2185,21 @@
       ],
       homeTaste,
     );
-  });
+  }
+  const rows = $derived(catalogueRows());
+  const homeCatalogueRows = (names: Record<number, string>, settled: boolean) =>
+    catalogueRows(
+      names,
+      session.kid ||
+        (atlasReady && (!atlas || !servicePicks.length)) ||
+        (atlasReady && !!atlas && settled),
+    );
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
    */
   const servicePicks = $derived(
     prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
-  );
-  type HomeServiceState = {
-    owner: ProfileSession;
-    language: string;
-    picks: readonly ServicePick[];
-    names: Record<number, string>;
-    settled: boolean;
-  };
-  let homeServiceState = $state.raw<HomeServiceState | null>(null);
-  function acceptHomeServiceState(state: HomeServiceState) {
-    homeServiceState = state;
-  }
-  const currentHomeServiceState = $derived(
-    homeServiceState?.owner === session &&
-      homeServiceState.language === i18n.language &&
-      homeServiceState.picks === servicePicks
-      ? homeServiceState
-      : null,
   );
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
   // Atlas row ids join it below only when their provider captions are final.
@@ -2212,17 +2209,6 @@
     startupRenderPhase('home_metadata');
     homeBrowseReady = true;
   });
-  const providerRowsReady = $derived(
-    session.kid ||
-      (atlasReady && (!atlas || !servicePicks.length)) ||
-      (atlasReady && !!atlas && currentHomeServiceState?.settled === true),
-  );
-  /**
-   * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
-   * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
-   * A visitor has no directory and so no names: their cards say when a title lands, not where.
-   */
-  const serviceNames: Record<number, string> = $derived(currentHomeServiceState?.names ?? {});
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
@@ -3284,8 +3270,7 @@
           showServices
           serviceSession={session}
           {servicePicks}
-          serviceResolver={homeServices}
-          onServiceState={acceptHomeServiceState}
+          serviceRows={homeCatalogueRows}
           onServiceIntent={primeService}
         />
       {:else}
