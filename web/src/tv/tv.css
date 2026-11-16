@@ -25,8 +25,12 @@
     U+A720-A7FF;
 }
 
-/* Ten-foot presentation. Imported by TV entry points only, so none of these selectors enter the web bundle. */
-:root {
+/* Ten-foot presentation. Imported by TV entry points only, so none of these selectors enter the web bundle.
+   Keep a plain root for the reduced-Tizen global-data transform, and a TV-specific root so these package tokens
+   win even when a later lazy chunk repeats app.css. Equal-specificity source order let the browser defaults replace
+   the 4px ring and 96px gutter in WebKit when its CSS chunk evaluation order changed. */
+:root,
+:root.den-tv {
   --gutter: clamp(54px, 5vw, 96px);
   --bar-space: 124px;
 
