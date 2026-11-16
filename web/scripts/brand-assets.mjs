@@ -7,7 +7,12 @@ export const brandAssets = {
   den: {
     repository: 'https://github.com/oxyc/den',
     revision: '97308fa758e0d7f63f955cf724617c7567d7175a',
-    generator: 'scripts/gen-icon.swift (make icon)',
+    generator: {
+      path: 'scripts/gen-icon.swift',
+      sha256: '3de1861e95fbdbc80a3086634ad1c09f78bea1876f9a2c4514a7bd9e573b2f1b',
+      invocation: 'make icon',
+      makefileSha256: 'eb4f515cf6bc5365b3c38693bd8c3f0d948c97aa3dec2d615d4cd2570ea6882e',
+    },
   },
   edgeGenerator: {
     path: 'web/scripts/tv-icons.mjs',
@@ -29,30 +34,35 @@ export const brandAssets = {
     {
       source: 'docs/brand/web/favicon-32.png',
       target: 'web/public/favicon-32.png',
+      size: [32, 32],
       sha256: '5526e81f1666d7a366538911270d566ade11387a153a47011031fe65e064d254',
       consumers: [['web/index.html', 'href="/favicon-32.png"']],
     },
     {
       source: 'docs/brand/web/apple-touch-icon.png',
       target: 'web/public/apple-touch-icon.png',
+      size: [180, 180],
       sha256: '3423c1da4dfd8965ce6212816355ceb9c4f750512ed7f4a92a8e493dc1f3efb0',
       consumers: [['web/index.html', 'href="/apple-touch-icon.png"']],
     },
     {
       source: 'docs/brand/web/icon-192.png',
       target: 'web/public/icon-192.png',
+      size: [192, 192],
       sha256: '54ff20a8da7005158565e1a226fd27e32399c4d057d6e37ecc9c1d37b35bb34a',
       consumers: [['web/public/manifest.webmanifest', '"src": "/icon-192.png"']],
     },
     {
       source: 'docs/brand/web/icon-512.png',
       target: 'web/public/icon-512.png',
+      size: [512, 512],
       sha256: 'f6533161c44d464080843e6556fc33495e2fad0d35ff90d894a86007e3339213',
       consumers: [['web/public/manifest.webmanifest', '"src": "/icon-512.png"']],
     },
     {
       source: 'docs/brand/web/icon-maskable-512.png',
       target: 'web/public/icon-maskable-512.png',
+      size: [512, 512],
       sha256: '0d110e42ec0932b4c6457139d979a5ada09ef38ec446f8d789451bf06b6cd5d2',
       consumers: [['web/public/manifest.webmanifest', '"src": "/icon-maskable-512.png"']],
     },
@@ -113,9 +123,19 @@ export const brandAssets = {
   local: [
     {
       target: 'web/public/og.png',
+      size: [1200, 630],
       provenance: 'Edge-owned social card, introduced by 164b14233197558eb43a61aded90a5e622eef658',
       sha256: '796f4640ee975c2df10f8ee93949095a4aabd7bf4b31e25e97b305d5fc19b828',
-      consumers: [['web/index.html', 'content="/og.png"']],
+      consumers: [
+        ['web/index.html', 'content="/og.png"'],
+        ['src/meta.rs', 'format!("{origin}/og.png")'],
+      ],
+    },
+  ],
+  excluded: [
+    {
+      target: 'web/src/assets/tmdb-logo.svg',
+      reason: 'Third-party TMDB service logo, not Den brand artwork',
     },
   ],
 };
