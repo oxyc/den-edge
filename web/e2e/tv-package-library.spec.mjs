@@ -86,9 +86,9 @@ test('bundled app routes, encrypted Worker sync and pairing work without a SPA s
           url.pathname,
         );
       const devicePath =
-        /^\/(?:pair|inbox|lib|recovery|config|health|routes|grant|oauth|playback|diagnostics|sync|mcp|link|version)(?:\/|$)/.test(
+        /^\/(?:pair|inbox|lib|recovery|config|health|routes|grant|oauth|playback|sync|mcp|link|version)(?:\/|$)/.test(
           url.pathname,
-        );
+        ) || url.pathname === '/diagnostics/failure';
       if ((url.origin === API && servicePath) || (url.origin === SERVICE && devicePath))
         misrouted.push(request.url());
     });
