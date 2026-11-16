@@ -1,6 +1,6 @@
-// The synthetic household `npm run rehearse` seeds when it is given no real data: a library v4 household with the row
-// shapes a long-lived one holds. Nothing here is anyone's real library — ids are common TMDB ids, every other value
-// is invented, and the key is generated per run.
+// Synthetic library-v4 rows for the large-household E2E fixture. Nothing here is anyone's real library: ids are
+// common TMDB ids and every other value is invented. Keep this beside its sole production-path test caller so it
+// cannot be mistaken for an operator migration or rehearsal input.
 
 const DEVICE = 'aaaaaaaaaaaaaaaa';
 const OTHER = 'bbbbbbbbbbbbbbbb';
@@ -10,7 +10,7 @@ const DAY = 86_400_000;
  * `rows(now)`: library rows (wire.ts `Row`s) with every stamp a few days to a few months before `now`. `scale`
  * multiplies the long history `large` adds.
  */
-export function syntheticRows(now = Date.now(), { legacy = false, large = false, scale = 1 } = {}) {
+export function syntheticRows(now = Date.now(), { large = false, scale = 1 } = {}) {
   const at = (daysAgo, device = DEVICE) => [now - daysAgo * DAY, 0, device];
   const setting = (name, values) => ({ kind: 'set', schema: 2, name, values });
   const text = (value, when) => ({ value: { string: value }, at: when });
@@ -76,8 +76,7 @@ export function syntheticRows(now = Date.now(), { legacy = false, large = false,
       'den.watchRegion': text('FI', at(60)),
       'den.myServicePicks': { value: { strings: ['8@FI'] }, at: at(60) },
       'den.audioLanguages': { value: { strings: ['en', 'fi'] }, at: at(60) },
-      // Non-default values for every preference, which the split moves to the Owner library (all of `set:prefs` is
-      // profile-scoped), so Settings after it can be told from defaults.
+      // Non-default profile-scoped preferences let Settings be distinguished from its defaults.
       'den.preferredSubtitleLanguage': text('fi', at(50)),
       'den.autoSkipSegments': { value: { bool: true }, at: at(50) },
       'den.excludedLanguages': { value: { strings: ['hi', 'ko'] }, at: at(50) },
@@ -121,39 +120,6 @@ export function syntheticRows(now = Date.now(), { legacy = false, large = false,
     setting('deliver:simkl:9', { lease: { value: { strings: ['', '0'] }, at: at(70) } }),
   );
 
-  // Rows den-core's split refuses outright (`legacy_source_row`), so a household holding one cannot be split until
-  // they are gone: a malformed tracker-event row (one per explicit action; this value is not an event, the shape a bad
-  // write leaves), and the library v3 watch-block and settlement rows from before documents.
-  if (!legacy) return rows;
-  rows.push(
-    setting('tracker-event:00000000-0000-4000-8000-000000000001', {
-      event: text('this is not an event', at(6)),
-    }),
-    {
-      kind: 'wat',
-      schema: 3,
-      title: { type: 'tv', id: 1399 },
-      season: 1,
-      block: 0,
-      seasonReset: null,
-      entries: {
-        1: {
-          imported: false,
-          progress: { value: 1, at: at(120), viewing: 0 },
-          plays: { 0: now - 120 * DAY },
-          cleared: null,
-        },
-      },
-    },
-    {
-      kind: 'snt',
-      schema: 3,
-      provider: 'simkl',
-      account: '42',
-      target: 'wat:tv:1399:1:0',
-      entries: {},
-    },
-  );
   return rows;
 }
 

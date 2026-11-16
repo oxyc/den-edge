@@ -346,35 +346,25 @@ write timings (`EDGE_RECOVERY_TIMINGS=1`) are local unoptimized diagnostics, not
 qualification. The normal Web CI check enables the recovery test with its existing Rust target cache; timing
 diagnostics remain opt-in and have no latency pass/fail threshold.
 
-### Migration rehearsal
+### Household and release rehearsals
 
-`npm run rehearse` (in `web/`) runs the Owner split end to end: the real `den-edge` binary on a temporary copy of the
-data (profile migration on, `NEW_LIBRARIES=members`, the household enrolled), serving the built web app, driven by real
-Den Web in Chromium. It opens the household, enables Profiles with a PIN, waits for the commit, then reopens a browser
-whose storage was snapshotted before the split, with one tab (`REHEARSE_TWO_TABS=1` adds a two-tab pass), and checks that it adopts the committed
-household without writing its old rows back. It needs `cargo build --locked` (or `DEN_EDGE_BIN`), `npm run build`, and
-Chromium (`npx playwright install chromium`, or an installed Chrome).
+The current rehearsals exercise supported household and release behavior. They do not restore or simulate the retired
+Owner-split migration. Run them from `web/` after `cargo build --locked` (or set `DEN_EDGE_BIN`), `npm run build`, and
+installing Chromium (`npx playwright install chromium`, or an installed Chrome):
 
 ```
-npm run rehearse                                          # a synthetic household (~6,100 rows) and a generated key
-npm run rehearse -- --small                               # the same with a ~30-row household (REHEARSE_SMALL=1)
-REHEARSE_DATA=/path/to/edge-data REHEARSE_KEY_FILE=/path/to/key npm run rehearse   # a copy of real data
+npm run rehearse:household  # create, use, interrupt, and resume a browser-born profile household
+npm run rehearse:join       # join one browser-born household to another through the real pairing flow
+npm run rehearse:release    # replace a served build and verify the first cached-browser reload reaches it
 ```
 
-`REHEARSE_DATA` is a copied `DATA_DIR` (`lib/` and `library-v3-index.redb`; an older
-`library-v3-index.json` is imported automatically); `REHEARSE_KEY_FILE` holds the household's
-base64 library key. Both are read only; the data is copied before anything runs, and neither is ever committed, so keep
-real copies outside the repo. Options (env, or `--flag value`): `REHEARSE_PIN` (default `1234`; the Owner PIN if the
-household has one), `REHEARSE_SETTLE_SECONDS` (how long each reopen is watched, default 25), `REHEARSE_MAX_BATCHES`
-(batch writes tolerated per reopen, default 6), `--keep` (keep the temp dir with the den-edge logs and browser
-profiles), `--headed`. `REHEARSE_LEGACY_ROWS=1` adds rows den-core refuses outright to the synthetic household (a
-malformed `set:tracker-event:*` row, v3 `wat`/`snt` rows).
-
-It prints PASS/FAIL per check and exits 1 if any fails: the household commits at wire minimum 5, its directory names an
-Owner library that holds the activity, the committed household holds no activity (title, season and delivery
-documents, `trackers`, `deliver:*`, `handoff:*`, `assistant-applied`, tracker events), and, after each reopen, at most
-`REHEARSE_MAX_BATCHES` `POST /lib/:id/batch` reached den-edge and the decrypted household again holds no activity.
-Each reopen starts from the committed data (den-edge restarted on a copy, same port), so they do not affect each other.
+Each command runs a real `den-edge` binary and built Web app against a disposable temporary directory, prints PASS/FAIL
+per check, and removes that directory after a successful run unless `REHEARSE_KEEP=1`; failed checks preserve it for
+diagnosis. `REHEARSE_DIST` selects another built app for the
+household and join rehearsals; `--headed` shows their browser. `rehearse:household` accepts `--only=<scenario>`, while
+`rehearse:join` accepts `REHEARSE_ONLY=<scenario>` and `REHEARSE_REPEAT=<count>`. See each script's opening comment for
+the exact current contract. These commands must not enable `PROFILE_MIGRATION_ENABLED`,
+`PROFILE_PREPARE_HOUSEHOLDS`, or any retired split route.
 
 ## Deploy
 
