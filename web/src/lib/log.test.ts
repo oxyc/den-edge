@@ -1712,7 +1712,7 @@ describe('LibraryLog', () => {
     }
   });
 
-  it('durably quarantines pre-split work until a failed local deletion can be retried', async () => {
+  it('does not advance or replay when both pre-split quarantine and deletion fail', async () => {
     const server = await edge([row(1)], [], 'generation-1');
     const { data, vault } = memoryVault();
     let posts = 0;
@@ -1742,8 +1742,14 @@ describe('LibraryLog', () => {
     profiles = true;
 
     const privateCause = `profile:${OWNER_ID} https://private.example/delete ${pendingKey}`;
+    const putInVault = vault.put.bind(vault);
     const deleteFromVault = vault.delete.bind(vault);
+    let blockPendingWrite = true;
     let blockPendingDelete = true;
+    vault.put = async (key, value) => {
+      if (blockPendingWrite && key === pendingKey) throw new Error(privateCause);
+      await putInVault(key, value);
+    };
     vault.delete = async (key) => {
       if (blockPendingDelete && key === pendingKey) throw new Error(privateCause);
       await deleteFromVault(key);
@@ -1751,21 +1757,26 @@ describe('LibraryLog', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       posts = 0;
-      await expect(log.refresh()).resolves.toBe(true);
+      await expect(log.refresh()).resolves.toBe(false);
       expect(posts).toBe(0);
       expect(log.pendingActions).toBe(1);
-      expect(new TextDecoder().decode(data.get(pendingKey))).toBe('{"splitDiscard":1}');
+      expect(log.currentGeneration).toBe('generation-1');
+      expect(new TextDecoder().decode(data.get(pendingKey))).toBe(JSON.stringify(stale));
+      expect(data.has(`${keys.id}:runtime:meta:splitAdoption`)).toBe(true);
       expect(error.mock.calls.flat().join(' ')).toContain(
-        '1 pre-split kept work items remain quarantined',
+        'pre-split work could not be durably quarantined; adoption will retry',
       );
       expect(error.mock.calls.flat().join(' ')).not.toContain(privateCause);
 
       log.close();
+      blockPendingWrite = false;
       blockPendingDelete = false;
       posts = 0;
       const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault, 5))!;
+      expect(reopened.settings('prefs')).toBeUndefined();
       await reopened.refresh();
       await vi.waitFor(() => expect(data.has(pendingKey)).toBe(false));
+      await vi.waitFor(() => expect(data.has(`${keys.id}:runtime:meta:splitAdoption`)).toBe(false));
       expect(reopened.pendingActions).toBe(0);
       expect(posts).toBe(0);
       reopened.close();

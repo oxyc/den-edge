@@ -647,6 +647,14 @@ export class LibraryLog {
     return `den.pendingTracker.${this.keys.id}.`;
   }
 
+  private get splitAdoptionKey(): string {
+    return this.metaKey('splitAdoption');
+  }
+
+  private get legacySplitAdoptionKey(): string {
+    return `den.librarySplitAdoption.${this.keys.id}`;
+  }
+
   private metaKey(name: string): string {
     return `${this.runtimePrefix}meta:${name}`;
   }
@@ -716,6 +724,16 @@ export class LibraryLog {
           return [];
         }
       }),
+      ...((): Array<[string, string, string]> => {
+        try {
+          const value = this.storage?.getItem(this.legacySplitAdoptionKey);
+          return value === null || value === undefined
+            ? []
+            : [[this.legacySplitAdoptionKey, this.splitAdoptionKey, value]];
+        } catch {
+          return [];
+        }
+      })(),
     ];
     for (const [oldKey, newKey, value] of legacy) {
       if (this.runtimeVault) {
@@ -764,6 +782,7 @@ export class LibraryLog {
         this.pending.set(key, value);
         if (value === SPLIT_DISCARD_MARKER) this.splitDiscard.add(key);
       }
+    this.installSplitAdoption(stored.get(this.splitAdoptionKey));
     this.observed = stored.get(this.metaKey('observed'));
     const remembered = Number(stored.get(this.metaKey('wireMin')));
     if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
@@ -793,6 +812,7 @@ export class LibraryLog {
             else this.splitDiscard.delete(key);
           }
         } else if (key === this.metaKey('observed')) this.observed = value;
+        else if (key === this.splitAdoptionKey) this.installSplitAdoption(value);
         else if (key === this.metaKey('wireMin')) {
           const minimum = Number(value);
           if (Number.isInteger(minimum) && minimum > this.wireMin) {
@@ -817,6 +837,34 @@ export class LibraryLog {
       this.runtimeChannel?.postMessage({ key, value });
     } catch {
       // A later IndexedDB scan remains authoritative.
+    }
+  }
+
+  private installSplitAdoption(value: string | undefined): void {
+    if (!value) return;
+    try {
+      for (const key of JSON.parse(value) as string[])
+        if (key.startsWith(this.pendingPrefix) && this.pending.has(key)) this.splitDiscard.add(key);
+    } catch {
+      // A malformed barrier protects nothing; adoption writes a fresh exact barrier before changing authority.
+    }
+  }
+
+  private async keepSplitAdoption(keys: readonly string[]): Promise<boolean> {
+    const value = JSON.stringify(keys);
+    if (!(await this.putRuntime(this.splitAdoptionKey, value, this.legacySplitAdoptionKey)))
+      return false;
+    this.installSplitAdoption(value);
+    return true;
+  }
+
+  private async clearSplitAdoption(): Promise<void> {
+    try {
+      if (this.runtimeVault) await this.runtimeVault.delete(this.splitAdoptionKey);
+      this.storage?.removeItem(this.legacySplitAdoptionKey);
+      this.announceRuntime(this.splitAdoptionKey);
+    } catch {
+      // The stale barrier names only removed random pending keys, so retaining it is safe and retryable.
     }
   }
 
@@ -2540,7 +2588,7 @@ export class LibraryLog {
         // exposing a cached log before every retained op is drawn would briefly show stale library state.
         try {
           if (kept.some((work) => work.kind === 'ops')) await ensureDeferredSyncPolicy();
-          for (const work of kept) log.projectWork(work);
+          for (const work of kept) if (!log.splitDiscard.has(work.key)) log.projectWork(work);
           overlay?.publish();
         } catch (error) {
           overlay?.refuse();
@@ -2605,8 +2653,9 @@ export class LibraryLog {
       const page = coherentResponsePage(res, await res.json());
       if (!page) return null;
       if (log.generation && page.generation && log.generation !== page.generation) {
-        if (log.directoryCommitted) await log.adoptProfileDirectory();
-        else if (!(await log.stageRecovery(page.generation))) return null;
+        if (log.directoryCommitted) {
+          if (!(await log.adoptProfileDirectory())) return null;
+        } else if (!(await log.stageRecovery(page.generation))) return null;
         log.memberRegistered = false;
         // Registered under the generation it now reads: under the old one den-edge refuses it.
         log.generation = page.generation;
@@ -3055,8 +3104,9 @@ export class LibraryLog {
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (this.directoryCommitted) await this.adoptProfileDirectory(active);
-            else if (!(await this.stageRecovery(page.generation, active))) return null;
+            if (this.directoryCommitted) {
+              if (!(await this.adoptProfileDirectory(active))) return null;
+            } else if (!(await this.stageRecovery(page.generation, active))) return null;
             if (!active()) return null;
             this.memberRegistered = false;
             // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -4484,8 +4534,34 @@ export class LibraryLog {
    * preferences and keys) into the household, which every profile reads. Kept edits are not routed to a profile
    * library from here: this log has none, so they are dropped and counted without exposing their identities.
    */
-  private async adoptProfileDirectory(active: () => boolean = () => true): Promise<void> {
-    if (!active()) return;
+  private async adoptProfileDirectory(active: () => boolean = () => true): Promise<boolean> {
+    if (!active()) return false;
+    await this.refreshPending();
+    if (!active()) return false;
+    const opened = new Map((await this.keptWork()).map((work) => [work.key, work]));
+    if (!active()) return false;
+    const pending = [...this.pending.keys()];
+    if (pending.length && !(await this.keepSplitAdoption(pending))) {
+      console.error('den: pre-split work could not be durably fenced; adoption will retry');
+      return false;
+    }
+    let directlyDropped = 0;
+    for (const key of pending) {
+      if (!active()) return false;
+      if (
+        this.pending.get(key) !== SPLIT_DISCARD_MARKER &&
+        !(await this.quarantineSplitWork(key))
+      ) {
+        // A direct durable delete is safe even when this storage refused the inert overwrite.
+        if (await this.discard(key)) {
+          directlyDropped++;
+          continue;
+        }
+        console.error('den: pre-split work could not be durably quarantined; adoption will retry');
+        return false;
+      }
+      if (!active()) return false;
+    }
     console.warn(
       `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
     );
@@ -4505,16 +4581,12 @@ export class LibraryLog {
         )
         .then(() => undefined)
         .catch(() => console.error('den: the pre-split household cache could not be removed'));
-    await this.refreshPending();
-    if (!active()) return;
-    const opened = new Map((await this.keptWork()).map((work) => [work.key, work]));
-    if (!active()) return;
-    for (const key of [...this.pending.keys()]) {
-      if (!active()) return;
-      await this.quarantineSplitWork(key);
-      if (!active()) return;
-    }
+    if (directlyDropped)
+      console.error(
+        `den: ${directlyDropped} kept work items from before the household split were dropped (unknown=${directlyDropped})`,
+      );
     await this.discardSplitWork(opened, active);
+    return active();
   }
 
   /** Retry quarantined pre-split deletion and report only work whose durable marker was actually removed. */
@@ -4563,6 +4635,7 @@ export class LibraryLog {
       console.error(
         `den: ${failed} pre-split kept work items remain quarantined until local deletion can be retried`,
       );
+    if (!this.splitDiscard.size) await this.clearSplitAdoption();
   }
 
   private async stageRecovery(
