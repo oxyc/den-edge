@@ -10,8 +10,10 @@ release; ordinary Den Edge releases do not rebuild the hosted-UI shell.
 `scripts/tv-package.mjs webos --url https://your-tv-host/` writes a hosted LG
 launcher into `tv-packages/webos/shell` and invokes LG's `ares-package` to put
 the `.ipk` in its sibling `packages` directory. It never modifies `dist-tv-*`.
-The checked-in 80×80 and 130×130 icons are rendered from `public/favicon.svg`
-by `node scripts/tv-icons.mjs`.
+The checked-in 80×80 and 130×130 icons are rendered from `public/apple-touch-icon.png`
+by `node scripts/tv-icons.mjs`. Android's app icon and banner use `public/favicon.svg` instead.
+The exact Den revision, copied-output hashes, derivation graph, and consumers live in
+`scripts/brand-assets.mjs`; `npm run check:brand` verifies them without network or browser work.
 
 The generated app is a remote-content shell. It contains no credentials and
 never installs or deploys to a device.
