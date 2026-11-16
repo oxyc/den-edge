@@ -18,8 +18,6 @@ describe('Samsung source-build guide', () => {
       expect(command).toContain('DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi');
     }
     expect(commands[0]).toContain('npm run build:tv:tizen');
-    expect(commands[1]).toContain(
-      'node scripts/tv-package.mjs tizen --url https://d-api.oxy.fi',
-    );
+    expect(commands[1]).toContain('node scripts/tv-package.mjs tizen --url https://d-api.oxy.fi');
   });
 });
