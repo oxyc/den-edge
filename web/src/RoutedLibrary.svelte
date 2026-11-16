@@ -1337,7 +1337,7 @@
       if (error instanceof LibraryServiceError && error.failure.code === 'unauthorized') {
         return 'unauthorized';
       }
-      console.warn('den: the profile key reset could not start', error);
+      console.warn('den: the profile key reset could not start');
       return pendingReset?.compound && pendingReset.from === from ? 'blocked' : 'failed';
     } finally {
       resetInFlight = false;
@@ -1422,9 +1422,7 @@
           if (alive && (result === 'waiting' || result === 'blocked'))
             compoundRetry = setTimeout(() => (pendingReset = readPendingReset()), 15_000);
         })
-        .catch((error: unknown) =>
-          console.warn('den: the profile key reset could not continue', error),
-        );
+        .catch(() => console.warn('den: the profile key reset could not continue'));
     run();
     return () => clearTimeout(compoundRetry);
   });
@@ -1871,7 +1869,7 @@
         if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
           setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
       })
-      .catch((error: unknown) => console.warn('den: a guest library could not be started', error))
+      .catch(() => console.warn('den: a guest library could not be started'))
       .finally(() => (guestStarting = false));
   });
 </script>

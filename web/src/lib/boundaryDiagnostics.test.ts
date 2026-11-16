@@ -76,6 +76,8 @@ describe('split-household boundary diagnostics', () => {
     expect(staged).toContain('den: the kid profile switch was refused');
     expect(staged).not.toContain('result.cause');
     expect(staged).not.toMatch(/console\.(?:warn|error)\([^\n]*,\s*error/);
+    expect(routed).not.toMatch(/profile key reset could not (?:start|continue)'\s*,/);
+    expect(routed).not.toMatch(/guest library could not be started'\s*,/);
 
     const rekey = log.match(/async rekeyKept[\s\S]*?async takeMoved/)?.[0];
     const recovery = log.match(/private async stageRecovery[\s\S]*?private holds/)?.[0];
