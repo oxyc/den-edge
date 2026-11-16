@@ -309,9 +309,6 @@
       !ended &&
       !failed,
   );
-  /** The hls.js engine is an ownership resource, not retained page state. */
-  const ownedManaged = $derived(allowed ? managed : null);
-
   onMount(() => {
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const small = matchMedia('(max-width: 759px)');
@@ -457,8 +454,8 @@
   // the bare element uses, so the two player paths cannot disagree about fallback order.
   $effect(() => {
     const player = video;
-    const master = ownedManaged;
-    if (__DEN_TV_LEGACY_JS_CORE__ || !player || !master) return;
+    const master = managed;
+    if (__DEN_TV_LEGACY_JS_CORE__ || !allowed || !player || !master) return;
     let live = true;
     let engine: Hls | undefined;
     const starting = loadHls().then(({ default: Hls }) => {
