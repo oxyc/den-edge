@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { isDeviceApiPath } from './runtimeUrl';
+import { API_PATH } from './runtimeUrl';
 
 describe('packaged TV device API paths', () => {
   it('routes only the exact failure-report endpoint', () => {
-    expect(isDeviceApiPath('/diagnostics/failure')).toBe(true);
-    expect(isDeviceApiPath('/diagnostics')).toBe(false);
-    expect(isDeviceApiPath('/diagnostics/failure/extra')).toBe(false);
-    expect(isDeviceApiPath('/diagnostics-private/failure')).toBe(false);
-    expect(isDeviceApiPath('/external/diagnostics/failure')).toBe(false);
+    expect(API_PATH.test('/diagnostics/failure')).toBe(true);
+    expect(API_PATH.test('/diagnostics')).toBe(false);
+    expect(API_PATH.test('/diagnostics/failure/extra')).toBe(false);
+    expect(API_PATH.test('/diagnostics-private/failure')).toBe(false);
+    expect(API_PATH.test('/external/diagnostics/failure')).toBe(false);
   });
 });
