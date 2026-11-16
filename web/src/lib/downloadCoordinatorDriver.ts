@@ -48,7 +48,6 @@ const UNANSWERED_WAIT = 5 * 60_000;
 const HEARTH_EVERY = 5 * 60_000;
 /** A failed handoff is retried without turning the visible service cadence into a request loop. */
 const HEARTH_RETRY_MIN = 5_000;
-const HEARTH_RETRY_MAX = 5 * 60_000;
 const ANOTHER_WINDOW = 'another-window';
 const FOREIGN = 'Another device’s ticket.';
 const GONE = 'This release is no longer listed.';
@@ -84,10 +83,9 @@ export class DownloadCoordinatorDriver {
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
   /** The last digest's acknowledgement (`failures: 0`) or bounded retry schedule. */
-  #hearth?: { digest: string; failures: number; at: number };
+  #hearth?: [digest: string, failures: number, at: number];
   /** Undefined for generic callers; null when discovery proves there is no Hearth; otherwise its exact install. */
-  #hearthAuthority: string | null | undefined;
-  #hearthAuthorityEpoch = 0;
+  #hearthAuthority?: { id: string | null };
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
@@ -95,9 +93,8 @@ export class DownloadCoordinatorDriver {
 
   /** Rebind acknowledgement and retry state to the exact discovered Hearth instance. */
   bindHearthAuthority(authority: string | null): void {
-    if (this.#hearthAuthority === authority) return;
-    this.#hearthAuthority = authority;
-    this.#hearthAuthorityEpoch++;
+    if (this.#hearthAuthority?.id === authority) return;
+    this.#hearthAuthority = { id: authority };
     this.#hearth = undefined;
   }
 
@@ -165,15 +162,15 @@ export class DownloadCoordinatorDriver {
 
   /** When the scheduler should next run solely to synchronize Hearth (if downloads do not need it sooner). */
   hearthDelay(now = this.queue.now()): number | undefined {
-    if (!this.queue.effects.wanted || this.#hearthAuthority === null) return undefined;
+    if (!this.queue.effects.wanted || this.#hearthAuthority?.id === null) return undefined;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
     const last = this.#hearth;
-    if (last?.digest === digest && last.failures) return Math.max(0, last.at - now);
+    if (last?.[0] === digest && last[1]) return Math.max(0, last[2] - now);
     // A fresh driver also sends one empty replacement. That clears intent retained by Hearth if the previous page or
     // worker disappeared after its local row removal but before receiving the clear response.
-    if (last?.digest !== digest) return 0;
-    return items.length ? Math.max(0, HEARTH_EVERY - (now - last.at)) : undefined;
+    if (last?.[0] !== digest) return 0;
+    return items.length ? Math.max(0, last[2] + HEARTH_EVERY - now) : undefined;
   }
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
@@ -453,35 +450,35 @@ export class DownloadCoordinatorDriver {
   async #syncHearth(now: number): Promise<boolean> {
     const current = this.#current;
     const send = this.queue.effects.wanted;
-    const authority = this.#hearthAuthority;
+    const binding = this.#hearthAuthority;
+    const authority = binding?.id;
     if (!send || authority === null) return false;
-    const authorityEpoch = this.#hearthAuthorityEpoch;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
     const last = this.#hearth;
     if (
-      last?.digest === digest &&
-      (last.failures ? now < last.at : !items.length || now - last.at < HEARTH_EVERY)
+      last?.[0] === digest &&
+      (last[1] ? now < last[2] : !items.length || now - last[2] < HEARTH_EVERY)
     )
       return false;
     let statuses: WantedStatus[] | null;
     try {
       statuses = await send(items, authority);
     } catch (error) {
-      if (this.#hearthAuthorityEpoch !== authorityEpoch) return false;
+      if (this.#hearthAuthority !== binding) return false;
       this.#retryHearth(digest, now);
       throw error;
     }
     // Discovery can rebind the same driver while the old authority's request is in flight. Its late response belongs
     // only to that old authority and must neither acknowledge nor delay the replacement's identical digest.
-    if (this.#hearthAuthorityEpoch !== authorityEpoch) return false;
+    if (this.#hearthAuthority !== binding) return false;
     // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. Keeping one
     // digest-scoped retry owner also means a changed (newer) intent bypasses the old intent's delay immediately.
     if (!statuses || !current() || !this.#stillHeld(now)) {
       this.#retryHearth(digest, now);
       return false;
     }
-    this.#hearth = { digest, at: now, failures: 0 };
+    this.#hearth = [digest, 0, now];
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
@@ -496,9 +493,9 @@ export class DownloadCoordinatorDriver {
 
   #retryHearth(digest: string, now: number): void {
     const previous = this.#hearth;
-    const failures = previous?.digest === digest ? previous.failures + 1 : 1;
-    const delay = Math.min(HEARTH_RETRY_MAX, HEARTH_RETRY_MIN * 2 ** (failures - 1));
-    this.#hearth = { digest, failures, at: now + delay };
+    const failures = previous?.[0] === digest ? previous[1] + 1 : 1;
+    const delay = Math.min(HEARTH_EVERY, HEARTH_RETRY_MIN * 2 ** (failures - 1));
+    this.#hearth = [digest, failures, now + delay];
   }
 
   /**
