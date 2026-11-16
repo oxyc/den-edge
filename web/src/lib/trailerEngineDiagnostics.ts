@@ -23,15 +23,6 @@ export function reportTrailerEngineFailure(outcome: TrailerEngineOutcome, error?
   console.warn(`[Den trailer] {"event":"engine-failure","outcome":"${outcome}"${classified}}`);
 }
 
-interface TrailerEngineFailureOwner {
-  /** Whether this engine still owns the mounted media attempt. */
-  current: () => boolean;
-  /** Retire ownership synchronously before an engine can emit a duplicate terminal event. */
-  retire: () => void;
-  stop: () => void;
-  advance: () => void;
-}
-
 interface HlsErrorData {
   fatal: boolean;
 }
@@ -47,29 +38,34 @@ export const MOST_TRAILER_FRAGMENT_LOADS = 4;
  * The production hls.js terminal-event state machine. Keeping it here makes its one-shot ownership, fallback and
  * privacy contract testable without mounting a decoder or forwarding hls.js's unbounded event payloads.
  */
-export function trailerEngineFailureHandlers(owner: TrailerEngineFailureOwner): {
-  error: (_event: unknown, data: HlsErrorData) => void;
-  fragmentLoading: (_event: unknown, data: HlsFragmentData) => void;
-} {
+export function trailerEngineFailureHandlers(
+  current: () => boolean,
+  retire: () => void,
+  stop: () => void,
+  advance: () => void,
+): readonly [
+  (_event: unknown, data: HlsErrorData) => void,
+  (_event: unknown, data: HlsFragmentData) => void,
+] {
   const loads = new Map<string, number>();
-  const fail = (outcome: 'fatal_error' | 'fragment_loop', stop: boolean) => {
-    if (!owner.current()) return;
-    owner.retire();
+  const fail = (outcome: 'fatal_error' | 'fragment_loop', stopLoad: boolean) => {
+    if (!current()) return;
+    retire();
     reportTrailerEngineFailure(outcome);
-    if (stop) owner.stop();
-    owner.advance();
+    if (stopLoad) stop();
+    advance();
   };
-  return {
-    error: (_event, data) => {
+  return [
+    (_event, data) => {
       if (data.fatal) fail('fatal_error', false);
     },
-    fragmentLoading: (_event, { frag }) => {
+    (_event, { frag }) => {
       const key = `${frag.type}:${frag.level}:${frag.sn}`;
       const count = (loads.get(key) ?? 0) + 1;
       loads.set(key, count);
       if (count > MOST_TRAILER_FRAGMENT_LOADS) fail('fragment_loop', true);
     },
-  };
+  ];
 }
 
 /**

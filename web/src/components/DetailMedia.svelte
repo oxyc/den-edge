@@ -480,15 +480,15 @@
           abrEwmaDefaultEstimate: 5_000_000,
           testBandwidth: false,
         });
-        const failures = trailerEngineFailureHandlers({
-          current: () => live,
-          retire: () => {
+        const [engineError, fragmentLoading] = trailerEngineFailureHandlers(
+          () => live,
+          () => {
             live = false;
           },
-          stop: () => engine?.stopLoad(),
-          advance: () => nextTrailer(),
-        });
-        engine.on(Hls.Events.ERROR, failures.error);
+          () => engine?.stopLoad(),
+          () => nextTrailer(),
+        );
+        engine.on(Hls.Events.ERROR, engineError);
         // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
         // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
         // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
@@ -511,7 +511,7 @@
         });
         // And whatever else might start one: a fragment asked for again and again is a loop, not a recovery. hls.js
         // retrying a failed fragment asks a few times; past that the trailer is given up for the next one.
-        engine.on(Hls.Events.FRAG_LOADING, failures.fragmentLoading);
+        engine.on(Hls.Events.FRAG_LOADING, fragmentLoading);
         engine.loadSource(master);
         engine.attachMedia(player);
       },

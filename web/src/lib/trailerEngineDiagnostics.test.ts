@@ -69,21 +69,21 @@ describe('trailer engine diagnostics', () => {
     let current = true;
     const stop = vi.fn();
     const advance = vi.fn();
-    const handlers = trailerEngineFailureHandlers({
-      current: () => current,
-      retire: () => {
+    const [error] = trailerEngineFailureHandlers(
+      () => current,
+      () => {
         current = false;
       },
       stop,
       advance,
-    });
+    );
 
-    handlers.error('error', { fatal: false });
+    error('error', { fatal: false });
     expect(warn).not.toHaveBeenCalled();
     expect(advance).not.toHaveBeenCalled();
 
-    handlers.error('error', { fatal: true });
-    handlers.error('duplicate', { fatal: true });
+    error('error', { fatal: true });
+    error('duplicate', { fatal: true });
 
     expect(warn.mock.calls).toEqual([
       ['[Den trailer] {"event":"engine-failure","outcome":"fatal_error"}'],
@@ -98,24 +98,24 @@ describe('trailer engine diagnostics', () => {
     let current = true;
     const stop = vi.fn();
     const advance = vi.fn();
-    const handlers = trailerEngineFailureHandlers({
-      current: () => current,
-      retire: () => {
+    const [, fragmentLoading] = trailerEngineFailureHandlers(
+      () => current,
+      () => {
         current = false;
       },
       stop,
       advance,
-    });
+    );
     const sentinel = { frag: { type: 'main-private', level: 7349281, sn: 'capability-secret' } };
 
     for (let count = 0; count < MOST_TRAILER_FRAGMENT_LOADS; count += 1)
-      handlers.fragmentLoading('loading', sentinel);
+      fragmentLoading('loading', sentinel);
     expect(warn).not.toHaveBeenCalled();
     expect(stop).not.toHaveBeenCalled();
     expect(advance).not.toHaveBeenCalled();
 
-    handlers.fragmentLoading('loading', sentinel);
-    handlers.fragmentLoading('duplicate', sentinel);
+    fragmentLoading('loading', sentinel);
+    fragmentLoading('duplicate', sentinel);
 
     expect(warn.mock.calls).toEqual([
       ['[Den trailer] {"event":"engine-failure","outcome":"fragment_loop"}'],
