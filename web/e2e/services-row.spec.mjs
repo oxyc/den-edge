@@ -102,7 +102,8 @@ test('the lazy catalogue replaces language and owner snapshots and fences their 
 
   const requests = page.locator('[data-requests]');
   const state = page.locator('[data-service-state]');
-  const row = page.getByRole('region', { name: 'Services' });
+  // The same rail's accessible name localizes when the language changes; keep tracking its stable production node.
+  const row = page.locator('.services-row');
   await row.scrollIntoViewIfNeeded();
   await expect(requests).toHaveText('1');
 

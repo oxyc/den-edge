@@ -104,7 +104,19 @@
     void directoryRetry;
     if (!showServices || !serviceDirectoriesAdmitted || !directory || !owner) return;
     let current = true;
-    const started: { key: string; request: number }[] = [];
+    const activeKeys = new Set(currentDirectoryKeys);
+    const loads = untrack(() => directoryLoads);
+    if (Object.keys(loads).some((key) => !activeKeys.has(key))) {
+      directoryLoads = Object.fromEntries(
+        Object.entries(loads).filter(([key]) => activeKeys.has(key)),
+      );
+    }
+    const retrying = untrack(() => retryingDirectories);
+    if (Object.keys(retrying).some((key) => !activeKeys.has(key))) {
+      retryingDirectories = Object.fromEntries(
+        Object.entries(retrying).filter(([key]) => activeKeys.has(key)),
+      );
+    }
     for (const country of new Set(servicePicks.map((pick) => pick.country))) {
       const key = `${directoryOwnerRevision}:${directoryKey(language, country)}`;
       const previous = untrack(() => directoryLoads[key]);
@@ -112,7 +124,6 @@
       delete refreshDirectories[key];
       if (previous && !refresh) continue;
       const request = ++directoryRequest;
-      started.push({ key, request });
       directoryLoads = {
         ...untrack(() => directoryLoads),
         [key]: directory.beginServiceDirectoryLoad(previous, request),
@@ -147,25 +158,7 @@
           }
         });
     }
-    return () => {
-      current = false;
-      const loads = untrack(() => directoryLoads);
-      const cancelled = new Set(
-        started
-          .filter(
-            ({ key, request }) =>
-              loads[key]?.request === request && loads[key].status === 'loading',
-          )
-          .map(({ key }) => key),
-      );
-      if (!cancelled.size) return;
-      directoryLoads = Object.fromEntries(
-        Object.entries(loads).filter(([key]) => !cancelled.has(key)),
-      );
-      retryingDirectories = Object.fromEntries(
-        Object.entries(untrack(() => retryingDirectories)).filter(([key]) => !cancelled.has(key)),
-      );
-    };
+    return () => (current = false);
   });
   function retryServiceDirectories() {
     if (directoryRetrying || !failedDirectories.length) return;

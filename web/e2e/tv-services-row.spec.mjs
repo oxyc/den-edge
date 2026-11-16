@@ -7,11 +7,12 @@ const geometry = (row) =>
     return { top: box.top + scrollY, height: box.height };
   });
 
-async function pendingRow(page, query = '') {
+async function pendingRow(page, query = '', beforeAdmission) {
   await page.goto(`${E2E_ORIGIN}/test/services-row.html${query}`);
   const row = page.locator('.services-row');
   await page.evaluate(() => document.fonts.ready);
   await expect(row).toHaveAttribute('data-layout-state', 'pending');
+  await beforeAdmission?.();
   const label = row.locator('.hold > :last-child').first();
   return {
     row,
@@ -69,14 +70,15 @@ test('TV Services does not advertise recovery for a retained failed directory ch
   page,
 }) => {
   let refused = false;
-  // `services-row-*.js` is this fixture's entry. Refuse only the lazy settings module; aborting the entry would
-  // prove nothing about the production Library's truthful disposition of an unrecoverable module failure.
-  await page.route(/\/assets\/services-(?!row-)[^/]+\.js(?:\?.*)?$/, (route) => {
-    if (refused) return route.continue();
-    refused = true;
-    return route.abort('connectionfailed');
-  });
-  const { row, reserved } = await pendingRow(page, '?result=module-failure');
+  const { row, reserved } = await pendingRow(page, '?result=module-failure', () =>
+    // Install the fault only after the fixture and its static service resolver have mounted. The next matching
+    // request is HomeCatalogue's near-viewport settings module, which is the retained import under test.
+    page.route(/\/assets\/services-(?!row-)[^/]+\.js(?:\?.*)?$/, (route) => {
+      if (refused) return route.continue();
+      refused = true;
+      return route.abort('connectionfailed');
+    }),
+  );
   const requests = page.locator('[data-requests]');
 
   await row.scrollIntoViewIfNeeded();
