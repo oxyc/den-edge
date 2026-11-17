@@ -43,6 +43,7 @@ export const KEPT_MS = 24 * 60 * 60 * 1000;
  */
 export const UNAVAILABLE_MS = 10 * 60 * 1000;
 const STORAGE_KEY = 'den.availability';
+const STORAGE_VERSION = 2;
 /** How long scout may take to answer a page of posters. */
 const ANSWER_MS = 15_000;
 
@@ -74,6 +75,35 @@ const verdictOf = (answer: Record<string, unknown>, id: string): Verdict => {
 type EpisodeProbe = Episode & { id: number };
 type BatchTarget =
   { kind: 'movie'; id: number } | { kind: 'episode'; key: string; probe: EpisodeProbe };
+export type AvailabilityAuthority = readonly [kind: string, libraryKey: string | null];
+
+type Kept = Record<string, [Verdict, number]>;
+type Stored = { version: typeof STORAGE_VERSION; authority: string; verdicts: Kept };
+
+/** An opaque local name for credential-bearing household/add-on authority. Old TV engines use the same
+ * non-cryptographic fallback as release memory; it is a namespace, never a credential or server proof. */
+async function authorityDigest(value: string): Promise<string> {
+  try {
+    const subtle = globalThis.crypto?.subtle;
+    if (subtle) {
+      const bytes = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(value)));
+      return btoa(String.fromCharCode(...bytes.subarray(0, 18)))
+        .replaceAll('+', '-')
+        .replaceAll('/', '_')
+        .replace(/=+$/, '');
+    }
+  } catch {
+    // Some supported TV webviews expose SubtleCrypto without a working digest implementation.
+  }
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+  }
+  return `${(first >>> 0).toString(36)}.${(second >>> 0).toString(36)}`;
+}
 
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
@@ -125,35 +155,20 @@ export class Availability {
    */
   private pausedUntil = 0;
   private scout: Scout | null = null;
-  /** The scout the verdicts are from: only a different one starts them over, not a session that has none yet. */
+  /** Exact in-memory authority. Persisted storage contains only its opaque digest. */
   private answeredBy: string | undefined;
+  private household: string | undefined;
+  private storageAuthority: string | undefined;
+  private connection = 0;
 
-  /** The last day's verdicts from `storage` fade their posters at once, and scout is still asked. */
+  /** Storage is restored only by `connect`, after the exact household and Scout authority are known. */
   constructor(
     private readonly storage: Storage | undefined = typeof localStorage === 'undefined'
       ? undefined
       : localStorage,
     private readonly now: () => number = Date.now,
-  ) {
-    try {
-      const kept = JSON.parse(storage?.getItem(STORAGE_KEY) ?? '{}') as Record<
-        string,
-        [Verdict, number]
-      >;
-      for (const [id, [verdict, at]] of Object.entries(kept)) {
-        if (verdict === 'unknown' || !(now() - at < KEPT_MS)) continue;
-        if (id.startsWith('tv:')) {
-          this.episodeVerdicts.set(id.slice(3), verdict);
-          this.episodeAnswers.set(id.slice(3), { at, settled: false });
-          continue;
-        }
-        this.verdicts.set(Number(id), verdict);
-        this.givenAt.set(Number(id), at);
-      }
-    } catch {
-      // Unreadable or refused storage: this visit starts without them.
-    }
-  }
+    private readonly digest: (value: string) => Promise<string> = authorityDigest,
+  ) {}
 
   /**
    * Ask this scout from now on — the library's (`findAddon`), or nobody when it has none.
@@ -171,36 +186,102 @@ export class Availability {
     scout: Addon | null,
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
+    authority: AvailabilityAuthority = ['test', null],
   ): void {
-    this.scout = scout ? { base: scout.base, content, fetch: fetchImpl } : null;
+    const connection = ++this.connection;
+    const household = JSON.stringify(authority);
+    if (this.household !== undefined && household !== this.household) this.reset();
+    this.household = household;
+    this.scout = null;
     if (!scout) return;
-    const previous = this.answeredBy;
-    this.answeredBy = scout.base;
-    if (previous !== undefined && scout.base !== previous) {
-      this.generation++;
-      clearTimeout(this.timer);
-      this.timer = undefined;
-      this.request?.abort();
-      this.request = undefined;
-      for (const timer of this.retryTimers) clearTimeout(timer);
-      this.retryTimers.clear();
-      for (const id of this.pending) this.wanted.add(id);
-      this.pending.clear();
-      this.asking = undefined;
-      this.pausedUntil = 0;
-      this.verdicts.clear();
-      this.settled.clear();
-      this.tries.clear();
-      for (const key of this.episodePending) {
-        const [id, season, episode] = key.split(':').map(Number);
-        this.episodeWanted.set(key, { id: id!, season: season!, episode: episode! });
-      }
-      this.episodePending.clear();
-      this.episodeVerdicts.clear();
-      this.episodeAnswers.clear();
-      this.episodeTries.clear();
+    const exact = JSON.stringify([authority, scout.install, scout.base]);
+    if (exact === this.answeredBy && this.storageAuthority) {
+      this.scout = { base: scout.base, content, fetch: fetchImpl };
+      this.gather();
+      return;
     }
+    if (exact !== this.answeredBy) {
+      this.reset();
+      this.answeredBy = exact;
+    }
+    this.scout = { base: scout.base, content, fetch: fetchImpl };
     this.gather();
+    const generation = this.generation;
+    void this.digest(exact).then((digest) => {
+      if (
+        connection !== this.connection ||
+        generation !== this.generation ||
+        exact !== this.answeredBy
+      )
+        return;
+      this.storageAuthority = digest;
+      this.restore(digest);
+      if (this.verdicts.size || this.episodeVerdicts.size) this.keep();
+    });
+  }
+
+  private reset(): void {
+    this.generation++;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.request?.abort();
+    this.request = undefined;
+    for (const timer of this.retryTimers) clearTimeout(timer);
+    this.retryTimers.clear();
+    for (const id of this.pending) this.wanted.add(id);
+    this.pending.clear();
+    this.asking = undefined;
+    this.pausedUntil = 0;
+    this.scout = null;
+    this.answeredBy = undefined;
+    this.storageAuthority = undefined;
+    this.verdicts.clear();
+    this.settled.clear();
+    this.givenAt.clear();
+    this.tries.clear();
+    for (const key of this.episodePending) {
+      const [id, season, episode] = key.split(':').map(Number);
+      this.episodeWanted.set(key, { id: id!, season: season!, episode: episode! });
+    }
+    this.episodePending.clear();
+    this.episodeVerdicts.clear();
+    this.episodeAnswers.clear();
+    this.episodeTries.clear();
+  }
+
+  private restore(authority: string): void {
+    try {
+      const stored = JSON.parse(this.storage?.getItem(STORAGE_KEY) ?? 'null') as Stored | null;
+      if (stored?.version !== STORAGE_VERSION || stored.authority !== authority) {
+        if (stored !== null) this.storage?.removeItem(STORAGE_KEY);
+        return;
+      }
+      for (const [id, row] of Object.entries(stored.verdicts)) {
+        if (!Array.isArray(row)) continue;
+        const [verdict, at] = row;
+        if (
+          (verdict !== 'available' && verdict !== 'unavailable') ||
+          typeof at !== 'number' ||
+          !(this.now() - at < KEPT_MS)
+        )
+          continue;
+        if (id.startsWith('tv:')) {
+          const key = id.slice(3);
+          if (!this.episodeAnswers.get(key)?.settled) {
+            this.episodeVerdicts.set(key, verdict);
+            this.episodeAnswers.set(key, { at, settled: false });
+          }
+        } else if (/^\d+$/.test(id)) {
+          const key = Number(id);
+          if (!this.settled.has(key)) {
+            this.verdicts.set(key, verdict);
+            this.givenAt.set(key, at);
+          }
+        }
+      }
+    } catch {
+      // Unreadable or refused storage: this authority starts without retained verdicts.
+    }
   }
 
   /**
@@ -486,7 +567,8 @@ export class Availability {
 
   /** Scout's verdicts, for the next visit's posters. Unknowns aren't kept: they are asked again anyway. */
   private keep(): void {
-    const kept: Record<string, [Verdict, number]> = {};
+    if (!this.storageAuthority) return;
+    const kept: Kept = {};
     for (const [id, verdict] of this.verdicts) {
       const at = this.givenAt.get(id);
       if (verdict !== 'unknown' && at !== undefined) kept[id] = [verdict, at];
@@ -496,7 +578,14 @@ export class Availability {
       if (verdict !== 'unknown' && at !== undefined) kept[`tv:${key}`] = [verdict, at];
     }
     try {
-      this.storage?.setItem(STORAGE_KEY, JSON.stringify(kept));
+      this.storage?.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          version: STORAGE_VERSION,
+          authority: this.storageAuthority,
+          verdicts: kept,
+        }),
+      );
     } catch {
       // Refused storage: the verdicts are this visit's.
     }

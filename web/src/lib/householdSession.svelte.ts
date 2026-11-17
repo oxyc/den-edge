@@ -40,7 +40,10 @@ export class HouseholdSession {
     this.#identity = identity;
     this.#model = model;
     this.policy = profilePolicy(model);
-    this.services = new SessionServices(model, content);
+    this.services = new SessionServices(model, content, undefined, undefined, () => [
+      this.#identity.kind,
+      this.#identity.libraryKey,
+    ]);
   }
 
   get identity(): HouseholdIdentity {

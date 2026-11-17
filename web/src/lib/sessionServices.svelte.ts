@@ -1,7 +1,7 @@
 // Session-scoped provider discovery. Durable inputs and retained results belong to LibraryModel; this class only
 // owns the live probes and the render-facing addresses they discover.
 
-import { availability } from './availability.svelte';
+import { availability, type AvailabilityAuthority } from './availability.svelte';
 import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
@@ -15,6 +15,7 @@ import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { GrantRefreshOutcome } from './grants.svelte';
+import { relayFetch } from './relayFetch';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
 type Grants = {
@@ -82,6 +83,7 @@ export class SessionServices {
     private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes | null> = fetchRoutesForDiscovery,
     private readonly grants: Grants = guestGrants,
+    private readonly availabilityAuthority: () => AvailabilityAuthority = () => ['test', null],
   ) {
     this.#model = model;
   }
@@ -95,6 +97,10 @@ export class SessionServices {
     this.atlasUnreachable = false;
     this.#for = 'invalidated';
     this.#rerun?.();
+  }
+
+  #connectAvailability(scout: Addon | null): void {
+    availability.connect(scout, this.content, relayFetch, this.availabilityAuthority());
   }
 
   /**
@@ -163,7 +169,7 @@ export class SessionServices {
     if (this.scout && !retainsScout(this.scout.install, visiblePlugins)) {
       this.scout = null;
       this.debrid = null;
-      if (this.#foregroundReady) availability.connect(null, this.content);
+      if (this.#foregroundReady) this.#connectAvailability(null);
     }
     if (this.#grantsRefreshing) return;
     if (this.#verifiedGrantsFor === grantsFor)
@@ -248,7 +254,7 @@ export class SessionServices {
     this.remux = null;
     this.remuxAway = false;
     this.remuxBlocked = false;
-    if (this.#foregroundReady) availability.connect(null, this.content);
+    if (this.#foregroundReady) this.#connectAvailability(null);
   }
 
   #configure(
@@ -257,7 +263,7 @@ export class SessionServices {
     remux: string | null,
     shared: readonly string[] = this.grants.pluginUrls(),
   ): void {
-    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
+    if (this.#for === undefined && !this.#foregroundReady) this.#connectAvailability(null);
     this.#rerun = () => this.#configure(library, libraryPlugins, remux, shared);
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
@@ -276,7 +282,7 @@ export class SessionServices {
     if (this.scout && !retainsScout(this.scout.install, plugins)) {
       this.scout = null;
       this.debrid = null;
-      if (this.#foregroundReady) availability.connect(null, this.content);
+      if (this.#foregroundReady) this.#connectAvailability(null);
     }
     let current = true;
     let routeRetry: ReturnType<typeof setTimeout> | undefined;
@@ -317,7 +323,7 @@ export class SessionServices {
               : null;
           this.reel = saved.reel;
           this.remux = saved.remux;
-          if (this.#foregroundReady) availability.connect(this.scout, this.content);
+          if (this.#foregroundReady) this.#connectAvailability(this.scout);
         })
         .catch(() => {
           // Retained discovery is only a first-paint hint; live discovery below remains authoritative.
@@ -369,7 +375,7 @@ export class SessionServices {
               scout: (found: Addon | null) => {
                 if (!current) return;
                 this.scout = found;
-                if (this.#foregroundReady) availability.connect(found, this.content);
+                if (this.#foregroundReady) this.#connectAvailability(found);
                 if (found)
                   void readDebridState(found).then((state) => {
                     if (current && this.scout === found) this.debrid = state;
@@ -421,7 +427,7 @@ export class SessionServices {
     if (this.#foregroundReady) return;
     this.#foregroundReady = true;
     if (this.#grantRetryNeeded) this.#scheduleGrantRetry();
-    availability.connect(this.scout, this.content);
+    this.#connectAvailability(this.scout);
   }
 
   stop(): void {

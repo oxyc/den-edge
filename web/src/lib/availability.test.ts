@@ -10,6 +10,8 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 
 const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', base: '/scout/sealed-cfg' };
+const HOUSEHOLD_A = ['profiles', 'household-a'] as const;
+const HOUSEHOLD_B = ['profiles', 'household-b'] as const;
 
 const contentQuery = async (request: { kind: string; title?: { id: number } }) => ({
   kind: 'title.external-id' as const,
@@ -37,8 +39,21 @@ function fake(verdicts: () => Record<string, string>) {
 }
 
 describe('Availability', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (_algorithm, input) => {
+      const bytes = new Uint8Array(input as ArrayBuffer);
+      const digest = new Uint8Array(32);
+      let hash = 0;
+      for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193);
+      digest.fill(hash & 0xff);
+      return digest.buffer;
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('batches movie and resolved episode IDs, fades only unavailable, and retries unknown', async () => {
     let second = 'unknown';
@@ -50,6 +65,7 @@ describe('Availability', () => {
     }));
     const availability = new Availability();
     availability.connect(SCOUT, content, fetchImpl);
+    await vi.advanceTimersByTimeAsync(0);
     for (const id of [1, 2, 3, 404]) availability.want({ type: 'movie', id });
     availability.want({ type: 'tv', id: 5 });
     await vi.advanceTimersByTimeAsync(100);
@@ -84,6 +100,7 @@ describe('Availability', () => {
     };
     const availability = new Availability();
     availability.connect(SCOUT, content, fetchImpl);
+    await vi.advanceTimersByTimeAsync(0);
     for (let id = 1; id <= 101; id++)
       availability.want({ type: 'movie', id, imdbId: `tt${String(id).padStart(7, '0')}` });
     availability.want({
@@ -121,32 +138,82 @@ describe('Availability', () => {
     expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
   });
 
-  it('fades what the last day found at once, still asks scout, and keeps its answer', async () => {
+  it('restores only an exact scoped row after authority is known and discards legacy storage', async () => {
     const data = new Map<string, string>();
     const storage = {
       getItem: (k: string) => data.get(k) ?? null,
       setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
     } as Storage;
     const now = 5 * KEPT_MS;
     data.set(
       'den.availability',
       JSON.stringify({ 1: ['unavailable', now - 1000], 2: ['unavailable', now - KEPT_MS - 1] }),
     );
-    const { calls, fetchImpl } = fake(() => ({ tt0000001: 'available', tt0000002: 'available' }));
-    const availability = new Availability(storage, () => now);
-    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
-    expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(false);
-
-    availability.connect(SCOUT, content, fetchImpl);
-    availability.want({ type: 'movie', id: 1 });
-    availability.want({ type: 'movie', id: 2 });
+    const { fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
+    const first = new Availability(storage, () => now);
+    expect(first.unavailable({ type: 'movie', id: 1 }), 'nothing before authority').toBe(false);
+    first.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(data.has('den.availability'), 'legacy owner is unknowable').toBe(false);
+    first.want({ type: 'movie', id: 1 });
     await vi.advanceTimersByTimeAsync(100);
-    expect(calls.filter((c) => c.url.endsWith('/availability'))).toHaveLength(1);
-    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(false);
-    expect(JSON.parse(data.get('den.availability')!)).toEqual({
-      1: ['available', now],
-      2: ['available', now],
-    });
+    expect(first.unavailable({ type: 'movie', id: 1 })).toBe(true);
+
+    const reloaded = new Availability(storage, () => now);
+    expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'still unknown before connect').toBe(
+      false,
+    );
+    reloaded.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'exact authority restores').toBe(true);
+
+    const other = new Availability(storage, () => now);
+    other.connect(SCOUT, content, fetchImpl, HOUSEHOLD_B);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(other.unavailable({ type: 'movie', id: 1 }), 'other household fails closed').toBe(false);
+    expect(JSON.stringify([...data.entries()])).not.toContain('household-a');
+    expect(JSON.stringify([...data.entries()])).not.toContain('sealed-cfg');
+  });
+
+  it('fences held A work and timers across A→B→A while preserving same-authority warmth', async () => {
+    let releaseA!: (response: Response) => void;
+    const heldA = new Promise<Response>((resolve) => (releaseA = resolve));
+    const calls: string[] = [];
+    const aFetch: typeof fetch = async () => {
+      calls.push('A');
+      return heldA;
+    };
+    const bFetch: typeof fetch = async () => {
+      calls.push('B');
+      return new Response('{"error":"busy"}', {
+        status: 429,
+        headers: { 'retry-after': '60' },
+      });
+    };
+    const finalFetch: typeof fetch = async () => {
+      calls.push('A2');
+      return Response.json({ availability: { tt7654321: 'available' } });
+    };
+    const availability = new Availability();
+    const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
+    availability.connect(SCOUT, content, aFetch, HOUSEHOLD_A);
+    await vi.advanceTimersByTimeAsync(0);
+    availability.want(movie);
+    await vi.advanceTimersByTimeAsync(100);
+    availability.connect(SCOUT, content, bFetch, HOUSEHOLD_B);
+    await vi.advanceTimersByTimeAsync(100);
+    availability.connect(SCOUT, content, finalFetch, HOUSEHOLD_A);
+    await vi.advanceTimersByTimeAsync(100);
+    releaseA(Response.json({ availability: { tt7654321: 'unavailable' } }));
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['A', 'B', 'A2']);
+    expect(availability.unavailable(movie), 'late A and B refusal cannot own final A').toBe(false);
+    availability.connect(null, content, finalFetch, HOUSEHOLD_A);
+    availability.connect(SCOUT, content, finalFetch, HOUSEHOLD_A);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls, 'same authority does not request an available verdict again').toHaveLength(3);
   });
 
   it('asks again about "nothing to play" once scout itself would have checked again, and never about "available"', async () => {
@@ -212,6 +279,40 @@ describe('Availability', () => {
     availability.connect(SCOUT, content, fetchImpl);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.some((c) => c.url === '/scout/sealed-cfg/availability')).toBe(true);
+  });
+
+  it('does not restore or ask when no Scout supersedes a held authority digest', async () => {
+    let release!: (scope: string) => void;
+    const digest = new Promise<string>((resolve) => (release = resolve));
+    const { calls, fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
+    const availability = new Availability(undefined, Date.now, () => digest);
+    availability.want({ type: 'movie', id: 1 });
+    availability.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    availability.connect(null, content, fetchImpl, HOUSEHOLD_A);
+    release('held-a');
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(calls).toEqual([]);
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(false);
+  });
+
+  it('fails closed when scoped storage is unreadable or refuses writes', async () => {
+    const storage = {
+      getItem: () => {
+        throw new Error('blocked');
+      },
+      setItem: () => {
+        throw new Error('blocked');
+      },
+    } as unknown as Storage;
+    const { fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
+    const availability = new Availability(storage);
+    availability.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    availability.want({ type: 'movie', id: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
+    expect(() => availability.confirm({ type: 'movie', id: 1 }, undefined, true)).not.toThrow();
   });
 
   it('does not duplicate an in-flight ask when a windowed poster remounts', async () => {
@@ -422,6 +523,7 @@ describe('Availability — series', () => {
     const { calls, fetchImpl } = scout(unavailable);
     const availability = new Availability();
     availability.connect(SCOUT, seriesContent, fetchImpl);
+    await vi.advanceTimersByTimeAsync(0);
     availability.want(andersson);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toEqual([[ID(1, 1)]]);
@@ -522,16 +624,24 @@ describe('Availability — series', () => {
     const storage = {
       getItem: (k: string) => data.get(k) ?? null,
       setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
     } as Storage;
     const { fetchImpl } = scout(unavailable);
     const availability = new Availability(storage);
     availability.connect(SCOUT, seriesContent, fetchImpl);
+    await vi.advanceTimersByTimeAsync(0);
     availability.want(andersson);
     await vi.advanceTimersByTimeAsync(100);
-    expect(new Availability(storage).unavailable(andersson), 'kept').toBe(true);
+    const kept = new Availability(storage);
+    kept.connect(SCOUT, seriesContent, fetchImpl);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kept.unavailable(andersson), 'kept').toBe(true);
 
     availability.confirm(andersson, { season: 1, episode: 1 }, true);
     expect(availability.unavailable(andersson)).toBe(false);
-    expect(new Availability(storage).unavailable(andersson)).toBe(false);
+    const healed = new Availability(storage);
+    healed.connect(SCOUT, seriesContent, fetchImpl);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(healed.unavailable(andersson)).toBe(false);
   });
 });
