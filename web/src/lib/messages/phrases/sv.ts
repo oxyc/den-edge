@@ -696,6 +696,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'of what you’ve already marked seen were skipped.':
     'av det du redan har markerat sett hoppades över.',
   Off: 'Av',
+  Offline: 'Offline',
   'Off.': 'Av.',
   omdb: 'omdb',
   'OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings on detail pages (free key at omdbapi.com). Without one, Den shows the ratings it already keeps for a title.':
@@ -1143,8 +1144,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   TMDB: 'TMDB',
   'TMDB has no IMDb record for this title, so sources can’t be matched yet.':
     'TMDB har ingen IMDb-post för denna titel, så källor kan inte matchas ännu.',
-  'TMDB is limiting requests. Try again shortly.':
-    'TMDB begränsar förfrågningar. Försök igen snart.',
+  'TMDB rate limit. Try again shortly.': 'TMDB:s anropsgräns. Försök igen snart.',
   'TMDB key': 'TMDB nyckel',
   to: 'till',
   'to browse sources.': 'för att bläddra i källor.',
