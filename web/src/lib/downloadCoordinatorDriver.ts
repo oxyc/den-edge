@@ -81,7 +81,7 @@ export class DownloadCoordinatorDriver {
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
   /** Exact Hearth binding, last acknowledged digest and its time. */
-  #hearth: [id: object | null, digest?: string, at?: number] = [null];
+  #hearth: [id?: object | null, digest?: string, at?: number] = [];
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
@@ -94,8 +94,7 @@ export class DownloadCoordinatorDriver {
     // A forced pass (a refresh) is asked for figures from now: the pass in flight began before it, with an older
     // `now`, the rows as they were, and possibly other names, so one more pass follows it, shared by every refresh
     // asked meanwhile, rather than answering with it.
-    if (this.#running && options.force) return this.#after(options);
-    if (this.#running) return this.#running;
+    if (this.#running) return options.force ? this.#after(options) : this.#running;
     const running = this.#run(options);
     this.#running = running;
     const clear = () => {
@@ -114,7 +113,7 @@ export class DownloadCoordinatorDriver {
       const names = waiting.options.names;
       waiting.options = {
         ...waiting.options,
-        names: names && options.names ? new Set([...names, ...options.names]) : undefined,
+        names: names && options.names && new Set([...names, ...options.names]),
       };
       return waiting.pass;
     }
@@ -134,14 +133,15 @@ export class DownloadCoordinatorDriver {
     const downloads = this.queue
       .list()
       .filter((download) => !options.names || options.names.has(download.name));
-    await this.#refresh(downloads, now, options.force ?? false);
-    if (!current()) return false;
     // A final removal still has work to do: clear Hearth's previously acknowledged non-empty list. Once that clear
     // is acknowledged there is no reason to acquire an otherwise idle download lease.
-    if (!downloads.length && (this.#hearth[0] === null || this.#hearth[1] === '[]')) return false;
+    await this.#refresh(downloads, now, !!options.force);
+    if (!current() || (!downloads.length && (!this.#hearth[0] || this.#hearth[1] === '[]')))
+      return false;
     await ensureDeferredSyncPolicy();
-    if (!(await this.#holdLease(now, options.observedFor)) || !current()) return false;
-    return this.#holderPass(now);
+    return (await this.#holdLease(now, options.observedFor)) && current()
+      ? this.#holderPass(now)
+      : false;
   }
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
