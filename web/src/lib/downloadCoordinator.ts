@@ -72,6 +72,12 @@ export interface DownloadStatus {
   announce: boolean;
 }
 
+export const downloadPollable = (state: DownloadStatus['state'], skipReady = true): boolean =>
+  (!skipReady || state !== 'ready') &&
+  state !== 'no_working_release' &&
+  state !== 'release_gone' &&
+  state !== 'paused';
+
 /**
  * `fresh` asks scout to rebuild the list past its caches (`?fresh=1`), for a viewer checking again by hand. `early` is a
  * list a viewer is looking at, which scout may answer before its slowest indexer (`fetchSourceList`).
@@ -113,7 +119,7 @@ export interface DownloadCoordinatorEffects {
   /** Maps a persisted ticket to one this service instance can reach. */
   ticket(url: string): string | null;
   /** Hand Hearth the wanted list and read back what it started (`hearthWanted`); absent with no Hearth. */
-  wanted?(items: WantedItem[]): Promise<WantedStatus[] | null>;
+  wanted?(items: WantedItem[], authority: object): Promise<WantedStatus[] | null>;
 }
 
 export interface DownloadCoordinatorOptions {
@@ -138,8 +144,8 @@ const sourceKey = (content: string, early: boolean) => (early ? `${content}\near
 export class DownloadCoordinator {
   readonly answers = new Map<string, Preparation>();
   /** By `raceKey`: den-scout's latest word on each race entry, and the ticket this instance reaches it by. */
-  readonly entryAnswers = new Map<string, Preparation>();
-  readonly entryUrls = new Map<string, string>();
+  readonly ea = new Map<string, Preparation>();
+  readonly eu = new Map<string, string>();
   readonly clocks = new Map<string, StallClock>();
   readonly urls = new Map<string, string>();
   readonly lapsed = new Set<string>();
@@ -365,12 +371,9 @@ export class DownloadCoordinator {
 
   async remove(download: Download, cancel: boolean): Promise<boolean> {
     if (cancel) {
-      if (!(await this.cancelIfSafe(download))) return false;
+      if (!(await this.cs(download))) return false;
       for (const entry of download.race.entries)
-        if (
-          !(await this.cancelEntryIfSafe(download, entry.identity, this.entryUrl(download, entry)))
-        )
-          return false;
+        if (!(await this.ce(download, entry.identity, this.er(download, entry)))) return false;
     }
     const current = this.log.settings(download.name);
     if (!current) return true;
@@ -379,7 +382,7 @@ export class DownloadCoordinator {
     this.answers.delete(download.name);
     this.clocks.delete(download.name);
     this.urls.delete(download.name);
-    this.clearEntries(download.name);
+    this.clear(download.name);
     this.changed();
     return true;
   }
@@ -533,13 +536,13 @@ export class DownloadCoordinator {
     }
   }
 
-  async tryReleaseIdentity(download: Download, identity: string): Promise<boolean> {
+  async ri(download: Download, identity: string): Promise<boolean> {
     const { sources } = await this.sourcesForTitle(download.title);
     const source = sources?.find((candidate) => candidate.identity === identity);
     return source ? this.tryRelease(download, source) : false;
   }
 
-  urlFor(download: Download): string | null {
+  ur(download: Download): string | null {
     return this.urls.get(download.name) ?? this.effects.ticket(download.release.url);
   }
 
@@ -554,7 +557,7 @@ export class DownloadCoordinator {
   async poll(download: Download): Promise<Preparation> {
     const pending = this.#pending.get(download.name);
     if (pending) return pending;
-    const url = this.urlFor(download);
+    const url = this.ur(download);
     if (!url) {
       const expired: Preparation = { state: 'expired', message: FOREIGN };
       this.answers.set(download.name, expired);
@@ -587,19 +590,19 @@ export class DownloadCoordinator {
   /** Add a race entry at the debrid, as a prefetch. A refusal (`refused`) is its active-download limit. */
   async addEntry(name: string, identity: string, url: string): Promise<Preparation> {
     const key = raceKey(name, identity);
-    this.entryUrls.set(key, url);
+    this.eu.set(key, url);
     const answer = await this.effects.prepare(url, true, true);
-    if (this.entryUrls.get(key) === url) this.entryAnswers.set(key, answer);
+    if (this.eu.get(key) === url) this.ea.set(key, answer);
     this.changed();
     return answer;
   }
 
   /** The ticket this instance reaches a race entry by, without asking anyone. */
-  entryUrl(download: Download, entry: DownloadRaceEntry): string | null {
+  er(download: Download, entry: DownloadRaceEntry): string | null {
     const key = raceKey(download.name, entry.identity);
     const observation = this.#entryObservation(download, entry);
     return (
-      this.entryUrls.get(key) ??
+      this.eu.get(key) ??
       (this.#entryRecovery.get(key)?.observation === observation
         ? null
         : this.effects.ticket(entry.url))
@@ -619,7 +622,7 @@ export class DownloadCoordinator {
     );
   }
 
-  entryRecoveryHeld(download: Download, entry: DownloadRaceEntry, now = this.now()): boolean {
+  rh(download: Download, entry: DownloadRaceEntry, now = this.now()): boolean {
     const held = this.#entryRecovery.get(raceKey(download.name, entry.identity));
     return (
       held?.observation === this.#entryObservation(download, entry) &&
@@ -639,12 +642,12 @@ export class DownloadCoordinator {
    * The ticket for a race entry, renewed from a fresh resolve when this instance can't reach the written one; `gone`
    * when a full answer no longer lists it, undefined when no answer settles it.
    */
-  async renewEntryUrl(
+  async ru(
     download: Download,
     entry: DownloadRaceEntry,
     options: { requireComplete?: boolean; current?: () => boolean } = {},
   ): Promise<string | 'gone' | undefined> {
-    const known = this.entryUrl(download, entry);
+    const known = this.er(download, entry);
     if (known) return known;
     const { sources, answer } = await this.sourcesForTitle(download.title, true);
     if (options.current && (!options.current() || !this.#entryCurrent(download, entry)))
@@ -653,7 +656,7 @@ export class DownloadCoordinator {
     if (options.requireComplete && !sourceAnswerComplete(answer)) return undefined;
     const same = sources.find((source) => source.identity === entry.identity);
     if (same) {
-      this.entryUrls.set(raceKey(download.name, entry.identity), same.url);
+      this.eu.set(raceKey(download.name, entry.identity), same.url);
       return same.url;
     }
     return answer?.kind === 'partial' || answer?.kind === 'unknown' || answer?.outage
@@ -677,19 +680,19 @@ export class DownloadCoordinator {
       const held = this.#entryRecovery.get(key);
       if (held && held.observation !== observation) {
         this.#entryRecovery.delete(key);
-        this.entryAnswers.delete(key);
-        this.entryUrls.delete(key);
+        this.ea.delete(key);
+        this.eu.delete(key);
       }
-      if (this.entryRecoveryHeld(download, entry, now)) return undefined;
+      if (this.rh(download, entry, now)) return undefined;
       let renewed = false;
       while (current() && this.#entryCurrent(download, entry)) {
         const expired = this.#entryRecovery.get(key)?.observation === observation;
         const url = expired
-          ? await this.renewEntryUrl(download, entry, {
+          ? await this.ru(download, entry, {
               requireComplete: true,
               current,
             })
-          : this.entryUrl(download, entry);
+          : this.er(download, entry);
         if (!current() || !this.#entryCurrent(download, entry)) return undefined;
         if (url === 'gone') return { state: 'failed', message: GONE } satisfies Preparation;
         if (!url) {
@@ -702,8 +705,8 @@ export class DownloadCoordinator {
           this.#entryRecovery.delete(key);
           return answer;
         }
-        this.entryAnswers.delete(key);
-        this.entryUrls.delete(key);
+        this.ea.delete(key);
+        this.eu.delete(key);
         this.#entryRecovery.set(key, { observation });
         if (renewed) {
           this.#holdEntryRecovery(download, entry, now);
@@ -716,7 +719,7 @@ export class DownloadCoordinator {
     this.#entryPolls.set(key, run);
     try {
       const answer = await run;
-      if (answer && this.#entryPolls.get(key) === run) this.entryAnswers.set(key, answer);
+      if (answer && this.#entryPolls.get(key) === run) this.ea.set(key, answer);
       return answer;
     } finally {
       if (this.#entryPolls.get(key) === run) this.#entryPolls.delete(key);
@@ -724,25 +727,25 @@ export class DownloadCoordinator {
   }
 
   /** A race entry that won becomes the row's release: its answer and ticket move with it. */
-  promoteEntry(download: Download, entry: DownloadRaceEntry): void {
+  pe(download: Download, entry: DownloadRaceEntry): void {
     const key = raceKey(download.name, entry.identity);
-    const answer = this.entryAnswers.get(key);
-    const url = this.entryUrls.get(key) ?? this.effects.ticket(entry.url);
+    const answer = this.ea.get(key);
+    const url = this.eu.get(key) ?? this.effects.ticket(entry.url);
     if (answer) this.answers.set(download.name, answer);
     if (url) this.urls.set(download.name, url);
-    this.forgetEntry(download.name, entry.identity);
+    this.fe(download.name, entry.identity);
   }
 
-  forgetEntry(name: string, identity: string): void {
+  fe(name: string, identity: string): void {
     const key = raceKey(name, identity);
-    this.entryAnswers.delete(key);
-    this.entryUrls.delete(key);
+    this.ea.delete(key);
+    this.eu.delete(key);
     this.#entryPolls.delete(key);
     this.#entryRecovery.delete(key);
   }
 
-  clearEntries(name: string): void {
-    for (const map of [this.entryAnswers, this.entryUrls, this.#entryPolls, this.#entryRecovery])
+  clear(name: string): void {
+    for (const map of [this.ea, this.eu, this.#entryPolls, this.#entryRecovery])
       for (const key of [...map.keys()]) if (key.startsWith(`${name}\n`)) map.delete(key);
   }
 
@@ -760,17 +763,13 @@ export class DownloadCoordinator {
     }
   }
 
-  async cancelIfSafe(download: Download): Promise<boolean> {
-    const url = this.urlFor(download);
+  async cs(download: Download): Promise<boolean> {
+    const url = this.ur(download);
     return !this.#cancelSafe(download) || !url || this.effects.cancel(url, false);
   }
 
   /** Cancel one release the row races, unless another row still names or races it (`download_cancel_safe`). */
-  async cancelEntryIfSafe(
-    download: Download,
-    identity: string,
-    url: string | null,
-  ): Promise<boolean> {
+  async ce(download: Download, identity: string, url: string | null): Promise<boolean> {
     return !this.#cancelSafe(download, identity) || !url || this.effects.cancel(url, false);
   }
 }

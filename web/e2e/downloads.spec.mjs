@@ -656,6 +656,10 @@ test('a season download keeps every episode until it can be fetched', async ({ p
 
   await page.reload();
   await expect(card(3)).toContainText('Searching for a release');
+  // Settle the reopened page's first pass before fake time moves. Otherwise a slow deferred-policy import can leave
+  // its lease observation in flight until after the jump, when two immediate passes correctly have not observed the
+  // old window for long enough to replace it.
+  await page.evaluate(() => window.downloadsFixture.refresh());
 
   // The season pack gets seeded. The next search after the first wait (12–18 minutes) starts it, unasked.
   listed[3] = [seasonPack()];
