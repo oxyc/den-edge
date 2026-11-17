@@ -8,6 +8,7 @@ import { EARLY_ANSWER_HEADER } from './sourceAnswer';
 import { directSubtitles } from './directSubtitles';
 import { apiUrl, serviceOrigin } from './runtimeUrl';
 import { debridPlayCodeOf, type DebridPlayCode } from './debridStatus';
+import { withDeadline } from './abortableDelay';
 
 /** Longer than Edge's route-specific 130 s bound; the caller may still cancel an obsolete attempt immediately. */
 export const PLAYBACK_ANSWER_MS = 150_000;
@@ -382,7 +383,6 @@ export async function startPlayback(
   for (let attempt = 0; attempt < 2; attempt++) {
     let response: Response;
     try {
-      const deadline = AbortSignal.timeout(PLAYBACK_ANSWER_MS);
       response = await fetchImpl(url, {
         method: 'POST',
         headers: {
@@ -395,7 +395,7 @@ export async function startPlayback(
         },
         body,
         cache: 'no-store',
-        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+        signal: withDeadline(PLAYBACK_ANSWER_MS, signal),
       });
     } catch {
       if (signal?.aborted || attempt > 0) return { failure: 'unreachable' };

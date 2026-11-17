@@ -11,6 +11,7 @@ export { PlaybackReceiptStatus };
 import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
+import { abortableDelay, withDeadline } from './abortableDelay';
 
 /**
  * §5 *Renewal*: the grants whose connection den-edge still lists, handed to the library service to renew (it renews
@@ -146,7 +147,7 @@ export async function drainQueue(
       method: 'POST',
       cache: 'no-store',
       ...(queue ? { headers: { 'content-type': 'application/json' }, body: queue.body } : {}),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(DRAIN_MS)]),
+      signal: withDeadline(DRAIN_MS, signal),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as { messages?: unknown };
@@ -173,9 +174,7 @@ export async function ackQueue(
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ upTo }),
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
-        : AbortSignal.timeout(15_000),
+      signal: withDeadline(15_000, signal),
     });
     return res.ok;
   } catch {
@@ -337,7 +336,7 @@ export function publishWhileOpen(
   },
   signal: AbortSignal,
 ): Promise<void> {
-  const sleep = loop.sleep ?? pause;
+  const sleep = loop.sleep ?? abortableDelay;
   return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
     while (!signal.aborted) {
       try {
@@ -363,19 +362,6 @@ export interface DrainLoop {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
-const pause = (ms: number, signal: AbortSignal) =>
-  signal.aborted
-    ? Promise.resolve()
-    : new Promise<void>((resolve) => {
-        const timer = setTimeout(done, ms);
-        function done() {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', done);
-          resolve();
-        }
-        signal.addEventListener('abort', done, { once: true });
-      });
-
 /**
  * Drain the library's assistant queue while `signal` stands: at once, then held (`?wait=`). One tab of this browser
  * drains a library at a time (a Web Lock); another takes over when it closes. Another device draining at once is
@@ -388,7 +374,7 @@ export function drainWhileOpen(loop: DrainLoop, signal: AbortSignal): Promise<vo
 }
 
 async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  const sleep = loop.sleep ?? pause;
+  const sleep = loop.sleep ?? abortableDelay;
   const fetchImpl = loop.fetchImpl ?? relayFetch;
   /** The drop-box key last given to den-edge in this session; it is given again when the library's changes. */
   let put: string | null = null;

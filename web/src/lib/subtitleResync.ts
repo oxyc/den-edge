@@ -1,6 +1,7 @@
 import type { Session } from './remux';
 import { relayFetch } from './relayFetch';
 import { apiUrl, serviceOrigin } from './runtimeUrl';
+import { withDeadline } from './abortableDelay';
 
 type Subtitle = NonNullable<Session['subtitles']>[number];
 const DEADLINE_MS = 130_000;
@@ -67,7 +68,7 @@ async function request(
   if (!Number.isSafeInteger(track.rendition) || track.rendition! < 0 || !track.resyncSupported)
     throw new Error('unavailable');
   const url = controlUrl(session);
-  const bounded = AbortSignal.any([signal, AbortSignal.timeout(DEADLINE_MS)]);
+  const bounded = withDeadline(DEADLINE_MS, signal);
   const response = await fetchImpl(url.href, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },

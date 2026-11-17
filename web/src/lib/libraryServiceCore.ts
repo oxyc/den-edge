@@ -190,7 +190,7 @@ export class LibraryServiceCore {
     ) {
       const admitted = this.#requests;
       let controller: AbortController | undefined;
-      let ownedRequestId: string | undefined;
+      let ownedRequestId!: string;
       if (isDownloadSourcesRequest(input) || isAssistantPublish(input)) {
         controller = new AbortController();
         ownedRequestId = input.requestId;
@@ -199,11 +199,7 @@ export class LibraryServiceCore {
       const work = admitted
         .then(() => this.#dispatch(input, controller?.signal))
         .finally(() => {
-          if (
-            controller &&
-            ownedRequestId &&
-            this.#requestControllers.get(ownedRequestId) === controller
-          )
+          if (controller && this.#requestControllers.get(ownedRequestId) === controller)
             this.#requestControllers.delete(ownedRequestId);
         });
       this.#providerWork.add(work);
@@ -659,14 +655,13 @@ function isSourceWaitRequest(
 function isAssistantPublish(
   input: unknown,
 ): input is Extract<LibraryServiceClientMessage, { type: 'task' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as {
+  const request = input as null | {
     type?: unknown;
     requestId?: unknown;
     task?: { kind?: unknown };
   };
   return (
-    request.type === 'task' &&
+    request?.type === 'task' &&
     typeof request.requestId === 'string' &&
     request.task?.kind === 'assistant.publish'
   );
