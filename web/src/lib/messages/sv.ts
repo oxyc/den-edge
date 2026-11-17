@@ -12,6 +12,12 @@ export const messages = {
   'nav.search': 'Sök',
   'nav.loadingLibrary': 'Läser in ditt bibliotek',
   'nav.libraryReady': 'Biblioteket är klart',
+  'error.pagerOffline':
+    'Det gick inte att ladda den här sidan. Kontrollera att den här enheten är online.',
+  'error.pagerRateLimited':
+    'TMDB begränsar tillfälligt förfrågningar. Vissa titlar kan saknas; försök igen efter en kort väntan.',
+  'error.pagerUnavailable': 'Tjänsterna är inte tillgängliga',
+  'error.pagerUnknown': 'Det gick inte att ladda',
   'settings.title': 'Inställningar',
   'settings.section.playback': 'Uppspelning',
   'settings.section.content': 'Innehåll',

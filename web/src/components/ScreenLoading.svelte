@@ -1,7 +1,7 @@
 <!-- What a page shows while its screen's chunk loads (`screens.svelte.ts`), and when it could not: a spinner that
      never ends would say the page is on its way when nothing is fetching it. -->
 <script lang="ts">
-  import { i18n, OFFLINE_PAGE } from '../lib/i18n.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   import Loading from './Loading.svelte';
   import { swapFailedScreen } from '../lib/release';
@@ -23,7 +23,7 @@
 </script>
 
 {#if screen.failed}
-  <p class="note">{i18n.phrase(OFFLINE_PAGE)}</p>
+  <p class="note">{i18n.text('error.pagerOffline')}</p>
   <button class="more" onclick={() => void screen.load()}>Try again</button>
 {:else}
   <Loading label="Loading" {page} />

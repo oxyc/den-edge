@@ -262,7 +262,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'couldn’t be matched': 'no se pudo igualar',
   'couldn’t be matched safely': 'no se pudo emparejar de forma segura',
   'Couldn’t finish': 'No pude terminar',
-  'Couldn’t load': 'No se pudo cargar',
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'No se pudieron cargar los episodios. No se marcó ninguno como visto.',
   'Couldn’t remove that download. Try again.':
@@ -289,8 +288,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load releases.': 'No se pudieron cargar las versiones.',
   'Couldn’t load the filmography.': 'No se pudo cargar la filmografía.',
   'Couldn’t load these. Try again': 'No se pudieron cargar estos. Inténtalo de nuevo',
-  'Couldn’t load this page. Check that this device is online.':
-    'No se pudo cargar esta página. Compruebe que este dispositivo esté en línea.',
   'Couldn’t load this person from TMDB.': 'No se pudo cargar a esta persona desde TMDB.',
   'Couldn’t load this season from TMDB.': 'No se pudo cargar esta temporada desde TMDB.',
   'Couldn’t load this title from TMDB.': 'No se pudo cargar este título desde TMDB.',
@@ -950,7 +947,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Series details': 'Detalles de la serie',
   'server?': 'servidor?',
   Services: 'Servicios',
-  'Services unavailable': 'Servicios no disponibles',
   'Services are licensed per country, so pick them by country. Each becomes a brand tile on Home, opening that country’s catalogue. Every pick shares the one shelf, and a tile says which country it is for when you have picked the same service twice. The “where to watch” badges on individual titles still follow your own region.':
     'Los servicios tienen licencia por país, así que selecciónelos por país. Cada uno se convierte en un mosaico de marca en Inicio, abriendo el catálogo de ese país. Cada elección comparte un estante y un mosaico indica para qué país es cuando ha elegido el mismo servicio dos veces. Las insignias de “dónde mirar” en títulos individuales siguen dependiendo de tu propia región.',
   'Set an Owner PIN': 'Establecer un PIN de propietario',
@@ -1160,8 +1156,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   TMDB: 'ZXQMARCA15ZXQ',
   'TMDB has no IMDb record for this title, so sources can’t be matched yet.':
     'TMDB no tiene registros de IMDb para este título, por lo que aún no se pueden comparar las fuentes.',
-  'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.':
-    'TMDB está limitando temporalmente las solicitudes. Es posible que falten algunos títulos; Vuelve a intentarlo después de una breve espera.',
   'TMDB key': 'Llave TMDB',
   to: 'a',
   'to browse sources.': 'para buscar fuentes.',

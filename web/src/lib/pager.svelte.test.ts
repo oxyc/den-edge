@@ -110,25 +110,23 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
-    expect(pager.failed).toBe('Couldn’t load');
+    expect(pager.failed).toBe('error.pagerUnknown');
     expect(pager.page + 1).toBe(1);
   });
 
   it.each([
-    [
-      'rate-limited',
-      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
-    ],
-    ['unavailable', 'Services unavailable'],
-    ['internal', 'Services unavailable'],
-    ['refused', 'Couldn’t load'],
-  ] as const)('keeps only a safe %s service reason', async (code, reason) => {
+    ['rate-limited', true, 'error.pagerRateLimited'],
+    ['unavailable', true, 'error.pagerUnavailable'],
+    ['internal', true, 'error.pagerUnavailable'],
+    ['not-ready', false, 'error.pagerUnavailable'],
+    ['refused', false, 'error.pagerUnknown'],
+  ] as const)('keeps only a safe %s service reason', async (code, retryable, reason) => {
     const pager = new Pager(
       async () => {
         throw new ContentServiceError({
           code,
           message: 'secret provider URL and response body',
-          retryable: true,
+          retryable,
         });
       },
       () => true,
@@ -148,7 +146,7 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failed).toBe('Couldn’t load this page. Check that this device is online.');
+    expect(pager.failed).toBe('error.pagerOffline');
     expect(pager.page + 1).toBe(1);
     expect(warning).not.toHaveBeenCalled();
     expect(JSON.stringify(warning.mock.calls)).not.toContain('credential');
@@ -167,7 +165,7 @@ describe('Pager', () => {
     );
     await pager.more();
     await pager.more();
-    expect(pager.failed).toBe('Couldn’t load');
+    expect(pager.failed).toBe('error.pagerUnknown');
     expect(pager.page + 1).toBe(2);
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
@@ -190,11 +188,9 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failed).toBe(
-      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
-    );
+    expect(pager.failed).toBe('error.pagerRateLimited');
     await pager.retry();
-    expect(pager.failed).toBe('Services unavailable');
+    expect(pager.failed).toBe('error.pagerUnavailable');
     expect(pager.page).toBe(0);
   });
 

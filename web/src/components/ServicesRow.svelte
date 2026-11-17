@@ -2,7 +2,7 @@
      until there is a library to pick in. It carries the JustWatch credit for the whole row, since what a tile leads to
      is availability data. A settled failure keeps one quiet placeholder so lower rows do not jump. -->
 <script lang="ts">
-  import { i18n, SERVICES_UNAVAILABLE } from '../lib/i18n.svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import { capitalizeHeading } from '../lib/headingText';
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
@@ -120,7 +120,9 @@
           {/if}
           <span role="status"
             >{i18n.phrase(
-              recovery === 'retrying' ? 'Trying again…' : (empty ?? SERVICES_UNAVAILABLE),
+              recovery === 'retrying'
+                ? 'Trying again…'
+                : (empty ?? i18n.text('error.pagerUnavailable')),
             )}</span
           >
         </span>

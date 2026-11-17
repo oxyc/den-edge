@@ -3,7 +3,6 @@
 // with nothing left to show. This keeps asking while that happens, a few pages at most per go.
 
 import { appendUniqueTitles } from './catalog';
-import { COULDNT_LOAD, OFFLINE_PAGE, SERVICES_UNAVAILABLE, TMDB_LIMITED } from './i18n.svelte';
 import type { Title } from './library';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
@@ -11,7 +10,7 @@ const FILL = 8;
 const MAX_BURST = 3;
 
 export type PagerFailure =
-  typeof OFFLINE_PAGE | typeof TMDB_LIMITED | typeof SERVICES_UNAVAILABLE | typeof COULDNT_LOAD;
+  'error.pagerOffline' | 'error.pagerRateLimited' | 'error.pagerUnavailable' | 'error.pagerUnknown';
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -57,12 +56,13 @@ export class Pager {
           const code = (error as { failure?: { code?: string } } | null)?.failure?.code;
           this.failed =
             globalThis.navigator?.onLine === false
-              ? OFFLINE_PAGE
+              ? 'error.pagerOffline'
               : code === 'rate-limited'
-                ? TMDB_LIMITED
-                : ['unavailable', 'not-ready', 'internal'].includes(code as string)
-                  ? SERVICES_UNAVAILABLE
-                  : COULDNT_LOAD;
+                ? 'error.pagerRateLimited'
+                : (error as { failure?: { retryable?: boolean } } | null)?.failure?.retryable ||
+                    code === 'not-ready'
+                  ? 'error.pagerUnavailable'
+                  : 'error.pagerUnknown';
           this.done = true;
           break;
         }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { i18n, SERVICES_UNAVAILABLE, TMDB_LIMITED } from './lib/i18n.svelte';
+  import { i18n } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onDestroy, tick, untrack } from 'svelte';
@@ -2986,7 +2986,7 @@
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    {i18n.phrase(keptNotice ?? TMDB_LIMITED)}
+    {keptNotice ? i18n.phrase(keptNotice) : i18n.text('error.pagerRateLimited')}
   </p>
 {/if}
 
@@ -3333,7 +3333,7 @@
           !directoryState.pending &&
           !directoryState.services.length &&
           (directoryServices === null || !directoryState.failed)
-            ? SERVICES_UNAVAILABLE
+            ? i18n.text('error.pagerUnavailable')
             : undefined}
           serviceRecovery={directoryState.retrying
             ? 'retrying'
