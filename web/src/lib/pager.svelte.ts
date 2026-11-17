@@ -12,13 +12,6 @@ const MAX_BURST = 3;
 
 export type PagerFailureReason = 'offline' | 'rate-limited' | 'unavailable' | 'unknown';
 
-export interface PagerFailure {
-  /** The page and request generation that failed, so a retry cannot inherit an older request's reason. */
-  page: number;
-  generation: number;
-  reason: PagerFailureReason;
-}
-
 const failureReason = (error: unknown): PagerFailureReason => {
   if (globalThis.navigator?.onLine === false) return 'offline';
   if (!(error instanceof ContentServiceError)) return 'unknown';
@@ -27,6 +20,17 @@ const failureReason = (error: unknown): PagerFailureReason => {
     ? 'unavailable'
     : 'unknown';
 };
+
+const failureCopy: Record<PagerFailureReason, string> = {
+  offline: 'Couldn’t load this page. Check that this device is online.',
+  'rate-limited':
+    'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
+  unavailable: 'Services unavailable',
+  unknown: 'Something went wrong on this page.',
+};
+
+export const pagerFailureCopy = (failure: PagerFailureReason | null): string =>
+  failureCopy[failure ?? 'unknown'];
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -37,14 +41,9 @@ export class Pager {
   exhausted = $state(false);
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
-  /** The exact current request that failed, with only a presentation-safe reason. */
-  failure = $state.raw<PagerFailure | null>(null);
-  /** The list says a page failed and offers `retry`, rather than simply ending. */
-  get failed(): boolean {
-    return this.failure !== null;
-  }
+  /** The current Pager generation's failed `page + 1`, with only a presentation-safe reason. */
+  failure = $state<PagerFailureReason | null>(null);
   #loading = false;
-  #generation = 0;
   readonly #lifetime = new AbortController();
   readonly #load: (page: number, signal?: AbortSignal) => Promise<Title[]>;
   readonly #admitted: (title: Title) => boolean;
@@ -65,7 +64,6 @@ export class Pager {
     try {
       for (let burst = 0; burst < MAX_BURST && !this.done; burst++) {
         const page = this.page + 1;
-        const generation = ++this.#generation;
         try {
           const next = await this.#load(page, signal);
           // A provider may ignore cancellation. Disposal still owns every observable mutation after the await.
@@ -75,9 +73,8 @@ export class Pager {
           if (next.length === 0) this.done = this.exhausted = true;
         } catch (error) {
           if (signal.aborted) break;
-          // Keep raw provider/transport details out of both presentation and ordinary device logs.
-          this.failure = { page, generation, reason: failureReason(error) };
-          console.warn('pager: page failed', page, generation, this.failure.reason);
+          // Keep raw provider/transport details out of presentation and ordinary device logs.
+          this.failure = failureReason(error);
           this.done = true;
           break;
         }
@@ -94,7 +91,7 @@ export class Pager {
 
   /** Ask again for the page that failed, and carry on from there. */
   retry(): Promise<void> {
-    if (!this.failed || this.#loading || this.#lifetime.signal.aborted) return Promise.resolve();
+    if (!this.failure || this.#loading || this.#lifetime.signal.aborted) return Promise.resolve();
     this.failure = null;
     this.done = false;
     return this.more();

@@ -44,7 +44,7 @@ describe('Pager', () => {
 
     expect(a.titles).toEqual([]);
     expect(a.page).toBe(0);
-    expect(a.failed).toBe(false);
+    expect(a.failure).toBeNull();
     expect(b.titles[0]).toEqual(film(200));
     expect(b.page).toBe(1);
   });
@@ -110,8 +110,8 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
-    expect(pager.failed).toBe(true);
-    expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'unknown' });
+    expect(pager.failure).toBe('unknown');
+    expect(pager.page + 1).toBe(1);
   });
 
   it.each([
@@ -131,7 +131,7 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failure?.reason).toBe(reason);
+    expect(pager.failure).toBe(reason);
     expect(JSON.stringify(pager.failure)).not.toContain('secret');
   });
 
@@ -145,8 +145,9 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'offline' });
-    expect(warning.mock.calls).toEqual([['pager: page failed', 1, 1, 'offline']]);
+    expect(pager.failure).toBe('offline');
+    expect(pager.page + 1).toBe(1);
+    expect(warning).not.toHaveBeenCalled();
     expect(JSON.stringify(warning.mock.calls)).not.toContain('credential');
   });
 
@@ -163,21 +164,20 @@ describe('Pager', () => {
     );
     await pager.more();
     await pager.more();
-    expect(pager.failed).toBe(true);
-    expect(pager.failure).toEqual({ page: 2, generation: 2, reason: 'unknown' });
+    expect(pager.failure).toBe('unknown');
+    expect(pager.page + 1).toBe(2);
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
     down = false;
     await pager.retry();
     expect(asked).toEqual([1, 2, 2]);
-    expect(pager.failed).toBe(false);
     expect(pager.failure).toBeNull();
     expect(pager.done).toBe(false);
     expect(pager.titles).toHaveLength(40);
     expect(pager.page).toBe(2);
   });
 
-  it('replaces a repeated failure with the same page and the new request generation', async () => {
+  it('replaces a repeated failure reason for the same page in the current Pager generation', async () => {
     const reasons: Array<'rate-limited' | 'unavailable'> = ['rate-limited', 'unavailable'];
     const pager = new Pager(
       async () => {
@@ -187,9 +187,9 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'rate-limited' });
+    expect(pager.failure).toBe('rate-limited');
     await pager.retry();
-    expect(pager.failure).toEqual({ page: 1, generation: 2, reason: 'unavailable' });
+    expect(pager.failure).toBe('unavailable');
     expect(pager.page).toBe(0);
   });
 

@@ -453,13 +453,13 @@ describe('moreLikeThisRow', () => {
 
     await pager.more();
     await pager.more();
-    expect(pager.failed).toBe(true);
+    expect(pager.failure).toBe('unknown');
     expect(pager.titles.map((title) => title.id)).toEqual(pageOf(100).map((title) => title.id));
 
     pageTwoDown = false;
     await pager.retry();
     expect(asked).toEqual([1, 2, 2]);
-    expect(pager.failed).toBe(false);
+    expect(pager.failure).toBeNull();
     expect(pager.page).toBe(2);
     expect(pager.titles).toHaveLength(40);
     expect(new Set(pager.titles.map((title) => `${title.type}:${title.id}`)).size).toBe(40);
@@ -503,7 +503,7 @@ describe('moreLikeThisRow', () => {
     expect(asked).toEqual([1, 2, 2]);
     expect(obsolete.page).toBe(1);
     expect(obsolete.titles.map((title) => title.id)).toEqual(pageOf(100).map((title) => title.id));
-    expect(obsolete.failed).toBe(false);
+    expect(obsolete.failure).toBeNull();
   });
 
   it('is TMDB’s recommendations alone, and asks atlas nothing, when there is no atlas', async () => {

@@ -37,7 +37,8 @@
   import { contentFilterCounts, contentFilterValues } from '../lib/contentAtlas';
   import type { ExploreType, MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
-  import { Pager } from '../lib/pager.svelte';
+  import { i18n } from '../lib/i18n.svelte';
+  import { Pager, pagerFailureCopy } from '../lib/pager.svelte';
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
   import { FACET, fansOf, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
@@ -710,31 +711,22 @@
         {/if}
         {#if feedHits.length}
           <SearchResults hits={feedHits} onend={() => void feed.pager.more()} />
-        {:else if feed.pager.done && !feed.pager.failed && culprit}
+        {:else if feed.pager.done && !feed.pager.failure && culprit}
           <p class="note empty" role="status">
             No results with {culprit.label}.
             <button type="button" class="clear" onclick={() => pick(culprit.id, false)}
               >Remove {culprit.label}</button
             >
           </p>
-        {:else if feed.pager.done && !feed.pager.failed}
+        {:else if feed.pager.done && !feed.pager.failure}
           <p class="note">Nothing here yet. Try taking a pick out.</p>
         {:else if !feed.pager.done}
           <Loading label="Loading" />
         {/if}
-        {#if feed.pager.failed}
+        {#if feed.pager.failure}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            {#if feed.pager.failure?.reason === 'offline'}
-              Couldn’t load this page. Check that this device is online.
-            {:else if feed.pager.failure?.reason === 'rate-limited'}
-              TMDB is temporarily limiting requests. Some titles may be missing; try again after a
-              short wait.
-            {:else if feed.pager.failure?.reason === 'unavailable'}
-              Services unavailable
-            {:else}
-              Something went wrong on this page.
-            {/if}
+            {i18n.phrase(pagerFailureCopy(feed.pager.failure))}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button
             >

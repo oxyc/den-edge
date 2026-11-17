@@ -17,7 +17,7 @@
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { gatesPlacement } from '../lib/placementGate';
-  import { Pager } from '../lib/pager.svelte';
+  import { Pager, pagerFailureCopy } from '../lib/pager.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
   import PosterRow from './PosterRow.svelte';
@@ -304,9 +304,9 @@
   class="row-window"
   class:placed
   class:near={gatesPlacement && rowNear}
-  class:gone={done && !pager.failed && visible.length === 0}
+  class:gone={done && !pager.failure && visible.length === 0}
   data-row-id={row.id}
-  data-layout-state={pager.failed ? 'error' : pager.page === 0 ? 'pending' : 'settled'}
+  data-layout-state={pager.failure ? 'error' : pager.page === 0 ? 'pending' : 'settled'}
 >
   <PosterRow
     heading={localizedHeading}
@@ -350,19 +350,10 @@
         {#each { length: 6 } as _, i (i)}<span class="skeleton" aria-hidden="true"></span>{/each}
       {/if}
     {/each}
-    {#if pager.failed}
+    {#if pager.failure}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
       <button class="retry" onclick={() => void pager.retry()}>
-        {#if pager.failure?.reason === 'offline'}
-          Couldn’t load this page. Check that this device is online.
-        {:else if pager.failure?.reason === 'rate-limited'}
-          TMDB is temporarily limiting requests. Some titles may be missing; try again after a short
-          wait.
-        {:else if pager.failure?.reason === 'unavailable'}
-          Services unavailable
-        {:else}
-          Something went wrong on this page.
-        {/if}
+        {i18n.phrase(pagerFailureCopy(pager.failure))}
         Try again
       </button>
     {/if}
