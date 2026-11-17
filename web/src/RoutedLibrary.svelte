@@ -1548,7 +1548,7 @@
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
-          console.warn('assistant:membership-wait');
+          console.warn('asst/membership-wait');
           unavailable?.(stop.signal);
           return;
         }
@@ -1570,7 +1570,7 @@
         );
       },
       (error: unknown) => {
-        console.warn('assistant:connection-load', error);
+        console.warn('asst/connection-load', error);
         if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
       },
     );
@@ -1583,7 +1583,7 @@
         void renewListed(
           (grants) => (work.household ?? work.model).renewAssistant(grants),
           work.fetchImpl,
-        ).catch((error: unknown) => console.warn('assistant:grants-renew', error));
+        ).catch((error: unknown) => console.warn('asst/grants-renew', error));
       renew();
       const renewal = setInterval(renew, RENEW_EVERY_MS);
       signal.addEventListener('abort', () => clearInterval(renewal), { once: true });

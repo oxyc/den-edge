@@ -164,22 +164,22 @@ export interface AssistantPort {
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
    * proof: this library's, or `member` (a lent household connection's). A refusal that said how long to wait
    * (`429` with `Retry-After`) answers that wait. */
-  putProjection(
+  put(
     grant: string,
     set: string,
     parts: string[],
     member?: AssistantConnection['member'],
     signal?: AbortSignal,
   ): Promise<boolean | { retryAfterMs: number }>;
-  deleteProjection(
+  drop(
     grant: string,
     member?: AssistantConnection['member'],
     signal?: AbortSignal,
   ): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
   membership(): Promise<AssistantConnection['member'] | null>;
-  loadRecords(): Promise<AssistantRecords | null | undefined>;
-  saveRecords(records: AssistantRecords): Promise<void>;
+  load(): Promise<AssistantRecords | null | undefined>;
+  save(records: AssistantRecords): Promise<void>;
   now(): number;
   /** 32 bytes from the platform's CSPRNG, as hex. */
   random(): string;
@@ -362,6 +362,7 @@ export class LibraryAssistantAuthority {
    */
   async lend(signal?: AbortSignal): Promise<AssistantConnection | null> {
     if (__DEN_TV_LEGACY_JS_CORE__) return null;
+    signal?.throwIfAborted();
     await abortable(this.port.refresh(), signal);
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
       await abortable(this.grants(), signal);
@@ -378,10 +379,10 @@ export class LibraryAssistantAuthority {
 
   async #load(strict = false): Promise<AssistantRecords> {
     try {
-      return readRecords(await this.port.loadRecords());
+      return readRecords(await this.port.load());
     } catch (error) {
       if (strict) throw error;
-      console.warn('assistant:records-read', error);
+      console.warn('asst/records-read', error);
       return { ...EMPTY };
     }
   }
@@ -409,11 +410,11 @@ export class LibraryAssistantAuthority {
       };
       // Losing a record weakens this device against an older row; it is said, never silent.
       if (!readBack)
-        await this.port.saveRecords(next).catch((error: unknown) => {
-          console.error('assistant:records-save', error);
+        await this.port.save(next).catch((error: unknown) => {
+          console.error('asst/records-save', error);
         });
       else {
-        await this.port.saveRecords(next);
+        await this.port.save(next);
         const durable = await this.#load(true);
         for (const [setting, value] of Object.entries(update.receiptApplied ?? {}))
           if (!sameConfigValue(durable.receiptApplied?.[setting], value))
@@ -668,7 +669,7 @@ export class LibraryAssistantAuthority {
     if (this.#dropping.has(grant)) return false;
     this.#dropping.add(grant);
     try {
-      const dropped = await this.port.deleteProjection(grant, lent?.member, signal);
+      const dropped = await this.port.drop(grant, lent?.member, signal);
       signal?.throwIfAborted();
       if (dropped) await this.#remember({ dropped: [grant] });
       return dropped;
@@ -801,7 +802,7 @@ export class LibraryAssistantAuthority {
       signal?.throwIfAborted();
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
-      console.error('assistant:projection-large', error);
+      console.error('asst/projection-large', error);
       // Not tried again until the library changes, or the heartbeat comes round.
       this.#builtFrom = inputs;
       this.#dueAt = now + HEARTBEAT_MS;
@@ -824,7 +825,7 @@ export class LibraryAssistantAuthority {
     let holdUntil = Infinity;
     for (const entry of built.publish) {
       if (now >= sendAt(entry.grant)) {
-        const answer = await this.port.putProjection(
+        const answer = await this.port.put(
           entry.grant,
           entry.set,
           entry.parts,
@@ -953,7 +954,7 @@ export class LibraryAssistantAuthority {
         if (opened.reject === 'from_future') {
           held = Math.min(held, seq);
           // Loud: a clock more than five minutes off is a fault the household should see.
-          console.error('assistant:request-clock-ahead');
+          console.error('asst/request-clock-ahead');
         }
         results.push({ seq, outcome: 'rejected', reason: opened.reject });
         continue;
@@ -970,7 +971,7 @@ export class LibraryAssistantAuthority {
           )),
         );
       } catch (error) {
-        console.warn('assistant:request-apply', error);
+        console.warn('asst/request-apply', error);
         // Nothing of it was kept, so this device must not refuse it as applied when it comes again.
         records = await this.#remember({ prune: [accept.setting] });
         // Neither it nor any request not reached yet is acknowledged: they are delivered again.
@@ -1086,7 +1087,7 @@ export class LibraryAssistantAuthority {
         applied += 1;
         ack = message.seq;
       } catch (error) {
-        console.warn('assistant:receipt-apply', error);
+        console.warn('asst/receipt-apply', error);
         break;
       }
     }
@@ -1170,7 +1171,7 @@ export class LibraryAssistantAuthority {
     try {
       await this.port.replace({ ...row, values });
     } catch (error) {
-      console.warn('assistant:prune', error);
+      console.warn('asst/prune', error);
     }
   }
 }

@@ -166,7 +166,7 @@ test('a drain is applied, announced, acknowledged, and then held', async () => {
   );
   expect(applied).toHaveBeenCalledWith(accepted);
   // A refusal is logged by its reason alone, never as a toast.
-  expect(info).toHaveBeenCalledWith('assistant:refused', 'revoked');
+  expect(info).toHaveBeenCalledWith('asst/refused', 'revoked');
   expect(calls.map((c) => c.path)).toEqual([
     '/assistant/drain',
     '/assistant/dropbox',

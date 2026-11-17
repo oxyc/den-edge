@@ -442,8 +442,8 @@ export class LibraryLogAuthority {
         if (!rode) await this.#writeRow(row, []);
         return result;
       },
-      loadRecords: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
-      saveRecords: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
+      load: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
+      save: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
       loadShape: async (title) => {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         return this.#shapes.has(titleKey(title));
@@ -503,7 +503,7 @@ export class LibraryLogAuthority {
         ),
       head: () => this.#log.logHead,
       inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
-      putProjection: async (grant, set, parts, member, signal) => {
+      put: async (grant, set, parts, member, signal) => {
         const res = await this.#memberSend(
           `/assistant/projection/${grant}`,
           'PUT',
@@ -514,7 +514,7 @@ export class LibraryLogAuthority {
         if (res?.status === 429) return { retryAfterMs: retryAfterMs(res, 60_000) };
         return res?.ok ?? false;
       },
-      deleteProjection: async (grant, member, signal) =>
+      drop: async (grant, member, signal) =>
         (
           await this.#memberSend(
             `/assistant/projection/${grant}`,

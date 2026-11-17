@@ -111,21 +111,21 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
     layouts: () => ({}),
     head: () => 7,
     inputs: () => JSON.stringify([shared.documents, [...shared.rows.values()]]),
-    putProjection: async (grant, set, parts, member) => {
+    put: async (grant, set, parts, member) => {
       shared.projections.set(grant, { set, parts });
       shared.sent.push(`put:${grant}`);
       shared.members.push(member?.libraryId ?? null);
       return true;
     },
-    deleteProjection: async (grant, member) => {
+    drop: async (grant, member) => {
       shared.projections.delete(grant);
       shared.sent.push(`delete:${grant}`);
       shared.members.push(member?.libraryId ?? null);
       return true;
     },
     membership: async () => ({ libraryId: fixed.library, memberToken: 'a'.repeat(64) }),
-    loadRecords: async () => records && structuredClone(records),
-    saveRecords: async (next) => void (records = structuredClone(next)),
+    load: async () => records && structuredClone(records),
+    save: async (next) => void (records = structuredClone(next)),
     now: () => now,
     // A projection's randomness may run out of scripted values: then any fresh 32 bytes do.
     random: () => randoms.shift() ?? randomHex(),
@@ -613,7 +613,7 @@ test('an aborted held projection PUT cannot publish or persist stale completion 
       return new Promise<boolean>((resolve) => (settle = resolve));
     },
   );
-  const made = device(shared, [seed('other'), seed('limited')], { putProjection });
+  const made = device(shared, [seed('other'), seed('limited')], { put: putProjection });
   const { grant } = await made.authority.consent('Reader', READ_ONLY);
   const lifecycle = new AbortController();
   const stalled = made.authority.publish(null, lifecycle.signal);
@@ -636,11 +636,11 @@ test('an abort while durable publication records load cannot suppress the surviv
   let hold = false;
   let release!: () => void;
   const made = device(shared, [seed('other'), seed('limited')], {
-    loadRecords: async () => {
+    load: async () => {
       if (hold) await new Promise<void>((resolve) => (release = resolve));
       return records && structuredClone(records);
     },
-    saveRecords: async (next) => void (records = structuredClone(next)),
+    save: async (next) => void (records = structuredClone(next)),
   });
   const { grant } = await made.authority.consent('Reader', READ_ONLY);
   hold = true;
@@ -678,6 +678,16 @@ test('an aborted held split-household connection lookup releases without inherit
   release();
 });
 
+test('a pre-aborted split-household connection lookup starts no refresh', async () => {
+  const refresh = vi.fn(async () => {});
+  const made = device(library(), [], { refresh });
+  const lifecycle = new AbortController();
+  lifecycle.abort();
+
+  await expect(made.authority.lend(lifecycle.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  expect(refresh).not.toHaveBeenCalled();
+});
+
 test('an aborted held split-household membership lookup releases before that lookup settles', async () => {
   const shared = library();
   let release!: () => void;
@@ -709,7 +719,7 @@ test('an aborted held projection DELETE is not remembered and remains idempotent
     expect(signal).toBeInstanceOf(AbortSignal);
     return new Promise<boolean>((resolve) => (settle = resolve));
   });
-  const made = device(shared, [seed('other'), seed('limited')], { deleteProjection });
+  const made = device(shared, [seed('other'), seed('limited')], { drop: deleteProjection });
   const { grant } = await made.authority.consent('Reader', READ_ONLY);
   await made.authority.publish();
   await made.authority.revoke(grant);
@@ -734,7 +744,7 @@ test('a failed projection DELETE is retried after the ordinary durable retry int
   const shared = library();
   let deletes = 0;
   const made = device(shared, [seed('other'), seed('limited')], {
-    deleteProjection: async () => ++deletes >= 3,
+    drop: async () => ++deletes >= 3,
   });
   const { grant } = await made.authority.consent('Reader', READ_ONLY);
   await made.authority.publish();
@@ -1026,7 +1036,7 @@ test('a TV saving progress every minute is sent at most every five minutes by ea
     const made = device(shared, [], {
       now: () => now,
       random: () => (builds++, randomHex()),
-      putProjection: async () => (puts++, budget.put()),
+      put: async () => (puts++, budget.put()),
     });
     return { ...made, builds: () => builds, puts: () => puts };
   };
@@ -1062,7 +1072,7 @@ test('a send den-edge refuses waits out its Retry-After, building nothing meanwh
   const attempts: number[] = [];
   const { authority, later } = device(shared, [seed('other'), seed('limited')], {
     random: () => (builds++, randomHex()),
-    putProjection: async () => {
+    put: async () => {
       attempts.push(builds);
       return refuse ? { retryAfterMs: 10 * 60_000 } : true;
     },

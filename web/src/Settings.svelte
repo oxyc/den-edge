@@ -477,7 +477,7 @@
       .then(
         (membership) => (membership ? householdAssistantFetch(membership) : undefined),
         (error: unknown) => {
-          console.error('assistant:membership-read', error);
+          console.error('asst/membership-read', error);
           return undefined;
         },
       );
