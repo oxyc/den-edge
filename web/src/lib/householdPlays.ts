@@ -21,7 +21,6 @@ interface VisitKey {
   source: string;
   library: string;
   key: string;
-  retired: AbortController;
 }
 let visit: VisitKey | undefined;
 let changed = new AbortController();
@@ -35,7 +34,6 @@ function siteStorage(): Storage | undefined {
 }
 
 function retire(): void {
-  visit?.retired.abort();
   changed.abort();
   changed = new AbortController();
   visit = undefined;
@@ -43,7 +41,7 @@ function retire(): void {
 
 function replace(source: string, library: string, key: string): VisitKey {
   retire();
-  return (visit = { source, library, key, retired: new AbortController() });
+  return (visit = { source, library, key });
 }
 
 /** A short, one-way tag of the library key, so a stored play key can say which library it was made for. */
@@ -68,6 +66,14 @@ function stored(storage: Storage | undefined): { library: string; key: string } 
   }
 }
 
+function persist(storage: Storage | undefined, library: string, key: string): void {
+  try {
+    storage?.setItem(KEY, JSON.stringify({ library, key }));
+  } catch {
+    // The visit copy still feeds check-in and both receivers; a later check-in retries it without rotation.
+  }
+}
+
 /**
  * This TV's household play key for the library `libraryKey` opens. Kept for that library and made anew when the
  * library key changes (inbox-v1 §5): a device shut out by a reset still knows the old one, and rows can carry the old
@@ -86,21 +92,13 @@ export async function playKeyFor(
   const current = visit;
   if (current?.library === library) {
     if (kept?.library === library && kept.key === current.key) return current.key;
-    try {
-      storage?.setItem(KEY, JSON.stringify({ library, key: current.key }));
-    } catch {
-      // The visit copy remains authoritative; a later check-in retries persistence without rotating it.
-    }
+    persist(storage, library, current.key);
     return current.key;
   }
   const key =
     kept?.library === library ? kept.key : toBase64url(crypto.getRandomValues(new Uint8Array(32)));
   replace(libraryKey, library, key);
-  try {
-    storage?.setItem(KEY, JSON.stringify({ library, key }));
-  } catch {
-    // The visit copy still feeds check-in and both receivers. A later check-in retries the same key.
-  }
+  persist(storage, library, key);
   return key;
 }
 
@@ -118,7 +116,7 @@ export async function whilePlayKey(
       await abortableDelay(FOREVER_MS, signal, changed.signal);
       continue;
     }
-    const active = AbortSignal.any([signal, current.retired.signal]);
+    const active = AbortSignal.any([signal, changed.signal]);
     try {
       await use(current.key, active);
     } catch (error) {
