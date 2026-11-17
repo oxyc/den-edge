@@ -1524,10 +1524,7 @@
     if (!__DEN_TV__) return;
     const stop = new AbortController();
     let unregister: (() => void) | undefined;
-    void import('./lib/householdPlays').then(async ({ playKeyFor, receiveTv, startPlaysWith }) => {
-      const libraryKey = session.household.identity.libraryKey;
-      if (!libraryKey) return;
-      await playKeyFor(libraryKey).catch(() => undefined);
+    void import('./lib/householdPlays').then(({ receiveTv, startPlaysWith }) => {
       if (stop.signal.aborted) return;
       // An assistant's play on this TV's lane (RoutedLibrary) starts here too: a trailer as the title page's.
       unregister = startPlaysWith(async (play) => {
@@ -1560,6 +1557,7 @@
           },
         },
         stop.signal,
+        session.household.identity.libraryKey,
       );
     });
     return () => {

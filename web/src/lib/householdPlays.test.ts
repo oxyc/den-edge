@@ -172,6 +172,7 @@ describe('receiving household plays', () => {
         transport: () => undefined,
       },
       stop.signal,
+      null,
       storage,
     );
     expect(started.map((request) => request.title)).toEqual(['Second']);
@@ -206,6 +207,7 @@ describe('receiving household plays', () => {
     const running = receiveTv(
       { play: async () => undefined, stale: () => undefined, transport: () => undefined },
       stop.signal,
+      null,
       storage,
     );
     await firstStarted;

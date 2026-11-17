@@ -181,8 +181,11 @@ export async function receiveTv(
     transport: (command: TransportCommand) => void;
   },
   signal: AbortSignal,
+  libraryKey?: string | null,
   storage: Storage | undefined = siteStorage(),
 ): Promise<void> {
+  if (libraryKey) await playKeyFor(libraryKey, storage).catch(() => undefined);
+  if (signal.aborted) return;
   await whilePlayKey(async (playKey, active) => {
     while (!active.aborted) {
       const started = Date.now();
