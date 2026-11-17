@@ -294,23 +294,21 @@
     // The play key belongs to the household library whose device list publishes it (inbox-v1 §5), not to the active
     // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
     const libraryKey = session.household.identity.libraryKey;
-    const stop = new AbortController();
+    let current = true;
     const playKey =
       __DEN_TV__ && libraryKey
-        ? import('./lib/householdPlays').then(({ playKeyFor }) =>
-            playKeyFor(libraryKey, undefined, stop.signal),
-          )
+        ? import('./lib/householdPlays').then(({ playKeyFor }) => playKeyFor(libraryKey))
         : Promise.resolve(undefined);
     void playKey.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
-      if (stop.signal.aborted) return;
+      if (!current) return;
       timer = setTimeout(
         () =>
           void (async () => {
             // A TV publishes its household play key, so any device holding the library can play on it.
             const householdPlayKey = await playKey;
-            if (stop.signal.aborted) return;
+            if (!current) return;
             await model.heartbeatDevice(
               name,
               undefined,
@@ -318,14 +316,14 @@
               householdPlayKey,
               __DEN_TV__ ? 1 : undefined,
             );
-          })().catch((error: unknown) =>
-            console.warn('den: this device could not check in', error),
-          ),
+          })().catch((error: unknown) => {
+            if (current) console.warn('den: this device could not check in', error);
+          }),
         1_000,
       );
     });
     return () => {
-      stop.abort();
+      current = false;
       if (timer) clearTimeout(timer);
     };
   });

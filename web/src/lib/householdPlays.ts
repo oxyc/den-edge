@@ -18,11 +18,11 @@ const RETRY_MS = 15_000;
 const FOREVER_MS = 0x7fffffff;
 
 interface VisitKey {
-  source: string;
   library: string;
   key: string;
 }
 let visit: VisitKey | undefined;
+let source: string | undefined;
 let changed = new AbortController();
 
 function siteStorage(): Storage | undefined {
@@ -37,11 +37,6 @@ function retire(): void {
   changed.abort();
   changed = new AbortController();
   visit = undefined;
-}
-
-function replace(source: string, library: string, key: string): VisitKey {
-  retire();
-  return (visit = { source, library, key });
 }
 
 /** A short, one-way tag of the library key, so a stored play key can say which library it was made for. */
@@ -82,12 +77,15 @@ function persist(storage: Storage | undefined, library: string, key: string): vo
 export async function playKeyFor(
   libraryKey: string,
   storage: Storage | undefined = siteStorage(),
-  signal?: AbortSignal,
 ): Promise<string> {
-  signal?.throwIfAborted();
-  if (visit?.source !== libraryKey) retire();
+  if (source !== libraryKey) {
+    source = libraryKey;
+    retire();
+  }
+  const authority = changed;
   const library = await libraryTag(libraryKey);
-  signal?.throwIfAborted();
+  if (source !== libraryKey || changed !== authority)
+    throw new DOMException('play key authority changed', 'AbortError');
   const kept = stored(storage);
   const current = visit;
   if (current?.library === library) {
@@ -97,7 +95,8 @@ export async function playKeyFor(
   }
   const key =
     kept?.library === library ? kept.key : toBase64url(crypto.getRandomValues(new Uint8Array(32)));
-  replace(libraryKey, library, key);
+  retire();
+  visit = { library, key };
   persist(storage, library, key);
   return key;
 }
