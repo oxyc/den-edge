@@ -156,8 +156,9 @@ type Delivery = 'synced' | 'queued' | 'local';
 
 /** The Kid journal's operation id for the Kid a household gets out of the box: one per household on this device. */
 const DEFAULT_KID_OPERATION = 'default-kid';
-/** Bound one projection replacement/drop so a lost response cannot retain the publisher Web Lock forever. */
-const PROJECTION_REQUEST_MS = 15_000;
+/** Bound projection requests so a lost response cannot retain the publisher Web Lock forever. */
+const PROJECTION_PUT_MS = 60_000; // The wire permits a projection near 17 MiB; matches the native publisher.
+const PROJECTION_DELETE_MS = 15_000;
 /**
  * Titles one naming batch looks up at once. Most are answered from this browser's TMDB cache, and asked together
  * their reads share a few IndexedDB transactions (`tmdbCache.ts` `coalesced`); a miss goes to den-edge's shared cache
@@ -545,7 +546,9 @@ export class LibraryLogAuthority {
     const member = lent ?? (await this.#log.relayMembership());
     lifecycle?.throwIfAborted();
     if (!member) return null;
-    const deadline = AbortSignal.timeout(PROJECTION_REQUEST_MS);
+    const deadline = AbortSignal.timeout(
+      method === 'PUT' ? PROJECTION_PUT_MS : PROJECTION_DELETE_MS,
+    );
     const signal = lifecycle ? AbortSignal.any([lifecycle, deadline]) : deadline;
     try {
       const response = await this.#fetch(path, {
