@@ -1517,7 +1517,7 @@
     /** Proves the household's membership on the assistant routes; undefined for the page's own credential. */
     fetchImpl?: typeof fetch;
     /** What `model` publishes and applies with: the household's connection, read again each time it is asked. */
-    lend(): Promise<AssistantConnection | undefined>;
+    lend(signal?: AbortSignal): Promise<AssistantConnection | undefined>;
   }
 
   function whileNeeded(
@@ -1559,9 +1559,9 @@
             household,
             libraryId: membership.libraryId,
             fetchImpl: householdAssistantFetch(membership),
-            lend: async () => {
+            lend: async (signal) => {
               if (!household) return undefined;
-              const connection = await household.assistantConnection();
+              const connection = await household.assistantConnection(signal);
               if (!connection) throw new Error('the household is not a member on den-edge');
               return connection;
             },
@@ -1715,7 +1715,7 @@
       void publishWhileOpen(
         {
           libraryId: work.libraryId,
-          publish: async (signal) => work.model.publishAssistant(await work.lend(), signal),
+          publish: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),
         },
         signal,
       );

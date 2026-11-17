@@ -1114,9 +1114,9 @@ export class LibraryModel {
    * This household's assistant connection, to lend Owner's library on a household split into profiles; null while
    * den-edge does not know this library as a member.
    */
-  async assistantConnection(): Promise<AssistantConnection | null> {
+  async assistantConnection(signal?: AbortSignal): Promise<AssistantConnection | null> {
     this.#assertOpen();
-    const { result } = await this.service.query({ kind: 'assistant.connection' });
+    const { result } = await this.service.query({ kind: 'assistant.connection' }, signal);
     if (result.kind !== 'assistant.connection') throw wrongQueryResult('assistant connection');
     return result.connection;
   }
