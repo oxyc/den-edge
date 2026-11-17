@@ -169,13 +169,19 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     expect(await tv.evaluate(() => localStorage.getItem('den.tvPlayKey.v1'))).toBeNull();
     const beforeRecovery = drains.map(([key]) => key);
 
-    // Recover storage and retrigger check-in by renaming the device. Persistence retries without rotation: the key
-    // now stored is the exact authority every drain already named, and the Owner profile's own library cannot replace
-    // the household key (inbox-v1 §5).
+    // Recover storage and replace Owner with Kids and back. Each session checks in, but it is still the same
+    // household: persistence retries without rotation, and the key now stored is the exact authority every drain
+    // already named (inbox-v1 §5).
     await tv.evaluate(() => (globalThis.__denRefusePlayKeyStorage = false));
-    await tv.goto(`${E2E_ORIGIN}/settings`);
-    await tv.getByRole('button', { name: /Linked devices/ }).click();
-    await tv.getByRole('textbox', { name: 'Name of this device' }).fill('Living room LG recovered');
+    const tvOwner = tv.getByRole('button', { name: 'Switch profile, current Owner' });
+    await tvOwner.click();
+    await tv.getByRole('button', { name: 'Use Kids' }).click();
+    const tvKid = tv.getByRole('button', { name: 'Switch profile, current Kids' });
+    await expect(tvKid).toBeVisible();
+    await tvKid.click();
+    await tv.getByRole('button', { name: 'Use Owner' }).click();
+    await tv.getByLabel('Owner PIN').fill('1234');
+    await expect(tvOwner).toBeVisible();
     const stored = () =>
       tv.evaluate(() => ({
         made: JSON.parse(localStorage.getItem('den.tvPlayKey.v1') ?? 'null'),
@@ -241,11 +247,9 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     // A Kid's real policy check can outlive the press that admitted it. Hold that provider answer, replace the
     // mounted ProfileSession, then release the old answer: it must neither route nor notify in the Owner tree.
     await tv.goto(E2E_ORIGIN);
-    const tvOwner = tv.getByRole('button', { name: 'Switch profile, current Owner' });
     await expect(tvOwner).toBeVisible({ timeout: 30_000 });
     await tvOwner.click();
     await tv.getByRole('button', { name: 'Use Kids' }).click();
-    const tvKid = tv.getByRole('button', { name: 'Switch profile, current Kids' });
     await expect(tvKid).toBeVisible({ timeout: 30_000 });
     holdEligibility = true;
     eligibilitySeen = new Promise((resolve) => (eligibilityStarted = resolve));
