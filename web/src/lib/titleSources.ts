@@ -31,15 +31,13 @@ export interface TitleSource {
 /** The releases as `rank_releases` takes them: scout's attributes, with each one's identity and file name (a
  *  download's pick sinks an AVI or XviD file by its name, which scout reads no codec from). */
 export const rankable = (sources: TitleSource[]) =>
-  sources.map((source) => {
-    const result: Record<string, unknown> = { ...source.attributes };
-    delete result.sizeBytes;
+  sources.map(({ attributes, identity, filename, size, seeders }) => {
+    const result: Record<string, unknown> = { ...attributes, identity, filename };
+    if (size === undefined) delete result.sizeBytes;
+    else result.sizeBytes = size;
     delete result.packSizeBytes;
-    delete result.seeders;
-    if (source.size !== undefined) result.sizeBytes = source.size;
-    if (source.seeders !== undefined) result.seeders = source.seeders;
-    result.identity = source.identity;
-    result.filename = source.filename;
+    if (seeders === undefined) delete result.seeders;
+    else result.seeders = seeders;
     return result;
   });
 
@@ -106,8 +104,8 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
         seeders: boundedInteger(a.seeders, 0, 1_000_000),
-        size: positiveSafeInteger(a.sizeBytes),
-        packSize: positiveSafeInteger(a.packSizeBytes),
+        size: boundedInteger(a.sizeBytes, 1),
+        packSize: boundedInteger(a.packSizeBytes, 1),
         badges: [
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',
@@ -126,10 +124,11 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
   });
 }
 
-const positiveSafeInteger = (value: unknown): number | undefined =>
-  Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
-
-const boundedInteger = (value: unknown, minimum: number, maximum: number): number | undefined =>
+const boundedInteger = (
+  value: unknown,
+  minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | undefined =>
   Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum
     ? (value as number)
     : undefined;
