@@ -551,7 +551,7 @@ export class LibraryLogAuthority {
     );
     const signal = lifecycle ? AbortSignal.any([lifecycle, deadline]) : deadline;
     try {
-      const response = await this.#fetch(path, {
+      return await this.#fetch(path, {
         method,
         signal,
         headers: {
@@ -560,8 +560,6 @@ export class LibraryLogAuthority {
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-      lifecycle?.throwIfAborted();
-      return response;
     } catch {
       lifecycle?.throwIfAborted();
       return null;

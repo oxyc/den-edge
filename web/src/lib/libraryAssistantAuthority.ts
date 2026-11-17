@@ -718,10 +718,8 @@ export class LibraryAssistantAuthority {
       // The same authority may survive a background/foreground edge. Do not let scheduling state computed before
       // cancellation suppress its immediate retry; successful member writes remain idempotent replacements/drops.
       if (signal?.aborted) {
-        this.#builtFrom = null;
-        this.#dueAt = 0;
-        this.#holdUntil = 0;
-        this.#holdRead = null;
+        this.#builtFrom = this.#holdRead = null;
+        this.#dueAt = this.#holdUntil = 0;
       }
       throw error;
     } finally {
@@ -732,7 +730,6 @@ export class LibraryAssistantAuthority {
   #publishing = false;
 
   async #publish(lent: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
-    signal?.throwIfAborted();
     const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();

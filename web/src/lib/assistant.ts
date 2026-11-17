@@ -11,6 +11,7 @@ export { PlaybackReceiptStatus };
 import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
+import { abortableDelay } from './abortableDelay';
 
 /**
  * §5 *Renewal*: the grants whose connection den-edge still lists, handed to the library service to renew (it renews
@@ -337,7 +338,7 @@ export function publishWhileOpen(
   },
   signal: AbortSignal,
 ): Promise<void> {
-  const sleep = loop.sleep ?? pause;
+  const sleep = loop.sleep ?? abortableDelay;
   return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
     while (!signal.aborted) {
       try {
@@ -363,19 +364,6 @@ export interface DrainLoop {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
-const pause = (ms: number, signal: AbortSignal) =>
-  signal.aborted
-    ? Promise.resolve()
-    : new Promise<void>((resolve) => {
-        const timer = setTimeout(done, ms);
-        function done() {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', done);
-          resolve();
-        }
-        signal.addEventListener('abort', done, { once: true });
-      });
-
 /**
  * Drain the library's assistant queue while `signal` stands: at once, then held (`?wait=`). One tab of this browser
  * drains a library at a time (a Web Lock); another takes over when it closes. Another device draining at once is
@@ -388,7 +376,7 @@ export function drainWhileOpen(loop: DrainLoop, signal: AbortSignal): Promise<vo
 }
 
 async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  const sleep = loop.sleep ?? pause;
+  const sleep = loop.sleep ?? abortableDelay;
   const fetchImpl = loop.fetchImpl ?? relayFetch;
   /** The drop-box key last given to den-edge in this session; it is given again when the library's changes. */
   let put: string | null = null;

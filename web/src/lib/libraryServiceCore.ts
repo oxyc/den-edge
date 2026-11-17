@@ -167,7 +167,7 @@ export class LibraryServiceCore {
   #closed = false;
   #requests: Promise<void> = Promise.resolve();
   readonly #providerWork = new Set<Promise<LibraryServiceServerMessage[]>>();
-  readonly #requestControllers = new Map<string, AbortController>();
+  readonly #controllers = new Map<string, AbortController>();
 
   constructor(
     private readonly openAuthority: LibraryAuthorityOpener,
@@ -182,29 +182,16 @@ export class LibraryServiceCore {
     // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
     // An assistant projection's publish is the same: it reads the library once, then waits on its own Worker's build
     // and on den-edge, and changes nothing the lane orders.
-    if (
-      isLibraryMetadataRequest(input) ||
-      isAssistantPublish(input) ||
-      isSourceWaitRequest(input) ||
-      isDownloadSourcesRequest(input)
-    ) {
+    const cancellable = isDownloadSourcesRequest(input) || isAssistantPublish(input) ? input : null;
+    if (isLibraryMetadataRequest(input) || isSourceWaitRequest(input) || cancellable) {
       const admitted = this.#requests;
-      let controller: AbortController | undefined;
-      let ownedRequestId: string | undefined;
-      if (isDownloadSourcesRequest(input) || isAssistantPublish(input)) {
-        controller = new AbortController();
-        ownedRequestId = input.requestId;
-        this.#requestControllers.set(ownedRequestId, controller);
-      }
+      const controller = cancellable ? new AbortController() : undefined;
+      if (controller) this.#controllers.set(cancellable.requestId, controller);
       const work = admitted
         .then(() => this.#dispatch(input, controller?.signal))
         .finally(() => {
-          if (
-            controller &&
-            ownedRequestId &&
-            this.#requestControllers.get(ownedRequestId) === controller
-          )
-            this.#requestControllers.delete(ownedRequestId);
+          if (controller && this.#controllers.get(cancellable!.requestId) === controller)
+            this.#controllers.delete(cancellable!.requestId);
         });
       this.#providerWork.add(work);
       void work.finally(() => this.#providerWork.delete(work));
@@ -240,8 +227,8 @@ export class LibraryServiceCore {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    for (const controller of this.#requestControllers.values()) controller.abort();
-    this.#requestControllers.clear();
+    for (const controller of this.#controllers.values()) controller.abort();
+    this.#controllers.clear();
     await this.#requests;
     await Promise.allSettled([...this.#providerWork]);
     // A completed metadata query may have queued its shape replacement just before it observed `#closed`.
@@ -271,7 +258,7 @@ export class LibraryServiceCore {
     try {
       switch (request.type) {
         case 'cancel':
-          this.#requestControllers.get(request.requestId)?.abort();
+          this.#controllers.get(request.requestId)?.abort();
           return [];
         case 'subscribe':
           return await this.#subscribe(request);
@@ -478,7 +465,7 @@ export class LibraryServiceCore {
       outcome === 'applied' &&
       affected.some((scope) => scope.kind === 'runtime' || scope.kind === 'all')
     )
-      for (const controller of this.#requestControllers.values()) controller.abort();
+      for (const controller of this.#controllers.values()) controller.abort();
     if (outcome === 'applied') this.#revision++;
     const version = this.#version();
     this.#rememberOperation(request.operationId, {
@@ -660,14 +647,10 @@ function isAssistantPublish(
   input: unknown,
 ): input is Extract<LibraryServiceClientMessage, { type: 'task' }> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as {
-    type?: unknown;
-    requestId?: unknown;
-    task?: { kind?: unknown };
-  };
+  const request = input as { type?: unknown; task?: { kind?: unknown } };
   return (
     request.type === 'task' &&
-    typeof request.requestId === 'string' &&
+    requestIdOf(input) !== undefined &&
     request.task?.kind === 'assistant.publish'
   );
 }
