@@ -185,8 +185,11 @@ export class LibraryServiceCore {
     const cancellable = isDownloadSourcesRequest(input) || isAssistantPublish(input) ? input : null;
     if (isLibraryMetadataRequest(input) || isSourceWaitRequest(input) || cancellable) {
       const admitted = this.#requests;
-      const controller = cancellable ? new AbortController() : undefined;
-      if (controller) this.#controllers.set(cancellable.requestId, controller);
+      let controller: AbortController | undefined;
+      if (cancellable) {
+        controller = new AbortController();
+        this.#controllers.set(cancellable.requestId, controller);
+      }
       const work = admitted
         .then(() => this.#dispatch(input, controller?.signal))
         .finally(() => {
