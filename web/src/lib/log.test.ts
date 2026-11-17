@@ -842,6 +842,29 @@ describe('LibraryLog', () => {
     expect(reopened.pendingActions).toBe(1);
   });
 
+  it('purges retired Owner-split records from the raw library namespace only after opening', async () => {
+    const { data, vault } = memoryVault();
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const generation = '11111111-1111-1111-1111-111111111111';
+    const state = `${keys.id}:profile-migration/v1/state`;
+    const candidate = `${keys.id}:profile-migration/v1/candidate/${'a'.repeat(64)}`;
+    const current = `${keys.id}:profile-create/v2/journal`;
+    data.set(`retirement-generation:${keys.id}`, new TextEncoder().encode(generation));
+    data.set(state, Uint8Array.of(1));
+    data.set(candidate, Uint8Array.of(2));
+    data.set(current, Uint8Array.of(3));
+    const server = await edge();
+
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(data.has(state)).toBe(true);
+    await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(true);
+
+    expect(data.has(state)).toBe(false);
+    expect(data.has(candidate)).toBe(false);
+    expect(data.get(current)).toEqual(Uint8Array.of(3));
+    expect(data.get(`${keys.id}:retired/profile-migration.v1`)).toEqual(Uint8Array.of(1));
+  });
+
   it('fails a durable edit before the request when the vault refuses its pending record', async () => {
     const memory = memoryVault();
     const vault: Vault = {

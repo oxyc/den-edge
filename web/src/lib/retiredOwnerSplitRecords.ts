@@ -28,7 +28,8 @@ export class RetiredOwnerSplitRecords {
   async run(): Promise<boolean> {
     if (this.#complete) return true;
     try {
-      if (await this.vault.get(this.#receipt)) {
+      const receipt = await this.vault.get(this.#receipt);
+      if (receipt?.length === 1 && receipt[0] === RECEIPT_VALUE[0]) {
         this.#complete = true;
         return true;
       }
@@ -36,10 +37,9 @@ export class RetiredOwnerSplitRecords {
         ? await this.vault.keys(this.#prefix, this.#after, PAGE_SIZE)
         : this.vault.page
           ? (await this.vault.page(this.#prefix, this.#after, PAGE_SIZE)).map(([key]) => key)
-          : (await this.vault.entries(this.#prefix))
-              .map(([key]) => key)
-              .filter((key) => this.#after === undefined || key > this.#after)
-              .slice(0, PAGE_SIZE);
+          : (() => {
+              throw new Error('Bounded Vault key enumeration is unavailable');
+            })();
       const changes: VaultChange[] = page.flatMap((key) =>
         this.#retired(key) ? [{ kind: 'delete' as const, key }] : [],
       );

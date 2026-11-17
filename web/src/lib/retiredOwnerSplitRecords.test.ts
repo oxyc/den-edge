@@ -75,6 +75,17 @@ describe('retired Owner-split browser records', () => {
     expect(memory.commits).toHaveLength(1);
   });
 
+  it('does not let a malformed receipt suppress cleanup', async () => {
+    const state = `${LIBRARY_A}:profile-migration/v1/state`;
+    const receipt = `${LIBRARY_A}:retired/profile-migration.v1`;
+    const memory = memoryVault([state, receipt]);
+    memory.data.set(receipt, Uint8Array.of(2));
+
+    await expect(new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A).run()).resolves.toBe(true);
+    expect(memory.data.has(state)).toBe(false);
+    expect(memory.data.get(receipt)).toEqual(Uint8Array.of(1));
+  });
+
   it('bounds each pass and resumes after the last committed key', async () => {
     const records = Array.from(
       { length: 65 },

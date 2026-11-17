@@ -14,7 +14,6 @@ import { libraryGenerationVault } from './libraryRetirementLease';
 import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
 import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
 import { retryAfterMs } from './retryAfter';
-import { RetiredOwnerSplitRecords } from './retiredOwnerSplitRecords';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
   kidApprovalName,
@@ -506,7 +505,8 @@ export class LibraryLog {
   private factStore: LibraryFactStore | null = null;
   private runtimeFallback = false;
   private runtimeChannel?: BroadcastChannel;
-  private retiredOwnerSplitRecords?: RetiredOwnerSplitRecords;
+  private retiredOwnerSplitVault?: Vault;
+  private retiredOwnerSplitRecords?: { run(): Promise<boolean> };
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -941,7 +941,7 @@ export class LibraryLog {
       vault,
       wire,
     );
-    log.retiredOwnerSplitRecords = new RetiredOwnerSplitRecords(vault, keys.id);
+    log.retiredOwnerSplitVault = vault;
     await log.initializeRuntime();
     log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     await ensureSyncPolicy();
@@ -2423,7 +2423,7 @@ export class LibraryLog {
       generationVault,
       wire,
     );
-    if (vault) log.retiredOwnerSplitRecords = new RetiredOwnerSplitRecords(vault, keys.id);
+    if (vault) log.retiredOwnerSplitVault = vault;
     await log.initializeRuntime();
     log.factStore = generationVault
       ? await LibraryFactStore.open(libraryKey, generationVault)
@@ -3220,6 +3220,19 @@ export class LibraryLog {
 
   /** One bounded pass over records left by the removed Web Owner-split implementation. */
   async cleanupRetiredOwnerSplitRecords(): Promise<boolean> {
+    if (!this.retiredOwnerSplitRecords && this.retiredOwnerSplitVault)
+      try {
+        const { RetiredOwnerSplitRecords } = await import('./retiredOwnerSplitRecords');
+        this.retiredOwnerSplitRecords = new RetiredOwnerSplitRecords(
+          this.retiredOwnerSplitVault,
+          this.keys.id,
+        );
+        this.retiredOwnerSplitVault = undefined;
+      } catch {
+        // The post-foreground asset or storage adapter may be transiently unavailable. Retry without exposing either.
+        console.warn('den: retired browser migration storage cleanup will be retried');
+        return false;
+      }
     return (await this.retiredOwnerSplitRecords?.run()) ?? true;
   }
 

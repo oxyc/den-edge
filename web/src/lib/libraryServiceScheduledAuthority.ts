@@ -29,6 +29,8 @@ export interface LibraryMaintenanceResult {
 /** The scheduler depends on one semantic maintenance operation, not LibraryLog internals. */
 export interface LibraryMaintenance {
   readonly mode: 'online' | 'local';
+  /** Optional bounded upgrade work. The scheduler calls it only after foreground content is ready. */
+  upgrade?(): Promise<void>;
   /** `waitSeconds` holds the read until something changes; `stopWaiting` ends that hold early. */
   run(options?: {
     waitSeconds?: number;
@@ -227,6 +229,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     this.#holding = holding;
     const running = (async () => {
       try {
+        if (this.#foregroundReady) await this.maintenance.upgrade?.();
         const result = await this.maintenance.run({
           waitSeconds: this.#lifecycle.playbackActive
             ? ACTIVE_PLAYBACK_REFRESH_MS / 1000
@@ -348,10 +351,9 @@ export function libraryLogMaintenance(
 ): LibraryMaintenance {
   return {
     mode,
+    // A failed bounded page is not marked complete, so a later foreground maintenance pass retries it.
+    upgrade: () => log.cleanupRetiredOwnerSplitRecords().then(() => undefined),
     async run(options) {
-      // Foreground readiness has already been signalled before this scheduler runs. Keep upgrade storage I/O off the
-      // first paint and retry a failed bounded page on a later maintenance pass.
-      await log.cleanupRetiredOwnerSplitRecords();
       let changed =
         mode === 'online' ? await log.refresh(options?.waitSeconds, options?.stopWaiting) : false;
       if (log.moved) return { changed, status: logStatus(log) };
