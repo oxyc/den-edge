@@ -121,7 +121,7 @@ describe('ScheduledLibraryServiceAuthority', () => {
   it('keeps library upgrade storage work behind foreground readiness', async () => {
     vi.useFakeTimers();
     const work = maintenance();
-    const upgrade = vi.fn(async () => undefined);
+    const upgrade = vi.fn(async () => true);
     const scheduled = new ScheduledLibraryServiceAuthority(authority().port, {
       ...work.port,
       upgrade,
@@ -135,6 +135,28 @@ describe('ScheduledLibraryServiceAuthority', () => {
     await scheduled.observe({ kind: 'foreground-ready' });
     await vi.advanceTimersByTimeAsync(0);
     expect(upgrade).toHaveBeenCalledTimes(1);
+    await scheduled.close();
+  });
+
+  it('retries bounded local upgrade pages without turning local maintenance into polling', async () => {
+    vi.useFakeTimers();
+    const work = maintenance('local');
+    const upgrade = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, {
+      ...work.port,
+      upgrade,
+    });
+
+    await scheduled.observe(lifecycle({ online: false }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(upgrade).not.toHaveBeenCalled();
+    await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(upgrade).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS);
+    expect(upgrade).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 2);
+    expect(upgrade).toHaveBeenCalledTimes(2);
     await scheduled.close();
   });
 
