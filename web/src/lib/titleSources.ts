@@ -31,15 +31,14 @@ export interface TitleSource {
 /** The releases as `rank_releases` takes them: scout's attributes, with each one's identity and file name (a
  *  download's pick sinks an AVI or XviD file by its name, which scout reads no codec from). */
 export const rankable = (sources: TitleSource[]) =>
-  sources.map(({ attributes, identity, filename, size, seeders }) => {
-    const result: Record<string, unknown> = { ...attributes, identity, filename };
-    if (size === undefined) delete result.sizeBytes;
-    else result.sizeBytes = size;
-    delete result.packSizeBytes;
-    if (seeders === undefined) delete result.seeders;
-    else result.seeders = seeders;
-    return result;
-  });
+  sources.map(({ attributes, identity, filename, size, seeders }) => ({
+    ...attributes,
+    identity,
+    filename,
+    sizeBytes: size,
+    packSizeBytes: undefined,
+    seeders,
+  }));
 
 /** Whether `addon` is the combined Den addon, asked under `/den` rather than Scout's `/scout`. */
 const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
