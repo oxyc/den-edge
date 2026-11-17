@@ -8,7 +8,9 @@ const candidate = (library: string, digit: string) =>
   `${library}:profile-migration/v1/candidate/${digit.repeat(64)}`;
 
 function memoryVault(initial: readonly string[] = []) {
-  const data = new Map(initial.map((key, index) => [key, Uint8Array.of(index + 1)]));
+  const data = new Map<string, Uint8Array>(
+    initial.map((key, index) => [key, Uint8Array.of(index + 1)]),
+  );
   let failCommit = false;
   const commits: VaultChange[][] = [];
   const vault: Vault = {
