@@ -681,7 +681,7 @@ test('an aborted held split-household connection lookup releases without inherit
 
 test('a pre-aborted split-household connection lookup starts no refresh', async () => {
   const refresh = vi.fn(async () => {});
-  const made = device(library(), [], { refresh });
+  const made = device(library(), [], { sync: refresh });
   const lifecycle = new AbortController();
   lifecycle.abort();
 
