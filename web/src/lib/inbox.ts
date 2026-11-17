@@ -225,10 +225,13 @@ export async function sendToTV(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   message: object,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<string | false> {
   try {
+    if (signal?.aborted) return false;
     const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
-    return appendSealed(link.inboxKey, enc, message, fetchImpl);
+    if (signal?.aborted) return false;
+    return appendSealed(link.inboxKey, enc, message, fetchImpl, signal);
   } catch {
     return false;
   }
@@ -242,6 +245,11 @@ export async function householdQueue(playKey: string): Promise<Pick<Link, 'inbox
   const key = fromBase64url(playKey) as Bytes;
   const { inbox } = await linkKeys(key);
   return { inboxKey: inbox, linkKey: btoa(String.fromCharCode(...key)) };
+}
+
+/** The assistant lane published to a wake controller for the same household play key. */
+export async function householdAssistantLane(playKey: string): Promise<string> {
+  return hex(await hkdf(fromBase64url(playKey) as Bytes, 'den/link/v1', 'assistant-tv', 16));
 }
 
 /** Queue one sealed message using a raw pairing link key. */
@@ -263,11 +271,15 @@ async function appendSealed(
   enc: Bytes,
   message: object,
   fetchImpl: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<string | false> {
+  if (signal?.aborted) return false;
   const sealed = await sealMessage(enc, message);
+  if (signal?.aborted) return false;
   try {
+    const deadline = AbortSignal.timeout(REQUEST_MS);
     const res = await fetchImpl('/inbox/append', {
-      signal: AbortSignal.timeout(REQUEST_MS),
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-den-link': inbox },
       body: JSON.stringify({ sealed }),
@@ -320,6 +332,60 @@ export async function tvListening(
     return typeof body.listening === 'boolean' ? body.listening : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Whether the exact assistant lane has a live household wake controller (wake-controller-v1 §8). The household
+ * key stays in this browser and is used only to derive the member proof; den-edge receives neither it nor a title.
+ * False includes an old/refusing backend and malformed replies, so callers never queue on unproved wake authority.
+ */
+export async function tvWakeable(
+  libraryKey: string,
+  lane: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  let raw: Bytes;
+  try {
+    raw = Uint8Array.from(atob(libraryKey), (character) => character.charCodeAt(0));
+  } catch {
+    return false;
+  }
+  if (raw.length !== 32 || btoa(String.fromCharCode(...raw)) !== libraryKey) {
+    raw.fill(0);
+    return false;
+  }
+  try {
+    // Keep this foreground-only wake check on inbox's compact crypto graph. `deriveKeys` also derives the
+    // library token, encryption and MAC keys and imports two CryptoKeys that this read never uses.
+    const [id, member] = await Promise.all([
+      hkdf(raw, 'den/library/salt/v1', 'den/library/id/v1', 16),
+      hkdf(raw, 'den/library/v2', 'member', 32),
+    ]);
+    const proof = `${hex(id)}:${hex(member)}`;
+    id.fill(0);
+    member.fill(0);
+    const res = await fetchImpl('/wake/targets', {
+      signal: AbortSignal.timeout(REQUEST_MS),
+      headers: {
+        accept: 'application/json',
+        'x-den-library-member': proof,
+      },
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { targets?: unknown };
+    if (!Array.isArray(body.targets)) return false;
+    return body.targets.some(
+      (target) =>
+        target !== null &&
+        typeof target === 'object' &&
+        (target as { tv?: unknown }).tv === lane &&
+        (target as { wakeable?: unknown }).wakeable === true,
+    );
+  } catch {
+    return false;
+  } finally {
+    raw.fill(0);
   }
 }
 

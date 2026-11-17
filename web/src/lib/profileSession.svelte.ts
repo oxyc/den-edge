@@ -310,7 +310,7 @@ export class ProfileSession {
       holdMs = TOAST_MS,
       undo = null,
     }: { holdMs?: number; undo?: { label: string; run: () => void } | null } = {},
-  ): void {
+  ): () => void {
     const presentation = ++this.toastPresentation;
     this.toast = message;
     this.undo = undo;
@@ -321,6 +321,15 @@ export class ProfileSession {
         this.toast = null;
         this.undo = null;
       }, holdMs);
+    // Async work owns only the presentation it created. Its cancellation can therefore retire a persistent status
+    // without erasing a newer command's success, failure or recovery notice.
+    return () => {
+      if (this.toastPresentation !== presentation) return;
+      clearTimeout(this.#toastTimer);
+      this.toast = null;
+      this.undo = null;
+      this.toastPresentation++;
+    };
   }
 
   close(): void {

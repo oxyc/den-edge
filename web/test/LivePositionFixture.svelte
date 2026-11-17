@@ -30,38 +30,50 @@
   };
   let route = $state(parseRoute(location.pathname + location.search));
   let profiles = $state.raw<ProfileModeCoordinator | null>(null);
+  let libraryMount = $state(0);
   const writer = params.has('writer');
+  const remover = params.has('remover');
   let ready = $state(false);
+  const fixtureWindow = window as unknown as {
+    fixturePlay?: (
+      title: { type: 'movie' | 'tv'; id: number },
+      seconds: number,
+      episode?: { season: number; episode: number },
+    ) => Promise<unknown>;
+    fixtureReplaceLibrary?: () => void;
+    fixtureRotateDevice?: () => Promise<unknown>;
+    fixtureRemoveDevice?: () => Promise<unknown>;
+  };
+  // A same-id session replacement in production remounts this subtree through RoutedLibrary's keyed session. This
+  // seam exercises that real destruction boundary without making transport races depend on profile setup dialogs.
+  fixtureWindow.fixtureReplaceLibrary = () => libraryMount++;
 
-  if (writer) {
+  if (writer || remover) {
     const services = createWorkerServiceSession();
     const model = new LibraryModel(services.library, {
       libraryKey,
       mode: 'online',
-      legacyClock: { device: 'aaaaaaaaaaaaaaaa', last: [0, 0, 'aaaaaaaaaaaaaaaa'] },
+      legacyClock: {
+        device: remover ? 'cccccccccccccccc' : 'aaaaaaaaaaaaaaaa',
+        last: [0, 0, remover ? 'cccccccccccccccc' : 'aaaaaaaaaaaaaaaa'],
+      },
     });
-    // Listed in `set:devices` under the name the page shows it by ("Playing on Apple TV").
-    void model.ready
-      .then(() =>
-        model.heartbeatDevice(
-          'Apple TV',
-          'fixture-device',
-          'tv',
-          toBase64url(new Uint8Array(32).fill(9)),
-          1,
-        ),
-      )
-      .then(() => (ready = true));
+    if (writer)
+      // Listed in `set:devices` under the name the page shows it by ("Playing on Apple TV").
+      void model.ready
+        .then(() =>
+          model.heartbeatDevice(
+            'Apple TV',
+            'fixture-device',
+            'tv',
+            toBase64url(new Uint8Array(32).fill(9)),
+            1,
+          ),
+        )
+        .then(() => (ready = true));
+    else void model.ready.then(() => (ready = true));
     let written = 0;
-    (
-      window as unknown as {
-        fixturePlay: (
-          title: { type: 'movie' | 'tv'; id: number },
-          seconds: number,
-          episode?: { season: number; episode: number },
-        ) => Promise<unknown>;
-      }
-    ).fixturePlay = (title, seconds, episode) =>
+    fixtureWindow.fixturePlay = (title, seconds, episode) =>
       model.recordProgress(
         {
           title,
@@ -74,23 +86,41 @@
         },
         `fixture-play-${++written}`,
       );
+    // The same TV id may publish a replacement household command key after reset/re-pair. The old key stops being
+    // authority immediately, including while a retry append to it is already in flight.
+    if (writer)
+      fixtureWindow.fixtureRotateDevice = () =>
+        model.heartbeatDevice(
+          'Apple TV',
+          'fixture-device-rotated',
+          'tv',
+          toBase64url(new Uint8Array(32).fill(10)),
+          1,
+        );
+    // Device removal is household authority exercised by another device. The writer cannot remove its own live
+    // entry, so the remover fixture has an independent clock and browser storage.
+    if (remover)
+      fixtureWindow.fixtureRemoveDevice = () =>
+        model.removeDevice('aaaaaaaaaaaaaaaa', 'fixture-device-removed');
   }
 </script>
 
-{#if writer}
-  {#if ready}<p role="status">Writer ready</p>{/if}
+{#if writer || remover}
+  {#if ready}<p role="status">{writer ? 'Writer ready' : 'Remover ready'}</p>{/if}
 {:else}
   <!-- `?nav`: the app's own bar, fed the profile control the way App does, for the profile switcher. -->
   {#if params.has('nav')}<NavigationBar {route} query="" {profiles} />{/if}
   <main style="padding:var(--bar-space) var(--gutter)">
-    <RoutedLibrary
-      link={params.has('local') ? null : link}
-      query=""
-      explore={{}}
-      people={{}}
-      watchedYear={undefined}
-      onchange={(next) => (route = next)}
-      onprofilecontrol={(control) => (profiles = control)}
-    />
+    {#key libraryMount}
+      <RoutedLibrary
+        link={params.has('local') ? null : link}
+        query=""
+        explore={{}}
+        people={{}}
+        watchedYear={undefined}
+        onchange={(next) => (route = next)}
+        onprofilecontrol={(control) => (profiles = control)}
+      />
+    {/key}
   </main>
 {/if}

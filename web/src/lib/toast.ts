@@ -6,7 +6,12 @@ import { getContext, setContext } from 'svelte';
 
 const TOAST = Symbol('toast');
 
-export type Notify = (message: string, undo?: { label: string; run: () => void }) => void;
+export type Notify = (
+  message: string,
+  undo?: { label: string; run: () => void },
+  /** Keep a recovery/status presentation until its owner replaces or explicitly retires it. */
+  persistent?: boolean,
+) => void | (() => void);
 
 export function setToastContext(notify: Notify) {
   setContext(TOAST, notify);

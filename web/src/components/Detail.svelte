@@ -154,7 +154,10 @@
     tvs?: readonly HouseholdTv[];
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     /** Controls the command-capable household TV that authored `live`; absent for another or older device. */
-    ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => Promise<boolean>;
+    ontransport?: (
+      action: 'play' | 'pause' | 'skip',
+      offsetSeconds?: number,
+    ) => Promise<'sent' | 'waking' | 'unconfirmed' | 'recovering' | false>;
     /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
     remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
@@ -329,7 +332,30 @@
     const sent = await ontransport(action, offsetSeconds);
     transportBusy = false;
     if (!sent) {
-      notify?.('Couldn’t reach your TV. Check that Den is open.');
+      notify?.(
+        i18n.format(
+          'playback.couldntReachTv',
+          'Couldn’t reach your TV. Check that Den is open.',
+          {},
+        ),
+        {
+          label: 'Try again',
+          run: () => void transport(action, offsetSeconds),
+        },
+        true,
+      );
+      return;
+    }
+    if (sent === 'recovering') return;
+    // Library owns the persistent waking presentation with the exact transport authority, so its reactive fence can
+    // retire that presentation on target/key/profile/route replacement without clearing a newer notice.
+    if (sent === 'waking') return;
+    if (sent === 'unconfirmed') {
+      notify?.(
+        i18n.format('playback.sentUnconfirmed', 'Sent to {device}, but playback is unconfirmed.', {
+          device: live?.device ?? 'your TV',
+        }),
+      );
       return;
     }
     if (action === 'play') optimisticPlaying = true;
