@@ -269,7 +269,7 @@ const providerSource = (value: unknown): DownloadSourceOption | null => {
     filename,
     ...(sizeBytes !== undefined ? { sizeBytes } : {}),
     ...(typeof source.cached === 'boolean' ? { cached: source.cached } : {}),
-    ...(seeders !== undefined ? { seeders } : {}),
+    ...(seeders !== undefined && seeders < 1_000_001 ? { seeders } : {}),
     ...(packSizeBytes !== undefined ? { packSizeBytes } : {}),
     badges: providerStrings(source.badges, 32, 256),
     languages: providerStrings(source.languages, 64, 64),

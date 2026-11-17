@@ -1508,6 +1508,8 @@ describe('library service server protocol', () => {
         },
       });
     expect(result({ cached: true, seeders: 2 })).toMatchObject({ ok: true });
+    expect(result({ seeders: 1_000_000 })).toMatchObject({ ok: true });
+    expect(result({ seeders: 1_000_001 })).toMatchObject({ ok: false });
     const outcome = {
       result: 'failed_retryable',
       category: 'source_discovery',

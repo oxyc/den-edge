@@ -6,6 +6,7 @@ import {
   fetchSourceList,
   parseAnswer,
   parseSources,
+  rankable,
   prepareSource,
   scoutTicket,
   fetchSources,
@@ -167,6 +168,76 @@ it('a never-opened pack sends sizeBytes:null — size must become undefined, nev
   const [source] = parseSources({ streams: [unopened] }, addon, routes)!;
   expect(source!.size).toBeUndefined();
   expect(source!.packSize).toBe(68_000_000_000);
+});
+it('admits only positive safe-integer file and pack sizes without dropping the source', () => {
+  const values: [unknown, number | undefined][] = [
+    [1, 1],
+    [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    [0, undefined],
+    [-1, undefined],
+    [1.5, undefined],
+    [Number.MAX_SAFE_INTEGER + 1, undefined],
+    [Number.POSITIVE_INFINITY, undefined],
+    ['1136580921', undefined],
+    [true, undefined],
+  ];
+  const sources = parseSources(
+    {
+      streams: values.map(([value], index) => ({
+        title: `Film-${index}.mkv`,
+        url: `http://lan:8080/p/size-${index}`,
+        attributes: { resolution: '1080p', sizeBytes: value, packSizeBytes: value },
+      })),
+    },
+    addon,
+    routes,
+  )!;
+
+  expect(sources).toHaveLength(values.length);
+  expect(sources.map(({ size, packSize, badges }) => ({ size, packSize, badges }))).toEqual(
+    values.map(([, accepted]) => ({ size: accepted, packSize: accepted, badges: ['1080p'] })),
+  );
+  expect(
+    rankable(sources).map(({ sizeBytes, packSizeBytes, resolution }) => ({
+      sizeBytes,
+      packSizeBytes,
+      resolution,
+    })),
+  ).toEqual(
+    values.map(([, accepted]) => ({
+      sizeBytes: accepted,
+      packSizeBytes: undefined,
+      resolution: '1080p',
+    })),
+  );
+});
+it('admits only bounded nonnegative integer seeders in display and ranking', () => {
+  const values: [unknown, number | undefined][] = [
+    [0, 0],
+    [1_000_000, 1_000_000],
+    [-1, undefined],
+    [1.5, undefined],
+    [1_000_001, undefined],
+    [Number.MAX_SAFE_INTEGER + 1, undefined],
+    ['12', undefined],
+    [true, undefined],
+  ];
+  const sources = parseSources(
+    {
+      streams: values.map(([value], index) => ({
+        title: `Film-seeders-${index}.mkv`,
+        url: `http://lan:8080/p/seeders-${index}`,
+        attributes: { resolution: '1080p', seeders: value },
+      })),
+    },
+    addon,
+    routes,
+  )!;
+
+  expect(sources.map(({ seeders }) => seeders)).toEqual(values.map(([, accepted]) => accepted));
+  expect(rankable(sources).map(({ seeders }) => seeders)).toEqual(
+    values.map(([, accepted]) => accepted),
+  );
 });
 it('scopes series sources to the exact requested episode', async () => {
   let path = '';

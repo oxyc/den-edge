@@ -31,14 +31,14 @@ export interface TitleSource {
 /** The releases as `rank_releases` takes them: scout's attributes, with each one's identity and file name (a
  *  download's pick sinks an AVI or XviD file by its name, which scout reads no codec from). */
 export const rankable = (sources: TitleSource[]) =>
-  sources.map((source) => ({
-    ...source.attributes,
-    identity: source.identity,
-    filename: source.filename,
+  sources.map(({ attributes, identity, filename, size, seeders }): Record<string, unknown> => ({
+    ...attributes,
+    identity,
+    filename,
+    sizeBytes: size,
+    packSizeBytes: undefined,
+    seeders,
   }));
-
-/** Whether `addon` is the combined Den addon, asked under `/den` rather than Scout's `/scout`. */
-const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
 
 /** Structured source names are untrusted add-on display data, not release-name tokens to repair. */
 const sourceBadge = (value: unknown): string => {
@@ -56,7 +56,7 @@ const sourceBadge = (value: unknown): string => {
  * beside `<base>/den/<config>`), and its `/den/play/…` is Reel's, never a release.
  */
 export function scoutTicket(url: string, addon: Addon, routes: Routes): string | null {
-  const den = isDen(addon);
+  const den = addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
   const mount = addon.install.slice(0, addon.install.lastIndexOf('/'));
   const suffix = within(
     url,
@@ -87,8 +87,6 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
     if (!url || typeof filename !== 'string' || !filename || seen.has(filename)) return [];
     seen.add(filename);
     const a = s.attributes && typeof s.attributes === 'object' ? s.attributes : {};
-    const texts = (value: unknown) =>
-      Array.isArray(value) ? value.filter((s): s is string => typeof s === 'string') : [];
     return [
       {
         filename,
@@ -99,10 +97,12 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         url,
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
-        seeders: Number.isFinite(a.seeders) && a.seeders >= 0 ? a.seeders : undefined,
-        size: Number.isFinite(a.sizeBytes) && a.sizeBytes > 0 ? a.sizeBytes : undefined,
-        packSize:
-          Number.isFinite(a.packSizeBytes) && a.packSizeBytes > 0 ? a.packSizeBytes : undefined,
+        seeders:
+          Number.isSafeInteger(a.seeders) && a.seeders >= 0 && a.seeders <= 1_000_000
+            ? a.seeders
+            : undefined,
+        size: positiveInteger(a.sizeBytes),
+        packSize: positiveInteger(a.packSizeBytes),
         badges: [
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',
@@ -112,7 +112,9 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
           a.hardcodedSubs ? 'Hardcoded subtitles' : '',
           a.threeD ? '3D' : '',
         ].filter((s): s is string => typeof s === 'string' && s.length > 0),
-        languages: texts(a.audioLanguages),
+        languages: Array.isArray(a.audioLanguages)
+          ? a.audioLanguages.filter((s: unknown): s is string => typeof s === 'string')
+          : [],
         probed: a.probed === true,
         identity: releaseIdentity(s.url, s.behaviorHints?.filename),
         attributes: a,
@@ -120,6 +122,9 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
     ];
   });
 }
+
+const positiveInteger = (value: unknown): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
 
 export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 
