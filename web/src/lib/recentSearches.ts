@@ -1,7 +1,7 @@
 import { householdTag } from './profileHouseholdHint';
 
 const LEGACY_STORAGE_KEY = 'den.recentSearches';
-const STORAGE_PREFIX = 'den.search.v2';
+const STORAGE_PREFIX = 'den.search.v2:';
 const LIMIT = 8;
 const MAX_QUERY_LENGTH = 200;
 let memory: string[] = [];
@@ -22,20 +22,11 @@ const browserStorage = (): Storage | undefined => {
   }
 };
 
-function boundScopes(storage: Storage, storageKey: string): void {
-  if (storage.getItem(storageKey) !== null) return;
-  for (let index = storage.length, kept = 1; index--;) {
-    const candidate = storage.key(index);
-    if (candidate?.startsWith(`${STORAGE_PREFIX}:`) && candidate !== storageKey && kept++ >= LIMIT)
-      storage.removeItem(candidate);
-  }
-}
-
 /**
  * Choose whose searches the default storage serves: an opaque, exact household-and-Owner namespace, or a fresh
  * in-memory list for one profile session. Changing household, profile or storage authority empties the in-memory
  * list, so nothing typed under one authority is offered to the next. The retired origin-global key is deleted but
- * never adopted: its plaintext could belong to a different household. An opaque registry bounds namespaces while
+ * never adopted: its plaintext could belong to a different household. Opaque namespace cleanup keeps storage
  * keeping up to eight household Owners available when this browser returns to them.
  */
 export function scopeRecentSearches(
@@ -45,7 +36,7 @@ export function scopeRecentSearches(
 ): void {
   const storageKey =
     persist && householdKey
-      ? `${STORAGE_PREFIX}:${householdTag(`${householdKey}\0${profile}`)}`
+      ? `${STORAGE_PREFIX}${householdTag(`${householdKey}\0${profile}`)}`
       : undefined;
   const scope = storageKey ?? `${householdKey}:${profile}`;
   if (scope === activeScope) return;
@@ -90,7 +81,12 @@ function write(searches: string[]): string[] {
     if (storage) {
       const key = activeStorageKey!;
       storage.removeItem(LEGACY_STORAGE_KEY);
-      boundScopes(storage, key);
+      if (!storage.getItem(key))
+        for (let index = storage.length, kept = 1; index--;) {
+          const candidate = storage.key(index);
+          if (candidate?.startsWith(STORAGE_PREFIX) && kept++ >= LIMIT)
+            storage.removeItem(candidate);
+        }
       if (searches.length) storage.setItem(key, JSON.stringify(searches));
       else storage.removeItem(key);
     }
