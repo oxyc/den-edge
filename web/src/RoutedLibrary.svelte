@@ -295,11 +295,6 @@
     // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
     const libraryKey = session.household.identity.libraryKey;
     let current = true;
-    const playKey =
-      __DEN_TV__ && libraryKey
-        ? import('./lib/householdPlays').then(({ playKeyFor }) => playKeyFor(libraryKey))
-        : Promise.resolve(undefined);
-    void playKey.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
       if (!current) return;
@@ -307,13 +302,16 @@
         () =>
           void (async () => {
             // A TV publishes its household play key, so any device holding the library can play on it.
-            const householdPlayKey = await playKey;
+            const playKey =
+              __DEN_TV__ && libraryKey
+                ? await (await import('./lib/householdPlays')).playKeyFor(libraryKey)
+                : undefined;
             if (!current) return;
             await model.heartbeatDevice(
               name,
               undefined,
               __DEN_TV__ ? 'tv' : 'browser',
-              householdPlayKey,
+              playKey,
               __DEN_TV__ ? 1 : undefined,
             );
           })().catch((error: unknown) => {
