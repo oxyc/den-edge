@@ -7,7 +7,6 @@
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
   import type { Service } from '../settings/services';
-  import { tick } from 'svelte';
   import ServiceTile from './ServiceTile.svelte';
 
   let {
@@ -40,13 +39,21 @@
   const localizedHeading = $derived(capitalizeHeading(i18n.phrase(heading), i18n.language));
   let section = $state<HTMLElement>();
   let retryButton = $state<HTMLButtonElement>();
+  let restoreRetryFocus = false;
 
-  $effect.pre(() => {
+  function retry() {
+    restoreRetryFocus = document.activeElement === retryButton;
+    onretry?.();
+  }
+
+  $effect(() => {
     const state = recovery;
-    if (state === 'retrying' || document.activeElement !== retryButton) return;
-    void tick().then(() => {
+    if (!restoreRetryFocus || state === 'retrying') return;
+    const frame = requestAnimationFrame(() => {
       (state === 'failed' ? retryButton : section?.querySelector<HTMLElement>('.tile'))?.focus();
+      restoreRetryFocus = false;
     });
+    return () => cancelAnimationFrame(frame);
   });
 
   $effect(() => {
@@ -112,7 +119,7 @@
             aria-label={i18n.phrase('Try again')}
             aria-disabled={recovery === 'retrying'}
             bind:this={retryButton}
-            onclick={onretry}>↻</button
+            onclick={retry}>↻</button
           >
           <span role="status"
             >{i18n.phrase(recovery === 'retrying' ? 'Trying again…' : 'Services unavailable')}</span
