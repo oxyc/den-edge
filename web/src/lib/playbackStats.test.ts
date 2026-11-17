@@ -556,4 +556,19 @@ describe('sendReport', () => {
     await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
     warn.mockRestore();
   });
+
+  it('settles once the answer is in, so what follows it can wait', async () => {
+    let answer!: (res: Response) => void;
+    let settled = false;
+    const sent = sendReport(
+      '/r',
+      '{}',
+      () => new Promise<Response>((done) => (answer = done)),
+    ).then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    answer(new Response(null, { status: 204 }));
+    await sent;
+    expect(settled).toBe(true);
+  });
 });

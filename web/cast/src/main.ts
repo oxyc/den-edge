@@ -575,8 +575,12 @@ function endPlaying(): void {
   endMedia(ended);
 }
 
-/** End a session this page played, at den-remux, with where it got to (`lastPosition`) when it carries a receipt. */
-function endMedia(media: PlayingMedia | undefined): void {
+/**
+ * End a session this page played, at den-remux, with where it got to (`lastPosition`) when it carries a receipt.
+ * `after` is the session's last report (`stopLocal`): den-remux answers a report for an ended session 410, so the end
+ * goes once that was answered. Not for a page that is going away, which has no time to wait.
+ */
+function endMedia(media: PlayingMedia | undefined, after?: Promise<void>): void {
   const lifecycle = denLifecycleMedia(media);
   if (!lifecycle) return;
   const base = lifecycle.replace(/\/master\.m3u8$/, '');
@@ -594,10 +598,13 @@ function endMedia(media: PlayingMedia | undefined): void {
         keepalive: true,
       }
     : { method: 'DELETE', keepalive: true };
-  void fetch(target, init).catch((error: unknown) =>
-    // It ends on its own once idle; this only says why it lingered.
-    console.warn('ending the session failed:', error),
-  );
+  const send = () =>
+    void fetch(target, init).catch((error: unknown) =>
+      // It ends on its own once idle; this only says why it lingered.
+      console.warn('ending the session failed:', error),
+    );
+  if (after) void after.then(send);
+  else send();
 }
 
 /**
@@ -620,8 +627,8 @@ function announceDevices(): void {
   );
 }
 
-/** Stop this page's hls.js and the connection it was watching. */
-function stopLocal(): void {
+/** Stop this page's hls.js and the connection it was watching. Settles when its last report was answered. */
+function stopLocal(): Promise<void> {
   clearLocalPlay();
   const owner = localPlayback;
   localPlayback = undefined;
@@ -629,12 +636,13 @@ function stopLocal(): void {
   if (owner?.timeUpdate) video.removeEventListener('timeupdate', owner.timeUpdate);
   if (owner?.ended) video.removeEventListener('ended', owner.ended);
   if (owner?.error) video.removeEventListener('error', owner.error);
-  owner?.watcher?.stop();
+  const reported = owner?.watcher?.stop() ?? Promise.resolve();
   owner?.hls?.destroy();
   if (hls === owner?.hls) hls = undefined;
   clearInterval(owner?.linkWatch);
   owner?.link?.dispose();
   if (statusPill.textContent === text(RECONNECTING)) setStatus('');
+  return reported;
 }
 
 /** Fail only the local player generation that caught this engine exception. */
@@ -1075,8 +1083,7 @@ async function loadCast(load: LoadMessage | undefined = current): Promise<void> 
       !replaced.external &&
       denLifecycleMedia(replaced) !== denLifecycleMedia(requested)
     ) {
-      if (!castStarted) stopLocal();
-      endMedia(replaced);
+      endMedia(replaced, castStarted ? undefined : stopLocal());
     }
     castStarted = true;
     attempt.settled = true;

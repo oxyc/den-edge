@@ -5239,7 +5239,7 @@
     // Read while the media is attached: once hls.js or AVPlay lets go, the element's duration is gone, and a direct
     // stream's session names none (`duration: 0`), so the receipt would end with no evidence.
     const evidence = terminalEvidence();
-    watcher?.stop();
+    const reported = watcher?.stop();
     watcher = undefined;
     hls?.destroy();
     hls = undefined;
@@ -5247,7 +5247,7 @@
       avplay?.destroy();
       avplay = undefined;
     }
-    endSession(current, undefined, evidence);
+    endSession(current, undefined, evidence, reported);
     castPlayBlocked = null;
     session = null;
   }

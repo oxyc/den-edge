@@ -483,6 +483,13 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
     stack.torbox.managed = false;
     const edgeFrom = stack.edge.lines().length;
     const { page, seen } = await household();
+    // A slow link to the public listener: the page's last playback report is still on its way when the request that
+    // ends the session follows it. The end must wait for the report's answer, or Remux has already forgotten the
+    // session and answers the report 410.
+    await page.route(/\/remux\/s\/[^/]+\/[^/]+\/report$/, async (route) => {
+      await new Promise((done) => setTimeout(done, 1_500));
+      await route.continue();
+    });
     await play(page);
     await playingPast(castFrame(page).locator('video'), 2);
     await expect(page.getByTestId('playback-source')).toHaveText('Den Remux');

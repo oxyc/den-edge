@@ -1179,6 +1179,12 @@ export function endSession(
   session: Session,
   fetchImpl: typeof fetch = fetch,
   evidence?: TerminalEvidence,
+  /**
+   * The session's last playback report (`Watcher.stop`): den-remux answers a report for an ended session 410, and two
+   * requests sent one after the other are not served in that order, so the end goes once that was answered. Left out
+   * for a page that is going away, which has no time to wait.
+   */
+  after?: Promise<void>,
 ): void {
   if (session.external) {
     session.dispose?.();
@@ -1193,23 +1199,27 @@ export function endSession(
   // The session's signed path is its whole authority, so another origin is sent no cookie: an uncredentialed
   // keepalive POST, which a wildcard answer does allow and which outlives the page as a beacon does.
   const crossOrigin = crossOriginUrl(base);
-  if (!crossOrigin && globalThis.navigator?.sendBeacon?.(`${base}/end`, beaconBody)) return;
-  if (evidence || crossOrigin) {
-    void fetchImpl(`${base}/end`, {
-      method: 'POST',
-      ...(evidence ? { headers: { 'content-type': 'application/json' } } : {}),
-      body,
+  const send = () => {
+    if (!crossOrigin && globalThis.navigator?.sendBeacon?.(`${base}/end`, beaconBody)) return;
+    if (evidence || crossOrigin) {
+      void fetchImpl(`${base}/end`, {
+        method: 'POST',
+        ...(evidence ? { headers: { 'content-type': 'application/json' } } : {}),
+        body,
+        keepalive: true,
+        ...(crossOrigin ? { credentials: 'omit' as const } : {}),
+      }).catch(() => undefined);
+      return;
+    }
+    void fetchImpl(base, {
+      method: 'DELETE',
       keepalive: true,
-      ...(crossOrigin ? { credentials: 'omit' as const } : {}),
-    }).catch(() => undefined);
-    return;
-  }
-  void fetchImpl(base, {
-    method: 'DELETE',
-    keepalive: true,
-  }).catch(
-    () => undefined, // it ends on its own once idle
-  );
+    }).catch(
+      () => undefined, // it ends on its own once idle
+    );
+  };
+  if (after) void after.then(send);
+  else send();
 }
 
 /**

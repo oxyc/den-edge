@@ -284,7 +284,7 @@ export class ReportSchedule {
   private ended = false;
 
   constructor(
-    private readonly send: (event: ReportEvent) => void,
+    private readonly send: (event: ReportEvent) => unknown,
     private readonly now: () => number = () => performance.now(),
     private readonly interval = REPORT_INTERVAL_MS,
     private readonly max = MAX_REPORTS,
@@ -315,18 +315,19 @@ export class ReportSchedule {
     this.sent += 1;
   }
 
-  end() {
-    if (this.ended) return;
+  /** The last report, as it is sent; settles when that is answered (at once when none goes). */
+  end(): Promise<void> {
+    if (this.ended) return Promise.resolve();
     this.ended = true;
-    if (this.sent < this.max) this.fire('end');
+    return this.sent < this.max ? this.fire('end') : Promise.resolve();
   }
 
-  private fire(event: ReportEvent) {
+  private fire(event: ReportEvent): Promise<void> {
     clearTimeout(this.timer);
     this.timer = undefined;
     this.last = this.now();
     this.sent += 1;
-    this.send(event);
+    return Promise.resolve(this.send(event)).then(() => undefined);
   }
 }
 
@@ -383,9 +384,17 @@ export function browserName(
   return `${browser} / ${os}`.slice(0, 80);
 }
 
-/** POST a report; not retried, since the next one carries everything this one did. Kept alive past the page's close. */
-export function sendReport(url: string, body: string, fetchImpl: typeof fetch = fetch): void {
-  void fetchImpl(url, { method: 'POST', body, keepalive: true })
+/**
+ * POST a report; not retried, since the next one carries everything this one did. Kept alive past the page's close.
+ * Settles once it was answered or failed, never rejects: whatever ends the session next waits for it, because den-remux
+ * answers a report for an ended session 410 and two requests sent one after the other are not served in that order.
+ */
+export function sendReport(
+  url: string,
+  body: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  return fetchImpl(url, { method: 'POST', body, keepalive: true })
     .then((res) => {
       if (!res.ok) console.warn(`playback report: den-remux answered ${res.status}`);
     })
@@ -403,7 +412,7 @@ export interface WatchOptions {
   hls?: { instance: Hls; Hls: typeof Hls };
   /** Remux's explicit report capability. Absent for externally managed HLS. */
   reportUrl?: string;
-  send?: (url: string, body: string) => void;
+  send?: (url: string, body: string) => unknown;
   now?: () => number;
   /** Told, as the watcher stops, what hls.js's bandwidth estimate came to and how much playing it rests on. */
   onEstimate?: (evidence: PlaybackEvidence) => void;
@@ -421,8 +430,11 @@ export interface PlaybackEvidence {
 }
 
 export interface Watcher {
-  /** Send the last report and stop; call it before hls.js is destroyed, while its estimate can still be read. */
-  stop(): void;
+  /**
+   * Send the last report and stop; call it before hls.js is destroyed, while its estimate can still be read. Settles
+   * when that report was answered (at once when there is none): end the session after it, not beside it.
+   */
+  stop(): Promise<void>;
   /** Count a report sent to this session from elsewhere, against den-remux's MAX_REPORTS. */
   spent(): void;
   /** `stallCount` and `stalledMs` so far, with the seeks and dropped frames, for den-edge's own one-shot outcome
@@ -478,7 +490,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
   };
   const schedule = new ReportSchedule((event) => {
     if (reportUrl)
-      send(
+      return send(
         reportUrl,
         reportBody(0, `playback stats (${event})`, recorder.snapshot(event, now(), live())),
       );
@@ -602,7 +614,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
 
   return {
     stop() {
-      if (stopped) return;
+      if (stopped) return Promise.resolve();
       const bps = hls?.instance.bandwidthEstimate;
       if (bps && Number.isFinite(bps) && bps > 0)
         options.onEstimate?.({
@@ -611,9 +623,10 @@ export function watchPlayback(options: WatchOptions): Watcher {
           playedSeconds: playedSecondsOf(video.played),
           stalls: recorder.linkStalls(),
         });
-      schedule.end();
+      const last = schedule.end();
       stopped = true;
       listening.abort();
+      return last;
     },
     spent: () => schedule.spent(),
     stats: () => ({
