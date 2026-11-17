@@ -2220,7 +2220,6 @@
     const language = i18n.language;
     const picks = servicePicks;
     if (!directory) return;
-    directoryState = { retrying: false, failed: false, services: [], names: {}, pending: 0 };
     const controller = directory.watchServiceDirectories(
       session.content,
       picks,

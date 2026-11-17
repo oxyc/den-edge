@@ -130,6 +130,7 @@ export function watchServiceDirectories<T extends { service: Service }>(
     };
     publish();
   };
+  publish();
   for (const country of countries) void load(country);
   return {
     retry: () => {
