@@ -35,8 +35,8 @@ export interface DownloadBackgroundWork {
 
 /** Worker-side provider discovery and download lifecycle. No provider request starts in the constructor. */
 export class DownloadServiceRuntime implements DownloadBackgroundWork {
-  readonly coordinator: DownloadCoordinator;
-  readonly driver: DownloadCoordinatorDriver;
+  readonly q: DownloadCoordinator;
+  private readonly d: DownloadCoordinatorDriver;
   #providers?: Promise<Providers>;
   #resolved?: Providers;
   #providerInput?: string;
@@ -59,7 +59,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         const result = await this.content.season(seriesId, season);
         return result.kind === 'found' ? result.value : null;
       });
-    this.coordinator = new DownloadCoordinator(
+    this.q = new DownloadCoordinator(
       log,
       clock,
       {
@@ -121,7 +121,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         },
       },
     );
-    this.driver = new DownloadCoordinatorDriver(this.coordinator);
+    this.d = new DownloadCoordinatorDriver(this.q);
   }
 
   async run(current: () => boolean = () => true): Promise<boolean> {
@@ -136,12 +136,12 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     this.#providersUnavailable = !scout;
     if (!scout || !current()) return false;
     const before = this.#digest();
-    const wrote = await this.driver.run({ current }, den);
+    const wrote = await this.d.run({ current }, den);
     return wrote || before !== this.#digest();
   }
 
   nextDelay(now = Date.now()): number | undefined {
-    const coordinator = this.coordinator;
+    const coordinator = this.q;
     const downloads = coordinator.list().filter((download) => {
       const state = coordinator.status(download, now).state;
       return downloadPollable(state);
@@ -175,7 +175,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
           }),
         )
       : undefined;
-    const wrote = await this.driver.run({
+    const wrote = await this.d.run({
       force: true,
       ...(name ? { names: new Set([name]) } : {}),
     });
@@ -203,7 +203,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   }
 
   #digest(): string {
-    const coordinator = this.coordinator;
+    const coordinator = this.q;
     return JSON.stringify(
       coordinator
         .list()

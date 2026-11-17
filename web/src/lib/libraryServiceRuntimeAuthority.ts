@@ -132,7 +132,7 @@ export async function openLibraryServiceAuthority(
     const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
     const logAuthority = new LibraryLogAuthority(log, clock, {
       mode: request.mode,
-      downloads: downloads.coordinator,
+      downloads: downloads.q,
       content,
       libraryKey: request.libraryKey,
       vault,
@@ -175,7 +175,7 @@ export async function openLibraryServiceAuthority(
     const downloads = new DownloadServiceRuntime(log, clock, () => {}, content);
     const logAuthority = new LibraryLogAuthority(log, clock, {
       mode: request.mode,
-      downloads: downloads.coordinator,
+      downloads: downloads.q,
       content,
       libraryKey: request.libraryKey,
       vault,

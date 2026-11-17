@@ -47,7 +47,7 @@ describe('DownloadServiceRuntime artwork', () => {
     await expect(runtime.run()).resolves.toBe(false);
     expect(runtime.nextDelay(1)).toBeUndefined();
     await expect(
-      runtime.coordinator.effects.resolve({
+      runtime.q.effects.resolve({
         mediaType: 'movie',
         mediaId: 7,
         imdbId: 'tt0000007',

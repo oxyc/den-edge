@@ -86,7 +86,7 @@ export class DownloadCoordinatorDriver {
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
-  constructor(readonly queue: DownloadCoordinator) {}
+  constructor(private readonly q: DownloadCoordinator) {}
 
   run(
     options: DownloadDriveOptions = {},
@@ -129,9 +129,9 @@ export class DownloadCoordinatorDriver {
   }
 
   async #run(options: DownloadDriveOptions): Promise<boolean> {
-    const now = options.now ?? this.queue.now();
+    const now = options.now ?? this.q.now();
     const current = (this.#current = options.current ?? (() => true));
-    const downloads = this.queue
+    const downloads = this.q
       .list()
       .filter((download) => !options.names || options.names.has(download.name));
     // A final removal still has work to do: clear Hearth's previously acknowledged non-empty list. Once that clear
@@ -145,7 +145,7 @@ export class DownloadCoordinatorDriver {
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
     const current = this.#current;
-    const queue = this.queue;
+    const queue = this.q;
     const polled = downloads.filter((download) => {
       const state = queue.status(download, now).state;
       if (state === 'awaiting_air' || !downloadPollable(state, force)) return false;
@@ -178,7 +178,7 @@ export class DownloadCoordinatorDriver {
 
   async #pollAndRenew(download: Download, now: number): Promise<void> {
     const current = this.#current;
-    const queue = this.queue;
+    const queue = this.q;
     const answer = await queue.poll(download);
     if (!current()) return;
     for (const entry of download.race.entries) {
@@ -195,11 +195,11 @@ export class DownloadCoordinatorDriver {
   #since(at: number, mono: number, now: number): number | undefined {
     const wall = now - at;
     if (wall < 0) return undefined;
-    return Math.max(wall, this.queue.monotonicNow() - mono);
+    return Math.max(wall, this.q.monotonicNow() - mono);
   }
 
   async #holdLease(now: number, observedFor?: number): Promise<boolean> {
-    const queue = this.queue;
+    const queue = this.q;
     const log = queue.log;
     const name = `set:${LEASE_ROW}`;
     const row = log.settings(LEASE_ROW);
@@ -257,9 +257,9 @@ export class DownloadCoordinatorDriver {
     const mine = this.#held;
     const elapsed = mine ? this.#since(mine.at, mine.mono, now) : undefined;
     if (!mine || elapsed === undefined || elapsed >= 120_000) return false;
-    const value = this.queue.log.settings(LEASE_ROW)?.values.lease?.value;
+    const value = this.q.log.settings(LEASE_ROW)?.values.lease?.value;
     const [holder, epoch] = value && 'strings' in value ? value.strings : [];
-    return holder === this.queue.device && Number(epoch) === mine.epoch;
+    return holder === this.q.device && Number(epoch) === mine.epoch;
   }
 
   #active(now: number): boolean {
@@ -272,12 +272,12 @@ export class DownloadCoordinatorDriver {
     now: number,
   ): Promise<boolean> {
     if (!this.#active(now)) return false;
-    return this.queue.log.writeAt(withValues(download.row, values), download.seq);
+    return this.q.log.writeAt(withValues(download.row, values), download.seq);
   }
 
   async #holderPass(now: number): Promise<boolean> {
     const current = this.#current;
-    const queue = this.queue;
+    const queue = this.q;
     let wrote = await this.#syncHearth(now);
     const states: Record<string, string> = {};
     const decided = queue.list();
@@ -413,11 +413,11 @@ export class DownloadCoordinatorDriver {
    * it changed and otherwise every few minutes (an empty one once, to clear what Hearth holds).
    */
   async #syncHearth(now: number): Promise<boolean> {
-    const send = this.queue.effects.wanted;
+    const send = this.q.effects.wanted;
     const binding = this.#hearth;
     const authority = binding[0];
     if (!send || !authority) return false;
-    const items = wantedItems(this.queue.list());
+    const items = wantedItems(this.q.list());
     const digest = JSON.stringify(items);
     if (binding[1] === digest && (!items.length || now - binding[2]! < HEARTH_EVERY)) return false;
     const statuses = await send(items, authority).catch(() => {});
@@ -431,7 +431,7 @@ export class DownloadCoordinatorDriver {
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
-      const download = this.queue
+      const download = this.q
         .list()
         .find((candidate) => candidate.content === status.key && candidate.exhausted);
       if (!download || download.tried.includes(status.identity)) continue;
@@ -445,7 +445,7 @@ export class DownloadCoordinatorDriver {
    * this client's own list by its identity, so the row names a ticket this client can use.
    */
   async #adopt(download: Download, status: WantedStatus, now: number): Promise<boolean> {
-    const { sources } = await this.queue.sourcesForTitle(download.title, true);
+    const { sources } = await this.q.sourcesForTitle(download.title, true);
     if (!this.#active(now) || !sources) return false;
     const chosen = sources.find((source) => source.identity === status.identity);
     if (!chosen) {
@@ -473,7 +473,7 @@ export class DownloadCoordinatorDriver {
    * waits longer; an answer that can't settle it writes nothing and asks again shortly.
    */
   async #retryExhausted(download: Download, attempt: number, now: number): Promise<boolean> {
-    const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
+    const { sources, answer } = await this.q.sourcesForTitle(download.title, true);
     if (!this.#active(now)) return false;
     if (sources === null || !sourceAnswerComplete(answer)) {
       this.#unanswered.set(download.name, now + UNANSWERED_WAIT);
@@ -487,10 +487,10 @@ export class DownloadCoordinatorDriver {
       ...(download.wanted ? [] : [download.release.identity]),
     ]);
     const fresh = viable.filter((source) => !tried.has(source.identity));
-    const chosen = this.queue.pick(fresh.length ? fresh : viable, download.title.originalLanguage);
+    const chosen = this.q.pick(fresh.length ? fresh : viable, download.title.originalLanguage);
     if (!chosen) {
       downloadDiagnostic(7);
-      const at = await this.queue.stamp(now);
+      const at = await this.q.stamp(now);
       const retries = { value: { int: attempt + 1 }, at };
       return this.#write(
         download,
@@ -526,7 +526,7 @@ export class DownloadCoordinatorDriver {
     picked: { retries: number; tried: string[]; candidates: number; queuedAt: number },
     now: number,
   ): Promise<boolean> {
-    const at = await this.queue.stamp(now);
+    const at = await this.q.stamp(now);
     const values: Record<string, Stamped<ConfigValue | null>> = {
       retries: { value: { int: picked.retries }, at },
       release: {
@@ -550,8 +550,8 @@ export class DownloadCoordinatorDriver {
       resumeAt: { value: null, at },
     };
     if (!(await this.#write(download, values, now))) return false;
-    this.queue.clocks.delete(download.name);
-    if (this.#stillHeld(now)) await this.queue.add(download.name, chosen.url);
+    this.q.clocks.delete(download.name);
+    if (this.#stillHeld(now)) await this.q.add(download.name, chosen.url);
     return true;
   }
 
@@ -559,7 +559,7 @@ export class DownloadCoordinatorDriver {
   async #raceList(download: Download, now: number): Promise<TitleSource[] | null> {
     const kept = this.#raceLists.get(download.name);
     if (kept && now - kept.at < RACE_LIST_MS) return kept.sources;
-    const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
+    const { sources, answer } = await this.q.sourcesForTitle(download.title, true);
     if (!sources || !sourceAnswerComplete(answer)) return kept?.sources ?? null;
     this.#raceLists.set(download.name, { at: now, sources });
     return sources;
@@ -579,7 +579,7 @@ export class DownloadCoordinatorDriver {
     const entries = race.entries;
     if (status.state === 'paused' || (status.state === 'ready' && !entries.length))
       return 'unchanged';
-    const primary = this.queue.answers.get(name);
+    const primary = this.q.answers.get(name);
     const flights = [
       {
         identity: download.release.identity,
@@ -592,7 +592,7 @@ export class DownloadCoordinatorDriver {
             : {}),
       },
       ...entries.map((entry) => {
-        const answer = this.queue.entryAnswers.get(raceKey(name, entry.identity));
+        const answer = this.q.entryAnswers.get(raceKey(name, entry.identity));
         return {
           identity: entry.identity,
           since: entry.queuedAt,
@@ -616,7 +616,7 @@ export class DownloadCoordinatorDriver {
       });
     // Until a race is under way a healthy download costs den-scout no list: den-core is asked first with the
     // releases last resolved (or none), and the title is resolved only when that answer escalates.
-    const held = entries.some((entry) => this.queue.entryRecoveryHeld(download, entry, now));
+    const held = entries.some((entry) => this.q.entryRecoveryHeld(download, entry, now));
     const first = decide(held ? [] : (this.#raceLists.get(name)?.sources ?? []));
     const finished = first.decision === 'take' && first.reason === 'finished';
     const underWay = race.stage > 0 || entries.length > 0 || first.stage !== race.stage;
@@ -645,7 +645,7 @@ export class DownloadCoordinatorDriver {
     const isPrimary = identity === download.release.identity;
     if (isPrimary && !entries.length) return 'unchanged';
     if (!isPrimary && !entry && !source) return 'unchanged';
-    const at = await this.queue.stamp(now);
+    const at = await this.q.stamp(now);
     const values: Record<string, Stamped<ConfigValue | null>> = {
       race: { value: raceValue(clearedRace(download.race, now)), at },
     };
@@ -658,7 +658,7 @@ export class DownloadCoordinatorDriver {
         cached: source!.cached,
         queuedAt: now,
       };
-      const url = entry ? (this.queue.entryUrl(download, entry) ?? taken.url) : taken.url;
+      const url = entry ? (this.q.entryUrl(download, entry) ?? taken.url) : taken.url;
       Object.assign(values, {
         release: {
           value: releaseValue({
@@ -684,16 +684,12 @@ export class DownloadCoordinatorDriver {
     downloadDiagnostic(9);
     for (const other of entries)
       if (other.identity !== identity)
-        await this.queue.cancelEntryIfSafe(
-          download,
-          other.identity,
-          this.queue.entryUrl(download, other),
-        );
-    if (!isPrimary) await this.queue.cancelIfSafe(download);
-    if (entry) this.queue.promoteEntry(download, entry);
-    this.queue.clearEntries(download.name);
-    this.queue.clocks.delete(download.name);
-    if (!isPrimary && !entry && source) await this.queue.add(download.name, source.url);
+        await this.q.cancelEntryIfSafe(download, other.identity, this.q.entryUrl(download, other));
+    if (!isPrimary) await this.q.cancelIfSafe(download);
+    if (entry) this.q.promoteEntry(download, entry);
+    this.q.clearEntries(download.name);
+    this.q.clocks.delete(download.name);
+    if (!isPrimary && !entry && source) await this.q.add(download.name, source.url);
     return 'written';
   }
 
@@ -716,11 +712,11 @@ export class DownloadCoordinatorDriver {
     for (const identity of decided.add) {
       const source = listed.find((candidate) => candidate.identity === identity);
       if (!source || !this.#active(now)) continue;
-      const answer = await this.queue.addEntry(download.name, identity, source.url);
+      const answer = await this.q.addEntry(download.name, identity, source.url);
       if (!this.#current()) return 'unchanged';
       if (answer.state === 'refused') {
         cappedAt = now;
-        this.queue.forgetEntry(download.name, identity);
+        this.q.forgetEntry(download.name, identity);
         break;
       }
       added.push({
@@ -752,7 +748,7 @@ export class DownloadCoordinatorDriver {
       tried.length === download.tried.length
     )
       return 'unchanged';
-    const at = await this.queue.stamp(now);
+    const at = await this.q.stamp(now);
     const values: Record<string, Stamped<ConfigValue | null>> = {
       race: { value: raceValue(exhausted ? clearedRace(race, now) : next), at },
       tried: { value: { strings: tried }, at },
@@ -764,7 +760,7 @@ export class DownloadCoordinatorDriver {
           value: releaseValue({
             identity: promoted.identity,
             label: promoted.label ?? promoted.identity,
-            url: this.queue.entryUrl(download, promoted) ?? promoted.url,
+            url: this.q.entryUrl(download, promoted) ?? promoted.url,
             sizeBytes: promoted.sizeBytes,
             cached: promoted.cached,
           }),
@@ -778,35 +774,31 @@ export class DownloadCoordinatorDriver {
       });
     if (!(await this.#write(download, values, now))) {
       for (const entry of added)
-        await this.queue.effects.cancel(this.queue.entryUrl(download, entry) ?? entry.url, false);
+        await this.q.effects.cancel(this.q.entryUrl(download, entry) ?? entry.url, false);
       return 'failed';
     }
     if (added.length) downloadDiagnostic(10);
     for (const identity of decided.cancel) {
-      if (identity === download.release.identity) await this.queue.cancelIfSafe(download);
+      if (identity === download.release.identity) await this.q.cancelIfSafe(download);
       else {
         const entry = race.entries.find((candidate) => candidate.identity === identity);
         if (entry)
-          await this.queue.cancelEntryIfSafe(
-            download,
-            identity,
-            this.queue.entryUrl(download, entry),
-          );
+          await this.q.cancelEntryIfSafe(download, identity, this.q.entryUrl(download, entry));
       }
-      this.queue.forgetEntry(download.name, identity);
+      this.q.forgetEntry(download.name, identity);
     }
     if (promoted) {
-      this.queue.promoteEntry(download, promoted);
-      this.queue.clocks.delete(download.name);
+      this.q.promoteEntry(download, promoted);
+      this.q.clocks.delete(download.name);
     }
     return 'written';
   }
 
   async #writeTicket(download: Download, now: number): Promise<boolean> {
-    const url = this.queue.urls.get(download.name);
-    this.queue.lapsed.delete(download.name);
+    const url = this.q.urls.get(download.name);
+    this.q.lapsed.delete(download.name);
     if (!url || url === download.release.url) return false;
-    const at = await this.queue.stamp(now);
+    const at = await this.q.stamp(now);
     return this.#write(
       download,
       {
@@ -820,7 +812,7 @@ export class DownloadCoordinatorDriver {
   }
 
   async #fallBack(download: Download, now: number): Promise<boolean> {
-    const { sources, answer } = await this.queue.sourcesForTitle(download.title, true);
+    const { sources, answer } = await this.q.sourcesForTitle(download.title, true);
     if (!this.#active(now)) return false;
     const next = syncPolicy<{
       decision: 'next' | 'exhausted' | 'undecided';
@@ -835,7 +827,7 @@ export class DownloadCoordinatorDriver {
       complete: sourceAnswerComplete(answer),
     });
     if (next.decision === 'undecided') return false;
-    const at = await this.queue.stamp(now);
+    const at = await this.q.stamp(now);
     const values: Record<string, Stamped<ConfigValue | null>> = {
       tried: { value: { strings: next.tried }, at },
     };
@@ -864,9 +856,9 @@ export class DownloadCoordinatorDriver {
       resumeAt: { value: null, at },
     });
     if (!(await this.#write(download, values, now))) return false;
-    await this.queue.cancelIfSafe(download);
-    this.queue.clocks.delete(download.name);
-    await this.queue.add(download.name, chosen.url);
+    await this.q.cancelIfSafe(download);
+    this.q.clocks.delete(download.name);
+    await this.q.add(download.name, chosen.url);
     downloadDiagnostic(11);
     return true;
   }
