@@ -311,8 +311,12 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
-  it('keeps a source lookup through a device heartbeat, and aborts it when the plugins change', async () => {
+  it('only aborts source lookup work when runtime changes', async () => {
     const aborted: string[] = [];
+    let releaseMetadata!: () => void;
+    let releasePublish!: () => void;
+    const metadataHeld = new Promise<void>((resolve) => (releaseMetadata = resolve));
+    const publishHeld = new Promise<void>((resolve) => (releasePublish = resolve));
     const held = {
       ...authority(),
       async command(command: LibraryCommand) {
@@ -328,6 +332,11 @@ describe('LibraryServiceCore', () => {
         };
       },
       async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind === 'library.metadata') {
+          signal?.addEventListener('abort', () => aborted.push('metadata'), { once: true });
+          await metadataHeld;
+          return { kind: 'library.metadata' as const, titles: [], shapes: [], retryable: [] };
+        }
         if (query.kind !== 'download.sources') throw new Error('unsupported query');
         await new Promise<void>((resolve) =>
           signal?.addEventListener(
@@ -340,6 +349,12 @@ describe('LibraryServiceCore', () => {
           ),
         );
         return { kind: 'download.sources' as const, sources: null };
+      },
+      async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        signal?.addEventListener('abort', () => aborted.push('publish'), { once: true });
+        await publishHeld;
+        return { result: { kind: 'assistant.publish' as const, published: 0 }, affected: [] };
       },
     };
     const core = new LibraryServiceCore(async () => held, 'instance-1');
@@ -361,6 +376,19 @@ describe('LibraryServiceCore', () => {
       });
 
     void lookup('before-heartbeat');
+    const metadata = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'metadata-during-runtime-change',
+      query: { kind: 'library.metadata', titles: [title] },
+    });
+    const publish = core.dispatch({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'publish-during-runtime-change',
+      operationId: 'publish-during-runtime-change',
+      task: { kind: 'assistant.publish' },
+    });
     await Promise.resolve();
     await command('heartbeat', {
       kind: 'device.heartbeat',
@@ -374,6 +402,9 @@ describe('LibraryServiceCore', () => {
       manifestUrl: 'https://scout.example/manifest.json',
     });
     expect(aborted).toEqual(['before-heartbeat']);
+    releaseMetadata();
+    releasePublish();
+    await Promise.all([metadata, publish]);
   });
 
   it('does not hold the command actor lane while an assistant projection is built and sent', async () => {

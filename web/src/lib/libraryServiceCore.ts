@@ -168,6 +168,7 @@ export class LibraryServiceCore {
   #requests: Promise<void> = Promise.resolve();
   readonly #providerWork = new Set<Promise<LibraryServiceServerMessage[]>>();
   readonly #controllers = new Map<string, AbortController>();
+  readonly #sourceControllers = new Set<AbortController>();
 
   constructor(
     private readonly openAuthority: LibraryAuthorityOpener,
@@ -186,9 +187,12 @@ export class LibraryServiceCore {
       const admitted = this.#requests;
       const controller = new AbortController();
       this.#controllers.set(input.requestId, controller);
+      if (input.type === 'query' && input.query.kind === 'download.sources')
+        this.#sourceControllers.add(controller);
       const work = admitted
         .then(() => this.#dispatch(input, controller.signal))
         .finally(() => {
+          this.#sourceControllers.delete(controller);
           if (this.#controllers.get(input.requestId) === controller)
             this.#controllers.delete(input.requestId);
         });
@@ -464,7 +468,7 @@ export class LibraryServiceCore {
       outcome === 'applied' &&
       affected.some((scope) => scope.kind === 'runtime' || scope.kind === 'all')
     )
-      for (const controller of this.#controllers.values()) controller.abort();
+      for (const controller of this.#sourceControllers) controller.abort();
     if (outcome === 'applied') this.#revision++;
     const version = this.#version();
     this.#rememberOperation(request.operationId, {
