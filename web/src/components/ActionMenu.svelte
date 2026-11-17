@@ -140,11 +140,20 @@
     window.addEventListener('touchmove', outsideScrollGesture, { capture: true, passive: true });
     window.addEventListener('keydown', outsideScrollGesture, true);
     // A menu whose rows change while it is open (a page of the player's options, another season of episodes) is placed
-    // again at its new size, so one above its trigger keeps its foot there rather than its old top.
+    // again at its new size, so one above its trigger keeps its foot there rather than its old top. Not when it reports
+    // the size `position` has just placed it at: opening already placed it, and each placing forces a layout.
     const resized =
       __DEN_TV__ || typeof ResizeObserver === 'undefined'
         ? undefined
-        : new ResizeObserver(() => {
+        : new ResizeObserver((entries) => {
+            const box = entries[0]?.borderBoxSize?.[0];
+            if (
+              placed &&
+              box &&
+              Math.abs(box.inlineSize - placed.width) < 1 &&
+              Math.abs(box.blockSize - placed.height) < 1
+            )
+              return;
             if (showing()) position();
           });
     if (menu) resized?.observe(menu);
@@ -240,10 +249,14 @@
     return menuItemEls().filter((el) => el.getAttribute('aria-disabled') !== 'true');
   }
 
+  /** The size the last `position` placed the menu at, which the resize observer need not place it at again. */
+  let placed: { width: number; height: number } | undefined;
+
   /** Measured and written while the popover is hidden, before `showPopover` puts it in the top layer. */
   function position() {
     const positioned = menu;
     if (!positioned) return;
+    placed = undefined;
     positioned.style.removeProperty('max-height');
     if (mobile) {
       positioned.style.removeProperty('left');
@@ -256,7 +269,8 @@
     // enough to decide which side of the viewport it has to flip away from. Once shown, its own size is used:
     // items with a second line are taller than the estimate. `scrollHeight` is the whole list, not the part a
     // previous cap left visible; it leaves out the border, which the border-box cap below counts.
-    const width = positioned.offsetWidth || 240;
+    const laidOut = positioned.offsetWidth;
+    const width = laidOut || 240;
     // The stylesheet's own cap (a caller's compact list), read before the room beside the trigger is written over it.
     const cap = parseFloat(getComputedStyle(positioned).maxHeight) || Infinity;
     let height = Math.min(
@@ -289,6 +303,8 @@
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
     positioned.style.left = `${x}px`;
     positioned.style.top = `${y}px`;
+    // Only a menu that is laid out has a size worth keeping: before its first showing these are estimates.
+    if (laidOut) placed = { width, height };
   }
 
   function opened() {

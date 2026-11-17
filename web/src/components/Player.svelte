@@ -29,6 +29,7 @@
   } from '../lib/castReceiver';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
+  import { reportMediaEngineFailure } from '../lib/mediaEngineDiagnostics';
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
   import { interfaceLocale, type InterfaceLanguage } from '../lib/interfaceLanguage';
@@ -1259,20 +1260,35 @@
   /** The season the Episodes list shows: the one playing, until another is picked there. */
   let listedSeason = $state<number>();
   const shownSeason = $derived(listedSeason ?? season);
-  /** Its episodes; undefined while they are asked for, null when they could not be had. */
-  let listedEpisodes = $state.raw<AiredEpisode[] | null>();
+  /** The last season's episodes asked for, kept with the season they belong to; null when they could not be had. */
+  let listed = $state.raw<{ season: number; episodes: AiredEpisode[] | null }>();
+  /** The shown season's episodes; undefined until they have arrived. */
+  const listedEpisodes = $derived(
+    listed && listed.season === shownSeason ? listed.episodes : undefined,
+  );
+  /** Whether the shown season's answer is late enough to say so: one from the cache arrives within a frame or two. */
+  let seasonLate = $state(false);
   const listsEpisodes = $derived(
     webTransport && !!onepisode && title.type === 'tv' && !!seasons?.length,
   );
   const hasSession = $derived(!!session);
   // Asked once playback has its session, off the start's critical path, and again for a season picked in the list.
+  // The rows read `listedEpisodes`, which is empty while the season they show is not the one answered, so a switch
+  // builds them once, for the season picked, rather than first for the old season's episodes under the new one's key.
   $effect(() => {
     const picked = shownSeason;
-    listedEpisodes = undefined;
+    seasonLate = false;
     if (!listsEpisodes || !hasSession || picked === undefined) return;
+    if (untrack(() => listed?.season) === picked) return;
     const controller = new AbortController();
-    void seasonEpisodes(picked, controller.signal).then((listed) => (listedEpisodes = listed));
-    return () => controller.abort();
+    const late = setTimeout(() => (seasonLate = true), 300);
+    void seasonEpisodes(picked, controller.signal).then((episodes) => {
+      if (!controller.signal.aborted) listed = { season: picked, episodes };
+    });
+    return () => {
+      clearTimeout(late);
+      controller.abort();
+    };
   });
   /** The list's rows: each episode with its menu item, a link to play it, or inert until it has aired. */
   const episodeRows = $derived.by(() => {
@@ -1329,6 +1345,46 @@
     reveal();
     return { update: reveal, destroy: () => sized?.disconnect() };
   }
+  /**
+   * Gives an episode still its `srcset` once it is within a screen of the list's visible part. `loading="lazy"` does
+   * not do that here: Chromium's lazy distance (1250px and more) covers a whole season, so all of its stills were
+   * fetched on every open and every season switch, alongside the video. Watched against the element that scrolls: the
+   * popover itself, or the list inside a phone's sheet.
+   */
+  function nearView(img: HTMLImageElement, sources: string) {
+    let shown = false;
+    const load = () => {
+      shown = true;
+      img.srcset = sources;
+    };
+    const root =
+      img.closest<HTMLElement>('.sheet .items') ?? img.closest<HTMLElement>('.menu') ?? null;
+    const near =
+      typeof IntersectionObserver === 'undefined'
+        ? undefined
+        : new IntersectionObserver(
+            (entries) => {
+              if (!entries.some((entry) => entry.isIntersecting)) return;
+              near?.disconnect();
+              load();
+            },
+            { root, rootMargin: '100% 0px' },
+          );
+    if (near) near.observe(img);
+    else load();
+    return {
+      update(next: string) {
+        sources = next;
+        if (shown) img.srcset = next;
+      },
+      destroy: () => near?.disconnect(),
+    };
+  }
+  /** A still at the sizes TMDB has for it, or the series backdrop at its own (backdrops have no w185). */
+  const stillSources = (item: AiredEpisode) =>
+    item.stillPath
+      ? `https://image.tmdb.org/t/p/w185${item.stillPath} 185w, https://image.tmdb.org/t/p/w300${item.stillPath} 300w`
+      : `https://image.tmdb.org/t/p/w300${title.backdropPath} 300w, https://image.tmdb.org/t/p/w780${title.backdropPath} 780w`;
 
   // The page under the player is not on screen while it plays (its `active` is off), so it names the tab no more:
   // the player does, as the title's page would.
@@ -2581,8 +2637,8 @@
         return mounted.start();
       });
       void starting.catch((error: unknown) => {
-        console.warn('Samsung AVPlay could not be started.', error);
         if (gone || ended || session !== current || failure || breaking) return;
+        reportMediaEngineFailure('avplay', 'startup', error);
         failure = 'engine';
         letGo();
       });
@@ -2707,8 +2763,8 @@
     // hls.js is its own chunk, fetched only now: offline, or after a release replaced it, it never comes — and the
     // video sat black with nothing said. The same for an engine that throws as it is set up.
     void starting.catch((error: unknown) => {
-      console.warn('hls.js could not be started.', error);
       if (gone || ended || session !== current) return;
+      reportMediaEngineFailure('hls.js', 'startup', error);
       failure = 'engine';
       letGo();
     });
@@ -3016,6 +3072,7 @@
       maxBitrate?: number;
       volume?: number;
       muted?: boolean;
+      failure?: unknown;
     };
     if (
       message.type === 'den-ready' ||
@@ -3148,6 +3205,14 @@
         reportFailure(current, 0, message.message);
         lastFailSource = 'cast_page_error';
         failure = 'protocol';
+        return;
+      }
+      // The Cast page's own lazy engine could not load or initialize. This is independent of the release, so trying
+      // another copy would only recreate the frame and repeat the same failed import. Keep the same terminal Reload
+      // recovery as this player's local hls.js/AVPlay startup path.
+      if (message.failure === 'engine') {
+        failure = 'engine';
+        letGo();
         return;
       }
       // A TorBox stream the receiver couldn't play stays TorBox: Den Remux is used only when the viewer picks it. A
@@ -7373,7 +7438,7 @@
     {/if}
     {#if listedEpisodes === null}
       <p class="episode-note">{i18n.phrase('Couldn’t load this season from TMDB.')}</p>
-    {:else if listedEpisodes === undefined}
+    {:else if listedEpisodes === undefined && seasonLate}
       <p class="episode-note" aria-busy="true">{i18n.phrase('Loading episodes')}</p>
     {/if}
     {#each episodeRows as row (row.menuItem.key)}
@@ -7391,9 +7456,10 @@
           <!-- An episode TMDB has no still for yet (often the newest) shows the series backdrop, as the title page does. -->
           {#if item.stillPath || title.backdropPath}<img
               class="episode-image"
-              src={`https://image.tmdb.org/t/p/w300${item.stillPath ?? title.backdropPath}`}
+              sizes="112px"
               alt=""
-              loading="lazy"
+              decoding="async"
+              use:nearView={stillSources(item)}
             />{/if}
           {#if progress > 0 && progress < WATCHED}<span
               class="episode-progress"

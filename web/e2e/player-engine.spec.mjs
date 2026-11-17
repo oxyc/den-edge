@@ -33,6 +33,11 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
       viewport: { width: 1280, height: 800 },
     });
     const page = await context.newPage();
+    const engineWarnings = [];
+    page.on('console', (message) => {
+      if (message.type() === 'warning' && message.text().includes('den: media engine failure'))
+        engineWarnings.push(message.text());
+    });
     await guardNetwork(page);
     const asked = { started: 0, ended: [] };
     await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
@@ -73,18 +78,44 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
     await expect(page.getByText('Couldn’t load the player.')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.player video')).toHaveCount(0);
     await expect.poll(() => asked.ended).toEqual(['/direct/s/d1/sig']);
+    await expect
+      .poll(() => engineWarnings)
+      .toEqual(['den: media engine failure hls.js startup type_error']);
+    expect(engineWarnings.join(' ')).not.toMatch(
+      /direct\/s|hls__js|d\.oxy\.fi|internetdisconnected/,
+    );
 
     await page.unroute(chunk);
     expect(fetched).toHaveLength(1);
+    await page.route(chunk, (route) =>
+      route.fulfill({
+        contentType: 'application/javascript',
+        body: `export default class Hls {
+          static isSupported() { return true; }
+          constructor() { throw new Error('private setup https://provider.invalid/tt7349281/master.m3u8'); }
+        }`,
+      }),
+    );
+    await page.getByRole('button', { name: 'Reload' }).click();
+    await expect.poll(() => asked.ended).toEqual(['/direct/s/d1/sig', '/direct/s/d2/sig']);
+    await expect
+      .poll(() => engineWarnings)
+      .toEqual([
+        'den: media engine failure hls.js startup type_error',
+        'den: media engine failure hls.js startup exception',
+      ]);
+    expect(engineWarnings.join(' ')).not.toMatch(/provider|tt7349281|master\.m3u8|private setup/);
+
+    await page.unroute(chunk);
     await page.getByRole('button', { name: 'Reload' }).click();
     await page.waitForFunction(
       () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
       undefined,
       { timeout: 30_000 },
     );
-    expect(asked.started).toBe(2);
-    expect(fetched).toHaveLength(2);
-    expect(asked.ended).toEqual(['/direct/s/d1/sig']);
+    expect(asked.started).toBe(3);
+    expect(fetched).toHaveLength(3);
+    expect(asked.ended).toEqual(['/direct/s/d1/sig', '/direct/s/d2/sig']);
   } finally {
     await browser.close();
   }

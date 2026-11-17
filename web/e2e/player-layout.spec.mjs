@@ -756,6 +756,58 @@ for (const [engine, browserType] of engines) {
     });
   }
 
+  // A long season's stills are fetched as the list nears them, not all on opening: `loading="lazy"` reaches a whole
+  // season in Chromium, so each open and season switch fetched every still alongside the video.
+  for (const [viewport, touch] of [
+    [DESKTOPS[0], false],
+    [PHONES[1], true],
+  ]) {
+    test(`the episode list fetches only the stills near view (${engine}, ${viewport.name})`, async () => {
+      installed();
+      const browser = await launch(browserType);
+      try {
+        const page = await newPage(browser, browserType, viewport, touch);
+        const stills = new Set();
+        await openPlaying(page, '?series&episodes', async () => {
+          await page.route('**/tmdb/3/tv/42/season/*', (route) =>
+            route.fulfill({
+              json: {
+                episodes: Array.from({ length: 24 }, (_, i) => ({
+                  episode_number: i + 1,
+                  name: `Episode ${i + 1}`,
+                  overview: 'An overview long enough to take its two lines in the row.',
+                  runtime: 40,
+                  still_path: `/still-${i + 1}.jpg`,
+                })),
+              },
+            }),
+          );
+          await page.route('https://image.tmdb.org/**', (route) => {
+            stills.add(new URL(route.request().url()).pathname.split('/').pop());
+            return route.fulfill({ status: 404, body: '' });
+          });
+        });
+        await showControls(page, touch);
+        await page.getByRole('button', { name: 'Episodes' }).click();
+        const menu = page.locator('.menu:popover-open:has(.episode-list)');
+        const rows = menu.locator('.episode-row');
+        await expect(rows).toHaveCount(24);
+        const first = rows.nth(0).locator('.episode-image');
+        const last = rows.nth(23).locator('.episode-image');
+        await expect(first).toHaveAttribute('srcset', /w185\/still-1\.jpg 185w/);
+        await expect(first).toHaveAttribute('sizes', '112px');
+        // The foot of the season is several screens down: nothing is asked for it yet.
+        await expect(last).not.toHaveAttribute('srcset', /./);
+        expect(stills.has('still-24.jpg')).toBe(false);
+        expect(stills.size).toBeLessThan(24);
+        await rows.nth(23).scrollIntoViewIfNeeded();
+        await expect(last).toHaveAttribute('srcset', /still-24\.jpg/);
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+
   // What is buffered past the play head shows as a lighter fill on the timeline, from the media's own ranges.
   for (const [viewport, touch] of [
     [PHONES[1], true],

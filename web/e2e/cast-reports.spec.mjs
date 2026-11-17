@@ -122,6 +122,7 @@ async function open({
   blockAutoplay = false,
   holdCastLan = false,
   trackLocalEvents = false,
+  failCastEngine = false,
 } = {}) {
   const lanGates = [];
   const browser = await chromium.launch({
@@ -173,6 +174,11 @@ async function open({
       { castOrigin: CAST, blockAutoplay },
     );
   const page = await context.newPage();
+  const engineWarnings = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning' && message.text().includes('den: media engine failure'))
+      engineWarnings.push(message.text());
+  });
   await guardNetwork(page);
   await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
@@ -239,6 +245,8 @@ async function open({
   });
   await context.route(`${CAST}/**`, async (r) => {
     const path = new URL(r.request().url()).pathname;
+    if (failCastEngine && /\/assets\/hls(?:\.js)?-[^/]+\.js$/.test(path))
+      return r.abort('internetdisconnected');
     const file = path === '/' ? 'index.html' : path.slice(1);
     const type = file.endsWith('.html')
       ? 'text/html'
@@ -254,7 +262,7 @@ async function open({
   await page.goto(
     `${ORIGIN}/test/player.html?remux=/remux${managed ? '&playback=/den/config/playback' : ''}`,
   );
-  return { browser, page, lanGates };
+  return { browser, page, lanGates, engineWarnings };
 }
 
 /** The cast page's video, once it is past `seconds`. */
@@ -563,6 +571,23 @@ test('a failure in the cast page is reported to den-remux by the cast page itsel
       .locator('video')
       .evaluate((v) => v.dispatchEvent(new Event('error')));
     await expect.poll(() => heard.reports.map((r) => r.message)).toContain('Playback failed');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a cast-page engine load failure is bounded and remains recoverable', async () => {
+  const { browser, page, engineWarnings } = await open({ failCastEngine: true });
+  try {
+    await expect.poll(() => heard.reports.map((r) => r.message)).toContain('Playback failed');
+    await expect
+      .poll(() => engineWarnings)
+      .toEqual(['den: media engine failure hls.js startup type_error']);
+    expect(engineWarnings.join(' ')).not.toMatch(
+      /media\.test|remux\/s|hls(?:\.js)?-|internetdisconnected/,
+    );
+    await expect(page.getByText('Couldn’t load the player.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reload' })).toBeVisible();
   } finally {
     await browser.close();
   }

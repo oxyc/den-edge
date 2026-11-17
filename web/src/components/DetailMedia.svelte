@@ -16,7 +16,7 @@
   import type { Routes } from '../lib/routes';
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { nativeHlsFirst } from '../lib/detailTrailerSources';
-  import { reportTrailerEngineFailure } from '../lib/trailerEngineDiagnostics';
+  import { reportMediaEngineFailure } from '../lib/mediaEngineDiagnostics';
   let {
     type,
     tmdbId,
@@ -480,7 +480,7 @@
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal || !live) return;
         live = false;
-        reportTrailerEngineFailure('fatal');
+        reportMediaEngineFailure('trailer', 'fatal');
         nextTrailer();
       });
       // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
@@ -514,7 +514,7 @@
         loads.set(key, count);
         if (count <= MOST_FRAGMENT_LOADS || !live) return;
         live = false;
-        reportTrailerEngineFailure('fragment_loop');
+        reportMediaEngineFailure('trailer', 'fragment_loop');
         engine?.stopLoad();
         nextTrailer();
       });
@@ -525,7 +525,7 @@
       // Losing the retained page's ownership while the lazy chunk resolves is ordinary teardown, not a failed
       // trailer. It must not advance the cursor or emit a diagnostic for the inactive generation.
       if (!live) return;
-      reportTrailerEngineFailure('startup', error);
+      reportMediaEngineFailure('trailer', 'startup', error);
       nextTrailer();
     });
     return () => {
@@ -649,7 +649,7 @@
       playback = next;
       forced = false;
       failed = !next;
-      if (!next && active) reportTrailerEngineFailure('exhausted');
+      if (!next && active) reportMediaEngineFailure('trailer', 'exhausted');
     }
     if (advancing === owner) advancing = null;
   }

@@ -409,5 +409,9 @@ if (process.argv.includes('--capture')) {
   // The Episodes list's series-backdrop fallback for missing stills and its current-season chip reveal add 162 gzip
   // bytes to the complete graph on matched base/head builds (122,647 -> 122,809), all in the lazy Player chunk. CI
   // measured the head at 122,754; allow the next 128-byte boundary above it, retaining 126 bytes.
-  if (coreTotalDelta > 122880) throw new Error('Browser total JS/CSS budget exceeded');
+  // The Episodes list's near-view still loader (an IntersectionObserver per still, with its srcset) and the menu's
+  // skip of a repeated placement, on a main that has since gained #1322 and #1343, measured 123,061 in CI. All of the
+  // list's share is in the lazy Player chunk. The next boundary would leave 75 bytes against #1282's run-to-run
+  // variance, so allow the one after it, retaining 203 bytes.
+  if (coreTotalDelta > 123264) throw new Error('Browser total JS/CSS budget exceeded');
 }

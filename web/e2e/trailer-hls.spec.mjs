@@ -77,7 +77,7 @@ test('a retained hls.js trailer stops inactive work and reactivates without adva
   const asked = new Map();
   const engineFailures = [];
   page.on('console', (message) => {
-    if (message.type() === 'warning' && message.text().startsWith('den: trailer engine failure'))
+    if (message.type() === 'warning' && message.text().startsWith('den: media engine failure'))
       engineFailures.push(message.text());
   });
   await page.route(

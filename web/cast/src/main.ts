@@ -1,5 +1,6 @@
 import type Hls from 'hls.js';
 import { hlsConfig } from '../../src/lib/hlsConfig';
+import { reportMediaEngineFailure } from '../../src/lib/mediaEngineDiagnostics';
 import { nativeHls } from '../../src/lib/nativeHls';
 import { Link } from '../../src/lib/resumingLoader';
 import {
@@ -553,13 +554,17 @@ function failFor(
   code = 0,
   owner: PlayingMedia | undefined = playing,
   ownerWatcher?: Watcher,
+  failure?: 'engine',
 ): void {
   const lifecycle = denLifecycleMedia(owner);
   if (lifecycle) {
     ownerWatcher?.spent();
     sendReport(reportUrlOf(lifecycle), reportBody(code, message));
   }
-  tellFor(load, 'den-error', { message: translateStatus(message) });
+  tellFor(load, 'den-error', {
+    message: translateStatus(message),
+    ...(failure ? { failure } : {}),
+  });
 }
 
 /** End the session this page played, so it stops holding den-remux and the media listener open. */
@@ -632,6 +637,15 @@ function stopLocal(): void {
   if (statusPill.textContent === text(RECONNECTING)) setStatus('');
 }
 
+/** Fail only the local player generation that caught this engine exception. */
+function failLocalEngine(owner: LocalPlayback, error: unknown): void {
+  if (!ownsLocal(owner)) return;
+  reportMediaEngineFailure('hls.js', 'startup', error);
+  setStatus('Playback failed');
+  failFor(owner.load, 'Playback failed', 0, owner.owner, owner.watcher, 'engine');
+  stopLocal();
+}
+
 /**
  * A connection that went away is waited out (`resumingLoader`): "Reconnecting…" once the buffer runs out, the
  * player outside asked to let this browser's address back in (it may have changed, and only that page can say so),
@@ -681,7 +695,13 @@ async function loadLocal(load: LoadMessage, url: string): Promise<void> {
   // button never plays anything itself: it is fetched the first time this page does.
   const loading = playing;
   const local: LocalPlayback = (localPlayback = { load, owner: loading });
-  const Hls = nativeHls(video) ? undefined : (await import('hls.js')).default;
+  let Hls: typeof import('hls.js').default | undefined;
+  try {
+    Hls = nativeHls(video) ? undefined : (await import('hls.js')).default;
+  } catch (error) {
+    failLocalEngine(local, error);
+    return;
+  }
   if (!ownsLocal(local)) return;
   local.timeUpdate = () => {
     if (!ownsLocal(local)) return;
@@ -712,6 +732,13 @@ async function loadLocal(load: LoadMessage, url: string): Promise<void> {
   video.addEventListener('timeupdate', local.timeUpdate);
   video.addEventListener('ended', local.ended);
   video.addEventListener('error', local.error);
+  let hlsSupported: boolean;
+  try {
+    hlsSupported = Hls?.isSupported() ?? false;
+  } catch (error) {
+    failLocalEngine(local, error);
+    return;
+  }
   if (!Hls) {
     video.src = url;
     local.watcher = watchPlayback({
@@ -725,58 +752,63 @@ async function loadLocal(load: LoadMessage, url: string): Promise<void> {
       applySubtitle(media.subtitleLanguage, media.subtitleIndex);
     };
     video.addEventListener('loadedmetadata', local.loadedMetadata, { once: true });
-  } else if (Hls.isSupported()) {
-    // The same tolerance as the player outside: a release den-remux converts answers its first segment late.
-    const connection = (local.link = new Link());
-    watchLink(connection, local);
-    const instance = new Hls(hlsConfig(start > 0 ? start : undefined, 'receiver', connection));
-    local.hls = instance;
-    hls = instance;
-    local.watcher = watchPlayback({
-      video,
-      hls: { instance, Hls },
-      reportUrl: media.external ? undefined : reportUrlOf(url),
-    });
-    let recovered = false;
-    instance.on(Hls.Events.ERROR, (_event, data) => {
-      if (!ownsLocal(local)) return;
-      if (data.frag?.type === 'subtitle')
-        console.warn(
-          `[Den subtitles] ${JSON.stringify({
-            event: 'cast-page-hls-error',
-            details: data.details,
-            fatal: data.fatal,
-            httpStatus: data.response?.code ?? null,
-            track: instance.subtitleTrack ?? null,
-          })}`,
-        );
-      if (!data.fatal) return;
-      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
-        // A decoder that lost its place: reset the buffer and carry on, once.
-        recovered = true;
-        instance.recoverMediaError();
-        return;
-      }
-      // The session ended at den-remux (410), or the connection stayed away until the loader stopped asking: the
-      // player outside offers to pick up where this was, rather than taking it for a release that won't play.
-      const code = data.response?.code;
-      if (
-        data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR &&
-        (code === 410 || (code === 0 && connection.down))
-      ) {
-        clearInterval(local.linkWatch);
-        setStatus('');
-        tellFor(load, 'den-lost', { currentTime: video.currentTime });
-        return;
-      }
-      setStatus('Playback failed');
-      failFor(load, `hls.js ${data.type} ${data.details}`, 0, loading, local.watcher);
-    });
-    instance.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (ownsLocal(local)) applySubtitle(media.subtitleLanguage, media.subtitleIndex);
-    });
-    instance.loadSource(url);
-    instance.attachMedia(video);
+  } else if (hlsSupported) {
+    try {
+      // The same tolerance as the player outside: a release den-remux converts answers its first segment late.
+      const connection = (local.link = new Link());
+      watchLink(connection, local);
+      const instance = new Hls(hlsConfig(start > 0 ? start : undefined, 'receiver', connection));
+      local.hls = instance;
+      hls = instance;
+      local.watcher = watchPlayback({
+        video,
+        hls: { instance, Hls },
+        reportUrl: media.external ? undefined : reportUrlOf(url),
+      });
+      let recovered = false;
+      instance.on(Hls.Events.ERROR, (_event, data) => {
+        if (!ownsLocal(local)) return;
+        if (data.frag?.type === 'subtitle')
+          console.warn(
+            `[Den subtitles] ${JSON.stringify({
+              event: 'cast-page-hls-error',
+              details: data.details,
+              fatal: data.fatal,
+              httpStatus: data.response?.code ?? null,
+              track: instance.subtitleTrack ?? null,
+            })}`,
+          );
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
+          // A decoder that lost its place: reset the buffer and carry on, once.
+          recovered = true;
+          instance.recoverMediaError();
+          return;
+        }
+        // The session ended at den-remux (410), or the connection stayed away until the loader stopped asking: the
+        // player outside offers to pick up where this was, rather than taking it for a release that won't play.
+        const code = data.response?.code;
+        if (
+          data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR &&
+          (code === 410 || (code === 0 && connection.down))
+        ) {
+          clearInterval(local.linkWatch);
+          setStatus('');
+          tellFor(load, 'den-lost', { currentTime: video.currentTime });
+          return;
+        }
+        setStatus('Playback failed');
+        failFor(load, `hls.js ${data.type} ${data.details}`, 0, loading, local.watcher);
+      });
+      instance.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (ownsLocal(local)) applySubtitle(media.subtitleLanguage, media.subtitleIndex);
+      });
+      instance.loadSource(url);
+      instance.attachMedia(video);
+    } catch (error) {
+      failLocalEngine(local, error);
+      return;
+    }
   } else {
     if (!ownsLocal(local)) return;
     const message = 'This browser cannot play HLS';

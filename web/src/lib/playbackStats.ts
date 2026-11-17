@@ -1,4 +1,4 @@
-// What a browser saw while playing a den-remux session — how its segments arrived, where playback stalled and how
+// What a browser saw while playing a den-remux session — how its segments arrived, how playback stalled and how
 // much of each track was buffered then, what it dropped and what went wrong — posted to the session's `/report` for
 // den-remux's log. The server sees requests only: whether a frozen picture was a slow link or a hole in the video
 // buffer is visible from here and nowhere else. Shared by the player and the cast page's own player.
@@ -32,8 +32,6 @@ const STALL_DETAILS = new Set(['bufferStalledError', 'bufferSeekOverHole', 'buff
 export type ReportEvent = 'stall' | 'hidden' | 'end';
 
 export interface Stall {
-  /** Media seconds where playback stopped. */
-  at: number;
   /** How long until it played again; null when it hadn't by the time of the report. */
   ms: number | null;
   /** `wait`: the element waited for data. `frozen`: the clock (the audio) ran on, and no new video frame came. */
@@ -448,8 +446,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
   let started = false;
   let sources: { video?: SourceBuffer; audio?: SourceBuffer } = {};
   /**
-   * The last time the decoded frame count moved: where the play head was, and what was buffered ahead of it then — a
-   * frozen stall is placed there, so its buffer is read there too, not seconds later when it is noticed.
+   * The last time the decoded frame count moved: the playhead kept only inside this watcher, and what was buffered
+   * ahead of it then. A frozen stall reads that earlier buffer, not the one seconds later when it is noticed.
    */
   let frames: { count: number; at: number; buffered?: Pick<Stall, 'videoAhead' | 'audioAhead'> } = {
     count: -1,
@@ -502,15 +500,16 @@ export function watchPlayback(options: WatchOptions): Watcher {
     return { videoAhead: both, audioAhead: both };
   };
 
-  const stall = (
-    kind: Stall['kind'],
-    at = video.currentTime,
-    buffered = ahead(video.currentTime),
-  ) => {
+  /** Exact media position used only inside this watcher to recognize recovery; never serialized. */
+  let waitAt = NaN;
+  const stall = (kind: Stall['kind'], buffered = ahead(video.currentTime)) => {
     if (stopped || !started || video.seeking) return;
-    const stalled = { at: tenth(at), kind, ...buffered, ...requests() };
+    const stalled = { kind, ...buffered, ...requests() };
     const early = playedSecondsOf(video.played) < EARLY_PLAYED_SECONDS;
-    if (recorder.stalled(now(), stalled, early)) schedule.stall();
+    if (recorder.stalled(now(), stalled, early)) {
+      waitAt = kind === 'wait' ? video.currentTime : NaN;
+      schedule.stall();
+    }
   };
 
   const on = <K extends keyof HTMLMediaElementEventMap>(type: K, listener: () => void) =>
@@ -550,7 +549,9 @@ export function watchPlayback(options: WatchOptions): Watcher {
         recorder.idleLow(since);
     }
     const open = recorder.stalling;
-    if (open?.kind === 'wait' && !video.paused && time > open.at + 0.2) recorder.resumed(now());
+    if (open?.kind === 'wait' && !video.paused && time > waitAt + 0.2) {
+      recorder.resumed(now());
+    }
     const count = video.getVideoPlaybackQuality?.().totalVideoFrames;
     if (count === undefined) return;
     if (count !== frames.count) {
@@ -560,7 +561,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
     }
     // A hidden page decodes no video in some browsers, and that is not a frozen picture.
     if (!video.paused && document.visibilityState === 'visible' && time - frames.at >= FROZEN_SECS)
-      stall('frozen', frames.at, frames.buffered);
+      stall('frozen', frames.buffered);
   });
   on('error', () => {
     if (video.error) recorder.error(`MediaError ${video.error.code}`, true);
