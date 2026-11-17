@@ -687,9 +687,6 @@ export class LibraryAssistantAuthority {
   #holdRead: string | null = null;
   /** Whether `#published` has been read back from this device's records (`Publication.sent`). */
   #restored = false;
-  /** Whether this service has said the projection was up to date when it was opened. */
-  #saidCurrent = false;
-
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
    * have stood for 30 s, and no sooner than `MIN_INTERVAL_MS` after its last send) or 15 minutes have passed, never
@@ -714,14 +711,6 @@ export class LibraryAssistantAuthority {
     this.#publishing = true;
     try {
       return await this.#publish(lent, signal);
-    } catch (error) {
-      // The same authority may survive a background/foreground edge. Do not let scheduling state computed before
-      // cancellation suppress its immediate retry; successful member writes remain idempotent replacements/drops.
-      if (signal?.aborted) {
-        this.#builtFrom = this.#holdRead = null;
-        this.#dueAt = this.#holdUntil = 0;
-      }
-      throw error;
     } finally {
       this.#publishing = false;
     }
@@ -779,9 +768,6 @@ export class LibraryAssistantAuthority {
     if (kept?.key === key && now < kept.dueAt) {
       this.#builtFrom = inputs;
       this.#dueAt = kept.dueAt;
-      // Said once a page: that a page opened on the library as it was published did not build it again.
-      if (!this.#saidCurrent) console.info('den: assistant projection up to date');
-      this.#saidCurrent = true;
       return [];
     }
     const request = JSON.stringify({
@@ -795,8 +781,6 @@ export class LibraryAssistantAuthority {
       random: this.port.random(),
       now,
     });
-    const started = performance.now();
-    let buildMs: number;
     let built: ProjectionAnswer;
     try {
       built = policyAnswer<ProjectionAnswer>(
@@ -805,8 +789,8 @@ export class LibraryAssistantAuthority {
         ),
       );
       signal?.throwIfAborted();
-      buildMs = Math.round(performance.now() - started);
     } catch (error) {
+      signal?.throwIfAborted();
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
       console.error('den: the library is too large to publish for assistants', error);
@@ -815,7 +799,6 @@ export class LibraryAssistantAuthority {
       this.#dueAt = now + HEARTBEAT_MS;
       return [];
     }
-    this.#builtFrom = inputs;
     if (this.#pending?.digest !== built.digest)
       this.#pending = { digest: built.digest, since: now };
     const settleAt = this.#pending.since + PUBLISH_DEBOUNCE_MS;
@@ -861,19 +844,20 @@ export class LibraryAssistantAuthority {
       );
     }
     // No live grant holds nothing back: the next change of the inputs builds.
-    this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
-    this.#holdRead = readKey;
     for (const grant of built.delete) {
       this.#published.delete(grant);
       if (!records.dropped.includes(grant) && !(await this.#drop(grant, lent, signal)))
-        dueAt = Math.min(dueAt, now + PUBLISH_DEBOUNCE_MS);
+        dueAt = now + PUBLISH_DEBOUNCE_MS;
     }
-    this.#dueAt = dueAt;
     // Metadata can keep arriving while the projection Worker builds. The key still names the exact request above,
     // so a later page rebuilds when these additions change it; carry them with the publication so closing this page
     // does not lose them and force every fresh page to discover the same layouts during its own build.
     const rememberedLayouts = { ...layouts, ...this.port.layouts() };
     signal?.throwIfAborted();
+    this.#builtFrom = inputs;
+    this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
+    this.#holdRead = readKey;
+    this.#dueAt = dueAt;
     await this.#remember({
       publication: {
         key,
@@ -883,8 +867,6 @@ export class LibraryAssistantAuthority {
         layouts: rememberedLayouts,
       },
     });
-    // Once it is recorded: a page opened after this line neither builds nor sends it again.
-    console.info(`den: assistant projection built in ${buildMs}ms, sent ${sent.length}`);
     return sent;
   }
 

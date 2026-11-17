@@ -182,8 +182,8 @@ export class LibraryServiceCore {
     // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
     // An assistant projection's publish is the same: it reads the library once, then waits on its own Worker's build
     // and on den-edge, and changes nothing the lane orders.
-    const cancellable = isDownloadSourcesRequest(input) || isAssistantPublish(input) ? input : null;
-    if (isLibraryMetadataRequest(input) || isSourceWaitRequest(input) || cancellable) {
+    const cancellable = isCancellableRequest(input) ? input : null;
+    if (isConcurrentRequest(input) || cancellable) {
       const admitted = this.#requests;
       let controller: AbortController | undefined;
       if (cancellable) {
@@ -618,43 +618,29 @@ function sameTitle(a: TitleRef, b: TitleRef): boolean {
   return a.type === b.type && a.id === b.id;
 }
 
-function isLibraryMetadataRequest(
+function isConcurrentRequest(
   input: unknown,
 ): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
   const request = input as { type?: unknown; query?: { kind?: unknown } };
-  return request.type === 'query' && request.query?.kind === 'library.metadata';
+  const kind = request.query?.kind;
+  return request.type === 'query' && (kind === 'library.metadata' || kind === 'source.wait');
 }
 
-function isDownloadSourcesRequest(
+function isCancellableRequest(
   input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
+): input is Extract<LibraryServiceClientMessage, { type: 'query' | 'task' }> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; requestId?: unknown; query?: { kind?: unknown } };
+  const request = input as {
+    type?: unknown;
+    requestId?: unknown;
+    query?: { kind?: unknown };
+    task?: { kind?: unknown };
+  };
   return (
-    request.type === 'query' &&
     typeof request.requestId === 'string' &&
-    request.query?.kind === 'download.sources'
-  );
-}
-
-function isSourceWaitRequest(
-  input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; query?: { kind?: unknown } };
-  return request.type === 'query' && request.query?.kind === 'source.wait';
-}
-
-function isAssistantPublish(
-  input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'task' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; task?: { kind?: unknown } };
-  return (
-    request.type === 'task' &&
-    requestIdOf(input) !== undefined &&
-    request.task?.kind === 'assistant.publish'
+    ((request.type === 'query' && request.query?.kind === 'download.sources') ||
+      (request.type === 'task' && request.task?.kind === 'assistant.publish'))
   );
 }
 
