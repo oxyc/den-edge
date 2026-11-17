@@ -658,12 +658,10 @@ export class LibraryAssistantAuthority {
     if (this.#dropping.has(grant)) return false;
     this.#dropping.add(grant);
     try {
-      if (await this.port.deleteProjection(grant, lent?.member, signal)) {
-        signal?.throwIfAborted();
-        await this.#remember({ dropped: [grant] });
-        return true;
-      }
-      return false;
+      const dropped = await this.port.deleteProjection(grant, lent?.member, signal);
+      signal?.throwIfAborted();
+      if (dropped) await this.#remember({ dropped: [grant] });
+      return dropped;
     } finally {
       this.#dropping.delete(grant);
     }
@@ -793,7 +791,7 @@ export class LibraryAssistantAuthority {
       signal?.throwIfAborted();
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
-      console.error('den: the library is too large to publish for assistants', error);
+      console.error('den: assistant projection too large', error);
       // Not tried again until the library changes, or the heartbeat comes round.
       this.#builtFrom = inputs;
       this.#dueAt = now + HEARTBEAT_MS;

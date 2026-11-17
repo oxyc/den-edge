@@ -343,8 +343,7 @@ export function publishWhileOpen(
       try {
         await loop.publish(signal);
       } catch (error) {
-        if (!signal.aborted)
-          console.warn('den: assistant projections could not be published', error);
+        if (!signal.aborted) console.warn('den: assistant publish failed', error);
       }
       await sleep(PUBLISH_TICK_MS, signal);
     }
