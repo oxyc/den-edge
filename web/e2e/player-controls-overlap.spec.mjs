@@ -205,7 +205,7 @@ for (const [engine, browserType] of engines) {
       try {
         const context = await browser.newContext({ viewport: { width, height: 720 } });
         const page = await context.newPage();
-        const video = await openPlaying(page, '?next&resume=52');
+        const video = await openPlaying(page, '?next&nextEpisode&resume=52');
         await page.mouse.move(width / 2, 300);
         await expect(video).not.toHaveAttribute('controls', '');
         await expect(page.getByRole('navigation', { name: 'Playback controls' })).toBeVisible();
@@ -280,7 +280,7 @@ for (const [engine, browserType] of engines) {
       const browser = await launch(browserType);
       try {
         const page = await touchPage(browser, browserType, viewport);
-        const video = await openPlaying(page, '?next&resume=52');
+        const video = await openPlaying(page, '?next&nextEpisode&resume=52');
         expect(await page.evaluate((q) => matchMedia(q).matches, FINE_POINTER)).toBe(false);
         await expect(video).not.toHaveAttribute('controls', '');
         await showControls(page);

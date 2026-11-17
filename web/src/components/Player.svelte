@@ -251,8 +251,8 @@
     resume: { fraction: number; seconds?: number };
     /** The episode after this one, as `S2 · E4`, when there is one. */
     next?: string;
-    /** That episode's own numbers, so it can be warmed before the advance (`shouldWarmNext`). */
-    nextEpisode?: { season?: number; episode?: number };
+    /** The ready successor, zero while loading, or false upcoming / true failed. */
+    nextEpisode?: { season?: number; episode?: number } | 0 | boolean;
     /** Timer seam for the browser fixture; the app always uses the production default. */
     castPlayMs?: number;
     /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
@@ -280,10 +280,46 @@
     ) => void;
   } = $props();
   const nextHref = $derived(
-    onnext && nextEpisode?.season !== undefined && nextEpisode.episode !== undefined
+    typeof nextEpisode === 'object' &&
+      nextEpisode.season !== undefined &&
+      nextEpisode.episode !== undefined
       ? titleHref({ ...title, ...nextEpisode, play: true })
       : undefined,
   );
+
+  // The production fixture records the props at Svelte's pre-effect boundary. That catches a previous episode's
+  // following state crossing the render before Library's ordinary effect retires it; a post-render assertion is too
+  // late to observe that ownership violation.
+  if (import.meta.env.DEN_E2E) {
+    $effect.pre(() => {
+      (
+        window as unknown as {
+          denTestNextEpisodeComposition?: (value: {
+            title: { type: Title['type']; id: number };
+            season?: number;
+            episode?: number;
+            availability?: string;
+            next?: { season?: number; episode?: number };
+            seasons?: number[];
+          }) => void;
+        }
+      ).denTestNextEpisodeComposition?.({
+        title: { type: title.type, id: title.id },
+        season,
+        episode,
+        availability:
+          typeof nextEpisode !== 'object' && nextEpisode !== undefined
+            ? nextEpisode === 0
+              ? 'loading'
+              : nextEpisode
+                ? 'failed'
+                : 'unreleased'
+            : undefined,
+        next: typeof nextEpisode === 'object' ? nextEpisode : undefined,
+        seasons: seasons?.map(({ number }) => number),
+      });
+    });
+  }
 
   function advanceLink(event: MouseEvent) {
     if (!onnext) return;
@@ -403,13 +439,13 @@
     ...guestLimits,
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable:
-      'Couldn’t reach Den’s player. Check this device’s connection, then try again. If it continues, ask your host to check Den Hearth.',
+      'Couldn’t reach Den’s player. Check this connection and try again. If it continues, ask your host to check Den Hearth.',
     request:
-      'Den’s player couldn’t use this playback request. Refresh the page. If it continues, ask your host to update Den Hearth.',
+      'Den’s player rejected this playback request. Refresh. If it continues, ask your host to update Den Hearth.',
     sourceUnavailable:
-      'Den couldn’t prepare this release through its available playback paths. Try again. If it continues, check Den Hearth and the home player.',
+      'Den couldn’t prepare this release. Try again. If it continues, check Den Hearth and the home player.',
     protocol:
-      'Den’s player returned an answer this page can’t use. Refresh the page. If it continues, ask your host to update Den Hearth.',
+      'Den’s player returned an unusable answer. Refresh. If it continues, ask your host to update Den Hearth.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
     unsupported: 'This browser can’t play video streams.',
     playback: 'This browser couldn’t play this release. Try it on your TV.',
@@ -438,31 +474,26 @@
   };
   const managedCauseMessages: Record<PlaybackCause, string> = {
     torbox_authentication_failed:
-      'Your TorBox API key was rejected. Update the key in Den Hearth settings, then try again.',
+      'TorBox rejected your API key. Update it in Den Hearth, then try again.',
     torbox_managed_streaming_unavailable_for_plan:
-      'Your TorBox plan doesn’t support streaming links. Update the TorBox plan or remove TorBox from this Den Hearth install.',
-    torbox_rate_limited:
-      'TorBox asked Den to wait before trying again. The home player could not prepare this release either, so Den is waiting as requested…',
+      'Your TorBox plan lacks streaming links. Update it or remove TorBox from Den Hearth.',
+    torbox_rate_limited: 'TorBox asked Den to wait. Home playback also failed, so Den is waiting…',
     torbox_item_not_found:
-      'TorBox no longer has this release, and the home player could not prepare it either. Try again.',
+      'TorBox no longer has this release. Home playback also failed. Try again.',
     torbox_dolby_vision_unsupported:
-      'TorBox can’t stream this Dolby Vision release correctly, and the home player could not prepare it either. Try again or pick another release.',
+      'TorBox can’t stream this Dolby Vision release correctly. Home playback also failed. Try again or pick another release.',
     torbox_receiver_unsupported:
-      'The receiver can’t play this release as TorBox streams it, and the home player could not prepare it either. Try another release.',
+      'The receiver can’t play this TorBox release, and home playback also failed. Try another release.',
     torbox_refused:
-      'TorBox refused to prepare this stream, and the home player could not prepare it either. Check your TorBox account, then try again.',
-    torbox_playlist_unavailable:
-      'TorBox’s playlist is temporarily unavailable, and the home player could not prepare this release either. Try again.',
-    torbox_unavailable:
-      'TorBox is temporarily unavailable, and the home player could not prepare this release either. Try again.',
-    torbox_unreachable:
-      'Den could not reach TorBox, and the home player could not prepare this release either. Try again.',
+      'TorBox refused this stream, and home playback also failed. Check your TorBox account, then try again.',
+    torbox_playlist_unavailable: 'TorBox’s playlist and home playback are unavailable. Try again.',
+    torbox_unavailable: 'TorBox and home playback are temporarily unavailable. Try again.',
+    torbox_unreachable: 'Den could not reach TorBox, and home playback also failed. Try again.',
     torbox_malformed_response:
-      'TorBox returned an answer Den could not use, and the home player could not prepare this release either. Try again.',
+      'TorBox returned an unusable answer, and home playback also failed. Try again.',
     torbox_unsafe_stream_url:
-      'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
-    managed_prepare_timeout:
-      'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
+      'TorBox returned an unusable streaming link, and home playback also failed. Try again.',
+    managed_prepare_timeout: 'TorBox took too long, and home playback also failed. Try again.',
     debrid_down: 'TorBox isn’t responding right now. Den will try again when it can…',
     debrid_slow: 'TorBox is slow right now, so this is taking longer to start. Trying again…',
   };
@@ -672,7 +703,7 @@
   let regrantedAt = -Infinity;
   let key = $state('');
   let badKey = $state(false);
-  /** Seconds until the next episode starts, once this one has ended. */
+  /** Seconds until advance; zero while a natural end still owns metadata recovery. */
   let upNext = $state<number | null>(null);
   let imdb: string | undefined;
   let hls: Hls | undefined;
@@ -4064,7 +4095,21 @@
     // For den-edge's own outcome report (`finish()`): this visit reached a natural end, whether or not there is
     // a next episode to count down to.
     reachedNaturalEnd = true;
-    if (!onnext || ended) return;
+    if (nextEpisode === 0) waitForNext();
+    else upNext = typeof nextEpisode === 'boolean' ? 0 : null;
+    if (typeof nextEpisode !== 'object' || ended) return;
+    startNextCountdown();
+  }
+
+  function waitForNext() {
+    clearInterval(countdown);
+    upNext = -1;
+    countdown = setTimeout(() => {
+      if (upNext === -1) upNext = 0;
+    }, 10_000);
+  }
+
+  function startNextCountdown() {
     // A second end (the last seconds replayed, or the cast page's `den-ended` again) starts the count over; left
     // running, the first would advance again every second after it.
     clearInterval(countdown);
@@ -4076,6 +4121,20 @@
       onnext?.();
     }, 1000);
   }
+
+  // Metadata can settle after the media's one `ended` event. Adopt a ready result only while that exact natural end
+  // still owns recovery; replay and Stay call `stay()` and therefore cannot be advanced by a late answer.
+  $effect(() => {
+    const outcome = nextEpisode;
+    if (untrack(() => upNext === null || ended)) return;
+    if (typeof outcome === 'object') untrack(startNextCountdown);
+    else if (outcome === 0) {
+      if (untrack(() => upNext !== -1)) untrack(waitForNext);
+    } else {
+      clearInterval(countdown);
+      upNext = typeof outcome === 'boolean' ? 0 : null;
+    }
+  });
 
   function stay() {
     clearInterval(countdown);
@@ -4705,20 +4764,21 @@
   let nextDetailRequest: AbortController | undefined;
   function describeNext(at: number) {
     const to = nextEpisode;
-    if (nextDetailRequest || title.type !== 'tv' || !onnext) return;
-    if (to?.season === undefined || to.episode === undefined) return;
+    if (nextDetailRequest || title.type !== 'tv') return;
+    if (typeof to !== 'object' || to.season === undefined || to.episode === undefined) return;
     if (!shouldWarmNext(at, length(), NEXT_DETAIL_LEAD_SECS)) return;
     const request = new AbortController();
     nextDetailRequest = request;
-    const asked = { season: to.season, episode: to.episode };
+    const askedSeason = to.season;
+    const askedEpisode = to.episode;
     content
       .query(
-        { kind: 'season', title: { type: 'tv', id: title.id }, season: asked.season },
+        { kind: 'season', title: { type: 'tv', id: title.id }, season: askedSeason },
         request.signal,
       )
       .then(({ episodes }) => {
         if (request.signal.aborted || episodes.state !== 'ready') return;
-        nextDetail = episodes.value.find((item) => item.number === asked.episode) ?? null;
+        nextDetail = episodes.value.find((item) => item.number === askedEpisode) ?? null;
       })
       .catch((error: unknown) => {
         if (!request.signal.aborted) reportNextDetailFailure(error);
@@ -4736,9 +4796,9 @@
     const activelyWatching = video
       ? !video.paused && !video.ended
       : customTransport && !remotePaused;
-    if (warmedNext || !imdb || !onnext || !session || !activelyWatching) return;
+    if (warmedNext || !imdb || !session || !activelyWatching) return;
     const to = nextEpisode;
-    if (!to || !shouldWarmNext(at, length())) return;
+    if (typeof to !== 'object' || !shouldWarmNext(at, length())) return;
     warmedNext = true;
     const playingFilename = session.release.filename;
     const from = { ...playingEpisode };
@@ -5525,6 +5585,26 @@
   /** What playback says as it goes, in the order the TV's stack shows it. */
   const notices = $derived.by(() => {
     const list: Notice[] = [];
+    if (upNext === -1)
+      list.push({
+        text: i18n.phrase('Loading episodes'),
+        quiet: true,
+        busy: true,
+      });
+    else if (upNext === 0)
+      list.push({
+        text: i18n.phrase(onnext ? 'Couldn’t load this season from TMDB.' : 'Upcoming'),
+        action: onnext
+          ? {
+              label: i18n.phrase('Try again'),
+              run: () => {
+                waitForNext();
+                onnext();
+              },
+            }
+          : undefined,
+        urgent: true,
+      });
     if (transitionNotice)
       list.push({ text: i18n.phrase(transitionNotice), quiet: true, busy: true });
     if (hasSubtitleResyncNotice(subtitleResyncNotice))
@@ -5562,14 +5642,14 @@
       else if (visibleBufferLine) list.push({ text: visibleBufferLine, quiet: true, busy: true });
       if (slowPick)
         list.push({
-          text: `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
+          text: `${slowPick} needs more than this connection gives and may pause to catch up.`,
           dismiss: () => (slowPick = null),
           action: { label: 'Try another release', run: tryAnother },
           urgent: true,
         });
       if (struggling)
         list.push({
-          text: `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
+          text: `${struggling} may pause to catch up; no lighter release fits this connection.`,
           dismiss: () => (struggling = null),
         });
       if (unchanged) list.push({ text: unchanged, dismiss: () => (unchanged = null) });
@@ -6318,7 +6398,7 @@
   class:web-touch-player={webTransport && !desktopTransport}
   class:web-controls-hidden={webTransport && !webControlsVisible}
   class:web-casting={webTransport && castView}
-  class:web-counting={webTransport && upNext !== null}
+  class:web-counting={webTransport && !!next && upNext !== null}
   role="dialog"
   tabindex="-1"
   aria-modal="true"
@@ -6787,7 +6867,7 @@
     {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
-    <footer class:counting-down={upNext !== null}>
+    <footer class:counting-down={!!next && upNext !== null}>
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -7949,19 +8029,14 @@
     color: rgb(255 255 255 / 0.78);
   }
 
-  .notice:last-of-type {
-    margin-bottom: 10px;
-  }
-
   .cast-status .notice {
-    box-sizing: border-box;
     width: 100%;
     min-height: 76px;
     pointer-events: auto;
   }
 
-  .cast-status .notice:last-of-type {
-    margin-bottom: 0;
+  .notices .notice:last-of-type {
+    margin-bottom: 10px;
   }
 
   /* A notice with nothing to dismiss still sits the same height as one with. A release name has no spaces to break
@@ -8186,10 +8261,6 @@
     pointer-events: none;
   }
 
-  .web-top > * {
-    pointer-events: auto;
-  }
-
   .web-heading {
     display: flex;
     flex: 1;
@@ -8220,12 +8291,6 @@
     justify-content: flex-end;
     min-width: 44px;
     min-height: 44px;
-  }
-
-  /* Empty, the box only holds the place. Away from home the cast page is the picture and draws its own Cast button in
-     its corner, under this box, which took that press whenever the controls showed. */
-  .web-top > .web-output-empty {
-    pointer-events: none;
   }
 
   /* Every control is a bare glyph on a 44px target; only Play is filled. Pressed, a faint circle behind it. */
@@ -8281,11 +8346,8 @@
     animation: status-spin 800ms linear infinite;
   }
 
-  .web-custom-player :global(.web-glyph:active)::before {
-    opacity: 1;
-  }
-
   /* A tap would leave a hover state stuck: only a mouse draws one. */
+  .web-custom-player :global(.web-glyph:active)::before,
   .web-custom-player:not(.web-touch-player) :global(.web-glyph:hover)::before {
     opacity: 1;
   }
@@ -8315,7 +8377,8 @@
     opacity: 1;
   }
 
-  .web-custom-player .icon .filled {
+  .web-custom-player .icon .filled,
+  .web-custom-player .transport-icon .filled {
     fill: currentcolor;
     stroke: none;
   }
@@ -8344,11 +8407,6 @@
     font-size: 15px;
     font-weight: 750;
     text-anchor: middle;
-  }
-
-  .web-custom-player .transport-icon .filled {
-    fill: currentcolor;
-    stroke: none;
   }
 
   /* A label beside the glyph where there is room for one: on its side, a tablet, a wide window. */
@@ -8452,10 +8510,6 @@
     cursor: auto;
   }
 
-  .web-toasts .notice:last-of-type {
-    margin-bottom: 0;
-  }
-
   .web-toasts .notice-copy {
     display: -webkit-box;
     overflow: hidden;
@@ -8505,6 +8559,7 @@
     display: flex;
   }
 
+  .web-top > *,
   .web-centre > *,
   .web-bar > *,
   .web-floating > * {
@@ -8989,7 +9044,9 @@
     opacity: 0;
   }
 
-  /* Invisible controls cannot intercept a pointer meant for the picture. Keyboard focus reveals them before it acts. */
+  /* Empty, the first box only holds the Cast button's place. Invisible controls cannot intercept a pointer meant for
+     the picture; keyboard focus reveals them before it acts. */
+  .web-top > .web-output-empty,
   .web-custom-player.web-controls-hidden .web-top > *,
   .web-custom-player.web-controls-hidden .web-centre > *,
   .web-custom-player.web-controls-hidden .web-bar > * {

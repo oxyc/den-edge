@@ -307,6 +307,11 @@ const progressOf = (page, episode) =>
     [SERIES, episode],
   );
 
+const nextMetadata = async (page, command) => {
+  await page.waitForFunction(() => window.denTestNextEpisodeMetadata);
+  return page.evaluate((command) => window.denTestNextEpisodeMetadata[command](), command);
+};
+
 /** Play the series from its page: Season 1's first episode. */
 async function playFirstEpisode(page, { next = true } = {}) {
   await page.getByRole('link', { name: /^Play/ }).first().click();
@@ -425,6 +430,169 @@ test('replaying a finished episode cancels its advance, and a later finish advan
     await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
     await expect.poll(() => asked.playback.map(itemOf), { timeout: 30_000 }).toEqual(['e1', 'e2']);
     await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E2`);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a failed next-episode lookup is distinct from a finale and Retry advances exactly once', async () => {
+  test.setTimeout(60_000);
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['next-metadata-recovery'],
+  });
+  try {
+    await nextMetadata(page, 'failOnce');
+    await playFirstEpisode(page, { next: false });
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+    const recovery = page.getByRole('status').filter({
+      hasText: 'Couldn’t load this season from TMDB.',
+    });
+    await expect(recovery).toBeVisible();
+    await nextMetadata(page, 'hold');
+    await recovery.getByRole('button', { name: 'Try again' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Loading episodes' })).toBeVisible();
+    await expect.poll(() => nextMetadata(page, 'requests')).toBe(1);
+    await nextMetadata(page, 'release');
+    await expect(player(page).getByRole('link', { name: 'Next episode: S1 · E2' })).toBeVisible();
+    await expect.poll(() => asked.playback.map(itemOf), { timeout: 20_000 }).toEqual(['e1', 'e2']);
+    await page.waitForTimeout(1_100);
+    expect(asked.playback.map(itemOf)).toEqual(['e1', 'e2']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('episode replacement never composes the prior episode’s following state', async () => {
+  const { browser, page, asked } = await open(chromium);
+  try {
+    await page.evaluate(() => {
+      window.__nextEpisodeCompositions = [];
+      window.denTestNextEpisodeComposition = (value) =>
+        window.__nextEpisodeCompositions.push(JSON.parse(JSON.stringify(value)));
+    });
+    await playFirstEpisode(page);
+    await player(page).getByRole('link', { name: 'Next episode: S1 · E2' }).click();
+    await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E2`);
+
+    const episodeTwo = await page.evaluate(() =>
+      window.__nextEpisodeCompositions.filter((value) => value.season === 1 && value.episode === 2),
+    );
+    expect(episodeTwo.length).toBeGreaterThan(0);
+    expect(episodeTwo[0].availability).toBe('loading');
+    for (const composition of episodeTwo) {
+      expect(composition.next).not.toEqual({ season: 1, episode: 2 });
+    }
+    // The old successor cannot be invoked as its own replacement before the current lookup settles.
+    await page.waitForTimeout(250);
+    expect(asked.playback.map(itemOf)).toEqual(['e1', 'e2']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('title replacement never composes the prior series’ episode state', async () => {
+  const { browser, page, asked } = await open(chromium);
+  try {
+    await page.evaluate(() => {
+      window.__nextEpisodeCompositions = [];
+      window.denTestNextEpisodeComposition = (value) =>
+        window.__nextEpisodeCompositions.push(JSON.parse(JSON.stringify(value)));
+    });
+    await playFirstEpisode(page);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__nextEpisodeCompositions.some(
+            (value) => value.title.type === 'tv' && value.seasons?.length,
+          ),
+        ),
+      )
+      .toBe(true);
+
+    await page.evaluate(() => window.denTestReplacePlayingTitle());
+    await expect(player(page)).toHaveAttribute('aria-label', `Film ${FILM}`);
+    await expect.poll(() => asked.playback.map(itemOf)).toEqual(['e1', 'film']);
+    const film = await page.evaluate(() =>
+      window.__nextEpisodeCompositions.filter(
+        (value) => value.title.type === 'movie' && value.title.id === 1001,
+      ),
+    );
+    expect(film.length).toBeGreaterThan(0);
+    for (const composition of film) {
+      expect(composition).not.toHaveProperty('seasons');
+      expect(composition).not.toHaveProperty('availability');
+      expect(composition).not.toHaveProperty('next');
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a late next-episode answer is adopted only while the ended player still owns it', async () => {
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['next-metadata-recovery'],
+  });
+  try {
+    await nextMetadata(page, 'hold');
+    await playFirstEpisode(page, { next: false });
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+    await expect(page.getByRole('status').filter({ hasText: 'Loading episodes' })).toBeVisible();
+
+    await optionsButton(page).click();
+    await optionsMenu(page).getByRole('menuitem', { name: 'Play from beginning' }).click();
+    await playingPast(page, 1);
+    await nextMetadata(page, 'release');
+    await expect.poll(() => nextMetadata(page, 'requests')).toBe(1);
+    await expect(player(page).getByRole('link', { name: 'Next episode: S1 · E2' })).toBeVisible();
+    await page.waitForTimeout(1_100);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('closing an ended player retires a held next-episode lookup', async () => {
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['next-metadata-recovery'],
+  });
+  try {
+    await nextMetadata(page, 'hold');
+    await playFirstEpisode(page, { next: false });
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+    await revealPlayerControls(page);
+    await page.getByRole('button', { name: 'Close' }).click();
+    await expect(player(page)).toHaveCount(0);
+    await nextMetadata(page, 'release');
+    await page.waitForTimeout(250);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    await expect(player(page)).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a provider-confirmed finale ends without a false recovery error', async () => {
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['next-metadata-recovery'],
+  });
+  try {
+    await nextMetadata(page, 'finale');
+    await playFirstEpisode(page, { next: false });
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+    await expect(page.getByText('Couldn’t check for the next episode.')).toHaveCount(0);
+    await expect(page.getByText('Loading episodes')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    expect(await nextMetadata(page, 'requests')).toBe(0);
   } finally {
     await browser.close();
   }

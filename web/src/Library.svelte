@@ -623,8 +623,23 @@
         }),
         replace,
       );
+    following = undefined;
+    if (playingSeasonsOf !== target.title) playingSeasons = undefined;
     playbackIntent += 1;
     playing = target;
+  }
+  if (import.meta.env.DEN_E2E) {
+    (window as unknown as { denTestReplacePlayingTitle?: () => void }).denTestReplacePlayingTitle =
+      () =>
+        playerAddress(
+          { title: { type: 'movie', id: 1001, title: ['Film', 1001].join(' ') } },
+          true,
+        );
+    onDestroy(
+      () =>
+        delete (window as unknown as { denTestReplacePlayingTitle?: unknown })
+          .denTestReplacePlayingTitle,
+    );
   }
 
   /** Feedback after a "Play on TV" press (den-edge#235): drives `session.notify` on its own; fed live positions
@@ -1703,36 +1718,42 @@
     },
   });
 
-  /** The aired episode after the one playing, from the series' season layout; none after a movie or the last. */
-  let following = $state<Target | null>(null);
+  /** The aired episode after the one playing, preserving why there is not one yet. */
+  let following = $state<{ season: number; episode: number } | boolean | null>();
   /**
    * The playing series' seasons and how much of each has aired, for the player's episode list. Kept across an advance
    * within the series, so the list neither blinks out nor asks for its season again.
    */
   let playingSeasons = $state.raw<{ number: number; aired: number }[]>();
-  let playingSeasonsOf: string | undefined;
+  let playingSeasonsOf: Title | undefined;
+
+  function findFollowing(target: Target): void {
+    const key = titleKey(target.title);
+    const shape = session.shapes.get(key);
+    if (!shape) {
+      following = undefined;
+      void promoteLibraryTitle(session, target.title).then(() => {
+        if (playing !== target) return;
+        if (session.shapes.has(key)) findFollowing(target);
+        else following = true;
+      });
+      return;
+    }
+    // Atlas's dates first: an episode out before TMDB's broadcast slot is next in line the day it is out.
+    const aired = airedThrough(
+      shape.lastAired,
+      untrack(() => airings.get(target.title.id)),
+    );
+    playingSeasons = airedSeasons(shape, aired);
+    playingSeasonsOf = target.title;
+    const next = episodeAfter({ season: target.season!, episode: target.episode! }, shape);
+    following = !next ? null : isAired(next, aired) ? next : false;
+  }
+
   $effect(() => {
     const target = playing;
-    following = null;
-    if (!target || playingSeasonsOf !== titleKey(target.title)) playingSeasons = undefined;
     if (!target || target.season === undefined || target.episode === undefined) return;
-    const at = { season: target.season, episode: target.episode };
-    void (async () => {
-      if (!session.shapes.has(titleKey(target.title)))
-        await promoteLibraryTitle(session, target.title);
-      const shape = session.shapes.get(titleKey(target.title));
-      const next = shape && episodeAfter(at, shape);
-      // Atlas's dates first: an episode out before TMDB's broadcast slot is next in line the day it is out.
-      const aired = airedThrough(
-        shape?.lastAired,
-        untrack(() => airings.get(target.title.id)),
-      );
-      if (playing !== target) return;
-      if (next && isAired(next, aired)) following = { title: target.title, ...next };
-      if (!shape) return;
-      playingSeasons = airedSeasons(shape, aired);
-      playingSeasonsOf = titleKey(target.title);
-    })();
+    untrack(() => findFollowing(target));
   });
 
   /** Autoplay and "Next": the profile's policy is asked again before the following episode starts. */
@@ -3355,7 +3376,7 @@
   </div>
 {:else if playing && scout && (scout.playback || remux !== null) && PlayerScreen.current}
   {@const target = playing}
-  {@const after = following}
+  {@const after = typeof following === 'object' ? following : null}
   <!-- A session names one source: a shared scout goes with the shared subtitles, a library's with its own. -->
   {@const guestSource = !!sharedInstallOf(scout.install)}
   {@const releaseAuthority = [
@@ -3367,7 +3388,8 @@
   ] as const}
   <!-- Keyed by the title alone: the next episode plays in the same player (`playEpisode`), so the video in fullscreen
        — and a Chromecast it is cast to — carries on into it. Authority replacement deliberately remounts it: an
-       old source session and its late lookups cannot survive a profile/library/household/add-on change. -->
+       old source session and its late lookups cannot survive a profile/library/household/add-on change. A different
+       title also renders before the ordinary effect clears its predecessor's episode list, so that prop is gated. -->
   {#key `${titleKey(target.title)}:${JSON.stringify(releaseAuthority)}`}
     <PlayerScreen.current
       title={target.title}
@@ -3395,7 +3417,9 @@
       preferredPlaybackSource={playbackPrefs.preferredPlaybackSource}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
-      nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
+      nextEpisode={target.season !== undefined && target.episode !== undefined && following !== null
+        ? (following ?? 0)
+        : undefined}
       onprogress={(fraction, seconds, at, playing) =>
         void progressed({ title: target.title, ...at }, fraction, seconds, playing)}
       onfinalprogress={(fraction, seconds, at) =>
@@ -3404,7 +3428,11 @@
       onplaybacksourcepreference={rememberPlaybackSource}
       playbackReceiptHandoffAsOwner={session.administersHousehold}
       onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
-      onnext={after ? () => void advance(after) : undefined}
+      onnext={after
+        ? () => void advance({ title: target.title, ...after })
+        : target.season !== undefined && (following === undefined || following === true)
+          ? () => findFollowing(target)
+          : undefined}
       seasons={playingSeasons}
       episodeProgress={(season, episode) =>
         // The open page's rows are keyed by season and episode alone, so they are this series' only while its page

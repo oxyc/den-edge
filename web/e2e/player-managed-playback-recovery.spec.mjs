@@ -60,7 +60,7 @@ test('an ambiguous startup transport failure replays one operation, not a second
     });
 
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
-    await expect(page.getByRole('alert')).toContainText('available playback paths');
+    await expect(page.getByRole('alert')).toContainText('couldn’t prepare this release');
     expect(requests).toHaveLength(2);
     expect(requests[0].postData()).toBe(requests[1].postData());
     expect(requests[0].headers()['idempotency-key']).toBe(requests[1].headers()['idempotency-key']);
@@ -141,7 +141,7 @@ test('a direct startup failure refreshes TorBox only, then offers both paths exp
     await expect.poll(() => operations.length).toBe(2);
     await expect(page.getByRole('status')).toHaveText('TorBox did not start—refreshing…');
     releaseRefresh();
-    await expect(page.getByRole('alert')).toContainText('available playback paths', {
+    await expect(page.getByRole('alert')).toContainText('couldn’t prepare this release', {
       timeout: 15_000,
     });
     await expect(page.getByText('TorBox did not start—refreshing…', { exact: true })).toHaveCount(
