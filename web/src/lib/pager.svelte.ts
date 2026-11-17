@@ -2,21 +2,14 @@
 // end nears, and both hide titles after loading — a hide rule, or a shelf's primary genre — so a page can arrive
 // with nothing left to show. This keeps asking while that happens, a few pages at most per go.
 
-import {
-  appendUniqueTitles,
-  COULDNT_LOAD,
-  OFFLINE_PAGE,
-  SERVICES_UNAVAILABLE,
-  TMDB_LIMITED,
-} from './catalog';
+import { appendUniqueTitles, PAGER_FAILURE } from './catalog';
 import type { Title } from './library';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
 const FILL = 8;
 const MAX_BURST = 3;
 
-export type PagerFailure =
-  typeof OFFLINE_PAGE | typeof TMDB_LIMITED | typeof SERVICES_UNAVAILABLE | typeof COULDNT_LOAD;
+export type PagerFailure = (typeof PAGER_FAILURE)[number];
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -59,16 +52,16 @@ export class Pager {
         } catch (error) {
           if (signal.aborted) break;
           // Keep raw provider/transport details out of presentation and ordinary device logs.
-          const code = (error as { failure?: { code?: string } } | null)?.failure?.code;
+          const failure = (error as { failure?: { code?: string; retryable?: boolean } } | null)
+            ?.failure;
           this.failed =
             globalThis.navigator?.onLine === false
-              ? OFFLINE_PAGE
-              : code === 'rate-limited'
-                ? TMDB_LIMITED
-                : (error as { failure?: { retryable?: boolean } } | null)?.failure?.retryable ||
-                    code === 'not-ready'
-                  ? SERVICES_UNAVAILABLE
-                  : COULDNT_LOAD;
+              ? PAGER_FAILURE[1]
+              : failure?.code === 'rate-limited'
+                ? PAGER_FAILURE[2]
+                : failure?.retryable || failure?.code === 'not-ready'
+                  ? PAGER_FAILURE[3]
+                  : PAGER_FAILURE[0];
           this.done = true;
           break;
         }

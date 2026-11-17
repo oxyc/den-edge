@@ -11,11 +11,12 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import type { HomeRowAffinity } from './homeRowRanking';
 
 /** Recovery copy shared by the eager shell and catalogue Pagers without adding another chunk edge. */
-export const OFFLINE_PAGE = 'Couldn’t load this page. Check that this device is online.';
-export const TMDB_LIMITED =
-  'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.';
-export const SERVICES_UNAVAILABLE = 'Services unavailable';
-export const COULDNT_LOAD = 'Couldn’t load';
+export const PAGER_FAILURE = [
+  'Couldn’t load',
+  'Couldn’t load this page. Check that this device is online.',
+  'TMDB is limiting requests. Try again shortly.',
+  'Services unavailable',
+] as const;
 
 /** A TMDB `/discover` query (DenKit DiscoverQuery). Within one parameter a comma is AND and a pipe OR. */
 export interface DiscoverQuery {

@@ -115,11 +115,7 @@ describe('Pager', () => {
   });
 
   it.each([
-    [
-      'rate-limited',
-      true,
-      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
-    ],
+    ['rate-limited', true, 'TMDB is limiting requests. Try again shortly.'],
     ['unavailable', true, 'Services unavailable'],
     ['internal', true, 'Services unavailable'],
     ['not-ready', false, 'Services unavailable'],
@@ -192,9 +188,7 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failed).toBe(
-      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
-    );
+    expect(pager.failed).toBe('TMDB is limiting requests. Try again shortly.');
     await pager.retry();
     expect(pager.failed).toBe('Services unavailable');
     expect(pager.page).toBe(0);

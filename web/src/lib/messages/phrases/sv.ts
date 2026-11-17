@@ -1143,8 +1143,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   TMDB: 'TMDB',
   'TMDB has no IMDb record for this title, so sources can’t be matched yet.':
     'TMDB har ingen IMDb-post för denna titel, så källor kan inte matchas ännu.',
-  'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.':
-    'TMDB begränsar tillfälligt förfrågningar. Vissa titlar kan saknas; försök igen efter en kort väntan.',
+  'TMDB is limiting requests. Try again shortly.':
+    'TMDB begränsar förfrågningar. Försök igen snart.',
   'TMDB key': 'TMDB nyckel',
   to: 'till',
   'to browse sources.': 'för att bläddra i källor.',

@@ -25,11 +25,10 @@
   } from './lib/screens.svelte';
   import {
     browseRows,
-    SERVICES_UNAVAILABLE,
-    TMDB_LIMITED,
     contentPages,
     homeRows,
     interleave,
+    PAGER_FAILURE,
     personalRows,
     type RowDef,
   } from './lib/catalog';
@@ -2988,7 +2987,7 @@
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    {keptNotice ? i18n.phrase(keptNotice) : TMDB_LIMITED}
+    {keptNotice ? i18n.phrase(keptNotice) : PAGER_FAILURE[2]}
   </p>
 {/if}
 
@@ -3335,7 +3334,7 @@
           !directoryState.pending &&
           !directoryState.services.length &&
           (directoryServices === null || !directoryState.failed)
-            ? SERVICES_UNAVAILABLE
+            ? PAGER_FAILURE[3]
             : undefined}
           serviceRecovery={directoryState.retrying
             ? 'retrying'
