@@ -56,6 +56,7 @@ describe('UI translation coverage', () => {
       Bingeable: 'Atracones',
       Whodunits: 'Novelas policíacas',
       Services: 'Servicios',
+      'Services unavailable': 'Servicios no disponibles',
       'Assistant library permissions couldn’t be read. Try again.':
         'No se pudieron leer los permisos de biblioteca de asistentes. Inténtalo de nuevo.',
       'Retry cleanup': 'Reintentar limpieza',
@@ -68,13 +69,12 @@ describe('UI translation coverage', () => {
       Downloads: 'Hämtningar',
       Play: 'Spela',
       Services: 'Tjänster',
+      'Services unavailable': 'Tjänsterna är inte tillgängliga',
       'Assistant library permissions couldn’t be read. Try again.':
         'Assistenternas biblioteksbehörigheter kunde inte läsas. Försök igen.',
       'Retry cleanup': 'Försök rensa igen',
       'Manage assistants in a supported browser': 'Hantera assistenter i en webbläsare som stöds',
     });
-    expect(spanishMessages['error.pagerUnavailable']).toBe('Servicios no disponibles');
-    expect(swedishMessages['error.pagerUnavailable']).toBe('Tjänsterna är inte tillgängliga');
   });
 
   it('keeps stable phrase ids collision-free and parameter placeholders identical in every catalog', () => {

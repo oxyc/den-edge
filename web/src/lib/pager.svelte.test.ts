@@ -110,16 +110,20 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
-    expect(pager.failed).toBe('error.pagerUnknown');
+    expect(pager.failed).toBe('Couldn’t load');
     expect(pager.page + 1).toBe(1);
   });
 
   it.each([
-    ['rate-limited', true, 'error.pagerRateLimited'],
-    ['unavailable', true, 'error.pagerUnavailable'],
-    ['internal', true, 'error.pagerUnavailable'],
-    ['not-ready', false, 'error.pagerUnavailable'],
-    ['refused', false, 'error.pagerUnknown'],
+    [
+      'rate-limited',
+      true,
+      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
+    ],
+    ['unavailable', true, 'Services unavailable'],
+    ['internal', true, 'Services unavailable'],
+    ['not-ready', false, 'Services unavailable'],
+    ['refused', false, 'Couldn’t load'],
   ] as const)('keeps only a safe %s service reason', async (code, retryable, reason) => {
     const pager = new Pager(
       async () => {
@@ -146,7 +150,7 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failed).toBe('error.pagerOffline');
+    expect(pager.failed).toBe('Couldn’t load this page. Check that this device is online.');
     expect(pager.page + 1).toBe(1);
     expect(warning).not.toHaveBeenCalled();
     expect(JSON.stringify(warning.mock.calls)).not.toContain('credential');
@@ -165,7 +169,7 @@ describe('Pager', () => {
     );
     await pager.more();
     await pager.more();
-    expect(pager.failed).toBe('error.pagerUnknown');
+    expect(pager.failed).toBe('Couldn’t load');
     expect(pager.page + 1).toBe(2);
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
@@ -188,9 +192,11 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failed).toBe('error.pagerRateLimited');
+    expect(pager.failed).toBe(
+      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
+    );
     await pager.retry();
-    expect(pager.failed).toBe('error.pagerUnavailable');
+    expect(pager.failed).toBe('Services unavailable');
     expect(pager.page).toBe(0);
   });
 

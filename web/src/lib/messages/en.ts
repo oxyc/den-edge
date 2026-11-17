@@ -8,11 +8,6 @@ export const ENGLISH_MESSAGES = {
   'nav.search': 'Search',
   'nav.loadingLibrary': 'Loading your library',
   'nav.libraryReady': 'Library ready',
-  'error.pagerOffline': 'Couldn’t load this page. Check that this device is online.',
-  'error.pagerRateLimited':
-    'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
-  'error.pagerUnavailable': 'Services unavailable',
-  'error.pagerUnknown': 'Couldn’t load',
   'settings.title': 'Settings',
   'settings.section.playback': 'Playback',
   'settings.section.content': 'Content',

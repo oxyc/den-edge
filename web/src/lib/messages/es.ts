@@ -12,12 +12,6 @@ export const messages = {
   'nav.search': 'Buscar',
   'nav.loadingLibrary': 'Cargando tu biblioteca',
   'nav.libraryReady': 'Biblioteca lista',
-  'error.pagerOffline':
-    'No se pudo cargar esta página. Compruebe que este dispositivo esté en línea.',
-  'error.pagerRateLimited':
-    'TMDB está limitando temporalmente las solicitudes. Es posible que falten algunos títulos; Vuelve a intentarlo después de una breve espera.',
-  'error.pagerUnavailable': 'Servicios no disponibles',
-  'error.pagerUnknown': 'No se pudo cargar',
   'settings.title': 'Ajustes',
   'settings.section.playback': 'Reproducción',
   'settings.section.content': 'Contenido',

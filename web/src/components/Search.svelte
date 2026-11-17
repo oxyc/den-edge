@@ -726,7 +726,7 @@
         {#if feed.pager.failed}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            {i18n.text(feed.pager.failed)}
+            {i18n.phrase(feed.pager.failed)}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button
             >

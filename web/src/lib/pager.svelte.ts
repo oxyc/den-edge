@@ -10,7 +10,10 @@ const FILL = 8;
 const MAX_BURST = 3;
 
 export type PagerFailure =
-  'error.pagerOffline' | 'error.pagerRateLimited' | 'error.pagerUnavailable' | 'error.pagerUnknown';
+  | 'Couldn’t load this page. Check that this device is online.'
+  | 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
+  | 'Services unavailable'
+  | 'Couldn’t load';
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -56,13 +59,13 @@ export class Pager {
           const code = (error as { failure?: { code?: string } } | null)?.failure?.code;
           this.failed =
             globalThis.navigator?.onLine === false
-              ? 'error.pagerOffline'
+              ? 'Couldn’t load this page. Check that this device is online.'
               : code === 'rate-limited'
-                ? 'error.pagerRateLimited'
+                ? 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
                 : (error as { failure?: { retryable?: boolean } } | null)?.failure?.retryable ||
                     code === 'not-ready'
-                  ? 'error.pagerUnavailable'
-                  : 'error.pagerUnknown';
+                  ? 'Services unavailable'
+                  : 'Couldn’t load';
           this.done = true;
           break;
         }

@@ -120,9 +120,7 @@
           {/if}
           <span role="status"
             >{i18n.phrase(
-              recovery === 'retrying'
-                ? 'Trying again…'
-                : (empty ?? i18n.text('error.pagerUnavailable')),
+              recovery === 'retrying' ? 'Trying again…' : (empty ?? 'Services unavailable'),
             )}</span
           >
         </span>

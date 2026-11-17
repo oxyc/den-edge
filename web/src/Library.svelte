@@ -2986,7 +2986,9 @@
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    {keptNotice ? i18n.phrase(keptNotice) : i18n.text('error.pagerRateLimited')}
+    {keptNotice
+      ? i18n.phrase(keptNotice)
+      : 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'}
   </p>
 {/if}
 
@@ -3333,7 +3335,7 @@
           !directoryState.pending &&
           !directoryState.services.length &&
           (directoryServices === null || !directoryState.failed)
-            ? i18n.text('error.pagerUnavailable')
+            ? 'Services unavailable'
             : undefined}
           serviceRecovery={directoryState.retrying
             ? 'retrying'

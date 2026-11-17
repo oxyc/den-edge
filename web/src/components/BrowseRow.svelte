@@ -353,7 +353,7 @@
     {#if pager.failed}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
       <button class="retry" onclick={() => void pager.retry()}>
-        {i18n.text(pager.failed)}
+        {i18n.phrase(pager.failed)}
         Try again
       </button>
     {/if}

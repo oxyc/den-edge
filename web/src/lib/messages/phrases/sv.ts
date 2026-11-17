@@ -259,6 +259,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'couldn’t be matched': 'gick inte att matcha',
   'couldn’t be matched safely': 'kunde inte matchas säkert',
   'Couldn’t finish': 'Kunde inte avsluta',
+  'Couldn’t load': 'Det gick inte att ladda',
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'Avsnitten kunde inte läsas in. Inget markerades som sett.',
   'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',
@@ -281,6 +282,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Couldn’t load releases.': 'Det gick inte att läsa in releaser.',
   'Couldn’t load the filmography.': 'Det gick inte att ladda filmografin.',
   'Couldn’t load these. Try again': 'Det gick inte att ladda dessa. Försök igen',
+  'Couldn’t load this page. Check that this device is online.':
+    'Det gick inte att ladda den här sidan. Kontrollera att den här enheten är online.',
   'Couldn’t load this person from TMDB.': 'Det gick inte att ladda den här personen från TMDB.',
   'Couldn’t load this season from TMDB.': 'Det gick inte att ladda den här säsongen från TMDB.',
   'Couldn’t load this title from TMDB.': 'Det gick inte att ladda den här titeln från TMDB.',
@@ -930,6 +933,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Series details': 'Seriedetaljer',
   'server?': 'server?',
   Services: 'Tjänster',
+  'Services unavailable': 'Tjänsterna är inte tillgängliga',
   'Services are licensed per country, so pick them by country. Each becomes a brand tile on Home, opening that country’s catalogue. Every pick shares the one shelf, and a tile says which country it is for when you have picked the same service twice. The “where to watch” badges on individual titles still follow your own region.':
     'Tjänsterna är licensierade per land, så välj dem efter land. Var och en blir en varumärkesbricka på Home, vilket öppnar landets katalog. Varje plocka delar på en hylla, och en bricka säger vilket land det är för när du har plockat samma tjänst två gånger. Märkena "var att titta på" på enskilda titlar följer fortfarande din egen region.',
   'Set an Owner PIN': 'Ställ in en ägar-PIN',
@@ -1139,6 +1143,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   TMDB: 'TMDB',
   'TMDB has no IMDb record for this title, so sources can’t be matched yet.':
     'TMDB har ingen IMDb-post för denna titel, så källor kan inte matchas ännu.',
+  'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.':
+    'TMDB begränsar tillfälligt förfrågningar. Vissa titlar kan saknas; försök igen efter en kort väntan.',
   'TMDB key': 'TMDB nyckel',
   to: 'till',
   'to browse sources.': 'för att bläddra i källor.',
