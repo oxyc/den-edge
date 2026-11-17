@@ -161,7 +161,7 @@ export class DownloadCoordinatorDriver {
           const said = JSON.stringify([
             queue.answers.get(download.name) ?? null,
             ...download.race.entries.map(
-              (entry) => queue.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
+              (entry) => queue.ea.get(raceKey(download.name, entry.identity)) ?? null,
             ),
           ]);
           const last = queue.asked.get(download.name);
@@ -299,7 +299,7 @@ export class DownloadCoordinatorDriver {
       }
       for (const entry of download.race.entries) {
         // An entry whose add never landed (a relaunch, another device's ticket) is asked for again.
-        const answer = queue.entryAnswers.get(raceKey(download.name, entry.identity));
+        const answer = queue.ea.get(raceKey(download.name, entry.identity));
         const url = answer?.state === 'not-queued' ? queue.entryUrl(download, entry) : null;
         if (url && this.#active(now)) await queue.addEntry(download.name, entry.identity, url);
       }
@@ -592,7 +592,7 @@ export class DownloadCoordinatorDriver {
             : {}),
       },
       ...entries.map((entry) => {
-        const answer = this.q.entryAnswers.get(raceKey(name, entry.identity));
+        const answer = this.q.ea.get(raceKey(name, entry.identity));
         return {
           identity: entry.identity,
           since: entry.queuedAt,

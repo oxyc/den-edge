@@ -144,8 +144,8 @@ const sourceKey = (content: string, early: boolean) => (early ? `${content}\near
 export class DownloadCoordinator {
   readonly answers = new Map<string, Preparation>();
   /** By `raceKey`: den-scout's latest word on each race entry, and the ticket this instance reaches it by. */
-  readonly entryAnswers = new Map<string, Preparation>();
-  readonly entryUrls = new Map<string, string>();
+  readonly ea = new Map<string, Preparation>();
+  readonly eu = new Map<string, string>();
   readonly clocks = new Map<string, StallClock>();
   readonly urls = new Map<string, string>();
   readonly lapsed = new Set<string>();
@@ -593,9 +593,9 @@ export class DownloadCoordinator {
   /** Add a race entry at the debrid, as a prefetch. A refusal (`refused`) is its active-download limit. */
   async addEntry(name: string, identity: string, url: string): Promise<Preparation> {
     const key = raceKey(name, identity);
-    this.entryUrls.set(key, url);
+    this.eu.set(key, url);
     const answer = await this.effects.prepare(url, true, true);
-    if (this.entryUrls.get(key) === url) this.entryAnswers.set(key, answer);
+    if (this.eu.get(key) === url) this.ea.set(key, answer);
     this.changed();
     return answer;
   }
@@ -605,7 +605,7 @@ export class DownloadCoordinator {
     const key = raceKey(download.name, entry.identity);
     const observation = this.#entryObservation(download, entry);
     return (
-      this.entryUrls.get(key) ??
+      this.eu.get(key) ??
       (this.#entryRecovery.get(key)?.observation === observation
         ? null
         : this.effects.ticket(entry.url))
@@ -659,7 +659,7 @@ export class DownloadCoordinator {
     if (options.requireComplete && !sourceAnswerComplete(answer)) return undefined;
     const same = sources.find((source) => source.identity === entry.identity);
     if (same) {
-      this.entryUrls.set(raceKey(download.name, entry.identity), same.url);
+      this.eu.set(raceKey(download.name, entry.identity), same.url);
       return same.url;
     }
     return answer?.kind === 'partial' || answer?.kind === 'unknown' || answer?.outage
@@ -683,8 +683,8 @@ export class DownloadCoordinator {
       const held = this.#entryRecovery.get(key);
       if (held && held.observation !== observation) {
         this.#entryRecovery.delete(key);
-        this.entryAnswers.delete(key);
-        this.entryUrls.delete(key);
+        this.ea.delete(key);
+        this.eu.delete(key);
       }
       if (this.entryRecoveryHeld(download, entry, now)) return undefined;
       let renewed = false;
@@ -708,8 +708,8 @@ export class DownloadCoordinator {
           this.#entryRecovery.delete(key);
           return answer;
         }
-        this.entryAnswers.delete(key);
-        this.entryUrls.delete(key);
+        this.ea.delete(key);
+        this.eu.delete(key);
         this.#entryRecovery.set(key, { observation });
         if (renewed) {
           this.#holdEntryRecovery(download, entry, now);
@@ -722,7 +722,7 @@ export class DownloadCoordinator {
     this.#entryPolls.set(key, run);
     try {
       const answer = await run;
-      if (answer && this.#entryPolls.get(key) === run) this.entryAnswers.set(key, answer);
+      if (answer && this.#entryPolls.get(key) === run) this.ea.set(key, answer);
       return answer;
     } finally {
       if (this.#entryPolls.get(key) === run) this.#entryPolls.delete(key);
@@ -732,8 +732,8 @@ export class DownloadCoordinator {
   /** A race entry that won becomes the row's release: its answer and ticket move with it. */
   promoteEntry(download: Download, entry: DownloadRaceEntry): void {
     const key = raceKey(download.name, entry.identity);
-    const answer = this.entryAnswers.get(key);
-    const url = this.entryUrls.get(key) ?? this.effects.ticket(entry.url);
+    const answer = this.ea.get(key);
+    const url = this.eu.get(key) ?? this.effects.ticket(entry.url);
     if (answer) this.answers.set(download.name, answer);
     if (url) this.urls.set(download.name, url);
     this.forgetEntry(download.name, entry.identity);
@@ -741,14 +741,14 @@ export class DownloadCoordinator {
 
   forgetEntry(name: string, identity: string): void {
     const key = raceKey(name, identity);
-    this.entryAnswers.delete(key);
-    this.entryUrls.delete(key);
+    this.ea.delete(key);
+    this.eu.delete(key);
     this.#entryPolls.delete(key);
     this.#entryRecovery.delete(key);
   }
 
   clearEntries(name: string): void {
-    for (const map of [this.entryAnswers, this.entryUrls, this.#entryPolls, this.#entryRecovery])
+    for (const map of [this.ea, this.eu, this.#entryPolls, this.#entryRecovery])
       for (const key of [...map.keys()]) if (key.startsWith(`${name}\n`)) map.delete(key);
   }
 

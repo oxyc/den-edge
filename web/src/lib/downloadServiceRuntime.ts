@@ -211,7 +211,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
           download.name,
           coordinator.status(download),
           download.race.entries.map(
-            (entry) => coordinator.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
+            (entry) => coordinator.ea.get(raceKey(download.name, entry.identity)) ?? null,
           ),
         ]),
     );
