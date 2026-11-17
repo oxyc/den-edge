@@ -1,7 +1,7 @@
 import { householdTag } from './profileHouseholdHint';
 
 const LEGACY_STORAGE_KEY = 'den.recentSearches';
-const STORAGE_PREFIX = 'den.recentSearches.v2';
+const STORAGE_PREFIX = 'den.searches.v2';
 const SCOPES_KEY = `${STORAGE_PREFIX}.scopes`;
 const LIMIT = 8;
 const MAX_QUERY_LENGTH = 200;
@@ -25,11 +25,11 @@ const browserStorage = (): Storage | undefined => {
 
 function retainScope(storage: Storage, storageKey: string): void {
   const tag = storageKey.slice(STORAGE_PREFIX.length + 1);
-  const storedScopes = storage.getItem(SCOPES_KEY);
-  const previous = storedScopes?.match(/[0-9a-f]{16}/g) ?? [];
-  const scopes = [tag, ...previous.filter((value) => value !== tag)];
-  for (const retired of scopes.splice(LIMIT)) storage.removeItem(`${STORAGE_PREFIX}:${retired}`);
-  const nextScopes = scopes.join();
+  const storedScopes = storage.getItem(SCOPES_KEY) ?? '';
+  const scopes = `${tag},${storedScopes.replace(`${tag},`, '')}`;
+  for (let offset = LIMIT * 17; offset < scopes.length; offset += 17)
+    storage.removeItem(`${STORAGE_PREFIX}:${scopes.slice(offset, offset + 16)}`);
+  const nextScopes = scopes.slice(0, LIMIT * 17);
   if (storedScopes !== nextScopes) storage.setItem(SCOPES_KEY, nextScopes);
 }
 
@@ -47,7 +47,7 @@ export function scopeRecentSearches(
 ): void {
   const storageKey =
     persist && householdKey
-      ? `${STORAGE_PREFIX}:${householdTag(`${STORAGE_PREFIX}:${profile}:${householdKey}`)}`
+      ? `${STORAGE_PREFIX}:${householdTag(`${householdKey}\0${profile}`)}`
       : undefined;
   const scope = storageKey ?? `${householdKey}:${profile}`;
   if (scope === activeScope) return;
@@ -58,11 +58,11 @@ export function scopeRecentSearches(
 }
 
 /** This browser's recent explicit title searches, newest first. */
-export function readRecentSearches(storage: Storage | undefined = browserStorage()): string[] {
-  const key = activeStorageKey;
-  if (!storage || !key) return memory;
+export function readRecentSearches(): string[] {
+  const storage = browserStorage();
+  if (!storage) return memory;
   try {
-    const parsed: unknown = JSON.parse(storage.getItem(key) ?? '[]');
+    const parsed: unknown = JSON.parse(storage.getItem(activeStorageKey!) ?? '[]');
     if (!Array.isArray(parsed)) return [];
     const seen = new Set<string>();
     return parsed
@@ -85,11 +85,12 @@ function changed(searches: string[]): void {
   globalThis.dispatchEvent(new CustomEvent(RECENT_SEARCHES_CHANGED, { detail: searches }));
 }
 
-function write(searches: string[], storage: Storage | undefined): string[] {
+function write(searches: string[]): string[] {
   memory = searches;
-  const key = activeStorageKey;
+  const storage = browserStorage();
   try {
-    if (key && storage) {
+    if (storage) {
+      const key = activeStorageKey!;
       storage.removeItem(LEGACY_STORAGE_KEY);
       retainScope(storage, key);
       if (searches.length) storage.setItem(key, JSON.stringify(searches));
@@ -103,35 +104,25 @@ function write(searches: string[], storage: Storage | undefined): string[] {
 }
 
 /** Keep an explicit search, deduplicated without changing the user's casing. */
-export function rememberSearch(
-  query: string,
-  storage: Storage | undefined = browserStorage(),
-): string[] {
+export function rememberSearch(query: string): string[] {
   const value = clean(query);
-  if (value.length < 2 || value.length > MAX_QUERY_LENGTH) return readRecentSearches(storage);
+  if (value.length < 2 || value.length > MAX_QUERY_LENGTH) return readRecentSearches();
   const key = value.toLocaleLowerCase();
   return write(
-    [
-      value,
-      ...readRecentSearches(storage).filter((recent) => recent.toLocaleLowerCase() !== key),
-    ].slice(0, LIMIT),
-    storage,
+    [value, ...readRecentSearches().filter((recent) => recent.toLocaleLowerCase() !== key)].slice(
+      0,
+      LIMIT,
+    ),
   );
 }
 
-export function forgetSearch(
-  query: string,
-  storage: Storage | undefined = browserStorage(),
-): string[] {
+export function forgetSearch(query: string): string[] {
   const key = clean(query).toLocaleLowerCase();
-  return write(
-    readRecentSearches(storage).filter((recent) => recent.toLocaleLowerCase() !== key),
-    storage,
-  );
+  return write(readRecentSearches().filter((recent) => recent.toLocaleLowerCase() !== key));
 }
 
-export function clearRecentSearches(storage: Storage | undefined = browserStorage()): string[] {
-  return write([], storage);
+export function clearRecentSearches(): string[] {
+  return write([]);
 }
 
 export function isRecentSearchStorageEvent(event: StorageEvent): boolean {

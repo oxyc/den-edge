@@ -6,7 +6,7 @@
   import { parseRoute, type Explore, type PeopleView } from '../src/lib/route';
   import type { LibraryLog } from '../src/lib/log';
   import { legacyProfileSession } from '../src/lib/profileSession.svelte';
-  import { scopeRecentSearches } from '../src/lib/recentSearches';
+  import { rememberSearch, scopeRecentSearches } from '../src/lib/recentSearches';
   import type { Row, SettingsRow, Stamp, TitleRow } from '../src/lib/wire';
   import { fixtureLog } from './fixtureLog';
   import { fixtureLibraryService } from './libraryService';
@@ -104,6 +104,11 @@
     content,
   );
   scopeRecentSearches(true, 'fixture', 'owner');
+  if (sessionStorage.getItem('den.test.recentSearches')) {
+    sessionStorage.removeItem('den.test.recentSearches');
+    rememberSearch('Studio Ghibli');
+    rememberSearch('Arrival');
+  }
   // RoutedLibrary normally configures after opening the model; this fixture mounts Library directly.
   if (library) void library.model.ready.then(() => session.configureServices());
   else session.configureServices();

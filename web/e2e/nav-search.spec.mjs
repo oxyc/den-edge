@@ -34,7 +34,8 @@ const input = (page) =>
 // The fixture is a file on the dev server, so its own path is where Home lives: the app reads the path, and
 // returning Home returns to the address the document was opened at.
 const FIXTURE = `${E2E_ORIGIN}/test/nav-search.html`;
-const RECENT_SEARCH_KEY = 'den.recentSearches.v2:46823038125e6ecf';
+const RECENT_SEARCH_PREFIX = 'den.searches.v2:';
+const RECENT_SEARCH_SEED = 'den.test.recentSearches';
 const HOME = /\/test\/nav-search\.html$/;
 async function setup(page, { atlasGate, catalogueGate, searchGate, billboard } = {}) {
   await guardNetwork(page);
@@ -121,10 +122,7 @@ for (const width of [390, 1280])
         hasTouch: width < 760,
       });
       await setup(page);
-      await page.addInitScript(
-        (key) => localStorage.setItem(key, JSON.stringify(['Arrival', 'Studio Ghibli'])),
-        RECENT_SEARCH_KEY,
-      );
+      await page.addInitScript((key) => sessionStorage.setItem(key, '1'), RECENT_SEARCH_SEED);
       await page.goto(FIXTURE);
       // Do not wait for Router's route prop: an immediate choice must work as soon as focus draws the popup.
       if (width < 760)
@@ -171,7 +169,12 @@ for (const width of [390, 1280])
       await expect(recent.getByRole('button', { name: 'Arrival', exact: true })).toHaveCount(0);
       await recent.getByRole('button', { name: 'Clear', exact: true }).click();
       await expect(recent).toHaveCount(0);
-      expect(await page.evaluate((key) => localStorage.getItem(key), RECENT_SEARCH_KEY)).toBeNull();
+      expect(
+        await page.evaluate(
+          (prefix) => Object.keys(localStorage).filter((key) => key.startsWith(prefix)),
+          RECENT_SEARCH_PREFIX,
+        ),
+      ).toEqual([]);
     } finally {
       await browser.close();
     }
@@ -187,10 +190,7 @@ test('a recent search is reused and removed by touch on an iPhone', async () => 
       hasTouch: true,
     });
     await setup(page);
-    await page.addInitScript(
-      (key) => localStorage.setItem(key, JSON.stringify(['Arrival', 'Studio Ghibli'])),
-      RECENT_SEARCH_KEY,
-    );
+    await page.addInitScript((key) => sessionStorage.setItem(key, '1'), RECENT_SEARCH_SEED);
     await page.goto(FIXTURE);
     await page.getByRole('button', { name: 'Search', exact: true }).tap();
     const recent = page.locator('.recent');

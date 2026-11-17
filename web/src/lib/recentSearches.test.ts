@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearRecentSearches,
   forgetSearch,
@@ -25,21 +25,24 @@ const storage = (initial: Record<string, string> = {}): Storage => {
 describe('recent searches', () => {
   let testScope = 0;
   beforeEach(() => scopeRecentSearches(true, 'test-household', `owner-${++testScope}`));
+  afterEach(() => vi.unstubAllGlobals());
 
   it('keeps explicit searches newest first, cleaned and case-insensitively deduplicated', () => {
     const kept = storage();
-    rememberSearch('  Studio   Ghibli ', kept);
-    rememberSearch('Swedish movies', kept);
-    expect(rememberSearch('studio ghibli', kept)).toEqual(['studio ghibli', 'Swedish movies']);
-    expect(readRecentSearches(kept)).toEqual(['studio ghibli', 'Swedish movies']);
+    vi.stubGlobal('localStorage', kept);
+    rememberSearch('  Studio   Ghibli ');
+    rememberSearch('Swedish movies');
+    expect(rememberSearch('studio ghibli')).toEqual(['studio ghibli', 'Swedish movies']);
+    expect(readRecentSearches()).toEqual(['studio ghibli', 'Swedish movies']);
   });
 
   it('keeps eight useful entries and can remove one or all', () => {
     const kept = storage();
-    for (let i = 0; i < 10; i++) rememberSearch(`Film ${i}`, kept);
-    expect(readRecentSearches(kept)).toHaveLength(8);
-    expect(forgetSearch('Film 8', kept)).not.toContain('Film 8');
-    expect(clearRecentSearches(kept)).toEqual([]);
+    vi.stubGlobal('localStorage', kept);
+    for (let i = 0; i < 10; i++) rememberSearch(`Film ${i}`);
+    expect(readRecentSearches()).toHaveLength(8);
+    expect(forgetSearch('Film 8')).not.toContain('Film 8');
+    expect(clearRecentSearches()).toEqual([]);
     expect(kept.removeItem).toHaveBeenCalled();
   });
 
@@ -47,16 +50,18 @@ describe('recent searches', () => {
     const malformed = storage();
     malformed.setItem = vi.fn();
     malformed.getItem = vi.fn(() => '{');
-    expect(readRecentSearches(malformed)).toEqual([]);
-    expect(rememberSearch('x', malformed)).toEqual([]);
-    expect(rememberSearch('x'.repeat(201), malformed)).toEqual([]);
+    vi.stubGlobal('localStorage', malformed);
+    expect(readRecentSearches()).toEqual([]);
+    expect(rememberSearch('x')).toEqual([]);
+    expect(rememberSearch('x'.repeat(201))).toEqual([]);
     const blocked = {
       getItem: () => {
         throw Error('blocked');
       },
     } as unknown as Storage;
-    expect(readRecentSearches(blocked)).toEqual([]);
-    expect(() => rememberSearch('Arrival', blocked)).not.toThrow();
+    vi.stubGlobal('localStorage', blocked);
+    expect(readRecentSearches()).toEqual([]);
+    expect(() => rememberSearch('Arrival')).not.toThrow();
   });
 
   it('isolates exact household Owners and memory-only profile sessions', () => {
@@ -68,7 +73,7 @@ describe('recent searches', () => {
       rememberSearch('Owner A search');
       expect(saved.removeItem).toHaveBeenCalledWith('den.recentSearches');
       const ownerAKey = vi.mocked(saved.setItem).mock.calls.at(-1)?.[0];
-      expect(ownerAKey).toMatch(/^den\.recentSearches\.v2:/);
+      expect(ownerAKey).toMatch(/^den\.searches\.v2:/);
       expect(ownerAKey).not.toContain('household-a-secret');
       expect(ownerAKey).not.toContain('owner-a');
 
@@ -110,7 +115,7 @@ describe('recent searches', () => {
     rememberSearch('Arrival');
     const activeKey = vi
       .mocked(kept.setItem)
-      .mock.calls.find(([key]) => key.startsWith('den.recentSearches.v2:'))?.[0];
+      .mock.calls.find(([key]) => key.startsWith('den.searches.v2:'))?.[0];
     expect(isRecentSearchStorageEvent({ key: activeKey } as StorageEvent)).toBe(true);
     expect(isRecentSearchStorageEvent({ key: null } as StorageEvent)).toBe(true);
     scopeRecentSearches(true, 'household-b', 'owner-b');
@@ -124,7 +129,7 @@ describe('recent searches', () => {
     const kept = storage();
     vi.stubGlobal('localStorage', kept);
     scopeRecentSearches(true, 'unsearched-household', 'owner');
-    expect(kept.getItem('den.recentSearches.v2.scopes')).toBeNull();
+    expect(kept.getItem('den.searches.v2.scopes')).toBeNull();
     expect(kept.setItem).not.toHaveBeenCalled();
     expect(kept.removeItem).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
@@ -137,7 +142,7 @@ describe('recent searches', () => {
     rememberSearch('First household search');
     const firstKey = vi
       .mocked(kept.setItem)
-      .mock.calls.find(([key]) => key.startsWith('den.recentSearches.v2:'))?.[0];
+      .mock.calls.find(([key]) => key.startsWith('den.searches.v2:'))?.[0];
     expect(firstKey).toBeDefined();
 
     for (let index = 1; index <= 8; index++) {
@@ -146,8 +151,8 @@ describe('recent searches', () => {
     }
 
     expect(kept.getItem(firstKey!)).toBeNull();
-    const scopes = kept.getItem('den.recentSearches.v2.scopes');
-    expect(scopes!.split(',')).toHaveLength(8);
+    const scopes = kept.getItem('den.searches.v2.scopes');
+    expect(scopes).toHaveLength(8 * 17);
     expect(scopes).not.toContain('household-');
     expect(scopes).not.toContain('owner-');
 
@@ -155,15 +160,15 @@ describe('recent searches', () => {
     // registry slot instead of leaving untracked plaintext behind.
     const activeKey = vi
       .mocked(kept.setItem)
-      .mock.calls.filter(([key]) => key.startsWith('den.recentSearches.v2:'))
+      .mock.calls.filter(([key]) => key.startsWith('den.searches.v2:'))
       .at(-1)?.[0];
     const remoteScopes = Array.from({ length: 8 }, (_, index) =>
       index.toString(16).padStart(16, '0'),
     );
-    kept.setItem('den.recentSearches.v2.scopes', remoteScopes.join());
+    kept.setItem('den.searches.v2.scopes', `${remoteScopes.join(',')},`);
     kept.removeItem(activeKey!);
     rememberSearch('Still active tab search');
-    expect(kept.getItem('den.recentSearches.v2.scopes')!.split(',')).toEqual([
+    expect(kept.getItem('den.searches.v2.scopes')!.match(/[0-9a-f]{16}/g)).toEqual([
       activeKey!.split(':').at(-1),
       ...remoteScopes.slice(0, 7),
     ]);
