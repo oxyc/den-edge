@@ -314,10 +314,9 @@
               playKey,
               __DEN_TV__ ? 1 : undefined,
             );
-          })().catch(
-            (error: unknown) =>
-              current && console.warn('den: this device could not check in', error),
-          ),
+          })().catch((error: unknown) => {
+            if (current) console.warn('den: this device could not check in', error);
+          }),
         1_000,
       );
     });
