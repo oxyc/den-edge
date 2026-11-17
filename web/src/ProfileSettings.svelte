@@ -218,9 +218,7 @@
               ? i18n.text('profile.saveFailed')
               : failure.kind === 'policy'
                 ? i18n.text('profile.policySaveFailed')
-                : i18n.phrase(
-                    'Your language was saved, but this screen couldn’t switch languages. Try again.',
-                  )}</span
+                : i18n.phrase('Language saved, but not shown.')}</span
           >
           {#if failure.kind !== 'policy'}<Button
               variant="secondary"

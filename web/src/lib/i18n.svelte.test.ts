@@ -189,15 +189,13 @@ it('localizes the reduced-TV download management handoff', async () => {
 
 it('localizes a saved-language presentation failure without claiming the write failed', async () => {
   const cases = [
-    ['en', 'Your language was saved, but this screen couldn’t switch languages. Try again.'],
-    ['es', 'Idioma guardado, pero no aplicado. Inténtalo de nuevo.'],
-    ['sv', 'Språket sparades men kunde inte visas. Försök igen.'],
+    ['en', 'Language saved, but not shown.'],
+    ['es', 'Idioma guardado, pero no aplicado.'],
+    ['sv', 'Språket sparades men visas inte.'],
   ] as const;
 
   for (const [language, message] of cases) {
     await setInterfaceLanguage(language);
-    expect(
-      i18n.phrase('Your language was saved, but this screen couldn’t switch languages. Try again.'),
-    ).toBe(message);
+    expect(i18n.phrase('Language saved, but not shown.')).toBe(message);
   }
 });
