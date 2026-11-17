@@ -110,7 +110,7 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
           a.threeD ? '3D' : '',
         ].filter((s): s is string => typeof s === 'string' && s.length > 0),
         languages: Array.isArray(a.audioLanguages)
-          ? a.audioLanguages.filter((s): s is string => typeof s === 'string')
+          ? a.audioLanguages.filter((s: unknown): s is string => typeof s === 'string')
           : [],
         probed: a.probed === true,
         identity: releaseIdentity(s.url, s.behaviorHints?.filename),
