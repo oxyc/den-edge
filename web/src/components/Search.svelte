@@ -725,7 +725,16 @@
         {#if feed.pager.failed}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            Couldn’t load {feedHits.length ? 'more' : 'these'}.
+            {#if feedHits.length}Couldn’t load more.{:else}Couldn’t load these.{/if}
+            {#if feed.pager.failure?.reason === 'offline'}
+              This device is offline.
+            {:else if feed.pager.failure?.reason === 'rate-limited'}
+              The service is asking Den to wait.
+            {:else if feed.pager.failure?.reason === 'unavailable'}
+              The service is temporarily unavailable.
+            {:else}
+              Something went wrong.
+            {/if}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button
             >

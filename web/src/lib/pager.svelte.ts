@@ -3,11 +3,30 @@
 // with nothing left to show. This keeps asking while that happens, a few pages at most per go.
 
 import { appendUniqueTitles } from './catalog';
+import { ContentServiceError } from './contentServiceClient';
 import type { Title } from './library';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
 const FILL = 8;
 const MAX_BURST = 3;
+
+export type PagerFailureReason = 'offline' | 'rate-limited' | 'unavailable' | 'unknown';
+
+export interface PagerFailure {
+  /** The page and request generation that failed, so a retry cannot inherit an older request's reason. */
+  page: number;
+  generation: number;
+  reason: PagerFailureReason;
+}
+
+const failureReason = (error: unknown): PagerFailureReason => {
+  if (globalThis.navigator?.onLine === false) return 'offline';
+  if (!(error instanceof ContentServiceError)) return 'unknown';
+  if (error.failure.code === 'rate-limited') return 'rate-limited';
+  return ['unavailable', 'not-ready', 'internal'].includes(error.failure.code)
+    ? 'unavailable'
+    : 'unknown';
+};
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -18,9 +37,14 @@ export class Pager {
   exhausted = $state(false);
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
-  /** The last page asked for failed: the list says so and offers `retry`, rather than simply ending. */
-  failed = $state(false);
+  /** The exact current request that failed, with only a presentation-safe reason. */
+  failure = $state.raw<PagerFailure | null>(null);
+  /** The list says a page failed and offers `retry`, rather than simply ending. */
+  get failed(): boolean {
+    return this.failure !== null;
+  }
   #loading = false;
+  #generation = 0;
   readonly #lifetime = new AbortController();
   readonly #load: (page: number, signal?: AbortSignal) => Promise<Title[]>;
   readonly #admitted: (title: Title) => boolean;
@@ -40,8 +64,10 @@ export class Pager {
     this.#loading = true;
     try {
       for (let burst = 0; burst < MAX_BURST && !this.done; burst++) {
+        const page = this.page + 1;
+        const generation = ++this.#generation;
         try {
-          const next = await this.#load(this.page + 1, signal);
+          const next = await this.#load(page, signal);
           // A provider may ignore cancellation. Disposal still owns every observable mutation after the await.
           if (signal.aborted) break;
           this.page++;
@@ -49,9 +75,10 @@ export class Pager {
           if (next.length === 0) this.done = this.exhausted = true;
         } catch (error) {
           if (signal.aborted) break;
-          // The row stops where its source failed, until `retry`; what failed is said, not swallowed.
-          console.warn('pager: page', this.page + 1, 'failed', error);
-          this.failed = this.done = true;
+          // Keep raw provider/transport details out of both presentation and ordinary device logs.
+          this.failure = { page, generation, reason: failureReason(error) };
+          console.warn('pager: page failed', page, generation, this.failure.reason);
+          this.done = true;
           break;
         }
         if (this.titles.filter(this.#admitted).length >= FILL * this.page) break;
@@ -68,7 +95,8 @@ export class Pager {
   /** Ask again for the page that failed, and carry on from there. */
   retry(): Promise<void> {
     if (!this.failed || this.#loading || this.#lifetime.signal.aborted) return Promise.resolve();
-    this.failed = this.done = false;
+    this.failure = null;
+    this.done = false;
     return this.more();
   }
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { ContentServiceError } from './contentServiceClient';
 import type { Title } from './library';
 import { Pager } from './pager.svelte';
 
@@ -105,6 +106,41 @@ describe('Pager', () => {
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
     expect(pager.failed).toBe(true);
+    expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'unknown' });
+  });
+
+  it.each([
+    ['rate-limited', 'rate-limited'],
+    ['unavailable', 'unavailable'],
+    ['internal', 'unavailable'],
+    ['refused', 'unknown'],
+  ] as const)('keeps only a safe %s service reason', async (code, reason) => {
+    const pager = new Pager(
+      async () => {
+        throw new ContentServiceError({
+          code,
+          message: 'secret provider URL and response body',
+          retryable: true,
+        });
+      },
+      () => true,
+    );
+    await pager.more();
+    expect(pager.failure?.reason).toBe(reason);
+    expect(JSON.stringify(pager.failure)).not.toContain('secret');
+  });
+
+  it('reports an offline device without inspecting an arbitrary exception', async () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    const pager = new Pager(
+      async () => {
+        throw new Error('credential-bearing provider detail');
+      },
+      () => true,
+    );
+    await pager.more();
+    expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'offline' });
+    vi.unstubAllGlobals();
   });
 
   it('says a page failed, and carries on from it when asked to try again', async () => {
@@ -121,14 +157,17 @@ describe('Pager', () => {
     await pager.more();
     await pager.more();
     expect(pager.failed).toBe(true);
+    expect(pager.failure).toEqual({ page: 2, generation: 2, reason: 'unknown' });
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
     down = false;
     await pager.retry();
     expect(asked).toEqual([1, 2, 2]);
     expect(pager.failed).toBe(false);
+    expect(pager.failure).toBeNull();
     expect(pager.done).toBe(false);
     expect(pager.titles).toHaveLength(40);
+    expect(pager.page).toBe(2);
   });
 
   it('never loads the same title twice across pages', async () => {

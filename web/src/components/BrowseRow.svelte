@@ -352,9 +352,19 @@
     {/each}
     {#if pager.failed}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
-      <button class="retry" onclick={() => void pager.retry()}
-        >Couldn’t load these. Try again</button
-      >
+      <button class="retry" onclick={() => void pager.retry()}>
+        Couldn’t load these.
+        {#if pager.failure?.reason === 'offline'}
+          This device is offline.
+        {:else if pager.failure?.reason === 'rate-limited'}
+          The service is asking Den to wait.
+        {:else if pager.failure?.reason === 'unavailable'}
+          The service is temporarily unavailable.
+        {:else}
+          Something went wrong.
+        {/if}
+        Try again
+      </button>
     {/if}
     <span bind:this={end} class="end" aria-hidden="true"></span>
   </PosterRow>
