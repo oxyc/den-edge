@@ -659,7 +659,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       if (!stored) return null;
       return stored.row?.kind === 'set' ? stored.row : undefined;
     } catch (error) {
-      console.warn('den: the assistant drop-box row could not be read from library facts', error);
+      console.warn('den: assistant', 'dropbox-read', error);
       return undefined;
     }
   }
@@ -675,7 +675,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     );
     if (dueAt === null || Date.now() >= dueAt) return false;
     // Said once a page, as the library log says it (`LibraryAssistantAuthority.publish`).
-    if (!this.#saidCurrent) console.info('den: assistant projection up to date');
+    if (!this.#saidCurrent) console.info('den: assistant', 'projection-current');
     this.#saidCurrent = true;
     return true;
   }

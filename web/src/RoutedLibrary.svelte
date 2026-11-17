@@ -1548,7 +1548,7 @@
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
-          console.warn('den: the library is not a member on den-edge yet; its assistants wait');
+          console.warn('den: assistant', 'membership-wait');
           unavailable?.(stop.signal);
           return;
         }
@@ -1570,7 +1570,7 @@
         );
       },
       (error: unknown) => {
-        console.warn('den: the assistant connection could not be loaded', error);
+        console.warn('den: assistant', 'connection-load', error);
         if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
       },
     );
@@ -1583,9 +1583,7 @@
         void renewListed(
           (grants) => (work.household ?? work.model).renewAssistant(grants),
           work.fetchImpl,
-        ).catch((error: unknown) =>
-          console.warn('den: assistant grants could not be renewed', error),
-        );
+        ).catch((error: unknown) => console.warn('den: assistant', 'grants-renew', error));
       renew();
       const renewal = setInterval(renew, RENEW_EVERY_MS);
       signal.addEventListener('abort', () => clearInterval(renewal), { once: true });
