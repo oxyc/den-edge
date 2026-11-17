@@ -40,9 +40,6 @@ export const rankable = (sources: TitleSource[]) =>
     seeders,
   }));
 
-/** Whether `addon` is the combined Den addon, asked under `/den` rather than Scout's `/scout`. */
-const isDen = (addon: Addon) => addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
-
 /** Structured source names are untrusted add-on display data, not release-name tokens to repair. */
 const sourceBadge = (value: unknown): string => {
   if (typeof value !== 'string' || value.length > 6) return '';
@@ -59,7 +56,7 @@ const sourceBadge = (value: unknown): string => {
  * beside `<base>/den/<config>`), and its `/den/play/…` is Reel's, never a release.
  */
 export function scoutTicket(url: string, addon: Addon, routes: Routes): string | null {
-  const den = isDen(addon);
+  const den = addon.base === DEN.path || addon.base.startsWith(`${DEN.path}/`);
   const mount = addon.install.slice(0, addon.install.lastIndexOf('/'));
   const suffix = within(
     url,
@@ -90,8 +87,6 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
     if (!url || typeof filename !== 'string' || !filename || seen.has(filename)) return [];
     seen.add(filename);
     const a = s.attributes && typeof s.attributes === 'object' ? s.attributes : {};
-    const texts = (value: unknown) =>
-      Array.isArray(value) ? value.filter((s): s is string => typeof s === 'string') : [];
     return [
       {
         filename,
@@ -114,7 +109,9 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
           a.hardcodedSubs ? 'Hardcoded subtitles' : '',
           a.threeD ? '3D' : '',
         ].filter((s): s is string => typeof s === 'string' && s.length > 0),
-        languages: texts(a.audioLanguages),
+        languages: Array.isArray(a.audioLanguages)
+          ? a.audioLanguages.filter((s): s is string => typeof s === 'string')
+          : [],
         probed: a.probed === true,
         identity: releaseIdentity(s.url, s.behaviorHints?.filename),
         attributes: a,
