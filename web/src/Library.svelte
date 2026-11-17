@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { i18n } from './lib/i18n.svelte';
+  import { i18n, SERVICES_UNAVAILABLE, TMDB_LIMITED } from './lib/i18n.svelte';
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onDestroy, tick, untrack } from 'svelte';
@@ -63,7 +63,6 @@
   import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
   import { lastPromiseCache } from './lib/lastPromiseCache';
   import { isHidden } from './lib/prefs';
-  import { SERVICES_UNAVAILABLE, TMDB_LIMITED } from './lib/recoveryPhrases';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
   import { openProfileSwitcher } from './lib/profileSwitcherControl';
