@@ -33,13 +33,8 @@ export class RetiredOwnerSplitRecords {
         this.#complete = true;
         return true;
       }
-      const page = this.vault.keys
-        ? await this.vault.keys(this.#prefix, this.#after, PAGE_SIZE)
-        : this.vault.page
-          ? (await this.vault.page(this.#prefix, this.#after, PAGE_SIZE)).map(([key]) => key)
-          : (() => {
-              throw new Error('Bounded Vault key enumeration is unavailable');
-            })();
+      if (!this.vault.keys) throw new Error('Bounded Vault key enumeration is unavailable');
+      const page = await this.vault.keys(this.#prefix, this.#after, PAGE_SIZE);
       const changes: VaultChange[] = page.flatMap((key) =>
         this.#retired(key) ? [{ kind: 'delete' as const, key }] : [],
       );
