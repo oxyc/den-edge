@@ -115,6 +115,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.justwatch-credit {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 button,
 input,
 select,

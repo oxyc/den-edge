@@ -20,7 +20,6 @@
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
-  import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
   import ServerUnreachable from './ServerUnreachable.svelte';
   import TypeFilter from './TypeFilter.svelte';
@@ -219,7 +218,7 @@
       <h1>{service.name}</h1>
     </header>
   </div>
-  <JustWatchCredit />
+  <p class="justwatch-credit credit">Streaming availability by JustWatch</p>
   {#if both}
     <div class="tabs">
       <TypeFilter value={tab} onchange={(value) => (tab = value)} label="Show on this service" />

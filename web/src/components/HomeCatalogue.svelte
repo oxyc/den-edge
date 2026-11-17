@@ -5,10 +5,9 @@
   import type { Title } from '../lib/library';
   import type { ProfileSession } from '../lib/profileSession.svelte';
   import type { ServicePick } from '../lib/prefs';
-  import type { InterfaceLanguage } from '../lib/interfaceLanguage';
   import { i18n } from '../lib/i18n.svelte';
   import { optionalImport } from '../lib/keyboardNavigation';
-  import type { Service } from '../settings/services';
+  import type { Service, ServiceDirectoryResult } from '../settings/services';
   import Browse from './Browse.svelte';
   import ServicesRow from './ServicesRow.svelte';
 
@@ -42,7 +41,7 @@
     typeof import('../settings/services') | null | false | undefined
   >(false);
   $effect(() => {
-    if (!showServices || directoryServices !== undefined) return;
+    if (directoryServices !== undefined) return;
     let current = true;
     void optionalImport(import('../settings/services')).then(
       (directory) => {
@@ -57,65 +56,50 @@
       current = false;
     };
   });
-  type DirectoryLoad = { services: Service[]; failed: boolean };
-  let directoryLoads = $state.raw<Record<string, DirectoryLoad>>({});
+  let directoryLoads = $state.raw<Record<string, ServiceDirectoryResult>>({});
   let directoryRetrying = $state(false);
-  let directoryGeneration = 0;
-  function setDirectory(run: number, country: string, load: DirectoryLoad) {
-    if (run === directoryGeneration) directoryLoads = { ...directoryLoads, [country]: load };
-  }
-  function loadDirectory(
-    directory: typeof import('../settings/services'),
-    owner: ProfileSession,
-    language: InterfaceLanguage,
-    country: string,
-    refresh: boolean,
-    run: number,
-    previous: Service[] = [],
-  ) {
-    return directory.contentServicesResult(owner.content, country, refresh, language).then(
-      (result) =>
-        setDirectory(run, country, {
-          services: result.complete
-            ? result.services
-            : directory.mergeServices(previous, result.services),
-          failed: !result.complete,
-        }),
-      () => setDirectory(run, country, { services: previous, failed: true }),
-    );
-  }
+  const retry = { current: () => {} };
   $effect(() => {
     const directory = directoryServices;
     const owner = serviceSession;
     const language = i18n.language;
     const picks = servicePicks;
-    if (!showServices || !directory || !owner) return;
+    if (!directory || !owner) return;
     const countries = [...new Set(picks.map((pick) => pick.country))];
-    const run = ++directoryGeneration;
+    let current = true;
     directoryLoads = {};
     directoryRetrying = false;
-    for (const country of countries)
-      void loadDirectory(directory, owner, language, country, false, run);
+    const load = async (country: string, refresh: boolean, previous: Service[] = []) => {
+      let result: ServiceDirectoryResult;
+      try {
+        result = await directory.contentServicesResult(owner.content, country, refresh, language);
+      } catch {
+        result = { services: previous, complete: false };
+      }
+      if (!current) return;
+      directoryLoads = {
+        ...directoryLoads,
+        [country]: result.complete
+          ? result
+          : { services: directory.mergeServices(previous, result.services), complete: false },
+      };
+    };
+    for (const country of countries) void load(country, false);
+    retry.current = () => {
+      if (directoryRetrying) return;
+      const failed = Object.entries(directoryLoads).filter(([, result]) => !result.complete);
+      if (!failed.length) return;
+      directoryRetrying = true;
+      void Promise.all(
+        failed.map(([country, result]) => load(country, true, result.services)),
+      ).finally(() => {
+        if (current) directoryRetrying = false;
+      });
+    };
     return () => {
-      if (run === directoryGeneration) directoryGeneration++;
+      current = false;
     };
   });
-  function retryDirectories() {
-    if (directoryRetrying) return;
-    const directory = directoryServices;
-    const owner = serviceSession;
-    const failed = Object.entries(directoryLoads).filter(([, load]) => load.failed);
-    if (!directory || !owner || !failed.length) return;
-    const run = directoryGeneration;
-    directoryRetrying = true;
-    void Promise.all(
-      failed.map(([country, load]) =>
-        loadDirectory(directory, owner, i18n.language, country, true, run, load.services),
-      ),
-    ).finally(() => {
-      if (run === directoryGeneration) directoryRetrying = false;
-    });
-  }
   const directoryView = $derived.by(() => {
     const countries = [...new Set(servicePicks.map((pick) => pick.country))];
     const naming =
@@ -131,7 +115,7 @@
     );
     return {
       naming,
-      failed: Object.values(directoryLoads).some((load) => load.failed),
+      failed: Object.values(directoryLoads).some((load) => !load.complete),
       services,
       names,
       settled: directoryServices === null || (!!directoryServices && naming === 0),
@@ -157,7 +141,7 @@
       : !directoryView.naming && directoryView.failed
         ? 'failed'
         : undefined}
-    onretry={retryDirectories}
+    onretry={() => retry.current()}
     onvisible={() => (directoryServices = undefined)}
     onintent={onServiceIntent}
   />

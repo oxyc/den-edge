@@ -7,7 +7,6 @@
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
   import type { Service } from '../settings/services';
-  import JustWatchCredit from './JustWatchCredit.svelte';
   import ServiceTile from './ServiceTile.svelte';
 
   let {
@@ -106,14 +105,14 @@
           {/each}
         {:else if empty}
           <span class="hold empty"
-            ><span class="plate" aria-hidden="true">—</span><span role="status" aria-atomic="true"
+            ><span class="plate" aria-hidden="true">—</span><span role="status"
               >{i18n.phrase(empty)}</span
             ></span
           >
         {/if}
       {/each}
       {#if recovery}
-        <span class="hold empty recovery">
+        <span class="hold empty">
           <button
             class="plate retry"
             type="button"
@@ -122,14 +121,14 @@
             bind:this={retryButton}
             onclick={retry}>↻</button
           >
-          <span role="status" aria-atomic="true"
+          <span role="status"
             >{i18n.phrase(recovery === 'retrying' ? 'Trying again…' : 'Services unavailable')}</span
           >
         </span>
       {/if}
     </div>
   </section>
-  <JustWatchCredit />
+  <p class="justwatch-credit credit">Streaming availability by JustWatch</p>
 {/if}
 
 <style>
@@ -208,11 +207,6 @@
     color: inherit;
     font: inherit;
     font-size: 28px;
-    cursor: pointer;
-  }
-
-  .retry[aria-disabled='true'] {
-    cursor: wait;
   }
 
   .retry:focus-visible {
