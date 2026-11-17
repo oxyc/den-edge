@@ -3,6 +3,8 @@
   import type { ServicePick } from '../src/lib/prefs';
   import { i18n, setInterfaceLanguage } from '../src/lib/i18n.svelte';
   import type { Service, ServiceDirectoryResult } from '../src/settings/services';
+  import type { ServiceDirectorySession } from '../src/settings/services';
+  import { optionalImport } from '../src/lib/keyboardNavigation';
   import HomeCatalogue from '../src/components/HomeCatalogue.svelte';
 
   const result = new URL(location.href).searchParams.get('result') ?? 'unavailable';
@@ -115,6 +117,52 @@
     return [];
   }
 
+  let directoryServices = $state.raw<
+    typeof import('../src/settings/services') | null | false | undefined
+  >(false);
+  let directoryState = $state.raw<ServiceDirectorySession<{ pick: ServicePick; service: Service }>>(
+    {
+      retrying: false,
+      failed: false,
+      services: [],
+      names: {},
+      pending: 0,
+    },
+  );
+  let retryDirectories = $state.raw<() => void>(() => {});
+  async function admitDirectories() {
+    if (directoryServices !== false) return;
+    directoryServices = undefined;
+    try {
+      directoryServices = await optionalImport(import('../src/settings/services'));
+    } catch {
+      directoryServices = null;
+    }
+  }
+  $effect(() => {
+    const directory = directoryServices;
+    const owner = serviceSession;
+    const language = i18n.language;
+    const picks = servicePicks;
+    if (!directory) return;
+    directoryState = { retrying: false, failed: false, services: [], names: {}, pending: 0 };
+    const controller = directory.watchServiceDirectories(
+      owner.content,
+      picks,
+      language,
+      serviceResolver.resolvePicks,
+      (state) => (directoryState = state),
+    );
+    retryDirectories = controller.retry;
+    return controller.cancel;
+  });
+  $effect(() => {
+    serviceRows(
+      directoryState.names,
+      directoryServices === null || (!!directoryServices && directoryState.pending === 0),
+    );
+  });
+
   (window as unknown as { replaceServicesWithDuplicate: () => void }).replaceServicesWithDuplicate =
     () =>
       (servicePicks = [
@@ -157,9 +205,22 @@
   browseReady={false}
   browseIdentity="fixture"
   showServices
-  {serviceSession}
-  {servicePicks}
-  {serviceResolver}
-  {serviceRows}
+  services={directoryState.services}
+  servicePending={directoryServices !== null && (!directoryServices || directoryState.pending)
+    ? servicePicks.length
+    : 0}
+  serviceEmpty={directoryServices !== false &&
+  !directoryState.pending &&
+  !directoryState.services.length &&
+  (directoryServices === null || !directoryState.failed)
+    ? 'Services unavailable'
+    : undefined}
+  serviceRecovery={directoryState.retrying
+    ? 'retrying'
+    : !directoryState.pending && directoryState.failed
+      ? 'failed'
+      : undefined}
+  onServiceRetry={retryDirectories}
+  onServiceVisible={() => void admitDirectories()}
   onServiceIntent={() => {}}
 />

@@ -80,8 +80,8 @@
   import { scheduleAfterStartupMilestone } from './lib/startupScheduling';
   import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
-  import type { AtlasCatalog } from './lib/services';
-  import type { Service } from './settings/services';
+  import type { AtlasCatalog, ResolvedService } from './lib/services';
+  import type { Service, ServiceDirectorySession } from './settings/services';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
@@ -2187,19 +2187,57 @@
     );
   }
   const rows = $derived(catalogueRows());
-  const homeCatalogueRows = (names: Record<number, string>, settled: boolean) =>
-    catalogueRows(
-      names,
-      session.kid ||
-        (atlasReady && (!atlas || !servicePicks.length)) ||
-        (atlasReady && !!atlas && settled),
-    );
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
    */
   const servicePicks = $derived(
     prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
+  );
+  /** Provider directories stay behind Home's visible rail, including the optional module itself. */
+  let directoryServices = $state.raw<
+    typeof import('./settings/services') | null | false | undefined
+  >(false);
+  let directoryState = $state.raw<ServiceDirectorySession<ResolvedService>>({
+    retrying: false,
+    failed: false,
+    services: [],
+    names: {},
+    pending: 0,
+  });
+  let retryDirectories = $state.raw<() => void>(() => {});
+  async function admitDirectories() {
+    if (directoryServices !== false) return;
+    directoryServices = undefined;
+    try {
+      directoryServices = await optionalImport(import('./settings/services'));
+    } catch {
+      directoryServices = null;
+    }
+  }
+  $effect(() => {
+    const directory = directoryServices;
+    const language = i18n.language;
+    const picks = servicePicks;
+    if (!directory) return;
+    directoryState = { retrying: false, failed: false, services: [], names: {}, pending: 0 };
+    const controller = directory.watchServiceDirectories(
+      session.content,
+      picks,
+      language,
+      homeServices?.resolvePicks ?? (() => []),
+      (state) => (directoryState = state),
+    );
+    retryDirectories = controller.retry;
+    return controller.cancel;
+  });
+  const homeCatalogueRows = $derived(
+    catalogueRows(
+      directoryState.names,
+      session.kid ||
+        (atlasReady && (!atlas || !servicePicks.length)) ||
+        (atlasReady && !!atlas && (directoryServices === null || directoryState.pending === 0)),
+    ),
   );
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
   // Atlas row ids join it below only when their provider captions are final.
@@ -3263,15 +3301,29 @@
     {#if !facet}
       {#if homeMetadataReady && HomeCatalogue}
         <HomeCatalogue
-          {rows}
+          rows={homeCatalogueRows}
           shown={browseShown}
           browseReady={homeBrowseReady}
           browseIdentity="home"
           showServices
-          serviceSession={session}
-          {servicePicks}
-          serviceResolver={homeServices}
-          serviceRows={homeCatalogueRows}
+          services={directoryState.services}
+          servicePending={directoryServices !== null &&
+          (!directoryServices || directoryState.pending)
+            ? servicePicks.length
+            : 0}
+          serviceEmpty={directoryServices !== false &&
+          !directoryState.pending &&
+          !directoryState.services.length &&
+          (directoryServices === null || !directoryState.failed)
+            ? 'Services unavailable'
+            : undefined}
+          serviceRecovery={directoryState.retrying
+            ? 'retrying'
+            : !directoryState.pending && directoryState.failed
+              ? 'failed'
+              : undefined}
+          onServiceRetry={retryDirectories}
+          onServiceVisible={() => void admitDirectories()}
           onServiceIntent={primeService}
         />
       {:else}
