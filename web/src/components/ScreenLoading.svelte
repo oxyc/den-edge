@@ -2,6 +2,7 @@
      never ends would say the page is on its way when nothing is fetching it. -->
 <script lang="ts">
   import Loading from './Loading.svelte';
+  import { OFFLINE_PAGE } from '../lib/catalog';
   import { swapFailedScreen } from '../lib/release';
 
   let {
@@ -21,7 +22,7 @@
 </script>
 
 {#if screen.failed}
-  <p class="note">Couldn’t load this page. Check that this device is online.</p>
+  <p class="note">{OFFLINE_PAGE}</p>
   <button class="more" onclick={() => void screen.load()}>Try again</button>
 {:else}
   <Loading label="Loading" {page} />

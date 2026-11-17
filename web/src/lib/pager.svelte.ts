@@ -2,7 +2,13 @@
 // end nears, and both hide titles after loading — a hide rule, or a shelf's primary genre — so a page can arrive
 // with nothing left to show. This keeps asking while that happens, a few pages at most per go.
 
-import { appendUniqueTitles } from './catalog';
+import {
+  appendUniqueTitles,
+  COULDNT_LOAD,
+  OFFLINE_PAGE,
+  SERVICES_UNAVAILABLE,
+  TMDB_LIMITED,
+} from './catalog';
 import type { Title } from './library';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
@@ -10,10 +16,7 @@ const FILL = 8;
 const MAX_BURST = 3;
 
 export type PagerFailure =
-  | 'Couldn’t load this page. Check that this device is online.'
-  | 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
-  | 'Services unavailable'
-  | 'Couldn’t load';
+  typeof OFFLINE_PAGE | typeof TMDB_LIMITED | typeof SERVICES_UNAVAILABLE | typeof COULDNT_LOAD;
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -59,13 +62,13 @@ export class Pager {
           const code = (error as { failure?: { code?: string } } | null)?.failure?.code;
           this.failed =
             globalThis.navigator?.onLine === false
-              ? 'Couldn’t load this page. Check that this device is online.'
+              ? OFFLINE_PAGE
               : code === 'rate-limited'
-                ? 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
+                ? TMDB_LIMITED
                 : (error as { failure?: { retryable?: boolean } } | null)?.failure?.retryable ||
                     code === 'not-ready'
-                  ? 'Services unavailable'
-                  : 'Couldn’t load';
+                  ? SERVICES_UNAVAILABLE
+                  : COULDNT_LOAD;
           this.done = true;
           break;
         }

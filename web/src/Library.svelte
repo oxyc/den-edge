@@ -25,6 +25,8 @@
   } from './lib/screens.svelte';
   import {
     browseRows,
+    SERVICES_UNAVAILABLE,
+    TMDB_LIMITED,
     contentPages,
     homeRows,
     interleave,
@@ -2986,9 +2988,7 @@
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    {keptNotice
-      ? i18n.phrase(keptNotice)
-      : 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'}
+    {keptNotice ? i18n.phrase(keptNotice) : TMDB_LIMITED}
   </p>
 {/if}
 
@@ -3335,7 +3335,7 @@
           !directoryState.pending &&
           !directoryState.services.length &&
           (directoryServices === null || !directoryState.failed)
-            ? 'Services unavailable'
+            ? SERVICES_UNAVAILABLE
             : undefined}
           serviceRecovery={directoryState.retrying
             ? 'retrying'
