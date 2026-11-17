@@ -14,11 +14,10 @@ export const RECENT_SEARCHES_CHANGED = 'den:recent-searches-changed';
 
 const clean = (value: string) => value.trim().replace(/\s+/g, ' ');
 const browserStorage = (): Storage | undefined => {
-  if (!activeStorageKey) return undefined;
   try {
-    return globalThis.localStorage;
+    if (activeStorageKey) return globalThis.localStorage;
   } catch {
-    return undefined;
+    // Storage can be blocked.
   }
 };
 
@@ -36,9 +35,9 @@ export function scopeRecentSearches(
 ): void {
   const storageKey =
     persist && householdKey
-      ? `${STORAGE_PREFIX}${householdTag(`${householdKey}\0${profile}`)}`
+      ? STORAGE_PREFIX + householdTag(householdKey + '\0' + profile)
       : undefined;
-  const scope = storageKey ?? `${householdKey}:${profile}`;
+  const scope = storageKey ?? householdKey + ':' + profile;
   if (scope === activeScope) return;
   activeScope = scope;
   activeStorageKey = storageKey;
@@ -70,8 +69,8 @@ export function readRecentSearches(): string[] {
 }
 
 function changed(searches: string[]): void {
-  if (typeof globalThis.dispatchEvent !== 'function' || typeof CustomEvent === 'undefined') return;
-  globalThis.dispatchEvent(new CustomEvent(RECENT_SEARCHES_CHANGED, { detail: searches }));
+  if (typeof CustomEvent !== 'undefined')
+    globalThis.dispatchEvent?.(new CustomEvent(RECENT_SEARCHES_CHANGED, { detail: searches }));
 }
 
 function write(searches: string[]): string[] {
