@@ -6,7 +6,6 @@
   import type { ProfileSession } from '../lib/profileSession.svelte';
   import type { ServicePick } from '../lib/prefs';
   import type { InterfaceLanguage } from '../lib/interfaceLanguage';
-  import { resolvePicks } from '../lib/services';
   import { i18n } from '../lib/i18n.svelte';
   import { optionalImport } from '../lib/keyboardNavigation';
   import type { Service } from '../settings/services';
@@ -21,6 +20,7 @@
     showServices,
     serviceSession,
     servicePicks = [],
+    serviceResolver,
     serviceRows,
     onServiceIntent,
   }: {
@@ -32,6 +32,7 @@
     showServices: boolean;
     serviceSession?: ProfileSession;
     servicePicks?: readonly ServicePick[];
+    serviceResolver?: Pick<typeof import('../lib/services'), 'resolvePicks'> | null;
     serviceRows?: (names: Record<number, string>, settled: boolean) => RowDef[];
     onServiceIntent: (service: Service, country: string) => void;
   } = $props();
@@ -120,7 +121,7 @@
     const naming = countries.length - Object.keys(directoryLoads).length;
     const services = countries.flatMap((country) => {
       const load = directoryLoads[country];
-      return resolvePicks(servicePicks, load?.services ?? [], country);
+      return serviceResolver?.resolvePicks(servicePicks, load?.services ?? [], country) ?? [];
     });
     const names = Object.fromEntries(
       services.flatMap(({ service }) =>

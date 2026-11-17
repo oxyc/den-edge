@@ -23,6 +23,15 @@
     series: true,
     variants: [],
   };
+  const serviceResolver = {
+    resolvePicks(picks: readonly ServicePick[], directory: readonly Service[], country: string) {
+      const here = picks.filter((pick) => pick.country === country);
+      return directory.flatMap((service) => {
+        const pick = here.find(({ id }) => service.id === id || service.variants.includes(id));
+        return pick ? [{ pick, service }] : [];
+      });
+    },
+  };
   let servicePicks = $state.raw<readonly ServicePick[]>([
     { id: netflix.id, country: 'US' },
     { id: max.id, country: 'US' },
@@ -150,6 +159,7 @@
   showServices
   {serviceSession}
   {servicePicks}
+  {serviceResolver}
   {serviceRows}
   onServiceIntent={() => {}}
 />

@@ -3270,6 +3270,7 @@
           showServices
           serviceSession={session}
           {servicePicks}
+          serviceResolver={homeServices}
           serviceRows={homeCatalogueRows}
           onServiceIntent={primeService}
         />
