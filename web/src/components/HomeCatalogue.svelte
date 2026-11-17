@@ -118,7 +118,8 @@
   }
   const directoryView = $derived.by(() => {
     const countries = [...new Set(servicePicks.map((pick) => pick.country))];
-    const naming = countries.length - Object.keys(directoryLoads).length;
+    const naming =
+      directoryServices === null ? 0 : countries.length - Object.keys(directoryLoads).length;
     const services = countries.flatMap((country) => {
       const load = directoryLoads[country];
       return serviceResolver?.resolvePicks(servicePicks, load?.services ?? [], country) ?? [];
