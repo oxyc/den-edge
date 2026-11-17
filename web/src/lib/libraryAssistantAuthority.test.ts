@@ -96,7 +96,7 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
       return result;
     },
     shape: async () => true,
-    episodes: async () => [1, 2, 3],
+    eps: async () => [1, 2, 3],
     patch: async (name, changes) => {
       shared.patch(name, changes);
       shared.batches.push({
@@ -105,12 +105,12 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
       });
       return [];
     },
-    write: async (row) => void shared.rows.set(row.name, row),
-    dropbox: put,
+    set: async (row) => void shared.rows.set(row.name, row),
+    send: put,
     docs: () => shared.documents,
-    series: () => ({}),
+    lays: () => ({}),
     head: () => 7,
-    inputs: () => JSON.stringify([shared.documents, [...shared.rows.values()]]),
+    key: () => JSON.stringify([shared.documents, [...shared.rows.values()]]),
     put: async (grant, set, parts, member) => {
       shared.projections.set(grant, { set, parts });
       shared.sent.push(`put:${grant}`);
@@ -123,7 +123,7 @@ function device(shared: Library, randoms: string[], overrides: Partial<Assistant
       shared.members.push(member?.libraryId ?? null);
       return true;
     },
-    member: async () => ({ libraryId: fixed.library, memberToken: 'a'.repeat(64) }),
+    join: async () => ({ libraryId: fixed.library, memberToken: 'a'.repeat(64) }),
     load: async () => records && structuredClone(records),
     save: async (next) => void (records = structuredClone(next)),
     now: () => now,
@@ -203,7 +203,7 @@ test('consent writes the drop-box key and the grant, hands den-edge the public k
 test('a drop-box key den-edge did not take stops the consent before any grant is written', async () => {
   const shared = library();
   const { authority } = device(shared, [seed('dropbox'), seed('grant')], {
-    dropbox: async () => false,
+    send: async () => false,
   });
   await expect(authority.consent('Claude', WRITE)).rejects.toThrow();
   expect(shared.rows.get(GRANTS_ROW)).toBeUndefined();
@@ -212,13 +212,13 @@ test('a drop-box key den-edge did not take stops the consent before any grant is
 test('receipt catch-up publishes an existing drop-box but never creates one in the background', async () => {
   const empty = library();
   const absent = device(empty, [seed('dropbox')]);
-  expect(await absent.authority.ensure(false)).toBeNull();
+  expect(await absent.authority.key(false)).toBeNull();
   expect(empty.rows.get(DROPBOX_ROW)).toBeUndefined();
   expect(absent.put).not.toHaveBeenCalled();
 
   const shared = await consented();
   const existing = device(shared, []);
-  expect(await existing.authority.ensure(false)).toEqual({
+  expect(await existing.authority.key(false)).toEqual({
     kid: fixed.keys.dropbox!.kid,
     public: fixed.keys.dropbox!.public,
   });
@@ -228,7 +228,7 @@ test('receipt catch-up publishes an existing drop-box but never creates one in t
 test('managed playback creates a receipt drop-box without creating an assistant grant', async () => {
   const shared = library();
   const { authority, put } = device(shared, [seed('dropbox')]);
-  await expect(authority.ensure()).resolves.toEqual({
+  await expect(authority.key()).resolves.toEqual({
     kid: fixed.keys.dropbox!.kid,
     public: fixed.keys.dropbox!.public,
   });
@@ -240,16 +240,16 @@ test('managed playback creates a receipt drop-box without creating an assistant 
 test('malformed playback receipts are durably refused without changing movie or episode progress', async () => {
   const shared = library();
   const opened = device(shared, [seed('dropbox')]);
-  await opened.authority.ensure();
+  await opened.authority.key();
   await expect(
-    opened.authority.receipts([
+    opened.authority.plays([
       { seq: 1, sealed: 'not-a-receipt' },
       { seq: 2, sealed: 'still-not-a-receipt' },
     ]),
   ).resolves.toEqual({ ack: 2, applied: 0 });
   expect(opened.commands).toEqual([]);
   expect(shared.rows.get('playback-receipts-applied')).toBeUndefined();
-  await expect(opened.reopen().receipts([{ seq: 3, sealed: 'not-a-receipt' }])).resolves.toEqual({
+  await expect(opened.reopen().plays([{ seq: 3, sealed: 'not-a-receipt' }])).resolves.toEqual({
     ack: 3,
     applied: 0,
   });
@@ -437,12 +437,12 @@ test('durable revocation readback is not fooled by this device’s local refusal
   await expect(authority.revoke(GRANT)).rejects.toThrow('offline between durable rows');
   // Enforcement/UI correctly joins the private refusal, but that is not household-wide durable proof.
   expect((await authority.grants()).plays[0]?.state).toBe('revoked');
-  expect(await authority.readback(GRANT)).toBe('unverified');
+  expect(await authority.read(GRANT)).toBe('unverified');
 
   fail = false;
   expect(await authority.revoke(GRANT)).toBe('revoked');
-  expect(await authority.readback(GRANT)).toBe('revoked');
-  expect(await authority.readback('00000000000000000000000000000000')).toBe('absent');
+  expect(await authority.read(GRANT)).toBe('revoked');
+  expect(await authority.read('00000000000000000000000000000000')).toBe('absent');
 });
 
 test('a key reset carries no drop-box key, and every grant, read and play record revoked', async () => {
@@ -694,7 +694,7 @@ test('an aborted held split-household membership lookup releases before that loo
   let release!: () => void;
   let hold = true;
   const made = device(shared, [], {
-    member: async () => {
+    join: async () => {
       if (hold) await new Promise<void>((resolve) => (release = resolve));
       return { libraryId: fixed.library, memberToken: 'a'.repeat(64) };
     },
@@ -838,13 +838,13 @@ test('a page opened again on the library as it was published builds and sends no
   const shared = library();
   let builds = 0;
   let head = 7;
-  let layouts: ReturnType<AssistantPort['series']> = {
+  let layouts: ReturnType<AssistantPort['lays']> = {
     '1399': { seasons: [{ season: 1, episodes: 10 }], last_aired: { season: 1, episode: 10 } },
   };
   const { authority, later, reopen } = device(shared, [seed('other'), seed('limited')], {
     rand: () => (builds++, randomHex()),
     head: () => head,
-    series: () => layouts,
+    lays: () => layouts,
   });
   const { grant } = await authority.consent('Reader', READ_ONLY);
   builds = 0;
@@ -934,11 +934,11 @@ test('layouts learnt while a projection builds are carried into the next page', 
     seasons: [{ season: 1, episodes }],
     last_aired: { season: 1, episode: episodes },
   });
-  let layouts: ReturnType<AssistantPort['series']> = { '100': layout(10) };
+  let layouts: ReturnType<AssistantPort['lays']> = { '100': layout(10) };
   let builds = 0;
   let publishing = false;
   const made = device(shared, [seed('other'), seed('limited')], {
-    series: () => layouts,
+    lays: () => layouts,
     rand: () => {
       if (publishing) {
         builds++;

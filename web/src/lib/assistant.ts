@@ -102,7 +102,6 @@ const DRAIN_MS = (WAIT_S + 15) * 1000;
 const IDLE_MS = 15_000;
 const BACKOFF_MS = 60_000;
 /** A library-service delivery is local, but must still retire if its Worker or port stops answering. */
-const APPLY_MS = 30_000;
 
 async function putDropbox(
   key: DropboxKey,
@@ -187,17 +186,17 @@ async function ackQueue(
 }
 
 /** Drain opaque Hearth completion receipts once after the library's foreground sync. */
-export function drainOnce(
+export function one(
   loop: {
-    libraryId: string;
-    apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null; applied?: number }>;
-    canAck?: () => boolean;
-    fetchImpl?: typeof fetch;
+    id: string;
+    run: (messages: QueuedRequest[]) => Promise<{ ack: number | null; applied?: number }>;
+    valid?: () => boolean;
+    fetch?: typeof fetch;
   },
   signal: AbortSignal,
 ): Promise<PlaybackReceiptDrainOutcome> {
-  return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
-    const fetchImpl = loop.fetchImpl ?? relayFetch;
+  return exclusive(`den.playback-receipts.drain.${loop.id}`, async () => {
+    const fetchImpl = loop.fetch ?? relayFetch;
     const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
     if (signal.aborted) return { outcome: 'retired' };
     if (messages === null) {
@@ -212,7 +211,7 @@ export function drainOnce(
     if (!messages.length) return { outcome: 'empty' };
     let result: { ack: number | null; applied?: number };
     try {
-      result = await loop.apply(messages);
+      result = await loop.run(messages);
     } catch (error) {
       if (!signal.aborted)
         reportClientFailure({
@@ -224,11 +223,11 @@ export function drainOnce(
         });
       return signal.aborted ? { outcome: 'retired' } : { outcome: 'failed', stage: 'apply' };
     }
-    if (signal.aborted || (loop.canAck && !loop.canAck())) return { outcome: 'retired' };
+    if (signal.aborted || (loop.valid && !loop.valid())) return { outcome: 'retired' };
     if (result.ack === null) return { outcome: 'failed', stage: 'apply' };
     const ack = result.ack;
     const acknowledged = await ackQueue(ack, fetchImpl, undefined, 'playback/receipts', signal);
-    if (signal.aborted || (loop.canAck && !loop.canAck())) return { outcome: 'retired' };
+    if (signal.aborted || (loop.valid && !loop.valid())) return { outcome: 'retired' };
     if (!acknowledged) {
       if (!signal.aborted)
         reportClientFailure({
@@ -245,33 +244,33 @@ export function drainOnce(
 }
 
 /** Drain one receipt batch only while the same foreground library/profile authority still owns every await. */
-export async function drainCurrent<Connection>(
+export async function current<Connection>(
   loop: {
-    libraryId: string;
-    ensure: () => Promise<DropboxKey | null>;
+    id: string;
+    key: () => Promise<DropboxKey | null>;
     lend: () => Promise<Connection>;
-    apply: (
+    run: (
       messages: QueuedRequest[],
       connection: Connection,
     ) => Promise<{ ack: number | null; applied?: number }>;
-    current: () => boolean;
-    fetchImpl?: typeof fetch;
+    valid: () => boolean;
+    fetch?: typeof fetch;
   },
   signal: AbortSignal,
 ): Promise<PlaybackReceiptDrainOutcome> {
-  return drainOnce(
+  return one(
     {
-      libraryId: loop.libraryId,
-      apply: async (messages) => {
-        if (signal.aborted || !loop.current()) return { ack: null };
-        const dropbox = await loop.ensure();
-        if (!dropbox || signal.aborted || !loop.current()) return { ack: null };
+      id: loop.id,
+      run: async (messages) => {
+        if (signal.aborted || !loop.valid()) return { ack: null };
+        const dropbox = await loop.key();
+        if (!dropbox || signal.aborted || !loop.valid()) return { ack: null };
         const connection = await loop.lend();
-        if (signal.aborted || !loop.current()) return { ack: null };
-        return loop.apply(messages, connection);
+        if (signal.aborted || !loop.valid()) return { ack: null };
+        return loop.run(messages, connection);
       },
-      canAck: () => !signal.aborted && loop.current(),
-      ...(loop.fetchImpl ? { fetchImpl: loop.fetchImpl } : {}),
+      valid: () => !signal.aborted && loop.valid(),
+      ...(loop.fetch ? { fetch: loop.fetch } : {}),
     },
     signal,
   );
@@ -292,20 +291,20 @@ export async function recover<Connection, Status>(
     lend: () => Promise<Connection>;
     fetchImpl?: typeof fetch;
   },
-  current: () => boolean,
+  valid: () => boolean,
   signal: AbortSignal,
   recovering: boolean,
   publish: (state: 'failed' | 'recovered' | null, expected?: Status) => Status | null,
 ): Promise<void> {
   try {
-    const result = await drainCurrent(
+    const result = await current(
       {
-        libraryId: work.libraryId,
-        ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
+        id: work.libraryId,
+        key: () => (work.household ?? work.model).ensurePlaybackReceipts(),
         lend: work.lend,
-        apply: (messages, connection) => work.model.applyPlaybackReceipts(messages, connection),
-        current,
-        ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+        run: (messages, connection) => work.model.applyPlaybackReceipts(messages, connection),
+        valid,
+        ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
       },
       signal,
     );
@@ -334,17 +333,17 @@ const PUBLISH_TICK_MS = 30_000;
  */
 export function publish(
   loop: {
-    libraryId: string;
-    publish: (signal: AbortSignal) => Promise<unknown>;
-    sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+    id: string;
+    run: (signal: AbortSignal) => Promise<unknown>;
+    wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   },
   signal: AbortSignal,
 ): Promise<void> {
-  const sleep = loop.sleep ?? pause;
-  return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
+  const sleep = loop.wait ?? pause;
+  return exclusive(`den.assistant.publish.${loop.id}`, async () => {
     while (!signal.aborted) {
       try {
-        await loop.publish(signal);
+        await loop.run(signal);
       } catch (error) {
         if (!signal.aborted) console.warn('asst/publish', error);
       }
@@ -354,15 +353,15 @@ export function publish(
 }
 
 export interface DrainLoop {
-  libraryId: string;
+  id: string;
   /** Drain this queue instead of the library's: a TV's lane (§16). */
   queue?: OtherQueue;
   /** Opens, checks and applies a drain's requests in the library service. */
-  apply: (messages: QueuedRequest[], signal: AbortSignal) => Promise<ApplyOutcome>;
+  run: (messages: QueuedRequest[], signal: AbortSignal) => Promise<ApplyOutcome>;
   /** Told of each applied request, for the page's quiet toast. */
-  applied: (result: Extract<ApplyResult, { outcome: 'accepted' }>) => void;
-  fetchImpl?: typeof fetch;
-  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  done: (result: Extract<ApplyResult, { outcome: 'accepted' }>) => void;
+  fetch?: typeof fetch;
+  wait?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 const pause = (ms: number, signal: AbortSignal) =>
@@ -382,14 +381,14 @@ const pause = (ms: number, signal: AbortSignal) =>
  * safe — the applied row refuses a request applied already — so the lock only saves the work twice.
  */
 export function drain(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  return exclusive(`den.assistant.drain.${loop.libraryId}${loop.queue?.key ?? ''}`, () =>
+  return exclusive(`den.assistant.drain.${loop.id}${loop.queue?.key ?? ''}`, () =>
     drainLoop(loop, signal),
   );
 }
 
 async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  const sleep = loop.sleep ?? pause;
-  const fetchImpl = loop.fetchImpl ?? relayFetch;
+  const sleep = loop.wait ?? pause;
+  const fetchImpl = loop.fetch ?? relayFetch;
   /** The drop-box key last given to den-edge in this session; it is given again when the library's changes. */
   let put: string | null = null;
   let wait = 0;
@@ -403,10 +402,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     }
     let outcome: ApplyOutcome;
     try {
-      outcome = await loop.apply(
-        messages,
-        AbortSignal.any([signal, AbortSignal.timeout(APPLY_MS)]),
-      );
+      outcome = await loop.run(messages, AbortSignal.any([signal, AbortSignal.timeout(30_000)]));
     } catch (error) {
       if (signal.aborted) return;
       console.warn('asst/apply', error);
@@ -426,7 +422,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       put = outcome.dropbox.public;
     if (signal.aborted) return;
     for (const result of outcome.results) {
-      if (result.outcome === 'accepted') loop.applied(result);
+      if (result.outcome === 'accepted') loop.done(result);
       // The reason, never the request: it is the household's, and a refusal is no error of this page's.
       else console.info('asst/refused', result.reason);
     }

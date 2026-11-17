@@ -1,8 +1,8 @@
 import { expect, test, vi } from 'vitest';
 import {
   drain,
-  drainCurrent,
-  drainOnce,
+  current as drainCurrent,
+  one,
   prepare,
   publish as publishLoop,
   type ApplyOutcome,
@@ -32,7 +32,7 @@ test('ordinary assistant publisher ticks retain only the current cancellable wai
     remove(type, listener, options);
   });
   const publish = vi.fn(async () => {});
-  const running = publishLoop({ libraryId: 'listener-cleanup', publish }, stop.signal);
+  const running = publishLoop({ id: 'listener-cleanup', run: publish }, stop.signal);
   await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
   expect(publish).toHaveBeenLastCalledWith(stop.signal);
   expect(active.size).toBe(1);
@@ -60,7 +60,7 @@ test('stopping a publisher aborts a held publish and releases its loop promptly'
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       }),
   );
-  const running = publishLoop({ libraryId: 'held-publish', publish }, stop.signal);
+  const running = publishLoop({ id: 'held-publish', run: publish }, stop.signal);
   await held;
 
   stop.abort();
@@ -119,12 +119,12 @@ async function run(
   const sleeps: number[] = [];
   const done = drain(
     {
-      libraryId: 'lib',
+      id: 'lib',
       ...(queue ? { queue } : {}),
-      apply,
-      applied,
-      fetchImpl,
-      sleep: async (ms) => void sleeps.push(ms),
+      run: apply,
+      done: applied,
+      fetch: fetchImpl,
+      wait: async (ms) => void sleeps.push(ms),
     },
     stop.signal,
   );
@@ -258,16 +258,16 @@ test('retiring a stalled apply releases its Web Lock without an announcement or 
   const oldApplied = vi.fn();
   const old = drain(
     {
-      libraryId: 'replaced-library',
-      apply: async (_messages, signal) => {
+      id: 'replaced-library',
+      run: async (_messages, signal) => {
         delivery = signal;
         await new Promise<void>((_resolve, reject) =>
           signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))),
         );
         throw new Error('unreachable');
       },
-      applied: oldApplied,
-      fetchImpl: oldFetch,
+      done: oldApplied,
+      fetch: oldFetch,
     },
     oldStop.signal,
   );
@@ -280,10 +280,10 @@ test('retiring a stalled apply releases its Web Lock without an announcement or 
   }) as unknown as typeof fetch;
   const next = drain(
     {
-      libraryId: 'replaced-library',
-      apply: async () => ({ results: [], ack: null, dropbox: null }),
-      applied: vi.fn(),
-      fetchImpl: nextFetch,
+      id: 'replaced-library',
+      run: async () => ({ results: [], ack: null, dropbox: null }),
+      done: vi.fn(),
+      fetch: nextFetch,
     },
     nextStop.signal,
   );
@@ -314,20 +314,20 @@ test('a stalled apply is cancelled at its delivery deadline and remains unacknow
   let delivery!: AbortSignal;
   const running = drain(
     {
-      libraryId: 'stalled-worker',
-      apply: async (_messages, signal) => {
+      id: 'stalled-worker',
+      run: async (_messages, signal) => {
         delivery = signal;
         await new Promise<void>((_resolve, reject) =>
           signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))),
         );
         throw new Error('unreachable');
       },
-      applied: vi.fn(),
-      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+      done: vi.fn(),
+      fetch: vi.fn(async (input: RequestInfo | URL) => {
         calls.push(String(input));
         return Response.json({ messages: [{ seq: 15, sealed: 'private-request' }] });
       }) as unknown as typeof fetch,
-      sleep: async (ms) => {
+      wait: async (ms) => {
         expect(ms).toBe(60_000);
         stop.abort();
       },
@@ -354,8 +354,8 @@ test('retirement after an applied result fences its announcement and ACK', async
   let publishing!: AbortSignal;
   const running = drain(
     {
-      libraryId: 'retired-after-result',
-      apply: async () => ({
+      id: 'retired-after-result',
+      run: async () => ({
         results: [
           {
             seq: 18,
@@ -368,8 +368,8 @@ test('retirement after an applied result fences its announcement and ACK', async
         ack: 18,
         dropbox: DROPBOX,
       }),
-      applied,
-      fetchImpl: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      done: applied,
+      fetch: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
         calls.push(path);
         if (path === '/assistant/drain')
@@ -410,7 +410,7 @@ test('playback receipts share the queue transport but use their own one-shot rou
   const apply = vi.fn(async () => ({ ack: 7 }));
 
   await expect(
-    drainOnce({ libraryId: 'lib', apply, fetchImpl }, new AbortController().signal),
+    one({ id: 'lib', run: apply, fetch: fetchImpl }, new AbortController().signal),
   ).resolves.toEqual({ outcome: 'completed', applied: 0 });
 
   expect(apply).toHaveBeenCalledWith([{ seq: 7, sealed: 'receipt' }]);
@@ -426,12 +426,12 @@ test('an empty playback receipt lane does not enter the crypto/apply path', asyn
   await expect(
     drainCurrent(
       {
-        libraryId: 'lib',
-        ensure,
+        id: 'lib',
+        key: ensure,
         lend: async () => null,
-        apply: async () => ({ ack: null }),
-        current: () => true,
-        fetchImpl,
+        run: async () => ({ ack: null }),
+        valid: () => true,
+        fetch: fetchImpl,
       },
       new AbortController().signal,
     ),
@@ -454,8 +454,8 @@ test('receipt work is fenced after key and profile awaits when authority is repl
     const fetchImpl = fetchSpy as unknown as typeof fetch;
     const running = drainCurrent(
       {
-        libraryId: `lib-${boundary}`,
-        ensure: async () => {
+        id: `lib-${boundary}`,
+        key: async () => {
           if (boundary === 'ensure') await held;
           return DROPBOX;
         },
@@ -463,9 +463,9 @@ test('receipt work is fenced after key and profile awaits when authority is repl
           if (boundary === 'lend') await held;
           return { profile: 'old' };
         },
-        apply,
-        current: () => current,
-        fetchImpl,
+        run: apply,
+        valid: () => current,
+        fetch: fetchImpl,
       },
       new AbortController().signal,
     );
@@ -494,12 +494,12 @@ test('replacement or abort while receipt apply is pending cannot acknowledge thr
     }) as unknown as typeof fetch;
     const running = drainCurrent(
       {
-        libraryId: `lib-${boundary}`,
-        ensure: async () => DROPBOX,
+        id: `lib-${boundary}`,
+        key: async () => DROPBOX,
         lend: async () => ({ profile: 'old' }),
-        apply: async () => applying,
-        current: () => current,
-        fetchImpl: originatingFetch,
+        run: async () => applying,
+        valid: () => current,
+        fetch: originatingFetch,
       },
       stop.signal,
     );
@@ -532,11 +532,11 @@ test('an aborted receipt drain held by relay opening cannot inherit replacement 
   const apply = vi.fn(async () => ({ ack: 9 }));
   const running = drainCurrent(
     {
-      libraryId: 'old',
-      ensure: async () => DROPBOX,
+      id: 'old',
+      key: async () => DROPBOX,
       lend: async () => ({ profile: 'old' }),
-      apply,
-      current: () => current,
+      run: apply,
+      valid: () => current,
     },
     stop.signal,
   );
@@ -566,15 +566,15 @@ test('a failed receipt key publication can be retried without acknowledging the 
       : Response.json({ removed: 1 });
   }) as unknown as typeof fetch;
   const options = {
-    libraryId: 'lib-retry',
-    ensure: async () => {
+    id: 'lib-retry',
+    key: async () => {
       if (attempt++ === 0) throw new Error('key publication failed');
       return DROPBOX;
     },
     lend: async () => null,
-    apply: async () => ({ ack: 7 }),
-    current: () => true,
-    fetchImpl,
+    run: async () => ({ ack: 7 }),
+    valid: () => true,
+    fetch: fetchImpl,
   };
   await expect(drainCurrent(options, new AbortController().signal)).resolves.toEqual({
     outcome: 'failed',
@@ -598,8 +598,8 @@ test('receipt transport, partial application, and acknowledgement failures stay 
     async () => new Response(null, { status: 503 }),
   ) as unknown as typeof fetch;
   await expect(
-    drainOnce(
-      { libraryId: 'transport', apply: async () => ({ ack: null }), fetchImpl: transport },
+    one(
+      { id: 'transport', run: async () => ({ ack: null }), fetch: transport },
       new AbortController().signal,
     ),
   ).resolves.toEqual({ outcome: 'failed', stage: 'drain' });
@@ -616,11 +616,11 @@ test('receipt transport, partial application, and acknowledgement failures stay 
   );
   const partialFetch = partialFetchSpy as unknown as typeof fetch;
   await expect(
-    drainOnce(
+    one(
       {
-        libraryId: 'partial',
-        apply: async () => ({ ack: 1, applied: 1 }),
-        fetchImpl: partialFetch,
+        id: 'partial',
+        run: async () => ({ ack: 1, applied: 1 }),
+        fetch: partialFetch,
       },
       new AbortController().signal,
     ),
@@ -637,8 +637,8 @@ test('receipt transport, partial application, and acknowledgement failures stay 
       : new Response(null, { status: 503 }),
   ) as unknown as typeof fetch;
   await expect(
-    drainOnce(
-      { libraryId: 'ack', apply: async () => ({ ack: 3, applied: 1 }), fetchImpl: ackFetch },
+    one(
+      { id: 'ack', run: async () => ({ ack: 3, applied: 1 }), fetch: ackFetch },
       new AbortController().signal,
     ),
   ).resolves.toEqual({ outcome: 'failed', stage: 'ack' });

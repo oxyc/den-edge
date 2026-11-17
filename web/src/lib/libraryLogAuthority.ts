@@ -448,7 +448,7 @@ export class LibraryLogAuthority {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         return this.#shapes.has(titleKey(title));
       },
-      episodes: async (title, season) => {
+      eps: async (title, season) => {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         const shape = this.#shapes.get(titleKey(title))?.shape;
         if (!shape) return null;
@@ -467,8 +467,8 @@ export class LibraryLogAuthority {
           );
         return written.affected;
       },
-      write: async (row) => void (await this.#writeRow(row, [])),
-      dropbox: async (key) => {
+      set: async (row) => void (await this.#writeRow(row, [])),
+      send: async (key) => {
         const member = await this.#log.relayMembership();
         if (!member) return false;
         try {
@@ -487,7 +487,7 @@ export class LibraryLogAuthority {
         }
       },
       docs: () => this.#log.documents().map(({ document }) => document),
-      series: () =>
+      lays: () =>
         Object.fromEntries(
           [...this.#shapes]
             .filter(([key]) => key.startsWith('tv:'))
@@ -502,7 +502,7 @@ export class LibraryLogAuthority {
             ]),
         ),
       head: () => this.#log.logHead,
-      inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
+      key: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
       put: async (grant, set, parts, member, signal) => {
         const res = await this.#memberSend(
           `/assistant/projection/${grant}`,
@@ -524,7 +524,7 @@ export class LibraryLogAuthority {
             signal,
           )
         )?.ok ?? false,
-      member: () => this.#log.relayMembership(),
+      join: () => this.#log.relayMembership(),
       now: () => Date.now(),
       rand: randomHex,
     });
@@ -818,7 +818,7 @@ export class LibraryLogAuthority {
       case 'assistant.revocation-readback':
         return {
           kind: 'assistant.revocation-readback',
-          outcome: await this.#assistant.readback(query.grant),
+          outcome: await this.#assistant.read(query.grant),
         };
       case 'assistant.connection':
         return {
@@ -1402,12 +1402,12 @@ export class LibraryLogAuthority {
         return {
           result: {
             kind: 'assistant.receipts.ensure',
-            dropbox: await this.#assistant.ensure(),
+            dropbox: await this.#assistant.key(),
           },
           affected: [],
         };
       case 'assistant.receipts.apply': {
-        const result = await this.#assistant.receipts(task.messages, task.connection ?? null);
+        const result = await this.#assistant.plays(task.messages, task.connection ?? null);
         return { result: { kind: 'assistant.receipts.apply', ...result }, affected: [] };
       }
       case 'assistant.apply': {

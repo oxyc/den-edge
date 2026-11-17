@@ -1595,11 +1595,11 @@
     return whileNeeded(drainNeeded, ({ drain }, work, signal) => {
       void drain(
         {
-          libraryId: work.libraryId,
-          apply: async (messages, signal) =>
+          id: work.libraryId,
+          run: async (messages, signal) =>
             work.model.applyAssistant(messages, await work.lend(signal), undefined, signal),
-          applied: (result) => void announceAssistant(current, result),
-          ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+          done: (result) => void announceAssistant(current, result),
+          ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
         },
         signal,
       );
@@ -1675,16 +1675,16 @@
         if (!playKey) return;
         await drain(
           {
-            libraryId: work.libraryId,
+            id: work.libraryId,
             queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
-            apply: async (messages, signal) =>
+            run: async (messages, signal) =>
               work.model.applyAssistant(
                 messages,
                 await work.lend(signal),
                 { awakeSince: plays.awakeSince() },
                 signal,
               ),
-            applied: (result) => {
+            done: (result) => {
               if (result.op !== 'play' && result.op !== 'play_trailer')
                 return void announceAssistant(current, result);
               const title = current.displayTitle(result.title)?.title ?? '';
@@ -1697,7 +1697,7 @@
                 ...(result.op === 'play_trailer' ? { trailer: true } : {}),
               });
             },
-            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+            ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
           },
           signal,
         );
@@ -1709,8 +1709,8 @@
     whileNeeded(publishNeeded, ({ publish }, work, signal) => {
       void publish(
         {
-          libraryId: work.libraryId,
-          publish: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),
+          id: work.libraryId,
+          run: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),
         },
         signal,
       );

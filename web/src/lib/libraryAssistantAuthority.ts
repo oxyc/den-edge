@@ -138,7 +138,7 @@ export interface AssistantPort {
     stamp: Stamp,
   ): Promise<LibraryAuthorityCommandResult>;
   /** A series' aired regular episodes of `season`, from TMDB's shape; null while it cannot be had. */
-  episodes(title: TitleRef, season: number): Promise<number[] | null>;
+  eps(title: TitleRef, season: number): Promise<number[] | null>;
   /** Load a series' shape, as the title page does before a whole-series Seen. False while it cannot be had. */
   shape(title: TitleRef): Promise<boolean>;
   /** Write settings into a row, with a fresh stamp; resolves once den-edge has them, or throws. */
@@ -152,15 +152,15 @@ export interface AssistantPort {
    */
   ride<T>(name: string, changes: Record<string, ConfigValue>, work: () => Promise<T>): Promise<T>;
   /** Write a row whole, as compare-and-set (pruning: no tombstones). */
-  write(row: SettingsRow): Promise<void>;
+  set(row: SettingsRow): Promise<void>;
   /** Hand den-edge the library's drop-box public key, with the member's proof. */
-  dropbox(key: DropboxKey): Promise<boolean>;
+  send(key: DropboxKey): Promise<boolean>;
   /** The library's v4 documents as held, the series layouts known (by TMDB id), and the log head they were read at. */
   docs(): unknown[];
-  series(): Record<string, SeriesLayout>;
+  lays(): Record<string, SeriesLayout>;
   head(): number;
   /** Changes whenever anything a projection is built from may have: the log head or a series layout known. */
-  inputs(): string;
+  key(): string;
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
    * proof: this library's, or `member` (a lent household connection's). A refusal that said how long to wait
    * (`429` with `Retry-After`) answers that wait. */
@@ -177,7 +177,7 @@ export interface AssistantPort {
     signal?: AbortSignal,
   ): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
-  member(): Promise<AssistantConnection['member'] | null>;
+  join(): Promise<AssistantConnection['member'] | null>;
   load(): Promise<AssistantRecords | null | undefined>;
   save(records: AssistantRecords): Promise<void>;
   now(): number;
@@ -366,7 +366,7 @@ export class LibraryAssistantAuthority {
     await abortable(this.port.sync(), signal);
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
       await abortable(this.grants(), signal);
-    const member = await abortable(this.port.member(), signal);
+    const member = await abortable(this.port.join(), signal);
     if (!member) return null;
     const rows = CONNECTION_ROWS.flatMap((name) => {
       const row = this.#row(name);
@@ -433,7 +433,7 @@ export class LibraryAssistantAuthority {
   }
 
   /** Lazily make and publish the household key managed-playback receipts seal to. */
-  async ensure(create = true): Promise<DropboxKey | null> {
+  async key(create = true): Promise<DropboxKey | null> {
     await ensureAssistantPolicy();
     await this.port.sync();
     let dropbox = this.box();
@@ -446,7 +446,7 @@ export class LibraryAssistantAuthority {
       dropbox = this.box();
     }
     if (!dropbox) return null;
-    if (!(await this.port.dropbox(dropbox)))
+    if (!(await this.port.send(dropbox)))
       throw new Error('den-edge did not take the library’s drop-box key');
     return dropbox;
   }
@@ -481,7 +481,7 @@ export class LibraryAssistantAuthority {
    * Prove consent rollback from the refreshed durable rows alone. `grants()` intentionally joins this device's
    * private refusal journal, which is correct for enforcement/UI but could mask a partial household write here.
    */
-  async readback(grant: string): Promise<'revoked' | 'absent' | 'unverified'> {
+  async read(grant: string): Promise<'revoked' | 'absent' | 'unverified'> {
     await ensureAssistantPolicy();
     await this.port.sync();
     let found = false;
@@ -544,7 +544,7 @@ export class LibraryAssistantAuthority {
   }
 
   async #writeGrant(client: string): Promise<{ grant: string; key: string }> {
-    if (!(await this.ensure())) throw new Error('the assistant drop-box key could not be made');
+    if (!(await this.key())) throw new Error('the assistant drop-box key could not be made');
     const now = this.port.now();
     const grant = assistantPolicy<{
       grant: string;
@@ -734,8 +734,8 @@ export class LibraryAssistantAuthority {
     if (now < this.#holdUntil && readKey === this.#holdRead) return [];
     // A change in either log is a change of the inputs.
     const inputs = lent
-      ? `${this.port.inputs()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
-      : this.port.inputs();
+      ? `${this.port.key()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
+      : this.port.key();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
     const records = await this.#load();
     signal?.throwIfAborted();
@@ -746,7 +746,7 @@ export class LibraryAssistantAuthority {
         if (!this.#published.has(grant)) this.#published.set(grant, sent);
     }
     // The layouts known when it was last built, under the ones this page has learnt since.
-    const layouts = { ...kept?.layouts, ...this.port.series() };
+    const layouts = { ...kept?.layouts, ...this.port.lays() };
     const library = lent?.member.libraryId ?? this.port.id;
     const grants = this.#row(GRANTS_ROW, lent);
     // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
@@ -860,7 +860,7 @@ export class LibraryAssistantAuthority {
     // Metadata can keep arriving while the projection Worker builds. The key still names the exact request above,
     // so a later page rebuilds when these additions change it; carry them with the publication so closing this page
     // does not lose them and force every fresh page to discover the same layouts during its own build.
-    const rememberedLayouts = { ...layouts, ...this.port.series() };
+    const rememberedLayouts = { ...layouts, ...this.port.lays() };
     signal?.throwIfAborted();
     this.#builtFrom = inputs;
     this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
@@ -1005,7 +1005,7 @@ export class LibraryAssistantAuthority {
   }
 
   /** Open and apply Hearth's opaque completion receipts through the ordinary progress command. */
-  async receipts(
+  async plays(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     lent?: AssistantConnection | null,
   ): Promise<{ ack: number | null; applied: number }> {
@@ -1125,7 +1125,7 @@ export class LibraryAssistantAuthority {
             watched,
           });
         if (season !== undefined) {
-          const episodes = await this.port.episodes(title, season);
+          const episodes = await this.port.eps(title, season);
           if (!episodes) throw new Error('the season’s episodes could not be loaded');
           if (season > 0)
             return run({
@@ -1175,7 +1175,7 @@ export class LibraryAssistantAuthority {
     const values = { ...row.values };
     for (const id of remove) delete values[id];
     try {
-      await this.port.write({ ...row, values });
+      await this.port.set({ ...row, values });
     } catch (error) {
       console.warn('asst/prune', error);
     }
