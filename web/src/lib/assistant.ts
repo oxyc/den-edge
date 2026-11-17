@@ -5,9 +5,9 @@
 // also drains its own lane of the TV queue (§16), whose plays it starts rather than applies.
 
 import { exclusive } from './exclusive';
-import PlaybackReceiptStatus from '../components/PlaybackReceiptStatus.svelte';
+import Status from '../components/PlaybackReceiptStatus.svelte';
 
-export { PlaybackReceiptStatus };
+export { Status };
 import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
@@ -16,7 +16,7 @@ import { relayFetch } from './relayFetch';
  * §5 *Renewal*: the grants whose connection den-edge still lists, handed to the library service to renew (it renews
  * at most once a day). A grant whose connection is gone is left to expire.
  */
-export async function renewListed(
+export async function renew(
   renew: (grants: string[]) => Promise<unknown>,
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<void> {
@@ -45,7 +45,7 @@ const preparedReceiptAuthorities = new WeakSet<PlaybackReceiptAuthority>();
 const receiptPreparations = new WeakMap<PlaybackReceiptAuthority, Promise<boolean>>();
 
 /** Lazily establish managed-playback completion recovery without adding assistant crypto to app startup. */
-export function preparePlaybackReceipts(
+export function prepare(
   authority: PlaybackReceiptAuthority,
   signal: AbortSignal,
 ): Promise<boolean> {
@@ -104,7 +104,7 @@ const BACKOFF_MS = 60_000;
 /** A library-service delivery is local, but must still retire if its Worker or port stops answering. */
 const APPLY_MS = 30_000;
 
-export async function putDropbox(
+async function putDropbox(
   key: DropboxKey,
   signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
@@ -136,7 +136,7 @@ export interface OtherQueue {
 }
 
 /** Every waiting request, oldest first; null when den-edge refused or could not be reached. */
-export async function drainQueue(
+async function drainQueue(
   wait: number,
   signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
@@ -164,7 +164,7 @@ export async function drainQueue(
   }
 }
 
-export async function ackQueue(
+async function ackQueue(
   upTo: number,
   fetchImpl: typeof fetch = relayFetch,
   queue?: OtherQueue,
@@ -187,7 +187,7 @@ export async function ackQueue(
 }
 
 /** Drain opaque Hearth completion receipts once after the library's foreground sync. */
-export function drainPlaybackReceiptsOnce(
+export function drainOnce(
   loop: {
     libraryId: string;
     apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null; applied?: number }>;
@@ -245,7 +245,7 @@ export function drainPlaybackReceiptsOnce(
 }
 
 /** Drain one receipt batch only while the same foreground library/profile authority still owns every await. */
-export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
+export async function drainCurrent<Connection>(
   loop: {
     libraryId: string;
     ensure: () => Promise<DropboxKey | null>;
@@ -259,7 +259,7 @@ export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
   },
   signal: AbortSignal,
 ): Promise<PlaybackReceiptDrainOutcome> {
-  return drainPlaybackReceiptsOnce(
+  return drainOnce(
     {
       libraryId: loop.libraryId,
       apply: async (messages) => {
@@ -278,7 +278,7 @@ export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
 }
 
 /** Map one authority-fenced drain into the only presentation transition its caller needs to retain. */
-export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Status>(
+export async function recover<Connection, Status>(
   work: {
     libraryId: string;
     model: {
@@ -298,7 +298,7 @@ export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Sta
   publish: (state: 'failed' | 'recovered' | null, expected?: Status) => Status | null,
 ): Promise<void> {
   try {
-    const result = await drainPlaybackReceiptsForCurrentAuthority(
+    const result = await drainCurrent(
       {
         libraryId: work.libraryId,
         ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
@@ -332,7 +332,7 @@ const PUBLISH_TICK_MS = 30_000;
  * projection that is due. One tab of this browser publishes a library at a time (a Web Lock), another taking over
  * when it closes; another device publishing too only replaces it with the same lists.
  */
-export function publishWhileOpen(
+export function publish(
   loop: {
     libraryId: string;
     publish: (signal: AbortSignal) => Promise<unknown>;
@@ -381,7 +381,7 @@ const pause = (ms: number, signal: AbortSignal) =>
  * drains a library at a time (a Web Lock); another takes over when it closes. Another device draining at once is
  * safe — the applied row refuses a request applied already — so the lock only saves the work twice.
  */
-export function drainWhileOpen(loop: DrainLoop, signal: AbortSignal): Promise<void> {
+export function drain(loop: DrainLoop, signal: AbortSignal): Promise<void> {
   return exclusive(`den.assistant.drain.${loop.libraryId}${loop.queue?.key ?? ''}`, () =>
     drainLoop(loop, signal),
   );
@@ -402,25 +402,20 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       continue;
     }
     let outcome: ApplyOutcome;
-    const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(), APPLY_MS);
     try {
-      outcome = await loop.apply(messages, AbortSignal.any([signal, deadline.signal]));
+      outcome = await loop.apply(
+        messages,
+        AbortSignal.any([signal, AbortSignal.timeout(APPLY_MS)]),
+      );
     } catch (error) {
       if (signal.aborted) return;
       console.warn('asst/apply', error);
       await sleep(BACKOFF_MS, signal);
       continue;
-    } finally {
-      clearTimeout(timer);
     }
     // The service may have completed as this authority retired. Its durable receipt makes redelivery safe; this
     // obsolete page must not announce an effect, publish a drop-box key or acknowledge the queue.
     if (signal.aborted) return;
-    if (deadline.signal.aborted) {
-      await sleep(BACKOFF_MS, signal);
-      continue;
-    }
     // The library queue's drain gives den-edge the drop-box key; a lane's leaves that to it.
     if (
       !loop.queue &&

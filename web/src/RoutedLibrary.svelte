@@ -1578,7 +1578,7 @@
   }
 
   $effect(() =>
-    whileNeeded(renewNeeded, ({ renewListed }, work, signal) => {
+    whileNeeded(renewNeeded, ({ renew: renewListed }, work, signal) => {
       const renew = () =>
         void renewListed(
           (grants) => (work.household ?? work.model).renewAssistant(grants),
@@ -1592,8 +1592,8 @@
 
   $effect(() => {
     const current = session;
-    return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
-      void drainWhileOpen(
+    return whileNeeded(drainNeeded, ({ drain }, work, signal) => {
+      void drain(
         {
           libraryId: work.libraryId,
           apply: async (messages, signal) =>
@@ -1644,17 +1644,10 @@
     };
     return whileNeeded(
       true,
-      (
-        { recoverPlaybackReceiptsForCurrentAuthority, PlaybackReceiptStatus: Status },
-        work,
-        signal,
-      ) => {
+      ({ recover, Status }, work, signal) => {
         PlaybackReceiptStatus = Status;
         publish('pending', signal);
-        void recoverPlaybackReceiptsForCurrentAuthority<
-          AssistantConnection | undefined,
-          PlaybackReceiptStatus
-        >(
+        void recover<AssistantConnection | undefined, PlaybackReceiptStatus>(
           work,
           () => current === session,
           signal,
@@ -1672,7 +1665,7 @@
   $effect(() => {
     if (!__DEN_TV__) return;
     const current = session;
-    return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
+    return whileNeeded(drainNeeded, ({ drain }, work, signal) => {
       void (async () => {
         const plays = await import('./lib/householdPlays');
         let playKey: string | undefined;
@@ -1680,7 +1673,7 @@
           await abortableDelay(10_000, signal);
         }
         if (!playKey) return;
-        await drainWhileOpen(
+        await drain(
           {
             libraryId: work.libraryId,
             queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
@@ -1713,8 +1706,8 @@
   });
 
   $effect(() =>
-    whileNeeded(publishNeeded, ({ publishWhileOpen }, work, signal) => {
-      void publishWhileOpen(
+    whileNeeded(publishNeeded, ({ publish }, work, signal) => {
+      void publish(
         {
           libraryId: work.libraryId,
           publish: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),

@@ -1141,7 +1141,7 @@ export class LibraryModel {
     const { result } = await this.task(
       {
         kind: 'assistant.apply',
-        messages: messages.map(({ seq, sealed }) => ({ seq, sealed })),
+        messages: [...messages],
         ...(connection ? { connection } : {}),
         ...(tv ? { tv } : {}),
       },
