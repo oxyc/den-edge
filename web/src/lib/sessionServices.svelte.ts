@@ -1,7 +1,7 @@
 // Session-scoped provider discovery. Durable inputs and retained results belong to LibraryModel; this class only
 // owns the live probes and the render-facing addresses they discover.
 
-import { availability, type AvailabilityAuthority } from './availability.svelte';
+import { availability } from './availability.svelte';
 import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
@@ -15,7 +15,6 @@ import type { Addon } from './scout';
 import { yieldTask } from './taskYield';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { GrantRefreshOutcome } from './grants.svelte';
-import { relayFetch } from './relayFetch';
 
 type Runtime = Immutable<RuntimeDiscoveryView>;
 type Grants = {
@@ -74,7 +73,6 @@ export class SessionServices {
   #foregroundReady = false;
   #atlasGeneration = 0;
   #atlasAcknowledgedGeneration = 0;
-  #availabilityAuthority: AvailabilityAuthority = ['test', null, 'test'];
   /** The current discovery run's inputs, run again by `retry`. */
   #rerun?: () => void;
   readonly #model: LibraryModel | null;
@@ -97,16 +95,6 @@ export class SessionServices {
     this.atlasUnreachable = false;
     this.#for = 'invalidated';
     this.#rerun?.();
-  }
-
-  #connectAvailability(scout: Addon | null): void {
-    availability.connect(scout, this.content, relayFetch, this.#availabilityAuthority);
-  }
-
-  #activateAvailability(authority: AvailabilityAuthority): void {
-    if (authority.every((part, index) => part === this.#availabilityAuthority[index])) return;
-    this.#availabilityAuthority = authority;
-    this.#connectAvailability(this.#foregroundReady ? this.scout : null);
   }
 
   /**
@@ -142,13 +130,8 @@ export class SessionServices {
   }
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
-  configure(
-    runtime: Runtime | undefined,
-    authority: AvailabilityAuthority = this.#availabilityAuthority,
-  ): void {
+  configure(runtime: Runtime | undefined): void {
     if (this.#stopped) return;
-    this.#activateAvailability(authority);
-    if (this.#model?.connection && this.#model.connection !== 'ready') return;
     // This read must stay synchronous: it is the Svelte dependency that re-runs the caller's real `$effect` when a
     // redeem, expiry, replacement, or A→B→A grant transition changes authority. Async refresh and discovery below
     // are fenced separately.
@@ -180,7 +163,7 @@ export class SessionServices {
     if (this.scout && !retainsScout(this.scout.install, visiblePlugins)) {
       this.scout = null;
       this.debrid = null;
-      if (this.#foregroundReady) this.#connectAvailability(null);
+      if (this.#foregroundReady) availability.connect(null, this.content);
     }
     if (this.#grantsRefreshing) return;
     if (this.#verifiedGrantsFor === grantsFor)
@@ -265,7 +248,7 @@ export class SessionServices {
     this.remux = null;
     this.remuxAway = false;
     this.remuxBlocked = false;
-    if (this.#foregroundReady) this.#connectAvailability(null);
+    if (this.#foregroundReady) availability.connect(null, this.content);
   }
 
   #configure(
@@ -274,7 +257,7 @@ export class SessionServices {
     remux: string | null,
     shared: readonly string[] = this.grants.pluginUrls(),
   ): void {
-    if (this.#for === undefined && !this.#foregroundReady) this.#connectAvailability(null);
+    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, this.content);
     this.#rerun = () => this.#configure(library, libraryPlugins, remux, shared);
     const plugins = [...libraryPlugins, ...shared].filter(
       (plugin, index, all) => all.indexOf(plugin) === index,
@@ -293,7 +276,7 @@ export class SessionServices {
     if (this.scout && !retainsScout(this.scout.install, plugins)) {
       this.scout = null;
       this.debrid = null;
-      if (this.#foregroundReady) this.#connectAvailability(null);
+      if (this.#foregroundReady) availability.connect(null, this.content);
     }
     let current = true;
     let routeRetry: ReturnType<typeof setTimeout> | undefined;
@@ -334,7 +317,7 @@ export class SessionServices {
               : null;
           this.reel = saved.reel;
           this.remux = saved.remux;
-          if (this.#foregroundReady) this.#connectAvailability(this.scout);
+          if (this.#foregroundReady) availability.connect(this.scout, this.content);
         })
         .catch(() => {
           // Retained discovery is only a first-paint hint; live discovery below remains authoritative.
@@ -386,7 +369,7 @@ export class SessionServices {
               scout: (found: Addon | null) => {
                 if (!current) return;
                 this.scout = found;
-                if (this.#foregroundReady) this.#connectAvailability(found);
+                if (this.#foregroundReady) availability.connect(found, this.content);
                 if (found)
                   void readDebridState(found).then((state) => {
                     if (current && this.scout === found) this.debrid = state;
@@ -434,12 +417,11 @@ export class SessionServices {
     });
   }
 
-  foregroundReady(authority: AvailabilityAuthority = this.#availabilityAuthority): void {
-    this.#activateAvailability(authority);
+  foregroundReady(): void {
     if (this.#foregroundReady) return;
     this.#foregroundReady = true;
     if (this.#grantRetryNeeded) this.#scheduleGrantRetry();
-    this.#connectAvailability(this.scout);
+    availability.connect(this.scout, this.content);
   }
 
   stop(): void {

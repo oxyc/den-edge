@@ -143,25 +143,28 @@ describe('Availability', () => {
     const { fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
     const first = new Availability(storage, () => now);
     expect(first.unavailable({ type: 'movie', id: 1 }), 'nothing before authority').toBe(false);
-    first.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    first.activate(HOUSEHOLD_A);
+    first.connect(SCOUT, content, fetchImpl);
     expect(data.has('den.availability'), 'legacy owner is unknowable').toBe(false);
     first.want({ type: 'movie', id: 1 });
     await vi.advanceTimersByTimeAsync(100);
     expect(first.unavailable({ type: 'movie', id: 1 })).toBe(true);
     expect(
       data.get('den.availability'),
-      'one verdict: 20 authority bytes over the legacy row',
-    ).toHaveLength(51);
+      'one verdict: 19 authority bytes over the legacy row',
+    ).toHaveLength(50);
 
     const reloaded = new Availability(storage, () => now);
     expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'still unknown before connect').toBe(
       false,
     );
-    reloaded.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    reloaded.activate(HOUSEHOLD_A);
+    reloaded.connect(SCOUT, content, fetchImpl);
     expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'exact authority restores').toBe(true);
 
     const other = new Availability(storage, () => now);
-    other.connect(SCOUT, content, fetchImpl, PROFILE_B);
+    other.activate(PROFILE_B);
+    other.connect(SCOUT, content, fetchImpl);
     expect(other.unavailable({ type: 'movie', id: 1 }), 'other household fails closed').toBe(false);
     expect(JSON.stringify([...data.entries()])).not.toContain('household-a');
     expect(JSON.stringify([...data.entries()])).not.toContain('sealed-cfg');
@@ -188,21 +191,24 @@ describe('Availability', () => {
     };
     const availability = new Availability();
     const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
-    availability.connect(SCOUT, content, aFetch, HOUSEHOLD_A);
+    availability.activate(HOUSEHOLD_A);
+    availability.connect(SCOUT, content, aFetch);
     await vi.advanceTimersByTimeAsync(0);
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
-    availability.connect(SCOUT, content, bFetch, PROFILE_B);
+    availability.activate(PROFILE_B);
+    availability.connect(SCOUT, content, bFetch);
     await vi.advanceTimersByTimeAsync(100);
-    availability.connect(SCOUT, content, finalFetch, HOUSEHOLD_A);
+    availability.activate(HOUSEHOLD_A);
+    availability.connect(SCOUT, content, finalFetch);
     await vi.advanceTimersByTimeAsync(100);
     releaseA(Response.json({ availability: { tt7654321: 'unavailable' } }));
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['A', 'B', 'A2']);
     expect(availability.unavailable(movie), 'late A and B refusal cannot own final A').toBe(false);
-    availability.connect(null, content, finalFetch, HOUSEHOLD_A);
-    availability.connect(SCOUT, content, finalFetch, HOUSEHOLD_A);
+    availability.connect(null, content, finalFetch);
+    availability.connect(SCOUT, content, finalFetch);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls, 'same authority does not request an available verdict again').toHaveLength(3);
   });
@@ -281,13 +287,15 @@ describe('Availability', () => {
     } as Storage;
     const { calls, fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
     const first = new Availability(storage);
-    first.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    first.activate(HOUSEHOLD_A);
+    first.connect(SCOUT, content, fetchImpl);
     first.want({ type: 'movie', id: 1 });
     await vi.advanceTimersByTimeAsync(100);
     calls.length = 0;
 
     const availability = new Availability(storage);
-    availability.connect(null, content, fetchImpl, HOUSEHOLD_A);
+    availability.activate(HOUSEHOLD_A);
+    availability.connect(null, content, fetchImpl);
     availability.want({ type: 'movie', id: 1 });
     await vi.advanceTimersByTimeAsync(100);
 
@@ -306,7 +314,8 @@ describe('Availability', () => {
     } as unknown as Storage;
     const { fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
     const availability = new Availability(storage);
-    availability.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    availability.activate(HOUSEHOLD_A);
+    availability.connect(SCOUT, content, fetchImpl);
     availability.want({ type: 'movie', id: 1 });
     await vi.advanceTimersByTimeAsync(100);
 

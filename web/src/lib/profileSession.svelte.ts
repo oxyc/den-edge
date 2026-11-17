@@ -4,6 +4,7 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
+import { availability } from './availability.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfileContentPolicy, type ProfilePolicy } from './profilePolicy';
@@ -236,8 +237,17 @@ export class ProfileSession {
     return this.household.updateRequired || libraryUpdateRequired(this.model);
   }
 
+  #activateAvailability(): void {
+    availability.activate([
+      this.household.identity.kind,
+      this.household.identity.libraryKey,
+      profileSessionKey(this.identity, this.policyKey),
+    ]);
+  }
+
   configureServices(): void {
-    this.household.configureServices(profileSessionKey(this.identity, this.policyKey));
+    this.#activateAvailability();
+    this.household.configureServices();
   }
 
   publishLibraryMetadata(
@@ -301,7 +311,8 @@ export class ProfileSession {
 
   foregroundReady(): void {
     this.foregrounded = true;
-    this.household.foreground(profileSessionKey(this.identity, this.policyKey));
+    this.#activateAvailability();
+    this.household.foreground();
     if (!this.household.ownsModel(this.model)) void this.model?.foregroundReady().catch(() => {});
   }
 

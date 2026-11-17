@@ -2,6 +2,8 @@
 // stable season-pack identity, never a release filename. Its storage name is a digest of every authority which may
 // make that identity meaningful, so changing profile, profile library, household or source add-on cannot reuse it.
 
+import { localAuthorityKey } from './localAuthorityKey';
+
 /** Profile, profile library, household, add-on install and source base, in that order. The compact tuple crosses
  * the always-loaded Library → lazy Player boundary without duplicating those field names in the startup chunk. */
 export type ReleaseAuthority = readonly [
@@ -66,19 +68,6 @@ const base64url = (bytes: Uint8Array): string => {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 };
 
-/** A synchronous fallback for old TV engines without SubtleCrypto. The stored row remains authority-scoped, but
- * this is not used as a credential or exposed to a server; modern Browser/LG/Samsung engines use SHA-256 below. */
-function fallbackDigest(value: string): string {
-  let first = 0x811c9dc5;
-  let second = 0x9e3779b9;
-  for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
-    first = Math.imul(first ^ code, 0x01000193);
-    second = Math.imul(second ^ code, 0x85ebca6b);
-  }
-  return `${(first >>> 0).toString(36)}.${(second >>> 0).toString(36)}`;
-}
-
 async function digestAuthority(authority: ReleaseAuthority): Promise<string> {
   const value = authorityText(authority);
   try {
@@ -90,7 +79,7 @@ async function digestAuthority(authority: ReleaseAuthority): Promise<string> {
   } catch {
     // Older TV webviews can expose crypto without a working digest implementation.
   }
-  return fallbackDigest(value);
+  return localAuthorityKey(value);
 }
 
 /** Remove filename-bearing rows written before authority scoping. They cannot be migrated: their owner and source

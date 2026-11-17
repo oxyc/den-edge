@@ -136,16 +136,15 @@ export class HouseholdSession {
     return libraryUpdateRequired(this.#model);
   }
 
-  configureServices(profile: string): void {
-    const authority = [this.#identity.kind, this.#identity.libraryKey, profile] as const;
-    this.services.configure(this.#model?.runtime.value, authority);
+  configureServices(): void {
+    if (this.#model && this.#model.connection !== 'ready') return;
+    this.services.configure(this.#model?.runtime.value);
   }
 
-  foreground(profile: string): void {
-    const authority = [this.#identity.kind, this.#identity.libraryKey, profile] as const;
+  foreground(): void {
     if (this.#foregroundReady || this.#closed) return;
     this.#foregroundReady = true;
-    this.services.foregroundReady(authority);
+    this.services.foregroundReady();
     void this.#model?.foregroundReady().catch(() => {});
   }
 
