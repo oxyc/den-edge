@@ -371,11 +371,9 @@ export class DownloadCoordinator {
 
   async remove(download: Download, cancel: boolean): Promise<boolean> {
     if (cancel) {
-      if (!(await this.cancelIfSafe(download))) return false;
+      if (!(await this.cs(download))) return false;
       for (const entry of download.race.entries)
-        if (
-          !(await this.cancelEntryIfSafe(download, entry.identity, this.entryUrl(download, entry)))
-        )
+        if (!(await this.ce(download, entry.identity, this.er(download, entry))))
           return false;
     }
     const current = this.log.settings(download.name);
@@ -385,7 +383,7 @@ export class DownloadCoordinator {
     this.answers.delete(download.name);
     this.clocks.delete(download.name);
     this.urls.delete(download.name);
-    this.clearEntries(download.name);
+    this.clear(download.name);
     this.changed();
     return true;
   }
@@ -539,13 +537,13 @@ export class DownloadCoordinator {
     }
   }
 
-  async tryReleaseIdentity(download: Download, identity: string): Promise<boolean> {
+  async ri(download: Download, identity: string): Promise<boolean> {
     const { sources } = await this.sourcesForTitle(download.title);
     const source = sources?.find((candidate) => candidate.identity === identity);
     return source ? this.tryRelease(download, source) : false;
   }
 
-  urlFor(download: Download): string | null {
+  ur(download: Download): string | null {
     return this.urls.get(download.name) ?? this.effects.ticket(download.release.url);
   }
 
@@ -560,7 +558,7 @@ export class DownloadCoordinator {
   async poll(download: Download): Promise<Preparation> {
     const pending = this.#pending.get(download.name);
     if (pending) return pending;
-    const url = this.urlFor(download);
+    const url = this.ur(download);
     if (!url) {
       const expired: Preparation = { state: 'expired', message: FOREIGN };
       this.answers.set(download.name, expired);
@@ -601,7 +599,7 @@ export class DownloadCoordinator {
   }
 
   /** The ticket this instance reaches a race entry by, without asking anyone. */
-  entryUrl(download: Download, entry: DownloadRaceEntry): string | null {
+  er(download: Download, entry: DownloadRaceEntry): string | null {
     const key = raceKey(download.name, entry.identity);
     const observation = this.#entryObservation(download, entry);
     return (
@@ -625,7 +623,7 @@ export class DownloadCoordinator {
     );
   }
 
-  entryRecoveryHeld(download: Download, entry: DownloadRaceEntry, now = this.now()): boolean {
+  rh(download: Download, entry: DownloadRaceEntry, now = this.now()): boolean {
     const held = this.#entryRecovery.get(raceKey(download.name, entry.identity));
     return (
       held?.observation === this.#entryObservation(download, entry) &&
@@ -645,12 +643,12 @@ export class DownloadCoordinator {
    * The ticket for a race entry, renewed from a fresh resolve when this instance can't reach the written one; `gone`
    * when a full answer no longer lists it, undefined when no answer settles it.
    */
-  async renewEntryUrl(
+  async ru(
     download: Download,
     entry: DownloadRaceEntry,
     options: { requireComplete?: boolean; current?: () => boolean } = {},
   ): Promise<string | 'gone' | undefined> {
-    const known = this.entryUrl(download, entry);
+    const known = this.er(download, entry);
     if (known) return known;
     const { sources, answer } = await this.sourcesForTitle(download.title, true);
     if (options.current && (!options.current() || !this.#entryCurrent(download, entry)))
@@ -686,16 +684,16 @@ export class DownloadCoordinator {
         this.ea.delete(key);
         this.eu.delete(key);
       }
-      if (this.entryRecoveryHeld(download, entry, now)) return undefined;
+      if (this.rh(download, entry, now)) return undefined;
       let renewed = false;
       while (current() && this.#entryCurrent(download, entry)) {
         const expired = this.#entryRecovery.get(key)?.observation === observation;
         const url = expired
-          ? await this.renewEntryUrl(download, entry, {
+          ? await this.ru(download, entry, {
               requireComplete: true,
               current,
             })
-          : this.entryUrl(download, entry);
+          : this.er(download, entry);
         if (!current() || !this.#entryCurrent(download, entry)) return undefined;
         if (url === 'gone') return { state: 'failed', message: GONE } satisfies Preparation;
         if (!url) {
@@ -730,16 +728,16 @@ export class DownloadCoordinator {
   }
 
   /** A race entry that won becomes the row's release: its answer and ticket move with it. */
-  promoteEntry(download: Download, entry: DownloadRaceEntry): void {
+  pe(download: Download, entry: DownloadRaceEntry): void {
     const key = raceKey(download.name, entry.identity);
     const answer = this.ea.get(key);
     const url = this.eu.get(key) ?? this.effects.ticket(entry.url);
     if (answer) this.answers.set(download.name, answer);
     if (url) this.urls.set(download.name, url);
-    this.forgetEntry(download.name, entry.identity);
+    this.fe(download.name, entry.identity);
   }
 
-  forgetEntry(name: string, identity: string): void {
+  fe(name: string, identity: string): void {
     const key = raceKey(name, identity);
     this.ea.delete(key);
     this.eu.delete(key);
@@ -747,7 +745,7 @@ export class DownloadCoordinator {
     this.#entryRecovery.delete(key);
   }
 
-  clearEntries(name: string): void {
+  clear(name: string): void {
     for (const map of [this.ea, this.eu, this.#entryPolls, this.#entryRecovery])
       for (const key of [...map.keys()]) if (key.startsWith(`${name}\n`)) map.delete(key);
   }
@@ -766,17 +764,13 @@ export class DownloadCoordinator {
     }
   }
 
-  async cancelIfSafe(download: Download): Promise<boolean> {
-    const url = this.urlFor(download);
+  async cs(download: Download): Promise<boolean> {
+    const url = this.ur(download);
     return !this.#cancelSafe(download) || !url || this.effects.cancel(url, false);
   }
 
   /** Cancel one release the row races, unless another row still names or races it (`download_cancel_safe`). */
-  async cancelEntryIfSafe(
-    download: Download,
-    identity: string,
-    url: string | null,
-  ): Promise<boolean> {
+  async ce(download: Download, identity: string, url: string | null): Promise<boolean> {
     return !this.#cancelSafe(download, identity) || !url || this.effects.cancel(url, false);
   }
 }

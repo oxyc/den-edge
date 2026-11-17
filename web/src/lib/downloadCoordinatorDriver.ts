@@ -300,7 +300,7 @@ export class DownloadCoordinatorDriver {
       for (const entry of download.race.entries) {
         // An entry whose add never landed (a relaunch, another device's ticket) is asked for again.
         const answer = queue.ea.get(raceKey(download.name, entry.identity));
-        const url = answer?.state === 'not-queued' ? queue.entryUrl(download, entry) : null;
+        const url = answer?.state === 'not-queued' ? queue.er(download, entry) : null;
         if (url && this.#active(now)) await queue.addEntry(download.name, entry.identity, url);
       }
       if (
@@ -308,7 +308,7 @@ export class DownloadCoordinatorDriver {
         download.resumeAt !== undefined &&
         download.resumeAt <= now
       ) {
-        const url = queue.urlFor(download);
+        const url = queue.ur(download);
         const at = url ? await queue.stamp(now) : undefined;
         if (
           url &&
@@ -359,7 +359,7 @@ export class DownloadCoordinatorDriver {
       if (!Object.keys(values).length) continue;
       const written = await this.#write(download, values, now);
       wrote = written || wrote;
-      const url = status.reannounce && written ? queue.urlFor(download) : undefined;
+      const url = status.reannounce && written ? queue.ur(download) : undefined;
       if (url) await queue.effects.cancel(url, true);
     }
 
@@ -616,7 +616,7 @@ export class DownloadCoordinatorDriver {
       });
     // Until a race is under way a healthy download costs den-scout no list: den-core is asked first with the
     // releases last resolved (or none), and the title is resolved only when that answer escalates.
-    const held = entries.some((entry) => this.q.entryRecoveryHeld(download, entry, now));
+    const held = entries.some((entry) => this.q.rh(download, entry, now));
     const first = decide(held ? [] : (this.#raceLists.get(name)?.sources ?? []));
     const finished = first.decision === 'take' && first.reason === 'finished';
     const underWay = race.stage > 0 || entries.length > 0 || first.stage !== race.stage;
@@ -658,7 +658,7 @@ export class DownloadCoordinatorDriver {
         cached: source!.cached,
         queuedAt: now,
       };
-      const url = entry ? (this.q.entryUrl(download, entry) ?? taken.url) : taken.url;
+      const url = entry ? (this.q.er(download, entry) ?? taken.url) : taken.url;
       Object.assign(values, {
         release: {
           value: releaseValue({
@@ -684,10 +684,10 @@ export class DownloadCoordinatorDriver {
     downloadDiagnostic(9);
     for (const other of entries)
       if (other.identity !== identity)
-        await this.q.cancelEntryIfSafe(download, other.identity, this.q.entryUrl(download, other));
-    if (!isPrimary) await this.q.cancelIfSafe(download);
-    if (entry) this.q.promoteEntry(download, entry);
-    this.q.clearEntries(download.name);
+        await this.q.ce(download, other.identity, this.q.er(download, other));
+    if (!isPrimary) await this.q.cs(download);
+    if (entry) this.q.pe(download, entry);
+    this.q.clear(download.name);
     this.q.clocks.delete(download.name);
     if (!isPrimary && !entry && source) await this.q.add(download.name, source.url);
     return 'written';
@@ -716,7 +716,7 @@ export class DownloadCoordinatorDriver {
       if (!this.#current()) return 'unchanged';
       if (answer.state === 'refused') {
         cappedAt = now;
-        this.q.forgetEntry(download.name, identity);
+        this.q.fe(download.name, identity);
         break;
       }
       added.push({
@@ -760,7 +760,7 @@ export class DownloadCoordinatorDriver {
           value: releaseValue({
             identity: promoted.identity,
             label: promoted.label ?? promoted.identity,
-            url: this.q.entryUrl(download, promoted) ?? promoted.url,
+            url: this.q.er(download, promoted) ?? promoted.url,
             sizeBytes: promoted.sizeBytes,
             cached: promoted.cached,
           }),
@@ -774,21 +774,20 @@ export class DownloadCoordinatorDriver {
       });
     if (!(await this.#write(download, values, now))) {
       for (const entry of added)
-        await this.q.effects.cancel(this.q.entryUrl(download, entry) ?? entry.url, false);
+        await this.q.effects.cancel(this.q.er(download, entry) ?? entry.url, false);
       return 'failed';
     }
     if (added.length) downloadDiagnostic(10);
     for (const identity of decided.cancel) {
-      if (identity === download.release.identity) await this.q.cancelIfSafe(download);
+      if (identity === download.release.identity) await this.q.cs(download);
       else {
         const entry = race.entries.find((candidate) => candidate.identity === identity);
-        if (entry)
-          await this.q.cancelEntryIfSafe(download, identity, this.q.entryUrl(download, entry));
+        if (entry) await this.q.ce(download, identity, this.q.er(download, entry));
       }
-      this.q.forgetEntry(download.name, identity);
+      this.q.fe(download.name, identity);
     }
     if (promoted) {
-      this.q.promoteEntry(download, promoted);
+      this.q.pe(download, promoted);
       this.q.clocks.delete(download.name);
     }
     return 'written';
@@ -856,7 +855,7 @@ export class DownloadCoordinatorDriver {
       resumeAt: { value: null, at },
     });
     if (!(await this.#write(download, values, now))) return false;
-    await this.q.cancelIfSafe(download);
+    await this.q.cs(download);
     this.q.clocks.delete(download.name);
     await this.q.add(download.name, chosen.url);
     downloadDiagnostic(11);

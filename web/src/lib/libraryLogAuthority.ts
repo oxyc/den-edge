@@ -2720,7 +2720,7 @@ export class LibraryLogAuthority {
     // A wanted download has no partial to keep beside the choice: the choice simply starts.
     const saved = download.wanted
       ? await this.#downloadsCoordinator.enqueueIdentity(download.title, identity)
-      : await this.#downloadsCoordinator.tryReleaseIdentity(download, identity);
+      : await this.#downloadsCoordinator.ri(download, identity);
     if (!saved) this.#writeFailed();
     return {
       outcome: 'applied',

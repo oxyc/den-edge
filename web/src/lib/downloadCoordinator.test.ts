@@ -232,7 +232,7 @@ describe('DownloadCoordinator', () => {
 
       expect(resolved).toEqual([exact]);
       expect(prepared).toEqual([stale, fresh.url]);
-      expect(queue.entryUrl(download, entry)).toBe(fresh.url);
+      expect(queue.er(download, entry)).toBe(fresh.url);
       expect(entry.identity).toBe(fresh.identity);
     },
   );
@@ -576,7 +576,7 @@ describe('DownloadCoordinator', () => {
     const entry = kept.race.entries[0]!;
     expect(kept.release.identity).toBe(first.identity);
     expect(entry).toMatchObject({ identity: fresh.identity, url: stale });
-    expect(queue.entryUrl(kept, entry)).toBe(fresh.url);
+    expect(queue.er(kept, entry)).toBe(fresh.url);
     await queue.pollEntry(kept, entry, { now: now + 10_000 });
     expect(prepared.filter((url) => url === stale)).toHaveLength(1);
     expect(prepared.at(-1)).toBe(fresh.url);
@@ -610,7 +610,7 @@ describe('DownloadCoordinator', () => {
 
     await expect(polling).resolves.toBeUndefined();
     expect(prepared).toEqual([entry.url]);
-    expect(queue.entryUrl(download, entry)).toBeNull();
+    expect(queue.er(download, entry)).toBeNull();
   });
 
   it('drops a late renewal after the exact durable entry is cancelled', async () => {
@@ -1247,7 +1247,7 @@ describe('DownloadCoordinator', () => {
     expect(resolves).toBe(2);
     const shown = queue.sourcesForTitle(title, true);
     const renewed = queue.renew(download);
-    const hedge = queue.renewEntryUrl(hedged, entry);
+    const hedge = queue.ru(hedged, entry);
 
     releaseFresh();
     await expect(shown).resolves.toMatchObject({ sources: [refreshedFirst, refreshedSecond] });
