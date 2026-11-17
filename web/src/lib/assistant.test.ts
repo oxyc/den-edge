@@ -341,6 +341,55 @@ test('a stalled apply is cancelled at its delivery deadline and remains unacknow
   vi.useRealTimers();
 });
 
+test('retirement after an applied result fences its announcement and ACK', async () => {
+  const stop = new AbortController();
+  const applied = vi.fn();
+  const calls: string[] = [];
+  let publishing!: AbortSignal;
+  const running = drainWhileOpen(
+    {
+      libraryId: 'retired-after-result',
+      apply: async () => ({
+        results: [
+          {
+            seq: 18,
+            outcome: 'accepted',
+            op: 'seen_set',
+            title: { type: 'movie', id: 603 },
+            detail: 'marked %s as seen',
+          },
+        ],
+        ack: 18,
+        dropbox: DROPBOX,
+      }),
+      applied,
+      fetchImpl: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        calls.push(path);
+        if (path === '/assistant/drain')
+          return Response.json({ messages: [{ seq: 18, sealed: 'private-request' }] });
+        if (path === '/assistant/dropbox') {
+          publishing = init?.signal as AbortSignal;
+          await new Promise<void>((_resolve, reject) =>
+            publishing.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            ),
+          );
+        }
+        throw new Error(`unexpected request: ${path}`);
+      }) as unknown as typeof fetch,
+    },
+    stop.signal,
+  );
+  await vi.waitFor(() => expect(publishing).toBeInstanceOf(AbortSignal));
+  stop.abort();
+  await running;
+
+  expect(publishing.aborted).toBe(true);
+  expect(applied).not.toHaveBeenCalled();
+  expect(calls).toEqual(['/assistant/drain', '/assistant/dropbox']);
+});
+
 test('playback receipts share the queue transport but use their own one-shot routes', async () => {
   const calls: Array<{ path: string; body?: unknown }> = [];
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
