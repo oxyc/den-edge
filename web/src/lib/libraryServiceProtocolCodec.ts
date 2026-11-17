@@ -2106,7 +2106,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       optional(candidate.cached, bool) &&
       optional(
         candidate.seeders,
-        (item): item is number => integer(item) && item >= 0 && item <= 1_000_000,
+        (item): item is number => integer(item) && item >= 0 && item < 1_000_001,
       ) &&
       optional(candidate.packSizeBytes, (item): item is number => integer(item) && item > 0) &&
       list(candidate.badges, (item): item is string => boundedText(item, 256), 32) &&

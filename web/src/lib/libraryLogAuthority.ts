@@ -237,14 +237,8 @@ const publicRelease = (
 const providerText = (value: unknown, max: number): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value.slice(0, max) : undefined;
 
-const providerInteger = (
-  value: unknown,
-  positive = false,
-  maximum = Number.MAX_SAFE_INTEGER,
-): number | undefined =>
-  Number.isSafeInteger(value) &&
-  (value as number) >= (positive ? 1 : 0) &&
-  (value as number) <= maximum
+const providerInteger = (value: unknown, positive = false): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) >= (positive ? 1 : 0)
     ? (value as number)
     : undefined;
 
@@ -267,7 +261,7 @@ const providerSource = (value: unknown): DownloadSourceOption | null => {
   if (!identity || !filename) return null;
   const label = providerText(source.label, 4_096) ?? filename;
   const sizeBytes = providerInteger(source.size, true);
-  const seeders = providerInteger(source.seeders, false, 1_000_000);
+  const seeders = providerInteger(source.seeders);
   const packSizeBytes = providerInteger(source.packSize, true);
   return {
     identity,
@@ -275,7 +269,7 @@ const providerSource = (value: unknown): DownloadSourceOption | null => {
     filename,
     ...(sizeBytes !== undefined ? { sizeBytes } : {}),
     ...(typeof source.cached === 'boolean' ? { cached: source.cached } : {}),
-    ...(seeders !== undefined ? { seeders } : {}),
+    ...(seeders !== undefined && seeders < 1_000_001 ? { seeders } : {}),
     ...(packSizeBytes !== undefined ? { packSizeBytes } : {}),
     badges: providerStrings(source.badges, 32, 256),
     languages: providerStrings(source.languages, 64, 64),

@@ -102,7 +102,7 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         url,
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
-        seeders: boundedInteger(a.seeders, 0, 1_000_000),
+        seeders: boundedInteger(a.seeders, 0, 1_000_001),
         size: boundedInteger(a.sizeBytes, 1),
         packSize: boundedInteger(a.packSizeBytes, 1),
         badges: [
@@ -123,12 +123,8 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
   });
 }
 
-const boundedInteger = (
-  value: unknown,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER,
-): number | undefined =>
-  Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum
+const boundedInteger = (value: unknown, minimum: number, maximum = Infinity): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) < maximum
     ? (value as number)
     : undefined;
 
