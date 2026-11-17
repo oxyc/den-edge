@@ -7,7 +7,10 @@ const film = (id: number): Title => ({ type: 'movie', id, title: `Film ${id}` })
 const pageOf = (start: number, size = 20) =>
   Array.from({ length: size }, (_, i) => film(start + i));
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('Pager', () => {
   it.each([
@@ -134,6 +137,7 @@ describe('Pager', () => {
 
   it('reports an offline device without inspecting an arbitrary exception', async () => {
     vi.stubGlobal('navigator', { onLine: false });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const pager = new Pager(
       async () => {
         throw new Error('credential-bearing provider detail');
@@ -142,6 +146,8 @@ describe('Pager', () => {
     );
     await pager.more();
     expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'offline' });
+    expect(warning.mock.calls).toEqual([['pager: page failed', 1, 1, 'offline']]);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('credential');
   });
 
   it('says a page failed, and carries on from it when asked to try again', async () => {
