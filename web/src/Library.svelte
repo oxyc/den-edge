@@ -2117,10 +2117,7 @@
         })
       : [];
   };
-  function catalogueRows(
-    serviceNames: Record<number, string> = {},
-    providerRowsReady = route.page !== 'library',
-  ) {
+  function catalogueRows() {
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
     const filter = atlas
@@ -2165,7 +2162,13 @@
       atlas: filter,
     });
     const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
-    const pooled = radar(undefined, serviceNames, providerRowsReady);
+    const pooled = radar(
+      undefined,
+      directoryState.names,
+      session.kid ||
+        (atlasReady && (!atlas || !servicePicks.length)) ||
+        (atlasReady && !!atlas && (directoryServices === null || directoryState.pending === 0)),
+    );
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
     const spine =
       arrivals && homeServices
@@ -2186,7 +2189,6 @@
       homeTaste,
     );
   }
-  const rows = $derived(catalogueRows());
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
@@ -2196,7 +2198,7 @@
   );
   /** Provider directories stay behind Home's visible rail, including the optional module itself. */
   let directoryServices = $state.raw<
-    typeof import('./settings/services') | null | false | undefined
+    Pick<typeof import('./settings/services'), 'watchServiceDirectories'> | null | false | undefined
   >(false);
   let directoryState = $state.raw<ServiceDirectorySession<ResolvedService>>({
     retrying: false,
@@ -2210,7 +2212,11 @@
     if (directoryServices !== false) return;
     directoryServices = undefined;
     try {
-      directoryServices = await optionalImport(import('./settings/services'));
+      directoryServices = await optionalImport(
+        import('./settings/services').then(({ watchServiceDirectories }) => ({
+          watchServiceDirectories,
+        })),
+      );
     } catch {
       directoryServices = null;
     }
@@ -2230,14 +2236,7 @@
     retryDirectories = controller.retry;
     return controller.cancel;
   });
-  const homeCatalogueRows = $derived(
-    catalogueRows(
-      directoryState.names,
-      session.kid ||
-        (atlasReady && (!atlas || !servicePicks.length)) ||
-        (atlasReady && !!atlas && (directoryServices === null || directoryState.pending === 0)),
-    ),
-  );
+  const rows = $derived(catalogueRows());
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
   // Atlas row ids join it below only when their provider captions are final.
   let homeBrowseReady = $state(false);
@@ -3300,7 +3299,7 @@
     {#if !facet}
       {#if homeMetadataReady && HomeCatalogue}
         <HomeCatalogue
-          rows={homeCatalogueRows}
+          {rows}
           shown={browseShown}
           browseReady={homeBrowseReady}
           browseIdentity="home"

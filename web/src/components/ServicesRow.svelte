@@ -49,11 +49,10 @@
   $effect(() => {
     const state = recovery;
     if (!restoreRetryFocus || state === 'retrying') return;
-    const frame = requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
       (state === 'failed' ? retryButton : section?.querySelector<HTMLElement>('.tile'))?.focus();
       restoreRetryFocus = false;
     });
-    return () => cancelAnimationFrame(frame);
   });
 
   $effect(() => {
@@ -103,26 +102,26 @@
               ><span class="plate"></span><span>&nbsp;</span></span
             >
           {/each}
-        {:else if empty}
-          <span class="hold empty"
-            ><span class="plate" aria-hidden="true">—</span><span role="status"
-              >{i18n.phrase(empty)}</span
-            ></span
-          >
         {/if}
       {/each}
-      {#if recovery}
+      {#if recovery || (!services.length && empty)}
         <span class="hold empty">
-          <button
-            class="plate retry"
-            type="button"
-            aria-label={i18n.phrase('Try again')}
-            aria-disabled={recovery === 'retrying'}
-            bind:this={retryButton}
-            onclick={retry}>↻</button
-          >
+          {#if recovery}
+            <button
+              class="plate retry"
+              type="button"
+              aria-label={i18n.phrase('Try again')}
+              aria-disabled={recovery === 'retrying'}
+              bind:this={retryButton}
+              onclick={retry}>↻</button
+            >
+          {:else}
+            <span class="plate" aria-hidden="true">—</span>
+          {/if}
           <span role="status"
-            >{i18n.phrase(recovery === 'retrying' ? 'Trying again…' : 'Services unavailable')}</span
+            >{i18n.phrase(
+              recovery === 'retrying' ? 'Trying again…' : (empty ?? 'Services unavailable'),
+            )}</span
           >
         </span>
       {/if}
@@ -205,8 +204,6 @@
     box-sizing: content-box;
     padding: 0;
     color: inherit;
-    font: inherit;
-    font-size: 28px;
   }
 
   .retry:focus-visible {

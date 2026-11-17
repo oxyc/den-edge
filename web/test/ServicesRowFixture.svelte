@@ -118,7 +118,10 @@
   }
 
   let directoryServices = $state.raw<
-    typeof import('../src/settings/services') | null | false | undefined
+    | Pick<typeof import('../src/settings/services'), 'watchServiceDirectories'>
+    | null
+    | false
+    | undefined
   >(false);
   let directoryState = $state.raw<ServiceDirectorySession<{ pick: ServicePick; service: Service }>>(
     {
@@ -134,7 +137,11 @@
     if (directoryServices !== false) return;
     directoryServices = undefined;
     try {
-      directoryServices = await optionalImport(import('../src/settings/services'));
+      directoryServices = await optionalImport(
+        import('../src/settings/services').then(({ watchServiceDirectories }) => ({
+          watchServiceDirectories,
+        })),
+      );
     } catch {
       directoryServices = null;
     }

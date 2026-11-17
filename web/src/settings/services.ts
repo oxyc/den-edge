@@ -97,7 +97,7 @@ export function watchServiceDirectories<T extends { service: Service }>(
   const countries = [...new Set(picks.map((pick) => pick.country))];
   let live = true;
   let retrying = false;
-  let results: Record<string, ServiceDirectoryResult> = {};
+  const results: Record<string, ServiceDirectoryResult> = {};
   const publish = () => {
     const services = countries.flatMap((country) =>
       resolve(picks, results[country]?.services ?? [], country),
@@ -122,12 +122,9 @@ export function watchServiceDirectories<T extends { service: Service }>(
       result = { services: previous, complete: false };
     }
     if (!live) return;
-    results = {
-      ...results,
-      [country]: result.complete
-        ? result
-        : { services: mergeServices(previous, result.services), complete: false },
-    };
+    results[country] = result.complete
+      ? result
+      : { services: mergeServices(previous, result.services), complete: false };
     publish();
   };
   publish();
