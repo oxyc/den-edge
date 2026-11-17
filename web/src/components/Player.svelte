@@ -4444,19 +4444,8 @@
     playerRoot?.querySelector<HTMLElement>('button.web-more')?.focus();
   }
 
-  function displayedSubtitleTracks(tracks: NonNullable<Session['subtitles']>) {
-    const visible = visibleSubtitleTracks(tracks, shownSubtitleLanguages);
-    if (maxSubtitlesPerLanguage <= 0) return visible;
-    const counts: Record<string, number> = {};
-    return visible.filter((track) => {
-      if (track.source !== 'opensubtitles') return true;
-      const language = track.language.toLowerCase().split('-')[0] ?? track.language;
-      const count = counts[language] ?? 0;
-      if (count >= maxSubtitlesPerLanguage) return false;
-      counts[language] = count + 1;
-      return true;
-    });
-  }
+  const displayedSubtitleTracks = (tracks: NonNullable<Session['subtitles']>) =>
+    visibleSubtitleTracks(tracks, shownSubtitleLanguages, subtitleChoice, maxSubtitlesPerLanguage);
 
   /**
    * Whether a subtitle here has to come in the HLS playlist itself. Where WebKit plays HLS itself (an iPhone, Safari)
