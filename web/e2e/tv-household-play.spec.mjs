@@ -93,6 +93,15 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
 
   const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   try {
+    await context.addInitScript(() => {
+      const setItem = Storage.prototype.setItem;
+      globalThis.__denRefusePlayKeyStorage = true;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === 'den.tvPlayKey.v1' && globalThis.__denRefusePlayKeyStorage)
+          throw new DOMException('fixture refuses play-key storage', 'SecurityError');
+        return setItem.call(this, key, value);
+      };
+    });
     const queues = new Map();
     const drains = [];
     // The linked profile opens production Workers. Own their requests at the context boundary as well as the page,
@@ -154,9 +163,19 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     await tv.getByLabel('Owner PIN').fill('1234');
     await expect(tv.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible();
 
-    // The TV makes its play key when it checks in, for the household library whose device list publishes it. The
-    // Owner profile's own library has another key: a play key made for that would replace the published one as soon
-    // as the Owner profile opened, and a play sent to the first would never be drained (inbox-v1 §5).
+    // The TV makes its play key when it checks in, for the household library whose device list publishes it. Site
+    // storage refuses that first key, but the receiver must already drain it rather than none or a prior household's.
+    await expect.poll(() => drains.length, { timeout: 30_000 }).toBeGreaterThan(0);
+    expect(await tv.evaluate(() => localStorage.getItem('den.tvPlayKey.v1'))).toBeNull();
+    const beforeRecovery = drains.map(([key]) => key);
+
+    // Recover storage and retrigger check-in by renaming the device. Persistence retries without rotation: the key
+    // now stored is the exact authority every drain already named, and the Owner profile's own library cannot replace
+    // the household key (inbox-v1 §5).
+    await tv.evaluate(() => (globalThis.__denRefusePlayKeyStorage = false));
+    await tv.goto(`${E2E_ORIGIN}/settings`);
+    await tv.getByRole('button', { name: /Linked devices/ }).click();
+    await tv.getByRole('textbox', { name: 'Name of this device' }).fill('Living room LG recovered');
     const stored = () =>
       tv.evaluate(() => ({
         made: JSON.parse(localStorage.getItem('den.tvPlayKey.v1') ?? 'null'),
@@ -170,6 +189,9 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
       createHash('sha256').update(household).digest().subarray(0, 16).toString('hex'),
     );
     const playKey = made.key;
+    const retainedInbox = seal(playKey, { type: 'fixture' }).inbox;
+    expect(beforeRecovery.every((key) => key === retainedInbox)).toBe(true);
+    await tv.goto(E2E_ORIGIN);
 
     const play = (id, sentAt) =>
       seal(playKey, { type: 'play', tmdbId: id, mediaType: 'movie', title: `Movie ${id}` }, sentAt);
