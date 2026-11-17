@@ -197,13 +197,18 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
     // one tab publishes at a time under a lock of its own (`publishWhileOpen`). It runs beside the operations here,
     // never ahead of them: a build and its upload take seconds on a phone, and a tap waiting behind them would too.
     if (task.kind === 'assistant.publish') return this.authority.task(task, operationId, signal);
-    return this.#serialized(() =>
-      this.runExclusive(`den.library.operations.${this.log.libraryId}`, () =>
-        this.#perform('task', operationId, task, () =>
+    return this.#serialized(() => {
+      signal?.throwIfAborted();
+      return this.runExclusive(`den.library.operations.${this.log.libraryId}`, () => {
+        // Cancellation can happen while this task waits behind an operation or another service instance's lock. Do
+        // not create a durable intent after its caller retired; once admitted, #perform and the authority preserve
+        // the receipt/effect ordering and finish any effect that already began.
+        signal?.throwIfAborted();
+        return this.#perform('task', operationId, task, () =>
           this.authority.task(task, operationId, signal),
-        ),
-      ),
-    );
+        );
+      });
+    });
   }
 
   async close(): Promise<void> {
