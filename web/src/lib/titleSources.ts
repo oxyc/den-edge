@@ -80,50 +80,51 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
   const streams = (body as { streams?: unknown } | null)?.streams;
   if (!Array.isArray(streams)) return null;
   const seen = new Set<string>();
-  return streams.flatMap((s): TitleSource[] => {
-    if (!s || typeof s.url !== 'string') return [];
+  const sources: TitleSource[] = [];
+  for (const s of streams) {
+    if (!s || typeof s.url !== 'string') continue;
     const url = scoutTicket(s.url, addon, routes);
     const filename = s.behaviorHints?.filename ?? s.title;
-    if (!url || typeof filename !== 'string' || !filename || seen.has(filename)) return [];
+    if (!url || typeof filename !== 'string' || !filename || seen.has(filename)) continue;
     seen.add(filename);
     const a = s.attributes && typeof s.attributes === 'object' ? s.attributes : {};
-    return [
-      {
-        filename,
-        bingeGroup:
-          typeof s.behaviorHints?.bingeGroup === 'string' && s.behaviorHints.bingeGroup
-            ? s.behaviorHints.bingeGroup
-            : undefined,
-        url,
-        label: typeof a.label === 'string' && a.label ? a.label : filename,
-        cached: typeof a.cached === 'boolean' ? a.cached : undefined,
-        seeders: boundedInteger(a.seeders, 0, 1_000_001),
-        size: boundedInteger(a.sizeBytes, 1),
-        packSize: boundedInteger(a.packSizeBytes, 1),
-        badges: [
-          a.resolution === '2160p' ? '4K' : a.resolution,
-          a.dolbyVision ? 'Dolby Vision' : '',
-          a.hdrFormat || (a.hdr ? 'HDR' : ''),
-          sourceBadge(a.source),
-          a.audio,
-          a.hardcodedSubs ? 'Hardcoded subtitles' : '',
-          a.threeD ? '3D' : '',
-        ].filter((s): s is string => typeof s === 'string' && s.length > 0),
-        languages: Array.isArray(a.audioLanguages)
-          ? a.audioLanguages.filter((s: unknown): s is string => typeof s === 'string')
-          : [],
-        probed: a.probed === true,
-        identity: releaseIdentity(s.url, s.behaviorHints?.filename),
-        attributes: a,
-      },
-    ];
-  });
+    sources.push({
+      filename,
+      bingeGroup:
+        typeof s.behaviorHints?.bingeGroup === 'string' && s.behaviorHints.bingeGroup
+          ? s.behaviorHints.bingeGroup
+          : undefined,
+      url,
+      label: typeof a.label === 'string' && a.label ? a.label : filename,
+      cached: typeof a.cached === 'boolean' ? a.cached : undefined,
+      seeders:
+        Number.isSafeInteger(a.seeders) && a.seeders >= 0 && a.seeders <= 1_000_000
+          ? a.seeders
+          : undefined,
+      size: positiveInteger(a.sizeBytes),
+      packSize: positiveInteger(a.packSizeBytes),
+      badges: [
+        a.resolution === '2160p' ? '4K' : a.resolution,
+        a.dolbyVision ? 'Dolby Vision' : '',
+        a.hdrFormat || (a.hdr ? 'HDR' : ''),
+        sourceBadge(a.source),
+        a.audio,
+        a.hardcodedSubs ? 'Hardcoded subtitles' : '',
+        a.threeD ? '3D' : '',
+      ].filter((s): s is string => typeof s === 'string' && s.length > 0),
+      languages: Array.isArray(a.audioLanguages)
+        ? a.audioLanguages.filter((s: unknown): s is string => typeof s === 'string')
+        : [],
+      probed: a.probed === true,
+      identity: releaseIdentity(s.url, s.behaviorHints?.filename),
+      attributes: a,
+    });
+  }
+  return sources;
 }
 
-const boundedInteger = (value: unknown, minimum: number, maximum = Infinity): number | undefined =>
-  Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) < maximum
-    ? (value as number)
-    : undefined;
+const positiveInteger = (value: unknown): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
 
 export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 
