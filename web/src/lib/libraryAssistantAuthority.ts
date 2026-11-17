@@ -101,7 +101,6 @@ const EMPTY: AssistantRecords = {
 
 const abortable = <T>(work: Promise<T>, signal?: AbortSignal): Promise<T> => {
   if (!signal) return work;
-  signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
@@ -363,18 +362,30 @@ export class LibraryAssistantAuthority {
    */
   async lend(signal?: AbortSignal): Promise<AssistantConnection | null> {
     if (__DEN_TV_LEGACY_JS_CORE__) return null;
-    await abortable(this.port.refresh(), signal);
-    if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
-      await abortable(this.grants(), signal);
-    const member = await abortable(this.port.membership(), signal);
-    if (!member) return null;
-    const rows = CONNECTION_ROWS.flatMap((name) => {
-      const row = this.#row(name);
-      return row
-        ? [{ kind: row.kind, schema: row.schema, name: row.name, values: row.values }]
-        : [];
-    });
-    return { member, rows, revoked: (await abortable(this.#load(), signal)).revoked };
+    signal?.throwIfAborted();
+    return abortable(
+      (async () => {
+        await this.port.refresh();
+        signal?.throwIfAborted();
+        if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length)) {
+          await this.grants();
+          signal?.throwIfAborted();
+        }
+        const member = await this.port.membership();
+        signal?.throwIfAborted();
+        if (!member) return null;
+        const rows = CONNECTION_ROWS.flatMap((name) => {
+          const row = this.#row(name);
+          return row
+            ? [{ kind: row.kind, schema: row.schema, name: row.name, values: row.values }]
+            : [];
+        });
+        const revoked = (await this.#load()).revoked;
+        signal?.throwIfAborted();
+        return { member, rows, revoked };
+      })(),
+      signal,
+    );
   }
 
   async #load(strict = false): Promise<AssistantRecords> {
@@ -382,7 +393,7 @@ export class LibraryAssistantAuthority {
       return readRecords(await this.port.loadRecords());
     } catch (error) {
       if (strict) throw error;
-      console.warn('den: assistant records read failed', error);
+      console.warn('den: assistant records read', error);
       return { ...EMPTY };
     }
   }
@@ -411,7 +422,7 @@ export class LibraryAssistantAuthority {
       // Losing a record weakens this device against an older row; it is said, never silent.
       if (!readBack)
         await this.port.saveRecords(next).catch((error: unknown) => {
-          console.error('den: assistant records save failed', error);
+          console.error('den: assistant records save', error);
         });
       else {
         await this.port.saveRecords(next);
@@ -971,7 +982,7 @@ export class LibraryAssistantAuthority {
           )),
         );
       } catch (error) {
-        console.warn('den: assistant request apply failed', error);
+        console.warn('den: assistant request apply', error);
         // Nothing of it was kept, so this device must not refuse it as applied when it comes again.
         records = await this.#remember({ prune: [accept.setting] });
         // Neither it nor any request not reached yet is acknowledged: they are delivered again.
@@ -1087,7 +1098,7 @@ export class LibraryAssistantAuthority {
         applied += 1;
         ack = message.seq;
       } catch (error) {
-        console.warn('den: assistant receipt apply failed', error);
+        console.warn('den: assistant receipt apply', error);
         break;
       }
     }
@@ -1171,7 +1182,7 @@ export class LibraryAssistantAuthority {
     try {
       await this.port.replace({ ...row, values });
     } catch (error) {
-      console.warn('den: assistant prune failed', error);
+      console.warn('den: assistant prune', error);
     }
   }
 }

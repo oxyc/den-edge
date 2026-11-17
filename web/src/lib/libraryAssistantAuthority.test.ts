@@ -678,6 +678,27 @@ test('an aborted held split-household connection lookup releases without inherit
   release();
 });
 
+test('an aborted held split-household membership lookup releases before that lookup settles', async () => {
+  const shared = library();
+  let release!: () => void;
+  let hold = true;
+  const made = device(shared, [], {
+    membership: async () => {
+      if (hold) await new Promise<void>((resolve) => (release = resolve));
+      return { libraryId: fixed.library, memberToken: 'a'.repeat(64) };
+    },
+  });
+  const lifecycle = new AbortController();
+  const stalled = made.authority.lend(lifecycle.signal);
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+  lifecycle.abort();
+  await expect(stalled).rejects.toMatchObject({ name: 'AbortError' });
+  hold = false;
+  await expect(made.authority.lend()).resolves.toMatchObject({ member: expect.any(Object) });
+  release();
+});
+
 test('an aborted held projection DELETE is not remembered and remains idempotently retryable', async () => {
   const shared = library();
   let settle!: (value: boolean) => void;
