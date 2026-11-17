@@ -589,8 +589,34 @@ test('recent searches follow the exact profile and Visitor visit while Owner rec
   await expect(page.getByRole('button', { name: 'Kid B search', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Visitor search', exact: true })).toHaveCount(0);
   await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(localStorage)
+          .filter((key) => key.startsWith('den.search.v2:'))
+          .map((key) => localStorage.getItem(key)),
+      ),
+    )
+    .toContain(JSON.stringify(['Owner durable search']));
+  await expect
     .poll(() => page.evaluate(() => localStorage.getItem('den.recentSearches')))
-    .toBe(JSON.stringify(['Owner durable search']));
+    .toBeNull();
+
+  await page.goto(`${FIXTURE}?pin=1234&twoKids&recentSearches&household=replacement`);
+  await expect(page.locator('#recent-searches')).toHaveCount(0);
+  await remember('Replacement Owner search');
+  await expectOnlyRecent('Replacement Owner search');
+  await expect(page.getByRole('button', { name: 'Owner durable search', exact: true })).toHaveCount(
+    0,
+  );
+
+  await page.goto(`${FIXTURE}?pin=1234&twoKids&recentSearches`);
+  await expectOnlyRecent('Owner durable search');
+  await expect(
+    page.getByRole('button', { name: 'Replacement Owner search', exact: true }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('den.recentSearches')))
+    .toBeNull();
 });
 
 test('preview Kid and Visitor Settings are personal while household administration stays unreachable', async ({

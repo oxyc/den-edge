@@ -32,6 +32,7 @@
   } from '../src/lib/visitorProfileSession.svelte';
 
   const params = new URLSearchParams(location.search);
+  const fixtureHouseholdKey = params.get('household') ?? 'fixture-household';
   const configured = params.get('pin') !== 'none';
   const connectionsMode = params.get('connections');
   const connectionFailures = Number(
@@ -240,7 +241,7 @@
     close: () => {},
   } as unknown as LibraryModel;
   const household = new HouseholdSession(
-    { kind: 'legacy', libraryKey: 'fixture-household', configurationOnly: false },
+    { kind: 'legacy', libraryKey: fixtureHouseholdKey, configurationOnly: false },
     model,
     {
       query: async (request) =>
@@ -253,7 +254,7 @@
     },
   );
   const owner = new ProfileSession(
-    legacyProfileIdentity('fixture-household', false),
+    legacyProfileIdentity(fixtureHouseholdKey, false),
     household,
     model,
     false,
@@ -515,7 +516,11 @@
   $effect(() => {
     const active = profiles?.session;
     if (active)
-      scopeRecentSearches(active.administersHousehold, profileSessionKey(active.identity));
+      scopeRecentSearches(
+        active.administersHousehold,
+        active.household.identity.libraryKey,
+        active.identity.id,
+      );
   });
 </script>
 

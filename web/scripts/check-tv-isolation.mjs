@@ -185,7 +185,15 @@ if (process.argv.includes('--capture')) {
   // its rows are a plain link or button because `<svelte:element>` pulled 1,640 bytes of runtime into the shared
   // startup chunk. Allow the next 128-byte boundary and the smallest five-decimal factor that reaches it, retaining
   // 127 bytes.
-  if (initialDelta > Math.min(10752, Math.floor(baseline.initialGzip * 0.05475)))
+  // Exact-household Owner recent searches (#1151) measure 10,762 bytes on live 0.271.251 versus 10,722 on its
+  // exact main (+40). The retained startup work is the synchronous authority boundary used by eagerly mounted Nav:
+  // delaying it behind an import can expose the previous household/profile before the chunk arrives, while moving
+  // only storage/cleanup async would make explicit writes and the eight-namespace bound race navigation/tab close.
+  // Search is already lazy but Nav owns the recent list on mount, so moving the module there cannot split startup.
+  // Compaction removed the storage registry, eager cleanup, a helper/current-key checks and redundant guard/string
+  // expressions. No request, poll, timer or launch cleanup was added; exact-key reads replace the global-key read,
+  // and the bounded app-owned key scan runs only on an explicit first write. Allow exactly +40 plus 30 bytes.
+  if (initialDelta > Math.min(10792, Math.floor((baseline.initialGzip * 10792) / 196396)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -420,5 +428,8 @@ if (process.argv.includes('--capture')) {
   // recovered 108 gzip bytes. Its exact-key bounded scan is post-foreground in a lazy chunk; moving it eager would
   // exceed startup's remaining 13-byte margin. Keep that cap unchanged and allow the second 128-byte boundary: the
   // first leaves only 8 bytes against measured variance, while this one retains 136 bytes before final compaction.
-  if (coreTotalDelta > 124032) throw new Error('Browser total JS/CSS budget exceeded');
+  // #1151 measures 124,095 bytes against exact live main's 123,999 (+96) after the same compactions. A separate
+  // lazy persistence chunk would retain this complete-graph code and add a request/chunk wrapper; Nav requires its
+  // synchronous read/write/event contract in the initial graph. Allow exactly +96 plus 30 bytes.
+  if (coreTotalDelta > 124125) throw new Error('Browser total JS/CSS budget exceeded');
 }

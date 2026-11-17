@@ -6,7 +6,7 @@ const MAX_HINTS = 16;
  * over 64 bits, synchronous so the library's first open is not held back for it; a household key is 32 random bytes,
  * so the 64 bits kept say nothing usable about it. Prefixed so it matches no other use of the same key.
  */
-function householdTag(libraryKey: string): string {
+export function householdTag(libraryKey: string): string {
   // FNV-1a's 64-bit offset basis, kept as two uint32 words so Chromium 47 does not need BigInt. Multiplication by
   // the prime 0x100000001b3 is `hash * 0x1b3 + hash * 2^40`; every intermediate below stays below 2^53.
   let high = 0xcbf29ce4;

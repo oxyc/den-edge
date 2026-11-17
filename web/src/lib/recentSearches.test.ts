@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearRecentSearches,
   forgetSearch,
@@ -8,84 +8,171 @@ import {
   scopeRecentSearches,
 } from './recentSearches';
 
-const storage = (initial: string | null = null): Storage => {
-  let value = initial;
+const storage = (initial: Record<string, string> = {}): Storage => {
+  const values = new Map(Object.entries(initial));
   return {
-    getItem: vi.fn(() => value),
-    setItem: vi.fn((_key, next) => (value = next)),
-    removeItem: vi.fn(() => (value = null)),
-    clear: vi.fn(),
-    key: vi.fn(() => null),
-    length: 0,
+    getItem: vi.fn((key) => values.get(key) ?? null),
+    setItem: vi.fn((key, next) => values.set(key, next)),
+    removeItem: vi.fn((key) => values.delete(key)),
+    clear: vi.fn(() => values.clear()),
+    key: vi.fn((index) => [...values.keys()][index] ?? null),
+    get length() {
+      return values.size;
+    },
   };
 };
 
 describe('recent searches', () => {
+  let testScope = 0;
+  beforeEach(() => scopeRecentSearches(true, 'test-household', `owner-${++testScope}`));
+  afterEach(() => vi.unstubAllGlobals());
+
   it('keeps explicit searches newest first, cleaned and case-insensitively deduplicated', () => {
     const kept = storage();
-    rememberSearch('  Studio   Ghibli ', kept);
-    rememberSearch('Swedish movies', kept);
-    expect(rememberSearch('studio ghibli', kept)).toEqual(['studio ghibli', 'Swedish movies']);
-    expect(readRecentSearches(kept)).toEqual(['studio ghibli', 'Swedish movies']);
+    vi.stubGlobal('localStorage', kept);
+    rememberSearch('  Studio   Ghibli ');
+    rememberSearch('Swedish movies');
+    expect(rememberSearch('studio ghibli')).toEqual(['studio ghibli', 'Swedish movies']);
+    expect(readRecentSearches()).toEqual(['studio ghibli', 'Swedish movies']);
   });
 
   it('keeps eight useful entries and can remove one or all', () => {
     const kept = storage();
-    for (let i = 0; i < 10; i++) rememberSearch(`Film ${i}`, kept);
-    expect(readRecentSearches(kept)).toHaveLength(8);
-    expect(forgetSearch('Film 8', kept)).not.toContain('Film 8');
-    expect(clearRecentSearches(kept)).toEqual([]);
+    vi.stubGlobal('localStorage', kept);
+    for (let i = 0; i < 10; i++) rememberSearch(`Film ${i}`);
+    expect(readRecentSearches()).toHaveLength(8);
+    expect(forgetSearch('Film 8')).not.toContain('Film 8');
+    expect(clearRecentSearches()).toEqual([]);
     expect(kept.removeItem).toHaveBeenCalled();
   });
 
   it('ignores short, malformed and inaccessible storage', () => {
-    const malformed = storage('{');
-    expect(readRecentSearches(malformed)).toEqual([]);
-    expect(rememberSearch('x', malformed)).toEqual([]);
-    expect(rememberSearch('x'.repeat(201), malformed)).toEqual([]);
+    const malformed = storage();
+    malformed.setItem = vi.fn();
+    malformed.getItem = vi.fn(() => '{');
+    vi.stubGlobal('localStorage', malformed);
+    expect(readRecentSearches()).toEqual([]);
+    expect(rememberSearch('x')).toEqual([]);
+    expect(rememberSearch('x'.repeat(201))).toEqual([]);
     const blocked = {
       getItem: () => {
         throw Error('blocked');
       },
     } as unknown as Storage;
-    expect(readRecentSearches(blocked)).toEqual([]);
-    expect(() => rememberSearch('Arrival', blocked)).not.toThrow();
+    vi.stubGlobal('localStorage', blocked);
+    expect(readRecentSearches()).toEqual([]);
+    expect(() => rememberSearch('Arrival')).not.toThrow();
   });
 
-  it('isolates each profile session while restoring the Owner saved list', () => {
-    const saved = storage(JSON.stringify(['Owner search']));
+  it('isolates exact household Owners and memory-only profile sessions', () => {
+    const saved = storage({ 'den.recentSearches': JSON.stringify(['Legacy search']) });
     vi.stubGlobal('localStorage', saved);
     try {
-      scopeRecentSearches(true, 'owner:owner:household');
-      expect(readRecentSearches()).toEqual(['Owner search']);
+      scopeRecentSearches(true, 'household-a-secret', 'owner-a');
+      expect(readRecentSearches()).toEqual([]);
+      rememberSearch('Owner A search');
+      expect(saved.removeItem).toHaveBeenCalledWith('den.recentSearches');
+      const ownerAKey = vi.mocked(saved.setItem).mock.calls.at(-1)?.[0];
+      expect(ownerAKey).toMatch(/^den\.search\.v2:/);
+      expect(ownerAKey).not.toContain('household-a-secret');
+      expect(ownerAKey).not.toContain('owner-a');
 
-      scopeRecentSearches(false, 'profile:kid-a:kid-a-library');
+      scopeRecentSearches(false, 'household-a-secret', 'kid-a');
       expect(readRecentSearches()).toEqual([]);
       expect(rememberSearch('Kid A cartoons')).toEqual(['Kid A cartoons']);
-      expect(saved.setItem).not.toHaveBeenCalled();
 
-      scopeRecentSearches(false, 'profile:kid-b:kid-b-library');
+      scopeRecentSearches(false, 'household-a-secret', 'kid-b');
       expect(readRecentSearches()).toEqual([]);
       expect(rememberSearch('Kid B cartoons')).toEqual(['Kid B cartoons']);
 
-      scopeRecentSearches(false, 'visitor:first-visit:');
+      scopeRecentSearches(false, 'household-a-secret', 'visitor-1');
       expect(readRecentSearches()).toEqual([]);
       expect(rememberSearch('Visitor search')).toEqual(['Visitor search']);
 
-      scopeRecentSearches(false, 'visitor:second-visit:');
+      scopeRecentSearches(false, 'household-a-secret', 'visitor-2');
       expect(readRecentSearches()).toEqual([]);
 
-      scopeRecentSearches(true, 'owner:owner:household');
-      expect(readRecentSearches()).toEqual(['Owner search']);
+      scopeRecentSearches(true, 'household-a-secret', 'replacement-owner');
+      expect(readRecentSearches()).toEqual([]);
+
+      scopeRecentSearches(true, 'household-b-secret', 'owner-b');
+      expect(readRecentSearches()).toEqual([]);
+      rememberSearch('Owner B search');
+      expect(forgetSearch('Owner A search')).toEqual(['Owner B search']);
+      expect(clearRecentSearches()).toEqual([]);
+
+      scopeRecentSearches(true, 'household-a-secret', 'owner-a');
+      expect(readRecentSearches()).toEqual(['Owner A search']);
     } finally {
-      scopeRecentSearches(true, 'test:owner');
       vi.unstubAllGlobals();
     }
   });
 
-  it('follows this key and whole-storage clears from another tab', () => {
-    expect(isRecentSearchStorageEvent({ key: 'den.recentSearches' } as StorageEvent)).toBe(true);
+  it('follows only the active authority key and whole-storage clears from another tab', () => {
+    const kept = storage();
+    vi.stubGlobal('localStorage', kept);
+    scopeRecentSearches(true, 'household-a', 'owner-a');
+    rememberSearch('Arrival');
+    const activeKey = vi
+      .mocked(kept.setItem)
+      .mock.calls.find(([key]) => key.startsWith('den.search.v2:'))?.[0];
+    expect(isRecentSearchStorageEvent({ key: activeKey } as StorageEvent)).toBe(true);
     expect(isRecentSearchStorageEvent({ key: null } as StorageEvent)).toBe(true);
+    scopeRecentSearches(true, 'household-b', 'owner-b');
+    expect(isRecentSearchStorageEvent({ key: activeKey } as StorageEvent)).toBe(false);
+    expect(isRecentSearchStorageEvent({ key: 'den.recentSearches' } as StorageEvent)).toBe(false);
     expect(isRecentSearchStorageEvent({ key: 'something.else' } as StorageEvent)).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it('does not create retained state merely by opening an Owner scope', () => {
+    const kept = storage();
+    vi.stubGlobal('localStorage', kept);
+    scopeRecentSearches(true, 'unsearched-household', 'owner');
+    expect(kept.setItem).not.toHaveBeenCalled();
+    expect(kept.removeItem).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('bounds retained opaque Owner namespaces', () => {
+    const kept = storage();
+    vi.stubGlobal('localStorage', kept);
+    scopeRecentSearches(true, 'household-0-secret', 'owner-0');
+    rememberSearch('First household search');
+    const firstKey = vi
+      .mocked(kept.setItem)
+      .mock.calls.find(([key]) => key.startsWith('den.search.v2:'))?.[0];
+    expect(firstKey).toBeDefined();
+
+    for (let index = 1; index <= 8; index++) {
+      scopeRecentSearches(true, `household-${index}-secret`, `owner-${index}`);
+      rememberSearch(`Household ${index} search`);
+    }
+
+    expect(kept.getItem(firstKey!)).toBeNull();
+    const scopes = Array.from({ length: kept.length }, (_, index) => kept.key(index)).filter(
+      (key) => key?.startsWith('den.search.v2:'),
+    );
+    expect(scopes).toHaveLength(8);
+    expect(scopes.join()).not.toContain('household-');
+    expect(scopes.join()).not.toContain('owner-');
+
+    // A still-open tab can write after another tab evicted its namespace. The explicit write must reclaim a bounded
+    // registry slot instead of leaving untracked plaintext behind.
+    const activeKey = vi
+      .mocked(kept.setItem)
+      .mock.calls.filter(([key]) => key.startsWith('den.search.v2:'))
+      .at(-1)?.[0];
+    for (let index = 0; index < 8; index++)
+      kept.setItem(`den.search.v2:${index.toString(16).padStart(16, '0')}`, '[]');
+    kept.removeItem(activeKey!);
+    rememberSearch('Still active tab search');
+    expect(kept.getItem(activeKey!)).toBe(JSON.stringify(['Still active tab search']));
+    expect(
+      Array.from({ length: kept.length }, (_, index) => kept.key(index)).filter((key) =>
+        key?.startsWith('den.search.v2:'),
+      ),
+    ).toHaveLength(8);
+    vi.unstubAllGlobals();
   });
 });

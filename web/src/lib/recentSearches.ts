@@ -1,43 +1,56 @@
-const STORAGE_KEY = 'den.recentSearches';
+import { householdTag } from './profileHouseholdHint';
+
+const LEGACY_STORAGE_KEY = 'den.recentSearches';
+const STORAGE_PREFIX = 'den.search.v2:';
 const LIMIT = 8;
 const MAX_QUERY_LENGTH = 200;
 let memory: string[] = [];
-// The saved list belongs to the household's own browsing. Any other profile keeps its searches in memory for the
-// session, so neither can read, extend or clear the other's after a switch.
-let persisted = true;
+// A saved list belongs to one exact household Owner. Any other profile keeps its searches in memory for the session,
+// so neither can read, extend or clear the other's after a switch.
 let activeScope: string | undefined;
+let activeStorageKey: string | undefined;
 
 export const RECENT_SEARCHES_CHANGED = 'den:recent-searches-changed';
 
 const clean = (value: string) => value.trim().replace(/\s+/g, ' ');
 const browserStorage = (): Storage | undefined => {
-  if (!persisted) return undefined;
   try {
-    return globalThis.localStorage;
+    if (activeStorageKey) return globalThis.localStorage;
   } catch {
-    return undefined;
+    // Storage can be blocked.
   }
 };
 
 /**
- * Choose whose searches the default storage serves: the saved list for the household, or a fresh in-memory list for
- * one profile session. The scope is the stable profile id, or the disposable visit id for Visitor. Changing either
- * identity or storage authority empties the in-memory list, so nothing typed under one profile is offered to the
- * next even when both use memory.
+ * Choose whose searches the default storage serves: an opaque, exact household-and-Owner namespace, or a fresh
+ * in-memory list for one profile session. Changing household, profile or storage authority empties the in-memory
+ * list, so nothing typed under one authority is offered to the next. The retired origin-global key is deleted but
+ * never adopted: its plaintext could belong to a different household. Opaque namespace cleanup keeps storage
+ * keeping up to eight household Owners available when this browser returns to them.
  */
-export function scopeRecentSearches(persist: boolean, scope: string): void {
-  if (persist === persisted && scope === activeScope) return;
-  persisted = persist;
+export function scopeRecentSearches(
+  persist: boolean,
+  householdKey: string | null,
+  profile: string,
+): void {
+  const storageKey =
+    persist && householdKey
+      ? STORAGE_PREFIX + householdTag(householdKey + '\0' + profile)
+      : undefined;
+  const scope = storageKey ?? householdKey + ':' + profile;
+  if (scope === activeScope) return;
   activeScope = scope;
+  activeStorageKey = storageKey;
   memory = [];
   changed(readRecentSearches());
 }
 
 /** This browser's recent explicit title searches, newest first. */
-export function readRecentSearches(storage: Storage | undefined = browserStorage()): string[] {
+export function readRecentSearches(): string[] {
+  const storage = browserStorage();
   if (!storage) return memory;
   try {
-    const parsed: unknown = JSON.parse(storage?.getItem(STORAGE_KEY) ?? '[]');
+    const parsed: unknown = JSON.parse(storage.getItem(activeStorageKey!) ?? '[]');
     if (!Array.isArray(parsed)) return [];
     const seen = new Set<string>();
     return parsed
@@ -56,15 +69,26 @@ export function readRecentSearches(storage: Storage | undefined = browserStorage
 }
 
 function changed(searches: string[]): void {
-  if (typeof globalThis.dispatchEvent !== 'function' || typeof CustomEvent === 'undefined') return;
-  globalThis.dispatchEvent(new CustomEvent(RECENT_SEARCHES_CHANGED, { detail: searches }));
+  if (typeof CustomEvent !== 'undefined')
+    globalThis.dispatchEvent?.(new CustomEvent(RECENT_SEARCHES_CHANGED, { detail: searches }));
 }
 
-function write(searches: string[], storage: Storage | undefined): string[] {
+function write(searches: string[]): string[] {
   memory = searches;
+  const storage = browserStorage();
   try {
-    if (searches.length) storage?.setItem(STORAGE_KEY, JSON.stringify(searches));
-    else storage?.removeItem(STORAGE_KEY);
+    if (storage) {
+      const key = activeStorageKey!;
+      storage.removeItem(LEGACY_STORAGE_KEY);
+      if (!storage.getItem(key))
+        for (let index = storage.length, kept = 1; index--;) {
+          const candidate = storage.key(index);
+          if (candidate?.startsWith(STORAGE_PREFIX) && kept++ >= LIMIT)
+            storage.removeItem(candidate);
+        }
+      if (searches.length) storage.setItem(key, JSON.stringify(searches));
+      else storage.removeItem(key);
+    }
   } catch {
     // The list still works for this visit when storage is blocked.
   }
@@ -73,37 +97,27 @@ function write(searches: string[], storage: Storage | undefined): string[] {
 }
 
 /** Keep an explicit search, deduplicated without changing the user's casing. */
-export function rememberSearch(
-  query: string,
-  storage: Storage | undefined = browserStorage(),
-): string[] {
+export function rememberSearch(query: string): string[] {
   const value = clean(query);
-  if (value.length < 2 || value.length > MAX_QUERY_LENGTH) return readRecentSearches(storage);
+  if (value.length < 2 || value.length > MAX_QUERY_LENGTH) return readRecentSearches();
   const key = value.toLocaleLowerCase();
   return write(
-    [
-      value,
-      ...readRecentSearches(storage).filter((recent) => recent.toLocaleLowerCase() !== key),
-    ].slice(0, LIMIT),
-    storage,
+    [value, ...readRecentSearches().filter((recent) => recent.toLocaleLowerCase() !== key)].slice(
+      0,
+      LIMIT,
+    ),
   );
 }
 
-export function forgetSearch(
-  query: string,
-  storage: Storage | undefined = browserStorage(),
-): string[] {
+export function forgetSearch(query: string): string[] {
   const key = clean(query).toLocaleLowerCase();
-  return write(
-    readRecentSearches(storage).filter((recent) => recent.toLocaleLowerCase() !== key),
-    storage,
-  );
+  return write(readRecentSearches().filter((recent) => recent.toLocaleLowerCase() !== key));
 }
 
-export function clearRecentSearches(storage: Storage | undefined = browserStorage()): string[] {
-  return write([], storage);
+export function clearRecentSearches(): string[] {
+  return write([]);
 }
 
 export function isRecentSearchStorageEvent(event: StorageEvent): boolean {
-  return event.key === STORAGE_KEY || event.key === null;
+  return event.key === activeStorageKey || event.key === null;
 }

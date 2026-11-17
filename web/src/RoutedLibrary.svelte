@@ -336,7 +336,9 @@
   );
   // The identity is required even for two memory-only profiles: Kid A -> Kid B and one Visitor visit -> the next
   // must rotate the list although household authority remains false throughout.
-  $effect.pre(() => scopeRecentSearches(householdAdmin, session.identity.id));
+  $effect.pre(() =>
+    scopeRecentSearches(householdAdmin, session.household.identity.libraryKey, session.identity.id),
+  );
   $effect.pre(() => onhouseholdadmin(householdAdmin));
   onDestroy(() => onhouseholdadmin(true));
 
