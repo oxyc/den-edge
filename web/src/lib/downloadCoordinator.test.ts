@@ -1485,6 +1485,7 @@ describe('DownloadCoordinator', () => {
       { now: () => T0, monotonicNow: () => 0 },
     );
     const driver = new DownloadCoordinatorDriver(queue);
+    driver.bindHearth({});
     await queue.want(title);
 
     await driver.run({ now: T0 + MINUTE, observedFor: 0 });
@@ -1517,6 +1518,7 @@ describe('DownloadCoordinator', () => {
       },
     });
     const driver = new DownloadCoordinatorDriver(queue);
+    driver.bindHearth({});
 
     await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
     expect(handed).toEqual([[]]);
@@ -1525,16 +1527,17 @@ describe('DownloadCoordinator', () => {
   });
 
   it('rebinds the same digest to a replacement Hearth and fences the old response', async () => {
-    const handed: Array<{ authority?: string; count: number }> = [];
+    const handed: number[] = [];
+    let calls = 0;
     let release!: () => void;
     let started!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const sending = new Promise<void>((resolve) => (started = resolve));
     const queue = new DownloadCoordinator(testLog().log, clock(), {
       ...effects(),
-      wanted: async (items, authority) => {
-        handed.push({ authority, count: items.length });
-        if (authority === 'hearth-a') {
+      wanted: async (items) => {
+        handed.push(items.length);
+        if (!calls++) {
           started();
           await gate;
         }
@@ -1542,20 +1545,17 @@ describe('DownloadCoordinator', () => {
       },
     });
     const driver = new DownloadCoordinatorDriver(queue);
-    driver.bindHearthAuthority('hearth-a');
+    driver.bindHearth({});
 
     const old = driver.run({ now: T0, observedFor: 120_001 });
     await sending;
-    driver.bindHearthAuthority('hearth-b');
+    driver.bindHearth({});
     release();
     await expect(old).resolves.toBe(false);
 
     await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
-    expect(handed).toEqual([
-      { authority: 'hearth-a', count: 0 },
-      { authority: 'hearth-b', count: 0 },
-    ]);
-    driver.bindHearthAuthority(null);
+    expect(handed).toEqual([0, 0]);
+    driver.bindHearth(null);
     await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
     expect(handed).toHaveLength(2);
   });
@@ -1586,6 +1586,7 @@ describe('DownloadCoordinator', () => {
       { now: () => T0, monotonicNow: () => 0 },
     );
     const driver = new DownloadCoordinatorDriver(queue);
+    driver.bindHearth({});
     await queue.want(title);
     await driver.run({ now: T0 + MINUTE, observedFor: 0 });
     shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));
@@ -1625,6 +1626,7 @@ describe('DownloadCoordinator', () => {
       { now: () => T0, monotonicNow: () => 0 },
     );
     const driver = new DownloadCoordinatorDriver(queue);
+    driver.bindHearth({});
     await queue.want(title);
     await driver.run({ now: T0 + MINUTE, observedFor: 0 });
     shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));

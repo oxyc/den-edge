@@ -81,14 +81,14 @@ export class DownloadCoordinatorDriver {
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
   /** Exact Hearth binding plus the last digest's acknowledgement (`retry: 0`) or retry schedule. */
-  #hearth: [id?: string | null, digest?: string, retry?: number, at?: number] = [];
+  #hearth: [id: object | null, digest?: string, retry?: number, at?: number] = [null];
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
   constructor(readonly queue: DownloadCoordinator) {}
 
   /** Rebind acknowledgement and retry state to the exact discovered Hearth instance. */
-  bindHearthAuthority(authority: string | null): void {
+  bindHearth(authority: object | null): void {
     if (this.#hearth[0] !== authority) this.#hearth = [authority];
   }
 
@@ -140,24 +140,15 @@ export class DownloadCoordinatorDriver {
     if (!current()) return false;
     // A final removal still has work to do: clear Hearth's previously acknowledged non-empty list. Once that clear
     // is acknowledged there is no reason to acquire an otherwise idle download lease.
-    const hearthOnly = !downloads.length;
+    const hearthOnly = !this.queue.list().length;
     const hearth = this.#hearth;
     if (
       hearthOnly &&
-      (!this.queue.effects.wanted ||
-        hearth[0] === null ||
-        (hearth[1] === '[]' && (!hearth[2] || now < hearth[3]!)))
+      (hearth[0] === null || (hearth[1] === '[]' && (!hearth[2] || now < hearth[3]!)))
     )
       return false;
     await ensureDeferredSyncPolicy();
-    if (!(await this.#holdLease(now, options.observedFor))) {
-      // Lease contention must not leave a due empty replacement at delay zero. It participates in the same single,
-      // bounded retry owner as a failed request and is bypassed immediately if the wanted digest changes.
-      if (hearthOnly && current())
-        this.#retryHearth(JSON.stringify(wantedItems(this.queue.list())), now);
-      return false;
-    }
-    if (!current()) return false;
+    if (!(await this.#holdLease(now, options.observedFor)) || !current()) return false;
     return this.#holderPass(now);
   }
 
@@ -438,20 +429,21 @@ export class DownloadCoordinatorDriver {
   async #syncHearth(now: number): Promise<boolean> {
     const send = this.queue.effects.wanted;
     const binding = this.#hearth;
-    const [authority, last, retry = 0, at = 0] = binding;
+    const [authority, last, retry, at] = binding;
     if (!send || authority === null) return false;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    if (last === digest && (retry ? now < at : !items.length || now - at < HEARTH_EVERY))
+    if (last === digest && (retry ? now < at! : !items.length || now - at! < HEARTH_EVERY))
       return false;
-    const statuses: WantedStatus[] | null = await send(items, authority).catch(() => null);
+    const statuses = await send(items).catch(() => null);
     // Discovery can rebind the same driver while the old authority's request is in flight. Its late response belongs
     // only to that old authority and must neither acknowledge nor delay the replacement's identical digest.
     if (this.#hearth !== binding) return false;
     // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. Keeping one
     // digest-scoped retry owner also means a changed (newer) intent bypasses the old intent's delay immediately.
     if (!statuses || !this.#active(now)) {
-      this.#retryHearth(digest, now);
+      const delay = last === digest && retry ? Math.min(HEARTH_EVERY, retry * 2) : 5_000;
+      this.#hearth = [authority, digest, delay, now + delay];
       return false;
     }
     this.#hearth = [authority, digest, 0, now];
@@ -465,12 +457,6 @@ export class DownloadCoordinatorDriver {
       wrote = (await this.#adopt(download, status, now)) || wrote;
     }
     return wrote;
-  }
-
-  #retryHearth(digest: string, now: number): void {
-    const [authority, previous, retry = 0] = this.#hearth;
-    const delay = previous === digest && retry ? Math.min(HEARTH_EVERY, retry * 2) : 5_000;
-    this.#hearth = [authority, digest, delay, now + delay];
   }
 
   /**
