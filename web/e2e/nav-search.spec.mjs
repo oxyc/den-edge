@@ -34,6 +34,7 @@ const input = (page) =>
 // The fixture is a file on the dev server, so its own path is where Home lives: the app reads the path, and
 // returning Home returns to the address the document was opened at.
 const FIXTURE = `${E2E_ORIGIN}/test/nav-search.html`;
+const RECENT_SEARCH_KEY = 'den.recentSearches.v2:46823038125e6ecf';
 const HOME = /\/test\/nav-search\.html$/;
 async function setup(page, { atlasGate, catalogueGate, searchGate, billboard } = {}) {
   await guardNetwork(page);
@@ -120,8 +121,9 @@ for (const width of [390, 1280])
         hasTouch: width < 760,
       });
       await setup(page);
-      await page.addInitScript(() =>
-        localStorage.setItem('den.recentSearches', JSON.stringify(['Arrival', 'Studio Ghibli'])),
+      await page.addInitScript(
+        (key) => localStorage.setItem(key, JSON.stringify(['Arrival', 'Studio Ghibli'])),
+        RECENT_SEARCH_KEY,
       );
       await page.goto(FIXTURE);
       // Do not wait for Router's route prop: an immediate choice must work as soon as focus draws the popup.
@@ -169,7 +171,7 @@ for (const width of [390, 1280])
       await expect(recent.getByRole('button', { name: 'Arrival', exact: true })).toHaveCount(0);
       await recent.getByRole('button', { name: 'Clear', exact: true }).click();
       await expect(recent).toHaveCount(0);
-      expect(await page.evaluate(() => localStorage.getItem('den.recentSearches'))).toBeNull();
+      expect(await page.evaluate((key) => localStorage.getItem(key), RECENT_SEARCH_KEY)).toBeNull();
     } finally {
       await browser.close();
     }
@@ -185,8 +187,9 @@ test('a recent search is reused and removed by touch on an iPhone', async () => 
       hasTouch: true,
     });
     await setup(page);
-    await page.addInitScript(() =>
-      localStorage.setItem('den.recentSearches', JSON.stringify(['Arrival', 'Studio Ghibli'])),
+    await page.addInitScript(
+      (key) => localStorage.setItem(key, JSON.stringify(['Arrival', 'Studio Ghibli'])),
+      RECENT_SEARCH_KEY,
     );
     await page.goto(FIXTURE);
     await page.getByRole('button', { name: 'Search', exact: true }).tap();
