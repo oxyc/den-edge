@@ -405,8 +405,8 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     }
     let outcome: ApplyOutcome;
     const delivery = new AbortController();
-    const retire = () => delivery.abort(signal.reason);
-    signal.addEventListener('abort', retire, { once: true });
+    const retire = () => delivery.abort();
+    signal.addEventListener('abort', retire);
     let expired = false;
     const deadline = setTimeout(() => {
       expired = true;
