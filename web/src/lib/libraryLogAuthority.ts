@@ -156,6 +156,9 @@ type Delivery = 'synced' | 'queued' | 'local';
 
 /** The Kid journal's operation id for the Kid a household gets out of the box: one per household on this device. */
 const DEFAULT_KID_OPERATION = 'default-kid';
+/** Bound projection requests so a lost response cannot retain the publisher Web Lock forever. */
+const PROJECTION_PUT_MS = 60_000; // The wire permits a projection near 17 MiB; matches the native publisher.
+const PROJECTION_DELETE_MS = 15_000;
 /**
  * Titles one naming batch looks up at once. Most are answered from this browser's TMDB cache, and asked together
  * their reads share a few IndexedDB transactions (`tmdbCache.ts` `coalesced`); a miss goes to den-edge's shared cache
@@ -445,8 +448,8 @@ export class LibraryLogAuthority {
         if (!rode) await this.#writeRow(row, []);
         return result;
       },
-      loadRecords: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
-      saveRecords: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
+      load: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
+      save: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
       loadShape: async (title) => {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         return this.#shapes.has(titleKey(title));
@@ -506,19 +509,27 @@ export class LibraryLogAuthority {
         ),
       head: () => this.#log.logHead,
       inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
-      putProjection: async (grant, set, parts, member) => {
+      put: async (grant, set, parts, member, signal) => {
         const res = await this.#memberSend(
           `/assistant/projection/${grant}`,
           'PUT',
           { set, parts },
           member,
+          signal,
         );
         if (res?.status === 429) return { retryAfterMs: retryAfterMs(res, 60_000) };
         return res?.ok ?? false;
       },
-      deleteProjection: async (grant, member) =>
-        (await this.#memberSend(`/assistant/projection/${grant}`, 'DELETE', undefined, member))
-          ?.ok ?? false,
+      drop: async (grant, member, signal) =>
+        (
+          await this.#memberSend(
+            `/assistant/projection/${grant}`,
+            'DELETE',
+            undefined,
+            member,
+            signal,
+          )
+        )?.ok ?? false,
       membership: () => this.#log.relayMembership(),
       now: () => Date.now(),
       random: randomHex,
@@ -535,12 +546,20 @@ export class LibraryLogAuthority {
     method: string,
     body?: unknown,
     lent?: { libraryId: string; memberToken: string },
+    lifecycle?: AbortSignal,
   ): Promise<Response | null> {
+    lifecycle?.throwIfAborted();
     const member = lent ?? (await this.#log.relayMembership());
+    lifecycle?.throwIfAborted();
     if (!member) return null;
+    const deadline = AbortSignal.timeout(
+      method === 'PUT' ? PROJECTION_PUT_MS : PROJECTION_DELETE_MS,
+    );
+    const signal = lifecycle ? AbortSignal.any([lifecycle, deadline]) : deadline;
     try {
       return await this.#fetch(path, {
         method,
+        signal,
         headers: {
           'x-den-library-member': `${member.libraryId}:${member.memberToken}`,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
@@ -548,6 +567,7 @@ export class LibraryLogAuthority {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch {
+      lifecycle?.throwIfAborted();
       return null;
     }
   }
@@ -809,7 +829,7 @@ export class LibraryLogAuthority {
       case 'assistant.connection':
         return {
           kind: 'assistant.connection',
-          connection: this.#options.mode === 'local' ? null : await this.#assistant.lend(),
+          connection: this.#options.mode === 'local' ? null : await this.#assistant.lend(signal),
         };
       case 'download.refresh':
         return {
@@ -1005,15 +1025,23 @@ export class LibraryLogAuthority {
     return { result: { kind: task.kind, outcome }, affected: [{ kind: 'profiles' }] };
   }
 
-  async task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
+  async task(
+    task: LibraryTask,
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryAuthorityTaskResult> {
     try {
-      return await this.#task(task, operationId);
+      return await this.#task(task, operationId, signal);
     } finally {
       this.#scheduleProjectionReconsideration();
     }
   }
 
-  async #task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult> {
+  async #task(
+    task: LibraryTask,
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryAuthorityTaskResult> {
     // Settling or explicitly adopting a reset necessarily starts from a log that may already report `moved`, and so
     // does continuing a compound reset: it retires the very household this log belongs to.
     if (
@@ -1024,7 +1052,7 @@ export class LibraryLogAuthority {
     )
       this.#writable();
     await ensureDeferredSyncPolicy();
-    if (task.kind.startsWith('assistant.')) return this.#assistantTask(task);
+    if (task.kind.startsWith('assistant.')) return this.#assistantTask(task, signal);
     if (
       task.kind === 'profile-key-reset.start' ||
       task.kind === 'profile-key-reset.resume' ||
@@ -1346,7 +1374,10 @@ export class LibraryLogAuthority {
    * Assistant writes live only in a library den-edge holds: a library kept only here has no queue to drain and no
    * den-edge to approve a grant with. Revoking one is always possible.
    */
-  async #assistantTask(task: LibraryTask): Promise<LibraryAuthorityTaskResult> {
+  async #assistantTask(
+    task: LibraryTask,
+    signal?: AbortSignal,
+  ): Promise<LibraryAuthorityTaskResult> {
     if (this.#options.mode === 'local' && task.kind !== 'assistant.revoke')
       throw authorityError('invalid-request', 'a library kept only here takes no assistant writes');
     switch (task.kind) {
@@ -1359,7 +1390,7 @@ export class LibraryLogAuthority {
         return {
           result: {
             kind: 'assistant.publish',
-            published: (await this.#assistant.publish(task.connection ?? null)).length,
+            published: (await this.#assistant.publish(task.connection ?? null, signal)).length,
           },
           affected: [],
         };

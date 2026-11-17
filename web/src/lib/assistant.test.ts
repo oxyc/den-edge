@@ -34,6 +34,7 @@ test('ordinary assistant publisher ticks retain only the current cancellable wai
   const publish = vi.fn(async () => {});
   const running = publishWhileOpen({ libraryId: 'listener-cleanup', publish }, stop.signal);
   await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+  expect(publish).toHaveBeenLastCalledWith(stop.signal);
   expect(active.size).toBe(1);
 
   await vi.advanceTimersByTimeAsync(30_000);
@@ -46,6 +47,27 @@ test('ordinary assistant publisher ticks retain only the current cancellable wai
   expect(active.size).toBe(0);
   expect(vi.getTimerCount()).toBe(0);
   vi.useRealTimers();
+});
+
+test('stopping a publisher aborts a held publish and releases its loop promptly', async () => {
+  const stop = new AbortController();
+  let started!: () => void;
+  const held = new Promise<void>((resolve) => (started = resolve));
+  const publish = vi.fn(
+    (signal: AbortSignal) =>
+      new Promise<void>((_resolve, reject) => {
+        started();
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }),
+  );
+  const running = publishWhileOpen({ libraryId: 'held-publish', publish }, stop.signal);
+  await held;
+
+  stop.abort();
+
+  await expect(running).resolves.toBeUndefined();
+  expect(publish).toHaveBeenCalledOnce();
+  expect(publish).toHaveBeenCalledWith(stop.signal);
 });
 
 test('managed playback receipt preparation is lazy, retryable, and cached only after success', async () => {
@@ -144,7 +166,7 @@ test('a drain is applied, announced, acknowledged, and then held', async () => {
   );
   expect(applied).toHaveBeenCalledWith(accepted);
   // A refusal is logged by its reason alone, never as a toast.
-  expect(info).toHaveBeenCalledWith('den: an assistant request was refused (revoked)');
+  expect(info).toHaveBeenCalledWith('asst/refused', 'revoked');
   expect(calls.map((c) => c.path)).toEqual([
     '/assistant/drain',
     '/assistant/dropbox',

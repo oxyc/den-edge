@@ -42,7 +42,7 @@ interface ProfileCreateReceipt {
   readonly directoryDigest: string;
 }
 
-interface ProfileCreateEnvelope {
+interface LegacyProfileCreateEnvelope {
   readonly version: 1;
   readonly householdId: string;
   readonly pending?: DurableProfileCreate;
@@ -50,6 +50,13 @@ interface ProfileCreateEnvelope {
   readonly terminal?: ProfileCreateReceipt;
   /** Bounded tombstones stop a delayed, already-acknowledged operation from allocating again. */
   readonly settled: readonly ProfileCreateReceipt[];
+}
+
+interface ProfileCreateEnvelope {
+  readonly version: 2;
+  readonly householdId: string;
+  readonly pending?: DurableProfileCreate;
+  readonly terminal?: ProfileCreateReceipt;
 }
 
 export interface ProfileDirectoryAuthority {
@@ -111,9 +118,10 @@ export class ProfileKidCreateStore {
   > {
     const request = checkedRequest({ operationId, name: name.trim(), maximumAge });
     const envelope = await this.envelope();
-    const receipt = [...(envelope.terminal ? [envelope.terminal] : []), ...envelope.settled].find(
-      ({ request: prior }) => prior.operationId === operationId,
-    );
+    const receipt =
+      envelope.terminal?.request.operationId === operationId
+        ? envelope.terminal
+        : await this.settled(operationId);
     if (receipt) {
       if (!sameRequest(receipt.request, request))
         throw new Error('Profile operation payload changed');
@@ -187,13 +195,17 @@ export class ProfileKidCreateStore {
 
   async acknowledge(operationId: string): Promise<void> {
     const envelope = await this.envelope();
-    if (envelope.settled.some(({ request }) => request.operationId === operationId)) return;
+    if (await this.settled(operationId)) {
+      if (envelope.terminal?.request.operationId === operationId)
+        await this.write({ ...envelope, terminal: undefined });
+      return;
+    }
     if (envelope.terminal?.request.operationId !== operationId)
       throw new Error('Kid creation receipt is unavailable');
+    await this.keepReceipt(envelope.terminal);
     await this.write({
       ...envelope,
       terminal: undefined,
-      settled: [...envelope.settled, envelope.terminal],
     });
   }
 
@@ -203,7 +215,7 @@ export class ProfileKidCreateStore {
 
   async acknowledgement(operationId: string): Promise<ProfileKidCreateResult | null> {
     const envelope = await this.envelope();
-    if (envelope.settled.some(({ request }) => request.operationId === operationId)) return null;
+    if (await this.settled(operationId)) return null;
     if (envelope.terminal?.request.operationId !== operationId)
       throw new Error('Kid creation receipt is unavailable');
     return envelope.terminal.result;
@@ -211,9 +223,19 @@ export class ProfileKidCreateStore {
 
   private async envelope(): Promise<ProfileCreateEnvelope> {
     const opened = await this.vault.keptRequired<unknown>(this.name(), this.binding());
-    if (opened.kind === 'absent')
-      return { version: 1, householdId: this.vault.libraryId, settled: [] };
-    return checkedEnvelope(opened.value, this.vault.libraryId);
+    if (opened.kind === 'absent') return { version: 2, householdId: this.vault.libraryId };
+    if (record(opened.value) && opened.value.version === 2)
+      return checkedEnvelope(opened.value, this.vault.libraryId);
+    const prior = checkedLegacyEnvelope(opened.value, this.vault.libraryId);
+    for (const receipt of prior.settled) await this.keepReceipt(receipt);
+    const migrated: ProfileCreateEnvelope = {
+      version: 2,
+      householdId: this.vault.libraryId,
+      ...(prior.pending ? { pending: prior.pending } : {}),
+      ...(prior.terminal ? { terminal: prior.terminal } : {}),
+    };
+    await this.write(migrated);
+    return migrated;
   }
 
   private async write(value: ProfileCreateEnvelope): Promise<void> {
@@ -222,11 +244,43 @@ export class ProfileKidCreateStore {
   }
 
   private name(): string {
+    // v2 overwrites the v1 slot only after every indexed receipt lands; the shared AAD makes that the migration commit.
     return 'profile-create/v1/state';
   }
 
   private binding(): string {
     return `profile-create:${this.vault.libraryId}:1`;
+  }
+
+  private async settled(operationId: string): Promise<ProfileCreateReceipt | null> {
+    const digest = await sha256(operationId);
+    const [name, binding] = this.receiptLocation(digest);
+    const opened = await this.vault.keptRequired<unknown>(name, binding);
+    if (opened.kind === 'absent') return null;
+    const receipt = checkedReceipt(opened.value);
+    if (receipt.request.operationId !== operationId)
+      throw new Error('Kid creation receipt index collided');
+    return receipt;
+  }
+
+  private async keepReceipt(receipt: ProfileCreateReceipt): Promise<void> {
+    const digest = await sha256(receipt.request.operationId);
+    const [name, binding] = this.receiptLocation(digest);
+    const opened = await this.vault.keptRequired<unknown>(name, binding);
+    if (opened.kind === 'value') {
+      const prior = checkedReceipt(opened.value);
+      if (JSON.stringify(prior) !== JSON.stringify(receipt))
+        throw new Error('Kid creation receipt changed');
+      return;
+    }
+    await this.vault.keepRequired(name, receipt, binding);
+  }
+
+  private receiptLocation(digest: string): [string, string] {
+    return [
+      `profile-create/v2/receipt/${digest}`,
+      `profile-create:${this.vault.libraryId}:2:receipt:${digest}`,
+    ];
   }
 }
 
@@ -421,7 +475,7 @@ function checkedDurable(value: unknown, householdId: string): DurableProfileCrea
   return value as unknown as DurableProfileCreate;
 }
 
-function checkedEnvelope(value: unknown, householdId: string): ProfileCreateEnvelope {
+function checkedLegacyEnvelope(value: unknown, householdId: string): LegacyProfileCreateEnvelope {
   if (
     !record(value) ||
     value.version !== 1 ||
@@ -433,25 +487,18 @@ function checkedEnvelope(value: unknown, householdId: string): ProfileCreateEnve
     value.pending === undefined ? undefined : checkedDurable(value.pending, householdId);
   const operations = new Set<string>();
   const profiles = new Set<string>();
-  const checkedReceipt = (candidate: unknown): ProfileCreateReceipt => {
-    if (!record(candidate)) throw new Error('Kid creation receipt is unavailable or corrupt');
-    const request = checkedRequest(candidate.request);
-    if (operations.has(request.operationId)) throw new Error('Kid creation receipt is duplicated');
-    operations.add(request.operationId);
-    const result = checkedResult(candidate.result);
-    if (profiles.has(result.profile)) throw new Error('Kid creation profile receipt is duplicated');
-    profiles.add(result.profile);
-    if (
-      result.name !== request.name ||
-      result.maximumAge !== request.maximumAge ||
-      typeof candidate.directoryDigest !== 'string' ||
-      !DIGEST.test(candidate.directoryDigest)
-    )
-      throw new Error('Kid creation receipt does not match its request');
-    return { request, result, directoryDigest: candidate.directoryDigest };
+  const collect = (candidate: unknown): ProfileCreateReceipt => {
+    const receipt = checkedReceipt(candidate);
+    if (operations.has(receipt.request.operationId))
+      throw new Error('Kid creation receipt is duplicated');
+    operations.add(receipt.request.operationId);
+    if (profiles.has(receipt.result.profile))
+      throw new Error('Kid creation profile receipt is duplicated');
+    profiles.add(receipt.result.profile);
+    return receipt;
   };
-  const terminal = value.terminal === undefined ? undefined : checkedReceipt(value.terminal);
-  const settled = value.settled.map(checkedReceipt);
+  const terminal = value.terminal === undefined ? undefined : collect(value.terminal);
+  const settled = value.settled.map(collect);
   if (
     pending &&
     (operations.has(pending.request.operationId) || profiles.has(pending.journal.profile))
@@ -464,6 +511,46 @@ function checkedEnvelope(value: unknown, householdId: string): ProfileCreateEnve
     ...(terminal ? { terminal } : {}),
     settled,
   };
+}
+
+function checkedEnvelope(value: unknown, householdId: string): ProfileCreateEnvelope {
+  if (
+    !record(value) ||
+    value.version !== 2 ||
+    value.householdId !== householdId ||
+    value.settled !== undefined
+  )
+    throw new Error('Kid creation state is unavailable or corrupt');
+  const pending =
+    value.pending === undefined ? undefined : checkedDurable(value.pending, householdId);
+  const terminal = value.terminal === undefined ? undefined : checkedReceipt(value.terminal);
+  if (
+    pending &&
+    terminal &&
+    (pending.request.operationId === terminal.request.operationId ||
+      pending.journal.profile === terminal.result.profile)
+  )
+    throw new Error('Kid creation operation is both pending and complete');
+  return {
+    version: 2,
+    householdId,
+    ...(pending ? { pending } : {}),
+    ...(terminal ? { terminal } : {}),
+  };
+}
+
+function checkedReceipt(candidate: unknown): ProfileCreateReceipt {
+  if (!record(candidate)) throw new Error('Kid creation receipt is unavailable or corrupt');
+  const request = checkedRequest(candidate.request);
+  const result = checkedResult(candidate.result);
+  if (
+    result.name !== request.name ||
+    result.maximumAge !== request.maximumAge ||
+    typeof candidate.directoryDigest !== 'string' ||
+    !DIGEST.test(candidate.directoryDigest)
+  )
+    throw new Error('Kid creation receipt does not match its request');
+  return { request, result, directoryDigest: candidate.directoryDigest };
 }
 
 function checkedRequest(value: unknown): ProfileCreateRequest {

@@ -2448,6 +2448,85 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('cancels held projection PUT and DELETE through the production task and member-fetch path', async () => {
+    const memberToken = 'b'.repeat(64);
+    let putMode: 'hold' | 'success' = 'hold';
+    let deleteMode: 'fail' | 'hold' | 'success' = 'fail';
+    const projectionCalls: Array<{ method: string; signal: AbortSignal }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const path = String(input);
+      if (path === '/assistant/dropbox') return new Response(null, { status: 204 });
+      expect(path).toMatch(/^\/assistant\/projection\/[0-9a-f]{32}$/);
+      expect(init?.headers).toMatchObject({
+        'x-den-library-member': expect.stringContaining(`:${memberToken}`),
+      });
+      const method = init?.method ?? 'GET';
+      const signal = init?.signal;
+      if (!signal) throw new Error('projection request signal missing');
+      projectionCalls.push({ method, signal });
+      if (method === 'PUT' ? putMode === 'success' : deleteMode === 'success')
+        return new Response(null, { status: 204 });
+      if (method === 'DELETE' && deleteMode === 'fail') return new Response(null, { status: 503 });
+      return new Promise<Response>((_resolve, reject) =>
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+      );
+    };
+    const { log, authority: opened } = await localAuthority(fetchImpl, 'online');
+    vi.spyOn(log, 'relayMembership').mockResolvedValue({
+      libraryId: log.libraryId,
+      memberToken,
+    });
+    const consent = await opened.task(
+      { kind: 'assistant.consent', client: 'Reader', write: false, read: true },
+      'projection-consent',
+    );
+    if (consent.result.kind !== 'assistant.consent') throw new Error('wrong consent result');
+    const grant = consent.result.grant;
+
+    const putLifecycle = new AbortController();
+    const heldPut = opened.task(
+      { kind: 'assistant.publish' },
+      'projection-put-held',
+      putLifecycle.signal,
+    );
+    await vi.waitFor(() => expect(projectionCalls).toHaveLength(1));
+    const putRejection = expect(heldPut).rejects.toMatchObject({ name: 'AbortError' });
+    putLifecycle.abort();
+    await putRejection;
+    expect(projectionCalls[0]).toMatchObject({ method: 'PUT', signal: { aborted: true } });
+
+    putMode = 'success';
+    await expect(
+      opened.task({ kind: 'assistant.publish' }, 'projection-put-retry'),
+    ).resolves.toMatchObject({ result: { kind: 'assistant.publish', published: 1 } });
+
+    await opened.task({ kind: 'assistant.revoke', grant }, 'projection-revoke');
+    await vi.waitFor(() =>
+      expect(projectionCalls.filter(({ method }) => method === 'DELETE')).toHaveLength(1),
+    );
+    deleteMode = 'hold';
+    const deleteLifecycle = new AbortController();
+    const heldDelete = opened.task(
+      { kind: 'assistant.publish' },
+      'projection-delete-held',
+      deleteLifecycle.signal,
+    );
+    await vi.waitFor(() =>
+      expect(projectionCalls.filter(({ method }) => method === 'DELETE')).toHaveLength(2),
+    );
+    const deleteRejection = expect(heldDelete).rejects.toMatchObject({ name: 'AbortError' });
+    deleteLifecycle.abort();
+    await deleteRejection;
+
+    deleteMode = 'success';
+    await expect(
+      opened.task({ kind: 'assistant.publish' }, 'projection-delete-retry'),
+    ).resolves.toMatchObject({ result: { kind: 'assistant.publish', published: 0 } });
+    expect(projectionCalls.filter(({ method }) => method === 'DELETE')).toHaveLength(3);
+    expect(JSON.stringify(projectionCalls)).not.toContain(memberToken);
+    await opened.close();
+  });
+
   it('gives a profile library the household preferences it has not decided, with their stamps, once', async () => {
     const { log, authority } = await localAuthority();
     const stamp = [1_000, 0, 'a1b2c3d4e5f60718'] as [number, number, string];

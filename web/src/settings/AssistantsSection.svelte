@@ -59,7 +59,7 @@
       grantsProblem = null;
     } catch (error) {
       if (generation !== grantsGeneration) return;
-      console.error('den: assistant grants could not be listed', error);
+      console.error('asst/grants-list', error);
       grantsProblem = 'Assistant library permissions couldn’t be read. Try again.';
     } finally {
       if (generation === grantsGeneration) grantsLoading = false;
@@ -106,7 +106,7 @@
     try {
       await revokeGrant?.(grant.grant);
     } catch (error) {
-      console.error('den: an assistant grant could not be revoked', error);
+      console.error('asst/grant-revoke', error);
       problem = 'Couldn’t revoke it. Try again in a moment.';
       return;
     }
@@ -194,7 +194,7 @@
         if (!revokeGrant) throw new Error('no library is open to revoke the grant in');
         await revokeGrant(connection.grant);
       } catch (error) {
-        console.error('den: an assistant grant could not be revoked', error);
+        console.error('asst/grant-revoke', error);
         problem = 'Couldn’t disconnect it. Try again in a moment.';
         return;
       }

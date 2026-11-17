@@ -315,7 +315,7 @@ export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Sta
     }
   } catch (error) {
     if (!signal.aborted) {
-      console.warn('den: playback receipts could not be applied', error);
+      console.warn('asst/receipts', error);
       publish('failed');
     }
   }
@@ -332,7 +332,7 @@ const PUBLISH_TICK_MS = 30_000;
 export function publishWhileOpen(
   loop: {
     libraryId: string;
-    publish: () => Promise<unknown>;
+    publish: (signal: AbortSignal) => Promise<unknown>;
     sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   },
   signal: AbortSignal,
@@ -341,11 +341,11 @@ export function publishWhileOpen(
   return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
     while (!signal.aborted) {
       try {
-        await loop.publish();
+        await loop.publish(signal);
       } catch (error) {
-        console.warn('den: assistant projections could not be published', error);
+        if (!signal.aborted) console.warn('asst/publish', error);
       }
-      await sleep(PUBLISH_TICK_MS, signal);
+      if (!signal.aborted) await sleep(PUBLISH_TICK_MS, signal);
     }
   });
 }
@@ -402,7 +402,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     try {
       outcome = await loop.apply(messages);
     } catch (error) {
-      console.warn('den: assistant requests could not be applied', error);
+      console.warn('asst/apply', error);
       await sleep(BACKOFF_MS, signal);
       continue;
     }
@@ -417,7 +417,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     for (const result of outcome.results) {
       if (result.outcome === 'accepted') loop.applied(result);
       // The reason, never the request: it is the household's, and a refusal is no error of this page's.
-      else console.info(`den: an assistant request was refused (${result.reason})`);
+      else console.info('asst/refused', result.reason);
     }
     if (outcome.ack !== null) await ackQueue(outcome.ack, fetchImpl, loop.queue);
     // An empty answer may come early (den-edge was busy, or the hold was refused), and requests left unacknowledged
