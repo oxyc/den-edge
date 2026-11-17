@@ -334,14 +334,14 @@ export class LibraryAssistantAuthority {
    * A row of this library's, or, for a connection row, the lent household's when there is one: Owner's service then
    * builds and applies with the household's connection, and with its own documents, prefs and applied row.
    */
-  #row(name: string, lent: AssistantConnection | null = null): SettingsRow | null {
+  #row(name: string, lent?: AssistantConnection | null): SettingsRow | null {
     if (lent && (CONNECTION_ROWS as readonly string[]).includes(name))
       return (lent.rows.find((row) => row.name === name) as SettingsRow | undefined) ?? null;
     return this.port.settings(name) ?? null;
   }
 
   /** The grants this device knows revoked: its own records', and a lent household's. */
-  #revoked(records: AssistantRecords, lent: AssistantConnection | null): string[] {
+  #revoked(records: AssistantRecords, lent?: AssistantConnection | null): string[] {
     return lent ? [...new Set([...records.revoked, ...lent.revoked])].sort() : records.revoked;
   }
 
@@ -371,7 +371,7 @@ export class LibraryAssistantAuthority {
       return readRecords(await this.port.loadRecords());
     } catch (error) {
       if (strict) throw error;
-      console.warn('den: this device’s assistant records could not be read', error);
+      console.warn('den: assistant records read failed', error);
       return { ...EMPTY };
     }
   }
@@ -400,7 +400,7 @@ export class LibraryAssistantAuthority {
       // Losing a record weakens this device against an older row; it is said, never silent.
       if (!readBack)
         await this.port.saveRecords(next).catch((error: unknown) => {
-          console.error('den: this device’s assistant records could not be saved', error);
+          console.error('den: assistant records save failed', error);
         });
       else {
         await this.port.saveRecords(next);
@@ -417,7 +417,7 @@ export class LibraryAssistantAuthority {
   }
 
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
-  dropbox(lent: AssistantConnection | null = null): DropboxKey | null {
+  dropbox(lent?: AssistantConnection | null): DropboxKey | null {
     return dropboxKey(this.#row(DROPBOX_ROW, lent));
   }
 
@@ -440,7 +440,7 @@ export class LibraryAssistantAuthority {
     return dropbox;
   }
 
-  #list(records: AssistantRecords, lent: AssistantConnection | null = null): AssistantGrantList {
+  #list(records: AssistantRecords, lent?: AssistantConnection | null): AssistantGrantList {
     return assistantPolicy<AssistantGrantList>({
       op: 'assistant_grants',
       grants: this.#row(GRANTS_ROW, lent),
@@ -455,7 +455,7 @@ export class LibraryAssistantAuthority {
    * Every grant, read and play record the library's rows hold (or a lent household's), for Settings; any shown
    * revoked joins this device's revoked set.
    */
-  async grants(lent: AssistantConnection | null = null): Promise<AssistantGrantList> {
+  async grants(lent?: AssistantConnection | null): Promise<AssistantGrantList> {
     await ensureAssistantPolicy();
     const records = await this.#load();
     const listed = this.#list(records, lent);
@@ -652,7 +652,7 @@ export class LibraryAssistantAuthority {
   /** Ask den-edge to drop a grant's projection; once it has, this device never asks again. */
   async #drop(
     grant: string,
-    lent: AssistantConnection | null = null,
+    lent?: AssistantConnection | null,
     signal?: AbortSignal,
   ): Promise<boolean> {
     if (this.#dropping.has(grant)) return false;
@@ -703,7 +703,7 @@ export class LibraryAssistantAuthority {
    * done in a Worker of its own (`buildProjection`). One publish at a time: a tick that finds one under way sends
    * nothing.
    */
-  async publish(lent: AssistantConnection | null = null, signal?: AbortSignal): Promise<string[]> {
+  async publish(lent?: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
     signal?.throwIfAborted();
     if (this.#publishing) return [];
     this.#publishing = true;
@@ -716,7 +716,7 @@ export class LibraryAssistantAuthority {
 
   #publishing = false;
 
-  async #publish(lent: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
+  async #publish(lent?: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
     const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
@@ -791,7 +791,7 @@ export class LibraryAssistantAuthority {
       signal?.throwIfAborted();
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
-      console.error('den: assistant projection too large', error);
+      console.error('den: assistant too large', error);
       // Not tried again until the library changes, or the heartbeat comes round.
       this.#builtFrom = inputs;
       this.#dueAt = now + HEARTBEAT_MS;
@@ -877,7 +877,7 @@ export class LibraryAssistantAuthority {
   #open(
     sealed: string,
     records: AssistantRecords,
-    lent: AssistantConnection | null,
+    lent: AssistantConnection | null | undefined,
     tv: { awakeSince: number } | null,
   ): Opened {
     return assistantPolicy<Opened>({
@@ -912,7 +912,7 @@ export class LibraryAssistantAuthority {
    */
   async apply(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
-    lent: AssistantConnection | null = null,
+    lent?: AssistantConnection | null,
     tv: { awakeSince: number } | null = null,
   ): Promise<{
     results: AssistantApplied[];
@@ -943,9 +943,7 @@ export class LibraryAssistantAuthority {
         if (opened.reject === 'from_future') {
           held = Math.min(held, seq);
           // Loud: a clock more than five minutes off is a fault the household should see.
-          console.error(
-            'den: an assistant request is dated more than five minutes ahead of this device’s clock; it stays queued until the clocks agree',
-          );
+          console.error('den: assistant request clock ahead');
         }
         results.push({ seq, outcome: 'rejected', reason: opened.reject });
         continue;
@@ -962,7 +960,7 @@ export class LibraryAssistantAuthority {
           )),
         );
       } catch (error) {
-        console.warn('den: an assistant request could not be applied yet', error);
+        console.warn('den: assistant request apply failed', error);
         // Nothing of it was kept, so this device must not refuse it as applied when it comes again.
         records = await this.#remember({ prune: [accept.setting] });
         // Neither it nor any request not reached yet is acknowledged: they are delivered again.
@@ -992,7 +990,7 @@ export class LibraryAssistantAuthority {
   /** Open and apply Hearth's opaque completion receipts through the ordinary progress command. */
   async applyPlaybackReceipts(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
-    lent: AssistantConnection | null = null,
+    lent?: AssistantConnection | null,
   ): Promise<{ ack: number | null; applied: number }> {
     type OpenedReceipt =
       | {
@@ -1078,7 +1076,7 @@ export class LibraryAssistantAuthority {
         applied += 1;
         ack = message.seq;
       } catch (error) {
-        console.warn('den: a playback receipt could not be applied yet', error);
+        console.warn('den: assistant receipt apply failed', error);
         break;
       }
     }
@@ -1162,7 +1160,7 @@ export class LibraryAssistantAuthority {
     try {
       await this.port.replace({ ...row, values });
     } catch (error) {
-      console.warn('den: applied assistant requests could not be pruned', error);
+      console.warn('den: assistant prune failed', error);
     }
   }
 }

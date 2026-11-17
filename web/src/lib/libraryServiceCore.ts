@@ -617,20 +617,17 @@ function sameTitle(a: TitleRef, b: TitleRef): boolean {
 function isConcurrentRequest(
   input: unknown,
 ): input is Extract<LibraryServiceClientMessage, { type: 'query' | 'task' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
   const request = input as {
     type?: unknown;
-    requestId?: unknown;
     query?: { kind?: unknown };
     task?: { kind?: unknown };
-  };
+  } | null;
+  const kind = request?.type === 'query' ? request.query?.kind : request?.task?.kind;
   return (
-    typeof request.requestId === 'string' &&
-    ((request.type === 'query' &&
-      (request.query?.kind === 'library.metadata' ||
-        request.query?.kind === 'source.wait' ||
-        request.query?.kind === 'download.sources')) ||
-      (request.type === 'task' && request.task?.kind === 'assistant.publish'))
+    kind === 'library.metadata' ||
+    kind === 'source.wait' ||
+    kind === 'download.sources' ||
+    kind === 'assistant.publish'
   );
 }
 

@@ -315,7 +315,7 @@ export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Sta
     }
   } catch (error) {
     if (!signal.aborted) {
-      console.warn('den: playback receipts could not be applied', error);
+      console.warn('den: assistant receipts failed', error);
       publish('failed');
     }
   }
@@ -343,7 +343,7 @@ export function publishWhileOpen(
       try {
         await loop.publish(signal);
       } catch (error) {
-        if (!signal.aborted) console.warn('den: assistant publish failed', error);
+        if (!signal.aborted) console.warn('den: assistant publish', error);
       }
       if (!signal.aborted) await sleep(PUBLISH_TICK_MS, signal);
     }
@@ -402,7 +402,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     try {
       outcome = await loop.apply(messages);
     } catch (error) {
-      console.warn('den: assistant requests could not be applied', error);
+      console.warn('den: assistant apply failed', error);
       await sleep(BACKOFF_MS, signal);
       continue;
     }
