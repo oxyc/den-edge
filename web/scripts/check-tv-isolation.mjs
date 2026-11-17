@@ -416,5 +416,9 @@ if (process.argv.includes('--capture')) {
   // Indexed Kid-create receipts measured 123,549 against exact-main's 123,259 (+290). The retained delta is the
   // crash-safe v1 migration and sealed indexed lookup, already inside the lazy administration/Worker graph; another
   // split cannot reduce the complete graph. Keep startup's cap unchanged and allow the next 128-byte boundary.
-  if (coreTotalDelta > 123648) throw new Error('Browser total JS/CSS budget exceeded');
+  // Retired Owner-split cleanup measured 123,896 against that 123,549 main (+347) after consolidating Vault reads
+  // recovered 108 gzip bytes. Its exact-key bounded scan is post-foreground in a lazy chunk; moving it eager would
+  // exceed startup's remaining 13-byte margin. Keep that cap unchanged and allow the second 128-byte boundary: the
+  // first leaves only 8 bytes against measured variance, while this one retains 136 bytes before final compaction.
+  if (coreTotalDelta > 124032) throw new Error('Browser total JS/CSS budget exceeded');
 }

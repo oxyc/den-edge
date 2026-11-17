@@ -1,7 +1,6 @@
 import type { Vault, VaultChange } from './localVault';
 
 const PAGE_SIZE = 64;
-const LIBRARY_ID = /^[0-9a-f]{32}$/;
 const RETIRED_RECORD = /^(?:state|candidate\/[0-9a-f]{64})$/;
 const RECEIPT_VALUE = Uint8Array.of(1);
 
@@ -14,7 +13,6 @@ export async function purgeRetiredOwnerSplitRecords(
   libraryId: string,
   after?: string,
 ): Promise<string | null> {
-  if (!LIBRARY_ID.test(libraryId)) throw new TypeError('Library identity is not canonical');
   const prefix = `${libraryId}:profile-migration/v1/`;
   const receiptKey = `${libraryId}:retired/m1`;
   const receipt = after === undefined && (await vault.get(receiptKey));
@@ -22,9 +20,7 @@ export async function purgeRetiredOwnerSplitRecords(
   if (!vault.page || !vault.commit) throw new Error('Atomic bounded Vault cleanup is unavailable');
   const page = await vault.page(prefix, after, PAGE_SIZE);
   const changes: VaultChange[] = page.flatMap(([key]) =>
-    key.startsWith(prefix) && RETIRED_RECORD.test(key.slice(prefix.length))
-      ? [{ kind: 'delete' as const, key }]
-      : [],
+    RETIRED_RECORD.test(key.slice(prefix.length)) ? [{ kind: 'delete' as const, key }] : [],
   );
   if (page.length < PAGE_SIZE) changes.push({ kind: 'put', key: receiptKey, value: RECEIPT_VALUE });
   await vault.commit(changes);
