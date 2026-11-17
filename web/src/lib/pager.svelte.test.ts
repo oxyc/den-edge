@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContentServiceError } from './contentServiceClient';
 import type { Title } from './library';
 import { Pager } from './pager.svelte';
@@ -6,6 +6,8 @@ import { Pager } from './pager.svelte';
 const film = (id: number): Title => ({ type: 'movie', id, title: `Film ${id}` });
 const pageOf = (start: number, size = 20) =>
   Array.from({ length: size }, (_, i) => film(start + i));
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('Pager', () => {
   it.each([
@@ -140,7 +142,6 @@ describe('Pager', () => {
     );
     await pager.more();
     expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'offline' });
-    vi.unstubAllGlobals();
   });
 
   it('says a page failed, and carries on from it when asked to try again', async () => {
@@ -168,6 +169,22 @@ describe('Pager', () => {
     expect(pager.done).toBe(false);
     expect(pager.titles).toHaveLength(40);
     expect(pager.page).toBe(2);
+  });
+
+  it('replaces a repeated failure with the same page and the new request generation', async () => {
+    const reasons: Array<'rate-limited' | 'unavailable'> = ['rate-limited', 'unavailable'];
+    const pager = new Pager(
+      async () => {
+        const code = reasons.shift()!;
+        throw new ContentServiceError({ code, message: 'private detail', retryable: true });
+      },
+      () => true,
+    );
+    await pager.more();
+    expect(pager.failure).toEqual({ page: 1, generation: 1, reason: 'rate-limited' });
+    await pager.retry();
+    expect(pager.failure).toEqual({ page: 1, generation: 2, reason: 'unavailable' });
+    expect(pager.page).toBe(0);
   });
 
   it('never loads the same title twice across pages', async () => {
