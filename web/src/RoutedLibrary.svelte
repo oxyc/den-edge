@@ -47,7 +47,6 @@
   import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
-  import { abortableDelay } from './lib/abortableDelay';
   import { householdAssistantFetch } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
@@ -307,6 +306,7 @@
               __DEN_TV__ && libraryKey
                 ? await (await import('./lib/householdPlays')).playKeyFor(libraryKey)
                 : undefined;
+            if (!current) return;
             await model.heartbeatDevice(
               name,
               undefined,
@@ -314,9 +314,9 @@
               playKey,
               __DEN_TV__ ? 1 : undefined,
             );
-          })().catch((error: unknown) =>
-            console.warn('den: this device could not check in', error),
-          ),
+          })().catch((error: unknown) => {
+            if (current) console.warn('den: this device could not check in', error);
+          }),
         1_000,
       );
     });
@@ -1668,39 +1668,38 @@
     return whileNeeded(drainNeeded, ({ drain }, work, signal) => {
       void (async () => {
         const plays = await import('./lib/householdPlays');
-        let playKey: string | undefined;
-        while (!signal.aborted && !(playKey = plays.currentPlayKey())) {
-          await abortableDelay(10_000, signal);
-        }
-        if (!playKey) return;
-        await drain(
-          {
-            id: work.libraryId,
-            queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
-            run: async (messages, signal) =>
-              work.model.applyAssistant(
-                messages,
-                await work.lend(signal),
-                { awakeSince: plays.awakeSince() },
-                signal,
-              ),
-            done: (result) => {
-              if (result.op !== 'play' && result.op !== 'play_trailer')
-                return void announceAssistant(current, result);
-              const title = current.displayTitle(result.title)?.title ?? '';
-              void plays.startPlay({
-                tmdbId: result.title.id,
-                mediaType: result.title.type,
-                title,
-                ...(result.season !== undefined ? { season: result.season } : {}),
-                ...(result.episode !== undefined ? { episode: result.episode } : {}),
-                ...(result.op === 'play_trailer' ? { trailer: true } : {}),
-              });
+        await plays.whilePlayKey(async (playKey, active) => {
+          const queue = await plays.laneQueue(playKey, cleanLabel(thisDevice.name));
+          if (active.aborted) return;
+          await drain(
+            {
+              id: work.libraryId,
+              queue,
+              run: async (messages, signal) =>
+                work.model.applyAssistant(
+                  messages,
+                  await work.lend(signal),
+                  { awakeSince: plays.awakeSince() },
+                  signal,
+                ),
+              done: (result) => {
+                if (result.op !== 'play' && result.op !== 'play_trailer')
+                  return void announceAssistant(current, result);
+                const title = current.displayTitle(result.title)?.title ?? '';
+                void plays.startPlay({
+                  tmdbId: result.title.id,
+                  mediaType: result.title.type,
+                  title,
+                  ...(result.season !== undefined ? { season: result.season } : {}),
+                  ...(result.episode !== undefined ? { episode: result.episode } : {}),
+                  ...(result.op === 'play_trailer' ? { trailer: true } : {}),
+                });
+              },
+              ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
             },
-            ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
-          },
-          signal,
-        );
+            active,
+          );
+        }, signal);
       })();
     });
   });

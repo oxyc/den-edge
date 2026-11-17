@@ -93,6 +93,15 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
 
   const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   try {
+    await context.addInitScript(() => {
+      const setItem = Storage.prototype.setItem;
+      setItem.call(localStorage, 'den.e2eRefusePlayKeyStorage', '1');
+      Storage.prototype.setItem = function (key, value) {
+        if (key === 'den.tvPlayKey.v1' && this.getItem('den.e2eRefusePlayKeyStorage'))
+          throw new DOMException('fixture refuses play-key storage', 'SecurityError');
+        return setItem.call(this, key, value);
+      };
+    });
     const queues = new Map();
     const drains = [];
     // The linked profile opens production Workers. Own their requests at the context boundary as well as the page,
@@ -154,9 +163,25 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     await tv.getByLabel('Owner PIN').fill('1234');
     await expect(tv.getByRole('button', { name: 'Switch profile, current Owner' })).toBeVisible();
 
-    // The TV makes its play key when it checks in, for the household library whose device list publishes it. The
-    // Owner profile's own library has another key: a play key made for that would replace the published one as soon
-    // as the Owner profile opened, and a play sent to the first would never be drained (inbox-v1 §5).
+    // The TV makes its play key when it checks in, for the household library whose device list publishes it. Site
+    // storage refuses that first key, but the receiver must already drain it rather than none or a prior household's.
+    await expect.poll(() => drains.length, { timeout: 30_000 }).toBeGreaterThan(0);
+    expect(await tv.evaluate(() => localStorage.getItem('den.tvPlayKey.v1'))).toBeNull();
+    const beforeRecovery = drains.map(([key]) => key);
+
+    // Recover storage and replace Owner with Kids and back. Each session checks in, but it is still the same
+    // household: persistence retries without rotation, and the key now stored is the exact authority every drain
+    // already named (inbox-v1 §5).
+    await tv.evaluate(() => localStorage.removeItem('den.e2eRefusePlayKeyStorage'));
+    const tvOwner = tv.getByRole('button', { name: 'Switch profile, current Owner' });
+    await tvOwner.click();
+    await tv.getByRole('button', { name: 'Use Kids' }).click();
+    const tvKid = tv.getByRole('button', { name: 'Switch profile, current Kids' });
+    await expect(tvKid).toBeVisible();
+    await tvKid.click();
+    await tv.getByRole('button', { name: 'Use Owner' }).click();
+    await tv.getByLabel('Owner PIN').fill('1234');
+    await expect(tvOwner).toBeVisible();
     const stored = () =>
       tv.evaluate(() => ({
         made: JSON.parse(localStorage.getItem('den.tvPlayKey.v1') ?? 'null'),
@@ -170,6 +195,9 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
       createHash('sha256').update(household).digest().subarray(0, 16).toString('hex'),
     );
     const playKey = made.key;
+    const retainedInbox = seal(playKey, { type: 'fixture' }).inbox;
+    expect(beforeRecovery.every((key) => key === retainedInbox)).toBe(true);
+    await tv.goto(E2E_ORIGIN);
 
     const play = (id, sentAt) =>
       seal(playKey, { type: 'play', tmdbId: id, mediaType: 'movie', title: `Movie ${id}` }, sentAt);
@@ -219,11 +247,9 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     // A Kid's real policy check can outlive the press that admitted it. Hold that provider answer, replace the
     // mounted ProfileSession, then release the old answer: it must neither route nor notify in the Owner tree.
     await tv.goto(E2E_ORIGIN);
-    const tvOwner = tv.getByRole('button', { name: 'Switch profile, current Owner' });
     await expect(tvOwner).toBeVisible({ timeout: 30_000 });
     await tvOwner.click();
     await tv.getByRole('button', { name: 'Use Kids' }).click();
-    const tvKid = tv.getByRole('button', { name: 'Switch profile, current Kids' });
     await expect(tvKid).toBeVisible({ timeout: 30_000 });
     holdEligibility = true;
     eligibilitySeen = new Promise((resolve) => (eligibilityStarted = resolve));

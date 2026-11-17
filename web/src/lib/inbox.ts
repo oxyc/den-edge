@@ -52,7 +52,7 @@ async function drainRequest(
   try {
     const response = await fetchImpl(path, {
       ...init,
-      signal: controller.signal,
+      signal: init.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal,
       cache: 'no-store',
     });
     clearTimeout(timer);
@@ -61,6 +61,7 @@ async function drainRequest(
     return await response.json();
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
 }
 
@@ -506,11 +507,13 @@ export async function drainTv(
     fetchImpl = fetch,
     now = () => Date.now(),
     storage = globalThis.localStorage,
+    signal,
   }: {
     wait?: number;
     fetchImpl?: typeof fetch;
     now?: () => number;
     storage?: Storage | undefined;
+    signal?: AbortSignal;
   } = {},
 ): Promise<TvDrain | null> {
   const household = playKey ? await linkKeys(fromBase64url(playKey) as Bytes) : null;
@@ -524,6 +527,7 @@ export async function drainTv(
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ keys }),
+        signal,
       },
       wait ? `/inbox/drain?wait=${wait}` : '/inbox/drain',
     )) as { queues?: unknown } | null;
