@@ -84,8 +84,7 @@ export async function playKeyFor(
   }
   const authority = changed;
   const library = await libraryTag(libraryKey);
-  if (source !== libraryKey || changed !== authority)
-    throw new DOMException('play key authority changed', 'AbortError');
+  if (source !== libraryKey) throw new DOMException('play key authority changed', 'AbortError');
   const kept = stored(storage);
   const current = visit;
   if (current?.library === library) {
@@ -93,6 +92,7 @@ export async function playKeyFor(
     persist(storage, library, current.key);
     return current.key;
   }
+  if (changed !== authority) throw new DOMException('play key authority changed', 'AbortError');
   const key =
     kept?.library === library ? kept.key : toBase64url(crypto.getRandomValues(new Uint8Array(32)));
   retire();

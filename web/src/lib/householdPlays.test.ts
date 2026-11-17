@@ -68,6 +68,15 @@ describe("a TV's household play key", () => {
     expect(await playKeyFor('library-one', storage)).not.toBe(first);
   });
 
+  it('lets concurrent preparation for one household adopt the same visit key', async () => {
+    const storage = memoryStorage();
+    const [first, second] = await Promise.all([
+      playKeyFor('concurrent-library', storage),
+      playKeyFor('concurrent-library', storage),
+    ]);
+    expect(second).toBe(first);
+  });
+
   it('never stores the library key itself', async () => {
     const storage = memoryStorage();
     await playKeyFor('a-library-key-that-must-stay-secret', storage);
