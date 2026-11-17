@@ -65,8 +65,8 @@ describe('recent searches', () => {
     try {
       scopeRecentSearches(true, 'household-a-secret', 'owner-a');
       expect(readRecentSearches()).toEqual([]);
-      expect(saved.removeItem).toHaveBeenCalledWith('den.recentSearches');
       rememberSearch('Owner A search');
+      expect(saved.removeItem).toHaveBeenCalledWith('den.recentSearches');
       const ownerAKey = vi.mocked(saved.setItem).mock.calls.at(-1)?.[0];
       expect(ownerAKey).toMatch(/^den\.recentSearches\.v2:/);
       expect(ownerAKey).not.toContain('household-a-secret');
@@ -126,6 +126,7 @@ describe('recent searches', () => {
     scopeRecentSearches(true, 'unsearched-household', 'owner');
     expect(kept.getItem('den.recentSearches.v2.scopes')).toBeNull();
     expect(kept.setItem).not.toHaveBeenCalled();
+    expect(kept.removeItem).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 

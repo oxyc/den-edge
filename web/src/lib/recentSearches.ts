@@ -3,7 +3,6 @@ import { householdTag } from './profileHouseholdHint';
 const LEGACY_STORAGE_KEY = 'den.recentSearches';
 const STORAGE_PREFIX = 'den.recentSearches.v2';
 const SCOPES_KEY = `${STORAGE_PREFIX}.scopes`;
-const SCOPE_LIMIT = 8;
 const LIMIT = 8;
 const MAX_QUERY_LENGTH = 200;
 let memory: string[] = [];
@@ -29,9 +28,8 @@ function retainScope(storage: Storage, storageKey: string): void {
   const storedScopes = storage.getItem(SCOPES_KEY);
   const previous = storedScopes?.match(/[0-9a-f]{16}/g) ?? [];
   const scopes = [tag, ...previous.filter((value) => value !== tag)];
-  for (const retired of scopes.slice(SCOPE_LIMIT))
-    storage.removeItem(`${STORAGE_PREFIX}:${retired}`);
-  const nextScopes = scopes.slice(0, SCOPE_LIMIT).join();
+  for (const retired of scopes.splice(LIMIT)) storage.removeItem(`${STORAGE_PREFIX}:${retired}`);
+  const nextScopes = scopes.join();
   if (storedScopes !== nextScopes) storage.setItem(SCOPES_KEY, nextScopes);
 }
 
@@ -47,21 +45,15 @@ export function scopeRecentSearches(
   householdKey: string | null,
   profile: string,
 ): void {
-  const scope = `${persist}:${householdKey ?? ''}:${profile}`;
-  if (scope === activeScope) return;
   const storageKey =
     persist && householdKey
-      ? `${STORAGE_PREFIX}:${householdTag(householdKey, `${STORAGE_PREFIX}:${profile}`)}`
+      ? `${STORAGE_PREFIX}:${householdTag(`${STORAGE_PREFIX}:${profile}:${householdKey}`)}`
       : undefined;
+  const scope = storageKey ?? `${householdKey}:${profile}`;
+  if (scope === activeScope) return;
   activeScope = scope;
   activeStorageKey = storageKey;
   memory = [];
-  try {
-    const storage = globalThis.localStorage;
-    storage?.removeItem(LEGACY_STORAGE_KEY);
-  } catch {
-    // The active scope still remains memory-only when storage is blocked.
-  }
   changed(readRecentSearches());
 }
 
@@ -97,9 +89,12 @@ function write(searches: string[], storage: Storage | undefined): string[] {
   memory = searches;
   const key = activeStorageKey;
   try {
-    if (key && storage) retainScope(storage, key);
-    if (key && searches.length) storage?.setItem(key, JSON.stringify(searches));
-    else if (key) storage?.removeItem(key);
+    if (key && storage) {
+      storage.removeItem(LEGACY_STORAGE_KEY);
+      retainScope(storage, key);
+      if (searches.length) storage.setItem(key, JSON.stringify(searches));
+      else storage.removeItem(key);
+    }
   } catch {
     // The list still works for this visit when storage is blocked.
   }
