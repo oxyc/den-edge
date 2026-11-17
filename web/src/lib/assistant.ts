@@ -101,17 +101,22 @@ const DRAIN_MS = (WAIT_S + 15) * 1000;
 /** Between drains when den-edge answered at once with nothing, or could not be reached. */
 const IDLE_MS = 15_000;
 const BACKOFF_MS = 60_000;
+/** A library-service delivery is local, but must still retire if its Worker or port stops answering. */
+const APPLY_MS = 30_000;
 
 export async function putDropbox(
   key: DropboxKey,
   fetchImpl: typeof fetch = relayFetch,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
     const res = await fetchImpl('/assistant/dropbox', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pk: key.public }),
-      signal: AbortSignal.timeout(15_000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+        : AbortSignal.timeout(15_000),
     });
     return res.ok;
   } catch {
@@ -355,7 +360,7 @@ export interface DrainLoop {
   /** Drain this queue instead of the library's: a TV's lane (§16). */
   queue?: OtherQueue;
   /** Opens, checks and applies a drain's requests in the library service. */
-  apply: (messages: QueuedRequest[]) => Promise<ApplyOutcome>;
+  apply: (messages: QueuedRequest[], signal: AbortSignal) => Promise<ApplyOutcome>;
   /** Told of each applied request, for the page's quiet toast. */
   applied: (result: Extract<ApplyResult, { outcome: 'accepted' }>) => void;
   fetchImpl?: typeof fetch;
@@ -399,10 +404,29 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       continue;
     }
     let outcome: ApplyOutcome;
+    const delivery = new AbortController();
+    const retire = () => delivery.abort(signal.reason);
+    signal.addEventListener('abort', retire, { once: true });
+    let expired = false;
+    const deadline = setTimeout(() => {
+      expired = true;
+      delivery.abort();
+    }, APPLY_MS);
     try {
-      outcome = await loop.apply(messages);
+      outcome = await loop.apply(messages, delivery.signal);
     } catch (error) {
+      if (signal.aborted) return;
       console.warn('asst/apply', error);
+      await sleep(BACKOFF_MS, signal);
+      continue;
+    } finally {
+      clearTimeout(deadline);
+      signal.removeEventListener('abort', retire);
+    }
+    // The service may have completed as this authority retired. Its durable receipt makes redelivery safe; this
+    // obsolete page must not announce an effect, publish a drop-box key or acknowledge the queue.
+    if (signal.aborted) return;
+    if (expired) {
       await sleep(BACKOFF_MS, signal);
       continue;
     }
@@ -411,15 +435,18 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       !loop.queue &&
       outcome.dropbox &&
       outcome.dropbox.public !== put &&
-      (await putDropbox(outcome.dropbox, fetchImpl))
+      (await putDropbox(outcome.dropbox, fetchImpl, signal))
     )
       put = outcome.dropbox.public;
+    if (signal.aborted) return;
     for (const result of outcome.results) {
       if (result.outcome === 'accepted') loop.applied(result);
       // The reason, never the request: it is the household's, and a refusal is no error of this page's.
       else console.info('asst/refused', result.reason);
     }
-    if (outcome.ack !== null) await ackQueue(outcome.ack, fetchImpl, loop.queue);
+    if (outcome.ack !== null)
+      await ackQueue(outcome.ack, fetchImpl, loop.queue, 'assistant', signal);
+    if (signal.aborted) return;
     // An empty answer may come early (den-edge was busy, or the hold was refused), and requests left unacknowledged
     // come straight back: never drain again at once.
     const last = messages.at(-1)?.seq;

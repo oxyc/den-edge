@@ -1596,7 +1596,8 @@
       void drainWhileOpen(
         {
           libraryId: work.libraryId,
-          apply: async (messages) => work.model.applyAssistant(messages, await work.lend()),
+          apply: async (messages, signal) =>
+            work.model.applyAssistant(messages, await work.lend(signal), undefined, signal),
           applied: (result) => void announceAssistant(current, result),
           ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
         },
@@ -1683,10 +1684,13 @@
           {
             libraryId: work.libraryId,
             queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
-            apply: async (messages) =>
-              work.model.applyAssistant(messages, await work.lend(), {
-                awakeSince: plays.awakeSince(),
-              }),
+            apply: async (messages, signal) =>
+              work.model.applyAssistant(
+                messages,
+                await work.lend(signal),
+                { awakeSince: plays.awakeSince() },
+                signal,
+              ),
             applied: (result) => {
               if (result.op !== 'play' && result.op !== 'play_trailer')
                 return void announceAssistant(current, result);

@@ -243,6 +243,104 @@ test('a library service that fails to apply backs off and acknowledges nothing',
   warn.mockRestore();
 });
 
+test('retiring a stalled apply releases its Web Lock without an announcement or ACK', async () => {
+  let delivery!: AbortSignal;
+  const oldCalls: string[] = [];
+  const oldFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    oldCalls.push(path);
+    if (oldCalls.length === 1)
+      return Response.json({ messages: [{ seq: 12, sealed: 'private-request' }] });
+    await new Promise<void>((resolve) => init?.signal?.addEventListener('abort', () => resolve()));
+    throw new DOMException('aborted', 'AbortError');
+  }) as unknown as typeof fetch;
+  const oldStop = new AbortController();
+  const oldApplied = vi.fn();
+  const old = drainWhileOpen(
+    {
+      libraryId: 'replaced-library',
+      apply: async (_messages, signal) => {
+        delivery = signal;
+        await new Promise<void>((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))),
+        );
+        throw new Error('unreachable');
+      },
+      applied: oldApplied,
+      fetchImpl: oldFetch,
+    },
+    oldStop.signal,
+  );
+  await vi.waitFor(() => expect(delivery).toBeInstanceOf(AbortSignal));
+
+  const nextStop = new AbortController();
+  const nextFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    await new Promise<void>((resolve) => init?.signal?.addEventListener('abort', () => resolve()));
+    throw new DOMException('aborted', 'AbortError');
+  }) as unknown as typeof fetch;
+  const next = drainWhileOpen(
+    {
+      libraryId: 'replaced-library',
+      apply: async () => ({ results: [], ack: null, dropbox: null }),
+      applied: vi.fn(),
+      fetchImpl: nextFetch,
+    },
+    nextStop.signal,
+  );
+  await Promise.resolve();
+  expect(nextFetch).not.toHaveBeenCalled();
+
+  oldStop.abort();
+  await old;
+  await vi.waitFor(() => expect(nextFetch).toHaveBeenCalledOnce());
+  expect(delivery.aborted).toBe(true);
+  expect(oldApplied).not.toHaveBeenCalled();
+  expect(oldCalls.some((path) => path.startsWith('/assistant/ack'))).toBe(false);
+
+  nextStop.abort();
+  await next;
+});
+
+test('a stalled apply is cancelled at its delivery deadline and remains unacknowledged', async () => {
+  vi.useFakeTimers();
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const stop = new AbortController();
+  const calls: string[] = [];
+  let delivery!: AbortSignal;
+  const running = drainWhileOpen(
+    {
+      libraryId: 'stalled-worker',
+      apply: async (_messages, signal) => {
+        delivery = signal;
+        await new Promise<void>((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))),
+        );
+        throw new Error('unreachable');
+      },
+      applied: vi.fn(),
+      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return Response.json({ messages: [{ seq: 15, sealed: 'private-request' }] });
+      }) as unknown as typeof fetch,
+      sleep: async (ms) => {
+        expect(ms).toBe(60_000);
+        stop.abort();
+      },
+    },
+    stop.signal,
+  );
+  await vi.waitFor(() => expect(delivery).toBeInstanceOf(AbortSignal));
+  expect(delivery.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(30_000);
+  await running;
+
+  expect(delivery.aborted).toBe(true);
+  expect(calls).toEqual(['/assistant/drain']);
+  expect(warn).toHaveBeenCalledOnce();
+  warn.mockRestore();
+  vi.useRealTimers();
+});
+
 test('playback receipts share the queue transport but use their own one-shot routes', async () => {
   const calls: Array<{ path: string; body?: unknown }> = [];
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

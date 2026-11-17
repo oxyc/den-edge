@@ -49,7 +49,7 @@ class FakeService {
   readonly commands: Array<{ command: LibraryCommand; operationId?: string }> = [];
   readonly queries: LibraryQuery[] = [];
   readonly observations: LibraryObservation[] = [];
-  readonly tasks: Array<{ task: LibraryTask; operationId?: string }> = [];
+  readonly tasks: Array<{ task: LibraryTask; operationId?: string; signal?: AbortSignal }> = [];
   profileCreateStatus: Extract<LibraryQueryResult, { kind: 'profile-create.status' }> = {
     kind: 'profile-create.status',
     phase: 'idle',
@@ -178,8 +178,18 @@ class FakeService {
   async task(
     task: LibraryTask,
     operationId?: string,
+    signal?: AbortSignal,
   ): Promise<{ result: LibraryTaskResult; version: LibraryVersion }> {
-    this.tasks.push({ task, ...(operationId ? { operationId } : {}) });
+    this.tasks.push({
+      task,
+      ...(operationId ? { operationId } : {}),
+      ...(signal ? { signal } : {}),
+    });
+    if (task.kind === 'assistant.apply')
+      return {
+        result: { kind: 'assistant.apply', results: [], ack: null, dropbox: null },
+        version: version(7),
+      };
     if (task.kind === 'profile.create')
       return {
         result: {
@@ -964,6 +974,40 @@ it('exposes the open model’s relay membership without consulting global profil
     memberToken: 'member-1',
   });
   expect(service.queries.at(-1)).toEqual({ kind: 'relay.membership' });
+  model.close();
+});
+
+it('delivers assistant applies through the caller’s cancellable service task', async () => {
+  const service = new FakeService();
+  const model = new LibraryModel(service, options);
+  await model.ready;
+  const stop = new AbortController();
+
+  await expect(
+    model.applyAssistant(
+      [{ seq: 4, sealed: 'private-request' }],
+      {
+        member: { libraryId: 'household-library', memberToken: 'member-token' },
+        rows: [],
+        revoked: [],
+      },
+      { awakeSince: 1_800_000_000_000 },
+      stop.signal,
+    ),
+  ).resolves.toEqual({ kind: 'assistant.apply', results: [], ack: null, dropbox: null });
+  expect(service.tasks.at(-1)).toEqual({
+    task: {
+      kind: 'assistant.apply',
+      messages: [{ seq: 4, sealed: 'private-request' }],
+      connection: {
+        member: { libraryId: 'household-library', memberToken: 'member-token' },
+        rows: [],
+        revoked: [],
+      },
+      tv: { awakeSince: 1_800_000_000_000 },
+    },
+    signal: stop.signal,
+  });
   model.close();
 });
 
