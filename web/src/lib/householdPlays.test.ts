@@ -8,6 +8,7 @@ import {
   receiveTv,
   startPlay,
   startPlaysWith,
+  whilePlayKey,
 } from './householdPlays';
 import { linkKeys, sealMessage, type PlayRequest } from './inbox';
 import { fromBase64url, fromHex, toBase64url } from './wire';
@@ -80,13 +81,61 @@ describe("a TV's household play key", () => {
     ).not.toContain('a-library-key-that-must-stay-secret');
   });
 
-  it('still makes a key when site data is unavailable', async () => {
+  it('keeps one visit key and retries its persistence when site data becomes available', async () => {
     const storage = memoryStorage();
+    const persist = storage.setItem;
     storage.setItem = () => {
       throw new DOMException('denied', 'SecurityError');
     };
-    expect(fromBase64url(await playKeyFor('library-one', storage))).toHaveLength(32);
-    expect(currentPlayKey(storage)).toBeUndefined();
+    const key = await playKeyFor('library-one', storage);
+    expect(fromBase64url(key)).toHaveLength(32);
+    expect(currentPlayKey(storage)).toBe(key);
+    expect(await playKeyFor('library-one', storage)).toBe(key);
+
+    storage.setItem = persist;
+    expect(await playKeyFor('library-one', storage)).toBe(key);
+    expect(JSON.parse(storage.getItem('den.tvPlayKey.v1') ?? 'null').key).toBe(key);
+  });
+
+  it('does not expose an old stored household key when persistence refuses its replacement', async () => {
+    const storage = memoryStorage();
+    const old = 'A'.repeat(43);
+    storage.setItem('den.tvPlayKey.v1', JSON.stringify({ library: 'old-household', key: old }));
+    storage.setItem = () => {
+      throw new DOMException('denied', 'SecurityError');
+    };
+    const current = await playKeyFor('new-household', storage);
+    expect(current).not.toBe(old);
+    expect(currentPlayKey(storage)).toBe(current);
+  });
+
+  it('retires old work on household replacement but not on another check for the same household', async () => {
+    const storage = memoryStorage();
+    const stop = new AbortController();
+    const first = await playKeyFor('library-one', storage);
+    let enter!: (signal: AbortSignal) => void;
+    const entered = new Promise<AbortSignal>((resolve) => (enter = resolve));
+    const seen: string[] = [];
+    const running = whilePlayKey(
+      async (key, signal) => {
+        seen.push(key);
+        if (key === first) enter(signal);
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      },
+      stop.signal,
+      storage,
+    );
+    const firstWork = await entered;
+    expect(await playKeyFor('library-one', storage)).toBe(first);
+    expect(firstWork.aborted).toBe(false);
+
+    const second = await playKeyFor('library-two', storage);
+    expect(firstWork.aborted).toBe(true);
+    await vi.waitFor(() => expect(seen).toEqual([first, second]));
+    stop.abort();
+    await running;
   });
 });
 
@@ -129,5 +178,41 @@ describe('receiving household plays', () => {
     expect(started.map((request) => request.title)).toEqual(['Second']);
     expect(stale.map((request) => request.title)).toEqual(['Waited']);
     expect(drains).toBe(1);
+  });
+
+  it('aborts a held old-household drain and takes over with the replacement key', async () => {
+    const storage = memoryStorage();
+    const first = await playKeyFor('library-one', storage);
+    const firstInbox = (await linkKeys(fromBase64url(first))).inbox;
+    const requests: string[] = [];
+    let startFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => (startFirst = resolve));
+    const stop = new AbortController();
+    vi.stubGlobal('fetch', async (_path: string | URL | Request, init?: RequestInit) => {
+      const key = (JSON.parse(String(init?.body)) as { keys: string[] }).keys[0];
+      if (!key) throw new Error('drain did not name its household queue');
+      requests.push(key);
+      if (key === firstInbox) {
+        startFirst();
+        await new Promise<void>((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          }),
+        );
+      }
+      stop.abort();
+      return new Response(JSON.stringify({ queues: [[]] }), { status: 200 });
+    });
+
+    const running = receiveTv(
+      { play: async () => undefined, stale: () => undefined, transport: () => undefined },
+      stop.signal,
+      storage,
+    );
+    await firstStarted;
+    const second = await playKeyFor('library-two', storage);
+    const secondInbox = (await linkKeys(fromBase64url(second))).inbox;
+    await running;
+    expect(requests).toEqual([firstInbox, secondInbox]);
   });
 });

@@ -47,7 +47,6 @@
   import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
-  import { abortableDelay } from './lib/abortableDelay';
   import { householdAssistantFetch } from './lib/relayFetch';
   import { persistentProfileIdentity, profileSessionKey } from './lib/profileIdentity';
   import { resetProfileNavigation } from './lib/profileNavigation';
@@ -295,18 +294,21 @@
     // The play key belongs to the household library whose device list publishes it (inbox-v1 §5), not to the active
     // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
     const libraryKey = session.household.identity.libraryKey;
-    let current = true;
+    const stop = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
-      if (!current) return;
+      if (stop.signal.aborted) return;
       timer = setTimeout(
         () =>
           void (async () => {
             // A TV publishes its household play key, so any device holding the library can play on it.
             const playKey =
               __DEN_TV__ && libraryKey
-                ? await (await import('./lib/householdPlays')).playKeyFor(libraryKey)
+                ? await (
+                    await import('./lib/householdPlays')
+                  ).playKeyFor(libraryKey, undefined, stop.signal)
                 : undefined;
+            if (stop.signal.aborted) return;
             await model.heartbeatDevice(
               name,
               undefined,
@@ -321,7 +323,7 @@
       );
     });
     return () => {
-      current = false;
+      stop.abort();
       if (timer) clearTimeout(timer);
     };
   });
@@ -1674,36 +1676,35 @@
     return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
       void (async () => {
         const plays = await import('./lib/householdPlays');
-        let playKey: string | undefined;
-        while (!signal.aborted && !(playKey = plays.currentPlayKey())) {
-          await abortableDelay(10_000, signal);
-        }
-        if (!playKey) return;
-        await drainWhileOpen(
-          {
-            libraryId: work.libraryId,
-            queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
-            apply: async (messages) =>
-              work.model.applyAssistant(messages, await work.lend(), {
-                awakeSince: plays.awakeSince(),
-              }),
-            applied: (result) => {
-              if (result.op !== 'play' && result.op !== 'play_trailer')
-                return void announceAssistant(current, result);
-              const title = current.displayTitle(result.title)?.title ?? '';
-              void plays.startPlay({
-                tmdbId: result.title.id,
-                mediaType: result.title.type,
-                title,
-                ...(result.season !== undefined ? { season: result.season } : {}),
-                ...(result.episode !== undefined ? { episode: result.episode } : {}),
-                ...(result.op === 'play_trailer' ? { trailer: true } : {}),
-              });
+        await plays.whilePlayKey(async (playKey, active) => {
+          const queue = await plays.laneQueue(playKey, cleanLabel(thisDevice.name));
+          if (active.aborted) return;
+          await drainWhileOpen(
+            {
+              libraryId: work.libraryId,
+              queue,
+              apply: async (messages) =>
+                work.model.applyAssistant(messages, await work.lend(active), {
+                  awakeSince: plays.awakeSince(),
+                }),
+              applied: (result) => {
+                if (result.op !== 'play' && result.op !== 'play_trailer')
+                  return void announceAssistant(current, result);
+                const title = current.displayTitle(result.title)?.title ?? '';
+                void plays.startPlay({
+                  tmdbId: result.title.id,
+                  mediaType: result.title.type,
+                  title,
+                  ...(result.season !== undefined ? { season: result.season } : {}),
+                  ...(result.episode !== undefined ? { episode: result.episode } : {}),
+                  ...(result.op === 'play_trailer' ? { trailer: true } : {}),
+                });
+              },
+              ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
             },
-            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
-          },
-          signal,
-        );
+            active,
+          );
+        }, signal);
       })();
     });
   });

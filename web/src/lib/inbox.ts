@@ -43,6 +43,9 @@ async function drainRequest(
   path = '/inbox/drain',
 ): Promise<unknown> {
   const controller = new AbortController();
+  const cancel = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) cancel();
+  else init.signal?.addEventListener('abort', cancel, { once: true });
   const limit = () =>
     setTimeout(
       () => controller.abort(new DOMException('den-edge stopped answering', 'TimeoutError')),
@@ -61,6 +64,7 @@ async function drainRequest(
     return await response.json();
   } finally {
     clearTimeout(timer);
+    init.signal?.removeEventListener('abort', cancel);
   }
 }
 
@@ -506,11 +510,13 @@ export async function drainTv(
     fetchImpl = fetch,
     now = () => Date.now(),
     storage = globalThis.localStorage,
+    signal,
   }: {
     wait?: number;
     fetchImpl?: typeof fetch;
     now?: () => number;
     storage?: Storage | undefined;
+    signal?: AbortSignal;
   } = {},
 ): Promise<TvDrain | null> {
   const household = playKey ? await linkKeys(fromBase64url(playKey) as Bytes) : null;
@@ -524,6 +530,7 @@ export async function drainTv(
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ keys }),
+        signal,
       },
       wait ? `/inbox/drain?wait=${wait}` : '/inbox/drain',
     )) as { queues?: unknown } | null;

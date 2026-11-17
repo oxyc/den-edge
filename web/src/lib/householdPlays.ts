@@ -15,8 +15,42 @@ const WAIT_S = 25;
 const DRAIN_GAP_MS = 5_000;
 /** After a refused or failed drain. */
 const RETRY_MS = 15_000;
-/** With no household command key yet, there is nothing to drain. */
-const IDLE_MS = 10_000;
+
+interface VisitKey {
+  library: string;
+  key: string;
+  retired: AbortController;
+}
+interface VisitKeys {
+  current?: VisitKey;
+  changed: AbortController;
+}
+const visits = new WeakMap<Storage, VisitKeys>();
+const noStorage: VisitKeys = { changed: new AbortController() };
+
+function visitKeys(storage: Storage | undefined): VisitKeys {
+  if (!storage) return noStorage;
+  let state = visits.get(storage);
+  if (!state) {
+    state = { changed: new AbortController() };
+    visits.set(storage, state);
+  }
+  return state;
+}
+
+function replace(state: VisitKeys, library: string, key: string): VisitKey {
+  state.current?.retired.abort();
+  state.changed.abort();
+  state.changed = new AbortController();
+  return (state.current = { library, key, retired: new AbortController() });
+}
+
+const untilAborted = (signal: AbortSignal) =>
+  signal.aborted
+    ? Promise.resolve()
+    : new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
 
 /** A short, one-way tag of the library key, so a stored play key can say which library it was made for. */
 async function libraryTag(libraryKey: string): Promise<string> {
@@ -48,23 +82,64 @@ function stored(storage: Storage | undefined): { library: string; key: string } 
 export async function playKeyFor(
   libraryKey: string,
   storage: Storage | undefined = globalThis.localStorage,
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const library = await libraryTag(libraryKey);
+  signal?.throwIfAborted();
+  const state = visitKeys(storage);
   const kept = stored(storage);
-  if (kept?.library === library) return kept.key;
-  const key = toBase64url(crypto.getRandomValues(new Uint8Array(32)));
+  const current = state.current;
+  if (current?.library === library) {
+    if (kept?.library === library && kept.key === current.key) return current.key;
+    try {
+      storage?.setItem(KEY, JSON.stringify({ library, key: current.key }));
+    } catch {
+      // The visit copy remains authoritative; a later check-in retries persistence without rotating it.
+    }
+    return current.key;
+  }
+  const key =
+    kept?.library === library ? kept.key : toBase64url(crypto.getRandomValues(new Uint8Array(32)));
+  replace(state, library, key);
   try {
     storage?.setItem(KEY, JSON.stringify({ library, key }));
   } catch {
-    // Without site data the key lasts this visit: the next check-in publishes a new one, and senders read that.
+    // The visit copy still feeds check-in and both receivers. A later check-in retries the same key.
   }
   return key;
 }
 
-/** The play key this TV last made, whichever profile is active now. */
+/** The play key this TV made for the household established during this visit. */
 export const currentPlayKey = (
   storage: Storage | undefined = globalThis.localStorage,
-): string | undefined => stored(storage)?.key;
+): string | undefined => visitKeys(storage).current?.key;
+
+/**
+ * Run `use` for each visit key while it remains current. A household replacement aborts the old work before the new
+ * key is exposed; a same-household profile replacement keeps the key and work intact.
+ */
+export async function whilePlayKey(
+  use: (key: string, signal: AbortSignal) => Promise<void>,
+  signal: AbortSignal,
+  storage: Storage | undefined = globalThis.localStorage,
+): Promise<void> {
+  const state = visitKeys(storage);
+  while (!signal.aborted) {
+    const current = state.current;
+    if (!current) {
+      await untilAborted(AbortSignal.any([signal, state.changed.signal]));
+      continue;
+    }
+    const active = AbortSignal.any([signal, current.retired.signal]);
+    try {
+      await use(current.key, active);
+    } catch (error) {
+      if (!active.aborted) throw error;
+    }
+    if (!active.aborted) await untilAborted(active);
+  }
+}
 
 /**
  * This TV's lane of the assistant's TV queue (den-spec assistant-v1 §16 *TV lanes*): derived from its play key, so it
@@ -124,26 +199,29 @@ export async function receiveTv(
   signal: AbortSignal,
   storage: Storage | undefined = globalThis.localStorage,
 ): Promise<void> {
-  while (!signal.aborted) {
-    const playKey = currentPlayKey(storage);
-    if (!playKey) {
-      await abortableDelay(IDLE_MS, signal);
-      continue;
-    }
-    const started = Date.now();
-    const drained = await drainTv({ playKey }, { wait: WAIT_S, storage }).catch(() => null);
-    if (signal.aborted) return;
-    if (!drained) {
-      await abortableDelay(RETRY_MS, signal);
-      continue;
-    }
-    for (const play of drained.stale) handlers.stale(play);
-    for (const command of drained.transport) handlers.transport(command);
-    const newest = drained.fresh.at(-1);
-    if (newest) await handlers.play(newest).catch(() => undefined);
-    // An empty answer that came early (no held drains on this den-edge, or its cap on them reached) must not be
-    // followed straight away by another (inbox-v1 §3). One that brought something drains again at once.
-    const empty = !drained.fresh.length && !drained.stale.length && !drained.transport.length;
-    if (empty) await abortableDelay(Math.max(0, DRAIN_GAP_MS - (Date.now() - started)), signal);
-  }
+  await whilePlayKey(
+    async (playKey, active) => {
+      while (!active.aborted) {
+        const started = Date.now();
+        const drained = await drainTv({ playKey }, { wait: WAIT_S, storage, signal: active }).catch(
+          () => null,
+        );
+        if (active.aborted) return;
+        if (!drained) {
+          await abortableDelay(RETRY_MS, active);
+          continue;
+        }
+        for (const play of drained.stale) handlers.stale(play);
+        for (const command of drained.transport) handlers.transport(command);
+        const newest = drained.fresh.at(-1);
+        if (newest) await handlers.play(newest).catch(() => undefined);
+        // An empty answer that came early (no held drains on this den-edge, or its cap on them reached) must not be
+        // followed straight away by another (inbox-v1 §3). One that brought something drains again at once.
+        const empty = !drained.fresh.length && !drained.stale.length && !drained.transport.length;
+        if (empty) await abortableDelay(Math.max(0, DRAIN_GAP_MS - (Date.now() - started)), active);
+      }
+    },
+    signal,
+    storage,
+  );
 }
