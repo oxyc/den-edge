@@ -315,7 +315,7 @@ export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Sta
     }
   } catch (error) {
     if (!signal.aborted) {
-      console.warn('den: assistant', 'receipts', error);
+      console.warn('assistant:receipts', error);
       publish('failed');
     }
   }
@@ -343,7 +343,7 @@ export function publishWhileOpen(
       try {
         await loop.publish(signal);
       } catch (error) {
-        if (!signal.aborted) console.warn('den: assistant', 'publish', error);
+        if (!signal.aborted) console.warn('assistant:publish', error);
       }
       if (!signal.aborted) await sleep(PUBLISH_TICK_MS, signal);
     }
@@ -402,7 +402,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     try {
       outcome = await loop.apply(messages);
     } catch (error) {
-      console.warn('den: assistant', 'apply', error);
+      console.warn('assistant:apply', error);
       await sleep(BACKOFF_MS, signal);
       continue;
     }
@@ -417,7 +417,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     for (const result of outcome.results) {
       if (result.outcome === 'accepted') loop.applied(result);
       // The reason, never the request: it is the household's, and a refusal is no error of this page's.
-      else console.info('den: assistant', 'request-refused', result.reason);
+      else console.info('assistant:refused', result.reason);
     }
     if (outcome.ack !== null) await ackQueue(outcome.ack, fetchImpl, loop.queue);
     // An empty answer may come early (den-edge was busy, or the hold was refused), and requests left unacknowledged

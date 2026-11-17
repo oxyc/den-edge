@@ -28,7 +28,7 @@ export async function buildProjection(request: string): Promise<string> {
       : await import('./assistantProjectionWorkerClient');
     worker = projectionWorker();
   } catch (error) {
-    console.warn('den: assistant', 'projection-worker', error);
+    console.warn('assistant:projection-worker', error);
     await ensureAssistantPolicy();
     return assistantAnswer(request);
   }

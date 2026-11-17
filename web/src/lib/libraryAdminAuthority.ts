@@ -640,7 +640,7 @@ export class LibraryAdminAuthority {
       if (moving.revokedGrants.length)
         await next
           .keep(ASSISTANT_RECORDS, { revoked: moving.revokedGrants, applied: {}, renewedAt: 0 })
-          .catch((error: unknown) => console.error('den: assistant', 'revoke-record', error));
+          .catch((error: unknown) => console.error('assistant:revoke-record', error));
       switch (await this.log.endMoved(moving, next)) {
         case 'deleted':
           await this.log.rekeyKept(next);

@@ -105,7 +105,6 @@ const abortable = <T>(work: Promise<T>, signal?: AbortSignal): Promise<T> => {
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) abort();
     void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
 };
@@ -382,7 +381,7 @@ export class LibraryAssistantAuthority {
       return readRecords(await this.port.loadRecords());
     } catch (error) {
       if (strict) throw error;
-      console.warn('den: assistant', 'records-read', error);
+      console.warn('assistant:records-read', error);
       return { ...EMPTY };
     }
   }
@@ -411,7 +410,7 @@ export class LibraryAssistantAuthority {
       // Losing a record weakens this device against an older row; it is said, never silent.
       if (!readBack)
         await this.port.saveRecords(next).catch((error: unknown) => {
-          console.error('den: assistant', 'records-save', error);
+          console.error('assistant:records-save', error);
         });
       else {
         await this.port.saveRecords(next);
@@ -802,7 +801,7 @@ export class LibraryAssistantAuthority {
       signal?.throwIfAborted();
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
-      console.error('den: assistant', 'projection-too-large', error);
+      console.error('assistant:projection-large', error);
       // Not tried again until the library changes, or the heartbeat comes round.
       this.#builtFrom = inputs;
       this.#dueAt = now + HEARTBEAT_MS;
@@ -954,7 +953,7 @@ export class LibraryAssistantAuthority {
         if (opened.reject === 'from_future') {
           held = Math.min(held, seq);
           // Loud: a clock more than five minutes off is a fault the household should see.
-          console.error('den: assistant', 'request-clock-ahead');
+          console.error('assistant:request-clock-ahead');
         }
         results.push({ seq, outcome: 'rejected', reason: opened.reject });
         continue;
@@ -971,7 +970,7 @@ export class LibraryAssistantAuthority {
           )),
         );
       } catch (error) {
-        console.warn('den: assistant', 'request-apply', error);
+        console.warn('assistant:request-apply', error);
         // Nothing of it was kept, so this device must not refuse it as applied when it comes again.
         records = await this.#remember({ prune: [accept.setting] });
         // Neither it nor any request not reached yet is acknowledged: they are delivered again.
@@ -1087,7 +1086,7 @@ export class LibraryAssistantAuthority {
         applied += 1;
         ack = message.seq;
       } catch (error) {
-        console.warn('den: assistant', 'receipt-apply', error);
+        console.warn('assistant:receipt-apply', error);
         break;
       }
     }
@@ -1171,7 +1170,7 @@ export class LibraryAssistantAuthority {
     try {
       await this.port.replace({ ...row, values });
     } catch (error) {
-      console.warn('den: assistant', 'prune', error);
+      console.warn('assistant:prune', error);
     }
   }
 }

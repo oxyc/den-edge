@@ -152,14 +152,14 @@
     } catch (error) {
       // A lost task reply is ambiguous: the durable rows may already be revoked. Read those rows directly before
       // asking the person to retry, without trusting this device's private refusal journal.
-      console.warn('den: assistant', 'revoke-readback', error);
+      console.warn('assistant:revoke-readback', error);
     }
     try {
       return (
         (await cleanup.authority.model.assistantRevocationReadback(cleanup.grant)) !== 'unverified'
       );
     } catch (error) {
-      console.error('den: assistant', 'revoke-verify', error);
+      console.error('assistant:revoke-verify', error);
       return false;
     }
   }
@@ -233,7 +233,7 @@
         };
       } catch (error) {
         if (!owns(ticket, requestId, authority)) return;
-        console.error('den: assistant', 'grant-write', error);
+        console.error('assistant:grant-write', error);
         working = false;
         problem = 'Couldn’t save the permission in your library. Try again in a moment.';
         return;
