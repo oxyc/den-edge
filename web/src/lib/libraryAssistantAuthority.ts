@@ -741,6 +741,7 @@ export class LibraryAssistantAuthority {
       : this.port.inputs();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
     const records = await this.#load();
+    signal?.throwIfAborted();
     const kept = records.publication;
     if (!this.#restored) {
       this.#restored = true;
@@ -774,6 +775,7 @@ export class LibraryAssistantAuthority {
       localRevoked,
     ]).slice(1, -1);
     const key = await digestText(`[${JSON.stringify(library)},${documents},${known},${rows}]`);
+    signal?.throwIfAborted();
     if (kept?.key === key && now < kept.dueAt) {
       this.#builtFrom = inputs;
       this.#dueAt = kept.dueAt;

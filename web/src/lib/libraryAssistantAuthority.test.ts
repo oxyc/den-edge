@@ -629,6 +629,35 @@ test('an aborted held projection PUT cannot publish or persist stale completion 
   expect(made.records()?.publication?.sent).toHaveProperty(grant);
 });
 
+test('an abort while durable publication records load cannot suppress the surviving authority retry', async () => {
+  const shared = library();
+  let records: AssistantRecords | null = null;
+  const savedRecords = () => records;
+  let hold = false;
+  let release!: () => void;
+  const made = device(shared, [seed('other'), seed('limited')], {
+    loadRecords: async () => {
+      if (hold) await new Promise<void>((resolve) => (release = resolve));
+      return records && structuredClone(records);
+    },
+    saveRecords: async (next) => void (records = structuredClone(next)),
+  });
+  const { grant } = await made.authority.consent('Reader', READ_ONLY);
+  hold = true;
+  const lifecycle = new AbortController();
+  const stalled = made.authority.publish(null, lifecycle.signal);
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+  lifecycle.abort();
+  release();
+
+  await expect(stalled).rejects.toMatchObject({ name: 'AbortError' });
+  expect(savedRecords()?.publication).toBeUndefined();
+  hold = false;
+  await expect(made.authority.publish()).resolves.toEqual([grant]);
+  expect(savedRecords()?.publication?.sent).toHaveProperty(grant);
+});
+
 test('an aborted held projection DELETE is not remembered and remains idempotently retryable', async () => {
   const shared = library();
   let settle!: (value: boolean) => void;
