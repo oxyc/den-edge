@@ -190,10 +190,7 @@ it('localizes the reduced-TV download management handoff', async () => {
 it('localizes a saved-language presentation failure without claiming the write failed', async () => {
   const cases = [
     ['en', 'Your language was saved, but this screen couldn’t switch languages. Try again.'],
-    [
-      'es',
-      'Idioma guardado, pero no aplicado. Inténtalo de nuevo.',
-    ],
+    ['es', 'Idioma guardado, pero no aplicado. Inténtalo de nuevo.'],
     ['sv', 'Språket sparades men kunde inte visas. Försök igen.'],
   ] as const;
 

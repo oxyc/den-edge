@@ -688,7 +688,7 @@
     subscriptions: () => structuredClone(trackerSubscriptions),
     rebinds: () => structuredClone(trackerRebinds),
     retries: () => structuredClone(trackerRetries),
-    views: () => structuredClone(trackerViews),
+    views: () => structuredClone($state.snapshot(trackerViews)),
     householdCommands: () => [...library.commandKinds],
   };
   (
