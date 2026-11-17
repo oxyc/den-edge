@@ -214,6 +214,11 @@ function memoryVault() {
         .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
         .sort(([left], [right]) => left.localeCompare(right))
         .slice(0, limit),
+    keys: async (prefix, after, limit) =>
+      [...data.keys()]
+        .filter((key) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort((left, right) => left.localeCompare(right))
+        .slice(0, limit),
     commit: async (changes) => {
       const next = new Map(data);
       for (const change of changes) {
