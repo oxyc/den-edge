@@ -16,8 +16,6 @@ export interface Vault {
     after: string | undefined,
     limit: number,
   ): Promise<Array<[key: string, value: Uint8Array]>>;
-  /** One bounded page of keys whose names start with `prefix`, without reading their values. */
-  keys?(prefix: string, after: string | undefined, limit: number): Promise<string[]>;
   put(key: string, value: Uint8Array): Promise<void>;
   /** Atomically replace one value from its current value. `updater` runs synchronously inside a write transaction. */
   update?(
@@ -228,6 +226,25 @@ export function indexedVault(factory: IDBFactory): Vault {
     (database) => database.createObjectStore('kept'),
     'kept',
   );
+  const read = async (prefix: string, after?: string, limit?: number) => {
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0))
+      throw new Error('Vault page limit must be positive');
+    const found = await run('readonly', (kept) => {
+      const range = after
+        ? IDBKeyRange.bound(after, prefix + String.fromCharCode(0xffff), true, false)
+        : prefixRange(prefix);
+      const keys = kept.getAllKeys(range, limit);
+      const values = kept.getAll(range, limit) as IDBRequest<Uint8Array[]>;
+      // Both requests belong to this transaction, so their ordered results describe one snapshot.
+      return () =>
+        keys.result.flatMap((key, index) =>
+          typeof key === 'string' && key.startsWith(prefix) && values.result[index]
+            ? [[key, values.result[index]!] as [string, Uint8Array]]
+            : [],
+        );
+    });
+    return found ?? [];
+  };
   return {
     get: (key) => run('readonly', (kept) => kept.get(key) as IDBRequest<Uint8Array | undefined>),
     getMany: async (keys) => {
@@ -237,54 +254,8 @@ export function indexedVault(factory: IDBFactory): Vault {
       });
       return found ?? [];
     },
-    entries: async (prefix) => {
-      const found = await run('readonly', (kept) => {
-        const range = prefixRange(prefix);
-        const keys = kept.getAllKeys(range);
-        const values = kept.getAll(range) as IDBRequest<Uint8Array[]>;
-        // Both requests belong to this transaction, so their ordered results describe one snapshot.
-        return () =>
-          keys.result.flatMap((key, index) =>
-            typeof key === 'string' && values.result[index]
-              ? [[key, values.result[index]!] as [string, Uint8Array]]
-              : [],
-          );
-      });
-      return found ?? [];
-    },
-    page: async (prefix, after, limit) => {
-      if (!Number.isSafeInteger(limit) || limit <= 0)
-        throw new Error('Vault page limit must be positive');
-      const found = await run('readonly', (kept) => {
-        const upper = prefix + String.fromCharCode(0xffff);
-        const range = after
-          ? IDBKeyRange.bound(after, upper, true, false)
-          : IDBKeyRange.bound(prefix, upper);
-        const keys = kept.getAllKeys(range, limit);
-        const values = kept.getAll(range, limit) as IDBRequest<Uint8Array[]>;
-        return () =>
-          keys.result.flatMap((key, index) =>
-            typeof key === 'string' && key.startsWith(prefix) && values.result[index]
-              ? [[key, values.result[index]!] as [string, Uint8Array]]
-              : [],
-          );
-      });
-      return found ?? [];
-    },
-    keys: async (prefix, after, limit) => {
-      if (!Number.isSafeInteger(limit) || limit <= 0)
-        throw new Error('Vault key page limit must be positive');
-      const found = await run('readonly', (kept) => {
-        const upper = prefix + String.fromCharCode(0xffff);
-        const range = after
-          ? IDBKeyRange.bound(after, upper, true, false)
-          : IDBKeyRange.bound(prefix, upper);
-        return kept.getAllKeys(range, limit);
-      });
-      return (found ?? []).flatMap((key) =>
-        typeof key === 'string' && key.startsWith(prefix) ? [key] : [],
-      );
-    },
+    entries: (prefix) => read(prefix),
+    page: (prefix, after, limit) => read(prefix, after, limit),
     put: async (key, value) => {
       await run('readwrite', (kept) => kept.put(value, key));
     },

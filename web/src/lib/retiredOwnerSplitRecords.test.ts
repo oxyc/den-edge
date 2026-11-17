@@ -18,10 +18,10 @@ function memoryVault(initial: readonly string[] = []) {
     entries: vi.fn(async () => {
       throw new Error('production cleanup must not read retired values');
     }),
-    keys: vi.fn(async (prefix: string, after: string | undefined, limit: number) =>
-      [...data.keys()]
-        .filter((key) => key.startsWith(prefix) && (after === undefined || key > after))
-        .sort()
+    page: vi.fn(async (prefix: string, after: string | undefined, limit: number) =>
+      [...data]
+        .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
         .slice(0, limit),
     ),
     put: vi.fn(async (key: string, value: Uint8Array) => void data.set(key, value)),
@@ -59,7 +59,7 @@ describe('retired Owner-split browser records', () => {
     await expect(new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A).run()).resolves.toBe(true);
 
     expect([...memory.data.keys()].sort()).toEqual(
-      [current, malformed, other, `${LIBRARY_A}:retired/profile-migration.v1`].sort(),
+      [current, malformed, other, `${LIBRARY_A}:retired/m1`].sort(),
     );
     expect(memory.vault.entries).not.toHaveBeenCalled();
     expect(memory.commits).toHaveLength(1);
@@ -73,13 +73,13 @@ describe('retired Owner-split browser records', () => {
     const reopened = new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
     await expect(reopened.run()).resolves.toBe(true);
 
-    expect(memory.vault.keys).toHaveBeenCalledTimes(1);
+    expect(memory.vault.page).toHaveBeenCalledTimes(1);
     expect(memory.commits).toHaveLength(1);
   });
 
   it('does not let a malformed receipt suppress cleanup', async () => {
     const state = `${LIBRARY_A}:profile-migration/v1/state`;
-    const receipt = `${LIBRARY_A}:retired/profile-migration.v1`;
+    const receipt = `${LIBRARY_A}:retired/m1`;
     const memory = memoryVault([state, receipt]);
     memory.data.set(receipt, Uint8Array.of(2));
 
@@ -99,7 +99,7 @@ describe('retired Owner-split browser records', () => {
 
     await expect(cleanup.run()).resolves.toBe(false);
     expect(memory.data.has(records[64]!)).toBe(true);
-    expect(memory.data.has(`${LIBRARY_A}:retired/profile-migration.v1`)).toBe(false);
+    expect(memory.data.has(`${LIBRARY_A}:retired/m1`)).toBe(false);
     await expect(cleanup.run()).resolves.toBe(true);
     expect(records.some((key) => memory.data.has(key))).toBe(false);
   });
@@ -113,7 +113,7 @@ describe('retired Owner-split browser records', () => {
 
     await expect(cleanup.run()).resolves.toBe(false);
     expect(memory.data.has(state)).toBe(true);
-    expect(memory.data.has(`${LIBRARY_A}:retired/profile-migration.v1`)).toBe(false);
+    expect(memory.data.has(`${LIBRARY_A}:retired/m1`)).toBe(false);
     expect(warn).toHaveBeenCalledWith(
       'den: retired browser migration storage cleanup will be retried',
     );

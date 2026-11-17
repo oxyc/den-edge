@@ -214,11 +214,6 @@ function memoryVault() {
         .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
         .sort(([left], [right]) => left.localeCompare(right))
         .slice(0, limit),
-    keys: async (prefix, after, limit) =>
-      [...data.keys()]
-        .filter((key) => key.startsWith(prefix) && (after === undefined || key > after))
-        .sort((left, right) => left.localeCompare(right))
-        .slice(0, limit),
     commit: async (changes) => {
       const next = new Map(data);
       for (const change of changes) {
@@ -867,7 +862,7 @@ describe('LibraryLog', () => {
     expect(data.has(state)).toBe(false);
     expect(data.has(candidate)).toBe(false);
     expect(data.get(current)).toEqual(Uint8Array.of(3));
-    expect(data.get(`${keys.id}:retired/profile-migration.v1`)).toEqual(Uint8Array.of(1));
+    expect(data.get(`${keys.id}:retired/m1`)).toEqual(Uint8Array.of(1));
   });
 
   it('fails a durable edit before the request when the vault refuses its pending record', async () => {
