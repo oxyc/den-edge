@@ -1434,10 +1434,4 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'El cambio de nombre, la eliminación y la creación de perfiles de adulto no están disponibles en este televisor. Se administrarán en Den en la web.',
   'This TV is viewer-only. Profile administration is not available on this TV.':
     'Este televisor es solo para visualización. La administración de perfiles no está disponible en este televisor.',
-  'Couldn’t load more.': 'No se pudo cargar más.',
-  'Couldn’t load these.': 'No se pudieron cargar estos.',
-  'This device is offline.': 'Este dispositivo no tiene conexión.',
-  'The service is asking Den to wait.': 'El servicio le pide a Den que espere.',
-  'The service is temporarily unavailable.': 'El servicio no está disponible temporalmente.',
-  'Something went wrong.': 'Algo salió mal.',
 };

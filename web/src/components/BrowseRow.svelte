@@ -353,15 +353,15 @@
     {#if pager.failed}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
       <button class="retry" onclick={() => void pager.retry()}>
-        Couldn’t load these.
         {#if pager.failure?.reason === 'offline'}
-          This device is offline.
+          Couldn’t load this page. Check that this device is online.
         {:else if pager.failure?.reason === 'rate-limited'}
-          The service is asking Den to wait.
+          TMDB is temporarily limiting requests. Some titles may be missing; try again after a short
+          wait.
         {:else if pager.failure?.reason === 'unavailable'}
-          The service is temporarily unavailable.
+          Services unavailable
         {:else}
-          Something went wrong.
+          Something went wrong on this page.
         {/if}
         Try again
       </button>

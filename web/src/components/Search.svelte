@@ -725,15 +725,15 @@
         {#if feed.pager.failed}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            {#if feedHits.length}Couldn’t load more.{:else}Couldn’t load these.{/if}
             {#if feed.pager.failure?.reason === 'offline'}
-              This device is offline.
+              Couldn’t load this page. Check that this device is online.
             {:else if feed.pager.failure?.reason === 'rate-limited'}
-              The service is asking Den to wait.
+              TMDB is temporarily limiting requests. Some titles may be missing; try again after a
+              short wait.
             {:else if feed.pager.failure?.reason === 'unavailable'}
-              The service is temporarily unavailable.
+              Services unavailable
             {:else}
-              Something went wrong.
+              Something went wrong on this page.
             {/if}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button

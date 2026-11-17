@@ -1414,10 +1414,4 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Namnbyte, borttagning och skapande av vuxenprofiler är inte tillgängliga på den här TV:n. De kommer att hanteras i Den på webben.',
   'This TV is viewer-only. Profile administration is not available on this TV.':
     'Den här TV:n är endast för visning. Profiladministration är inte tillgänglig på den här TV:n.',
-  'Couldn’t load more.': 'Det gick inte att ladda mer.',
-  'Couldn’t load these.': 'Det gick inte att ladda dessa.',
-  'This device is offline.': 'Den här enheten är offline.',
-  'The service is asking Den to wait.': 'Tjänsten ber Den att vänta.',
-  'The service is temporarily unavailable.': 'Tjänsten är tillfälligt otillgänglig.',
-  'Something went wrong.': 'Något gick fel.',
 };
