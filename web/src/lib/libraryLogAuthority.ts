@@ -422,7 +422,7 @@ export class LibraryLogAuthority {
       },
       settings: (name) => this.#log.settings(name),
       acknowledgedSettings: (name) => this.#log.acknowledgedSettings(name),
-      refresh: async () => void (await this.#log.refresh()),
+      refresh: async (signal) => void (await this.#log.refresh(0, signal)),
       command: async (command, operationId, stamp) => {
         this.#asOf = stamp;
         try {
@@ -1418,6 +1418,7 @@ export class LibraryLogAuthority {
           task.messages,
           task.connection ?? null,
           task.tv ?? null,
+          signal,
         );
         return { result: { kind: 'assistant.apply', results, ack, dropbox }, affected };
       }

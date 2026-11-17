@@ -632,7 +632,8 @@ function isConcurrentRequest(
     kind === 'source.wait' ||
     kind === 'download.sources' ||
     kind === 'assistant.connection' ||
-    kind === 'assistant.publish'
+    kind === 'assistant.publish' ||
+    kind === 'assistant.apply'
   );
 }
 

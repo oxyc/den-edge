@@ -127,7 +127,7 @@ export interface AssistantPort {
   /** The row last authenticated from den-edge, excluding this device's durable unsent projection. */
   acknowledgedSettings(name: string): SettingsRow | undefined;
   /** Read the library log to its head. */
-  refresh(): Promise<void>;
+  refresh(signal?: AbortSignal): Promise<void>;
   /**
    * A person's command, as their tap sends it, its writes stamped `stamp`. `operationId` makes a repeated apply the
    * same tracker event.
@@ -925,17 +925,23 @@ export class LibraryAssistantAuthority {
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     lent?: AssistantConnection | null,
     tv: { awakeSince: number } | null = null,
+    signal?: AbortSignal,
   ): Promise<{
     results: AssistantApplied[];
     ack: number | null;
     dropbox: DropboxKey | null;
     affected: LibrarySelectionScope[];
   }> {
+    signal?.throwIfAborted();
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    signal?.throwIfAborted();
+    await this.port.refresh(signal);
+    signal?.throwIfAborted();
     // Revocations in the row as read join this device's set before anything is opened against it.
     await this.grants(lent);
+    signal?.throwIfAborted();
     let records = await this.#load();
+    signal?.throwIfAborted();
     const order = messages
       .map((message) => {
         const opened = this.#open(message.sealed, records, lent, tv);
@@ -948,6 +954,7 @@ export class LibraryAssistantAuthority {
     /** The lowest `seq` that may not be acknowledged: a `from_future`, or one that could not be applied. */
     let held = Infinity;
     for (const [index, { seq, sealed }] of order.entries()) {
+      signal?.throwIfAborted();
       // Opened again: an earlier request in this drain may have changed what this one is checked against.
       const opened = this.#open(sealed, records, lent, tv);
       if ('reject' in opened) {

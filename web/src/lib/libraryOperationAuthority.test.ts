@@ -89,6 +89,36 @@ describe('DurableOperationAuthority', () => {
     expect(JSON.stringify([...stored.kept.values()])).not.toContain('publish-1');
   });
 
+  it('forwards cancellation into a serialized assistant apply and releases later operations', async () => {
+    const stored = storedLog();
+    let delivery!: AbortSignal;
+    const inner = {
+      ...base(),
+      task: vi.fn(async (_task, _operationId, signal?: AbortSignal) => {
+        if (!signal) throw new Error('apply signal missing');
+        delivery = signal;
+        await new Promise<void>((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        );
+        throw new Error('unreachable');
+      }),
+    } satisfies LibraryServiceAuthority;
+    const authority = new DurableOperationAuthority(inner, stored.log);
+    const stop = new AbortController();
+    const applying = authority.task(
+      { kind: 'assistant.apply', messages: [] },
+      'assistant-apply-1',
+      stop.signal,
+    );
+    await vi.waitFor(() => expect(delivery).toBe(stop.signal));
+
+    stop.abort();
+    await expect(applying).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      authority.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } }, 'tap-after'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+  });
+
   it('returns the original command result after authority replacement without executing again', async () => {
     const stored = storedLog();
     const first = base();

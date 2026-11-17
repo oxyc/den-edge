@@ -199,7 +199,9 @@ export class DurableOperationAuthority implements LibraryServiceAuthority {
     if (task.kind === 'assistant.publish') return this.authority.task(task, operationId, signal);
     return this.#serialized(() =>
       this.runExclusive(`den.library.operations.${this.log.libraryId}`, () =>
-        this.#perform('task', operationId, task, () => this.authority.task(task, operationId)),
+        this.#perform('task', operationId, task, () =>
+          this.authority.task(task, operationId, signal),
+        ),
       ),
     );
   }

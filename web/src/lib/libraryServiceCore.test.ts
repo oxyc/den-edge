@@ -564,6 +564,74 @@ describe('LibraryServiceCore', () => {
     );
   });
 
+  it('cancels a stalled assistant apply in the authority and admits current work', async () => {
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => (started = resolve));
+    const signals: AbortSignal[] = [];
+    const heldAuthority = {
+      ...authority(),
+      async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
+        if (task.kind !== 'assistant.apply') throw new Error('unsupported task');
+        if (!signal) throw new Error('apply signal missing');
+        signals.push(signal);
+        if (signals.length === 1) {
+          started();
+          await new Promise<void>((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          );
+        }
+        return {
+          result: { kind: 'assistant.apply' as const, results: [], ack: null, dropbox: null },
+          affected: [],
+        };
+      },
+    };
+    const core = new LibraryServiceCore(async () => heldAuthority, 'instance-1');
+    await core.dispatch(hello);
+    const request = (requestId: string) => ({
+      type: 'task' as const,
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      operationId: `${requestId}-operation`,
+      task: { kind: 'assistant.apply' as const, messages: [] },
+    });
+
+    const stalled = core.dispatch(request('apply-stalled'));
+    await held;
+    await expect(
+      core.dispatch({
+        type: 'cancel',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'apply-stalled',
+      }),
+    ).resolves.toEqual([]);
+    await expect(stalled).resolves.toEqual([
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ]);
+    expect(signals[0]?.aborted).toBe(true);
+    await expect(core.dispatch(request('apply-current'))).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.apply', results: [], ack: null, dropbox: null },
+      }),
+    ]);
+    expect(signals[1]?.aborted).toBe(false);
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-after-apply-cancel',
+        operationId: 'operation-after-apply-cancel',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+  });
+
   it('carries playback receipt ensure and apply through the production task lane', async () => {
     const tasks: string[] = [];
     const held = {
