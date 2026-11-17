@@ -1,8 +1,7 @@
 import { householdTag } from './profileHouseholdHint';
 
 const LEGACY_STORAGE_KEY = 'den.recentSearches';
-const STORAGE_PREFIX = 'den.searches.v2';
-const SCOPES_KEY = `${STORAGE_PREFIX}.scopes`;
+const STORAGE_PREFIX = 'den.search.v2';
 const LIMIT = 8;
 const MAX_QUERY_LENGTH = 200;
 let memory: string[] = [];
@@ -23,14 +22,13 @@ const browserStorage = (): Storage | undefined => {
   }
 };
 
-function retainScope(storage: Storage, storageKey: string): void {
-  const tag = storageKey.slice(STORAGE_PREFIX.length + 1);
-  const storedScopes = storage.getItem(SCOPES_KEY) ?? '';
-  const scopes = `${tag},${storedScopes.replace(`${tag},`, '')}`;
-  for (let offset = LIMIT * 17; offset < scopes.length; offset += 17)
-    storage.removeItem(`${STORAGE_PREFIX}:${scopes.slice(offset, offset + 16)}`);
-  const nextScopes = scopes.slice(0, LIMIT * 17);
-  if (storedScopes !== nextScopes) storage.setItem(SCOPES_KEY, nextScopes);
+function boundScopes(storage: Storage, storageKey: string): void {
+  if (storage.getItem(storageKey) !== null) return;
+  for (let index = storage.length, kept = 1; index--;) {
+    const candidate = storage.key(index);
+    if (candidate?.startsWith(`${STORAGE_PREFIX}:`) && candidate !== storageKey && kept++ >= LIMIT)
+      storage.removeItem(candidate);
+  }
 }
 
 /**
@@ -38,7 +36,7 @@ function retainScope(storage: Storage, storageKey: string): void {
  * in-memory list for one profile session. Changing household, profile or storage authority empties the in-memory
  * list, so nothing typed under one authority is offered to the next. The retired origin-global key is deleted but
  * never adopted: its plaintext could belong to a different household. An opaque registry bounds namespaces while
- * keeping recently used households available when this browser returns to them.
+ * keeping up to eight household Owners available when this browser returns to them.
  */
 export function scopeRecentSearches(
   persist: boolean,
@@ -92,7 +90,7 @@ function write(searches: string[]): string[] {
     if (storage) {
       const key = activeStorageKey!;
       storage.removeItem(LEGACY_STORAGE_KEY);
-      retainScope(storage, key);
+      boundScopes(storage, key);
       if (searches.length) storage.setItem(key, JSON.stringify(searches));
       else storage.removeItem(key);
     }

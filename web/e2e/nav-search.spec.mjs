@@ -34,7 +34,7 @@ const input = (page) =>
 // The fixture is a file on the dev server, so its own path is where Home lives: the app reads the path, and
 // returning Home returns to the address the document was opened at.
 const FIXTURE = `${E2E_ORIGIN}/test/nav-search.html`;
-const RECENT_SEARCH_PREFIX = 'den.searches.v2:';
+const RECENT_SEARCH_PREFIX = 'den.search.v2:';
 const RECENT_SEARCH_SEED = 'den.test.recentSearches';
 const HOME = /\/test\/nav-search\.html$/;
 async function setup(page, { atlasGate, catalogueGate, searchGate, billboard } = {}) {

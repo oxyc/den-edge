@@ -592,7 +592,7 @@ test('recent searches follow the exact profile and Visitor visit while Owner rec
     .poll(() =>
       page.evaluate(() =>
         Object.keys(localStorage)
-          .filter((key) => key.startsWith('den.searches.v2:'))
+          .filter((key) => key.startsWith('den.search.v2:'))
           .map((key) => localStorage.getItem(key)),
       ),
     )
