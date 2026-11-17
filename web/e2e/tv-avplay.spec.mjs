@@ -254,12 +254,24 @@ test('Samsung subtitle menu honors hidden languages and the OpenSubtitles per-la
       name: 'Spanish candidate',
       source: 'opensubtitles',
     },
+    {
+      value: 'opensubtitles:fi:0',
+      language: 'fi',
+      name: 'Finnish preferred',
+      source: 'opensubtitles',
+    },
   ]);
-  await page.goto(`${ORIGIN}/test/player.html?shownSubtitles=en&subtitlesPerLanguage=1`);
+  await page.goto(
+    `${ORIGIN}/test/player.html?subtitleLanguage=fi&shownSubtitles=en&subtitlesPerLanguage=1`,
+  );
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
-  await page.getByRole('button', { name: /^Subtitles:/ }).click();
+  const picker = page.getByRole('button', { name: /^Subtitles:/ });
+  await expect(picker).toHaveAccessibleName('Subtitles: Finnish preferred');
+  await picker.click();
   await expect(page.getByRole('menuitemradio', { name: /^English candidate/ })).toHaveCount(1);
   await expect(page.getByRole('menuitemradio', { name: 'Spanish candidate' })).toHaveCount(0);
+  await expect(page.getByRole('menuitemradio', { name: 'Finnish preferred' })).toBeChecked();
+  await expect(page.getByRole('menuitemradio', { name: 'Off' })).toBeVisible();
 });
 
 test('Samsung serializes rapid seeks and coalesces them to the latest remote target', async ({

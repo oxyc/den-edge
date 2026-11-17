@@ -477,6 +477,27 @@ test('a newer external subtitle wins while an older load is still pending', asyn
   }
 });
 
+test('the preferred subtitle stays selectable outside the shown-language list', async () => {
+  const browser = await launchChromium();
+  try {
+    const context = await browser.newContext({ locale: 'en-US' });
+    const page = await context.newPage();
+    await mockHearth(page);
+    await page.goto(
+      `${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=sv&shownSubtitles=en`,
+    );
+    await playing(page);
+
+    await showsSubtitles(page, 'Swedish');
+    await subtitlesButton(page).click();
+    await expect(subtitleChoice(page, 'Swedish')).toBeChecked();
+    await expect(subtitleChoice(page, 'English')).toBeVisible();
+    await expect(subtitleChoice(page, 'Off')).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('an automatic external subtitle failure is visible and recoverable', async () => {
   const browser = await launchChromium();
   try {
