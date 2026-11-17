@@ -385,20 +385,36 @@ export function browserName(
 }
 
 /**
+ * How long whatever ends a session waits for its last report before going anyway. A report is a small POST answered
+ * at once; one still unanswered after this is stuck, and the session's end must not be held behind it.
+ */
+export const REPORT_SETTLE_MS = 5_000;
+
+/**
  * POST a report; not retried, since the next one carries everything this one did. Kept alive past the page's close.
- * Settles once it was answered or failed, never rejects: whatever ends the session next waits for it, because den-remux
- * answers a report for an ended session 410 and two requests sent one after the other are not served in that order.
+ * Settles once it was answered or failed, or after `REPORT_SETTLE_MS`, never rejects: whatever ends the session next
+ * waits for it, because den-remux answers a report for an ended session 410 and two requests sent one after the other
+ * are not served in that order. The request itself carries on past that point.
  */
 export function sendReport(
   url: string,
   body: string,
   fetchImpl: typeof fetch = fetch,
+  settleMs = REPORT_SETTLE_MS,
 ): Promise<void> {
-  return fetchImpl(url, { method: 'POST', body, keepalive: true })
+  const answered = fetchImpl(url, { method: 'POST', body, keepalive: true })
     .then((res) => {
       if (!res.ok) console.warn(`playback report: den-remux answered ${res.status}`);
     })
     .catch((error: unknown) => console.warn('playback report not sent:', error));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stuck = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`playback report: no answer within ${settleMs} ms; ending the session anyway`);
+      resolve();
+    }, settleMs);
+  });
+  return Promise.race([answered, stuck]).finally(() => clearTimeout(timer));
 }
 
 /** A session's report URL, beside its playlist. */

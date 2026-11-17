@@ -40,6 +40,15 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
     });
     await guardNetwork(page);
     const asked = { started: 0, ended: [] };
+    // Settles once `count` sessions were ended. A reload loads the whole page again before its session is asked
+    // for and let go, which takes as long as the machine takes: wait for that event, not for a stretch of time.
+    let endedChanged = () => {};
+    const endedCount = (count) =>
+      new Promise((resolve) => {
+        const check = () => asked.ended.length >= count && resolve();
+        endedChanged = check;
+        check();
+      });
     await routeTmdb(page, (r) => r.fulfill({ json: { imdb_id: 'tt42' } }));
     await page.route(`${ORIGIN}/skipdb/**`, (r) => r.fulfill({ status: 404, json: {} }));
     await page.route(`${ORIGIN}/config`, (r) => r.fulfill({ json: {} }));
@@ -52,6 +61,7 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
       const path = new URL(request.url()).pathname;
       if (request.method() === 'DELETE') {
         asked.ended.push(path);
+        endedChanged();
         return r.fulfill({ status: 204 });
       }
       // A real browser's navigator.sendBeacon, which endSession() now prefers: the beacon-compatible twin
@@ -59,6 +69,7 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
       // one way of saying "ended", whichever one actually fired.
       if (request.method() === 'POST' && path.endsWith('/end')) {
         asked.ended.push(path.slice(0, -'/end'.length));
+        endedChanged();
         return r.fulfill({ status: 204 });
       }
       if (request.method() === 'POST') return r.fulfill({ status: 204 });
@@ -97,7 +108,8 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
       }),
     );
     await page.getByRole('button', { name: 'Reload' }).click();
-    await expect.poll(() => asked.ended).toEqual(['/direct/s/d1/sig', '/direct/s/d2/sig']);
+    await endedCount(2);
+    expect(asked.ended).toEqual(['/direct/s/d1/sig', '/direct/s/d2/sig']);
     await expect
       .poll(() => engineWarnings)
       .toEqual([

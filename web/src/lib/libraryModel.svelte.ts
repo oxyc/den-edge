@@ -1136,13 +1136,18 @@ export class LibraryModel {
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     connection?: AssistantConnection,
     tv?: { awakeSince: number },
+    signal?: AbortSignal,
   ) {
-    const { result } = await this.task({
-      kind: 'assistant.apply',
-      messages: messages.map(({ seq, sealed }) => ({ seq, sealed })),
-      ...(connection ? { connection } : {}),
-      ...(tv ? { tv } : {}),
-    });
+    const { result } = await this.task(
+      {
+        kind: 'assistant.apply',
+        messages: [...messages],
+        ...(connection ? { connection } : {}),
+        ...(tv ? { tv } : {}),
+      },
+      undefined,
+      signal,
+    );
     if (result.kind !== 'assistant.apply') throw wrongQueryResult('assistant apply');
     return result;
   }

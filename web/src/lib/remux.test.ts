@@ -298,6 +298,23 @@ describe('startSession', () => {
     expect(await startSession(plain, cutOff)).toEqual({ failure: 'unreachable' });
   });
 
+  it("leaves Hearth's playback-route fields out of a session asked of den-remux", async () => {
+    // Remux's session route refuses unknown fields: `title` alone turned every such start into a 400.
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return answer(201, { ...session, releases: [] });
+    };
+    await startSession(
+      { ...want, subtitleLanguages: [], title: { type: 'tv', id: 1398 }, subtitleTrack: 2 },
+      fetchImpl,
+    );
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty('title');
+    expect(bodies[0]).not.toHaveProperty('subtitleTrack');
+    expect(bodies[0]).toHaveProperty('imdb', want.imdb);
+  });
+
   it('gives den-remux a deadline for the session and the release list', async () => {
     const signals: unknown[] = [];
     const fetchImpl: typeof fetch = async (_input, init) => {

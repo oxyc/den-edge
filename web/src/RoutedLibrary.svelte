@@ -1578,7 +1578,7 @@
   }
 
   $effect(() =>
-    whileNeeded(renewNeeded, ({ renewListed }, work, signal) => {
+    whileNeeded(renewNeeded, ({ renew: renewListed }, work, signal) => {
       const renew = () =>
         void renewListed(
           (grants) => (work.household ?? work.model).renewAssistant(grants),
@@ -1592,13 +1592,14 @@
 
   $effect(() => {
     const current = session;
-    return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
-      void drainWhileOpen(
+    return whileNeeded(drainNeeded, ({ drain }, work, signal) => {
+      void drain(
         {
-          libraryId: work.libraryId,
-          apply: async (messages) => work.model.applyAssistant(messages, await work.lend()),
-          applied: (result) => void announceAssistant(current, result),
-          ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+          id: work.libraryId,
+          run: async (messages, signal) =>
+            work.model.applyAssistant(messages, await work.lend(signal), undefined, signal),
+          done: (result) => void announceAssistant(current, result),
+          ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
         },
         signal,
       );
@@ -1643,17 +1644,10 @@
     };
     return whileNeeded(
       true,
-      (
-        { recoverPlaybackReceiptsForCurrentAuthority, PlaybackReceiptStatus: Status },
-        work,
-        signal,
-      ) => {
+      ({ recover, Status }, work, signal) => {
         PlaybackReceiptStatus = Status;
         publish('pending', signal);
-        void recoverPlaybackReceiptsForCurrentAuthority<
-          AssistantConnection | undefined,
-          PlaybackReceiptStatus
-        >(
+        void recover<AssistantConnection | undefined, PlaybackReceiptStatus>(
           work,
           () => current === session,
           signal,
@@ -1671,7 +1665,7 @@
   $effect(() => {
     if (!__DEN_TV__) return;
     const current = session;
-    return whileNeeded(drainNeeded, ({ drainWhileOpen }, work, signal) => {
+    return whileNeeded(drainNeeded, ({ drain }, work, signal) => {
       void (async () => {
         const plays = await import('./lib/householdPlays');
         let playKey: string | undefined;
@@ -1679,15 +1673,18 @@
           await abortableDelay(10_000, signal);
         }
         if (!playKey) return;
-        await drainWhileOpen(
+        await drain(
           {
-            libraryId: work.libraryId,
+            id: work.libraryId,
             queue: await plays.laneQueue(playKey, cleanLabel(thisDevice.name)),
-            apply: async (messages) =>
-              work.model.applyAssistant(messages, await work.lend(), {
-                awakeSince: plays.awakeSince(),
-              }),
-            applied: (result) => {
+            run: async (messages, signal) =>
+              work.model.applyAssistant(
+                messages,
+                await work.lend(signal),
+                { awakeSince: plays.awakeSince() },
+                signal,
+              ),
+            done: (result) => {
               if (result.op !== 'play' && result.op !== 'play_trailer')
                 return void announceAssistant(current, result);
               const title = current.displayTitle(result.title)?.title ?? '';
@@ -1700,7 +1697,7 @@
                 ...(result.op === 'play_trailer' ? { trailer: true } : {}),
               });
             },
-            ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+            ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
           },
           signal,
         );
@@ -1709,11 +1706,11 @@
   });
 
   $effect(() =>
-    whileNeeded(publishNeeded, ({ publishWhileOpen }, work, signal) => {
-      void publishWhileOpen(
+    whileNeeded(publishNeeded, ({ publish }, work, signal) => {
+      void publish(
         {
-          libraryId: work.libraryId,
-          publish: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),
+          id: work.libraryId,
+          run: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),
         },
         signal,
       );

@@ -315,8 +315,10 @@ describe('LibraryServiceCore', () => {
     const aborted: string[] = [];
     let releaseMetadata!: () => void;
     let releasePublish!: () => void;
+    let releaseApply!: () => void;
     const metadataHeld = new Promise<void>((resolve) => (releaseMetadata = resolve));
     const publishHeld = new Promise<void>((resolve) => (releasePublish = resolve));
+    const applyHeld = new Promise<void>((resolve) => (releaseApply = resolve));
     const held = {
       ...authority(),
       async command(command: LibraryCommand) {
@@ -351,10 +353,20 @@ describe('LibraryServiceCore', () => {
         return { kind: 'download.sources' as const, sources: null };
       },
       async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
-        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
-        signal?.addEventListener('abort', () => aborted.push('publish'), { once: true });
-        await publishHeld;
-        return { result: { kind: 'assistant.publish' as const, published: 0 }, affected: [] };
+        if (task.kind === 'assistant.publish') {
+          signal?.addEventListener('abort', () => aborted.push('publish'), { once: true });
+          await publishHeld;
+          return { result: { kind: 'assistant.publish' as const, published: 0 }, affected: [] };
+        }
+        if (task.kind === 'assistant.apply') {
+          signal?.addEventListener('abort', () => aborted.push('apply'), { once: true });
+          await applyHeld;
+          return {
+            result: { kind: 'assistant.apply' as const, results: [], ack: null, dropbox: null },
+            affected: [],
+          };
+        }
+        throw new Error('unsupported task');
       },
     };
     const core = new LibraryServiceCore(async () => held, 'instance-1');
@@ -389,6 +401,13 @@ describe('LibraryServiceCore', () => {
       operationId: 'publish-during-runtime-change',
       task: { kind: 'assistant.publish' },
     });
+    const apply = core.dispatch({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'apply-during-runtime-change',
+      operationId: 'apply-during-runtime-change',
+      task: { kind: 'assistant.apply', messages: [] },
+    });
     await Promise.resolve();
     await command('heartbeat', {
       kind: 'device.heartbeat',
@@ -404,7 +423,8 @@ describe('LibraryServiceCore', () => {
     expect(aborted).toEqual(['before-heartbeat']);
     releaseMetadata();
     releasePublish();
-    await Promise.all([metadata, publish]);
+    releaseApply();
+    await Promise.all([metadata, publish, apply]);
   });
 
   it('does not hold the command actor lane while an assistant projection is built and sent', async () => {
@@ -557,6 +577,74 @@ describe('LibraryServiceCore', () => {
         protocol: LIBRARY_SERVICE_PROTOCOL,
         requestId: 'command-after-connection-cancel',
         operationId: 'command-after-connection-cancel',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+  });
+
+  it('cancels a stalled assistant apply in the authority and admits current work', async () => {
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => (started = resolve));
+    const signals: AbortSignal[] = [];
+    const heldAuthority = {
+      ...authority(),
+      async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
+        if (task.kind !== 'assistant.apply') throw new Error('unsupported task');
+        if (!signal) throw new Error('apply signal missing');
+        signals.push(signal);
+        if (signals.length === 1) {
+          started();
+          await new Promise<void>((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          );
+        }
+        return {
+          result: { kind: 'assistant.apply' as const, results: [], ack: null, dropbox: null },
+          affected: [],
+        };
+      },
+    };
+    const core = new LibraryServiceCore(async () => heldAuthority, 'instance-1');
+    await core.dispatch(hello);
+    const request = (requestId: string) => ({
+      type: 'task' as const,
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      operationId: `${requestId}-operation`,
+      task: { kind: 'assistant.apply' as const, messages: [] },
+    });
+
+    const stalled = core.dispatch(request('apply-stalled'));
+    await held;
+    await expect(
+      core.dispatch({
+        type: 'cancel',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'apply-stalled',
+      }),
+    ).resolves.toEqual([]);
+    await expect(stalled).resolves.toEqual([
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ]);
+    expect(signals[0]?.aborted).toBe(true);
+    await expect(core.dispatch(request('apply-current'))).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.apply', results: [], ack: null, dropbox: null },
+      }),
+    ]);
+    expect(signals[1]?.aborted).toBe(false);
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-after-apply-cancel',
+        operationId: 'operation-after-apply-cancel',
         command: { kind: 'watchlist.add', title },
       }),
     ).resolves.toEqual(

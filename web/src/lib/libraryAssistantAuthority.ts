@@ -120,27 +120,27 @@ export const ASSISTANT_RECORDS = 'assistant.records.v1';
 
 /** What the library service lends this authority: its rows, its commands, its device's records, and den-edge. */
 export interface AssistantPort {
-  readonly libraryId: string;
+  readonly id: string;
   /** This device's stamp device id (16 hex). */
-  readonly device: string;
-  settings(name: string): SettingsRow | undefined;
+  readonly dev: string;
+  row(name: string): SettingsRow | undefined;
   /** The row last authenticated from den-edge, excluding this device's durable unsent projection. */
-  acknowledgedSettings(name: string): SettingsRow | undefined;
+  ack(name: string): SettingsRow | undefined;
   /** Read the library log to its head. */
-  refresh(): Promise<void>;
+  sync(signal?: AbortSignal): Promise<void>;
   /**
    * A person's command, as their tap sends it, its writes stamped `stamp`. `operationId` makes a repeated apply the
    * same tracker event.
    */
-  command(
+  run(
     command: LibraryCommand,
     operationId: string,
     stamp: Stamp,
   ): Promise<LibraryAuthorityCommandResult>;
   /** A series' aired regular episodes of `season`, from TMDB's shape; null while it cannot be had. */
-  seasonEpisodes(title: TitleRef, season: number): Promise<number[] | null>;
+  eps(title: TitleRef, season: number): Promise<number[] | null>;
   /** Load a series' shape, as the title page does before a whole-series Seen. False while it cannot be had. */
-  loadShape(title: TitleRef): Promise<boolean>;
+  shape(title: TitleRef): Promise<boolean>;
   /** Write settings into a row, with a fresh stamp; resolves once den-edge has them, or throws. */
   patch(
     name: string,
@@ -152,15 +152,15 @@ export interface AssistantPort {
    */
   ride<T>(name: string, changes: Record<string, ConfigValue>, work: () => Promise<T>): Promise<T>;
   /** Write a row whole, as compare-and-set (pruning: no tombstones). */
-  replace(row: SettingsRow): Promise<void>;
+  set(row: SettingsRow): Promise<void>;
   /** Hand den-edge the library's drop-box public key, with the member's proof. */
-  putDropbox(key: DropboxKey): Promise<boolean>;
+  send(key: DropboxKey): Promise<boolean>;
   /** The library's v4 documents as held, the series layouts known (by TMDB id), and the log head they were read at. */
-  documents(): unknown[];
-  layouts(): Record<string, SeriesLayout>;
+  docs(): unknown[];
+  lays(): Record<string, SeriesLayout>;
   head(): number;
   /** Changes whenever anything a projection is built from may have: the log head or a series layout known. */
-  inputs(): string;
+  key(): string;
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
    * proof: this library's, or `member` (a lent household connection's). A refusal that said how long to wait
    * (`429` with `Retry-After`) answers that wait. */
@@ -177,12 +177,12 @@ export interface AssistantPort {
     signal?: AbortSignal,
   ): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
-  membership(): Promise<AssistantConnection['member'] | null>;
+  join(): Promise<AssistantConnection['member'] | null>;
   load(): Promise<AssistantRecords | null | undefined>;
   save(records: AssistantRecords): Promise<void>;
   now(): number;
   /** 32 bytes from the platform's CSPRNG, as hex. */
-  random(): string;
+  rand(): string;
 }
 
 type Accept = {
@@ -347,7 +347,7 @@ export class LibraryAssistantAuthority {
   #row(name: string, lent?: AssistantConnection | null): SettingsRow | null {
     if (lent && (CONNECTION_ROWS as readonly string[]).includes(name))
       return (lent.rows.find((row) => row.name === name) as SettingsRow | undefined) ?? null;
-    return this.port.settings(name) ?? null;
+    return this.port.row(name) ?? null;
   }
 
   /** The grants this device knows revoked: its own records', and a lent household's. */
@@ -363,10 +363,10 @@ export class LibraryAssistantAuthority {
   async lend(signal?: AbortSignal): Promise<AssistantConnection | null> {
     if (__DEN_TV_LEGACY_JS_CORE__) return null;
     signal?.throwIfAborted();
-    await abortable(this.port.refresh(), signal);
+    await abortable(this.port.sync(), signal);
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
       await abortable(this.grants(), signal);
-    const member = await abortable(this.port.membership(), signal);
+    const member = await abortable(this.port.join(), signal);
     if (!member) return null;
     const rows = CONNECTION_ROWS.flatMap((name) => {
       const row = this.#row(name);
@@ -428,25 +428,25 @@ export class LibraryAssistantAuthority {
   }
 
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
-  dropbox(lent?: AssistantConnection | null): DropboxKey | null {
+  box(lent?: AssistantConnection | null): DropboxKey | null {
     return dropboxKey(this.#row(DROPBOX_ROW, lent));
   }
 
   /** Lazily make and publish the household key managed-playback receipts seal to. */
-  async ensureDropbox(create = true): Promise<DropboxKey | null> {
+  async key(create = true): Promise<DropboxKey | null> {
     await ensureAssistantPolicy();
-    await this.port.refresh();
-    let dropbox = this.dropbox();
+    await this.port.sync();
+    let dropbox = this.box();
     if (!dropbox && create) {
       const made = assistantPolicy<DropboxKey & { setting: string; value: ConfigValue }>({
         op: 'assistant_keygen_dropbox',
-        random: this.port.random(),
+        random: this.port.rand(),
       });
       await this.port.patch(DROPBOX_ROW, { [made.setting]: made.value });
-      dropbox = this.dropbox();
+      dropbox = this.box();
     }
     if (!dropbox) return null;
-    if (!(await this.port.putDropbox(dropbox)))
+    if (!(await this.port.send(dropbox)))
       throw new Error('den-edge did not take the library’s drop-box key');
     return dropbox;
   }
@@ -481,12 +481,12 @@ export class LibraryAssistantAuthority {
    * Prove consent rollback from the refreshed durable rows alone. `grants()` intentionally joins this device's
    * private refusal journal, which is correct for enforcement/UI but could mask a partial household write here.
    */
-  async revocationReadback(grant: string): Promise<'revoked' | 'absent' | 'unverified'> {
+  async read(grant: string): Promise<'revoked' | 'absent' | 'unverified'> {
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    await this.port.sync();
     let found = false;
     for (const name of GRANT_ROWS) {
-      const row = this.port.acknowledgedSettings(name);
+      const row = this.port.ack(name);
       if (!row?.values[grant]?.value) continue;
       found = true;
       // Ask policy about each durable row independently. A revoked grant row deliberately makes the ordinary
@@ -520,13 +520,13 @@ export class LibraryAssistantAuthority {
   ): Promise<{ grant: string; key: string; readKey?: string }> {
     if (!write && !read) throw new Error('a consent allows writing, reading, or both');
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    await this.port.sync();
     const { grant, key } = write
       ? await this.#writeGrant(client)
       : (() => {
           const made = assistantPolicy<{ grant: string; secret: string }>({
             op: 'assistant_grant_key',
-            random: this.port.random(),
+            random: this.port.rand(),
           });
           return { grant: made.grant, key: made.secret };
         })();
@@ -534,7 +534,7 @@ export class LibraryAssistantAuthority {
     const record = assistantPolicy<{ key: string; setting: string; value: ConfigValue }>({
       op: 'assistant_keygen_read',
       grant,
-      random: this.port.random(),
+      random: this.port.rand(),
       client,
       now: this.port.now(),
     });
@@ -544,8 +544,7 @@ export class LibraryAssistantAuthority {
   }
 
   async #writeGrant(client: string): Promise<{ grant: string; key: string }> {
-    if (!(await this.ensureDropbox()))
-      throw new Error('the assistant drop-box key could not be made');
+    if (!(await this.key())) throw new Error('the assistant drop-box key could not be made');
     const now = this.port.now();
     const grant = assistantPolicy<{
       grant: string;
@@ -554,7 +553,7 @@ export class LibraryAssistantAuthority {
       value: ConfigValue;
     }>({
       op: 'assistant_keygen_grant',
-      random: this.port.random(),
+      random: this.port.rand(),
       client,
       ops: [...OPS],
       cap: DAILY_CAP,
@@ -582,7 +581,7 @@ export class LibraryAssistantAuthority {
   async revoke(grant: string): Promise<'revoked' | 'absent'> {
     await this.#remember({ revoked: [grant] });
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    await this.port.sync();
     let found = false;
     for (const name of GRANT_ROWS) {
       const value = this.#row(name)?.values[grant]?.value;
@@ -609,7 +608,7 @@ export class LibraryAssistantAuthority {
     const now = this.port.now();
     if (now - (await this.#load()).renewedAt < DAY_MS) return 0;
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    await this.port.sync();
     let renewed = 0;
     // A grant and its read and play records are renewed together (§15, §16).
     for (const name of GRANT_ROWS) {
@@ -735,8 +734,8 @@ export class LibraryAssistantAuthority {
     if (now < this.#holdUntil && readKey === this.#holdRead) return [];
     // A change in either log is a change of the inputs.
     const inputs = lent
-      ? `${this.port.inputs()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
-      : this.port.inputs();
+      ? `${this.port.key()}:${JSON.stringify([lent.member.libraryId, lent.rows, lent.revoked])}`
+      : this.port.key();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
     const records = await this.#load();
     signal?.throwIfAborted();
@@ -747,8 +746,8 @@ export class LibraryAssistantAuthority {
         if (!this.#published.has(grant)) this.#published.set(grant, sent);
     }
     // The layouts known when it was last built, under the ones this page has learnt since.
-    const layouts = { ...kept?.layouts, ...this.port.layouts() };
-    const library = lent?.member.libraryId ?? this.port.libraryId;
+    const layouts = { ...kept?.layouts, ...this.port.lays() };
+    const library = lent?.member.libraryId ?? this.port.id;
     const grants = this.#row(GRANTS_ROW, lent);
     // The household's hide rules travel with the lists (§15); a change to them is a change of the rows.
     const prefs = this.#row(PREFS_ROW);
@@ -758,7 +757,7 @@ export class LibraryAssistantAuthority {
     // a page that wrote or synced them holds them as they came, one that read them back from this device's store as
     // the store keeps them, and the same library must be the same inputs on both, or every returning page rebuilds it.
     const documents = `[${this.port
-      .documents()
+      .docs()
       .map((document) => JSON.stringify(document))
       .sort()
       .join(',')}]`;
@@ -787,7 +786,7 @@ export class LibraryAssistantAuthority {
       grants,
       prefs,
       localRevoked,
-      random: this.port.random(),
+      random: this.port.rand(),
       now,
     });
     let built: ProjectionAnswer;
@@ -861,7 +860,7 @@ export class LibraryAssistantAuthority {
     // Metadata can keep arriving while the projection Worker builds. The key still names the exact request above,
     // so a later page rebuilds when these additions change it; carry them with the publication so closing this page
     // does not lose them and force every fresh page to discover the same layouts during its own build.
-    const rememberedLayouts = { ...layouts, ...this.port.layouts() };
+    const rememberedLayouts = { ...layouts, ...this.port.lays() };
     signal?.throwIfAborted();
     this.#builtFrom = inputs;
     this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
@@ -893,8 +892,8 @@ export class LibraryAssistantAuthority {
   ): Opened {
     return assistantPolicy<Opened>({
       op: 'assistant_open',
-      library: lent?.member.libraryId ?? this.port.libraryId,
-      device: this.port.device,
+      library: lent?.member.libraryId ?? this.port.id,
+      device: this.port.dev,
       sealed,
       queue: tv ? 'tv' : 'library',
       ...(tv ? { awakeSince: tv.awakeSince } : {}),
@@ -925,17 +924,23 @@ export class LibraryAssistantAuthority {
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     lent?: AssistantConnection | null,
     tv: { awakeSince: number } | null = null,
+    signal?: AbortSignal,
   ): Promise<{
     results: AssistantApplied[];
     ack: number | null;
     dropbox: DropboxKey | null;
     affected: LibrarySelectionScope[];
   }> {
+    signal?.throwIfAborted();
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    signal?.throwIfAborted();
+    await this.port.sync(signal);
+    signal?.throwIfAborted();
     // Revocations in the row as read join this device's set before anything is opened against it.
     await this.grants(lent);
+    signal?.throwIfAborted();
     let records = await this.#load();
+    signal?.throwIfAborted();
     const order = messages
       .map((message) => {
         const opened = this.#open(message.sealed, records, lent, tv);
@@ -948,6 +953,7 @@ export class LibraryAssistantAuthority {
     /** The lowest `seq` that may not be acknowledged: a `from_future`, or one that could not be applied. */
     let held = Infinity;
     for (const [index, { seq, sealed }] of order.entries()) {
+      signal?.throwIfAborted();
       // Opened again: an earlier request in this drain may have changed what this one is checked against.
       const opened = this.#open(sealed, records, lent, tv);
       if ('reject' in opened) {
@@ -993,13 +999,13 @@ export class LibraryAssistantAuthority {
     return {
       results,
       ack: handled.length ? Math.max(...handled) : null,
-      dropbox: this.dropbox(lent),
+      dropbox: this.box(lent),
       affected,
     };
   }
 
   /** Open and apply Hearth's opaque completion receipts through the ordinary progress command. */
-  async applyPlaybackReceipts(
+  async plays(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
     lent?: AssistantConnection | null,
   ): Promise<{ ack: number | null; applied: number }> {
@@ -1018,15 +1024,15 @@ export class LibraryAssistantAuthority {
         }
       | { reject: string };
     await ensureAssistantPolicy();
-    await this.port.refresh();
+    await this.port.sync();
     let records = await this.#load(true);
     let ack: number | null = null;
     let applied = 0;
     for (const message of messages) {
       const opened = assistantPolicy<OpenedReceipt>({
         op: 'playback_receipt_open',
-        library: lent?.member.libraryId ?? this.port.libraryId,
-        device: this.port.device,
+        library: lent?.member.libraryId ?? this.port.id,
+        device: this.port.dev,
         sealed: message.sealed,
         assistant: this.#row(DROPBOX_ROW, lent),
         applied: this.#row(PLAYBACK_RECEIPTS_APPLIED_ROW),
@@ -1054,7 +1060,7 @@ export class LibraryAssistantAuthority {
                     episode: accept.episode,
                   }
                 : undefined;
-            await this.port.command(
+            await this.port.run(
               {
                 kind: 'progress.record',
                 title: accept.title,
@@ -1070,7 +1076,7 @@ export class LibraryAssistantAuthority {
         );
         // ACK only after both durable replay layers can be read back. The shared row protects every device; this
         // device's kept record protects against an older row served after reconnecting.
-        await this.port.refresh();
+        await this.port.sync();
         if (
           !sameConfigValue(
             this.#row(PLAYBACK_RECEIPTS_APPLIED_ROW)?.values[accept.setting]?.value,
@@ -1098,7 +1104,7 @@ export class LibraryAssistantAuthority {
     const { title, value, season, episode } = accept.args;
     const operationId = `assistant:${accept.id}`;
     const run = async (command: LibraryCommand, id = operationId) =>
-      (await this.port.command(command, id, accept.stamp)).affected;
+      (await this.port.run(command, id, accept.stamp)).affected;
     switch (accept.op) {
       case 'watchlist_add':
         return run({ kind: 'watchlist.add', title });
@@ -1119,7 +1125,7 @@ export class LibraryAssistantAuthority {
             watched,
           });
         if (season !== undefined) {
-          const episodes = await this.port.seasonEpisodes(title, season);
+          const episodes = await this.port.eps(title, season);
           if (!episodes) throw new Error('the season’s episodes could not be loaded');
           if (season > 0)
             return run({
@@ -1144,7 +1150,7 @@ export class LibraryAssistantAuthority {
             );
           return scopes;
         }
-        if (title.type === 'tv' && !(await this.port.loadShape(title)))
+        if (title.type === 'tv' && !(await this.port.shape(title)))
           throw new Error('the series’ episodes could not be loaded');
         return run({ kind: 'watched.set', title, watched });
       }
@@ -1169,7 +1175,7 @@ export class LibraryAssistantAuthority {
     const values = { ...row.values };
     for (const id of remove) delete values[id];
     try {
-      await this.port.replace({ ...row, values });
+      await this.port.set({ ...row, values });
     } catch (error) {
       console.warn('asst/prune', error);
     }

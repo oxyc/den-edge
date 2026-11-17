@@ -622,14 +622,18 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     }
   }
   task: LibraryServiceAuthority['task'] = async (task, ...args) => {
+    const signal = args[1];
+    signal?.throwIfAborted();
     // Deciding what to publish reads the whole library; until this device's publication is due, nothing is.
     if (task.kind === 'assistant.publish' && !this.#full && (await this.#publicationCurrent()))
       return { result: { kind: 'assistant.publish', published: 0 }, affected: [] };
     // A drain that found nothing has nothing to apply: the drop-box key is all it needs, from its one row.
     if (task.kind === 'assistant.apply' && !task.messages.length && !this.#full) {
       const row = await this.#dropboxRow(task.connection ?? null);
+      signal?.throwIfAborted();
       if (row !== undefined) {
         await ensureAssistantPolicy();
+        signal?.throwIfAborted();
         return {
           result: { kind: 'assistant.apply', results: [], ack: null, dropbox: dropboxKey(row) },
           affected: [],

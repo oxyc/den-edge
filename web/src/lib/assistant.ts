@@ -5,9 +5,9 @@
 // also drains its own lane of the TV queue (§16), whose plays it starts rather than applies.
 
 import { exclusive } from './exclusive';
-import PlaybackReceiptStatus from '../components/PlaybackReceiptStatus.svelte';
+import Status from '../components/PlaybackReceiptStatus.svelte';
 
-export { PlaybackReceiptStatus };
+export { Status };
 import { clientFailureErrorClass, reportClientFailure } from './diagnosticsReport';
 import { listConnections } from './oauth';
 import { relayFetch } from './relayFetch';
@@ -16,7 +16,7 @@ import { relayFetch } from './relayFetch';
  * §5 *Renewal*: the grants whose connection den-edge still lists, handed to the library service to renew (it renews
  * at most once a day). A grant whose connection is gone is left to expire.
  */
-export async function renewListed(
+export async function renew(
   renew: (grants: string[]) => Promise<unknown>,
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<void> {
@@ -45,7 +45,7 @@ const preparedReceiptAuthorities = new WeakSet<PlaybackReceiptAuthority>();
 const receiptPreparations = new WeakMap<PlaybackReceiptAuthority, Promise<boolean>>();
 
 /** Lazily establish managed-playback completion recovery without adding assistant crypto to app startup. */
-export function preparePlaybackReceipts(
+export function prepare(
   authority: PlaybackReceiptAuthority,
   signal: AbortSignal,
 ): Promise<boolean> {
@@ -101,9 +101,11 @@ const DRAIN_MS = (WAIT_S + 15) * 1000;
 /** Between drains when den-edge answered at once with nothing, or could not be reached. */
 const IDLE_MS = 15_000;
 const BACKOFF_MS = 60_000;
+/** A library-service delivery is local, but must still retire if its Worker or port stops answering. */
 
-export async function putDropbox(
+async function putDropbox(
   key: DropboxKey,
+  signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<boolean> {
   try {
@@ -111,7 +113,7 @@ export async function putDropbox(
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pk: key.public }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
     });
     return res.ok;
   } catch {
@@ -133,7 +135,7 @@ export interface OtherQueue {
 }
 
 /** Every waiting request, oldest first; null when den-edge refused or could not be reached. */
-export async function drainQueue(
+async function drainQueue(
   wait: number,
   signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
@@ -161,7 +163,7 @@ export async function drainQueue(
   }
 }
 
-export async function ackQueue(
+async function ackQueue(
   upTo: number,
   fetchImpl: typeof fetch = relayFetch,
   queue?: OtherQueue,
@@ -184,17 +186,17 @@ export async function ackQueue(
 }
 
 /** Drain opaque Hearth completion receipts once after the library's foreground sync. */
-export function drainPlaybackReceiptsOnce(
+export function one(
   loop: {
-    libraryId: string;
-    apply: (messages: QueuedRequest[]) => Promise<{ ack: number | null; applied?: number }>;
-    canAck?: () => boolean;
-    fetchImpl?: typeof fetch;
+    id: string;
+    run: (messages: QueuedRequest[]) => Promise<{ ack: number | null; applied?: number }>;
+    valid?: () => boolean;
+    fetch?: typeof fetch;
   },
   signal: AbortSignal,
 ): Promise<PlaybackReceiptDrainOutcome> {
-  return exclusive(`den.playback-receipts.drain.${loop.libraryId}`, async () => {
-    const fetchImpl = loop.fetchImpl ?? relayFetch;
+  return exclusive(`den.playback-receipts.drain.${loop.id}`, async () => {
+    const fetchImpl = loop.fetch ?? relayFetch;
     const messages = await drainQueue(0, signal, fetchImpl, undefined, 'playback/receipts');
     if (signal.aborted) return { outcome: 'retired' };
     if (messages === null) {
@@ -209,7 +211,7 @@ export function drainPlaybackReceiptsOnce(
     if (!messages.length) return { outcome: 'empty' };
     let result: { ack: number | null; applied?: number };
     try {
-      result = await loop.apply(messages);
+      result = await loop.run(messages);
     } catch (error) {
       if (!signal.aborted)
         reportClientFailure({
@@ -221,11 +223,11 @@ export function drainPlaybackReceiptsOnce(
         });
       return signal.aborted ? { outcome: 'retired' } : { outcome: 'failed', stage: 'apply' };
     }
-    if (signal.aborted || (loop.canAck && !loop.canAck())) return { outcome: 'retired' };
+    if (signal.aborted || (loop.valid && !loop.valid())) return { outcome: 'retired' };
     if (result.ack === null) return { outcome: 'failed', stage: 'apply' };
     const ack = result.ack;
     const acknowledged = await ackQueue(ack, fetchImpl, undefined, 'playback/receipts', signal);
-    if (signal.aborted || (loop.canAck && !loop.canAck())) return { outcome: 'retired' };
+    if (signal.aborted || (loop.valid && !loop.valid())) return { outcome: 'retired' };
     if (!acknowledged) {
       if (!signal.aborted)
         reportClientFailure({
@@ -242,40 +244,40 @@ export function drainPlaybackReceiptsOnce(
 }
 
 /** Drain one receipt batch only while the same foreground library/profile authority still owns every await. */
-export async function drainPlaybackReceiptsForCurrentAuthority<Connection>(
+export async function current<Connection>(
   loop: {
-    libraryId: string;
-    ensure: () => Promise<DropboxKey | null>;
+    id: string;
+    key: () => Promise<DropboxKey | null>;
     lend: () => Promise<Connection>;
-    apply: (
+    run: (
       messages: QueuedRequest[],
       connection: Connection,
     ) => Promise<{ ack: number | null; applied?: number }>;
-    current: () => boolean;
-    fetchImpl?: typeof fetch;
+    valid: () => boolean;
+    fetch?: typeof fetch;
   },
   signal: AbortSignal,
 ): Promise<PlaybackReceiptDrainOutcome> {
-  return drainPlaybackReceiptsOnce(
+  return one(
     {
-      libraryId: loop.libraryId,
-      apply: async (messages) => {
-        if (signal.aborted || !loop.current()) return { ack: null };
-        const dropbox = await loop.ensure();
-        if (!dropbox || signal.aborted || !loop.current()) return { ack: null };
+      id: loop.id,
+      run: async (messages) => {
+        if (signal.aborted || !loop.valid()) return { ack: null };
+        const dropbox = await loop.key();
+        if (!dropbox || signal.aborted || !loop.valid()) return { ack: null };
         const connection = await loop.lend();
-        if (signal.aborted || !loop.current()) return { ack: null };
-        return loop.apply(messages, connection);
+        if (signal.aborted || !loop.valid()) return { ack: null };
+        return loop.run(messages, connection);
       },
-      canAck: () => !signal.aborted && loop.current(),
-      ...(loop.fetchImpl ? { fetchImpl: loop.fetchImpl } : {}),
+      valid: () => !signal.aborted && loop.valid(),
+      ...(loop.fetch ? { fetch: loop.fetch } : {}),
     },
     signal,
   );
 }
 
 /** Map one authority-fenced drain into the only presentation transition its caller needs to retain. */
-export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Status>(
+export async function recover<Connection, Status>(
   work: {
     libraryId: string;
     model: {
@@ -289,20 +291,20 @@ export async function recoverPlaybackReceiptsForCurrentAuthority<Connection, Sta
     lend: () => Promise<Connection>;
     fetchImpl?: typeof fetch;
   },
-  current: () => boolean,
+  valid: () => boolean,
   signal: AbortSignal,
   recovering: boolean,
   publish: (state: 'failed' | 'recovered' | null, expected?: Status) => Status | null,
 ): Promise<void> {
   try {
-    const result = await drainPlaybackReceiptsForCurrentAuthority(
+    const result = await current(
       {
-        libraryId: work.libraryId,
-        ensure: () => (work.household ?? work.model).ensurePlaybackReceipts(),
+        id: work.libraryId,
+        key: () => (work.household ?? work.model).ensurePlaybackReceipts(),
         lend: work.lend,
-        apply: (messages, connection) => work.model.applyPlaybackReceipts(messages, connection),
-        current,
-        ...(work.fetchImpl ? { fetchImpl: work.fetchImpl } : {}),
+        run: (messages, connection) => work.model.applyPlaybackReceipts(messages, connection),
+        valid,
+        ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),
       },
       signal,
     );
@@ -329,19 +331,19 @@ const PUBLISH_TICK_MS = 30_000;
  * projection that is due. One tab of this browser publishes a library at a time (a Web Lock), another taking over
  * when it closes; another device publishing too only replaces it with the same lists.
  */
-export function publishWhileOpen(
+export function publish(
   loop: {
-    libraryId: string;
-    publish: (signal: AbortSignal) => Promise<unknown>;
-    sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+    id: string;
+    run: (signal: AbortSignal) => Promise<unknown>;
+    wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   },
   signal: AbortSignal,
 ): Promise<void> {
-  const sleep = loop.sleep ?? pause;
-  return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
+  const sleep = loop.wait ?? pause;
+  return exclusive(`den.assistant.publish.${loop.id}`, async () => {
     while (!signal.aborted) {
       try {
-        await loop.publish(signal);
+        await loop.run(signal);
       } catch (error) {
         if (!signal.aborted) console.warn('asst/publish', error);
       }
@@ -351,15 +353,15 @@ export function publishWhileOpen(
 }
 
 export interface DrainLoop {
-  libraryId: string;
+  id: string;
   /** Drain this queue instead of the library's: a TV's lane (§16). */
   queue?: OtherQueue;
   /** Opens, checks and applies a drain's requests in the library service. */
-  apply: (messages: QueuedRequest[]) => Promise<ApplyOutcome>;
+  run: (messages: QueuedRequest[], signal: AbortSignal) => Promise<ApplyOutcome>;
   /** Told of each applied request, for the page's quiet toast. */
-  applied: (result: Extract<ApplyResult, { outcome: 'accepted' }>) => void;
-  fetchImpl?: typeof fetch;
-  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  done: (result: Extract<ApplyResult, { outcome: 'accepted' }>) => void;
+  fetch?: typeof fetch;
+  wait?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 const pause = (ms: number, signal: AbortSignal) =>
@@ -378,15 +380,15 @@ const pause = (ms: number, signal: AbortSignal) =>
  * drains a library at a time (a Web Lock); another takes over when it closes. Another device draining at once is
  * safe — the applied row refuses a request applied already — so the lock only saves the work twice.
  */
-export function drainWhileOpen(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  return exclusive(`den.assistant.drain.${loop.libraryId}${loop.queue?.key ?? ''}`, () =>
+export function drain(loop: DrainLoop, signal: AbortSignal): Promise<void> {
+  return exclusive(`den.assistant.drain.${loop.id}${loop.queue?.key ?? ''}`, () =>
     drainLoop(loop, signal),
   );
 }
 
 async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
-  const sleep = loop.sleep ?? pause;
-  const fetchImpl = loop.fetchImpl ?? relayFetch;
+  const sleep = loop.wait ?? pause;
+  const fetchImpl = loop.fetch ?? relayFetch;
   /** The drop-box key last given to den-edge in this session; it is given again when the library's changes. */
   let put: string | null = null;
   let wait = 0;
@@ -400,26 +402,33 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
     }
     let outcome: ApplyOutcome;
     try {
-      outcome = await loop.apply(messages);
+      outcome = await loop.run(messages, AbortSignal.any([signal, AbortSignal.timeout(30_000)]));
     } catch (error) {
+      if (signal.aborted) return;
       console.warn('asst/apply', error);
       await sleep(BACKOFF_MS, signal);
       continue;
     }
+    // The service may have completed as this authority retired. Its durable receipt makes redelivery safe; this
+    // obsolete page must not announce an effect, publish a drop-box key or acknowledge the queue.
+    if (signal.aborted) return;
     // The library queue's drain gives den-edge the drop-box key; a lane's leaves that to it.
     if (
       !loop.queue &&
       outcome.dropbox &&
       outcome.dropbox.public !== put &&
-      (await putDropbox(outcome.dropbox, fetchImpl))
+      (await putDropbox(outcome.dropbox, signal, fetchImpl))
     )
       put = outcome.dropbox.public;
+    if (signal.aborted) return;
     for (const result of outcome.results) {
-      if (result.outcome === 'accepted') loop.applied(result);
+      if (result.outcome === 'accepted') loop.done(result);
       // The reason, never the request: it is the household's, and a refusal is no error of this page's.
       else console.info('asst/refused', result.reason);
     }
-    if (outcome.ack !== null) await ackQueue(outcome.ack, fetchImpl, loop.queue);
+    if (outcome.ack !== null)
+      await ackQueue(outcome.ack, fetchImpl, loop.queue, 'assistant', signal);
+    if (signal.aborted) return;
     // An empty answer may come early (den-edge was busy, or the hold was refused), and requests left unacknowledged
     // come straight back: never drain again at once.
     const last = messages.at(-1)?.seq;
