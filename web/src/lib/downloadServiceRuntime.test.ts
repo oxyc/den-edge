@@ -43,7 +43,7 @@ describe('DownloadServiceRuntime artwork', () => {
       fetchImpl,
     );
 
-    expect(runtime.nextDelay(1)).toBe(0);
+    expect(runtime.nextDelay(1)).toBeUndefined();
     await expect(runtime.run()).resolves.toBe(false);
     expect(runtime.nextDelay(1)).toBeUndefined();
     await expect(
@@ -63,7 +63,7 @@ describe('DownloadServiceRuntime artwork', () => {
     const fetchImpl = vi.fn(async () => Response.json({}));
     const runtime = new DownloadServiceRuntime(testLog().log, clock, () => {}, content, fetchImpl);
 
-    expect(runtime.nextDelay(1)).toBe(0);
+    expect(runtime.nextDelay(1)).toBeUndefined();
     await expect(runtime.run()).resolves.toBe(false);
     expect(fetchImpl).toHaveBeenCalledWith('/routes');
     expect(runtime.nextDelay(1)).toBeUndefined();

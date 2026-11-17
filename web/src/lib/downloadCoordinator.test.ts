@@ -1494,20 +1494,15 @@ describe('DownloadCoordinator', () => {
 
     await driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 });
     expect(handed.map((items) => items.length)).toEqual([1, 0]);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE)).toBe(5_000);
-
     await driver.run({ now: T0 + 2 * MINUTE + 4_999, observedFor: 0 });
     expect(handed).toHaveLength(2);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 4_999)).toBe(1);
 
     await driver.run({ now: T0 + 2 * MINUTE + 5_000, observedFor: 0 });
     expect(handed.map((items) => items.length)).toEqual([1, 0, 0]);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_000)).toBe(10_000);
     await driver.run({ now: T0 + 2 * MINUTE + 14_999, observedFor: 0 });
     expect(handed).toHaveLength(3);
     await driver.run({ now: T0 + 2 * MINUTE + 15_000, observedFor: 0 });
     expect(handed.map((items) => items.length)).toEqual([1, 0, 0, 0]);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 15_000)).toBeUndefined();
     await driver.run({ now: T0 + 2 * MINUTE + 30_000, observedFor: 0 });
     expect(handed).toHaveLength(4);
   });
@@ -1523,10 +1518,8 @@ describe('DownloadCoordinator', () => {
     });
     const driver = new DownloadCoordinatorDriver(queue);
 
-    expect(driver.hearthDelay(T0)).toBe(0);
     await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
     expect(handed).toEqual([[]]);
-    expect(driver.hearthDelay(T0 + 30_000)).toBeUndefined();
     await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
     expect(handed).toEqual([[]]);
   });
@@ -1557,16 +1550,12 @@ describe('DownloadCoordinator', () => {
     release();
     await expect(old).resolves.toBe(false);
 
-    expect(driver.hearthDelay(T0)).toBe(0);
     await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
     expect(handed).toEqual([
       { authority: 'hearth-a', count: 0 },
       { authority: 'hearth-b', count: 0 },
     ]);
-    expect(driver.hearthDelay(T0 + 30_000)).toBeUndefined();
-
     driver.bindHearthAuthority(null);
-    expect(driver.hearthDelay(T0)).toBeUndefined();
     await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
     expect(handed).toHaveLength(2);
   });
@@ -1612,7 +1601,6 @@ describe('DownloadCoordinator', () => {
     release();
     await expect(clearing).resolves.toBe(false);
 
-    expect(driver.hearthDelay(T0 + 2 * MINUTE)).toBe(0);
     await driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 });
     expect(handed.map((items) => items.length)).toEqual([1, 0, 1]);
   });
@@ -1641,8 +1629,7 @@ describe('DownloadCoordinator', () => {
     await driver.run({ now: T0 + MINUTE, observedFor: 0 });
     shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));
 
-    await expect(driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 })).rejects.toBe(cancelled);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE)).toBe(5_000);
+    await expect(driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 })).resolves.toBe(false);
 
     const lease = shared.log.settings(LEASE_ROW)!;
     shared.land({
@@ -1655,7 +1642,6 @@ describe('DownloadCoordinator', () => {
     cancelEmpty = false;
     await driver.run({ now: T0 + 2 * MINUTE + 5_000, observedFor: 0 });
     expect(handed).toHaveLength(2);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 5_000)).toBe(10_000);
 
     shared.land({
       ...shared.log.settings(LEASE_ROW)!,
@@ -1666,7 +1652,6 @@ describe('DownloadCoordinator', () => {
     });
     await driver.run({ now: T0 + 2 * MINUTE + 15_000, observedFor: 120_001 });
     expect(handed.map((items) => items.length)).toEqual([1, 0, 0]);
-    expect(driver.hearthDelay(T0 + 2 * MINUTE + 15_000)).toBeUndefined();
   });
 
   it('waits for a wanted episode to air before searching for it', async () => {

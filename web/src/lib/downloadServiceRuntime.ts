@@ -111,7 +111,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             : { ...found, imdb: 'resolved' as const };
         },
         wanted: async (items, authority) => {
-          const { den } = await providers();
+          const den = this.#resolved?.den;
           return den && den.install === authority
             ? sendWanted(den.base, items, this.fetchImpl)
             : null;
@@ -159,19 +159,17 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         state !== 'paused'
       );
     });
-    const hearth = this.driver.hearthDelay(now);
     // An unasked download is due immediately only when a pass can actually ask Scout. Without a configured or
     // reachable provider, returning zero makes the authority run maintenance and this no-op again without pause.
     // Fall back to its ordinary visible cadence; a plugin-row change is then observed before the next attempt.
     if (this.#providersUnavailable) return undefined;
-    if (!downloads.length) return hearth;
-    const downloadsDelay = Math.min(
+    if (!downloads.length) return undefined;
+    return Math.min(
       ...downloads.map((download) => {
         const asked = this.coordinator.asked.get(download.name);
         return asked ? Math.max(0, downloadPollDelay(asked.quiet) - (now - asked.at)) : 0;
       }),
     );
-    return hearth === undefined ? downloadsDelay : Math.min(downloadsDelay, hearth);
   }
 
   listen(listener: () => void): () => void {
