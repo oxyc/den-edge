@@ -87,19 +87,20 @@ export class DownloadCoordinatorDriver {
 
   constructor(readonly queue: DownloadCoordinator) {}
 
-  run(options: DownloadDriveOptions = {}, hearth?: object | null): Promise<boolean> {
-    if (hearth !== undefined && this.#hearth[0] !== hearth) {
+  run(
+    options: DownloadDriveOptions = {},
+    hearth: object | null | undefined = this.#hearth[0],
+  ): Promise<boolean> {
+    if (this.#hearth[0] !== hearth) {
       this.#hearth = [hearth];
     }
     // A forced pass (a refresh) is asked for figures from now: the pass in flight began before it, with an older
     // `now`, the rows as they were, and possibly other names, so one more pass follows it, shared by every refresh
     // asked meanwhile, rather than answering with it.
-    if (this.#running) return options.force ? this.#after(options) : this.#running;
-    const running = this.#run(options);
-    this.#running = running;
-    const clear = () => {
-      if (this.#running === running) this.#running = undefined;
-    };
+    const active = this.#running;
+    if (active) return options.force ? this.#after(options) : active;
+    const running = (this.#running = this.#run(options));
+    const clear = () => this.#running === running && (this.#running = undefined);
     // `finally` creates a second promise which rejects with `running`. Dropping that promise made an expected
     // fetch AbortError an unhandled rejection even when the scheduler handled the promise returned from `run`.
     // Observe both outcomes directly so cleanup cannot manufacture another rejection.
@@ -117,13 +118,12 @@ export class DownloadCoordinatorDriver {
       };
       return waiting.pass;
     }
-    const again = { options } as { options: DownloadDriveOptions; pass: Promise<boolean> };
-    const next = () => {
-      this.#again = undefined;
-      return this.run(again.options);
-    };
+    const again = (this.#again = { options } as {
+      options: DownloadDriveOptions;
+      pass: Promise<boolean>;
+    });
+    const next = () => ((this.#again = undefined), this.run(again.options));
     again.pass = this.#running!.then(next, next);
-    this.#again = again;
     return again.pass;
   }
 
@@ -139,9 +139,7 @@ export class DownloadCoordinatorDriver {
     if (!current() || (!downloads.length && (!this.#hearth[0] || this.#hearth[1] === '[]')))
       return false;
     await ensureDeferredSyncPolicy();
-    return (await this.#holdLease(now, options.observedFor)) && current()
-      ? this.#holderPass(now)
-      : false;
+    return (await this.#holdLease(now, options.observedFor)) && current() && this.#holderPass(now);
   }
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
