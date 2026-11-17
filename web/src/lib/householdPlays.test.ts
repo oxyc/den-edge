@@ -63,11 +63,11 @@ describe("a TV's household play key", () => {
     const first = await playKeyFor('library-one', storage);
     expect(fromBase64url(first)).toHaveLength(32);
     expect(await playKeyFor('library-one', storage)).toBe(first);
-    expect(currentPlayKey(storage)).toBe(first);
+    expect(currentPlayKey()).toBe(first);
 
     const second = await playKeyFor('library-two', storage);
     expect(second).not.toBe(first);
-    expect(currentPlayKey(storage)).toBe(second);
+    expect(currentPlayKey()).toBe(second);
     expect(await playKeyFor('library-one', storage)).not.toBe(first);
   });
 
@@ -89,7 +89,7 @@ describe("a TV's household play key", () => {
     };
     const key = await playKeyFor('library-one', storage);
     expect(fromBase64url(key)).toHaveLength(32);
-    expect(currentPlayKey(storage)).toBe(key);
+    expect(currentPlayKey()).toBe(key);
     expect(await playKeyFor('library-one', storage)).toBe(key);
 
     storage.setItem = persist;
@@ -106,7 +106,14 @@ describe("a TV's household play key", () => {
     };
     const current = await playKeyFor('new-household', storage);
     expect(current).not.toBe(old);
-    expect(currentPlayKey(storage)).toBe(current);
+    expect(currentPlayKey()).toBe(current);
+  });
+
+  it('persists the same visit key when unavailable storage itself recovers', async () => {
+    const key = await playKeyFor('storage-recovery', undefined);
+    const storage = memoryStorage();
+    expect(await playKeyFor('storage-recovery', storage)).toBe(key);
+    expect(JSON.parse(storage.getItem('den.tvPlayKey.v1') ?? 'null').key).toBe(key);
   });
 
   it('retires old work on household replacement but not on another check for the same household', async () => {
@@ -116,17 +123,13 @@ describe("a TV's household play key", () => {
     let enter!: (signal: AbortSignal) => void;
     const entered = new Promise<AbortSignal>((resolve) => (enter = resolve));
     const seen: string[] = [];
-    const running = whilePlayKey(
-      async (key, signal) => {
-        seen.push(key);
-        if (key === first) enter(signal);
-        await new Promise<void>((resolve) =>
-          signal.addEventListener('abort', () => resolve(), { once: true }),
-        );
-      },
-      stop.signal,
-      storage,
-    );
+    const running = whilePlayKey(async (key, signal) => {
+      seen.push(key);
+      if (key === first) enter(signal);
+      await new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+    }, stop.signal);
     const firstWork = await entered;
     expect(await playKeyFor('library-one', storage)).toBe(first);
     expect(firstWork.aborted).toBe(false);
