@@ -14,9 +14,11 @@
     browseReady,
     browseIdentity,
     showServices,
-    services,
-    servicePending,
+    services = [],
+    servicePending = 0,
     serviceEmpty,
+    serviceRecovery,
+    onServiceRetry,
     onServiceVisible,
     onServiceIntent,
   }: {
@@ -26,10 +28,12 @@
     browseReady: boolean;
     browseIdentity: string;
     showServices: boolean;
-    services: ResolvedService[];
-    servicePending: number;
+    services?: ResolvedService[];
+    servicePending?: number;
     serviceEmpty?: string;
-    onServiceVisible: () => void;
+    serviceRecovery?: 'failed' | 'retrying';
+    onServiceRetry?: () => void;
+    onServiceVisible?: () => void;
     onServiceIntent: (service: Service, country: string) => void;
   } = $props();
 </script>
@@ -39,6 +43,8 @@
     {services}
     pending={servicePending}
     empty={serviceEmpty}
+    recovery={serviceRecovery}
+    onretry={onServiceRetry}
     onvisible={onServiceVisible}
     onintent={onServiceIntent}
   />

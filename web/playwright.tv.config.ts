@@ -28,11 +28,16 @@ export default defineConfig({
     // Replacing the browser webServer must preserve its upstream isolation guard for build and preview.
     env: {
       DEN_E2E: '1',
+      // The production TV build embeds the browser origin used by supported-browser handoffs. Keep the fixture
+      // explicit: without it, Vite falls back to this loopback preview and no longer exercises that destination.
+      DEN_TV_WEB_ORIGIN: 'https://household.example',
       // Keep server evidence beside, not inside, the test outputDir Playwright clears at startup.
       // Existing TV failure artifact uploads retain it along with browser traces.
       DEN_TV_PREVIEW_DIAGNOSTICS: `test-results-tv/preview-${platform}-${E2E_PORT}-${engine}.jsonl`,
     },
-    command: `DEN_TV_OUT_DIR=${output} DEN_TV_E2E=1 npm run build:tv:${platform} && DEN_TV_OUT_DIR=${output} npm run preview:tv:${platform} -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
+    // Old-engine limits constrain the compiled E2E bundle, not Vite's Node preview process. Clear that build-only
+    // guard before preview so a reduced-Tizen workflow can serve the artifact it just qualified.
+    command: `DEN_TV_OUT_DIR=${output} DEN_TV_E2E=1 npm run build:tv:${platform} && DEN_TV_OLD_ENGINE_LIMITS= DEN_TV_OUT_DIR=${output} npm run preview:tv:${platform} -- --host 127.0.0.1 --port ${E2E_PORT} --strictPort`,
     url: E2E_ORIGIN,
     reuseExistingServer: false,
     timeout: 120_000,

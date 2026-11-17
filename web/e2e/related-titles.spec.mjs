@@ -77,6 +77,190 @@ test('a failed recommendation continuation stays visible and retries the same pa
   await page.close();
 });
 
+test('a transient Other versions failure stays distinct from absence and retries only that lane', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  let versionsAttempts = 0;
+  const asked = [];
+  await page.route('**/atlas-versions-retry/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    asked.push(path);
+    if (path.includes('/versions/')) {
+      versionsAttempts++;
+      if (versionsAttempts === 1)
+        return route.fulfill({ status: 503, json: { error: 'temporarily unavailable' } });
+      return route.fulfill({
+        json: {
+          seed: { type: 'movie', id: 1 },
+          versions: [
+            {
+              type: 'movie',
+              id: 40,
+              title: 'The Seed Restaged',
+              year: 2024,
+              posterPath: '/restaged.jpg',
+              kind: 'remake',
+            },
+          ],
+          total: 1,
+        },
+      });
+    }
+    if (path.includes('/similar/')) return route.fulfill({ json: { ids: [], mixed: [] } });
+    if (path.includes('/suggest'))
+      return route.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-versions-retry`);
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole('region', { name: 'More like this' })).toBeAttached();
+  expect(asked.filter((path) => path.includes('/versions/'))).toHaveLength(1);
+
+  await retry.click();
+  const versions = page.getByRole('region', { name: 'Other versions' });
+  await expect(versions.getByRole('link', { name: /^The Seed Restaged / })).toBeVisible();
+  await expect(retry).toHaveCount(0);
+  expect(asked.filter((path) => path.includes('/versions/'))).toHaveLength(2);
+  await page.close();
+});
+
+test('a transient versions refresh retains the authoritative row until its retry succeeds', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  let replacementAttempts = 0;
+  await page.route('**/atlas-retain-*/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.includes('/versions/')) {
+      if (path.includes('atlas-retain-b') && replacementAttempts++ === 0)
+        return route.fulfill({ status: 503, json: { error: 'temporarily unavailable' } });
+      const replacement = path.includes('atlas-retain-b');
+      return route.fulfill({
+        json: {
+          seed: { type: 'movie', id: 1 },
+          versions: [
+            {
+              type: 'movie',
+              id: replacement ? 42 : 41,
+              title: replacement ? 'Replacement version' : 'Retained version',
+              posterPath: replacement ? '/replacement.jpg' : '/retained.jpg',
+              kind: 'remake',
+            },
+          ],
+          total: 1,
+        },
+      });
+    }
+    if (path.includes('/similar/')) return route.fulfill({ json: { ids: [], mixed: [] } });
+    if (path.includes('/suggest'))
+      return route.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-retain-a`);
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  const versions = page.getByRole('region', { name: 'Other versions' });
+  await expect(versions.getByRole('link', { name: /^Retained version / })).toBeVisible();
+
+  await page.evaluate(() => window.relatedFixture.setAtlas('/atlas-retain-b'));
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await expect(versions.getByRole('link', { name: /^Retained version / })).toBeVisible();
+
+  await retry.click();
+  await expect(versions.getByRole('link', { name: /^Replacement version / })).toBeVisible();
+  await expect(versions.getByRole('link', { name: /^Retained version / })).toHaveCount(0);
+  expect(replacementAttempts).toBe(2);
+  await page.close();
+});
+
+test('authority replacement cancels stale versions discovery without publishing an error', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    window.__relatedUnhandledRejections = [];
+    addEventListener('unhandledrejection', (event) => {
+      window.__relatedUnhandledRejections.push(String(event.reason));
+    });
+  });
+  let oldStarted;
+  const started = new Promise((resolve) => (oldStarted = resolve));
+  let releaseOld;
+  const held = new Promise((resolve) => (releaseOld = resolve));
+  await page.route('**/atlas-replaced-*/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.includes('/versions/') && path.includes('atlas-replaced-old')) {
+      oldStarted();
+      await held;
+      await route
+        .fulfill({
+          json: {
+            seed: { type: 'movie', id: 1 },
+            versions: [
+              {
+                type: 'movie',
+                id: 41,
+                title: 'Stale version',
+                posterPath: '/stale.jpg',
+                kind: 'remake',
+              },
+            ],
+            total: 1,
+          },
+        })
+        .catch(() => {});
+      return;
+    }
+    if (path.includes('/versions/'))
+      return route.fulfill({
+        json: {
+          seed: { type: 'movie', id: 1 },
+          versions: [
+            {
+              type: 'movie',
+              id: 42,
+              title: 'Current version',
+              posterPath: '/current.jpg',
+              kind: 'remake',
+            },
+          ],
+          total: 1,
+        },
+      });
+    if (path.includes('/similar/')) return route.fulfill({ json: { ids: [], mixed: [] } });
+    if (path.includes('/suggest'))
+      return route.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-replaced-old`);
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await started;
+  await page.evaluate(() => window.relatedFixture.setAtlas('/atlas-replaced-current'));
+  const versions = page.getByRole('region', { name: 'Other versions' });
+  await expect(versions.getByRole('link', { name: /^Current version / })).toBeVisible();
+  releaseOld();
+  await page.waitForTimeout(250);
+
+  await expect(versions.getByRole('link', { name: /^Stale version / })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+  expect(await page.evaluate(() => window.__relatedUnhandledRejections)).toEqual([]);
+  await page.close();
+});
+
 test('an atlas-late rebuild does not load untouched related rows', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);

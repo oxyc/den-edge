@@ -22,7 +22,7 @@ import {
 } from './relatedRows';
 import { NO_FACTS } from './titleFacts';
 import { ContentAuthority } from './contentAuthority';
-import type { ContentServiceClientPort } from './contentServiceClient';
+import { ContentServiceError, type ContentServiceClientPort } from './contentServiceClient';
 import { Pager } from './pager.svelte';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
@@ -71,12 +71,19 @@ const franchiseRow = (
   atlas: Parameters<typeof franchiseRowImpl>[2],
   options: FixtureOptions,
 ) => franchiseRowImpl(collection, title, atlas, fixtureOptions(options));
+const versionsRowResult = (
+  title: Parameters<typeof versionsRowImpl>[0],
+  atlas: Parameters<typeof versionsRowImpl>[1],
+  franchise: Parameters<typeof versionsRowImpl>[2],
+  options: FixtureOptions,
+  signal?: AbortSignal,
+) => versionsRowImpl(title, atlas, franchise, fixtureOptions(options), signal);
 const versionsRow = (
   title: Parameters<typeof versionsRowImpl>[0],
   atlas: Parameters<typeof versionsRowImpl>[1],
   franchise: Parameters<typeof versionsRowImpl>[2],
   options: FixtureOptions,
-) => versionsRowImpl(title, atlas, franchise, fixtureOptions(options));
+) => versionsRowResult(title, atlas, franchise, options);
 const personRow = (
   person: Parameters<typeof personRowImpl>[0],
   department: Parameters<typeof personRowImpl>[1],
@@ -983,15 +990,21 @@ describe('versionsRow', () => {
     expect(asked).toEqual([versionsPath]);
   });
 
-  it('is no row, and no error, from an atlas that predates the route or answers something else', async () => {
+  it('keeps an absent or older versions route distinct from a transient failure', async () => {
     const older = answering({});
-    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl: older })).toBeNull();
+    expect(
+      await versionsRowResult(self, '/atlas', none, { key: 'k', fetchImpl: older }),
+    ).toBeNull();
     const other = answering({ [versionsPath]: { ids: [8] } });
-    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl: other })).toBeNull();
+    expect(
+      await versionsRowResult(self, '/atlas', none, { key: 'k', fetchImpl: other }),
+    ).toBeNull();
     const down = (async () => {
       throw new TypeError('offline');
     }) as unknown as typeof fetch;
-    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl: down })).toBeNull();
+    expect(
+      await versionsRowResult(self, '/atlas', none, { key: 'k', fetchImpl: down }),
+    ).toBeUndefined();
   });
 
   it('asks nothing without atlas', async () => {
@@ -1000,6 +1013,56 @@ describe('versionsRow', () => {
       await versionsRow(self, null, none, { key: 'k', fetchImpl: answering({}, asked) }),
     ).toBeNull();
     expect(asked).toEqual([]);
+  });
+
+  it('propagates authority replacement instead of presenting it as an outage', async () => {
+    const replaced = new AbortController();
+    replaced.abort(new DOMException('title replaced', 'AbortError'));
+    await expect(
+      versionsRowResult(self, '/atlas', none, { key: 'k' }, replaced.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('propagates the production content client cancellation shape after authority replacement', async () => {
+    const replaced = new AbortController();
+    const content: ContentServiceClientPort = {
+      query: async () => {
+        throw new ContentServiceError({
+          code: 'cancelled',
+          message: 'content request was cancelled',
+          retryable: false,
+        });
+      },
+      onStatus: () => () => {},
+    };
+
+    await expect(
+      versionsRowImpl(self, '/atlas', none, { content }, replaced.signal),
+    ).rejects.toMatchObject({ failure: { code: 'cancelled' } });
+  });
+
+  it('sends exact title refs rather than versions presentation cards', async () => {
+    const asked: unknown[] = [];
+    const card: Title = { type: 'movie', id: 2, title: 'Needs one', year: 2024 };
+    const content: ContentServiceClientPort = {
+      query: async (request) => {
+        if (request.kind === 'atlas.related')
+          return {
+            kind: 'atlas.related',
+            answer: {
+              state: 'ready',
+              value: { operation: 'versions', versions: [{ title: card, note: 'Remake' }] },
+            },
+          } as never;
+        if (request.kind !== 'titles') throw new Error('unexpected content query');
+        asked.push(request.titles);
+        return { kind: 'titles', titles: [card], retryable: [] } as never;
+      },
+      onStatus: () => () => {},
+    };
+
+    await versionsRowImpl(self, '/atlas', none, { content });
+    expect(asked).toEqual([[{ type: 'movie', id: 2 }]]);
   });
 });
 

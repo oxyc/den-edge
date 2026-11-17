@@ -13,7 +13,10 @@ test('service directories are admitted only as their rail approaches the viewpor
   const reserved = await row.boundingBox();
   await row.scrollIntoViewIfNeeded();
   await expect(requests).toHaveText('1');
-  await expect(row.getByText('Services unavailable')).toBeVisible();
+  const status = row.getByRole('status');
+  const retry = row.getByRole('button', { name: 'Try again' });
+  await expect(status).toHaveText('Services unavailable');
+  await expect(retry).toBeVisible();
   const track = row.locator('.track');
   await expect(track).toHaveCSS('padding-left', '0px');
   await expect(track).toHaveCSS('padding-right', '0px');
@@ -27,9 +30,25 @@ test('service directories are admitted only as their rail approaches the viewpor
   const settled = await row.boundingBox();
   expect(settled?.height).toBe(reserved?.height);
 
+  await retry.focus();
+  await retry.click();
+  await expect(requests).toHaveText('2');
+  await expect(retry).toBeFocused();
+  await expect(retry).toHaveAttribute('aria-disabled', 'true');
+  await expect(status).toHaveText('Trying again…');
+  await page.keyboard.press('Enter');
+  await expect(requests, 'an activation while the retry is live does not duplicate it').toHaveText(
+    '2',
+  );
+  expect((await row.boundingBox())?.height).toBe(reserved?.height);
+
+  await page.evaluate(() => document.querySelector('[data-resolve-retry]').click());
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeFocused();
+  expect((await row.boundingBox())?.height).toBe(reserved?.height);
+
   await page.evaluate(() => scrollTo(0, 0));
   await row.scrollIntoViewIfNeeded();
-  await expect(requests).toHaveText('1');
+  await expect(requests).toHaveText('2');
 });
 
 test('the Services rail uses the phone viewport, not the desktop presentation maximum', async ({
@@ -46,4 +65,108 @@ test('the Services rail uses the phone viewport, not the desktop presentation ma
   expect(box.right ?? box.x + box.width).toBeLessThanOrEqual(390);
   expect(box.width).toBeLessThanOrEqual(390);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test('a failed country waits for another country before offering a bounded retry', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=staggered`);
+
+  const requests = page.locator('[data-requests]');
+  const row = page.getByRole('region', { name: 'Services' });
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(row.getByRole('status')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+
+  await page.evaluate(() => document.querySelector('[data-resolve-outstanding]').click());
+  const status = row.getByRole('status');
+  const retry = row.getByRole('button', { name: 'Try again' });
+  await expect(status).toHaveText('Services unavailable');
+  await retry.focus();
+  await retry.click();
+  await expect(retry).toBeFocused();
+  await expect(retry).toHaveAttribute('aria-disabled', 'true');
+  await expect(status).toHaveText('Trying again…');
+  await expect(requests).toHaveText('3');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+});
+
+test('the lazy catalogue replaces language and owner snapshots and fences their stale answer', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=stale-owner`);
+
+  const requests = page.locator('[data-requests]');
+  const state = page.locator('[data-service-state]');
+  // The same rail's accessible name localizes when the language changes; keep tracking its stable production node.
+  const row = page.locator('.services-row');
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('1');
+
+  await page.evaluate(() => globalThis.replaceServiceLanguage());
+  await expect(requests).toHaveText('2');
+  await expect(state).toHaveText('old:sv:true:Netflix SV:1');
+  await expect(row.getByRole('link', { name: 'Netflix SV' })).toBeVisible();
+
+  await page.evaluate(() => globalThis.replaceServiceOwner());
+  await expect(requests).toHaveText('3');
+  await expect(state).toHaveText('new:sv:true:Netflix SV:1');
+  await page.evaluate(() => document.querySelector('[data-resolve-stale]').click());
+  await expect(state).toHaveText('new:sv:true:Netflix SV:1');
+  await expect(row.getByRole('link', { name: 'Netflix SV' })).toBeVisible();
+  await expect(requests).toHaveText('3');
+});
+
+test('an owner replacement fences a live retry and clears its obsolete recovery state', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=retry-owner`);
+
+  const requests = page.locator('[data-requests]');
+  const state = page.locator('[data-service-state]');
+  const row = page.locator('.services-row');
+  await row.scrollIntoViewIfNeeded();
+  await expect(requests).toHaveText('1');
+  await row.getByRole('button', { name: 'Try again' }).click();
+  await expect(requests).toHaveText('2');
+  await expect(row.getByRole('status')).toHaveText('Trying again…');
+
+  await page.evaluate(() => globalThis.replaceServiceOwner());
+  await expect(requests).toHaveText('3');
+  await expect(state).toHaveText('new:en:true:Netflix:2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(row.getByRole('status')).toHaveCount(0);
+
+  await page.evaluate(() => document.querySelector('[data-resolve-stale-retry]').click());
+  await expect(state).toHaveText('new:en:true:Netflix:2');
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  await expect(requests).toHaveText('3');
+});
+
+test('a resolved duplicate-country replacement keeps the shared browser rail in place', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 800 });
+  await page.goto(`${E2E_ORIGIN}/test/services-row.html?result=replacement`);
+
+  const row = page.getByRole('region', { name: 'Services' });
+  await page.evaluate(() => document.fonts.ready);
+  const reserved = await row.boundingBox();
+  await row.scrollIntoViewIfNeeded();
+  await expect(row.getByRole('link', { name: 'Netflix' })).toBeVisible();
+  const resolved = await row.boundingBox();
+  await page.evaluate(() => globalThis.replaceServicesWithDuplicate());
+  await expect(row.getByRole('link', { name: 'Netflix, US' })).toBeVisible();
+  await expect(row.getByRole('link', { name: 'Netflix, FI' })).toBeVisible();
+  await expect(page.locator('[data-service-state]')).toHaveText('first:en:true:Netflix:2');
+  const replaced = await row.boundingBox();
+
+  expect(resolved?.height).toBe(reserved?.height);
+  expect(replaced?.height).toBe(reserved?.height);
+  await expect(row.locator('.country')).toHaveText(['US', 'FI']);
 });

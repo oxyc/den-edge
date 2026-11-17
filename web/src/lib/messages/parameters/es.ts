@@ -26,6 +26,7 @@ export const parameters = {
   'notice.removedComingUp': '“{value}” se quitó de Próximamente',
   'notice.setReaction': '“{title}” se cambió a {reaction}',
   'player.playNextEpisode': 'Reproducir siguiente · T{season} · E{episode}',
+  'player.startingEpisode': 'Iniciando T{season} · E{episode}…',
   'episode.play': 'Reproducir episodio {number}: {name}',
   'episode.upcoming': 'Episodio {number}: {name}. Se emite el {date}',
   'episode.outOn': 'Disponible el {date} en {service}',

@@ -6,7 +6,7 @@
      The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
-  import { withAiring } from '../lib/airing';
+  import { withAiring, type AiredEpisode } from '../lib/airing';
   import { airingStore } from '../lib/airing.svelte';
   import type Hls from 'hls.js';
   import { tick as renderTick, untrack } from 'svelte';
@@ -29,9 +29,11 @@
   } from '../lib/castReceiver';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
+  import { reportMediaEngineFailure } from '../lib/mediaEngineDiagnostics';
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
   import { interfaceLocale, type InterfaceLanguage } from '../lib/interfaceLanguage';
+  import { languageName } from '../lib/languageName';
   import type { Episode as EpisodeDetail } from '../lib/detail';
   import { PLAYBACK_PROGRESS_SAVE_MS, PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -130,6 +132,7 @@
     type SubtitleResyncNotice,
   } from '../lib/subtitleResyncNotice';
   import type { MenuItem } from '../lib/titleActions';
+  import { airDate, cleanedOverview } from '../lib/detailPresentation';
   import {
     activeAt,
     canAutoSkip,
@@ -207,6 +210,9 @@
     playbackReceiptHandoffAsOwner,
     onplaybackreceipthandoff,
     onnext,
+    seasons,
+    episodeProgress,
+    onepisode,
     onclose,
     oncontrols,
   }: {
@@ -245,8 +251,8 @@
     resume: { fraction: number; seconds?: number };
     /** The episode after this one, as `S2 · E4`, when there is one. */
     next?: string;
-    /** That episode's own numbers, so it can be warmed before the advance (`shouldWarmNext`). */
-    nextEpisode?: { season?: number; episode?: number };
+    /** The ready successor, zero while loading, or false upcoming / true failed. */
+    nextEpisode?: { season?: number; episode?: number } | 0 | boolean;
     /** Timer seam for the browser fixture; the app always uses the production default. */
     castPlayMs?: number;
     /** Where playback got to, and the episode that is about: one advanced to in place reports as itself. */
@@ -261,6 +267,12 @@
     /** Leaves playback only after handing terminal progress to the host's durable recovery surface. */
     onplaybackreceipthandoff: () => void;
     onnext?: () => void;
+    /** The series' seasons, Specials last, and how many of each have aired: what the Episodes list offers. */
+    seasons?: readonly { number: number; aired: number }[];
+    /** How much of an episode this profile has watched, 0 to 1. */
+    episodeProgress?: (season: number, episode: number) => number;
+    /** Another episode of this series, played in this player as Next plays the following one. */
+    onepisode?: (at: { season: number; episode: number }) => void;
     onclose: () => void;
     /** The TV shell's paired-inbox receiver installs these while this exact player is mounted. */
     oncontrols?: (
@@ -268,10 +280,46 @@
     ) => void;
   } = $props();
   const nextHref = $derived(
-    onnext && nextEpisode?.season !== undefined && nextEpisode.episode !== undefined
+    typeof nextEpisode === 'object' &&
+      nextEpisode.season !== undefined &&
+      nextEpisode.episode !== undefined
       ? titleHref({ ...title, ...nextEpisode, play: true })
       : undefined,
   );
+
+  // The production fixture records the props at Svelte's pre-effect boundary. That catches a previous episode's
+  // following state crossing the render before Library's ordinary effect retires it; a post-render assertion is too
+  // late to observe that ownership violation.
+  if (import.meta.env.DEN_E2E) {
+    $effect.pre(() => {
+      (
+        window as unknown as {
+          denTestNextEpisodeComposition?: (value: {
+            title: { type: Title['type']; id: number };
+            season?: number;
+            episode?: number;
+            availability?: string;
+            next?: { season?: number; episode?: number };
+            seasons?: number[];
+          }) => void;
+        }
+      ).denTestNextEpisodeComposition?.({
+        title: { type: title.type, id: title.id },
+        season,
+        episode,
+        availability:
+          typeof nextEpisode !== 'object' && nextEpisode !== undefined
+            ? nextEpisode === 0
+              ? 'loading'
+              : nextEpisode
+                ? 'failed'
+                : 'unreleased'
+            : undefined,
+        next: typeof nextEpisode === 'object' ? nextEpisode : undefined,
+        seasons: seasons?.map(({ number }) => number),
+      });
+    });
+  }
 
   function advanceLink(event: MouseEvent) {
     if (!onnext) return;
@@ -391,13 +439,13 @@
     ...guestLimits,
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable:
-      'Couldn’t reach Den’s player. Check this device’s connection, then try again. If it continues, ask your host to check Den Hearth.',
+      'Couldn’t reach Den’s player. Check this connection and try again. If it continues, ask your host to check Den Hearth.',
     request:
-      'Den’s player couldn’t use this playback request. Refresh the page. If it continues, ask your host to update Den Hearth.',
+      'Den’s player rejected this playback request. Refresh. If it continues, ask your host to update Den Hearth.',
     sourceUnavailable:
-      'Den couldn’t prepare this release through its available playback paths. Try again. If it continues, check Den Hearth and the home player.',
+      'Den couldn’t prepare this release. Try again. If it continues, check Den Hearth and the home player.',
     protocol:
-      'Den’s player returned an answer this page can’t use. Refresh the page. If it continues, ask your host to update Den Hearth.',
+      'Den’s player returned an unusable answer. Refresh. If it continues, ask your host to update Den Hearth.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
     unsupported: 'This browser can’t play video streams.',
     playback: 'This browser couldn’t play this release. Try it on your TV.',
@@ -426,31 +474,26 @@
   };
   const managedCauseMessages: Record<PlaybackCause, string> = {
     torbox_authentication_failed:
-      'Your TorBox API key was rejected. Update the key in Den Hearth settings, then try again.',
+      'TorBox rejected your API key. Update it in Den Hearth, then try again.',
     torbox_managed_streaming_unavailable_for_plan:
-      'Your TorBox plan doesn’t support streaming links. Update the TorBox plan or remove TorBox from this Den Hearth install.',
-    torbox_rate_limited:
-      'TorBox asked Den to wait before trying again. The home player could not prepare this release either, so Den is waiting as requested…',
+      'Your TorBox plan lacks streaming links. Update it or remove TorBox from Den Hearth.',
+    torbox_rate_limited: 'TorBox asked Den to wait. Home playback also failed, so Den is waiting…',
     torbox_item_not_found:
-      'TorBox no longer has this release, and the home player could not prepare it either. Try again.',
+      'TorBox no longer has this release. Home playback also failed. Try again.',
     torbox_dolby_vision_unsupported:
-      'TorBox can’t stream this Dolby Vision release correctly, and the home player could not prepare it either. Try again or pick another release.',
+      'TorBox can’t stream this Dolby Vision release correctly. Home playback also failed. Try again or pick another release.',
     torbox_receiver_unsupported:
-      'The receiver can’t play this release as TorBox streams it, and the home player could not prepare it either. Try another release.',
+      'The receiver can’t play this TorBox release, and home playback also failed. Try another release.',
     torbox_refused:
-      'TorBox refused to prepare this stream, and the home player could not prepare it either. Check your TorBox account, then try again.',
-    torbox_playlist_unavailable:
-      'TorBox’s playlist is temporarily unavailable, and the home player could not prepare this release either. Try again.',
-    torbox_unavailable:
-      'TorBox is temporarily unavailable, and the home player could not prepare this release either. Try again.',
-    torbox_unreachable:
-      'Den could not reach TorBox, and the home player could not prepare this release either. Try again.',
+      'TorBox refused this stream, and home playback also failed. Check your TorBox account, then try again.',
+    torbox_playlist_unavailable: 'TorBox’s playlist and home playback are unavailable. Try again.',
+    torbox_unavailable: 'TorBox and home playback are temporarily unavailable. Try again.',
+    torbox_unreachable: 'Den could not reach TorBox, and home playback also failed. Try again.',
     torbox_malformed_response:
-      'TorBox returned an answer Den could not use, and the home player could not prepare this release either. Try again.',
+      'TorBox returned an unusable answer, and home playback also failed. Try again.',
     torbox_unsafe_stream_url:
-      'TorBox returned a streaming link Den could not use, and the home player could not prepare this release either. Try again.',
-    managed_prepare_timeout:
-      'TorBox took too long to prepare a stream, and the home player could not prepare this release either. Try again.',
+      'TorBox returned an unusable streaming link, and home playback also failed. Try again.',
+    managed_prepare_timeout: 'TorBox took too long, and home playback also failed. Try again.',
     debrid_down: 'TorBox isn’t responding right now. Den will try again when it can…',
     debrid_slow: 'TorBox is slow right now, so this is taking longer to start. Trying again…',
   };
@@ -551,6 +594,8 @@
   let castDevice = $state<string>();
   /** A Cast failure in plain words, with a way back when this page can offer one. */
   let castNotice = $state<{ text: string; retry?: () => void } | null>(null);
+  /** The exact cast-page load whose browser asked for another user gesture before local playback may start. */
+  let castPlayBlocked = $state<{ id: string; generation: number } | null>(null);
   /** This move to Cast has spent its one retry of a TorBox stream the receiver couldn't play. */
   let castRetried = false;
   /** Where the Cast button is drawn: Den's own button surface, which the cast page's frame lies exactly over. */
@@ -590,6 +635,8 @@
    */
   let chosenRelease: string | undefined = untrack(() => filename);
   let session = $state<Session | null>(null);
+  /** Stable identity for the accepted session; unlike start attempts, failed replacements do not advance it. */
+  let castLoadGeneration = 0;
   /** Holds a direct Cast handoff until its selected external subtitle has its receiver URL. */
   let castSubtitlePreparing = $state(false);
   /**
@@ -656,7 +703,7 @@
   let regrantedAt = -Infinity;
   let key = $state('');
   let badKey = $state(false);
-  /** Seconds until the next episode starts, once this one has ended. */
+  /** Seconds until advance; zero while a natural end still owns metadata recovery. */
   let upNext = $state<number | null>(null);
   let imdb: string | undefined;
   let hls: Hls | undefined;
@@ -1199,6 +1246,30 @@
       .filter(Boolean)
       .join(' · '),
   );
+  /**
+   * A season's episodes through the already-open content service, dated as the title page's list dates them: atlas's
+   * release day where atlas has one. Null when they could not be had; never settles once `signal` has aborted.
+   */
+  function seasonEpisodes(picked: number, signal: AbortSignal): Promise<AiredEpisode[] | null> {
+    return new Promise((resolve) => {
+      void content
+        .query({ kind: 'season', title: { type: 'tv', id: title.id }, season: picked }, signal)
+        .then(({ episodes }) =>
+          episodes.state === 'ready'
+            ? withAiring(
+                episodes.value,
+                picked,
+                untrack(() => airingStore(content).get(title.id)),
+              )
+            : null,
+        )
+        .catch(() => null)
+        .then((listed) => {
+          if (!signal.aborted) resolve(listed);
+        });
+    });
+  }
+
   // tvOS resolves episode metadata after playback has begun. Do the same through the already-open content service:
   // it enriches the transport and Down panel without joining the source/session critical path.
   $effect(() => {
@@ -1212,38 +1283,143 @@
     )
       return;
     const controller = new AbortController();
-    void content
-      .query(
-        { kind: 'season', title: { type: 'tv', id: title.id }, season: pickedSeason },
-        controller.signal,
-      )
-      .then(({ episodes }) => {
-        if (controller.signal.aborted) return;
-        // Dated as the episode list dates it: atlas's release day where atlas has one.
-        tvEpisode =
-          episodes.state === 'ready'
-            ? (withAiring(
-                episodes.value,
-                pickedSeason,
-                untrack(() => airingStore(content).get(title.id)),
-              ).find((item) => item.number === pickedEpisode) ?? null)
-            : null;
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) tvEpisode = null;
-      });
+    void seasonEpisodes(pickedSeason, controller.signal).then(
+      (listed) => (tvEpisode = listed?.find((item) => item.number === pickedEpisode) ?? null),
+    );
     return () => controller.abort();
   });
+  /** The season the Episodes list shows: the one playing, until another is picked there. */
+  let listedSeason = $state<number>();
+  const shownSeason = $derived(listedSeason ?? season);
+  /** The last season's episodes asked for, kept with the season they belong to; null when they could not be had. */
+  let listed = $state.raw<{ season: number; episodes: AiredEpisode[] | null }>();
+  /** The shown season's episodes; undefined until they have arrived. */
+  const listedEpisodes = $derived(
+    listed && listed.season === shownSeason ? listed.episodes : undefined,
+  );
+  /** Whether the shown season's answer is late enough to say so: one from the cache arrives within a frame or two. */
+  let seasonLate = $state(false);
+  const listsEpisodes = $derived(
+    webTransport && !!onepisode && title.type === 'tv' && !!seasons?.length,
+  );
+  const hasSession = $derived(!!session);
+  // Asked once playback has its session, off the start's critical path, and again for a season picked in the list.
+  // The rows read `listedEpisodes`, which is empty while the season they show is not the one answered, so a switch
+  // builds them once, for the season picked, rather than first for the old season's episodes under the new one's key.
+  $effect(() => {
+    const picked = shownSeason;
+    seasonLate = false;
+    if (!listsEpisodes || !hasSession || picked === undefined) return;
+    if (untrack(() => listed?.season) === picked) return;
+    const controller = new AbortController();
+    const late = setTimeout(() => (seasonLate = true), 300);
+    void seasonEpisodes(picked, controller.signal).then((episodes) => {
+      if (!controller.signal.aborted) listed = { season: picked, episodes };
+    });
+    return () => {
+      clearTimeout(late);
+      controller.abort();
+    };
+  });
+  /** The list's rows: each episode with its menu item, a link to play it, or inert until it has aired. */
+  const episodeRows = $derived.by(() => {
+    const picked = shownSeason;
+    const aired = seasons?.find((item) => item.number === picked)?.aired ?? 0;
+    return (listedEpisodes ?? []).map((item) => {
+      const at = { season: picked!, episode: item.number };
+      const current = picked === season && item.number === episode;
+      const menuItem: MenuItem =
+        item.number > aired
+          ? {
+              kind: 'item',
+              key: `${picked}:${item.number}`,
+              label: item.name,
+              onselect: NO_ACTION,
+              disabled: true,
+            }
+          : {
+              kind: 'link',
+              key: `${picked}:${item.number}`,
+              label: item.name,
+              href: titleHref({ ...title, ...at, play: true }),
+              onselect: () => {
+                if (current) return;
+                // As Next does: the countdown cannot also advance once another episode is asked for.
+                stay();
+                onepisode?.(at);
+              },
+            };
+      return {
+        episode: item,
+        menuItem,
+        current,
+        progress: episodeProgress?.(at.season, at.episode) ?? 0,
+      };
+    });
+  });
+  const seasonLabel = (number: number) =>
+    number === 0 ? i18n.phrase('Specials') : `${i18n.phrase('Season')} ${number}`;
+  /**
+   * Scrolls the season chips sideways to centre the one shown, on opening and on every switch: a long series (South
+   * Park's 29) otherwise opens on seasons 1–10 with the one playing out of sight. Sets `scrollLeft` rather than
+   * `scrollIntoView`, which would also move the list under it. The row is rendered while its popover is still hidden,
+   * with no width to measure, so it also reveals when the row is first given a size.
+   */
+  function revealSeason(row: HTMLElement, _shown: number | undefined) {
+    const reveal = () => {
+      const chip = row.querySelector<HTMLElement>('[aria-checked="true"]');
+      if (chip && row.clientWidth)
+        row.scrollLeft = chip.offsetLeft - (row.clientWidth - chip.offsetWidth) / 2;
+    };
+    const sized = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(reveal);
+    sized?.observe(row);
+    reveal();
+    return { update: reveal, destroy: () => sized?.disconnect() };
+  }
+  /**
+   * Gives an episode still its `srcset` once it is within a screen of the list's visible part. `loading="lazy"` does
+   * not do that here: Chromium's lazy distance (1250px and more) covers a whole season, so all of its stills were
+   * fetched on every open and every season switch, alongside the video. Watched against the element that scrolls: the
+   * popover itself, or the list inside a phone's sheet.
+   */
+  function nearView(img: HTMLImageElement, sources: string) {
+    let shown = false;
+    const load = () => {
+      shown = true;
+      img.srcset = sources;
+    };
+    const root =
+      img.closest<HTMLElement>('.sheet .items') ?? img.closest<HTMLElement>('.menu') ?? null;
+    const near =
+      typeof IntersectionObserver === 'undefined'
+        ? undefined
+        : new IntersectionObserver(
+            (entries) => {
+              if (!entries.some((entry) => entry.isIntersecting)) return;
+              near?.disconnect();
+              load();
+            },
+            { root, rootMargin: '100% 0px' },
+          );
+    if (near) near.observe(img);
+    else load();
+    return {
+      update(next: string) {
+        sources = next;
+        if (shown) img.srcset = next;
+      },
+      destroy: () => near?.disconnect(),
+    };
+  }
+  /** A still at the sizes TMDB has for it, or the series backdrop at its own (backdrops have no w185). */
+  const stillSources = (item: AiredEpisode) =>
+    item.stillPath
+      ? `https://image.tmdb.org/t/p/w185${item.stillPath} 185w, https://image.tmdb.org/t/p/w300${item.stillPath} 300w`
+      : `https://image.tmdb.org/t/p/w300${title.backdropPath} 300w, https://image.tmdb.org/t/p/w780${title.backdropPath} 780w`;
+
   // The page under the player is not on screen while it plays (its `active` is off), so it names the tab no more:
   // the player does, as the title's page would.
   nameTab(() => named(heading, season === undefined ? title.year : undefined));
-  const names = (() => {
-    try {
-      return new Intl.DisplayNames([navigator.language], { type: 'language' });
-    } catch {
-      return null;
-    }
-  })();
 
   /**
    * Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. `extra`
@@ -1722,6 +1898,8 @@
     castSubtitlePreparing = result.external === true && subtitleChoice !== null;
     subtitleSelectionGeneration += 1;
     subtitleLoadFailure = null;
+    castPlayBlocked = null;
+    castLoadGeneration += 1;
     session = result;
     if (chosenRelease === result.release.filename && !continuityGroup)
       rememberContinuityChoice(result.release.filename);
@@ -2073,6 +2251,7 @@
     hls?.destroy();
     hls = undefined;
     endSession(current);
+    castPlayBlocked = null;
     session = null;
     showTransition('Resuming…');
     void begin(
@@ -2489,8 +2668,8 @@
         return mounted.start();
       });
       void starting.catch((error: unknown) => {
-        console.warn('Samsung AVPlay could not be started.', error);
         if (gone || ended || session !== current || failure || breaking) return;
+        reportMediaEngineFailure('avplay', 'startup', error);
         failure = 'engine';
         letGo();
       });
@@ -2615,8 +2794,8 @@
     // hls.js is its own chunk, fetched only now: offline, or after a release replaced it, it never comes — and the
     // video sat black with nothing said. The same for an engine that throws as it is set up.
     void starting.catch((error: unknown) => {
-      console.warn('hls.js could not be started.', error);
       if (gone || ended || session !== current) return;
+      reportMediaEngineFailure('hls.js', 'startup', error);
       failure = 'engine';
       letGo();
     });
@@ -2723,6 +2902,7 @@
       {
         type: 'den-load',
         id: current.playlist,
+        generation: castLoadGeneration,
         media: {
           url: current.playlist,
           ...(current.external
@@ -2884,17 +3064,34 @@
   function castMessage(event: MessageEvent<unknown>): void {
     const frame = castFrame?.contentWindow;
     if (!frame || event.source !== frame || !frameOrigin || event.origin !== frameOrigin) return;
-    const button = event.data as Parameters<typeof castButtonMessage>[0] & { generation?: unknown };
+    const button = event.data as Parameters<typeof castButtonMessage>[0] & {
+      id?: unknown;
+      generation?: unknown;
+    };
     if (button.type === 'den-ready' && castDocumentReady(event.origin, button.generation)) {
       frame.postMessage({ type: 'den-discover', interfaceLanguage }, event.origin);
       sendCastLayout();
     }
-    if (castButtonMessage(button)) return;
     const current = session;
+    // Receiver errors describe one exact LOAD, unlike document-scoped Cast-button state. A delayed receiver event
+    // from a replaced generation must not become the next session's diagnostics merely because its URL was reused.
+    if (button.type === 'den-receiver-error') {
+      if (
+        !current?.castOrigin ||
+        event.origin !== current.castOrigin ||
+        button.id !== current.playlist ||
+        button.generation !== castLoadGeneration
+      )
+        return;
+      castButtonMessage(button);
+      return;
+    }
+    if (castButtonMessage(button)) return;
     if (!current?.castOrigin || event.origin !== current.castOrigin) return;
     const message = event.data as {
       type?: string;
       id?: string;
+      generation?: number;
       currentTime?: number;
       duration?: number;
       paused?: boolean;
@@ -2906,9 +3103,19 @@
       maxBitrate?: number;
       volume?: number;
       muted?: boolean;
+      failure?: unknown;
     };
-    if (message.type === 'den-ready' || message.id !== current.playlist) return;
-    if (message.type === 'den-progress') {
+    if (
+      message.type === 'den-ready' ||
+      message.id !== current.playlist ||
+      message.generation !== castLoadGeneration
+    )
+      return;
+    if (message.type === 'den-autoplay-blocked') {
+      castPlayBlocked = { id: current.playlist, generation: castLoadGeneration };
+    } else if (message.type === 'den-playing') {
+      castPlayBlocked = null;
+    } else if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
       // The receiver's own volume, which Den's volume control now sets.
@@ -2947,7 +3154,11 @@
           restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
         } else
           readyCastFrame(current.castOrigin)?.postMessage(
-            { type: 'den-continue', id: current.playlist },
+            {
+              type: 'den-continue',
+              id: current.playlist,
+              generation: castLoadGeneration,
+            },
             current.castOrigin,
           );
       }
@@ -3005,6 +3216,7 @@
       endCastSession();
       finished();
     } else if (message.type === 'den-error') {
+      castPlayBlocked = null;
       casting = false;
       endCastSession();
       castFailed = true;
@@ -3024,6 +3236,14 @@
         reportFailure(current, 0, message.message);
         lastFailSource = 'cast_page_error';
         failure = 'protocol';
+        return;
+      }
+      // The Cast page's own lazy engine could not load or initialize. This is independent of the release, so trying
+      // another copy would only recreate the frame and repeat the same failed import. Keep the same terminal Reload
+      // recovery as this player's local hls.js/AVPlay startup path.
+      if (message.failure === 'engine') {
+        failure = 'engine';
+        letGo();
         return;
       }
       // A TorBox stream the receiver couldn't play stays TorBox: Den Remux is used only when the viewer picks it. A
@@ -3475,13 +3695,17 @@
   });
 
   // Back to playing in this page, the frame stays for its button: what it had loaded is let go there.
-  let castFrameLoad: string | undefined;
+  let castFrameLoad: { id: string; generation: number } | undefined;
   $effect(() => {
     const current = session;
-    if (current?.castOrigin) castFrameLoad = current.playlist;
+    if (current?.castOrigin)
+      castFrameLoad = { id: current.playlist, generation: castLoadGeneration };
     else if (castFrameLoad && current && !heldFrame && frameOrigin) {
+      const reset = castFrameLoad;
       castFrameLoad = undefined;
-      untrack(() => readyCastFrame(frameOrigin)?.postMessage({ type: 'den-reset' }, frameOrigin));
+      untrack(() =>
+        readyCastFrame(frameOrigin)?.postMessage({ type: 'den-reset', ...reset }, frameOrigin),
+      );
     }
   });
 
@@ -3533,7 +3757,7 @@
   // rather than leaving the frame blank.
   $effect(() => {
     const current = session;
-    if (!current?.castOrigin || casting) return;
+    if (!current?.castOrigin || casting || castPlayBlocked) return;
     const wait = setTimeout(() => {
       if (session !== current || played || casting) return;
       const why = `nothing played in the cast page after ${castPlayMs / 1000} s`;
@@ -3871,7 +4095,21 @@
     // For den-edge's own outcome report (`finish()`): this visit reached a natural end, whether or not there is
     // a next episode to count down to.
     reachedNaturalEnd = true;
-    if (!onnext || ended) return;
+    if (nextEpisode === 0) waitForNext();
+    else upNext = typeof nextEpisode === 'boolean' ? 0 : null;
+    if (typeof nextEpisode !== 'object' || ended) return;
+    startNextCountdown();
+  }
+
+  function waitForNext() {
+    clearInterval(countdown);
+    upNext = -1;
+    countdown = setTimeout(() => {
+      if (upNext === -1) upNext = 0;
+    }, 10_000);
+  }
+
+  function startNextCountdown() {
     // A second end (the last seconds replayed, or the cast page's `den-ended` again) starts the count over; left
     // running, the first would advance again every second after it.
     clearInterval(countdown);
@@ -3883,6 +4121,20 @@
       onnext?.();
     }, 1000);
   }
+
+  // Metadata can settle after the media's one `ended` event. Adopt a ready result only while that exact natural end
+  // still owns recovery; replay and Stay call `stay()` and therefore cannot be advanced by a late answer.
+  $effect(() => {
+    const outcome = nextEpisode;
+    if (untrack(() => upNext === null || ended)) return;
+    if (typeof outcome === 'object') untrack(startNextCountdown);
+    else if (outcome === 0) {
+      if (untrack(() => upNext !== -1)) untrack(waitForNext);
+    } else {
+      clearInterval(countdown);
+      upNext = typeof outcome === 'boolean' ? 0 : null;
+    }
+  });
 
   function stay() {
     clearInterval(countdown);
@@ -4241,6 +4493,7 @@
       {
         type: 'den-subtitle',
         id: current.playlist,
+        generation: castLoadGeneration,
         language: selectedSubtitleLanguage(current),
         track: current.externalSubtitles
           ?.filter((track) => track.value === subtitleChoice && track.castUrl)
@@ -4511,20 +4764,21 @@
   let nextDetailRequest: AbortController | undefined;
   function describeNext(at: number) {
     const to = nextEpisode;
-    if (nextDetailRequest || title.type !== 'tv' || !onnext) return;
-    if (to?.season === undefined || to.episode === undefined) return;
+    if (nextDetailRequest || title.type !== 'tv') return;
+    if (typeof to !== 'object' || to.season === undefined || to.episode === undefined) return;
     if (!shouldWarmNext(at, length(), NEXT_DETAIL_LEAD_SECS)) return;
     const request = new AbortController();
     nextDetailRequest = request;
-    const asked = { season: to.season, episode: to.episode };
+    const askedSeason = to.season;
+    const askedEpisode = to.episode;
     content
       .query(
-        { kind: 'season', title: { type: 'tv', id: title.id }, season: asked.season },
+        { kind: 'season', title: { type: 'tv', id: title.id }, season: askedSeason },
         request.signal,
       )
       .then(({ episodes }) => {
         if (request.signal.aborted || episodes.state !== 'ready') return;
-        nextDetail = episodes.value.find((item) => item.number === asked.episode) ?? null;
+        nextDetail = episodes.value.find((item) => item.number === askedEpisode) ?? null;
       })
       .catch((error: unknown) => {
         if (!request.signal.aborted) reportNextDetailFailure(error);
@@ -4542,9 +4796,9 @@
     const activelyWatching = video
       ? !video.paused && !video.ended
       : customTransport && !remotePaused;
-    if (warmedNext || !imdb || !onnext || !session || !activelyWatching) return;
+    if (warmedNext || !imdb || !session || !activelyWatching) return;
     const to = nextEpisode;
-    if (!to || !shouldWarmNext(at, length())) return;
+    if (typeof to !== 'object' || !shouldWarmNext(at, length())) return;
     warmedNext = true;
     const playingFilename = session.release.filename;
     const from = { ...playingEpisode };
@@ -4625,7 +4879,10 @@
     if (!castView || !current?.castOrigin) return false;
     const frame = readyCastFrame(current.castOrigin);
     if (!frame) return false;
-    frame.postMessage({ ...message, id: current.playlist }, current.castOrigin);
+    frame.postMessage(
+      { ...message, id: current.playlist, generation: castLoadGeneration },
+      current.castOrigin,
+    );
     return true;
   }
 
@@ -4800,7 +5057,10 @@
     if (!current?.castOrigin) return false;
     const frame = readyCastFrame(current.castOrigin);
     if (!frame) return false;
-    frame.postMessage({ type: 'den-seek', id: current.playlist, time }, current.castOrigin);
+    frame.postMessage(
+      { type: 'den-seek', id: current.playlist, generation: castLoadGeneration, time },
+      current.castOrigin,
+    );
     return true;
   }
 
@@ -5039,7 +5299,7 @@
     // Read while the media is attached: once hls.js or AVPlay lets go, the element's duration is gone, and a direct
     // stream's session names none (`duration: 0`), so the receipt would end with no evidence.
     const evidence = terminalEvidence();
-    watcher?.stop();
+    const reported = watcher?.stop();
     watcher = undefined;
     hls?.destroy();
     hls = undefined;
@@ -5047,17 +5307,13 @@
       avplay?.destroy();
       avplay = undefined;
     }
-    endSession(current, undefined, evidence);
+    endSession(current, undefined, evidence, reported);
+    castPlayBlocked = null;
     session = null;
   }
 
   function trackLabel(track: AudioTrack, n: number): string {
-    let language: string | undefined;
-    try {
-      language = track.language ? (names?.of(track.language) ?? track.language) : undefined;
-    } catch {
-      language = track.language ?? undefined;
-    }
+    const language = track.language ? (languageName(track.language) ?? track.language) : undefined;
     const channels = track.channels === 6 ? ' 5.1' : track.channels === 8 ? ' 7.1' : '';
     return `${language ?? track.name ?? `Track ${n + 1}`}${channels}${track.commentary ? ' · commentary' : ''}`;
   }
@@ -5220,7 +5476,15 @@
     releaseListing = 'idle';
     swapped = autoSwitch = struggling = slowPick = unchanged = null;
     clearTransition();
-    showTransition('Starting next…');
+    // Named, not "next": one picked from the Episodes list may be any episode of the series.
+    showTransition(
+      at.season === undefined || at.episode === undefined
+        ? 'Starting next…'
+        : i18n.format('player.startingEpisode', 'Starting S{season} · E{episode}…', {
+            season: at.season,
+            episode: at.episode,
+          }),
+    );
     switchCount = 0;
     lastSwitchReason = undefined;
     degraded = false;
@@ -5321,6 +5585,26 @@
   /** What playback says as it goes, in the order the TV's stack shows it. */
   const notices = $derived.by(() => {
     const list: Notice[] = [];
+    if (upNext === -1)
+      list.push({
+        text: i18n.phrase('Loading episodes'),
+        quiet: true,
+        busy: true,
+      });
+    else if (upNext === 0)
+      list.push({
+        text: i18n.phrase(onnext ? 'Couldn’t load this season from TMDB.' : 'Upcoming'),
+        action: onnext
+          ? {
+              label: i18n.phrase('Try again'),
+              run: () => {
+                waitForNext();
+                onnext();
+              },
+            }
+          : undefined,
+        urgent: true,
+      });
     if (transitionNotice)
       list.push({ text: i18n.phrase(transitionNotice), quiet: true, busy: true });
     if (hasSubtitleResyncNotice(subtitleResyncNotice))
@@ -5331,6 +5615,11 @@
           (offset) => formattedSubtitleOffset(offset),
         ),
         quiet: true,
+      });
+    if (castPlayBlocked)
+      list.push({
+        text: i18n.text('player.autoplayBlocked'),
+        urgent: true,
       });
     const failed = subtitleLoadFailure;
     if (failed)
@@ -5353,14 +5642,14 @@
       else if (visibleBufferLine) list.push({ text: visibleBufferLine, quiet: true, busy: true });
       if (slowPick)
         list.push({
-          text: `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
+          text: `${slowPick} needs more than this connection gives and may pause to catch up.`,
           dismiss: () => (slowPick = null),
           action: { label: 'Try another release', run: tryAnother },
           urgent: true,
         });
       if (struggling)
         list.push({
-          text: `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
+          text: `${struggling} may pause to catch up; no lighter release fits this connection.`,
           dismiss: () => (struggling = null),
         });
       if (unchanged) list.push({ text: unchanged, dismiss: () => (unchanged = null) });
@@ -5695,18 +5984,14 @@
   }
 
   /**
-   * Into a row's page, or back out of it (`label` null): the options stay open — a popover keeps its bottom edge where
-   * it was, above its button, as it grows or shrinks — and focus goes to the page's first row or, coming back, to the
-   * row that opened it.
+   * Into a row's page, or back out of it (`label` null): the options stay open — `ActionMenu` places them again at
+   * their new size — and focus goes to the page's first row or, coming back, to the row that opened it.
    */
   async function showOptionsPage(label: string | null) {
     const from = optionsPage;
     const menu = document.querySelector<HTMLElement>('.menu:popover-open:has(.options-rows)');
-    const bottom = menu?.getBoundingClientRect().bottom;
     optionsPage = label;
     await renderTick();
-    if (menu && bottom !== undefined && !menu.classList.contains('sheet'))
-      menu.style.top = `${Math.max(8, bottom - menu.offsetHeight)}px`;
     const rows = Array.from(
       menu?.querySelectorAll<HTMLElement>(
         '.options-rows [role^="menuitem"]:not([aria-disabled="true"])',
@@ -6113,7 +6398,7 @@
   class:web-touch-player={webTransport && !desktopTransport}
   class:web-controls-hidden={webTransport && !webControlsVisible}
   class:web-casting={webTransport && castView}
-  class:web-counting={webTransport && upNext !== null}
+  class:web-counting={webTransport && !!next && upNext !== null}
   role="dialog"
   tabindex="-1"
   aria-modal="true"
@@ -6582,7 +6867,7 @@
     {@const short = pickLabel(session.release)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
-    <footer class:counting-down={upNext !== null}>
+    <footer class:counting-down={!!next && upNext !== null}>
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -6740,6 +7025,7 @@
       bind:this={castFrame}
       class="cast-frame"
       class:cast-frame-stage={castStage}
+      class:cast-frame-play-blocked={castStage && !!castPlayBlocked}
       class:cast-frame-unplaced={!castFrameBox}
       class:cast-focused={castFocus === 'keyboard'}
       style:left={castFrameBox ? `${castFrameBox.left}px` : undefined}
@@ -7001,6 +7287,25 @@
               >{@render nextIcon()}<span class="web-label">Next episode</span></a
             >
           {/if}
+          {#if session && listsEpisodes}
+            <span class="web-tip" data-tip={i18n.phrase('Episodes')}>
+              <ActionMenu
+                label="Episodes"
+                heading={shownSeason === undefined ? 'Episodes' : seasonLabel(shownSeason)}
+                rows={episodeList}
+                triggerClass="web-glyph web-labelled web-episodes"
+                sheetQuery={PHONE_SHEET}
+                onclose={() => {
+                  listedSeason = undefined;
+                  scheduleWebControls();
+                }}
+                items={() => episodeRows.map((row) => row.menuItem)}
+              >
+                {#snippet glyph()}{@render episodesIcon()}<span class="web-label">Episodes</span
+                  >{/snippet}
+              </ActionMenu>
+            </span>
+          {/if}
         </div>
         <div class="web-dock-group">
           {#if transport && !castView}
@@ -7184,6 +7489,99 @@
     {/if}
     <span class="options-chip">{playbackSource}</span>
   </div>
+{/snippet}
+
+<!-- The series under what is playing: its seasons as a row of chips, which change the list in place, then each episode
+     with its still, how much of it is watched, and its synopsis cut to two lines. The one playing is marked and
+     focused first; one not yet aired is listed and cannot be played. -->
+{#snippet episodeList(_: MenuItem[], run: (item: MenuItem, event: MouseEvent) => void)}
+  <div class="episode-list" role="none">
+    {#if seasons && seasons.length > 1}
+      <div
+        class="episode-seasons"
+        role="group"
+        aria-label={i18n.phrase('Season')}
+        use:revealSeason={shownSeason}
+      >
+        {#each seasons as item (item.number)}
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={item.number === shownSeason}
+            aria-label={seasonLabel(item.number)}
+            class="episode-season"
+            onclick={() => (listedSeason = item.number)}
+            >{item.number === 0 ? i18n.phrase('Specials') : item.number}</button
+          >
+        {/each}
+      </div>
+    {/if}
+    {#if listedEpisodes === null}
+      <p class="episode-note">{i18n.phrase('Couldn’t load this season from TMDB.')}</p>
+    {:else if listedEpisodes === undefined && seasonLate}
+      <p class="episode-note" aria-busy="true">{i18n.phrase('Loading episodes')}</p>
+    {/if}
+    {#each episodeRows as row (row.menuItem.key)}
+      {@const { episode: item, menuItem, current, progress } = row}
+      {@const meta = [
+        current ? i18n.phrase('Now playing') : undefined,
+        menuItem.disabled ? airDate(item.airDate) || i18n.phrase('Upcoming') : undefined,
+        !current && progress >= WATCHED ? i18n.phrase('Watched') : undefined,
+        item.runtime ? `${item.runtime} min` : undefined,
+      ].filter(Boolean)}
+      <!-- An explicit link or button rather than `<svelte:element>`: its runtime would join the shared startup chunk
+           every page loads, for a list that only exists inside the player. -->
+      {#snippet rowContent()}
+        <span class="episode-still">
+          <!-- An episode TMDB has no still for yet (often the newest) shows the series backdrop, as the title page does. -->
+          {#if item.stillPath || title.backdropPath}<img
+              class="episode-image"
+              sizes="112px"
+              alt=""
+              decoding="async"
+              use:nearView={stillSources(item)}
+            />{/if}
+          {#if progress > 0 && progress < WATCHED}<span
+              class="episode-progress"
+              style:--episode-progress={`${progress * 100}%`}
+            ></span>{/if}
+        </span>
+        <span class="episode-text">
+          <b>{item.number}. {item.name}</b>
+          {#if meta.length}<small>{meta.join(' · ')}</small>{/if}
+          {#if item.overview}<span class="episode-overview">{cleanedOverview(item)}</span>{/if}
+        </span>
+      {/snippet}
+      {#if menuItem.kind === 'link'}
+        <a
+          href={menuItem.href}
+          role="menuitem"
+          tabindex="0"
+          class="item episode-row"
+          aria-current={current || undefined}
+          onclick={(event: MouseEvent) => run(menuItem, event)}>{@render rowContent()}</a
+        >
+      {:else}
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="0"
+          class="item episode-row"
+          aria-current={current || undefined}
+          aria-disabled={menuItem.disabled || undefined}
+          onclick={(event: MouseEvent) => run(menuItem, event)}>{@render rowContent()}</button
+        >
+      {/if}
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet episodesIcon()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <rect x="3" y="4.5" width="7" height="5" rx="1.2" />
+    <rect x="3" y="14.5" width="7" height="5" rx="1.2" />
+    <path d="M13 6h8M13 8.5h5M13 16h8M13 18.5h5" />
+  </svg>
 {/snippet}
 
 {#snippet pipIcon()}
@@ -7443,6 +7841,11 @@
     background: #000;
   }
 
+  /* A blocked cross-origin player must receive its own trusted Play click, above Den's overlapping chrome. */
+  .cast-frame-stage.cast-frame-play-blocked {
+    z-index: 6;
+  }
+
   /* Before it has a place, rendered but unseen, so the Cast SDK in it runs as usual. */
   .cast-frame-unplaced {
     top: 0;
@@ -7626,19 +8029,14 @@
     color: rgb(255 255 255 / 0.78);
   }
 
-  .notice:last-of-type {
-    margin-bottom: 10px;
-  }
-
   .cast-status .notice {
-    box-sizing: border-box;
     width: 100%;
     min-height: 76px;
     pointer-events: auto;
   }
 
-  .cast-status .notice:last-of-type {
-    margin-bottom: 0;
+  .notices .notice:last-of-type {
+    margin-bottom: 10px;
   }
 
   /* A notice with nothing to dismiss still sits the same height as one with. A release name has no spaces to break
@@ -7813,6 +8211,12 @@
     /* The timeline and the dock together: what floats above them (Skip, up next) sits this far up. */
     --web-bar: 68px;
     --web-remote: 0px;
+
+    /* The timeline's pointer target, which the dock's tooltips clear (a finger's is 44px). */
+    --web-track-target: 24px;
+
+    /* Room above the timeline for the dock's tooltips (28px and a 6px gap): Skip floats clear of them. */
+    --web-tips: 34px;
     --web-glass: var(--glass-bg, rgb(28 28 34 / 0.62));
     --web-glass-edge: var(--glass-edge, rgb(255 255 255 / 0.13));
     --web-glass-blur: var(--glass-blur, blur(24px) saturate(160%));
@@ -7823,6 +8227,10 @@
 
   .web-touch-player {
     --web-bar: 88px;
+    --web-tips: 0px;
+
+    /* A finger's timeline: a 44px target, the times at its two ends. */
+    --web-track-target: 44px;
   }
 
   .web-custom-player > .stage {
@@ -7851,10 +8259,6 @@
     padding: var(--player-top) calc(var(--player-side) - 10px) 64px;
     background: linear-gradient(rgb(0 0 0 / 0.62), transparent);
     pointer-events: none;
-  }
-
-  .web-top > * {
-    pointer-events: auto;
   }
 
   .web-heading {
@@ -7887,12 +8291,6 @@
     justify-content: flex-end;
     min-width: 44px;
     min-height: 44px;
-  }
-
-  /* Empty, the box only holds the place. Away from home the cast page is the picture and draws its own Cast button in
-     its corner, under this box, which took that press whenever the controls showed. */
-  .web-top > .web-output-empty {
-    pointer-events: none;
   }
 
   /* Every control is a bare glyph on a 44px target; only Play is filled. Pressed, a faint circle behind it. */
@@ -7948,11 +8346,8 @@
     animation: status-spin 800ms linear infinite;
   }
 
-  .web-custom-player :global(.web-glyph:active)::before {
-    opacity: 1;
-  }
-
   /* A tap would leave a hover state stuck: only a mouse draws one. */
+  .web-custom-player :global(.web-glyph:active)::before,
   .web-custom-player:not(.web-touch-player) :global(.web-glyph:hover)::before {
     opacity: 1;
   }
@@ -7982,7 +8377,8 @@
     opacity: 1;
   }
 
-  .web-custom-player .icon .filled {
+  .web-custom-player .icon .filled,
+  .web-custom-player .transport-icon .filled {
     fill: currentcolor;
     stroke: none;
   }
@@ -8011,11 +8407,6 @@
     font-size: 15px;
     font-weight: 750;
     text-anchor: middle;
-  }
-
-  .web-custom-player .transport-icon .filled {
-    fill: currentcolor;
-    stroke: none;
   }
 
   /* A label beside the glyph where there is room for one: on its side, a tablet, a wide window. */
@@ -8068,6 +8459,20 @@
     transition-delay: 500ms;
   }
 
+  /* The dock's tips clear the timeline right above it instead of covering the playhead. */
+  .web-custom-player:not(.web-touch-player) .web-dock [data-tip]::after {
+    bottom: calc(100% + var(--web-track-target) + 6px);
+  }
+
+  /* A labelled control already says its name; a tip only for its key. */
+  @media (width >= 40rem) {
+    .web-custom-player:not(.web-touch-player)
+      .web-dock
+      [data-tip]:not([data-key]):has(.web-label)::after {
+      content: none;
+    }
+  }
+
   .web-custom-player:not(.web-touch-player) .web-top [data-tip]::after {
     top: calc(100% + 6px);
     bottom: auto;
@@ -8103,10 +8508,6 @@
     border-radius: 18px;
     pointer-events: auto;
     cursor: auto;
-  }
-
-  .web-toasts .notice:last-of-type {
-    margin-bottom: 0;
   }
 
   .web-toasts .notice-copy {
@@ -8158,6 +8559,7 @@
     display: flex;
   }
 
+  .web-top > *,
   .web-centre > *,
   .web-bar > *,
   .web-floating > * {
@@ -8246,7 +8648,9 @@
   .web-floating {
     position: absolute;
     right: var(--player-side);
-    bottom: calc(var(--web-bar) + var(--web-remote) + var(--player-bottom) + 12px);
+    bottom: calc(
+      var(--web-bar) + var(--web-remote) + var(--web-tips) + var(--player-bottom) + 12px
+    );
     left: var(--player-side);
     z-index: 6;
     display: flex;
@@ -8411,7 +8815,7 @@
 
     grid-area: track;
     width: 100%;
-    height: 24px;
+    height: var(--web-track-target, 24px);
     margin: 0;
     padding: 0;
     border: 0;
@@ -8468,11 +8872,6 @@
     border: 0;
     border-radius: 50%;
     background: #fff;
-  }
-
-  /* A finger's timeline: a 44px target, the times at its two ends. */
-  .web-touch-player .web-track {
-    height: 44px;
   }
 
   /* Held, the track thickens and the thumb grows; a mouse hovering thickens it too (below). */
@@ -8645,7 +9044,9 @@
     opacity: 0;
   }
 
-  /* Invisible controls cannot intercept a pointer meant for the picture. Keyboard focus reveals them before it acts. */
+  /* Empty, the first box only holds the Cast button's place. Invisible controls cannot intercept a pointer meant for
+     the picture; keyboard focus reveals them before it acts. */
+  .web-top > .web-output-empty,
   .web-custom-player.web-controls-hidden .web-top > *,
   .web-custom-player.web-controls-hidden .web-centre > *,
   .web-custom-player.web-controls-hidden .web-bar > * {
@@ -8718,6 +9119,174 @@
     content: '‹';
     margin-right: 8px;
     color: var(--muted, rgb(255 255 255 / 0.6));
+  }
+
+  /* Episodes: wider than the options, since each row carries a still and two lines of synopsis. Its season chips stay
+     at the top while the episodes scroll under them. One height for every season, so switching seasons doesn't resize
+     the list under the pointer; a short season leaves room below. ActionMenu's inline max-height still caps it to the
+     room beside its trigger. */
+  :global(div.menu:not(.sheet):has(.episode-list)) {
+    width: 420px;
+    max-width: calc(100vw - 16px);
+    height: min(600px, calc(100dvh - 16px));
+    max-height: min(600px, calc(100dvh - 16px));
+  }
+
+  :global(div.menu.sheet:has(.episode-list)) {
+    height: 72dvh;
+    max-height: 72dvh;
+  }
+
+  .episode-seasons {
+    position: sticky;
+    top: -6px;
+    z-index: 1;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    margin: -6px -6px 6px;
+    padding: 8px 8px 6px;
+    background: #222228;
+
+    /* A hairline and a short shade along its foot, so the episodes scrolling under the pinned chips read as passing
+       beneath them rather than running into them. A shadow, not a pseudo-element: the chips scroll sideways in here. */
+    box-shadow:
+      0 1px 0 var(--line, rgb(255 255 255 / 0.14)),
+      0 8px 12px -6px rgb(0 0 0 / 0.6);
+    scrollbar-width: none;
+  }
+
+  /* The negative margins above reach a popover's 6px padding, where the list scrolls in the menu itself. A phone
+     sheet scrolls its unpadded items instead, so there they would push the row 6px past both edges and the whole list
+     would scroll sideways. */
+  :global(.menu.sheet) .episode-seasons {
+    top: 0;
+    margin: 0 0 6px;
+  }
+
+  .episode-season {
+    flex: none;
+    min-width: 34px;
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--line, rgb(255 255 255 / 0.14));
+    border-radius: 999px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+
+  .episode-season:hover,
+  .episode-season:focus-visible {
+    background: #fff2;
+  }
+
+  .episode-season:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: -2px;
+  }
+
+  .episode-season[aria-checked='true'] {
+    border-color: transparent;
+    background: #fff;
+    color: #111;
+    font-weight: 600;
+  }
+
+  .episode-note {
+    margin: 10px;
+    color: var(--muted, rgb(255 255 255 / 0.6));
+    font-size: 13px;
+  }
+
+  .episode-row {
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    width: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-decoration: none;
+  }
+
+  .episode-row[aria-current='true'] {
+    background: rgb(91 141 239 / 0.16);
+  }
+
+  .episode-still {
+    position: relative;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    border-radius: 6px;
+    background: rgb(255 255 255 / 0.08);
+  }
+
+  .episode-image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .episode-row[aria-disabled='true'] :is(.episode-image, .episode-text) {
+    opacity: 0.5;
+  }
+
+  /* How much of it is watched, along the still's foot as on the title page. */
+  .episode-progress {
+    position: absolute;
+    inset: auto 0 0;
+    height: 3px;
+    background: rgb(255 255 255 / 0.3);
+  }
+
+  .episode-progress::after {
+    content: '';
+    display: block;
+    width: var(--episode-progress);
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .episode-text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .episode-text b {
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .episode-text small,
+  .episode-overview {
+    color: var(--muted, rgb(255 255 255 / 0.6));
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  .episode-row[aria-current='true'] small {
+    color: var(--accent);
+  }
+
+  .episode-overview {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    line-height: 1.35;
   }
 
   .item-value {
@@ -8831,6 +9400,7 @@
     .web-custom-player {
       --web-bar: 104px;
       --web-remote: 72px;
+      --web-track-target: 44px;
     }
 
     .web-custom-player .web-centre {
@@ -8860,10 +9430,6 @@
 
     .web-custom-player :global(.web-labelled) {
       padding: 0;
-    }
-
-    .web-custom-player .web-track {
-      height: 44px;
     }
 
     .web-custom-player .web-elapsed,

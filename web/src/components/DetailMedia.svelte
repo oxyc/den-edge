@@ -16,6 +16,7 @@
   import type { Routes } from '../lib/routes';
   import { tvRuntimePlatform } from '../lib/tvRuntimePlatform';
   import { nativeHlsFirst } from '../lib/detailTrailerSources';
+  import { reportMediaEngineFailure } from '../lib/mediaEngineDiagnostics';
   let {
     type,
     tmdbId,
@@ -308,7 +309,6 @@
       !ended &&
       !failed,
   );
-
   onMount(() => {
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const small = matchMedia('(max-width: 759px)');
@@ -455,7 +455,7 @@
   $effect(() => {
     const player = video;
     const master = managed;
-    if (__DEN_TV_LEGACY_JS_CORE__ || !player || !master) return;
+    if (__DEN_TV_LEGACY_JS_CORE__ || !allowed || !player || !master) return;
     let live = true;
     let engine: Hls | undefined;
     const starting = loadHls().then(({ default: Hls }) => {
@@ -478,15 +478,16 @@
         testBandwidth: false,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
-        // Once per engine: a fatal error can be followed by another, and each would step again.
         if (!data.fatal || !live) return;
         live = false;
+        reportMediaEngineFailure('trailer', 'fatal');
         nextTrailer();
       });
       // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
       // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
       // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
       engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (!live) return;
         const levels = engine?.levels ?? [];
         const best = levels.reduce(
           (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
@@ -513,20 +514,25 @@
         loads.set(key, count);
         if (count <= MOST_FRAGMENT_LOADS || !live) return;
         live = false;
-        console.warn('hls.js kept fetching one fragment; the trailer is given up.', key);
+        reportMediaEngineFailure('trailer', 'fragment_loop');
         engine?.stopLoad();
         nextTrailer();
       });
       engine.loadSource(master);
       engine.attachMedia(player);
     });
-    // hls.js is its own chunk, fetched only now; one that never comes is a master that will not play.
     void starting.catch((error: unknown) => {
-      console.warn('hls.js could not be started for the trailer.', error);
-      if (live) nextTrailer();
+      // Losing the retained page's ownership while the lazy chunk resolves is ordinary teardown, not a failed
+      // trailer. It must not advance the cursor or emit a diagnostic for the inactive generation.
+      if (!live) return;
+      reportMediaEngineFailure('trailer', 'startup', error);
+      nextTrailer();
     });
     return () => {
       live = false;
+      // Preserve the retained page's visible position before destroy detaches MediaSource and releases its buffers.
+      // A source replacement while still allowed is a real cursor transition and must not keep the old frame.
+      if (!allowed && managed === master) keepFrame(player);
       engine?.destroy();
     };
   });
@@ -643,6 +649,7 @@
       playback = next;
       forced = false;
       failed = !next;
+      if (!next && active) reportMediaEngineFailure('trailer', 'exhausted');
     }
     if (advancing === owner) advancing = null;
   }

@@ -23,6 +23,9 @@
   import type { JoinLibrary } from '../src/lib/browserHousehold';
   import profileFixture from '../src/vendor/den-core/profiles-v1.json';
   import { validateStoredProfileDirectory } from '../src/lib/profileDirectory';
+  import type { ProfilePreferences } from '../src/lib/profilePreferences.svelte';
+  import type { ProfilePolicy } from '../src/lib/profilePolicy';
+  import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
@@ -37,6 +40,8 @@
     fixtureQuery.has('profile-reset-pending');
   const joinPresentationFixture = fixtureQuery.has('join-presentation');
   const profileTrackerAuthorityFixture = fixtureQuery.has('profile-tracker-authority');
+  const importAuthorityReplacementFixture = fixtureQuery.has('hold-import-reply');
+  const playbackAuthorityFixture = fixtureQuery.has('playback-authority-replacement');
   const profileDirectory = (() => {
     if (!profileResetFixture || fixtureQuery.has('wire5-missing')) return null;
     const stored = structuredClone(profileFixture.migrationBase);
@@ -50,6 +55,7 @@
     fixtureQuery.has('recovery-authority-replacement') ||
     fixtureQuery.has('assistant-authority-replacement') ||
     fixtureQuery.has('pin-authority-replacement') ||
+    playbackAuthorityFixture ||
     joinPresentationFixture;
   let releaseRecoveryWrite = () => {};
   const recoveryWriteGate = fixtureQuery.has('recovery-authority-replacement')
@@ -262,7 +268,58 @@
         libraryKey: fixtureLibraryKey,
       })
     : undefined;
+  const profileLibrary = playbackAuthorityFixture
+    ? fixtureLibraryService({ log, device: fixtureClock.device, libraryKey: fixtureLibraryKey })
+    : undefined;
+  const replacementProfileLibrary = playbackAuthorityFixture
+    ? fixtureLibraryService({ log, device: fixtureClock.device, libraryKey: fixtureLibraryKey })
+    : undefined;
   let model = $state.raw<LibraryModel>(primaryModel);
+  let activeActivityModel = $state.raw<LibraryModel>(profileLibrary?.model ?? primaryModel);
+  const preferenceCommands = { primary: [] as string[], replacement: [] as string[] };
+  let preferencePatchStarted = false;
+  let releasePreferencePatch = () => {};
+  const heldPreferencePatch = new Promise<void>((resolve) => (releasePreferencePatch = resolve));
+  const presentationLanguages: string[] = [];
+  const profilePreferences = (
+    name: keyof typeof preferenceCommands,
+    owner: LibraryModel,
+    interfaceLanguage: 'en' | 'sv',
+  ) =>
+    ({
+      get value() {
+        const value = owner.settings.value?.preferences;
+        return value ? { ...structuredClone(value), interfaceLanguage } : undefined;
+      },
+      policy: {
+        get settings() {
+          return owner.settings;
+        },
+      } satisfies ProfilePolicy,
+      async patch(changes) {
+        if (playbackAuthorityFixture && name === 'primary') {
+          preferencePatchStarted = true;
+          await heldPreferencePatch;
+        }
+        preferenceCommands[name].push(
+          changes.interfaceLanguage
+            ? `language:${changes.interfaceLanguage}`
+            : (changes.playbackSourcePolicy ?? 'other'),
+        );
+      },
+      close() {},
+    }) satisfies ProfilePreferences;
+  const primaryPreferences = profilePreferences(
+    'primary',
+    profileLibrary?.model ?? primaryModel,
+    'en',
+  );
+  const replacementPreferences = replacementProfileLibrary
+    ? profilePreferences('replacement', replacementProfileLibrary.model, 'sv')
+    : null;
+  let activePreferences = $state.raw<ProfilePreferences | null>(
+    playbackAuthorityFixture ? primaryPreferences : null,
+  );
   let settingsMounted = $state(true);
   const recoveryAuthorityControls = {
     replace() {
@@ -291,6 +348,8 @@
   ).fixtureRecoveryAuthority = recoveryAuthorityControls;
   let heldConnections: ReturnType<typeof library.holdNextSelection> | undefined;
   let heldSimkl: ReturnType<typeof library.holdNextSelection> | undefined;
+  let heldReplacementConnections: ReturnType<typeof library.holdNextSelection> | undefined;
+  let heldReplacementSimkl: ReturnType<typeof library.holdNextSelection> | undefined;
   let heldAuthorityPublication: Promise<void> | undefined;
   let heldAssistantGrants: ReturnType<typeof library.holdNextAssistantGrants> | undefined;
   const authorityReplacementControls = {
@@ -345,6 +404,37 @@
           }),
         );
       model = replacementLibrary.model;
+    },
+    async replacePlaybackHeld() {
+      if (!replacementLibrary || !replacementProfileLibrary || !replacementPreferences) return;
+      heldReplacementConnections = replacementLibrary.holdNextSelection('connections');
+      heldReplacementSimkl = replacementProfileLibrary.holdNextSelection('simkl');
+      activePreferences = replacementPreferences;
+      activeActivityModel = replacementProfileLibrary.model;
+      model = replacementLibrary.model;
+      await Promise.all([heldReplacementConnections.started, heldReplacementSimkl.started]);
+    },
+    releasePlaybackReplacement() {
+      heldReplacementConnections?.release();
+      heldReplacementSimkl?.release();
+    },
+    preferenceCommands() {
+      return structuredClone(preferenceCommands);
+    },
+    preferencePatchStarted() {
+      return preferencePatchStarted;
+    },
+    releasePreferencePatch() {
+      releasePreferencePatch();
+    },
+    presentationLanguages() {
+      return [...presentationLanguages];
+    },
+    failPreferenceSettings() {
+      profileLibrary?.failSelection('settings');
+    },
+    async setPresentationLanguage(language: 'en' | 'sv') {
+      await setInterfaceLanguage(language);
     },
     releasePinReply() {
       releasePinReply();
@@ -474,12 +564,15 @@
       fixtureJoinPresentation?: typeof joinPresentationControls;
     }
   ).fixtureJoinPresentation = joinPresentationControls;
-  // A second activity identity over the same fixture authority is enough to exercise Settings' import handoff:
-  // it has its own retained import scope while the old model's in-flight semantic reply remains real.
+  // A second activity identity over the same fixture authority exercises Settings' import handoff: it has its own
+  // retained import scope while the old model's in-flight semantic reply remains real. Keep the complete Settings
+  // activity contract, including the tracker selector that the authority bundle acquires atomically; omitting it
+  // would make the test double throw during replacement instead of exercising a ready production-model handoff.
   const replacementActivityModel = {
     get overview() {
       return primaryModel.overview;
     },
+    simkl: primaryModel.simkl.bind(primaryModel),
     importHistory: primaryModel.importHistory.bind(primaryModel),
     exportHistory: primaryModel.exportHistory.bind(primaryModel),
   } as unknown as LibraryModel;
@@ -631,9 +724,20 @@
   {#if contentReady && settingsMounted}<Settings
       {link}
       {model}
-      activityModel={profileTrackerAuthorityFixture ? activityModel : model}
+      activityModel={playbackAuthorityFixture
+        ? activeActivityModel
+        : profileTrackerAuthorityFixture || importAuthorityReplacementFixture
+          ? activityModel
+          : model}
+      preferences={activePreferences}
       {content}
       local={joinPresentationFixture}
+      oninterfacelanguage={playbackAuthorityFixture
+        ? (language) => {
+            presentationLanguages.push(language);
+            void setInterfaceLanguage(language);
+          }
+        : undefined}
       onjoin={joinPresentationFixture ? heldJoin : undefined}
       onresetkey={async () => null}
       oncompoundreset={profileResetFixture

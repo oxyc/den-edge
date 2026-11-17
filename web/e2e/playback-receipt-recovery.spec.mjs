@@ -22,6 +22,8 @@ async function expectBootstrapRetry(page) {
   return retry;
 }
 
+const receiptStatus = (page) => page.locator('.library-status.receipt[role="status"]');
+
 test('the production library exposes one bounded receipt retry and announces recovery', async ({
   page,
 }) => {
@@ -44,7 +46,7 @@ test('the production library exposes one bounded receipt retry and announces rec
   await openMemberLibrary(page);
 
   await expect.poll(() => attempts, { timeout: 30_000 }).toBe(1);
-  await expect(page.getByRole('status')).toContainText('Checking saved playback progress…');
+  await expect(receiptStatus(page)).toContainText('Checking saved playback progress…');
   releases.shift()();
   await expect(page.getByRole('alert')).toContainText(
     'Saved playback progress couldn’t be updated. Try again.',
@@ -57,9 +59,9 @@ test('the production library exposes one bounded receipt retry and announces rec
   await expect(retry).toBeFocused();
   await retry.press('Enter');
   await expect.poll(() => attempts).toBe(2);
-  await expect(page.getByRole('status')).toContainText('Checking saved playback progress…');
+  await expect(receiptStatus(page)).toContainText('Checking saved playback progress…');
   releases.shift()();
-  await expect(page.getByRole('status')).toContainText('Saved playback progress is up to date.');
+  await expect(receiptStatus(page)).toContainText('Saved playback progress is up to date.');
   await expect.poll(() => attempts).toBe(2);
 });
 
@@ -82,7 +84,7 @@ test('an unavailable lazy receipt module exposes Retry and recovers through the 
   await page.evaluate(() => (window.__denFailAssistantImport = false));
   await retry.press('Enter');
   await expect.poll(() => drains, { timeout: 30_000 }).toBe(1);
-  await expect(page.getByRole('status')).toContainText('Saved playback progress is up to date.');
+  await expect(receiptStatus(page)).toContainText('Saved playback progress is up to date.');
 });
 
 test('a rejected relay membership query exposes Retry and recovers through the production client', async ({
@@ -148,5 +150,5 @@ test('a rejected relay membership query exposes Retry and recovers through the p
   await page.evaluate(() => (window.__failReceiptMembership = false));
   await retry.press('Enter');
   await expect.poll(() => drains).toBe(1);
-  await expect(page.getByRole('status')).toContainText('Saved playback progress is up to date.');
+  await expect(receiptStatus(page)).toContainText('Saved playback progress is up to date.');
 });

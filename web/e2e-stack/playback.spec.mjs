@@ -73,10 +73,16 @@ test.afterEach(async () => {
  * A browser of the household: desktop Chrome away from home (TorBox's CDN name resolves to its fake), or an iPhone's
  * WebKit. TMDB and the Cast sender are answered here; every other request goes to den-edge, the cast page or the public
  * media listener (this run's fronts) or TorBox's CDN, and one for anywhere else is refused. `seen` keeps what the page
- * did for the invariants (`clean`). `refuse`: the Cast receiver refuses every LOAD.
+ * did for the invariants (`clean`). `refuse`: the Cast receiver refuses every LOAD. `blockCastAutoplay`: its local
+ * video refuses the first `play()` exactly as iPhone WebKit can after a slow cross-origin session setup.
  */
 let deviceCount = 0;
-async function household({ iphone = false, clock = false, refuse = false } = {}) {
+async function household({
+  iphone = false,
+  clock = false,
+  refuse = false,
+  blockCastAutoplay = false,
+} = {}) {
   const browser = iphone
     ? await webkit.launch()
     : await chromium.launch({
@@ -110,6 +116,19 @@ async function household({ iphone = false, clock = false, refuse = false } = {})
         return send(url, data);
       };
   });
+  if (blockCastAutoplay)
+    await context.addInitScript((castOrigin) => {
+      if (location.origin !== castOrigin) return;
+      const play = HTMLMediaElement.prototype.play;
+      let first = true;
+      HTMLMediaElement.prototype.play = function () {
+        if (first) {
+          first = false;
+          return Promise.reject(new DOMException('Autoplay is blocked', 'NotAllowedError'));
+        }
+        return play.call(this);
+      };
+    }, stack.castOrigin);
   const trail = [];
   const seen = {
     requests: [],
@@ -464,6 +483,13 @@ test.describe('the regressions of 2026-10-29 to 11-08', () => {
     stack.torbox.managed = false;
     const edgeFrom = stack.edge.lines().length;
     const { page, seen } = await household();
+    // A slow link to the public listener: the page's last playback report is still on its way when the request that
+    // ends the session follows it. The end must wait for the report's answer, or Remux has already forgotten the
+    // session and answers the report 410.
+    await page.route(/\/remux\/s\/[^/]+\/[^/]+\/report$/, async (route) => {
+      await new Promise((done) => setTimeout(done, 1_500));
+      await route.continue();
+    });
     await play(page);
     await playingPast(castFrame(page).locator('video'), 2);
     await expect(page.getByTestId('playback-source')).toHaveText('Den Remux');
@@ -590,10 +616,19 @@ test.describe('the playback scenario matrix', () => {
     test.skip(!(await webkit.executablePath()), 'WebKit is not installed');
     stack.torbox.managed = false;
     const edgeFrom = stack.edge.lines().length;
-    const { page, seen } = await household({ iphone: true });
+    const { page, seen } = await household({ iphone: true, blockCastAutoplay: true });
     await play(page);
+    const notice = page.getByRole('status').filter({
+      hasText: 'Select Play on the video to continue.',
+    });
+    await expect(notice).toBeVisible();
+    await castFrame(page).getByRole('button', { name: 'Play', exact: true }).click();
     // Away from home, as every flow here: the session plays in the cast frame, on the public listener's origin.
     await playingPast(castFrame(page).locator('video'), 2);
+    expect(
+      playbacks(seen),
+      'the autoplay prompt did not reject or re-request the release',
+    ).toHaveLength(1);
     await expect(page.getByTestId('playback-source')).toHaveText('Den Remux');
     expect(
       stack.exchanges.some(

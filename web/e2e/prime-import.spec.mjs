@@ -137,6 +137,7 @@ test('a mounted import row follows activity-model replacement and fences the old
       .elementHandle();
     await page.getByRole('button', { name: /Prime Video viewing history/ }).click();
     const prime = page.getByRole('region', { name: 'Prime Video viewing history' });
+    const mountedPrime = await prime.elementHandle();
     await prime.locator('input[type=file]').setInputFiles([
       { name: 'Watch Events.csv', mimeType: 'text/csv', buffer: Buffer.from(watchEvents) },
       { name: 'Viewing History.csv', mimeType: 'text/csv', buffer: Buffer.from(viewingHistory) },
@@ -147,6 +148,7 @@ test('a mounted import row follows activity-model replacement and fences the old
 
     await page.evaluate(() => globalThis.fixtureImportScope.replace());
     expect(await settingsHeading.isVisible()).toBe(true);
+    expect(await mountedPrime.isVisible()).toBe(true);
     await expect(prime.getByText('Choose both files…')).toBeVisible();
     await expect(prime.getByText('Saving…')).toHaveCount(0);
 

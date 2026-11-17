@@ -14,7 +14,24 @@ const source = (filename) => ({
 export async function sourceRefreshFixture(page, { bundled = false, packaged = false } = {}) {
   await guardNetwork(page);
   if (bundled) await page.route('**/assets/**', (route) => route.continue());
-  if (packaged) await page.route('**/package/**', (route) => route.continue());
+  if (packaged) {
+    await page.route('**/package/**', (route) => route.continue());
+    // Packaged production reports source-start failures to the narrow device API face. This fixture exercises the
+    // source failure which legitimately emits it; admit only that exact origin/path so the network guard still
+    // catches a service-origin or broader diagnostics route.
+    await page.route('https://den-tv-api.example.invalid/diagnostics/failure', (route) =>
+      ['POST', 'OPTIONS'].includes(route.request().method())
+        ? route.fulfill({
+            status: 204,
+            headers: {
+              'access-control-allow-origin': '*',
+              'access-control-allow-methods': 'POST, OPTIONS',
+              'access-control-allow-headers': 'content-type',
+            },
+          })
+        : route.fallback(),
+    );
+  }
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({ contentType: 'image/svg+xml', body: art }),
   );

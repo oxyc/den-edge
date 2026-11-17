@@ -2,7 +2,8 @@
   // Home and the Watchlist page on a library that already holds something, with writes that land where the
   // page reads them back from. Without them, pressing Remove or Mark watched threw and the page said
   // "Couldn't save that" — so the actions a test most wants to press were the ones it could not.
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import Library from '../src/Library.svelte';
   import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import '../src/app.css';
@@ -14,6 +15,8 @@
     markWatched,
     updateProgress,
   } from '../src/lib/actions';
+  import { titleKey } from '../src/lib/library';
+  import type { TitleRef } from '../src/lib/libraryServiceProtocol';
   import { parseRoute, type Route } from '../src/lib/route';
   import { activeProfileSession, type ProfileSession } from '../src/lib/profileSession.svelte';
   import { persistentProfileIdentity, visitorVisitId } from '../src/lib/profileIdentity';
@@ -593,6 +596,80 @@
               )
             : library.session,
   );
+  if (params.has('next-metadata-recovery')) {
+    const originalMetadata = session.libraryMetadata.bind(session);
+    let failures = 0;
+    let requests = 0;
+    let releaseHeld = () => {};
+    let held: Promise<void> | undefined;
+    const pending = new SvelteSet<Promise<Awaited<ReturnType<typeof originalMetadata>>>>();
+    session.libraryMetadata = (refs: readonly TitleRef[]) => {
+      const ownsSeries = refs.some((ref) => ref.type === 'tv' && ref.id === 2002);
+      if (!ownsSeries) return originalMetadata(refs);
+      const request = (async () => {
+        requests += 1;
+        await held;
+        if (failures > 0) {
+          failures -= 1;
+          return { titles: [], shapes: [], retryable: [...refs], retryAfterMs: 60_000 };
+        }
+        return originalMetadata(refs);
+      })();
+      pending.add(request);
+      void request.then(
+        () => pending.delete(request),
+        () => pending.delete(request),
+      );
+      return request;
+    };
+    const arm = async () => {
+      // The title route itself promotes metadata. Let that foreground request publish before a test removes its shape
+      // and arms the one playback-owned outcome it intends to observe.
+      await tick();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await Promise.all([...pending]);
+      await tick();
+      requests = 0;
+    };
+    (
+      window as unknown as {
+        denTestNextEpisodeMetadata: {
+          failOnce: () => void;
+          hold: () => void;
+          release: () => void;
+          finale: () => void;
+          requests: () => number;
+        };
+      }
+    ).denTestNextEpisodeMetadata = {
+      failOnce: async () => {
+        await arm();
+        session.shapes.delete(titleKey({ type: 'tv', id: 2002 }));
+        // Keep every lookup before the viewer's explicit Retry failed. Library naming and the player can both
+        // legitimately promote the same missing shape; allowing the second promotion to succeed makes the fixture
+        // restore a ready successor before natural EOF and stops exercising the recovery state altogether.
+        failures = Number.POSITIVE_INFINITY;
+      },
+      hold: async () => {
+        await arm();
+        session.shapes.delete(titleKey({ type: 'tv', id: 2002 }));
+        failures = 0;
+        held = new Promise<void>((resolve) => (releaseHeld = resolve));
+      },
+      release: () => {
+        releaseHeld();
+        held = undefined;
+      },
+      finale: async () => {
+        await arm();
+        session.shapes.set(titleKey({ type: 'tv', id: 2002 }), {
+          counts: new Map([[1, 1]]),
+          lastAired: { season: 1, episode: 1 },
+        });
+      },
+      requests: () => requests,
+    };
+  }
   if (watchlistReplacement)
     (
       window as unknown as { denTestReplaceWatchlistSession: () => void }
@@ -712,6 +789,7 @@
       delete (window as { denTestReleaseProgressReply?: unknown }).denTestReleaseProgressReply;
       delete (window as { denTestProgressOperationIds?: unknown }).denTestProgressOperationIds;
       delete (window as { denTestPlayBoundary?: unknown }).denTestPlayBoundary;
+      delete (window as { denTestNextEpisodeMetadata?: unknown }).denTestNextEpisodeMetadata;
       delete (window as { denTestReleaseFirstWrite?: unknown }).denTestReleaseFirstWrite;
       delete (window as { denTestReplaceWatchlistSession?: unknown })
         .denTestReplaceWatchlistSession;

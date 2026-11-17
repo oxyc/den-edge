@@ -171,13 +171,19 @@ Old desktop-engine evidence still does not establish TV firmware or codec suppor
 
 ## Samsung Tizen
 
-The packaged path is explicitly opt-in and requires an HTTPS
-`DEN_TV_API_ORIGIN` plus a named Tizen certificate profile:
+The packaged path is explicitly opt-in and requires HTTPS device/library and
+service origins plus a named Tizen certificate profile:
 
 ```sh
-DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.oxy.fi npm run build:tv:tizen
-DEN_TV_API_ORIGIN=https://d-api.oxy.fi node scripts/tv-package.mjs tizen --url https://d-api.oxy.fi --profile MyCertificateProfile
+DEN_TV_PACKAGED=1 DEN_TV_API_ORIGIN=https://d-api.oxy.fi DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi npm run build:tv:tizen
+DEN_TV_API_ORIGIN=https://d-api.oxy.fi DEN_TV_SERVICE_ORIGIN=https://d.oxy.fi node scripts/tv-package.mjs tizen --url https://d-api.oxy.fi --profile MyCertificateProfile
 ```
+
+`d-api.oxy.fi` is the device and library API face. `d.oxy.fi` is the service
+face for addon, metadata, and playback discovery routes. Keep that pair on both
+commands so the packaged app and package metadata agree. A custom same-origin
+installation may set both variables to its single origin; omitting
+`DEN_TV_SERVICE_ORIGIN` retains that same-origin fallback.
 
 To install it on a supported Samsung TV:
 
@@ -206,7 +212,9 @@ This copies the actual bundle into a Tizen shell and writes `config.xml`; it
 exits nonzero when the CLI/profile is unavailable. `--prepare` generates and
 validates the unsigned shell without invoking the SDK. Local assets and dedicated
 Workers remain in the package; app routes use `index.html#/…` and only allowlisted
-Den API paths move to the explicit API origin. The production-package E2E suite
+device/library paths move to the API origin while allowlisted service paths move
+to the service origin. Arbitrary external URLs stay unchanged and do not receive
+Den credentials. The production-package E2E suite
 serves physical files without SPA rewrites or an API proxy and exercises encrypted
 pairing, Worker sync, reload, detail/Back and actual HLS playback across origins.
 It does not claim that arbitrary remote
@@ -551,7 +559,7 @@ for a device memory soak. Diagnostics also catch synchronous IndexedDB write ref
 inside their callback, so the check reports failure without an uncaught storage error
 and can be retried after storage becomes available.
 
-Samsung AVPlay opens relative playback URLs at the configured API origin, waits for
+Samsung AVPlay opens relative playback URLs at their route-classified Den origin, waits for
 resume seeking before Play, and fences callbacks after teardown. SDK error details can
 contain signed URLs: only recognized platform error enums reach diagnostics/reports.
 External WebVTT uses browser cue parsing and an overlay synchronized to the AVPlay clock.

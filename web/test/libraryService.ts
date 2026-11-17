@@ -124,6 +124,7 @@ class FixtureService {
   }
 
   retry() {
+    for (const subscription of this.#subscriptions.values()) subscription.failed = false;
     return this.open();
   }
 

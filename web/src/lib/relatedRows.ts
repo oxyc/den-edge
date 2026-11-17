@@ -10,16 +10,20 @@ import type { MediaType, Title } from './library';
 import { fansId, likeId, personHref, searchHref } from './route';
 import type { Browsable, TitleFacts } from './titleFacts';
 import type { ContentServiceClientPort } from './contentServiceClient';
+import type { ContentRelatedQuery } from './contentServiceProtocol';
 import type { ParameterMessageId } from './messages/parameters';
 
 /** Titles a page adds: a screenful and a bit, the size TMDB's own pages come in. */
 const CHUNK = 20;
-/** How many plot neighbours atlas is asked for once the closer ones and TMDB's recommendations run out (its cap). */
-const NEIGHBOURS = 50;
-
 const keyOf = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
 
 type Ref = { type: MediaType; id: number };
+const UNKNOWN = 0;
+const CARDS = 1;
+const SIMILAR = 2;
+const NEIGHBOURS = 3;
+const RECOMMENDED = 4;
+const DONE = 5;
 
 const titleMessage = (
   id: ParameterMessageId,
@@ -38,7 +42,10 @@ async function drawRefs(
   signal?: AbortSignal,
 ): Promise<Title[]> {
   const byKey = new Map(cards.map((t) => [keyOf(t), t]));
-  const missing = refs.filter((ref) => !byKey.get(keyOf(ref))?.posterPath);
+  // Keep the service request to its narrow ref contract even when a caller can reuse richer cards for ordering.
+  const missing = refs
+    .filter((ref) => !byKey.get(keyOf(ref))?.posterPath)
+    .map(({ type, id }) => ({ type, id }));
   const normalized = missing.length
     ? (await content.query({ kind: 'titles', titles: missing }, signal)).titles
     : [];
@@ -103,64 +110,53 @@ export function moreLikeThisRow(
   seen.add(keyOf(self));
 
   /** `unknown` is atlas not yet asked; whether it has anything for this title decides which way the row goes. */
-  type Source = 'unknown' | 'cards' | 'similar' | 'neighbours' | 'recommended' | 'done';
+  type Source = 0 | 1 | 2 | 3 | 4 | 5;
   /** How far into the paged affinity row (`cardsPath`) the row has read. */
   let cardsSkip = 0;
-  let source: Source = atlas === null ? 'recommended' : 'unknown';
+  let source: Source = atlas === null ? RECOMMENDED : UNKNOWN;
   /** The TMDB page the detail already carried (page 1) is served first, then page 2 on. */
   let recommendedPage = 1;
   let queue: Ref[] | undefined;
+
+  async function related(query: ContentRelatedQuery, signal?: AbortSignal) {
+    try {
+      const answer = (await content.query({ kind: 'atlas.related', query }, signal)).answer;
+      return answer.state === 'ready' ? answer.value : undefined;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
+  }
 
   /**
    * The titles an atlas list names: its `ids`, of the seed's type, or — for a mixed row, where the answer has one —
    * its `mixed` list, each with its own type.
    */
   async function idsFrom(source: 'similar' | 'neighbours', signal?: AbortSignal): Promise<Ref[]> {
-    try {
-      const result = await content.query(
-        {
-          kind: 'atlas.related',
-          query: {
-            operation: 'list',
-            source,
-            title: { type: self.type, id: self.id },
-            mixed,
-            limit: source === 'neighbours' ? NEIGHBOURS : similarLimit,
-          },
-        },
-        signal,
-      );
-      return result.answer.state === 'ready' && result.answer.value.operation === 'refs'
-        ? result.answer.value.refs
-        : [];
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      return [];
-    }
+    const answer = await related(
+      {
+        operation: 'list',
+        source,
+        title: { type: self.type, id: self.id },
+        mixed,
+        limit: source === 'neighbours' ? 50 : similarLimit,
+      },
+      signal,
+    );
+    return answer?.operation === 'refs' ? answer.refs : [];
   }
 
   /** The one requested seed's row, or null when this Atlas does not implement the affinity contract. */
   async function suggested(signal?: AbortSignal): Promise<Ref[] | null> {
-    try {
-      const result = await content.query(
-        {
-          kind: 'atlas.related',
-          query: {
-            operation: 'suggest',
-            title: { type: self.type, id: self.id },
-            mixed,
-            limit: similarLimit,
-          },
-        },
-        signal,
-      );
-      return result.answer.state === 'ready' && result.answer.value.operation === 'refs'
-        ? result.answer.value.refs
-        : null;
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      return null;
-    }
+    const answer = await related(
+      {
+        operation: 'suggest',
+        title: { type: self.type, id: self.id },
+        mixed,
+        limit: similarLimit,
+      },
+      signal,
+    );
+    return answer?.operation === 'refs' ? answer.refs : null;
   }
 
   /**
@@ -168,30 +164,21 @@ export function moreLikeThisRow(
    * route (the POST's ids are read instead), `undefined` once the row has nothing left.
    */
   async function drawCards(signal?: AbortSignal): Promise<Title[] | null | undefined> {
-    try {
-      const result = await content.query(
-        {
-          kind: 'atlas.related',
-          query: {
-            operation: 'cards',
-            title: { type: self.type, id: self.id },
-            skip: cardsSkip,
-            limit: CHUNK,
-          },
-        },
-        signal,
-      );
-      if (result.answer.state !== 'ready' || result.answer.value.operation !== 'cards')
-        return cardsSkip === 0 ? null : undefined;
-      const { refs, titles } = result.answer.value;
-      if (refs.length === 0) return undefined;
-      cardsSkip += refs.length;
-      const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
-      return drawRefs(wanted, titles, content, signal);
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      return cardsSkip === 0 ? null : undefined;
-    }
+    const answer = await related(
+      {
+        operation: 'cards',
+        title: { type: self.type, id: self.id },
+        skip: cardsSkip,
+        limit: CHUNK,
+      },
+      signal,
+    );
+    if (answer?.operation !== 'cards') return cardsSkip === 0 ? null : undefined;
+    const { refs, titles } = answer;
+    if (refs.length === 0) return undefined;
+    cardsSkip += refs.length;
+    const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
+    return drawRefs(wanted, titles, content, signal);
   }
 
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
@@ -208,43 +195,43 @@ export function moreLikeThisRow(
   }
 
   /** Where the row goes once atlas's own answer for it has run out: the wider sources, or nowhere. */
-  const after: Source = fallback ? 'neighbours' : 'done';
+  const after: Source = fallback ? NEIGHBOURS : DONE;
 
   async function step(signal?: AbortSignal): Promise<Title[]> {
-    if (source === 'unknown' && affinity && mixed) {
+    if (source === UNKNOWN && affinity && mixed) {
       const found = await drawCards(signal);
       if (found !== null) {
         if (found) {
-          source = 'cards';
+          source = CARDS;
           return found;
         }
         source = after; // atlas's affinity row for this title is empty
       }
     }
-    if (source === 'cards') {
+    if (source === CARDS) {
       const found = await drawCards(signal);
       if (found) return found;
       source = after;
     }
-    if (source === 'unknown') {
+    if (source === UNKNOWN) {
       queue = affinity
         ? ((await suggested(signal)) ?? (fallback ? await idsFrom('similar', signal) : []))
         : await idsFrom('similar', signal);
-      source = queue.length > 0 ? 'similar' : fallback ? 'recommended' : 'done';
-      if (source !== 'similar') queue = undefined; // atlas has nothing for this title: TMDB alone
+      source = queue.length > 0 ? SIMILAR : fallback ? RECOMMENDED : DONE;
+      if (source !== SIMILAR) queue = undefined; // atlas has nothing for this title: TMDB alone
     }
-    if (source === 'similar') {
+    if (source === SIMILAR) {
       const found = await drawQueued('similar', signal);
       if (found) return found;
       source = after;
       queue = undefined;
     }
-    if (source === 'neighbours') {
+    if (source === NEIGHBOURS) {
       const found = await drawQueued('neighbours', signal);
       if (found) return found;
-      source = 'recommended'; // atlas is exhausted: TMDB pads the end
+      source = RECOMMENDED; // atlas is exhausted: TMDB pads the end
     }
-    if (source === 'recommended') {
+    if (source === RECOMMENDED) {
       if (recommendedPage === 1 && detail.more) {
         recommendedPage = 2;
         return detail.more;
@@ -264,7 +251,7 @@ export function moreLikeThisRow(
       if (signal?.aborted) throw signal;
       recommendedPage++;
       if (page.length > 0) return page;
-      source = 'done';
+      source = DONE;
     }
     return [];
   }
@@ -278,7 +265,7 @@ export function moreLikeThisRow(
       ? { label: 'Explore', href: searchHref('', { chips: [fansId(self)] }) }
       : { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) },
     load: async (_page, signal) => {
-      while (source !== 'done') {
+      while (source !== DONE) {
         const fresh = (await step(signal)).filter((t) => {
           if (seen.has(keyOf(t))) return false;
           seen.add(keyOf(t));
@@ -291,9 +278,6 @@ export function moreLikeThisRow(
   };
 }
 
-/** How many pages `firstScreen` reads while looking for a title that survives the hide rules (`BrowseRow`'s burst). */
-const SEARCH_PAGES = 3;
-
 /**
  * A row only once it has something to show. Reads pages until one holds a title `keep` admits, and answers with the
  * row served from what it read, so the loader is not asked for them again; null when there is nothing. A row nobody
@@ -305,7 +289,7 @@ export async function firstScreen(
   keep: (title: Title) => boolean,
 ): Promise<RowDef | null> {
   const read: Title[][] = [];
-  for (let page = 1; page <= SEARCH_PAGES; page++) {
+  for (let page = 1; page <= 3; page++) {
     let titles: Title[];
     try {
       titles = await row.load(page);
@@ -511,14 +495,11 @@ export function countryRow(
   };
 }
 
-/** A studio or network's row is worth it between these many titles: fewer is no row, more says nothing (Warner Bros.). */
-const PRODUCER_TITLES = { min: 10, max: 300 };
-
 const folded = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 /**
  * "More from Showtime": the network a series aired on, then the company that made a title, one row each at most, from
- * atlas's facts. Only the right size to say something (`PRODUCER_TITLES`), and none a curated studio row already shows.
+ * atlas's facts. Only 10–300 titles is specific enough, and none a curated studio row already shows.
  */
 export function producerRows(
   facts: TitleFacts,
@@ -528,8 +509,8 @@ export function producerRows(
 ): RowDef[] {
   const taken = new Set(studios.flatMap((studio) => [studio.id, folded(studio.name)]));
   const fits = (value: Browsable) =>
-    value.titles >= PRODUCER_TITLES.min &&
-    value.titles <= PRODUCER_TITLES.max &&
+    value.titles >= 10 &&
+    value.titles <= 300 &&
     !taken.has(value.id) &&
     !taken.has(folded(value.name));
   const rows: RowDef[] = [];
@@ -564,12 +545,9 @@ function producerRow(
   };
 }
 
-/** A subject or place's row is worth it between these many titles: fewer is a row of a few, more says nothing (New York City). */
-const THEME_TITLES = { min: 8, max: 300 };
-
 /**
  * "More about drug trafficking" and "Set in Baltimore", from atlas's facts: the first subject and the first place the
- * right size to say something (`THEME_TITLES`), films and series together. A place that is the title's own country
+ * right size to say something (8–300 titles), films and series together. A place that is the title's own country
  * (`countryName`) is left to the country row.
  */
 export function themeRows(
@@ -578,8 +556,7 @@ export function themeRows(
   content: ContentServiceClientPort,
   countryName?: string,
 ): RowDef[] {
-  const fits = (value: Browsable) =>
-    value.titles >= THEME_TITLES.min && value.titles <= THEME_TITLES.max;
+  const fits = (value: Browsable) => value.titles >= 8 && value.titles <= 300;
   const rows: RowDef[] = [];
   const subject = facts.subjects.find(fits);
   if (subject) rows.push(themeRow('subject', subject, 'More about ', self, content));
@@ -719,9 +696,7 @@ export async function franchiseRow(
       });
       if (result.answer.state === 'ready' && result.answer.value.operation === 'franchise') {
         const { id, name, members: cards } = result.answer.value;
-        const refs = cards
-          .filter((card) => keyOf(card) !== keyOf(self))
-          .map(({ type, id }) => ({ type, id }));
+        const refs = cards.filter((card) => keyOf(card) !== keyOf(self));
         if (refs.length === 0) return null;
         let members: Promise<Title[]> | undefined;
         return {
@@ -745,65 +720,65 @@ export async function franchiseRow(
  * franchise comes with the rest of that franchise, each card captioned with the franchise's label ("Wallander
  * (Sweden)"); a remake outside one says "Remake". Atlas leaves out the title's own curated franchise; whatever the
  * franchise row shows is left out here too, since that row can be TMDB's collection instead. One page: atlas answers
- * with every version at once. Null when there are none, or when the atlas predates the route, so the page never shows
- * the row empty.
+ * with every version at once. Null means there are none or Atlas predates the route; undefined is the distinct
+ * retryable unavailable result, so the page never presents a transport failure as an authoritative empty row.
  */
 export async function versionsRow(
   self: Title,
   atlas: string | null,
   franchise: Promise<RowDef | null>,
   { content }: RelatedOptions,
-): Promise<RowDef | null> {
+  signal?: AbortSignal,
+): Promise<RowDef | null | undefined> {
   if (!atlas) return null;
   try {
-    const result = await content.query({
-      kind: 'atlas.related',
-      query: { operation: 'versions', title: { type: self.type, id: self.id } },
-    });
+    const result = await content.query(
+      {
+        kind: 'atlas.related',
+        query: { operation: 'versions', title: { type: self.type, id: self.id } },
+      },
+      signal,
+    );
+    if (result.answer.state === 'unavailable') return undefined;
     if (result.answer.state !== 'ready' || result.answer.value.operation !== 'versions')
       return null;
     const listed = result.answer.value.versions;
     /** What each card says beside its year: its franchise's label, else "Remake" for a remake. */
-    const notes = new Map(
-      listed.flatMap(({ title, note }) => (note ? [[keyOf(title), note]] : [])),
-    );
-    const refs = listed.map(({ title }) => ({ type: title.type, id: title.id }));
+    const notes = new Map(listed.map(({ title, note }) => [keyOf(title), note]));
+    const cards = listed.map(({ title }) => title);
     const elsewhere = new Set<string>(
       (await franchise.then((row) => row?.load(1)).catch(() => undefined))?.map(keyOf),
     );
     elsewhere.add(keyOf(self));
-    const wanted = refs.filter((ref) => !elsewhere.has(keyOf(ref)));
+    const wanted = cards.filter((card) => !elsewhere.has(keyOf(card)));
     if (wanted.length === 0) return null;
-    const titles = await drawRefs(
-      wanted,
-      listed.map(({ title }) => title),
-      content,
-    );
+    const titles = await drawRefs(wanted, cards, content, signal);
     if (titles.length === 0) return null;
     return {
       id: 'other-versions',
       title: 'Other versions',
       caption: (t) => {
         const note = notes.get(keyOf(t));
-        return note ? [t.year, note].filter(Boolean).join(' · ') : undefined;
+        return note ? (t.year ? `${t.year} · ${note}` : note) : undefined;
       },
       load: async (page) => (page === 1 ? titles : []),
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (
+      signal?.aborted ||
+      (error as { failure?: { code?: string } })?.failure?.code === 'cancelled'
+    )
+      throw error;
+    return undefined;
   }
 }
 
 type Department = 'Directing' | 'Writing' | 'Acting';
 
-/** The most filmography rows one title page shows, and the most of them that are "Starring". */
-const MAX_PERSON_ROWS = 5;
-const MAX_LEAD_ROWS = 3;
-
 /**
  * The filmography rows a title gets, in display order: its director, creator and writer (one row each), then its
  * leads. Each person gets one row, under their first role in that order, so an auteur who wrote and directed is
- * "More from", not also "Written by". Stops at MAX_PERSON_ROWS, so the leads are what a fully credited title gives
+ * "More from", not also "Written by". Stops at five rows, so the leads are what a fully credited title gives
  * up. The TV builds the same rows (DetailModel.personRows).
  */
 export function personRows(
@@ -817,14 +792,14 @@ export function personRows(
     department: Department,
     before: string,
   ) => {
-    if (!person || rows.length >= MAX_PERSON_ROWS || seen.has(person.id)) return;
+    if (!person || rows.length >= 5 || seen.has(person.id)) return;
     seen.add(person.id);
     rows.push({ person, department, before });
   };
   add(detail.directors[0], 'Directing', 'More from ');
   add(fresh(detail.creators)[0], 'Writing', 'Created by ');
   add(fresh(detail.writers)[0], 'Writing', 'Written by ');
-  for (const lead of fresh(detail.cast).slice(0, MAX_LEAD_ROWS)) add(lead, 'Acting', 'Starring ');
+  for (const lead of fresh(detail.cast).slice(0, 3)) add(lead, 'Acting', 'Starring ');
   return rows;
 }
 

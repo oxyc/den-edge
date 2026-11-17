@@ -1483,6 +1483,27 @@ describe('endSession', () => {
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
   });
 
+  it('ends the session only once the report it follows was answered', async () => {
+    const calls: string[] = [];
+    let answered!: () => void;
+    const report = new Promise<void>((done) => (answered = done));
+    endSession(
+      session,
+      async (input) => {
+        calls.push(String(input));
+        return new Response(null, { status: 204 });
+      },
+      undefined,
+      report,
+    );
+    await Promise.resolve();
+    expect(calls).toEqual([]);
+    answered();
+    await report;
+    await Promise.resolve();
+    expect(calls).toEqual(['/remux/s/sid/sig']);
+  });
+
   it('uses Hearth’s explicit lifecycle capabilities instead of deriving them from the URL', () => {
     const calls: [string, string | undefined][] = [];
     const coordinated = {

@@ -131,6 +131,61 @@ test('a page scroll while the menu is open closes it', async () => {
   }
 });
 
+// den-edge#1143: focus enters a popover on its first animation frame. A fast Escape can therefore still target
+// the trigger, outside the menu's own keydown path; a containing player must nevertheless see that key consumed.
+test('Escape before the first menu-focus frame closes only the menu', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await openFixture(page);
+    const trigger = page.getByRole('button', { name: 'Actions for Movie 101' });
+    const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
+
+    await trigger.focus();
+    await page.evaluate(() => {
+      const queued = new Map();
+      const request = window.requestAnimationFrame;
+      const cancel = window.cancelAnimationFrame;
+      let next = 1_000_000;
+      window.requestAnimationFrame = (callback) => {
+        const id = next++;
+        queued.set(id, callback);
+        return id;
+      };
+      window.cancelAnimationFrame = (id) => {
+        if (!queued.delete(id)) cancel(id);
+      };
+      window.__releaseActionMenuFrames = () => {
+        window.requestAnimationFrame = request;
+        window.cancelAnimationFrame = cancel;
+        queued.forEach((callback) => request(callback));
+        queued.clear();
+      };
+    });
+    await trigger.evaluate((button) => button.click());
+    await expect(menu).toBeVisible();
+    await expect(trigger).toBeFocused();
+
+    const consumed = await trigger.evaluate((button) => {
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    expect(consumed).toBe(true);
+    await expect(menu).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.evaluate(() => window.__releaseActionMenuFrames());
+  } finally {
+    await browser.close();
+  }
+});
+
 // den-edge#260: closing on the bare `scroll` event closed the menu on any browser-caused scroll too — not
 // only a swipe or a wheel behind it. The W3C menu's own keyboard model moves focus to an item a short popover
 // has no room for (arrow keys cycling to one near an edge, or the menu simply opening low on a tall page),

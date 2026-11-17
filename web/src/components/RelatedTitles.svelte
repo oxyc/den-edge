@@ -30,6 +30,7 @@
   import { SvelteSet } from 'svelte/reactivity';
   import { yieldTask } from '../lib/taskYield';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import { i18n } from '../lib/i18n.svelte';
 
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
   import BrowseRow from './BrowseRow.svelte';
@@ -61,8 +62,6 @@
     shown: (t: Title) => boolean;
   } = $props();
 
-  /** You might also like's row id (`moreLikeThisRow`). */
-  const SUGGESTED = 'you-might-also-like';
   /** Each shown row with its build: a rebuilt row keeps its id, and must still start its own loader afresh. */
   // Row definitions are replaced as complete builds and never mutated. Avoid deep proxies around every loader and
   // filter while the detail page constructs its below-fold placeholders.
@@ -74,10 +73,8 @@
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read and written only by loader closures.
   let startedRows = new Set<string>();
   let root: HTMLDivElement;
-  let discovery = $state<{
-    start: () => Promise<void>;
-    cancel: () => void;
-  }>();
+  let discovery = $state<() => void>();
+  let retryVersions = $state<() => Promise<void>>();
   /** Live BrowseRows already admitted. The one-block substitutes keep the same initial skeleton height. */
   const mountedRows = new SvelteSet<string>();
 
@@ -91,10 +88,10 @@
     let cancelIdle = () => {};
     const start = () => {
       cancelIdle();
-      void pending.start();
+      pending();
     };
     const stopNear = observeNearViewport(root, (near) => near && start(), '800px 0px');
-    cancelIdle = whenIdle(pending.start);
+    cancelIdle = whenIdle(pending);
     return () => {
       cancelIdle();
       stopNear();
@@ -156,30 +153,28 @@
               options,
             )
           : withPosters(languageRow(regionalLanguage, self, content), options);
-    let live = true;
     // Every title the rows above You might also like have shown — the franchise, other versions and More like this —
     // so it offers none of them again.
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read by loaders only, never rendered.
     const onPage = new Set<string>([titleKey(self)]);
     // The same, as it grows: other versions, which load after You might also like, drop their titles from it then.
     const above = new SvelteSet<string>();
-    const noted = (row: RowDef): RowDef => ({
-      ...row,
-      load: async (page) => {
-        const titles = await row.load(page);
-        for (const title of titles) {
-          onPage.add(titleKey(title));
-          above.add(titleKey(title));
-        }
-        return titles;
-      },
-    });
     /** Mark the first real entry into a row loader, not merely construction of its placeholder. */
-    const tracked = (row: RowDef): RowDef => ({
+    const tracked = (row: RowDef, note = false): RowDef => ({
       ...row,
       load: (page) => {
         started.add(row.id);
-        return row.load(page);
+        const loaded = row.load(page);
+        return note
+          ? loaded.then((titles) => {
+              for (const title of titles) {
+                const key = titleKey(title);
+                onPage.add(key);
+                above.add(key);
+              }
+              return titles;
+            })
+          : loaded;
       },
     });
     // Known to exist once atlas (or TMDB's collection) names its members, so it joins then with placeholders
@@ -187,37 +182,43 @@
     // is one TMDB request per member.
     // The promise identities live for this whole build, even while its RoutePage is retained inactive. Their gate
     // stops either loader from being called by component construction alone.
-    let releaseDiscovery!: (start: boolean) => void;
-    let discoveryDecided = false;
-    const discoveryGate = new Promise<boolean>((resolve) => (releaseDiscovery = resolve));
+    const build = ++builds;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const current = () => !signal.aborted;
+    let decideDiscovery!: (start: boolean) => void;
+    // Promise settlement itself makes repeated near/idle/cleanup decisions harmless.
+    const discoveryGate = new Promise<boolean>((resolve) => (decideDiscovery = resolve));
     const franchise = discoveryGate.then((start) =>
       start
         ? franchiseRow(detail.collection, self, atlas, options).then(
-            (row) => row && tracked(noted(row)),
+            (row) => row && tracked(row, true),
           )
         : null,
     );
-    const versions = discoveryGate.then((start) =>
-      start
-        ? versionsRow(self, atlas, franchise, options).then((row) =>
-            row ? firstScreen(tracked(noted(row)), shown) : null,
-          )
-        : null,
-    );
-    const decideDiscovery = (start: boolean) => {
-      if (discoveryDecided) return;
-      discoveryDecided = true;
-      releaseDiscovery(start);
+    const loadVersions = async () => {
+      const row = await versionsRow(self, atlas, franchise, options, signal).catch(() => null);
+      return row ? firstScreen(tracked(row, true), shown) : row;
     };
-    const settledDiscovery = Promise.all([franchise, versions]).then(() => undefined);
-    const pendingDiscovery = {
-      start: () => {
-        decideDiscovery(true);
-        return settledDiscovery;
-      },
-      cancel: () => decideDiscovery(false),
+    // versionsRow turns every transient provider error into undefined. Only cancellation escapes, and cancellation
+    // belongs to the retired build rather than its recovery UI.
+    const versionsAnswer = discoveryGate.then((start) => (start ? loadVersions() : null));
+    const placeVersions = async (request = versionsAnswer) => {
+      retryVersions = undefined;
+      const answer = await request;
+      if (!current()) return;
+      if (answer === undefined) {
+        retryVersions = () => placeVersions(loadVersions());
+        return;
+      }
+      const upper = await franchise;
+      if (!current()) return;
+      const next = rows.filter(({ row }) => row.id !== 'other-versions');
+      if (answer)
+        next.splice(upper && next[0]?.row.id === upper.id ? 1 : 0, 0, { build, row: answer });
+      rows = next;
     };
-    discovery = pendingDiscovery;
+    discovery = () => decideDiscovery(true);
     const author = atlas ? authorRow(known, self, content) : null;
     // Closest first: what is like this title and what its fans also love, then what else came from its source
     // author's books, the people who made it, then the same of its strongest mood, its studio, network and country or
@@ -252,7 +253,7 @@
       // Films and series together; curated primary members have their own row and atlas excludes them here.
       // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
       // the broader plot-neighbour and TMDB sources.
-      noted({ ...similar, load: (page: number) => similar.load(page).finally(similarIn) }),
+      { ...similar, load: (page: number) => similar.load(page).finally(similarIn) },
       ...(affinity
         ? [
             {
@@ -275,43 +276,44 @@
           ].map((row) => withPosters(row, options))
         : []),
       ...(regional ? [regional] : []),
-    ].map(tracked);
-    const build = ++builds;
-    const current = () => live && builds === build && rowsFor === key;
+    ].map((row, index) => tracked(row, index === 0));
     if (rebuild) {
       void Promise.all([
         franchise,
-        versions,
         // Only replace content a viewer has already caused to load with another pre-resolved row. Untouched rows
         // remain cheap definitions and keep the same heading/skeleton geometry when this build is published.
         ...defined.map((row) => (preserve.has(row.id) ? firstScreen(row, shown) : row)),
-      ]).then((found) => {
+      ]).then(([upper, ...rest]) => {
         if (!current()) return;
-        const next = found
+        const next = [upper, ...rest]
           .filter((row): row is RowDef => row !== null)
           .map((row) => ({ build, row }));
+        // A transient Atlas failure is not evidence that an already authoritative row became empty. Keep that row
+        // until this exact lane answers successfully; Retry below reuses the current title/franchise authority.
+        const keptVersions = rows.find(({ row }) => row.id === 'other-versions');
+        if (keptVersions)
+          next.splice(upper && next[0]?.row.id === upper.id ? 1 : 0, 0, keptVersions);
         // A rebuild with no atlas has none to suggest: the suggestions already shown for this title stay, under
         // More like this, rather than shrinking the page under the viewer.
-        const kept = affinity ? undefined : rows.find(({ row }) => row.id === SUGGESTED);
+        const kept = affinity
+          ? undefined
+          : rows.find(({ row }) => row.id === 'you-might-also-like');
         if (kept) next.splice(next.findIndex(({ row }) => row.id === similar.id) + 1, 0, kept);
         rows = next;
+        void placeVersions();
       });
     } else {
       rows = defined.map((row) => ({ build, row }));
-      void franchise.then(async (row) => {
+      void franchise.then((row) => {
         if (current() && row) rows = [{ build, row }, ...rows];
-        // Other versions sit straight under the franchise, which they are never part of.
-        const other = await versions;
-        if (!current() || !other) return;
-        const at = row
-          ? rows.findIndex((entry) => entry.build === build && entry.row.id === row.id) + 1
-          : 0;
-        rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
       });
+      // Other versions sit straight under the franchise, which they are never part of.
+      void placeVersions();
     }
     return () => {
-      live = false;
-      pendingDiscovery.cancel();
+      controller.abort();
+      retryVersions = undefined;
+      decideDiscovery(false);
     };
   });
 
@@ -338,6 +340,15 @@
 </script>
 
 <div bind:this={root} aria-hidden={!active}>
+  {#if retryVersions}
+    <button
+      type="button"
+      class="den-button den-button-compact"
+      aria-live="assertive"
+      data-spatial-section
+      onclick={retryVersions}>{i18n.phrase('Couldn’t load these. Try again')}</button
+    >
+  {/if}
   {#each rows as { build, row } (`${build}:${row.id}`)}
     {#if mountedRows.has(`${build}:${row.id}`)}
       <BrowseRow {row} {shown} prefetch={false} />

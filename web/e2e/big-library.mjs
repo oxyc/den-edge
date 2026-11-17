@@ -17,7 +17,7 @@
 import { expect } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { syntheticRows } from '../scripts/rehearse-synthetic.mjs';
+import { syntheticRows } from './synthetic-library.mjs';
 import { evaluateAssistant, initializeAssistant } from '../src/vendor/den-core/assistant.js';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { CODE, routeGuestEdge } from './guest-edge.mjs';
@@ -31,7 +31,7 @@ if (!Number.isFinite(FIXTURE_NOW) || FIXTURE_NOW % DAY !== 0)
   throw new Error('DEN_FIXTURE_NOW must be midnight UTC as Unix milliseconds');
 export const fixtureNow = () => FIXTURE_NOW;
 
-/** A series being watched (`rehearse-synthetic.mjs`: every fifteenth long-history series), with four seasons. */
+/** A series being watched (`synthetic-library.mjs`: every fifteenth long-history series), with four seasons. */
 export const WATCHED_SERIES = 200_000;
 
 /** Its last season, downloading: two episodes have a release, the rest are still searched for. */
@@ -127,7 +127,7 @@ const fixedRandom = (name) => createHash('sha256').update(`den-e2e-${name}`).dig
 /**
  * The household's connection to an assistant that may change and read its library, made a day ago as Settings'
  * consent makes it (den-spec assistant-v1 §1, §15, §16): a drop-box key, a grant, a play record and a read record.
- * They are household rows (profiles-v1 §6.1), so the split leaves them with the household. `grant`: its id.
+ * They are household rows (profiles-v1 §6.1), so they remain with the household. `grant`: its id.
  */
 export async function assistantRows(now = fixtureNow()) {
   const at = [now - DAY, 1, 'aaaaaaaaaaaaaaaa'];

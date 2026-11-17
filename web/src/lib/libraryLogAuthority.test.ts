@@ -2037,6 +2037,22 @@ describe('LibraryLogAuthority', () => {
     });
   });
 
+  it('keeps raw download rows out of overview projection while downloads retain their own authority', async () => {
+    const { log, authority } = await localAuthority();
+    const storedRows = vi.spyOn(log, 'storedRows');
+
+    await expect(authority.select({ kind: 'overview' })).resolves.toMatchObject({
+      kind: 'overview',
+    });
+    expect(storedRows).not.toHaveBeenCalled();
+
+    await expect(authority.select({ kind: 'downloads' })).resolves.toMatchObject({
+      kind: 'downloads',
+    });
+    expect(storedRows).toHaveBeenCalledTimes(1);
+    authority.close();
+  });
+
   it('projects an in-progress movie as a protocol-only title reference', async () => {
     const { authority } = await localAuthority();
     await authority.command(

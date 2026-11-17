@@ -74,6 +74,7 @@ export const messages = {
   'common.play': 'Spela',
   'common.resume': 'Fortsätt',
   'common.close': 'Stäng',
+  'player.autoplayBlocked': 'Välj Spela på videon för att fortsätta.',
   'player.subtitleTiming': 'Undertextsynkronisering',
   'player.subtitleEarlier': 'Tidigare',
   'player.subtitleLater': 'Senare',

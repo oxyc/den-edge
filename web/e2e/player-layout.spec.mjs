@@ -103,8 +103,10 @@ async function newPage(browser, browserType, viewport, touch) {
   return context.newPage();
 }
 
-async function openPlaying(page, query = '') {
+/** `routes` adds the test's own answers over the player's, before the page asks for anything. */
+async function openPlaying(page, query = '', routes = async () => {}) {
   await mockPlayer(page);
+  await routes();
   await page.goto(`${ORIGIN}/test/player.html${query}`);
   const video = page.locator('.player video');
   await expect
@@ -652,6 +654,154 @@ for (const [engine, browserType] of engines) {
           await expect(card.locator('img')).toHaveCount(0);
           await expect(card).not.toContainText('Low Tide');
         }
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+
+  // Episodes: the series under what is playing, over the picture. It opens on the episode playing, marks how much of
+  // each is watched, switches seasons in place, keeps an episode not yet aired inert, and plays a picked one in this
+  // player. A popover beside its button with a mouse, a bottom sheet on a phone.
+  for (const [viewport, touch] of [
+    [DESKTOPS[0], false],
+    [PHONES[1], true],
+  ]) {
+    test(`the episode list picks another episode in place (${engine}, ${viewport.name})`, async () => {
+      installed();
+      const browser = await launch(browserType);
+      try {
+        const page = await newPage(browser, browserType, viewport, touch);
+        const seasons = [];
+        await openPlaying(page, '?series&episodes', async () => {
+          await page.route('**/tmdb/3/tv/42/season/*', (route) => {
+            const number = Number(new URL(route.request().url()).pathname.split('/').pop());
+            seasons.push(number);
+            const names =
+              number === 1
+                ? ['Low Tide', 'The Undertow', 'Slack Water', 'Spring Tide']
+                : ['Landfall', 'Offshore'];
+            return route.fulfill({
+              json: {
+                episodes: names.map((name, i) => ({
+                  episode_number: i + 1,
+                  name,
+                  overview: `${name} overview.`,
+                  runtime: 40 + i,
+                  still_path: `/still-${number}-${i + 1}.jpg`,
+                })),
+              },
+            });
+          });
+          await page.route('https://image.tmdb.org/**', (route) =>
+            route.fulfill({ status: 404, body: '' }),
+          );
+        });
+        await showControls(page, touch);
+        await page.getByRole('button', { name: 'Episodes' }).click();
+        const menu = page.locator('.menu:popover-open:has(.episode-list)');
+        await expect(menu).toBeVisible();
+        const rows = menu.locator('.episode-row');
+        await expect(rows).toHaveCount(4);
+        // Opened where the viewer is.
+        await expect(rows.nth(0)).toHaveAttribute('aria-current', 'true');
+        await expect(rows.nth(0)).toBeFocused();
+        await expect(rows.nth(0)).toContainText('Now playing');
+        await expect(rows.nth(1).locator('.episode-progress')).toHaveCount(1);
+        await expect(rows.nth(3)).toHaveAttribute('aria-disabled', 'true');
+        expect(seasons).toEqual([1]);
+        const box = await menu.boundingBox();
+        // Whatever scrolls the list (the popover itself, or a sheet's items) never scrolls sideways.
+        expect(
+          await menu.locator('.episode-list').evaluate((list) => {
+            let scroller = list.parentElement;
+            while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY))
+              scroller = scroller.parentElement;
+            return scroller ? scroller.scrollWidth - scroller.clientWidth : 0;
+          }),
+        ).toBe(0);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
+        // A popover's foot stays just above its button, however long the season it shows.
+        const footAboveTrigger = async () => {
+          if (touch) return;
+          const trigger = await page.locator('.web-episodes').boundingBox();
+          const now = await menu.boundingBox();
+          expect(now.y + now.height).toBeLessThanOrEqual(trigger.y + 1);
+          expect(now.y + now.height).toBeGreaterThan(trigger.y - 16);
+        };
+        await footAboveTrigger();
+
+        await menu.getByRole('menuitemradio', { name: 'Season 2' }).click();
+        await expect(menu).toBeVisible();
+        await expect(rows).toHaveCount(2);
+        await expect(rows.nth(0)).toContainText('Landfall');
+        await expect(rows.nth(1)).toHaveAttribute('aria-disabled', 'true');
+        await expect(rows.nth(1)).toContainText('Upcoming');
+        await expect.poll(footAboveTrigger).toBeUndefined();
+        // A shorter season keeps the list's size: it doesn't resize under the pointer.
+        expect((await menu.boundingBox()).height).toBeCloseTo(box.height, 0);
+        await rows.nth(1).click({ force: true });
+        await expect(page.getByTestId('player-picked-episodes')).toHaveText('');
+
+        await rows.nth(0).click();
+        await expect(menu).toBeHidden();
+        await expect(page.getByTestId('player-picked-episodes')).toHaveText('S2E1');
+        // Played here, in the same player: the next session starts for S2 · E1.
+        await expect(page.locator('.player video')).toHaveCount(1);
+        await expect(page).toHaveTitle(/S2 · E1/);
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+
+  // A long season's stills are fetched as the list nears them, not all on opening: `loading="lazy"` reaches a whole
+  // season in Chromium, so each open and season switch fetched every still alongside the video.
+  for (const [viewport, touch] of [
+    [DESKTOPS[0], false],
+    [PHONES[1], true],
+  ]) {
+    test(`the episode list fetches only the stills near view (${engine}, ${viewport.name})`, async () => {
+      installed();
+      const browser = await launch(browserType);
+      try {
+        const page = await newPage(browser, browserType, viewport, touch);
+        const stills = new Set();
+        await openPlaying(page, '?series&episodes', async () => {
+          await page.route('**/tmdb/3/tv/42/season/*', (route) =>
+            route.fulfill({
+              json: {
+                episodes: Array.from({ length: 24 }, (_, i) => ({
+                  episode_number: i + 1,
+                  name: `Episode ${i + 1}`,
+                  overview: 'An overview long enough to take its two lines in the row.',
+                  runtime: 40,
+                  still_path: `/still-${i + 1}.jpg`,
+                })),
+              },
+            }),
+          );
+          await page.route('https://image.tmdb.org/**', (route) => {
+            stills.add(new URL(route.request().url()).pathname.split('/').pop());
+            return route.fulfill({ status: 404, body: '' });
+          });
+        });
+        await showControls(page, touch);
+        await page.getByRole('button', { name: 'Episodes' }).click();
+        const menu = page.locator('.menu:popover-open:has(.episode-list)');
+        const rows = menu.locator('.episode-row');
+        await expect(rows).toHaveCount(24);
+        const first = rows.nth(0).locator('.episode-image');
+        const last = rows.nth(23).locator('.episode-image');
+        await expect(first).toHaveAttribute('srcset', /w185\/still-1\.jpg 185w/);
+        await expect(first).toHaveAttribute('sizes', '112px');
+        // The foot of the season is several screens down: nothing is asked for it yet.
+        await expect(last).not.toHaveAttribute('srcset', /./);
+        expect(stills.has('still-24.jpg')).toBe(false);
+        expect(stills.size).toBeLessThan(24);
+        await rows.nth(23).scrollIntoViewIfNeeded();
+        await expect(last).toHaveAttribute('srcset', /still-24\.jpg/);
       } finally {
         await browser.close();
       }

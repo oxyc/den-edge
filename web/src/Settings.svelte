@@ -89,6 +89,8 @@
     model: LibraryModel;
     /** Exact active Owner activity authority: tracker credentials, commands and delivery review. */
     activityModel: LibraryModel;
+    /** Exact active profile preference writer; null means the household settings log owns preferences. */
+    preferences: ProfilePreferences | null;
     connections: ReturnType<LibraryModel['connections']>;
     simkl?: ReturnType<LibraryModel['simkl']>;
     recovery?: ReturnType<LibraryModel['recovery']>;
@@ -96,9 +98,11 @@
   const acquireAuthority = (
     household: LibraryModel,
     activity: LibraryModel,
+    profilePreferences: ProfilePreferences | null,
   ): SettingsAuthority => ({
     model: household,
     activityModel: activity,
+    preferences: profilePreferences,
     connections: household.connections(),
     ...(!__DEN_TV_LEGACY_JS_CORE__
       ? { simkl: activity.simkl(), recovery: household.recovery() }
@@ -109,22 +113,30 @@
       lease?.release(),
     );
   const joinPresentation = new LibraryJoinPresentationOwner();
-  let authority = $state.raw(untrack(() => acquireAuthority(model, activityModel)));
+  let authority = $state.raw(untrack(() => acquireAuthority(model, activityModel, preferences)));
   let authorityGeneration = 0;
   let retrying = $state(false);
   let failure = $state<string | null>(null);
   let saving = $state(false);
   // A retained Settings page can receive either a replacement household or a replacement Owner activity library.
-  // Publish the complete replacement bundle before retiring every old lease, so tracker presentation and commands
-  // can never fall back to the household control log or remain attached to the previous profile generation.
-  $effect(() => {
+  // Publish the complete replacement bundle before DOM reconciliation and before retiring every old lease, so a
+  // ready replacement keeps retained sections mounted while tracker presentation and commands can never fall back
+  // to the household control log or remain attached to the previous profile generation.
+  $effect.pre(() => {
     const replacementHousehold = model;
     const replacementActivity = activityModel;
+    const replacementPreferences = preferences;
     joinPresentation.replace(replacementHousehold);
-    if (authority.model === replacementHousehold && authority.activityModel === replacementActivity)
+    if (
+      authority.model === replacementHousehold &&
+      authority.activityModel === replacementActivity &&
+      authority.preferences === replacementPreferences
+    )
       return;
     const previous = authority;
-    authority = untrack(() => acquireAuthority(replacementHousehold, replacementActivity));
+    authority = untrack(() =>
+      acquireAuthority(replacementHousehold, replacementActivity, replacementPreferences),
+    );
     authorityGeneration++;
     retrying = false;
     failure = null;
@@ -142,24 +154,44 @@
     const view = authority.recovery?.snapshot.value;
     return view ? structuredClone(view) : undefined;
   });
-  const effectivePreferences = $derived(preferences ? preferences.value : settings?.preferences);
+  const exactAuthority = $derived(
+    authority.model === model &&
+      authority.activityModel === activityModel &&
+      authority.preferences === preferences,
+  );
+  const ownsAuthority = (owner: SettingsAuthority, generation: number): boolean =>
+    generation === authorityGeneration &&
+    authority === owner &&
+    owner.model === model &&
+    owner.activityModel === activityModel &&
+    owner.preferences === preferences;
+  const effectivePreferences = $derived(
+    authority.preferences ? authority.preferences.value : settings?.preferences,
+  );
   let localInterfaceLanguage = $state(
     untrack(() => (local ? readLocalInterfaceLanguage() : undefined)),
   );
   const loadError = $derived(
     authority.model.settings.error ??
+      authority.preferences?.policy.settings.error ??
       authority.connections.snapshot.error ??
       authority.simkl?.snapshot.error,
   );
-  // A failed selector may retain its previous value for diagnosis, but that stale authority must not keep Settings
-  // actionable or hide the retry control while a fresh binding is required.
-  const ready = $derived(
+  // Keep a complete presentation mounted across a ready-to-ready authority swap. Props invalidate exactAuthority
+  // before the pre-effect can publish the replacement bundle; using exactAuthority as the block's mount condition
+  // would therefore destroy and recreate every section for that internal handoff. Commands and controls still use
+  // exact `ready`, so the old presentation cannot act during that boundary. An actually opening or failed replacement
+  // has no complete presentation and remains withheld.
+  const authorityLoaded = $derived(
     !!settings &&
       !!effectivePreferences &&
       !!connections &&
       (__DEN_TV_LEGACY_JS_CORE__ || !!simkl) &&
       !loadError,
   );
+  // A failed selector may retain its previous value for diagnosis, but that stale authority must not keep Settings
+  // actionable or hide the retry control while a fresh binding is required.
+  const ready = $derived(exactAuthority && authorityLoaded);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
   let routes = $state.raw<Routes>({});
   /** Whether /routes has answered (or failed): until then an install on another of the deployment's names is unplaced. */
@@ -197,6 +229,7 @@
     profileTopology || profileTopologyBlocked || (connections?.diagnostics.libraryFormat ?? 0) >= 5,
   );
   async function run(action: () => Promise<unknown>, quiet = false): Promise<boolean> {
+    const owner = authority;
     const generation = authorityGeneration;
     const restoreFocus =
       document.activeElement instanceof HTMLElement &&
@@ -227,7 +260,7 @@
       return true;
     } catch (error) {
       console.warn('den: settings command failed', error);
-      if (!quiet && generation === authorityGeneration)
+      if (!quiet && ownsAuthority(owner, generation))
         failure = 'Couldn’t save that. Check your connection and try again.';
       return false;
     } finally {
@@ -235,7 +268,7 @@
       // remote can observe the newly enabled surface, move to its next control, and then have the continuation below
       // steal focus back to the setting that just saved.
       flushSync(() => {
-        if (!quiet && generation === authorityGeneration) saving = false;
+        if (!quiet && ownsAuthority(owner, generation)) saving = false;
       });
       // Saving temporarily disables the settings surface. Some engines move focus to the document when the active
       // native control becomes disabled, which strands the next keyboard/remote press. Return keyboard users to that
@@ -246,6 +279,7 @@
         // TV Settings is intentionally inert during a save; a remote press cannot make a reliable move until it
         // settles, so always return to its semantic origin. Pointer/keyboard web users may deliberately move on.
         if (
+          ownsAuthority(owner, generation) &&
           (__DEN_TV__ || !movedOn) &&
           restoreFocus.isConnected &&
           !restoreFocus.matches(':disabled')
@@ -256,31 +290,45 @@
   }
 
   async function patchPreferences(changes: PreferenceChanges): Promise<void> {
-    if (!preferences) {
-      const language = changes.interfaceLanguage;
-      await authority.model.patchPreferences(changes);
-      if (language) {
-        rememberFreshPresentationLanguage(language);
-        if (local) {
-          localInterfaceLanguage = language;
-          rememberLocalInterfaceLanguage(language);
-        }
-        oninterfacelanguage?.(language);
+    const owner = authority;
+    const generation = authorityGeneration;
+    const profilePreferences = owner.preferences;
+    const publishInterfaceLanguage = oninterfacelanguage;
+    const localPresentation = local;
+    const publishLanguage = (language: InterfaceLanguage) => {
+      if (
+        !ownsAuthority(owner, generation) ||
+        publishInterfaceLanguage !== oninterfacelanguage ||
+        localPresentation !== local
+      )
+        return;
+      rememberFreshPresentationLanguage(language);
+      if (localPresentation) {
+        localInterfaceLanguage = language;
+        rememberLocalInterfaceLanguage(language);
       }
+      publishInterfaceLanguage?.(language);
+    };
+    if (!profilePreferences) {
+      const language = changes.interfaceLanguage;
+      await owner.model.patchPreferences(changes);
+      if (language) publishLanguage(language);
       return;
     }
     // Every preference, region and services included, belongs to the active profile's library; the household's write
     // guard would drop one sent to the control log. Only the maturity ceiling is not a profile preference (a
     // profile's policy lives in the directory) and stays on the control log.
     const { maturityCeiling, ...personal } = changes;
-    if ('maturityCeiling' in changes) await authority.model.patchPreferences({ maturityCeiling });
-    if (Object.keys(personal).length) await preferences.patch(personal);
-    if (changes.interfaceLanguage) {
-      rememberFreshPresentationLanguage(changes.interfaceLanguage);
-      oninterfacelanguage?.(changes.interfaceLanguage);
-    }
+    if ('maturityCeiling' in changes) await owner.model.patchPreferences({ maturityCeiling });
+    if (Object.keys(personal).length) await profilePreferences.patch(personal);
+    if (changes.interfaceLanguage) publishLanguage(changes.interfaceLanguage);
   }
-  const savePrefs = (changes: PreferenceChanges) => void run(() => patchPreferences(changes));
+  const savePrefs = (changes: PreferenceChanges) => {
+    // A native disabled control cannot emit user changes, but keep the command boundary authoritative too: a queued
+    // event from the exact frame in which model/activity/profile props changed must not cross into either authority.
+    if (!ready) return;
+    void run(() => patchPreferences(changes));
+  };
   async function saveParentalPin(
     current: string | null,
     pin: string | null,
@@ -352,9 +400,20 @@
     try {
       const current = authority;
       const retries: Promise<unknown>[] = [];
-      if (current.model.connection === 'failed') retries.push(current.model.retry());
+      const preferenceSettingsFailed = !!current.preferences?.policy.settings.error;
+      if (
+        current.model.connection === 'failed' ||
+        current.model.settings.error ||
+        (current.activityModel === current.model && preferenceSettingsFailed)
+      )
+        retries.push(current.model.retry());
       else if (current.connections.snapshot.error) current.connections.rebind();
-      if (current.activityModel !== current.model && current.activityModel.connection === 'failed')
+      if (
+        current.activityModel !== current.model &&
+        (current.activityModel.connection === 'failed' ||
+          current.activityModel.settings.error ||
+          preferenceSettingsFailed)
+      )
         retries.push(current.activityModel.retry());
       else if (current.simkl?.snapshot.error) current.simkl.rebind();
       await Promise.allSettled(retries);
@@ -447,13 +506,13 @@
     items: Parameters<LibraryModel['importHistory']>[0],
     operationId: string,
   ) {
-    const { result } = await activityModel.importHistory(items, operationId);
+    const { result } = await authority.activityModel.importHistory(items, operationId);
     if (result.kind !== 'history.import') throw new Error('wrong history import response');
     return result;
   }
 
   async function exportHistory() {
-    const { result } = await activityModel.exportHistory();
+    const { result } = await authority.activityModel.exportHistory();
     if (result.kind !== 'history.export') throw new Error('wrong history export response');
     return result;
   }
@@ -474,20 +533,23 @@
         class="banner settings-load"
         role={loadError ? 'alert' : 'status'}
       >
-        <p>{loadError ? 'Couldn’t load your settings.' : 'Loading your settings…'}</p>
+        <p>{i18n.phrase(loadError ? 'Couldn’t load your settings.' : 'Loading your settings…')}</p>
         {#if loadError}
           <Button
             variant="secondary"
             icon="retry"
-            label={retrying ? 'Trying again…' : 'Try again'}
+            label={i18n.phrase(retrying ? 'Trying again…' : 'Try again')}
             disabled={retrying}
             onclick={() => void retryLoad()}
           />
         {/if}
       </div>
-    {:else}
+    {/if}
+    {#if !__DEN_TV_LEGACY_JS_CORE__ && prefs}
+      <PlaybackSection {prefs} {disabled} save={savePrefs} />
+    {/if}
+    {#if authorityLoaded}
       {#if !__DEN_TV_LEGACY_JS_CORE__}
-        <PlaybackSection prefs={prefs!} {disabled} save={savePrefs} />
         {#key authority.model}<ContentSection
             prefs={prefs!}
             {content}
@@ -590,9 +652,9 @@
         {/key}
         <ImportSection
           {ready}
-          scope={activityModel}
+          scope={authority.activityModel}
           {content}
-          watched={activityModel.overview.value?.watched ?? []}
+          watched={authority.activityModel.overview.value?.watched ?? []}
           {importHistory}
           {exportHistory}
         />

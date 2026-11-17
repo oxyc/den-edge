@@ -25,6 +25,7 @@ export const PARAMETER_FALLBACKS = {
   'notice.removedComingUp': 'Removed “{value}” from Coming up',
   'notice.setReaction': 'Set “{title}” to {reaction}',
   'player.playNextEpisode': 'Play Next · S{season} · E{episode}',
+  'player.startingEpisode': 'Starting S{season} · E{episode}…',
   'episode.play': 'Play episode {number}: {name}',
   'episode.upcoming': 'Episode {number}: {name}. Airs {date}',
   'episode.outOn': 'Out {date} on {service}',

@@ -130,3 +130,9 @@ it.each([
   expect(config.webServer.env.DEN_E2E).toBe('1');
   expect(config.webServer.reuseExistingServer).toBe(false);
 });
+
+it('builds TV handoff journeys with an explicit household Web origin', async () => {
+  vi.resetModules();
+  const { default: config } = await import('../playwright.tv.config.ts');
+  expect(config.webServer.env.DEN_TV_WEB_ORIGIN).toBe('https://household.example');
+});

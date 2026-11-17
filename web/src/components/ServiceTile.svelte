@@ -51,8 +51,10 @@
       <span class="initials" aria-hidden="true">{initials}</span>
     {/if}
   </span>
-  <span class="name">{service.name}</span>
-  {#if showCountry}<span class="country">{country}</span>{/if}
+  <span class="label">
+    <span class="name">{service.name}</span>
+    {#if showCountry}<span class="country">{country}</span>{/if}
+  </span>
 </a>
 
 <style>
@@ -88,8 +90,16 @@
     color: var(--muted);
   }
 
+  .label {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: center;
+    white-space: nowrap;
+  }
+
   .name {
-    max-width: 100%;
+    min-width: 0;
     overflow: hidden;
     font-size: var(--service-name-size, 14px);
     text-overflow: ellipsis;
@@ -97,7 +107,8 @@
   }
 
   .country {
-    margin-top: -6px;
+    flex: 0 0 auto;
+    margin-left: 6px;
     color: var(--muted);
     font-size: var(--service-country-size, 12px);
   }

@@ -171,8 +171,21 @@ if (process.argv.includes('--capture')) {
   // Browser-owned persistent title approval (#530) adds 388 bytes at startup on matched fc04556c/head builds. The
   // exact mutation authority must stay with the eagerly mounted profile coordinator/Library boundary; the TV-only
   // handoff was consolidated into the already lazy Detail chunk. Allow the smallest 128-byte boundary; the tighter
-  // proportional bound retains 7 bytes on the matched graph.
-  if (initialDelta > Math.min(10240, Math.floor(baseline.initialGzip * 0.0517)))
+  // proportional bound retained 7 bytes on that matched graph. Exact clean main after the separately measured Cast
+  // and Settings authority fixes is 10,214 bytes over the fixed baseline: 61 bytes past that proportional bound but
+  // still 26 bytes inside the existing 10,240-byte absolute ceiling. Align the proportional side with that unchanged
+  // absolute boundary using the smallest five-decimal factor that reaches it; no shipped byte or other budget moves.
+  // ActionMenu opening on the side with room and capping its height there (a long list scrolls above its trigger
+  // instead of covering it) puts the initial graph at 10,300 bytes over the baseline in CI: ActionMenu is in the
+  // `actions` chunk the poster menus load at startup. Allow the next 128-byte boundary and the smallest five-decimal
+  // factor that reaches it, retaining 68 bytes.
+  // The player's Episodes list adds 317 gzip bytes at startup on matched main/head builds (10,308 -> 10,625): ActionMenu
+  // placing an open menu again when its rows change size and opening on the row marked current (+123 in `actions`),
+  // and the series' aired seasons Library hands the player (+190). The list itself stays in the lazy Player chunk;
+  // its rows are a plain link or button because `<svelte:element>` pulled 1,640 bytes of runtime into the shared
+  // startup chunk. Allow the next 128-byte boundary and the smallest five-decimal factor that reaches it, retaining
+  // 127 bytes.
+  if (initialDelta > Math.min(10752, Math.floor(baseline.initialGzip * 0.05475)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -389,5 +402,16 @@ if (process.argv.includes('--capture')) {
   // Exact clean current main independently measures 121,434 here, 3,802 above its committed 117,632 ceiling; #1282
   // owns the reproducibility defect. Recalibrate clean main separately to 121,472 (38-byte margin), then account for
   // #530's matched +756-byte non-translation delta. Allow the smallest 128-byte boundary, retaining 50 bytes.
-  if (coreTotalDelta > 122240) throw new Error('Browser total JS/CSS budget exceeded');
+  // The player's Episodes list adds 1,945 gzip bytes to the complete non-translation graph on matched main/head builds
+  // (120,408 -> 122,353), nearly all in the lazy Player chunk: the list, its season reader and its styles. CI measured
+  // the same head at 122,509 (#1282's run-to-run variance), so allow the boundary above CI's figure plus one more,
+  // retaining 115 bytes there.
+  // The Episodes list's series-backdrop fallback for missing stills and its current-season chip reveal add 162 gzip
+  // bytes to the complete graph on matched base/head builds (122,647 -> 122,809), all in the lazy Player chunk. CI
+  // measured the head at 122,754; allow the next 128-byte boundary above it, retaining 126 bytes.
+  // The Episodes list's near-view still loader (an IntersectionObserver per still, with its srcset) and the menu's
+  // skip of a repeated placement, on a main that has since gained #1322 and #1343, measured 123,061 in CI. All of the
+  // list's share is in the lazy Player chunk. The next boundary would leave 75 bytes against #1282's run-to-run
+  // variance, so allow the one after it, retaining 203 bytes.
+  if (coreTotalDelta > 123264) throw new Error('Browser total JS/CSS budget exceeded');
 }

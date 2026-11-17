@@ -33,8 +33,10 @@
   } from './lib/catalog';
   import { householdQueue, sendToTV, tvListening, type PlayRequest } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
+  import { episodeProgress } from './lib/detailPresentation';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
+    airedSeasons,
     episodeAfter,
     isAired,
     titleKey,
@@ -78,8 +80,8 @@
   import { scheduleAfterStartupMilestone } from './lib/startupScheduling';
   import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
-  import type { AtlasCatalog } from './lib/services';
-  import type { Service } from './settings/services';
+  import type { AtlasCatalog, ResolvedService } from './lib/services';
+  import type { Service, ServiceDirectorySession } from './settings/services';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
@@ -210,7 +212,6 @@
   let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
   let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
   let homeServicesSettled = $state(false);
-  let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
   let HomeCatalogue = $state.raw<typeof import('./components/HomeCatalogue.svelte').default | null>(
     null,
   );
@@ -622,8 +623,23 @@
         }),
         replace,
       );
+    following = undefined;
+    if (playingSeasonsOf !== target.title) playingSeasons = undefined;
     playbackIntent += 1;
     playing = target;
+  }
+  if (import.meta.env.DEN_E2E) {
+    (window as unknown as { denTestReplacePlayingTitle?: () => void }).denTestReplacePlayingTitle =
+      () =>
+        playerAddress(
+          { title: { type: 'movie', id: 1001, title: ['Film', 1001].join(' ') } },
+          true,
+        );
+    onDestroy(
+      () =>
+        delete (window as unknown as { denTestReplacePlayingTitle?: unknown })
+          .denTestReplacePlayingTitle,
+    );
   }
 
   /** Feedback after a "Play on TV" press (den-edge#235): drives `session.notify` on its own; fed live positions
@@ -1702,26 +1718,42 @@
     },
   });
 
-  /** The aired episode after the one playing, from the series' season layout; none after a movie or the last. */
-  let following = $state<Target | null>(null);
+  /** The aired episode after the one playing, preserving why there is not one yet. */
+  let following = $state<{ season: number; episode: number } | boolean | null>();
+  /**
+   * The playing series' seasons and how much of each has aired, for the player's episode list. Kept across an advance
+   * within the series, so the list neither blinks out nor asks for its season again.
+   */
+  let playingSeasons = $state.raw<{ number: number; aired: number }[]>();
+  let playingSeasonsOf: Title | undefined;
+
+  function findFollowing(target: Target): void {
+    const key = titleKey(target.title);
+    const shape = session.shapes.get(key);
+    if (!shape) {
+      following = undefined;
+      void promoteLibraryTitle(session, target.title).then(() => {
+        if (playing !== target) return;
+        if (session.shapes.has(key)) findFollowing(target);
+        else following = true;
+      });
+      return;
+    }
+    // Atlas's dates first: an episode out before TMDB's broadcast slot is next in line the day it is out.
+    const aired = airedThrough(
+      shape.lastAired,
+      untrack(() => airings.get(target.title.id)),
+    );
+    playingSeasons = airedSeasons(shape, aired);
+    playingSeasonsOf = target.title;
+    const next = episodeAfter({ season: target.season!, episode: target.episode! }, shape);
+    following = !next ? null : isAired(next, aired) ? next : false;
+  }
+
   $effect(() => {
     const target = playing;
-    following = null;
     if (!target || target.season === undefined || target.episode === undefined) return;
-    const at = { season: target.season, episode: target.episode };
-    void (async () => {
-      if (!session.shapes.has(titleKey(target.title)))
-        await promoteLibraryTitle(session, target.title);
-      const shape = session.shapes.get(titleKey(target.title));
-      const next = shape && episodeAfter(at, shape);
-      // Atlas's dates first: an episode out before TMDB's broadcast slot is next in line the day it is out.
-      const aired = airedThrough(
-        shape?.lastAired,
-        untrack(() => airings.get(target.title.id)),
-      );
-      if (playing === target && next && isAired(next, aired))
-        following = { title: target.title, ...next };
-    })();
+    untrack(() => findFollowing(target));
   });
 
   /** Autoplay and "Next": the profile's policy is asked again before the following episode starts. */
@@ -2090,19 +2122,23 @@
     };
   });
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
-  const radar = (only?: 'movie' | 'tv') => {
+  const radar = (
+    only?: 'movie' | 'tv',
+    names: Record<number, string> = {},
+    ready = route.page !== 'library',
+  ) => {
     const content = session.content;
     // Home publishes its ordinary TMDB/recipe rows without waiting for provider discovery. Its provider rows join
     // only once their captions are final; direct Movies/Series routes retain their existing eager behavior.
-    return atlas && homeServices && (route.page !== 'library' || providerRowsReady)
+    return atlas && homeServices && ready
       ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
-          names: serviceNames,
+          names,
           content,
         })
       : [];
   };
-  const rows = $derived.by(() => {
+  function catalogueRows() {
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
     const filter = atlas
@@ -2147,7 +2183,13 @@
       atlas: filter,
     });
     const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
-    const pooled = radar();
+    const pooled = radar(
+      undefined,
+      directoryState.names,
+      session.kid ||
+        (atlasReady && (!atlas || !servicePicks.length)) ||
+        (atlasReady && !!atlas && (directoryServices === null || directoryState.pending === 0)),
+    );
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
     const spine =
       arrivals && homeServices
@@ -2167,7 +2209,7 @@
       ],
       homeTaste,
     );
-  });
+  }
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
@@ -2175,74 +2217,47 @@
   const servicePicks = $derived(
     prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
   );
-  /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
-  let serviceDirectoriesAdmitted = $state(false);
-  let directoryServicesFailed = $state(false);
-  $effect(() => {
-    if (!serviceDirectoriesAdmitted || directoryServices) return;
-    let current = true;
-    void optionalImport(import('./settings/services')).then(
-      (directory) => {
-        if (current) directoryServices = directory;
-      },
-      () => {
-        // A stale optional chunk is retried on the next full page visit; the row remains unavailable meanwhile.
-        if (current) directoryServicesFailed = true;
-      },
-    );
-    return () => {
-      current = false;
-    };
+  /** Provider directories stay behind Home's visible rail, including the optional module itself. */
+  let directoryServices = $state.raw<
+    Pick<typeof import('./settings/services'), 'watchServiceDirectories'> | null | false | undefined
+  >(false);
+  let directoryState = $state.raw<ServiceDirectorySession<ResolvedService>>({
+    retrying: false,
+    failed: false,
+    services: [],
+    names: {},
+    pending: 0,
   });
-  /** Which locale/countries have been asked for; a directory is one request per locale/country, not one per pick. */
-  const askedFor: Record<string, true> = {};
-  let directories = $state.raw<Record<string, Service[]>>({});
-  const directoryKey = (language: string, country: string) => `${language}:${country}`;
-  /** Locale-owned directory requests: an old language cannot keep the replacement Services row pending. */
-  let namingByLanguage = $state.raw<Record<string, number>>({});
-  const naming = $derived(namingByLanguage[i18n.language] ?? 0);
+  let retryDirectories = $state.raw<() => void>(() => {});
+  async function admitDirectories() {
+    if (directoryServices !== false) return;
+    directoryServices = undefined;
+    try {
+      directoryServices = await optionalImport(
+        import('./settings/services').then(({ watchServiceDirectories }) => ({
+          watchServiceDirectories,
+        })),
+      );
+    } catch {
+      directoryServices = null;
+    }
+  }
   $effect(() => {
     const directory = directoryServices;
     const language = i18n.language;
-    if (!serviceDirectoriesAdmitted || !directory) return;
-    for (const { country } of servicePicks) {
-      const key = directoryKey(language, country);
-      if (askedFor[key]) continue;
-      askedFor[key] = true;
-      namingByLanguage = {
-        ...namingByLanguage,
-        [language]: (namingByLanguage[language] ?? 0) + 1,
-      };
-      void directory
-        .contentServices(session.content, country, language)
-        .then(
-          (listed) => {
-            directories = { ...directories, [key]: listed };
-          },
-          () => {
-            // One request per country per visit includes failures. Leaving it admitted lets `naming` settle to the
-            // reserved unavailable row; a later visit gets a fresh page and asks again.
-          },
-        )
-        .finally(() => {
-          namingByLanguage = {
-            ...namingByLanguage,
-            [language]: Math.max(0, (namingByLanguage[language] ?? 1) - 1),
-          };
-        });
-    }
+    const picks = servicePicks;
+    if (!directory) return;
+    const controller = directory.watchServiceDirectories(
+      session.content,
+      picks,
+      language,
+      homeServices?.resolvePicks ?? (() => []),
+      (state) => (directoryState = state),
+    );
+    retryDirectories = controller.retry;
+    return controller.cancel;
   });
-  /** The picks their country's directory can account for, named and ordered by it. */
-  const services = $derived(
-    [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
-      (country) =>
-        homeServices?.resolvePicks(
-          servicePicks,
-          directories[directoryKey(i18n.language, country)] ?? [],
-          country,
-        ) ?? [],
-    ),
-  );
+  const rows = $derived(catalogueRows());
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
   // Atlas row ids join it below only when their provider captions are final.
   let homeBrowseReady = $state(false);
@@ -2251,29 +2266,6 @@
     startupRenderPhase('home_metadata');
     homeBrowseReady = true;
   });
-  const providerRowsReady = $derived(
-    session.kid ||
-      (atlasReady && (!atlas || !servicePicks.length)) ||
-      (serviceDirectoriesAdmitted && directoryServicesFailed) ||
-      (atlasReady &&
-        !!atlas &&
-        serviceDirectoriesAdmitted &&
-        !!directoryServices &&
-        naming === 0 &&
-        servicePicks.every(({ country }) => askedFor[directoryKey(i18n.language, country)])),
-  );
-  /**
-   * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
-   * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
-   * A visitor has no directory and so no names: their cards say when a title lands, not where.
-   */
-  const serviceNames: Record<number, string> = $derived(
-    Object.fromEntries(
-      services.flatMap(({ service }) =>
-        [service.id, ...service.variants].map((id) => [id, service.name]),
-      ),
-    ),
-  );
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
@@ -3186,6 +3178,15 @@
       onseen={setSeen}
     />
   {/if}
+{:else if session.kid && !facet && discovered.atlasUnreachable}
+  <!-- Kid discovery deliberately has no saved-content fallback. Once live Atlas discovery has conclusively failed,
+       replace the indefinite shelf load with the same retry authority People and service pages use. -->
+  <section class="library-failure" role="alert" aria-label={i18n.text('nav.home')}>
+    <p class="note">{i18n.phrase('Den’s server can’t be reached right now.')}</p>
+    <button type="button" class="retry" onclick={() => discovered.retry()}>
+      {i18n.phrase('Try again')}
+    </button>
+  </section>
 {:else}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   <Billboard
@@ -3324,16 +3325,24 @@
           browseReady={homeBrowseReady}
           browseIdentity="home"
           showServices
-          {services}
-          servicePending={serviceDirectoriesAdmitted
-            ? naming
-              ? servicePicks.length
-              : 0
-            : servicePicks.length}
-          serviceEmpty={serviceDirectoriesAdmitted && !naming && !services.length
+          services={directoryState.services}
+          servicePending={directoryServices !== null &&
+          (!directoryServices || directoryState.pending)
+            ? servicePicks.length
+            : 0}
+          serviceEmpty={directoryServices !== false &&
+          !directoryState.pending &&
+          !directoryState.services.length &&
+          (directoryServices === null || !directoryState.failed)
             ? 'Services unavailable'
             : undefined}
-          onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
+          serviceRecovery={directoryState.retrying
+            ? 'retrying'
+            : !directoryState.pending && directoryState.failed
+              ? 'failed'
+              : undefined}
+          onServiceRetry={retryDirectories}
+          onServiceVisible={() => void admitDirectories()}
           onServiceIntent={primeService}
         />
       {:else}
@@ -3352,9 +3361,6 @@
         browseReady
         browseIdentity={facet}
         showServices={false}
-        {services}
-        servicePending={0}
-        onServiceVisible={() => {}}
         onServiceIntent={primeService}
       />
     {/if}
@@ -3370,7 +3376,7 @@
   </div>
 {:else if playing && scout && (scout.playback || remux !== null) && PlayerScreen.current}
   {@const target = playing}
-  {@const after = following}
+  {@const after = typeof following === 'object' ? following : null}
   <!-- A session names one source: a shared scout goes with the shared subtitles, a library's with its own. -->
   {@const guestSource = !!sharedInstallOf(scout.install)}
   {@const releaseAuthority = [
@@ -3382,7 +3388,8 @@
   ] as const}
   <!-- Keyed by the title alone: the next episode plays in the same player (`playEpisode`), so the video in fullscreen
        — and a Chromecast it is cast to — carries on into it. Authority replacement deliberately remounts it: an
-       old source session and its late lookups cannot survive a profile/library/household/add-on change. -->
+       old source session and its late lookups cannot survive a profile/library/household/add-on change. A different
+       title also renders before the ordinary effect clears its predecessor's episode list, so that prop is gated. -->
   {#key `${titleKey(target.title)}:${JSON.stringify(releaseAuthority)}`}
     <PlayerScreen.current
       title={target.title}
@@ -3410,7 +3417,9 @@
       preferredPlaybackSource={playbackPrefs.preferredPlaybackSource}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
-      nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
+      nextEpisode={target.season !== undefined && target.episode !== undefined && following !== null
+        ? (following ?? 0)
+        : undefined}
       onprogress={(fraction, seconds, at, playing) =>
         void progressed({ title: target.title, ...at }, fraction, seconds, playing)}
       onfinalprogress={(fraction, seconds, at) =>
@@ -3419,7 +3428,19 @@
       onplaybacksourcepreference={rememberPlaybackSource}
       playbackReceiptHandoffAsOwner={session.administersHousehold}
       onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
-      onnext={after ? () => void advance(after) : undefined}
+      onnext={after
+        ? () => void advance({ title: target.title, ...after })
+        : target.season !== undefined && (following === undefined || following === true)
+          ? () => findFollowing(target)
+          : undefined}
+      seasons={playingSeasons}
+      episodeProgress={(season, episode) =>
+        // The open page's rows are keyed by season and episode alone, so they are this series' only while its page
+        // is the one open under the player; another series' page would lend its own progress.
+        page?.type === target.title.type && page.id === target.title.id
+          ? episodeProgress(pageEpisodes.get(`${season}:${episode}`), pageRow)
+          : 0}
+      onepisode={(at) => void advance({ title: target.title, ...at })}
       oncontrols={(controls) => (tvControls = controls)}
       onclose={closePlayer}
     />

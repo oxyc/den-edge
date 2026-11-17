@@ -42,6 +42,13 @@ jobs:
           DEN_TIZEN_VERSION: "3.0"
           DEN_TV_OLD_ENGINE_LIMITS: "1"
         run: npm run test:e2e:tv-package
+      - name: Run Services recovery in the reduced Tizen engine
+        env:
+          DEN_TIZEN_VERSION: "3.0"
+          DEN_TV_OLD_ENGINE_LIMITS: "1"
+          DEN_TV_PLATFORM: tizen
+          DEN_TV_TEST_ENGINE: webkit
+        run: npm run test:e2e:tv -- tv-services-row.spec.mjs
       - name: Run the big-library journeys at phone-speed CPU
         id: budgets
         continue-on-error: true

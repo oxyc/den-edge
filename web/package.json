@@ -42,7 +42,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint:css": "stylelint \"{src,test}/**/*.{css,svelte}\" --max-warnings 0",
-    "lint": "npm run format:check && npm run lint:js && npm run lint:css && npm run check && npm run check:cast",
+    "check:brand": "node scripts/check-brand-assets.mjs",
+    "lint": "npm run check:brand && npm run format:check && npm run lint:js && npm run lint:css && npm run check && npm run check:cast",
     "lint:js": "eslint . --max-warnings 0",
     "audit": "node scripts/audit.mjs"
   },

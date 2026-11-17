@@ -19,10 +19,10 @@ Legend:
 |---|---|---|---|---|---|---|
 | Browse and play | Supported | Supported | Supported | Supported | Supported | Supported viewer path |
 | Personal playback and content preferences | Supported for a ready linked profile; local-only mode has a smaller surface | Supported; Visitor values are visit-local | Supported | Supported | Supported | Subset: playback-facing profile controls only |
-| Mobile Visitor profile | **Unavailable**; tracked by [Den #529](https://github.com/oxyc/den/issues/529) | Supported, visit-local | Supported, visit-local | Supported, visit-local | Supported, visit-local | Subset; no household authority |
+| Mobile Visitor profile | Supported, visit-local | Supported, visit-local | Supported, visit-local | Supported, visit-local | Supported, visit-local | Subset; no household authority |
 | Household administration | Web handoff for complex operations | Subset of remote-practical controls; Web handoff for complex or destructive operations | **Primary supported surface** | Subset plus Web handoff | Subset plus Web handoff | **Unavailable**; Web handoff |
 | Add Kid | Supported for the active Owner | Supported for the active Owner | Supported | Supported | Supported | **Unavailable**; no Add Kid handoff is currently rendered |
-| Broader profile lifecycle: rename, delete, or create an adult profile | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable**; open product work | **Unavailable** |
+| Broader profile lifecycle: rename, delete, or create an adult profile | **Unavailable today**; planned for Web | **Unavailable today**; planned for Web | **Unavailable today**; designated future primary surface | **Unavailable on TV**; planned for Web | **Unavailable on TV**; planned for Web | **Unavailable**; viewer-only |
 | Persistent Kid title approvals | Exact-title Web handoff | Exact-title Web handoff | Supported | Web handoff | Web handoff | **Unavailable**; Web handoff |
 | Owner PIN administration | Verify or Web handoff; no duplicate secret editor | Verify or Web handoff | Supported | Supported | Supported | **Unavailable**; Web handoff |
 | Metadata, provider, and Apple TV Access credentials | Web handoff; the installed phone token is not rewritten by Web Access changes | Supported Owner administration | Supported Owner administration | Supported Owner administration | Supported Owner administration | **Unavailable**; no credential-management handoff is currently rendered |
@@ -41,6 +41,16 @@ The native Add Kid cells reflect the Owner-only production routes in `MobileProf
 `PairedLibrarySession.createKidProfile` and `ProfilesSetupView` / `AddKidProfileView`. They do not imply rename,
 delete, Adult-profile creation, or physical-device qualification. The reduced Tizen 3 package compiles the Add Kid
 form out; its guest-administration handoff is not a profile-creation handoff.
+
+Mobile Visitor support on iPhone and iPad is the transactional, visit-local implementation completed by
+[Den #529](https://github.com/oxyc/den/issues/529) and [Den PR #1006](https://github.com/oxyc/den/pull/1006). It
+does not grant household, tracker, assistant, download, device, or system-publication authority.
+
+The broader profile lifecycle follows the product decision completed by
+[Den #544](https://github.com/oxyc/den/issues/544), [Den PR #1004](https://github.com/oxyc/den/pull/1004), and
+[den-edge PR #1291](https://github.com/oxyc/den-edge/pull/1291). The browser is the designated future primary
+surface, but no rename, delete, or Adult-profile writer or linked-host handoff exists today. Implementation remains
+[den-edge #1289](https://github.com/oxyc/den-edge/issues/1289); Add Kid is a separate capability.
 
 ## Boundaries that must stay visible
 
@@ -63,11 +73,10 @@ parity items remain open:
 
 - [Den #528](https://github.com/oxyc/den/issues/528): physical-device performance qualification for mobile
   next-episode prefetch and continuity.
-- [Den #529](https://github.com/oxyc/den/issues/529): transactional, ephemeral Mobile Visitor support.
 - [Den #532](https://github.com/oxyc/den/issues/532): the remaining detailed Settings scope decisions behind this
   summary matrix.
-- [Den #544](https://github.com/oxyc/den/issues/544): the broader profile lifecycle outside the browser-primary
-  administration policy.
+- [den-edge #1289](https://github.com/oxyc/den-edge/issues/1289): implement the durable Browser lifecycle writer
+  and only then add truthful linked-host handoffs.
 - [Den #545](https://github.com/oxyc/den/issues/545), [#546](https://github.com/oxyc/den/issues/546), and
   [#550](https://github.com/oxyc/den/issues/550): native controls, signed system integrations, playback routes, and
   cross-host/profile/restart qualification.

@@ -187,6 +187,10 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
   try {
     const context = await browser.newContext();
     const page = await context.newPage();
+    const receiverLogs = [];
+    page.on('console', (message) => {
+      if (message.text().startsWith('[Den receiver]')) receiverLogs.push(message.text());
+    });
     const framework = [];
     await context.route('https://www.gstatic.com/**', (r) => {
       framework.push(new URL(r.request().url()).pathname);
@@ -263,14 +267,27 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
     );
     await expect(page.locator('.brand')).toBeVisible();
 
-    // What the TV's player does reaches every sender: the TV's own console is out of reach.
-    await page.evaluate(() => {
+    // What the TV's player does reaches every sender: the TV's own console is out of reach. A delayed SDK event
+    // without media identity must remain unidentified even after two identified LOADs; otherwise it is falsely
+    // attributed to whichever load happens to be active when the callback arrives.
+    const privateLoadId = 'https://media.test/den/master.m3u8?token=do-not-log';
+    await page.evaluate((privateLoadId) => {
       window.__player.load({
-        requestData: { media: { contentType: 'application/x-mpegurl', hlsSegmentFormat: 'fmp4' } },
+        requestData: {
+          media: { contentType: 'application/x-mpegurl', hlsSegmentFormat: 'fmp4' },
+          customData: { denLoad: { id: privateLoadId, generation: 1 } },
+        },
       });
+      window.__player.load({
+        requestData: {
+          media: { contentType: 'application/x-mpegurl', hlsSegmentFormat: 'fmp4' },
+          customData: { denLoad: { id: privateLoadId, generation: 2 } },
+        },
+      });
+      window.__player.mediastatus({ mediaStatus: { playerState: 'PLAYING' } });
       window.__player.buffering({ isBuffering: true });
       window.__player.error({ detailedErrorCode: 311, error: { shakaErrorCode: 1001 } });
-    });
+    }, privateLoadId);
     const reports = (await page.evaluate(() => window.toSender))
       .slice(1)
       .map((sent) => sent.message);
@@ -280,11 +297,24 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
       {
         type: 'den-receiver-event',
         event: 'load',
+        id: privateLoadId,
+        generation: 1,
         contentType: 'application/x-mpegurl',
         hlsSegmentFormat: 'fmp4',
         hlsVideoSegmentFormat: null,
         streamType: null,
       },
+      {
+        type: 'den-receiver-event',
+        event: 'load',
+        id: privateLoadId,
+        generation: 2,
+        contentType: 'application/x-mpegurl',
+        hlsSegmentFormat: 'fmp4',
+        hlsVideoSegmentFormat: null,
+        streamType: null,
+      },
+      { type: 'den-receiver-event', event: 'state', state: 'PLAYING', idleReason: null },
       { type: 'den-receiver-event', event: 'buffering', buffering: true },
       {
         type: 'den-receiver-event',
@@ -294,6 +324,8 @@ test('Den’s receiver, under its policy, shows Den while idle and tells a sende
         error: { message: null, code: null, shakaErrorCode: 1001 },
       },
     ]);
+    expect(receiverLogs.some((line) => line.includes('"generation":2'))).toBe(true);
+    expect(receiverLogs.every((line) => !line.includes(privateLoadId))).toBe(true);
     expect(await page.evaluate(() => window.violations)).toEqual([]);
   } finally {
     await browser.close();

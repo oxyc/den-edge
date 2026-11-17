@@ -74,6 +74,82 @@ export function failServiceDirectoryLoad(
   return current.request === request ? { ...current, status: 'failed' } : current;
 }
 
+export interface ServiceDirectorySession<T = never> {
+  retrying: boolean;
+  failed: boolean;
+  services: T[];
+  names: Record<number, string>;
+  pending: number;
+}
+
+/** One cancellable Home session: old profile/language/pick answers cannot publish into its replacement. */
+export function watchServiceDirectories<T extends { service: Service }>(
+  content: ContentServiceClientPort,
+  picks: readonly { id: number; country: string }[],
+  language: InterfaceLanguage,
+  resolve: (
+    picks: readonly { id: number; country: string }[],
+    services: Service[],
+    country: string,
+  ) => T[],
+  update: (session: ServiceDirectorySession<T>) => void,
+): { retry: () => void; cancel: () => void } {
+  const countries = [...new Set(picks.map((pick) => pick.country))];
+  let live = true;
+  let retrying = false;
+  const results: Record<string, ServiceDirectoryResult> = {};
+  const publish = () => {
+    const services = countries.flatMap((country) =>
+      resolve(picks, results[country]?.services ?? [], country),
+    );
+    update({
+      retrying,
+      failed: Object.values(results).some((result) => !result.complete),
+      services,
+      pending: countries.length - Object.keys(results).length,
+      names: Object.fromEntries(
+        services.flatMap(({ service }) =>
+          [service.id, ...service.variants].map((id) => [id, service.name]),
+        ),
+      ),
+    });
+  };
+  const load = async (country: string, refresh = false, previous: Service[] = []) => {
+    let result: ServiceDirectoryResult;
+    try {
+      result = await contentServicesResult(content, country, refresh, language);
+    } catch {
+      result = { services: previous, complete: false };
+    }
+    if (!live) return;
+    results[country] = result.complete
+      ? result
+      : { services: mergeServices(previous, result.services), complete: false };
+    publish();
+  };
+  publish();
+  for (const country of countries) void load(country);
+  return {
+    retry: () => {
+      if (retrying) return;
+      const failed = Object.entries(results).filter(([, result]) => !result.complete);
+      if (!failed.length) return;
+      retrying = true;
+      publish();
+      void Promise.all(
+        failed.map(([country, result]) => load(country, true, result.services)),
+      ).finally(() => {
+        if (!live) return;
+        retrying = false;
+        publish();
+      });
+    },
+    cancel: () => {
+      live = false;
+    },
+  };
+}
+
 interface ProviderEntry {
   provider_id?: unknown;
   provider_name?: unknown;

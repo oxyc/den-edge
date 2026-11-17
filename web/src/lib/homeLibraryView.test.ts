@@ -6,7 +6,7 @@ import { homeFromColumns } from './libraryColumns';
 import { applyOps, projectDocument } from './libraryV4';
 import { syncPolicy } from './syncCore';
 import { ensureSyncPolicy } from './syncLoader';
-import { readDownloads, startRow } from './downloadRows';
+import { startRow } from './downloadRows';
 import { isDocument, type DocumentRow, type Row, type SettingsRow, type TitleRow } from './wire';
 
 beforeAll(async () => ensureSyncPolicy());
@@ -88,6 +88,30 @@ it('selects the fixed Home view from rows once', () => {
     seeds: { watched: ['movie:1'], watchlisted: ['tv:2'] },
   });
   expect(worker).not.toHaveProperty('continue');
+});
+
+it('does not retain raw download rows or release capabilities in the Home view', () => {
+  const stamp = (value: number): [number, number, string] => [value, 0, 'aaaaaaaaaaaaaaaa'];
+  const downloads = Array.from({ length: 100 }, (_, index) =>
+    startRow(
+      undefined,
+      {
+        release: {
+          identity: `release-${index}`,
+          label: `Release ${index}`,
+          url: `https://private.example/download/${index}?token=secret-${index}`,
+        },
+        title: { mediaType: 'movie', mediaId: index + 1, title: `Title ${index}` },
+      },
+      () => stamp(index + 1),
+      index + 1,
+    ),
+  );
+
+  const view = selectHomeLibraryView(emptyLibrary(), downloads);
+  expect(view).not.toHaveProperty('downloads');
+  expect(JSON.stringify(view)).not.toContain('private.example');
+  expect(selectHomeLibraryView(emptyLibrary(), [])).toEqual(view);
 });
 
 it('reads the exact full-fold Home view from the held v4 documents', () => {
@@ -213,7 +237,7 @@ it('reads the exact full-fold Home view from the held v4 documents', () => {
     const index = new LibraryColumns();
     try {
       index.upsert(JSON.stringify(documents.filter(isDocument)));
-      return homeFromColumns(index, now, readDownloads(documents));
+      return homeFromColumns(index, now);
     } finally {
       index.free();
     }
@@ -226,7 +250,7 @@ it('reads the exact full-fold Home view from the held v4 documents', () => {
   expect(held(seasonsFirst)).toEqual(fullFold(projected(seasonsFirst)));
   expect(direct.owned).toEqual(['tv:40', 'movie:41']);
   expect(direct.watchlist).toEqual(['movie:41']);
-  expect(direct.downloads.map(({ title }) => title.mediaId)).toEqual([40]);
+  expect(direct).not.toHaveProperty('downloads');
   expect(
     direct.continueLibrary.records.map(({ title, status }) => [title.type, title.id, status]),
   ).toEqual([['tv', 40, 'watched']]);

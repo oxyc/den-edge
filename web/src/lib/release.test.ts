@@ -1,10 +1,21 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // `release.ts` keeps whether a release is waiting for the life of the page, so each test starts from a fresh module.
 let release: typeof import('./release');
+// `reloadOnce`'s loop guard (`den.reloadedAt`) lives in `sessionStorage`. Node 25+ defines a real one on `globalThis`
+// that outlives a test, so every test gets its own empty one rather than inheriting whichever reload ran before it.
+let kept: Map<string, string>;
 beforeEach(async () => {
+  kept = new Map();
+  vi.stubGlobal('sessionStorage', {
+    getItem: (key: string) => kept.get(key) ?? null,
+    setItem: (key: string, value: string) => void kept.set(key, value),
+  });
   vi.resetModules();
   release = await import('./release');
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 function place() {
@@ -210,19 +221,11 @@ describe('watching the shell release', () => {
 
 describe('a chunk failing to load', () => {
   it('always honors an explicit update reload, even inside the recovery guard', () => {
-    const kept = new Map([['den.reloadedAt', String(Date.now())]]);
-    vi.stubGlobal('sessionStorage', {
-      getItem: (key: string) => kept.get(key) ?? null,
-      setItem: (key: string, value: string) => void kept.set(key, value),
-    });
-    try {
-      release.pageLeaving();
-      const page = hiddenPage();
-      release.reloadForUpdate(page.page);
-      expect(page.at.went).toEqual([expect.stringMatching(AGAIN)]);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    kept.set('den.reloadedAt', String(Date.now()));
+    release.pageLeaving();
+    const page = hiddenPage();
+    release.reloadForUpdate(page.page);
+    expect(page.at.went).toEqual([expect.stringMatching(AGAIN)]);
   });
 
   it('reloads at once when nothing on screen would be lost — never waiting for a navigation', () => {
@@ -232,21 +235,12 @@ describe('a chunk failing to load', () => {
   });
 
   it('reloads past the shared cache once, not again moments later', () => {
-    const kept = new Map<string, string>();
-    vi.stubGlobal('sessionStorage', {
-      getItem: (key: string) => kept.get(key) ?? null,
-      setItem: (key: string, value: string) => void kept.set(key, value),
-    });
-    try {
-      const first = hiddenPage();
-      release.recoverChunkFailure(first.page);
-      const again = hiddenPage();
-      release.recoverChunkFailure(again.page);
-      expect(first.at.went).toHaveLength(1);
-      expect(again.at.went).toEqual([]);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const first = hiddenPage();
+    release.recoverChunkFailure(first.page);
+    const again = hiddenPage();
+    release.recoverChunkFailure(again.page);
+    expect(first.at.went).toHaveLength(1);
+    expect(again.at.went).toEqual([]);
   });
 
   it('still marks a release waiting, so it reaches the page by the usual route when it must defer', () => {
