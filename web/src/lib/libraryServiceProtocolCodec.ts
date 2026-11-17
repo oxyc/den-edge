@@ -370,10 +370,7 @@ function downloadTitle(value: unknown): value is DownloadTitleDescriptor {
     optional(value.posterPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
     optional(value.stillPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
     optional(value.originalLanguage, languageCode) &&
-    optional(
-      value.airDate,
-      (candidate): candidate is number => integer(candidate) && candidate >= 0,
-    )
+    optional(value.airDate, integer)
   );
 }
 
@@ -383,10 +380,7 @@ function downloadRelease(value: unknown): value is DownloadReleaseDescriptor {
     exact(value, ',identity,label,sizeBytes,cached,') &&
     boundedText(value.identity, 4_096) &&
     boundedText(value.label, 4_096) &&
-    optional(
-      value.sizeBytes,
-      (candidate): candidate is number => integer(candidate) && candidate > 0,
-    ) &&
+    optional(value.sizeBytes, positiveInteger) &&
     optional(value.cached, bool)
   );
 }
@@ -517,12 +511,7 @@ function preferencesPatch(value: unknown): value is LibraryPreferencesPatch {
         candidate === 'en' || candidate === 'es' || candidate === 'sv',
     ) &&
     (genres === undefined ||
-      (list(
-        genres,
-        (candidate): candidate is number => integer(candidate) && candidate > 0,
-        PROFILE_GENRE_LIMIT,
-      ) &&
-        unique(genres))) &&
+      (list(genres, positiveInteger, PROFILE_GENRE_LIMIT) && unique(genres))) &&
     (excludedLanguages === undefined ||
       (list(excludedLanguages, languageCode, PROFILE_LANGUAGE_LIMIT) &&
         unique(excludedLanguages))) &&
@@ -619,11 +608,7 @@ function command(value: unknown): value is LibraryCommand {
         !titleRef(value.title) ||
         value.title.type !== 'tv' ||
         !integer(value.season) ||
-        !list(
-          value.episodes,
-          (candidate): candidate is number => integer(candidate) && candidate > 0,
-          LIBRARY_SERVICE_WIRE_LIMITS.seasonEpisodes,
-        ) ||
+        !list(value.episodes, positiveInteger, LIBRARY_SERVICE_WIRE_LIMITS.seasonEpisodes) ||
         !unique(value.episodes) ||
         !bool(value.watched)
       )
@@ -713,10 +698,7 @@ function command(value: unknown): value is LibraryCommand {
           value.playKey,
           (key): key is string => typeof key === 'string' && /^[A-Za-z0-9_-]{43}$/.test(key),
         ) &&
-        optional(
-          value.controlVersion,
-          (version): version is number => integer(version) && version > 0,
-        )
+        optional(value.controlVersion, positiveInteger)
       );
     case 'device.played':
       return exact(value, ',kind,');
@@ -750,10 +732,7 @@ function command(value: unknown): value is LibraryCommand {
         exact(value, ',kind,title,release,candidates,') &&
         downloadTitle(value.title) &&
         downloadRelease(value.release) &&
-        optional(
-          value.candidates,
-          (candidate): candidate is number => integer(candidate) && candidate > 0,
-        )
+        optional(value.candidates, positiveInteger)
       );
     case 'download.want':
       return exact(value, ',kind,title,') && downloadTitle(value.title);
@@ -857,16 +836,13 @@ function query(value: unknown): value is LibraryQuery {
     return (
       exact(value, ',kind,elapsedMs,attempt,onlineRestored,retryAfterMs,jitter,') &&
       integer(value.elapsedMs) &&
-      value.elapsedMs >= 0 &&
       value.elapsedMs <= 86_400_000 &&
       integer(value.attempt) &&
-      value.attempt >= 0 &&
       value.attempt <= 16 &&
       optional(value.onlineRestored, bool) &&
       optional(
         value.retryAfterMs,
-        (candidate): candidate is number =>
-          integer(candidate) && candidate >= 0 && candidate <= 86_400_000,
+        (candidate): candidate is number => integer(candidate) && candidate <= 86_400_000,
       ) &&
       optional(
         value.jitter,
@@ -1059,7 +1035,6 @@ function task(value: unknown): value is LibraryTask {
         exact(value, ',kind,name,maximumAge,pin,') &&
         boundedScalarText(value.name, 64) &&
         integer(value.maximumAge) &&
-        value.maximumAge >= 0 &&
         value.maximumAge <= 18 &&
         pin(value.pin)
       );
@@ -1071,8 +1046,7 @@ function task(value: unknown): value is LibraryTask {
       return (
         exact(value, ',kind,profile,maximumAge,unknownRatings,pin,') &&
         hexId(value.profile) &&
-        (value.maximumAge === null ||
-          (integer(value.maximumAge) && value.maximumAge >= 0 && value.maximumAge <= 18)) &&
+        (value.maximumAge === null || (integer(value.maximumAge) && value.maximumAge <= 18)) &&
         (value.unknownRatings === 'allow' || value.unknownRatings === 'block') &&
         pin(value.pin)
       );
@@ -1385,7 +1359,7 @@ function download(value: unknown): value is DownloadViewItem {
     exact(candidate, ',identity,label,sizeBytes,cached,') &&
     boundedText(candidate.identity, 4_096) &&
     boundedText(candidate.label, 4_096) &&
-    optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
+    optional(candidate.sizeBytes, positiveInteger) &&
     optional(candidate.cached, bool);
   const status = value && record(value) ? value.status : undefined;
   const downloadFetch = (
@@ -1402,8 +1376,8 @@ function download(value: unknown): value is DownloadViewItem {
         item === 'stalled' ||
         item === 'failed',
     ) &&
-    optional(candidate.seeds, (item): item is number => integer(item) && item >= 0) &&
-    optional(candidate.peers, (item): item is number => integer(item) && item >= 0) &&
+    optional(candidate.seeds, integer) &&
+    optional(candidate.peers, integer) &&
     optional(candidate.service, (item): item is string => boundedText(item, 256));
   return (
     record(value) &&
@@ -1422,7 +1396,6 @@ function download(value: unknown): value is DownloadViewItem {
     optional(value.posterPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
     optional(value.stillPath, (candidate): candidate is string => boundedText(candidate, 2_048)) &&
     integer(value.queuedAt) &&
-    value.queuedAt >= 0 &&
     record(value.queuedBy) &&
     exact(value.queuedBy, ',device,name,isSelf,') &&
     boundedText(value.queuedBy.device, 256) &&
@@ -1455,10 +1428,7 @@ function download(value: unknown): value is DownloadViewItem {
       status.fraction,
       (candidate): candidate is number => finite(candidate) && candidate >= 0 && candidate <= 1,
     ) &&
-    optional(
-      status.progressAt,
-      (candidate): candidate is number => integer(candidate) && candidate >= 0,
-    ) &&
+    optional(status.progressAt, integer) &&
     optional(
       status.etaSeconds,
       (candidate): candidate is number => finite(candidate) && candidate >= 0,
@@ -1469,17 +1439,10 @@ function download(value: unknown): value is DownloadViewItem {
     ) &&
     optional(status.fetch, downloadFetch) &&
     optional(status.service, (candidate): candidate is string => boundedText(candidate, 256)) &&
-    optional(
-      status.until,
-      (candidate): candidate is number => integer(candidate) && candidate >= 0,
-    ) &&
+    optional(status.until, integer) &&
     bool(status.stalled) &&
     integer(value.tried) &&
-    value.tried >= 0 &&
-    optional(
-      value.candidates,
-      (candidate): candidate is number => integer(candidate) && candidate > 0,
-    ) &&
+    optional(value.candidates, positiveInteger) &&
     bool(value.announced)
   );
 }
@@ -1505,11 +1468,7 @@ function preferencesView(value: unknown): boolean {
       (candidate): candidate is 'en' | 'es' | 'sv' =>
         candidate === 'en' || candidate === 'es' || candidate === 'sv',
     ) &&
-    list(
-      genres,
-      (candidate): candidate is number => integer(candidate) && candidate > 0,
-      PROFILE_GENRE_LIMIT,
-    ) &&
+    list(genres, positiveInteger, PROFILE_GENRE_LIMIT) &&
     unique(genres) &&
     list(excludedLanguages, languageCode, PROFILE_LANGUAGE_LIMIT) &&
     unique(excludedLanguages) &&
@@ -1570,10 +1529,7 @@ const libraryDevice = (candidate: unknown): candidate is ConnectionsView['device
   optional(candidate.lastSeenAt, integer) &&
   optional(candidate.libraryFormat, integer) &&
   optional(candidate.playKey, playKey) &&
-  optional(
-    candidate.controlVersion,
-    (version): version is number => integer(version) && version > 0,
-  ) &&
+  optional(candidate.controlVersion, positiveInteger) &&
   optional(candidate.playedAt, integer);
 
 function connectionsView(value: unknown): value is ConnectionsView {
@@ -1890,10 +1846,7 @@ function profileDirectoryView(
         profile.keyVersion > 0 &&
         record(profile.policy) &&
         exact(profile.policy, ',maximumAge,unknownRatings,') &&
-        nullable(
-          profile.policy.maximumAge,
-          (age): age is number => integer(age) && age >= 0 && age <= 18,
-        ) &&
+        nullable(profile.policy.maximumAge, (age): age is number => integer(age) && age <= 18) &&
         (profile.policy.unknownRatings === 'allow' || profile.policy.unknownRatings === 'block') &&
         optional(
           profile.approvals,
@@ -1930,7 +1883,6 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       hexId(value.profile) &&
       boundedScalarText(value.name, 64) &&
       integer(value.maximumAge) &&
-      value.maximumAge >= 0 &&
       value.maximumAge <= 18 &&
       boundedText(value.receipt, 256)
     );
@@ -2087,10 +2039,8 @@ function queryResult(value: unknown): value is LibraryQueryResult {
     return (
       exact(value, ',kind,phase,nextMs,retryInMs,') &&
       (value.phase === 'loading' || value.phase === 'slow' || value.phase === 'deadline') &&
-      (value.nextMs === null ||
-        (integer(value.nextMs) && value.nextMs >= 0 && value.nextMs <= 86_400_000)) &&
-      (value.retryInMs === null ||
-        (integer(value.retryInMs) && value.retryInMs >= 0 && value.retryInMs <= 86_400_000))
+      (value.nextMs === null || (integer(value.nextMs) && value.nextMs <= 86_400_000)) &&
+      (value.retryInMs === null || (integer(value.retryInMs) && value.retryInMs <= 86_400_000))
     );
   if (value.kind === 'download.sources') {
     const source = (candidate: unknown): candidate is Record<string, unknown> =>
@@ -2102,13 +2052,10 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       boundedText(candidate.identity, 4_096) &&
       boundedText(candidate.label, 4_096) &&
       boundedText(candidate.filename, 4_096) &&
-      optional(candidate.sizeBytes, (item): item is number => integer(item) && item > 0) &&
+      optional(candidate.sizeBytes, positiveInteger) &&
       optional(candidate.cached, bool) &&
-      optional(
-        candidate.seeders,
-        (item): item is number => integer(item) && item >= 0 && item < 1_000_001,
-      ) &&
-      optional(candidate.packSizeBytes, (item): item is number => integer(item) && item > 0) &&
+      optional(candidate.seeders, (item): item is number => integer(item) && item < 1_000_001) &&
+      optional(candidate.packSizeBytes, positiveInteger) &&
       list(candidate.badges, (item): item is string => boundedText(item, 256), 32) &&
       list(candidate.languages, (item): item is string => boundedText(item, 64), 64) &&
       bool(candidate.probed);
@@ -2121,21 +2068,17 @@ function queryResult(value: unknown): value is LibraryQueryResult {
         candidate.kind === 'unknown' ||
         candidate.kind === 'stale') &&
       integer(candidate.missing) &&
-      candidate.missing >= 0 &&
       optional(candidate.late, integer) &&
-      optional(candidate.outageBuiltAt, (item): item is number => integer(item) && item >= 0);
+      optional(candidate.outageBuiltAt, integer);
     const outcome = (candidate: unknown): candidate is Record<string, unknown> => {
       if (!record(candidate)) return false;
       const caveat = (item: unknown): item is Record<string, unknown> =>
         record(item) &&
         exact(item, ',staleSince,missing,late,failedAddons,') &&
-        (item.staleSince === null || (integer(item.staleSince) && item.staleSince >= 0)) &&
+        (item.staleSince === null || integer(item.staleSince)) &&
         integer(item.missing) &&
-        item.missing >= 0 &&
         integer(item.late) &&
-        item.late >= 0 &&
-        integer(item.failedAddons) &&
-        item.failedAddons >= 0;
+        integer(item.failedAddons);
       return (
         exact(candidate, ',result,category,list,caveat,mayMarkUnavailable,retryable,') &&
         [
@@ -2163,10 +2106,7 @@ function queryResult(value: unknown): value is LibraryQueryResult {
       optional(value.answer, answer) &&
       optional(value.fresh, (item): item is string => item === 'rebuilt' || item === 'limited') &&
       optional(value.outcome, outcome) &&
-      optional(
-        value.retryAfterMs,
-        (item): item is number => integer(item) && item >= 0 && item <= 60_000,
-      ) &&
+      optional(value.retryAfterMs, (item): item is number => integer(item) && item <= 60_000) &&
       optional(
         value.failure,
         (item): item is string =>
@@ -2435,7 +2375,6 @@ function taskResult(value: unknown): value is LibraryTaskResult {
         hexId(value.profile) &&
         boundedScalarText(value.name, 64) &&
         integer(value.maximumAge) &&
-        value.maximumAge >= 0 &&
         value.maximumAge <= 18 &&
         boundedText(value.receipt, 256)
       );
@@ -2447,7 +2386,6 @@ function taskResult(value: unknown): value is LibraryTaskResult {
             hexId(value.profile) &&
             boundedScalarText(value.name, 64) &&
             integer(value.maximumAge) &&
-            value.maximumAge >= 0 &&
             value.maximumAge <= 18 &&
             boundedText(value.receipt, 256)))
       );

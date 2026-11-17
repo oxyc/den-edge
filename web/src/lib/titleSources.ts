@@ -97,9 +97,12 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         url,
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
-        seeders: boundedInteger(a.seeders, 0, 1_000_001),
-        size: boundedInteger(a.sizeBytes, 1),
-        packSize: boundedInteger(a.packSizeBytes, 1),
+        seeders:
+          Number.isSafeInteger(a.seeders) && a.seeders >= 0 && a.seeders <= 1_000_000
+            ? a.seeders
+            : undefined,
+        size: positiveInteger(a.sizeBytes),
+        packSize: positiveInteger(a.packSizeBytes),
         badges: [
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',
@@ -120,10 +123,8 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
   });
 }
 
-const boundedInteger = (value: unknown, minimum: number, maximum = Infinity): number | undefined =>
-  Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) < maximum
-    ? (value as number)
-    : undefined;
+const positiveInteger = (value: unknown): number | undefined =>
+  Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
 
 export { EARLY_ANSWER_HEADER, parseAnswer, type SourceAnswer } from './sourceAnswer';
 
