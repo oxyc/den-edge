@@ -62,11 +62,10 @@ describe('playGuard, the one place every "Play" actually starts from', () => {
   it('asks the content Worker for the household region', async () => {
     const { content, query } = contentWith('PG-13');
     await playGuard({ type: 'movie', id: 7 }, { content, ceiling: 'pg13', region: 'FI' });
-    expect(query).toHaveBeenCalledWith({
-      kind: 'title.detail',
-      title: { type: 'movie', id: 7 },
-      region: 'FI',
-    });
+    expect(query).toHaveBeenCalledWith(
+      { kind: 'title.detail', title: { type: 'movie', id: 7 }, region: 'FI' },
+      undefined,
+    );
   });
 });
 

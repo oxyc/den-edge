@@ -1,8 +1,8 @@
 /** A strict workstation implementation of Samsung's documented AVPlay states and callbacks. */
-export function installAvplayFixture() {
+export function installAvplayFixture(initialDuration = 60_000) {
   let state = 'NONE';
   let currentTime = 0;
-  let duration = 60_000;
+  let duration = initialDuration;
   let listener;
   let timer;
   let delaySeeks = false;
@@ -44,7 +44,7 @@ export function installAvplayFixture() {
       requireState('open', ['NONE', 'IDLE']);
       record('open', url);
       currentTime = 0;
-      duration = 60_000;
+      duration = initialDuration;
       state = 'IDLE';
     },
     close() {
@@ -183,7 +183,8 @@ export function installAvplayFixture() {
 
 export const AVPLAY_FIXTURE_SCRIPT = `(${installAvplayFixture.toString()})();`;
 
-export const installAvplayInitScript = (page) => page.addInitScript(installAvplayFixture);
+export const installAvplayInitScript = (page, duration) =>
+  page.addInitScript(installAvplayFixture, duration);
 
 export const callsNamed = (page, name) =>
   page.evaluate((wanted) => window.__avplayFixture.calls.filter(([call]) => call === wanted), name);

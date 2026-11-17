@@ -58,7 +58,8 @@
   // `?episodes`: S1 · E1 of a series with two seasons, the second aired through E1, and S1 · E2 half watched. Picking
   // an episode plays it in this player, as the app's advance does.
   const listsEpisodes = query.has('episodes');
-  let playingAt = $state(listsEpisodes ? { season: 1, episode: 1 } : {});
+  const replacesEpisode = query.has('replaceEpisode');
+  let playingAt = $state(listsEpisodes || replacesEpisode ? { season: 1, episode: 1 } : {});
   let picked = $state<string[]>([]);
   // A guest's page names its host's install as its own (`/den/~<gid>`), as the app does for a grant.
   const scoutInstall = query.get('scout') ?? 'http://scout.test/config';
@@ -114,6 +115,7 @@
     season={playingAt.season}
     episode={playingAt.episode}
     {content}
+    region="US"
     scout={{ install: scoutInstall, base: '/scout/config' }}
     releaseAuthority={[
       'fixture:owner',
@@ -180,6 +182,13 @@
 {/if}
 {#if startsClosed}
   <button type="button" onclick={() => (open = true)}>Open fixture player</button>
+{/if}
+{#if replacesEpisode}
+  <button
+    type="button"
+    data-testid="replace-player-episode"
+    onclick={() => (playingAt = { season: 2, episode: 1 })}>Replace episode</button
+  >
 {/if}
 {#if languageControls}
   {#each ['en', 'es', 'sv'] as language (language)}
