@@ -43,9 +43,6 @@ async function drainRequest(
   path = '/inbox/drain',
 ): Promise<unknown> {
   const controller = new AbortController();
-  const cancel = () => controller.abort(init.signal?.reason);
-  if (init.signal?.aborted) cancel();
-  else init.signal?.addEventListener('abort', cancel, { once: true });
   const limit = () =>
     setTimeout(
       () => controller.abort(new DOMException('den-edge stopped answering', 'TimeoutError')),
@@ -55,7 +52,7 @@ async function drainRequest(
   try {
     const response = await fetchImpl(path, {
       ...init,
-      signal: controller.signal,
+      signal: init.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal,
       cache: 'no-store',
     });
     clearTimeout(timer);
@@ -64,7 +61,7 @@ async function drainRequest(
     return await response.json();
   } finally {
     clearTimeout(timer);
-    init.signal?.removeEventListener('abort', cancel);
+    controller.abort();
   }
 }
 

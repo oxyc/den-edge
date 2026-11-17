@@ -28,6 +28,14 @@ interface VisitKeys {
 const visits = new WeakMap<Storage, VisitKeys>();
 const noStorage: VisitKeys = { changed: new AbortController() };
 
+function siteStorage(): Storage | undefined {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 function visitKeys(storage: Storage | undefined): VisitKeys {
   if (!storage) return noStorage;
   let state = visits.get(storage);
@@ -81,7 +89,7 @@ function stored(storage: Storage | undefined): { library: string; key: string } 
  */
 export async function playKeyFor(
   libraryKey: string,
-  storage: Storage | undefined = globalThis.localStorage,
+  storage: Storage | undefined = siteStorage(),
   signal?: AbortSignal,
 ): Promise<string> {
   signal?.throwIfAborted();
@@ -111,9 +119,8 @@ export async function playKeyFor(
 }
 
 /** The play key this TV made for the household established during this visit. */
-export const currentPlayKey = (
-  storage: Storage | undefined = globalThis.localStorage,
-): string | undefined => visitKeys(storage).current?.key;
+export const currentPlayKey = (storage: Storage | undefined = siteStorage()): string | undefined =>
+  visitKeys(storage).current?.key;
 
 /**
  * Run `use` for each visit key while it remains current. A household replacement aborts the old work before the new
@@ -122,7 +129,7 @@ export const currentPlayKey = (
 export async function whilePlayKey(
   use: (key: string, signal: AbortSignal) => Promise<void>,
   signal: AbortSignal,
-  storage: Storage | undefined = globalThis.localStorage,
+  storage: Storage | undefined = siteStorage(),
 ): Promise<void> {
   const state = visitKeys(storage);
   while (!signal.aborted) {
@@ -197,7 +204,7 @@ export async function receiveTv(
     transport: (command: TransportCommand) => void;
   },
   signal: AbortSignal,
-  storage: Storage | undefined = globalThis.localStorage,
+  storage: Storage | undefined = siteStorage(),
 ): Promise<void> {
   await whilePlayKey(
     async (playKey, active) => {
