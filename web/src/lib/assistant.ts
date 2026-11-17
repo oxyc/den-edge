@@ -106,17 +106,15 @@ const APPLY_MS = 30_000;
 
 export async function putDropbox(
   key: DropboxKey,
+  signal: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
-  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
     const res = await fetchImpl('/assistant/dropbox', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pk: key.public }),
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
-        : AbortSignal.timeout(15_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
     });
     return res.ok;
   } catch {
@@ -404,29 +402,22 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       continue;
     }
     let outcome: ApplyOutcome;
-    const delivery = new AbortController();
-    const retire = () => delivery.abort();
-    signal.addEventListener('abort', retire);
-    let expired = false;
-    const deadline = setTimeout(() => {
-      expired = true;
-      delivery.abort();
-    }, APPLY_MS);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), APPLY_MS);
     try {
-      outcome = await loop.apply(messages, delivery.signal);
+      outcome = await loop.apply(messages, AbortSignal.any([signal, deadline.signal]));
     } catch (error) {
       if (signal.aborted) return;
       console.warn('asst/apply', error);
       await sleep(BACKOFF_MS, signal);
       continue;
     } finally {
-      clearTimeout(deadline);
-      signal.removeEventListener('abort', retire);
+      clearTimeout(timer);
     }
     // The service may have completed as this authority retired. Its durable receipt makes redelivery safe; this
     // obsolete page must not announce an effect, publish a drop-box key or acknowledge the queue.
     if (signal.aborted) return;
-    if (expired) {
+    if (deadline.signal.aborted) {
       await sleep(BACKOFF_MS, signal);
       continue;
     }
@@ -435,7 +426,7 @@ async function drainLoop(loop: DrainLoop, signal: AbortSignal): Promise<void> {
       !loop.queue &&
       outcome.dropbox &&
       outcome.dropbox.public !== put &&
-      (await putDropbox(outcome.dropbox, fetchImpl, signal))
+      (await putDropbox(outcome.dropbox, signal, fetchImpl))
     )
       put = outcome.dropbox.public;
     if (signal.aborted) return;
