@@ -23,6 +23,7 @@ import {
   type VerifiedProfileMove,
 } from './profileKeyResetExecutor';
 import type { ProfileKidCreateVault } from './profileKidCreateWorker';
+import * as profilesCore from './profilesCore';
 import { profilesMaterialize, profilesMerge } from './profilesCore';
 import { compareStamps, deriveKeys } from './wire';
 
@@ -416,6 +417,51 @@ function noEffects(backend: FakeBackend) {
 }
 
 describe('compound profile key reset', () => {
+  it('never authorizes an unknown planner effect', async () => {
+    const planner = vi
+      .spyOn(profilesCore, 'profilesResetNext')
+      .mockReturnValue({ effect: 'future' } as never);
+    try {
+      const backend = new FakeBackend();
+      const keys = new Keys();
+      const runner = executor(backend, keys);
+
+      expect(await runner.start(directory(), HOUSEHOLD_KEY, FENCE)).toMatchObject({
+        phase: 'locked',
+      });
+      expect(await runner.resume()).toMatchObject({ phase: 'locked' });
+      noEffects(backend);
+      expect(backend.events).toEqual(['lock']);
+    } finally {
+      planner.mockRestore();
+    }
+  });
+
+  it.each([
+    { effect: 'move-live-profiles', profiles: [] },
+    { effect: 'commit-successor-household' },
+    { effect: 'retire-old-libraries', profiles: [], household: false },
+    { effect: 'complete' },
+  ])('refuses malformed or premature planner effect $effect', async (decision) => {
+    const planner = vi
+      .spyOn(profilesCore, 'profilesResetNext')
+      .mockReturnValue(decision as ReturnType<typeof profilesCore.profilesResetNext>);
+    try {
+      const backend = new FakeBackend();
+      const keys = new Keys();
+      const runner = executor(backend, keys);
+
+      expect(await runner.start(directory(), HOUSEHOLD_KEY, FENCE)).toMatchObject({
+        phase: 'locked',
+      });
+      await expect(runner.resume()).rejects.toMatchObject({ code: 'corrupt-journal' });
+      noEffects(backend);
+      expect(backend.events).toEqual(['lock']);
+    } finally {
+      planner.mockRestore();
+    }
+  });
+
   it('moves and verifies Owner and every Kid before publishing, then retires all old credentials', async () => {
     const backend = new FakeBackend();
     const keys = new Keys();

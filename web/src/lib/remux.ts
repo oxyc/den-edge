@@ -920,13 +920,26 @@ export function subtitleLanguagesMatch(
 export function visibleSubtitleTracks(
   tracks: readonly SubtitleTrack[],
   shownLanguages: readonly string[] | undefined,
+  choice: string | null = null,
+  maxPerLanguage = 0,
 ): SubtitleTrack[] {
-  if (!shownLanguages?.length) return [...tracks];
-  const shown = new Set(shownLanguages.map(canonicalLanguage));
-  return tracks.filter(
-    (track) =>
-      unknownSubtitleLanguage(track.language) || shown.has(canonicalLanguage(track.language)),
-  );
+  const shown = shownLanguages?.length ? new Set(shownLanguages.map(canonicalLanguage)) : undefined;
+  const chosen = preferredSubtitleTrack(tracks, choice);
+  const counts: Record<string, number> = {};
+  return tracks.filter((track) => {
+    if (
+      track !== chosen &&
+      shown &&
+      !unknownSubtitleLanguage(track.language) &&
+      !shown.has(canonicalLanguage(track.language))
+    )
+      return false;
+    if (maxPerLanguage <= 0 || track.source !== 'opensubtitles') return true;
+    const language = track.language.toLowerCase().split('-')[0] ?? track.language;
+    const count = counts[language] ?? 0;
+    counts[language] = count + 1;
+    return track === chosen || count < maxPerLanguage;
+  });
 }
 
 const forcedSubtitle = (track: SubtitleTrack): boolean =>

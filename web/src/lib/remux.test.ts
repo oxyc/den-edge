@@ -189,6 +189,27 @@ describe('subtitle picker policy', () => {
     expect(visibleSubtitleTracks([arabic, forced, unknown], ['en'])).toEqual([forced, unknown]);
     expect(visibleSubtitleTracks([arabic, forced, unknown], [])).toEqual([arabic, forced, unknown]);
   });
+
+  it('keeps the preferred track outside the shown-language filter', () => {
+    const finnish = { value: 'torbox:4', language: 'fi', name: 'Finnish', torboxTrack: 4 };
+    const arabic = { value: 'torbox:2', language: 'ar', name: 'Arabic', torboxTrack: 2 };
+    expect(visibleSubtitleTracks([arabic, finnish, full], ['en'], 'fi')).toEqual([finnish, full]);
+    expect(visibleSubtitleTracks([arabic], ['en'], null)).toEqual([]);
+  });
+
+  it('keeps an exact selected alternative beyond the per-language cap', () => {
+    const tracks = [1, 2, 3, 4].map((id) => ({
+      value: `opensubtitles:${id}`,
+      language: 'en',
+      name: `English ${id}`,
+      source: 'opensubtitles' as const,
+    }));
+    expect(visibleSubtitleTracks(tracks, ['en'], 'opensubtitles:4', 2)).toEqual([
+      tracks[0],
+      tracks[1],
+      tracks[3],
+    ]);
+  });
 });
 
 describe('startSession', () => {
