@@ -17,16 +17,13 @@ const DRAIN_GAP_MS = 5_000;
 const RETRY_MS = 15_000;
 
 interface VisitKey {
+  storage: Storage | undefined;
   library: string;
   key: string;
   retired: AbortController;
 }
-interface VisitKeys {
-  current?: VisitKey;
-  changed: AbortController;
-}
-const visits = new WeakMap<Storage, VisitKeys>();
-const noStorage: VisitKeys = { changed: new AbortController() };
+let visit: VisitKey | undefined;
+let changed = new AbortController();
 
 function siteStorage(): Storage | undefined {
   try {
@@ -36,21 +33,11 @@ function siteStorage(): Storage | undefined {
   }
 }
 
-function visitKeys(storage: Storage | undefined): VisitKeys {
-  if (!storage) return noStorage;
-  let state = visits.get(storage);
-  if (!state) {
-    state = { changed: new AbortController() };
-    visits.set(storage, state);
-  }
-  return state;
-}
-
-function replace(state: VisitKeys, library: string, key: string): VisitKey {
-  state.current?.retired.abort();
-  state.changed.abort();
-  state.changed = new AbortController();
-  return (state.current = { library, key, retired: new AbortController() });
+function replace(storage: Storage | undefined, library: string, key: string): VisitKey {
+  visit?.retired.abort();
+  changed.abort();
+  changed = new AbortController();
+  return (visit = { storage, library, key, retired: new AbortController() });
 }
 
 const untilAborted = (signal: AbortSignal) =>
@@ -95,9 +82,8 @@ export async function playKeyFor(
   signal?.throwIfAborted();
   const library = await libraryTag(libraryKey);
   signal?.throwIfAborted();
-  const state = visitKeys(storage);
   const kept = stored(storage);
-  const current = state.current;
+  const current = visit?.storage === storage ? visit : undefined;
   if (current?.library === library) {
     if (kept?.library === library && kept.key === current.key) return current.key;
     try {
@@ -109,7 +95,7 @@ export async function playKeyFor(
   }
   const key =
     kept?.library === library ? kept.key : toBase64url(crypto.getRandomValues(new Uint8Array(32)));
-  replace(state, library, key);
+  replace(storage, library, key);
   try {
     storage?.setItem(KEY, JSON.stringify({ library, key }));
   } catch {
@@ -120,7 +106,7 @@ export async function playKeyFor(
 
 /** The play key this TV made for the household established during this visit. */
 export const currentPlayKey = (storage: Storage | undefined = siteStorage()): string | undefined =>
-  visitKeys(storage).current?.key;
+  visit?.storage === storage ? visit?.key : undefined;
 
 /**
  * Run `use` for each visit key while it remains current. A household replacement aborts the old work before the new
@@ -131,11 +117,10 @@ export async function whilePlayKey(
   signal: AbortSignal,
   storage: Storage | undefined = siteStorage(),
 ): Promise<void> {
-  const state = visitKeys(storage);
   while (!signal.aborted) {
-    const current = state.current;
+    const current = visit?.storage === storage ? visit : undefined;
     if (!current) {
-      await untilAborted(AbortSignal.any([signal, state.changed.signal]));
+      await untilAborted(AbortSignal.any([signal, changed.signal]));
       continue;
     }
     const active = AbortSignal.any([signal, current.retired.signal]);
