@@ -567,9 +567,7 @@
     if (!authority || signal.aborted) return 'temporarily-unavailable';
     const assistant = await import('./lib/assistant');
     if (signal.aborted) return 'temporarily-unavailable';
-    return (await assistant.preparePlaybackReceipts(authority, signal))
-      ? 'ready'
-      : 'temporarily-unavailable';
+    return (await assistant.prepare(authority, signal)) ? 'ready' : 'temporarily-unavailable';
   }
   $effect(() => {
     const downloadsPage = route.page === 'downloads' && !__DEN_TV_LEGACY_JS_CORE__;

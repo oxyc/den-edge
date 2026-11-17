@@ -13,6 +13,11 @@ const ALLOWLIST = {
       'dev-only lint tooling; DoS on attacker-crafted glob patterns, which lint never receives',
     expires: '2026-11-02',
   },
+  'GHSA-fc5q-39xc-vjpf': {
+    reason:
+      'picomatch ReDoS on attacker-crafted extglobs; only dev tooling (vite, vitest, stylelint, svelte-check, typescript-eslint) loads it, with patterns from our own config, and no fixed release exists past 4.0.7 yet',
+    expires: '2026-12-17',
+  },
 };
 
 function runAudit() {

@@ -416,14 +416,14 @@ export class LibraryLogAuthority {
         destination: options.destination,
       });
     this.#assistant = new LibraryAssistantAuthority({
-      libraryId: log.libraryId,
-      get device() {
+      id: log.libraryId,
+      get dev() {
         return clock.device;
       },
-      settings: (name) => this.#log.settings(name),
-      acknowledgedSettings: (name) => this.#log.acknowledgedSettings(name),
-      refresh: async () => void (await this.#log.refresh()),
-      command: async (command, operationId, stamp) => {
+      row: (name) => this.#log.settings(name),
+      ack: (name) => this.#log.acknowledgedSettings(name),
+      sync: async (signal) => void (await this.#log.refresh(0, signal)),
+      run: async (command, operationId, stamp) => {
         this.#asOf = stamp;
         try {
           return await this.command(command, operationId);
@@ -444,11 +444,11 @@ export class LibraryLogAuthority {
       },
       load: () => this.#log.kept<AssistantRecords>(ASSISTANT_RECORDS),
       save: (records) => this.#log.keep(ASSISTANT_RECORDS, records),
-      loadShape: async (title) => {
+      shape: async (title) => {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         return this.#shapes.has(titleKey(title));
       },
-      seasonEpisodes: async (title, season) => {
+      eps: async (title, season) => {
         if (!this.#shapes.has(titleKey(title))) await this.#libraryMetadata([title]);
         const shape = this.#shapes.get(titleKey(title))?.shape;
         if (!shape) return null;
@@ -467,8 +467,8 @@ export class LibraryLogAuthority {
           );
         return written.affected;
       },
-      replace: async (row) => void (await this.#writeRow(row, [])),
-      putDropbox: async (key) => {
+      set: async (row) => void (await this.#writeRow(row, [])),
+      send: async (key) => {
         const member = await this.#log.relayMembership();
         if (!member) return false;
         try {
@@ -486,8 +486,8 @@ export class LibraryLogAuthority {
           return false;
         }
       },
-      documents: () => this.#log.documents().map(({ document }) => document),
-      layouts: () =>
+      docs: () => this.#log.documents().map(({ document }) => document),
+      lays: () =>
         Object.fromEntries(
           [...this.#shapes]
             .filter(([key]) => key.startsWith('tv:'))
@@ -502,7 +502,7 @@ export class LibraryLogAuthority {
             ]),
         ),
       head: () => this.#log.logHead,
-      inputs: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
+      key: () => `${this.#log.rowsVersion}:${this.#log.logHead}:${this.#shapesVersion}`,
       put: async (grant, set, parts, member, signal) => {
         const res = await this.#memberSend(
           `/assistant/projection/${grant}`,
@@ -524,9 +524,9 @@ export class LibraryLogAuthority {
             signal,
           )
         )?.ok ?? false,
-      membership: () => this.#log.relayMembership(),
+      join: () => this.#log.relayMembership(),
       now: () => Date.now(),
-      random: randomHex,
+      rand: randomHex,
     });
     this.#scheduleProjectionReconsideration();
   }
@@ -818,7 +818,7 @@ export class LibraryLogAuthority {
       case 'assistant.revocation-readback':
         return {
           kind: 'assistant.revocation-readback',
-          outcome: await this.#assistant.revocationReadback(query.grant),
+          outcome: await this.#assistant.read(query.grant),
         };
       case 'assistant.connection':
         return {
@@ -1402,15 +1402,12 @@ export class LibraryLogAuthority {
         return {
           result: {
             kind: 'assistant.receipts.ensure',
-            dropbox: await this.#assistant.ensureDropbox(),
+            dropbox: await this.#assistant.key(),
           },
           affected: [],
         };
       case 'assistant.receipts.apply': {
-        const result = await this.#assistant.applyPlaybackReceipts(
-          task.messages,
-          task.connection ?? null,
-        );
+        const result = await this.#assistant.plays(task.messages, task.connection ?? null);
         return { result: { kind: 'assistant.receipts.apply', ...result }, affected: [] };
       }
       case 'assistant.apply': {
@@ -1418,6 +1415,7 @@ export class LibraryLogAuthority {
           task.messages,
           task.connection ?? null,
           task.tv ?? null,
+          signal,
         );
         return { result: { kind: 'assistant.apply', results, ack, dropbox }, affected };
       }

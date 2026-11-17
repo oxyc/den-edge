@@ -571,4 +571,24 @@ describe('sendReport', () => {
     await sent;
     expect(settled).toBe(true);
   });
+
+  it('settles after a bounded wait when no answer ever comes, so the end is not held back for good', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      let settled = false;
+      const sent = sendReport('/r', '{}', () => new Promise<Response>(() => {}), 5_000).then(
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await sent;
+      expect(settled).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('no answer within 5000 ms'));
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });

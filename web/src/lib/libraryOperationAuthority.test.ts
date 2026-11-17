@@ -89,6 +89,100 @@ describe('DurableOperationAuthority', () => {
     expect(JSON.stringify([...stored.kept.values()])).not.toContain('publish-1');
   });
 
+  it('forwards cancellation into a serialized assistant apply and releases later operations', async () => {
+    const stored = storedLog();
+    let delivery!: AbortSignal;
+    const inner = {
+      ...base(),
+      task: vi.fn(async (_task, _operationId, signal?: AbortSignal) => {
+        if (!signal) throw new Error('apply signal missing');
+        delivery = signal;
+        await new Promise<void>((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        );
+        throw new Error('unreachable');
+      }),
+    } satisfies LibraryServiceAuthority;
+    const authority = new DurableOperationAuthority(inner, stored.log);
+    const stop = new AbortController();
+    const applying = authority.task(
+      { kind: 'assistant.apply', messages: [] },
+      'assistant-apply-1',
+      stop.signal,
+    );
+    await vi.waitFor(() => expect(delivery).toBe(stop.signal));
+
+    stop.abort();
+    await expect(applying).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      authority.command({ kind: 'watchlist.add', title: { type: 'movie', id: 1 } }, 'tap-after'),
+    ).resolves.toMatchObject({ outcome: 'applied' });
+  });
+
+  it('does not persist an assistant apply cancelled while waiting for the operation lane', async () => {
+    const stored = storedLog();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const inner = {
+      ...base(),
+      command: vi.fn(async () => {
+        await held;
+        return { outcome: 'applied' as const, delivery: 'synced' as const, affected: [] };
+      }),
+    };
+    const authority = new DurableOperationAuthority(inner, stored.log);
+    const first = authority.command(
+      { kind: 'watchlist.add', title: { type: 'movie', id: 1 } },
+      'held-command',
+    );
+    await vi.waitFor(() => expect(inner.command).toHaveBeenCalledOnce());
+    const stop = new AbortController();
+    const applying = authority.task(
+      { kind: 'assistant.apply', messages: [] },
+      'cancelled-apply',
+      stop.signal,
+    );
+
+    stop.abort();
+    release();
+    await first;
+    await expect(applying).rejects.toMatchObject({ name: 'AbortError' });
+    expect(inner.task).not.toHaveBeenCalled();
+    expect(JSON.stringify([...stored.kept.values()])).not.toContain('cancelled-apply');
+  });
+
+  it('does not persist an assistant apply cancelled while waiting for another instance lock', async () => {
+    const stored = storedLog();
+    let enter!: () => void;
+    const admitted = new Promise<void>((resolve) => (enter = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let first = true;
+    const lock = async <T>(_name: string, work: () => Promise<T>) => {
+      if (first) {
+        first = false;
+        enter();
+        await held;
+      }
+      return work();
+    };
+    const inner = base();
+    const authority = new DurableOperationAuthority(inner, stored.log, lock);
+    const stop = new AbortController();
+    const applying = authority.task(
+      { kind: 'assistant.apply', messages: [] },
+      'cancelled-under-lock',
+      stop.signal,
+    );
+
+    await admitted;
+    stop.abort();
+    release();
+    await expect(applying).rejects.toMatchObject({ name: 'AbortError' });
+    expect(inner.task).not.toHaveBeenCalled();
+    expect(JSON.stringify([...stored.kept.values()])).not.toContain('cancelled-under-lock');
+  });
+
   it('returns the original command result after authority replacement without executing again', async () => {
     const stored = storedLog();
     const first = base();

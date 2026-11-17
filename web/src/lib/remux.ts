@@ -955,7 +955,16 @@ export async function startSession(
   lookup: () => Promise<string | undefined> = () => ipv4Hint(),
   signal?: AbortSignal,
 ): Promise<Session | Refused> {
-  const { subtitles, subtitleLanguages, ...fields } = want;
+  // `title` and `subtitleTrack` are for Hearth's playback route alone, which takes them out before Remux reads the
+  // rest. Remux's own session route refuses a field it doesn't know, so sending them here failed the session (a 400
+  // the player could only call "unreachable").
+  const {
+    subtitles,
+    subtitleLanguages,
+    title: _title,
+    subtitleTrack: _subtitleTrack,
+    ...fields
+  } = want;
   const offered = subtitles
     .filter((install) => subtitleVerdicts.get(install) !== false)
     .sort(
