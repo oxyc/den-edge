@@ -139,12 +139,14 @@ export class HouseholdSession {
     return libraryUpdateRequired(this.#model);
   }
 
-  configureServices(): void {
+  configureServices(profile: string): void {
+    this.services.activateProfile(profile);
     if (this.#model && this.#model.connection !== 'ready') return;
     this.services.configure(this.#model?.runtime.value);
   }
 
-  foreground(): void {
+  foreground(profile: string): void {
+    this.services.activateProfile(profile);
     if (this.#foregroundReady || this.#closed) return;
     this.#foregroundReady = true;
     this.services.foregroundReady();

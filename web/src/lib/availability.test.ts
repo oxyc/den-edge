@@ -10,8 +10,8 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 
 const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', base: '/scout/sealed-cfg' };
-const HOUSEHOLD_A = ['profiles', 'household-a'] as const;
-const HOUSEHOLD_B = ['profiles', 'household-b'] as const;
+const HOUSEHOLD_A = ['profiles', 'household-a', 'profile-a'] as const;
+const PROFILE_B = ['profiles', 'household-a', 'profile-b'] as const;
 
 const contentQuery = async (request: { kind: string; title?: { id: number } }) => ({
   kind: 'title.external-id' as const,
@@ -169,7 +169,7 @@ describe('Availability', () => {
     expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'exact authority restores').toBe(true);
 
     const other = new Availability(storage, () => now);
-    other.connect(SCOUT, content, fetchImpl, HOUSEHOLD_B);
+    other.connect(SCOUT, content, fetchImpl, PROFILE_B);
     await vi.advanceTimersByTimeAsync(0);
     expect(other.unavailable({ type: 'movie', id: 1 }), 'other household fails closed').toBe(false);
     expect(JSON.stringify([...data.entries()])).not.toContain('household-a');
@@ -201,7 +201,7 @@ describe('Availability', () => {
     await vi.advanceTimersByTimeAsync(0);
     availability.want(movie);
     await vi.advanceTimersByTimeAsync(100);
-    availability.connect(SCOUT, content, bFetch, HOUSEHOLD_B);
+    availability.connect(SCOUT, content, bFetch, PROFILE_B);
     await vi.advanceTimersByTimeAsync(100);
     availability.connect(SCOUT, content, finalFetch, HOUSEHOLD_A);
     await vi.advanceTimersByTimeAsync(100);

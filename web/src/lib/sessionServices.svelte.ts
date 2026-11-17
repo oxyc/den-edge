@@ -1,7 +1,7 @@
 // Session-scoped provider discovery. Durable inputs and retained results belong to LibraryModel; this class only
 // owns the live probes and the render-facing addresses they discover.
 
-import { availability, type AvailabilityAuthority } from './availability.svelte';
+import { availability } from './availability.svelte';
 import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
@@ -74,6 +74,7 @@ export class SessionServices {
   #foregroundReady = false;
   #atlasGeneration = 0;
   #atlasAcknowledgedGeneration = 0;
+  #availabilityProfile = 'test';
   /** The current discovery run's inputs, run again by `retry`. */
   #rerun?: () => void;
   readonly #model: LibraryModel | null;
@@ -83,7 +84,10 @@ export class SessionServices {
     private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes | null> = fetchRoutesForDiscovery,
     private readonly grants: Grants = guestGrants,
-    private readonly availabilityAuthority: () => AvailabilityAuthority = () => ['test', null],
+    private readonly availabilityHousehold: () => readonly [string, string | null] = () => [
+      'test',
+      null,
+    ],
   ) {
     this.#model = model;
   }
@@ -100,7 +104,17 @@ export class SessionServices {
   }
 
   #connectAvailability(scout: Addon | null): void {
-    availability.connect(scout, this.content, relayFetch, this.availabilityAuthority());
+    availability.connect(scout, this.content, relayFetch, [
+      ...this.availabilityHousehold(),
+      this.#availabilityProfile,
+    ]);
+  }
+
+  /** Viewer identity is presentation authority even though discovery remains household-owned. */
+  activateProfile(profile: string): void {
+    if (profile === this.#availabilityProfile) return;
+    this.#availabilityProfile = profile;
+    this.#connectAvailability(this.#foregroundReady ? this.scout : null);
   }
 
   /**

@@ -75,7 +75,12 @@ const verdictOf = (answer: Record<string, unknown>, id: string): Verdict => {
 type EpisodeProbe = Episode & { id: number };
 type BatchTarget =
   { kind: 'movie'; id: number } | { kind: 'episode'; key: string; probe: EpisodeProbe };
-export type AvailabilityAuthority = readonly [kind: string, libraryKey: string | null];
+/** Exact active viewer and household. Credential-bearing keys are admitted here but only the digest is persisted. */
+export type AvailabilityAuthority = readonly [
+  householdKind: string,
+  householdKey: string | null,
+  profile: string,
+];
 
 type Kept = Record<string, [Verdict, number]>;
 type Stored = { version: typeof STORAGE_VERSION; authority: string; verdicts: Kept };
@@ -186,7 +191,7 @@ export class Availability {
     scout: Addon | null,
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
-    authority: AvailabilityAuthority = ['test', null],
+    authority: AvailabilityAuthority = ['test', null, 'test'],
   ): void {
     const connection = ++this.connection;
     const household = JSON.stringify(authority);

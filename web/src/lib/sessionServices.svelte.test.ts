@@ -126,7 +126,35 @@ describe('SessionServices', () => {
 
     connect.mockClear();
     services.foregroundReady();
-    expect(connect).toHaveBeenCalledWith(services.scout, content);
+    expect(connect).toHaveBeenCalledWith(services.scout, content, expect.any(Function), [
+      'test',
+      null,
+      'test',
+    ]);
+    services.stop();
+  });
+
+  it('rebinds availability when the active profile changes without restarting discovery', async () => {
+    const connect = vi.spyOn(availability, 'connect');
+    const services = new SessionServices(fakeModel(), content, async () => availableRoutes());
+    services.foregroundReady();
+    connect.mockClear();
+
+    services.activateProfile('profile-a');
+    expect(connect).toHaveBeenLastCalledWith(null, content, expect.any(Function), [
+      'test',
+      null,
+      'profile-a',
+    ]);
+    connect.mockClear();
+    services.activateProfile('profile-a');
+    expect(connect).not.toHaveBeenCalled();
+    services.activateProfile('profile-b');
+    expect(connect).toHaveBeenLastCalledWith(null, content, expect.any(Function), [
+      'test',
+      null,
+      'profile-b',
+    ]);
     services.stop();
   });
 
@@ -252,7 +280,11 @@ describe('SessionServices', () => {
     guestPluginUrls = ['https://den.example/den/~bbbbbbbb/manifest.json'];
     services.configure(runtime());
     expect(services.scout).toBeNull();
-    expect(connect).toHaveBeenLastCalledWith(null, content);
+    expect(connect).toHaveBeenLastCalledWith(null, content, expect.any(Function), [
+      'test',
+      null,
+      'test',
+    ]);
     await vi.waitFor(() => expect(discoveryPublishes).toHaveLength(2));
     discoveryPublishes[0]!.scout?.(a);
     expect(services.scout).toBeNull();

@@ -9,6 +9,7 @@ import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfileContentPolicy, type ProfilePolicy } from './profilePolicy';
 import {
   legacyProfileIdentity,
+  profileSessionKey,
   type PersistentProfileIdentity,
   type ProfileIdentity,
 } from './profileIdentity';
@@ -236,7 +237,7 @@ export class ProfileSession {
   }
 
   configureServices(): void {
-    this.household.configureServices();
+    this.household.configureServices(profileSessionKey(this.identity, this.policyKey));
   }
 
   publishLibraryMetadata(
@@ -300,7 +301,7 @@ export class ProfileSession {
 
   foregroundReady(): void {
     this.foregrounded = true;
-    this.household.foreground();
+    this.household.foreground(profileSessionKey(this.identity, this.policyKey));
     if (!this.household.ownsModel(this.model)) void this.model?.foregroundReady().catch(() => {});
   }
 
