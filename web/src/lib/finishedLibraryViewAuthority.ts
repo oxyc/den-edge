@@ -621,7 +621,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       return null;
     }
   }
-  task: LibraryServiceAuthority['task'] = async (task, operationId, signal) => {
+  task: LibraryServiceAuthority['task'] = async (task, ...args) => {
     // Deciding what to publish reads the whole library; until this device's publication is due, nothing is.
     if (task.kind === 'assistant.publish' && !this.#full && (await this.#publicationCurrent()))
       return { result: { kind: 'assistant.publish', published: 0 }, affected: [] };
@@ -636,7 +636,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         };
       }
     }
-    return (await this.#promote(`task:${task.kind}`)).task(task, operationId, signal);
+    return (await this.#promote(`task:${task.kind}`)).task(task, ...args);
   };
 
   /**

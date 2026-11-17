@@ -182,19 +182,15 @@ export class LibraryServiceCore {
     // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
     // An assistant projection's publish is the same: it reads the library once, then waits on its own Worker's build
     // and on den-edge, and changes nothing the lane orders.
-    const cancellable = isCancellableRequest(input) ? input : null;
-    if (isConcurrentRequest(input) || cancellable) {
+    if (isConcurrentRequest(input)) {
       const admitted = this.#requests;
-      let controller: AbortController | undefined;
-      if (cancellable) {
-        controller = new AbortController();
-        this.#controllers.set(cancellable.requestId, controller);
-      }
+      const controller = new AbortController();
+      this.#controllers.set(input.requestId, controller);
       const work = admitted
-        .then(() => this.#dispatch(input, controller?.signal))
+        .then(() => this.#dispatch(input, controller.signal))
         .finally(() => {
-          if (controller && this.#controllers.get(cancellable!.requestId) === controller)
-            this.#controllers.delete(cancellable!.requestId);
+          if (this.#controllers.get(input.requestId) === controller)
+            this.#controllers.delete(input.requestId);
         });
       this.#providerWork.add(work);
       void work.finally(() => this.#providerWork.delete(work));
@@ -620,15 +616,6 @@ function sameTitle(a: TitleRef, b: TitleRef): boolean {
 
 function isConcurrentRequest(
   input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; query?: { kind?: unknown } };
-  const kind = request.query?.kind;
-  return request.type === 'query' && (kind === 'library.metadata' || kind === 'source.wait');
-}
-
-function isCancellableRequest(
-  input: unknown,
 ): input is Extract<LibraryServiceClientMessage, { type: 'query' | 'task' }> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
   const request = input as {
@@ -639,7 +626,10 @@ function isCancellableRequest(
   };
   return (
     typeof request.requestId === 'string' &&
-    ((request.type === 'query' && request.query?.kind === 'download.sources') ||
+    ((request.type === 'query' &&
+      (request.query?.kind === 'library.metadata' ||
+        request.query?.kind === 'source.wait' ||
+        request.query?.kind === 'download.sources')) ||
       (request.type === 'task' && request.task?.kind === 'assistant.publish'))
   );
 }

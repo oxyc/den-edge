@@ -345,7 +345,7 @@ export function publishWhileOpen(
       } catch (error) {
         if (!signal.aborted) console.warn('den: assistant publish failed', error);
       }
-      await sleep(PUBLISH_TICK_MS, signal);
+      if (!signal.aborted) await sleep(PUBLISH_TICK_MS, signal);
     }
   });
 }
@@ -363,17 +363,15 @@ export interface DrainLoop {
 }
 
 const pause = (ms: number, signal: AbortSignal) =>
-  signal.aborted
-    ? Promise.resolve()
-    : new Promise<void>((resolve) => {
-        const timer = setTimeout(done, ms);
-        function done() {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', done);
-          resolve();
-        }
-        signal.addEventListener('abort', done, { once: true });
-      });
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
 
 /**
  * Drain the library's assistant queue while `signal` stands: at once, then held (`?wait=`). One tab of this browser
