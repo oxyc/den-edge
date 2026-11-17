@@ -1715,7 +1715,7 @@
       void publishWhileOpen(
         {
           libraryId: work.libraryId,
-          publish: async () => work.model.publishAssistant(await work.lend()),
+          publish: async (signal) => work.model.publishAssistant(await work.lend(), signal),
         },
         signal,
       );

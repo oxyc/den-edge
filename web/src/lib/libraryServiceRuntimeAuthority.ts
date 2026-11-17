@@ -44,8 +44,8 @@ class CredentialBoundLibraryAuthority implements LibraryServiceAuthority {
   command: LibraryServiceAuthority['command'] = (command, operationId) =>
     this.authority.command(command, operationId);
   query: LibraryServiceAuthority['query'] = (query, signal) => this.authority.query(query, signal);
-  task: LibraryServiceAuthority['task'] = (task, operationId) =>
-    this.authority.task(task, operationId);
+  task: LibraryServiceAuthority['task'] = (task, operationId, signal) =>
+    this.authority.task(task, operationId, signal);
   observe: LibraryServiceAuthority['observe'] = (observation) =>
     this.authority.observe(observation);
 

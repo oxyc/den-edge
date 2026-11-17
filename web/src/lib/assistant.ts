@@ -332,7 +332,7 @@ const PUBLISH_TICK_MS = 30_000;
 export function publishWhileOpen(
   loop: {
     libraryId: string;
-    publish: () => Promise<unknown>;
+    publish: (signal: AbortSignal) => Promise<unknown>;
     sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   },
   signal: AbortSignal,
@@ -341,9 +341,10 @@ export function publishWhileOpen(
   return exclusive(`den.assistant.publish.${loop.libraryId}`, async () => {
     while (!signal.aborted) {
       try {
-        await loop.publish();
+        await loop.publish(signal);
       } catch (error) {
-        console.warn('den: assistant projections could not be published', error);
+        if (!signal.aborted)
+          console.warn('den: assistant projections could not be published', error);
       }
       await sleep(PUBLISH_TICK_MS, signal);
     }
@@ -363,15 +364,17 @@ export interface DrainLoop {
 }
 
 const pause = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    const timer = setTimeout(done, ms);
-    function done() {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', done);
-      resolve();
-    }
-    signal.addEventListener('abort', done, { once: true });
-  });
+  signal.aborted
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => {
+        const timer = setTimeout(done, ms);
+        function done() {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', done);
+          resolve();
+        }
+        signal.addEventListener('abort', done, { once: true });
+      });
 
 /**
  * Drain the library's assistant queue while `signal` stands: at once, then held (`?wait=`). One tab of this browser

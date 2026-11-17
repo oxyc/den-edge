@@ -159,8 +159,13 @@ export interface AssistantPort {
     set: string,
     parts: string[],
     member?: AssistantConnection['member'],
+    signal?: AbortSignal,
   ): Promise<boolean | { retryAfterMs: number }>;
-  deleteProjection(grant: string, member?: AssistantConnection['member']): Promise<boolean>;
+  deleteProjection(
+    grant: string,
+    member?: AssistantConnection['member'],
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
   membership(): Promise<AssistantConnection['member'] | null>;
   loadRecords(): Promise<AssistantRecords | null | undefined>;
@@ -645,12 +650,20 @@ export class LibraryAssistantAuthority {
   }
 
   /** Ask den-edge to drop a grant's projection; once it has, this device never asks again. */
-  async #drop(grant: string, lent: AssistantConnection | null = null): Promise<void> {
-    if (this.#dropping.has(grant)) return;
+  async #drop(
+    grant: string,
+    lent: AssistantConnection | null = null,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (this.#dropping.has(grant)) return false;
     this.#dropping.add(grant);
     try {
-      if (await this.port.deleteProjection(grant, lent?.member))
+      if (await this.port.deleteProjection(grant, lent?.member, signal)) {
+        signal?.throwIfAborted();
         await this.#remember({ dropped: [grant] });
+        return true;
+      }
+      return false;
     } finally {
       this.#dropping.delete(grant);
     }
@@ -695,11 +708,22 @@ export class LibraryAssistantAuthority {
    * done in a Worker of its own (`buildProjection`). One publish at a time: a tick that finds one under way sends
    * nothing.
    */
-  async publish(lent: AssistantConnection | null = null): Promise<string[]> {
+  async publish(lent: AssistantConnection | null = null, signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     if (this.#publishing) return [];
     this.#publishing = true;
     try {
-      return await this.#publish(lent);
+      return await this.#publish(lent, signal);
+    } catch (error) {
+      // The same authority may survive a background/foreground edge. Do not let scheduling state computed before
+      // cancellation suppress its immediate retry; successful member writes remain idempotent replacements/drops.
+      if (signal?.aborted) {
+        this.#builtFrom = null;
+        this.#dueAt = 0;
+        this.#holdUntil = 0;
+        this.#holdRead = null;
+      }
+      throw error;
     } finally {
       this.#publishing = false;
     }
@@ -707,7 +731,8 @@ export class LibraryAssistantAuthority {
 
   #publishing = false;
 
-  async #publish(lent: AssistantConnection | null): Promise<string[]> {
+  async #publish(lent: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
@@ -780,6 +805,7 @@ export class LibraryAssistantAuthority {
           `${request.slice(0, -1)},"documents":${documents},"layouts":${known}}`,
         ),
       );
+      signal?.throwIfAborted();
       buildMs = Math.round(performance.now() - started);
     } catch (error) {
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
@@ -813,7 +839,9 @@ export class LibraryAssistantAuthority {
           entry.set,
           entry.parts,
           lent?.member,
+          signal,
         );
+        signal?.throwIfAborted();
         if (answer === true) {
           this.#published.set(entry.grant, { digest: built.digest, at: now });
           this.#retryAt.delete(entry.grant);
@@ -838,13 +866,15 @@ export class LibraryAssistantAuthority {
     this.#holdRead = readKey;
     for (const grant of built.delete) {
       this.#published.delete(grant);
-      if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
+      if (!records.dropped.includes(grant) && !(await this.#drop(grant, lent, signal)))
+        dueAt = Math.min(dueAt, now + PUBLISH_DEBOUNCE_MS);
     }
     this.#dueAt = dueAt;
     // Metadata can keep arriving while the projection Worker builds. The key still names the exact request above,
     // so a later page rebuilds when these additions change it; carry them with the publication so closing this page
     // does not lose them and force every fresh page to discover the same layouts during its own build.
     const rememberedLayouts = { ...layouts, ...this.port.layouts() };
+    signal?.throwIfAborted();
     await this.#remember({
       publication: {
         key,

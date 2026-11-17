@@ -1073,11 +1073,15 @@ export class LibraryModel {
    * Publish every live read grant's projection that is due (§15). How many were sent. `connection`: a split
    * household's (`assistantConnection`), which this, Owner's library, publishes its lists for.
    */
-  async publishAssistant(connection?: AssistantConnection): Promise<number> {
-    const { result } = await this.task({
-      kind: 'assistant.publish',
-      ...(connection ? { connection } : {}),
-    });
+  async publishAssistant(connection?: AssistantConnection, signal?: AbortSignal): Promise<number> {
+    const { result } = await this.task(
+      {
+        kind: 'assistant.publish',
+        ...(connection ? { connection } : {}),
+      },
+      undefined,
+      signal,
+    );
     if (result.kind !== 'assistant.publish') throw wrongQueryResult('assistant publish');
     return result.published;
   }

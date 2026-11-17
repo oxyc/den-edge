@@ -418,6 +418,59 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
+  it('cancels a stalled assistant publish in the authority and admits its replacement', async () => {
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => (started = resolve));
+    const signals: AbortSignal[] = [];
+    const authorityWithHeldPublish = {
+      ...authority(),
+      async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        if (!signal) throw new Error('publish signal missing');
+        signals.push(signal);
+        if (signals.length === 1) {
+          started();
+          await new Promise<void>((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          );
+        }
+        return { result: { kind: 'assistant.publish' as const, published: 1 }, affected: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => authorityWithHeldPublish, 'instance-1');
+    await core.dispatch(hello);
+    const request = (requestId: string) => ({
+      type: 'task' as const,
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      operationId: `${requestId}-operation`,
+      task: { kind: 'assistant.publish' as const },
+    });
+
+    const stalled = core.dispatch(request('publish-stalled'));
+    await held;
+    await core.dispatch({
+      type: 'cancel',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'publish-stalled',
+    });
+
+    await expect(stalled).resolves.toEqual([
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ]);
+    expect(signals[0]?.aborted).toBe(true);
+    await expect(core.dispatch(request('publish-replacement'))).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.publish', published: 1 },
+      }),
+    ]);
+    expect(signals[1]?.aborted).toBe(false);
+  });
+
   it('carries playback receipt ensure and apply through the production task lane', async () => {
     const tasks: string[] = [];
     const held = {
