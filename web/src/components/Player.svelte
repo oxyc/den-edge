@@ -29,7 +29,6 @@
   } from '../lib/castReceiver';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
-  import { withDeadline } from '../lib/abortableDelay';
   import { reportMediaEngineFailure } from '../lib/mediaEngineDiagnostics';
   import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
@@ -869,7 +868,7 @@
     const choice = manualChoiceGeneration;
     let answer: SourceListResult;
     try {
-      const lookupSignal = withDeadline(CONTINUITY_LOOKUP_MS, signal);
+      const lookupSignal = AbortSignal.any([signal, AbortSignal.timeout(CONTINUITY_LOOKUP_MS)]);
       answer = await beforeAbort(sourceListFor(at), lookupSignal);
     } catch {
       return undefined;
@@ -1639,7 +1638,10 @@
     if (playback && onmanagedplayback) {
       let receiptPreparation: PlaybackReceiptPreparation = 'temporarily-unavailable';
       try {
-        const receiptSignal = withDeadline(RECEIPT_PREPARE_MS, attempt.signal);
+        const receiptSignal = AbortSignal.any([
+          attempt.signal,
+          AbortSignal.timeout(RECEIPT_PREPARE_MS),
+        ]);
         // The deadline owns the whole callback, including the first lazy module load and any transport reconnect.
         // Passing it down still cancels work that observes the signal; racing it here prevents an uncooperative
         // boundary from holding playback indefinitely.

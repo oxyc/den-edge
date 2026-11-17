@@ -11,7 +11,6 @@ import type { PlaybackEvidence } from './playbackStats';
 import { retryAfterMs } from './retryAfter';
 import { relayFetch } from './relayFetch';
 import { serviceOrigin } from './runtimeUrl';
-import { withDeadline } from './abortableDelay';
 
 export { nativeHls } from './nativeHls';
 
@@ -969,11 +968,12 @@ export async function startSession(
     const body = candidate ? { ...fields, subtitles: candidate, subtitleLanguages } : fields;
     let res: Response;
     try {
+      const deadline = AbortSignal.timeout(REMUX_ANSWER_MS);
       res = await fetchImpl(`${base}/session`, {
         method: 'POST',
         headers: browserHeaders(base),
         body: JSON.stringify(body),
-        signal: withDeadline(REMUX_ANSWER_MS, signal),
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       });
     } catch {
       return { failure: 'unreachable' };

@@ -14,9 +14,3 @@ export function abortableDelay(
     for (const signal of signals) signal?.addEventListener('abort', done, { once: true });
   });
 }
-
-/** A request deadline that also respects its owning lifetime. */
-export function withDeadline(ms: number, owner?: AbortSignal): AbortSignal {
-  const deadline = AbortSignal.timeout(ms);
-  return owner ? AbortSignal.any([owner, deadline]) : deadline;
-}

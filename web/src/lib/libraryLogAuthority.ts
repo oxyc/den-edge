@@ -98,7 +98,6 @@ import type { Vault } from './localVault';
 import { keptSomething } from './localLibraryMove';
 import type { ContentReader } from './contentAuthority';
 import { ProfileKidCreateCoordinator, ProfileKidCreateStore } from './profileKidCreateWorker';
-import { withDeadline } from './abortableDelay';
 import { profilesApplyPolicy } from './profilesCore';
 import { exclusive } from './exclusive';
 import { sourceWait } from './sourceDiscoveryPolicy';
@@ -547,10 +546,10 @@ export class LibraryLogAuthority {
     const member = lent ?? (await this.#log.relayMembership());
     lifecycle?.throwIfAborted();
     if (!member) return null;
-    const signal = withDeadline(
+    const deadline = AbortSignal.timeout(
       method === 'PUT' ? PROJECTION_PUT_MS : PROJECTION_DELETE_MS,
-      lifecycle,
     );
+    const signal = lifecycle ? AbortSignal.any([lifecycle, deadline]) : deadline;
     try {
       const response = await this.#fetch(path, {
         method,
