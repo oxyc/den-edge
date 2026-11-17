@@ -1517,7 +1517,7 @@
     /** Proves the household's membership on the assistant routes; undefined for the page's own credential. */
     fetchImpl?: typeof fetch;
     /** What `model` publishes and applies with: the household's connection, read again each time it is asked. */
-    lend(): Promise<AssistantConnection | undefined>;
+    lend(signal?: AbortSignal): Promise<AssistantConnection | undefined>;
   }
 
   function whileNeeded(
@@ -1548,7 +1548,7 @@
       ([assistant, membership]) => {
         if (stop.signal.aborted || current !== session) return;
         if (!membership) {
-          console.warn('den: the library is not a member on den-edge yet; its assistants wait');
+          console.warn('asst/membership-wait');
           unavailable?.(stop.signal);
           return;
         }
@@ -1559,9 +1559,9 @@
             household,
             libraryId: membership.libraryId,
             fetchImpl: householdAssistantFetch(membership),
-            lend: async () => {
+            lend: async (signal) => {
               if (!household) return undefined;
-              const connection = await household.assistantConnection();
+              const connection = await household.assistantConnection(signal);
               if (!connection) throw new Error('the household is not a member on den-edge');
               return connection;
             },
@@ -1570,7 +1570,7 @@
         );
       },
       (error: unknown) => {
-        console.warn('den: the assistant connection could not be loaded', error);
+        console.warn('asst/connection-load', error);
         if (!stop.signal.aborted && current === session) unavailable?.(stop.signal);
       },
     );
@@ -1583,9 +1583,7 @@
         void renewListed(
           (grants) => (work.household ?? work.model).renewAssistant(grants),
           work.fetchImpl,
-        ).catch((error: unknown) =>
-          console.warn('den: assistant grants could not be renewed', error),
-        );
+        ).catch((error: unknown) => console.warn('asst/grants-renew', error));
       renew();
       const renewal = setInterval(renew, RENEW_EVERY_MS);
       signal.addEventListener('abort', () => clearInterval(renewal), { once: true });
@@ -1715,7 +1713,7 @@
       void publishWhileOpen(
         {
           libraryId: work.libraryId,
-          publish: async () => work.model.publishAssistant(await work.lend()),
+          publish: async (signal) => work.model.publishAssistant(await work.lend(signal), signal),
         },
         signal,
       );

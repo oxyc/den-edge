@@ -413,5 +413,8 @@ if (process.argv.includes('--capture')) {
   // skip of a repeated placement, on a main that has since gained #1322 and #1343, measured 123,061 in CI. All of the
   // list's share is in the lazy Player chunk. The next boundary would leave 75 bytes against #1282's run-to-run
   // variance, so allow the one after it, retaining 203 bytes.
-  if (coreTotalDelta > 123264) throw new Error('Browser total JS/CSS budget exceeded');
+  // Indexed Kid-create receipts measured 123,549 against exact-main's 123,259 (+290). The retained delta is the
+  // crash-safe v1 migration and sealed indexed lookup, already inside the lazy administration/Worker graph; another
+  // split cannot reduce the complete graph. Keep startup's cap unchanged and allow the next 128-byte boundary.
+  if (coreTotalDelta > 123648) throw new Error('Browser total JS/CSS budget exceeded');
 }

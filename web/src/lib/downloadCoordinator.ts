@@ -373,8 +373,7 @@ export class DownloadCoordinator {
     if (cancel) {
       if (!(await this.cs(download))) return false;
       for (const entry of download.race.entries)
-        if (!(await this.ce(download, entry.identity, this.er(download, entry))))
-          return false;
+        if (!(await this.ce(download, entry.identity, this.er(download, entry)))) return false;
     }
     const current = this.log.settings(download.name);
     if (!current) return true;

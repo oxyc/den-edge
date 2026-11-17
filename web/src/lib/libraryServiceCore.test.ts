@@ -311,8 +311,12 @@ describe('LibraryServiceCore', () => {
     ]);
   });
 
-  it('keeps a source lookup through a device heartbeat, and aborts it when the plugins change', async () => {
+  it('only aborts source lookup work when runtime changes', async () => {
     const aborted: string[] = [];
+    let releaseMetadata!: () => void;
+    let releasePublish!: () => void;
+    const metadataHeld = new Promise<void>((resolve) => (releaseMetadata = resolve));
+    const publishHeld = new Promise<void>((resolve) => (releasePublish = resolve));
     const held = {
       ...authority(),
       async command(command: LibraryCommand) {
@@ -328,6 +332,11 @@ describe('LibraryServiceCore', () => {
         };
       },
       async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind === 'library.metadata') {
+          signal?.addEventListener('abort', () => aborted.push('metadata'), { once: true });
+          await metadataHeld;
+          return { kind: 'library.metadata' as const, titles: [], shapes: [], retryable: [] };
+        }
         if (query.kind !== 'download.sources') throw new Error('unsupported query');
         await new Promise<void>((resolve) =>
           signal?.addEventListener(
@@ -340,6 +349,12 @@ describe('LibraryServiceCore', () => {
           ),
         );
         return { kind: 'download.sources' as const, sources: null };
+      },
+      async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        signal?.addEventListener('abort', () => aborted.push('publish'), { once: true });
+        await publishHeld;
+        return { result: { kind: 'assistant.publish' as const, published: 0 }, affected: [] };
       },
     };
     const core = new LibraryServiceCore(async () => held, 'instance-1');
@@ -361,6 +376,19 @@ describe('LibraryServiceCore', () => {
       });
 
     void lookup('before-heartbeat');
+    const metadata = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'metadata-during-runtime-change',
+      query: { kind: 'library.metadata', titles: [title] },
+    });
+    const publish = core.dispatch({
+      type: 'task',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'publish-during-runtime-change',
+      operationId: 'publish-during-runtime-change',
+      task: { kind: 'assistant.publish' },
+    });
     await Promise.resolve();
     await command('heartbeat', {
       kind: 'device.heartbeat',
@@ -374,6 +402,9 @@ describe('LibraryServiceCore', () => {
       manifestUrl: 'https://scout.example/manifest.json',
     });
     expect(aborted).toEqual(['before-heartbeat']);
+    releaseMetadata();
+    releasePublish();
+    await Promise.all([metadata, publish]);
   });
 
   it('does not hold the command actor lane while an assistant projection is built and sent', async () => {
@@ -416,6 +447,121 @@ describe('LibraryServiceCore', () => {
         result: { kind: 'assistant.publish', published: 1 },
       }),
     ]);
+  });
+
+  it('cancels a stalled assistant publish in the authority and admits its replacement', async () => {
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => (started = resolve));
+    const signals: AbortSignal[] = [];
+    const authorityWithHeldPublish = {
+      ...authority(),
+      async task(task: { kind: string }, _operationId: string, signal?: AbortSignal) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        if (!signal) throw new Error('publish signal missing');
+        signals.push(signal);
+        if (signals.length === 1) {
+          started();
+          await new Promise<void>((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          );
+        }
+        return { result: { kind: 'assistant.publish' as const, published: 1 }, affected: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => authorityWithHeldPublish, 'instance-1');
+    await core.dispatch(hello);
+    const request = (requestId: string) => ({
+      type: 'task' as const,
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      operationId: `${requestId}-operation`,
+      task: { kind: 'assistant.publish' as const },
+    });
+
+    const stalled = core.dispatch(request('publish-stalled'));
+    await held;
+    await core.dispatch({
+      type: 'cancel',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId: 'publish-stalled',
+    });
+
+    await expect(stalled).resolves.toEqual([
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ]);
+    expect(signals[0]?.aborted).toBe(true);
+    await expect(core.dispatch(request('publish-replacement'))).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.publish', published: 1 },
+      }),
+    ]);
+    expect(signals[1]?.aborted).toBe(false);
+  });
+
+  it('cancels a held assistant connection lookup without blocking replacement publish or actor work', async () => {
+    let connectionStarted!: () => void;
+    const started = new Promise<void>((resolve) => (connectionStarted = resolve));
+    const held = {
+      ...authority(),
+      async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind !== 'assistant.connection') throw new Error('unsupported query');
+        connectionStarted();
+        await new Promise<void>((_resolve, reject) =>
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        );
+        return { kind: 'assistant.connection' as const, connection: null };
+      },
+      async task(task: { kind: string }) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        return { result: { kind: 'assistant.publish' as const, published: 1 }, affected: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    const requestId = 'held-assistant-connection';
+    const connection = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      query: { kind: 'assistant.connection' },
+    });
+    await started;
+    await core.dispatch({ type: 'cancel', protocol: LIBRARY_SERVICE_PROTOCOL, requestId });
+    await expect(connection).resolves.toEqual([
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ]);
+    await expect(
+      core.dispatch({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'replacement-publish',
+        operationId: 'replacement-publish',
+        task: { kind: 'assistant.publish' },
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.publish', published: 1 },
+      }),
+    ]);
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-after-connection-cancel',
+        operationId: 'command-after-connection-cancel',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
   });
 
   it('carries playback receipt ensure and apply through the production task lane', async () => {

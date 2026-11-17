@@ -61,7 +61,11 @@ export interface LibraryServiceAuthority {
   select(selection: LibrarySelection): Promise<LibrarySelectionValue>;
   command(command: LibraryCommand, operationId: string): Promise<LibraryAuthorityCommandResult>;
   query(query: LibraryQuery, signal?: AbortSignal): Promise<LibraryQueryResult>;
-  task(task: LibraryTask, operationId: string): Promise<LibraryAuthorityTaskResult>;
+  task(
+    task: LibraryTask,
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryAuthorityTaskResult>;
   observe(observation: LibraryObservation): Promise<LibraryAuthorityObservationResult>;
   listen?(listener: (event: LibraryAuthorityEvent) => void): () => void;
   close?(): void | Promise<void>;
@@ -163,7 +167,8 @@ export class LibraryServiceCore {
   #closed = false;
   #requests: Promise<void> = Promise.resolve();
   readonly #providerWork = new Set<Promise<LibraryServiceServerMessage[]>>();
-  readonly #queryControllers = new Map<string, AbortController>();
+  readonly #controllers = new Map<string, AbortController>();
+  readonly #sourceControllers = new Set<AbortController>();
 
   constructor(
     private readonly openAuthority: LibraryAuthorityOpener,
@@ -178,29 +183,18 @@ export class LibraryServiceCore {
     // the actor, but do not occupy the lane while the network is in flight: commands and subscriptions remain live.
     // An assistant projection's publish is the same: it reads the library once, then waits on its own Worker's build
     // and on den-edge, and changes nothing the lane orders.
-    if (
-      isLibraryMetadataRequest(input) ||
-      isAssistantPublish(input) ||
-      isSourceWaitRequest(input) ||
-      isDownloadSourcesRequest(input)
-    ) {
+    if (isConcurrentRequest(input)) {
       const admitted = this.#requests;
-      let controller: AbortController | undefined;
-      let ownedRequestId: string | undefined;
-      if (isDownloadSourcesRequest(input)) {
-        controller = new AbortController();
-        ownedRequestId = input.requestId;
-        this.#queryControllers.set(ownedRequestId, controller);
-      }
+      const controller = new AbortController();
+      this.#controllers.set(input.requestId, controller);
+      if (input.type === 'query' && input.query.kind === 'download.sources')
+        this.#sourceControllers.add(controller);
       const work = admitted
-        .then(() => this.#dispatch(input, controller?.signal))
+        .then(() => this.#dispatch(input, controller.signal))
         .finally(() => {
-          if (
-            controller &&
-            ownedRequestId &&
-            this.#queryControllers.get(ownedRequestId) === controller
-          )
-            this.#queryControllers.delete(ownedRequestId);
+          this.#sourceControllers.delete(controller);
+          if (this.#controllers.get(input.requestId) === controller)
+            this.#controllers.delete(input.requestId);
         });
       this.#providerWork.add(work);
       void work.finally(() => this.#providerWork.delete(work));
@@ -236,8 +230,8 @@ export class LibraryServiceCore {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    for (const controller of this.#queryControllers.values()) controller.abort();
-    this.#queryControllers.clear();
+    for (const controller of this.#controllers.values()) controller.abort();
+    this.#controllers.clear();
     await this.#requests;
     await Promise.allSettled([...this.#providerWork]);
     // A completed metadata query may have queued its shape replacement just before it observed `#closed`.
@@ -267,7 +261,7 @@ export class LibraryServiceCore {
     try {
       switch (request.type) {
         case 'cancel':
-          this.#queryControllers.get(request.requestId)?.abort();
+          this.#controllers.get(request.requestId)?.abort();
           return [];
         case 'subscribe':
           return await this.#subscribe(request);
@@ -294,7 +288,7 @@ export class LibraryServiceCore {
             },
           ];
         case 'task': {
-          const task = await this.#authority.task(request.task, request.operationId);
+          const task = await this.#authority.task(request.task, request.operationId, signal);
           this.#revision++;
           let updates: LibraryServiceServerMessage[] = [];
           try {
@@ -474,7 +468,7 @@ export class LibraryServiceCore {
       outcome === 'applied' &&
       affected.some((scope) => scope.kind === 'runtime' || scope.kind === 'all')
     )
-      for (const controller of this.#queryControllers.values()) controller.abort();
+      for (const controller of this.#sourceControllers) controller.abort();
     if (outcome === 'applied') this.#revision++;
     const version = this.#version();
     this.#rememberOperation(request.operationId, {
@@ -624,38 +618,22 @@ function sameTitle(a: TitleRef, b: TitleRef): boolean {
   return a.type === b.type && a.id === b.id;
 }
 
-function isLibraryMetadataRequest(
+function isConcurrentRequest(
   input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; query?: { kind?: unknown } };
-  return request.type === 'query' && request.query?.kind === 'library.metadata';
-}
-
-function isDownloadSourcesRequest(
-  input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; requestId?: unknown; query?: { kind?: unknown } };
+): input is Extract<LibraryServiceClientMessage, { type: 'query' | 'task' }> {
+  const request = input as {
+    type?: unknown;
+    query?: { kind?: unknown };
+    task?: { kind?: unknown };
+  } | null;
+  const kind = request?.type === 'query' ? request.query?.kind : request?.task?.kind;
   return (
-    request.type === 'query' &&
-    typeof request.requestId === 'string' &&
-    request.query?.kind === 'download.sources'
+    kind === 'library.metadata' ||
+    kind === 'source.wait' ||
+    kind === 'download.sources' ||
+    kind === 'assistant.connection' ||
+    kind === 'assistant.publish'
   );
-}
-
-function isSourceWaitRequest(
-  input: unknown,
-): input is Extract<LibraryServiceClientMessage, { type: 'query' }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; query?: { kind?: unknown } };
-  return request.type === 'query' && request.query?.kind === 'source.wait';
-}
-
-function isAssistantPublish(input: unknown): boolean {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
-  const request = input as { type?: unknown; task?: { kind?: unknown } };
-  return request.type === 'task' && request.task?.kind === 'assistant.publish';
 }
 
 function scopeMatches(scope: LibrarySelectionScope, selection: LibrarySelection): boolean {

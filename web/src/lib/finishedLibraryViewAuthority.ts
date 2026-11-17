@@ -621,7 +621,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       return null;
     }
   }
-  task: LibraryServiceAuthority['task'] = async (task, operationId) => {
+  task: LibraryServiceAuthority['task'] = async (task, ...args) => {
     // Deciding what to publish reads the whole library; until this device's publication is due, nothing is.
     if (task.kind === 'assistant.publish' && !this.#full && (await this.#publicationCurrent()))
       return { result: { kind: 'assistant.publish', published: 0 }, affected: [] };
@@ -636,7 +636,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         };
       }
     }
-    return (await this.#promote(`task:${task.kind}`)).task(task, operationId);
+    return (await this.#promote(`task:${task.kind}`)).task(task, ...args);
   };
 
   /**
@@ -659,7 +659,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       if (!stored) return null;
       return stored.row?.kind === 'set' ? stored.row : undefined;
     } catch (error) {
-      console.warn('den: the assistant drop-box row could not be read from library facts', error);
+      console.warn('asst/dropbox-read', error);
       return undefined;
     }
   }

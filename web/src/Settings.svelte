@@ -477,7 +477,7 @@
       .then(
         (membership) => (membership ? householdAssistantFetch(membership) : undefined),
         (error: unknown) => {
-          console.error('den: the library’s assistant membership could not be read', error);
+          console.error('asst/membership-read', error);
           return undefined;
         },
       );

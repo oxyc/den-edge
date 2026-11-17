@@ -99,6 +99,16 @@ const EMPTY: AssistantRecords = {
   dropped: [],
 };
 
+const abortable = <T>(work: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return work;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+};
+
 const sameConfigValue = (left: ConfigValue | null | undefined, right: ConfigValue): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
@@ -154,17 +164,22 @@ export interface AssistantPort {
   /** Replace a grant's projection at den-edge with one publish's set and sealed parts, or drop it, with the member's
    * proof: this library's, or `member` (a lent household connection's). A refusal that said how long to wait
    * (`429` with `Retry-After`) answers that wait. */
-  putProjection(
+  put(
     grant: string,
     set: string,
     parts: string[],
     member?: AssistantConnection['member'],
+    signal?: AbortSignal,
   ): Promise<boolean | { retryAfterMs: number }>;
-  deleteProjection(grant: string, member?: AssistantConnection['member']): Promise<boolean>;
+  drop(
+    grant: string,
+    member?: AssistantConnection['member'],
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   /** This library's member proof, or null while den-edge does not know it as a member. */
   membership(): Promise<AssistantConnection['member'] | null>;
-  loadRecords(): Promise<AssistantRecords | null | undefined>;
-  saveRecords(records: AssistantRecords): Promise<void>;
+  load(): Promise<AssistantRecords | null | undefined>;
+  save(records: AssistantRecords): Promise<void>;
   now(): number;
   /** 32 bytes from the platform's CSPRNG, as hex. */
   random(): string;
@@ -329,14 +344,14 @@ export class LibraryAssistantAuthority {
    * A row of this library's, or, for a connection row, the lent household's when there is one: Owner's service then
    * builds and applies with the household's connection, and with its own documents, prefs and applied row.
    */
-  #row(name: string, lent: AssistantConnection | null = null): SettingsRow | null {
+  #row(name: string, lent?: AssistantConnection | null): SettingsRow | null {
     if (lent && (CONNECTION_ROWS as readonly string[]).includes(name))
       return (lent.rows.find((row) => row.name === name) as SettingsRow | undefined) ?? null;
     return this.port.settings(name) ?? null;
   }
 
   /** The grants this device knows revoked: its own records', and a lent household's. */
-  #revoked(records: AssistantRecords, lent: AssistantConnection | null): string[] {
+  #revoked(records: AssistantRecords, lent?: AssistantConnection | null): string[] {
     return lent ? [...new Set([...records.revoked, ...lent.revoked])].sort() : records.revoked;
   }
 
@@ -345,12 +360,13 @@ export class LibraryAssistantAuthority {
    * head, with every revocation its rows show joined to this device's records first. Null while den-edge does not
    * know this library as a member.
    */
-  async lend(): Promise<AssistantConnection | null> {
+  async lend(signal?: AbortSignal): Promise<AssistantConnection | null> {
     if (__DEN_TV_LEGACY_JS_CORE__) return null;
-    await this.port.refresh();
+    signal?.throwIfAborted();
+    await abortable(this.port.refresh(), signal);
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
-      await this.grants();
-    const member = await this.port.membership();
+      await abortable(this.grants(), signal);
+    const member = await abortable(this.port.membership(), signal);
     if (!member) return null;
     const rows = CONNECTION_ROWS.flatMap((name) => {
       const row = this.#row(name);
@@ -358,15 +374,15 @@ export class LibraryAssistantAuthority {
         ? [{ kind: row.kind, schema: row.schema, name: row.name, values: row.values }]
         : [];
     });
-    return { member, rows, revoked: (await this.#load()).revoked };
+    return { member, rows, revoked: (await abortable(this.#load(), signal)).revoked };
   }
 
   async #load(strict = false): Promise<AssistantRecords> {
     try {
-      return readRecords(await this.port.loadRecords());
+      return readRecords(await this.port.load());
     } catch (error) {
       if (strict) throw error;
-      console.warn('den: this device’s assistant records could not be read', error);
+      console.warn('asst/records-read', error);
       return { ...EMPTY };
     }
   }
@@ -394,11 +410,11 @@ export class LibraryAssistantAuthority {
       };
       // Losing a record weakens this device against an older row; it is said, never silent.
       if (!readBack)
-        await this.port.saveRecords(next).catch((error: unknown) => {
-          console.error('den: this device’s assistant records could not be saved', error);
+        await this.port.save(next).catch((error: unknown) => {
+          console.error('asst/records-save', error);
         });
       else {
-        await this.port.saveRecords(next);
+        await this.port.save(next);
         const durable = await this.#load(true);
         for (const [setting, value] of Object.entries(update.receiptApplied ?? {}))
           if (!sameConfigValue(durable.receiptApplied?.[setting], value))
@@ -412,7 +428,7 @@ export class LibraryAssistantAuthority {
   }
 
   /** Once the assistant module is loaded (`ensureAssistantPolicy`). */
-  dropbox(lent: AssistantConnection | null = null): DropboxKey | null {
+  dropbox(lent?: AssistantConnection | null): DropboxKey | null {
     return dropboxKey(this.#row(DROPBOX_ROW, lent));
   }
 
@@ -435,7 +451,7 @@ export class LibraryAssistantAuthority {
     return dropbox;
   }
 
-  #list(records: AssistantRecords, lent: AssistantConnection | null = null): AssistantGrantList {
+  #list(records: AssistantRecords, lent?: AssistantConnection | null): AssistantGrantList {
     return assistantPolicy<AssistantGrantList>({
       op: 'assistant_grants',
       grants: this.#row(GRANTS_ROW, lent),
@@ -450,7 +466,7 @@ export class LibraryAssistantAuthority {
    * Every grant, read and play record the library's rows hold (or a lent household's), for Settings; any shown
    * revoked joins this device's revoked set.
    */
-  async grants(lent: AssistantConnection | null = null): Promise<AssistantGrantList> {
+  async grants(lent?: AssistantConnection | null): Promise<AssistantGrantList> {
     await ensureAssistantPolicy();
     const records = await this.#load();
     const listed = this.#list(records, lent);
@@ -645,12 +661,18 @@ export class LibraryAssistantAuthority {
   }
 
   /** Ask den-edge to drop a grant's projection; once it has, this device never asks again. */
-  async #drop(grant: string, lent: AssistantConnection | null = null): Promise<void> {
-    if (this.#dropping.has(grant)) return;
+  async #drop(
+    grant: string,
+    lent?: AssistantConnection | null,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (this.#dropping.has(grant)) return false;
     this.#dropping.add(grant);
     try {
-      if (await this.port.deleteProjection(grant, lent?.member))
-        await this.#remember({ dropped: [grant] });
+      const dropped = await this.port.drop(grant, lent?.member, signal);
+      signal?.throwIfAborted();
+      if (dropped) await this.#remember({ dropped: [grant] });
+      return dropped;
     } finally {
       this.#dropping.delete(grant);
     }
@@ -674,9 +696,6 @@ export class LibraryAssistantAuthority {
   #holdRead: string | null = null;
   /** Whether `#published` has been read back from this device's records (`Publication.sent`). */
   #restored = false;
-  /** Whether this service has said the projection was up to date when it was opened. */
-  #saidCurrent = false;
-
   /**
    * §15 *Publishing*: build the projection for every live read grant and send it when the lists changed (once they
    * have stood for 30 s, and no sooner than `MIN_INTERVAL_MS` after its last send) or 15 minutes have passed, never
@@ -695,11 +714,12 @@ export class LibraryAssistantAuthority {
    * done in a Worker of its own (`buildProjection`). One publish at a time: a tick that finds one under way sends
    * nothing.
    */
-  async publish(lent: AssistantConnection | null = null): Promise<string[]> {
+  async publish(lent?: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     if (this.#publishing) return [];
     this.#publishing = true;
     try {
-      return await this.#publish(lent);
+      return await this.#publish(lent, signal);
     } finally {
       this.#publishing = false;
     }
@@ -707,7 +727,7 @@ export class LibraryAssistantAuthority {
 
   #publishing = false;
 
-  async #publish(lent: AssistantConnection | null): Promise<string[]> {
+  async #publish(lent?: AssistantConnection | null, signal?: AbortSignal): Promise<string[]> {
     const read = this.#row(READ_ROW, lent);
     if (!read || !Object.keys(read.values).length) return [];
     const now = this.port.now();
@@ -719,6 +739,7 @@ export class LibraryAssistantAuthority {
       : this.port.inputs();
     if (inputs === this.#builtFrom && now < this.#dueAt) return [];
     const records = await this.#load();
+    signal?.throwIfAborted();
     const kept = records.publication;
     if (!this.#restored) {
       this.#restored = true;
@@ -752,12 +773,10 @@ export class LibraryAssistantAuthority {
       localRevoked,
     ]).slice(1, -1);
     const key = await digestText(`[${JSON.stringify(library)},${documents},${known},${rows}]`);
+    signal?.throwIfAborted();
     if (kept?.key === key && now < kept.dueAt) {
       this.#builtFrom = inputs;
       this.#dueAt = kept.dueAt;
-      // Said once a page: that a page opened on the library as it was published did not build it again.
-      if (!this.#saidCurrent) console.info('den: assistant projection up to date');
-      this.#saidCurrent = true;
       return [];
     }
     const request = JSON.stringify({
@@ -771,8 +790,6 @@ export class LibraryAssistantAuthority {
       random: this.port.random(),
       now,
     });
-    const started = performance.now();
-    let buildMs: number;
     let built: ProjectionAnswer;
     try {
       built = policyAnswer<ProjectionAnswer>(
@@ -780,17 +797,17 @@ export class LibraryAssistantAuthority {
           `${request.slice(0, -1)},"documents":${documents},"layouts":${known}}`,
         ),
       );
-      buildMs = Math.round(performance.now() - started);
+      signal?.throwIfAborted();
     } catch (error) {
+      signal?.throwIfAborted();
       // §15: a library past 64 parts is never published cut short. It stays unpublished until it is smaller.
       if (!(error instanceof Error) || !error.message.endsWith(': too_large')) throw error;
-      console.error('den: the library is too large to publish for assistants', error);
+      console.error('asst/projection-large', error);
       // Not tried again until the library changes, or the heartbeat comes round.
       this.#builtFrom = inputs;
       this.#dueAt = now + HEARTBEAT_MS;
       return [];
     }
-    this.#builtFrom = inputs;
     if (this.#pending?.digest !== built.digest)
       this.#pending = { digest: built.digest, since: now };
     const settleAt = this.#pending.since + PUBLISH_DEBOUNCE_MS;
@@ -808,12 +825,14 @@ export class LibraryAssistantAuthority {
     let holdUntil = Infinity;
     for (const entry of built.publish) {
       if (now >= sendAt(entry.grant)) {
-        const answer = await this.port.putProjection(
+        const answer = await this.port.put(
           entry.grant,
           entry.set,
           entry.parts,
           lent?.member,
+          signal,
         );
+        signal?.throwIfAborted();
         if (answer === true) {
           this.#published.set(entry.grant, { digest: built.digest, at: now });
           this.#retryAt.delete(entry.grant);
@@ -834,17 +853,20 @@ export class LibraryAssistantAuthority {
       );
     }
     // No live grant holds nothing back: the next change of the inputs builds.
-    this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
-    this.#holdRead = readKey;
     for (const grant of built.delete) {
       this.#published.delete(grant);
-      if (!records.dropped.includes(grant)) await this.#drop(grant, lent);
+      if (!records.dropped.includes(grant) && !(await this.#drop(grant, lent, signal)))
+        dueAt = now + PUBLISH_DEBOUNCE_MS;
     }
-    this.#dueAt = dueAt;
     // Metadata can keep arriving while the projection Worker builds. The key still names the exact request above,
     // so a later page rebuilds when these additions change it; carry them with the publication so closing this page
     // does not lose them and force every fresh page to discover the same layouts during its own build.
     const rememberedLayouts = { ...layouts, ...this.port.layouts() };
+    signal?.throwIfAborted();
+    this.#builtFrom = inputs;
+    this.#holdUntil = Number.isFinite(holdUntil) ? holdUntil : 0;
+    this.#holdRead = readKey;
+    this.#dueAt = dueAt;
     await this.#remember({
       publication: {
         key,
@@ -854,8 +876,6 @@ export class LibraryAssistantAuthority {
         layouts: rememberedLayouts,
       },
     });
-    // Once it is recorded: a page opened after this line neither builds nor sends it again.
-    console.info(`den: assistant projection built in ${buildMs}ms, sent ${sent.length}`);
     return sent;
   }
 
@@ -868,7 +888,7 @@ export class LibraryAssistantAuthority {
   #open(
     sealed: string,
     records: AssistantRecords,
-    lent: AssistantConnection | null,
+    lent: AssistantConnection | null | undefined,
     tv: { awakeSince: number } | null,
   ): Opened {
     return assistantPolicy<Opened>({
@@ -903,7 +923,7 @@ export class LibraryAssistantAuthority {
    */
   async apply(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
-    lent: AssistantConnection | null = null,
+    lent?: AssistantConnection | null,
     tv: { awakeSince: number } | null = null,
   ): Promise<{
     results: AssistantApplied[];
@@ -934,9 +954,7 @@ export class LibraryAssistantAuthority {
         if (opened.reject === 'from_future') {
           held = Math.min(held, seq);
           // Loud: a clock more than five minutes off is a fault the household should see.
-          console.error(
-            'den: an assistant request is dated more than five minutes ahead of this device’s clock; it stays queued until the clocks agree',
-          );
+          console.error('asst/request-clock-ahead');
         }
         results.push({ seq, outcome: 'rejected', reason: opened.reject });
         continue;
@@ -953,7 +971,7 @@ export class LibraryAssistantAuthority {
           )),
         );
       } catch (error) {
-        console.warn('den: an assistant request could not be applied yet', error);
+        console.warn('asst/request-apply', error);
         // Nothing of it was kept, so this device must not refuse it as applied when it comes again.
         records = await this.#remember({ prune: [accept.setting] });
         // Neither it nor any request not reached yet is acknowledged: they are delivered again.
@@ -983,7 +1001,7 @@ export class LibraryAssistantAuthority {
   /** Open and apply Hearth's opaque completion receipts through the ordinary progress command. */
   async applyPlaybackReceipts(
     messages: ReadonlyArray<{ seq: number; sealed: string }>,
-    lent: AssistantConnection | null = null,
+    lent?: AssistantConnection | null,
   ): Promise<{ ack: number | null; applied: number }> {
     type OpenedReceipt =
       | {
@@ -1069,7 +1087,7 @@ export class LibraryAssistantAuthority {
         applied += 1;
         ack = message.seq;
       } catch (error) {
-        console.warn('den: a playback receipt could not be applied yet', error);
+        console.warn('asst/receipt-apply', error);
         break;
       }
     }
@@ -1153,7 +1171,7 @@ export class LibraryAssistantAuthority {
     try {
       await this.port.replace({ ...row, values });
     } catch (error) {
-      console.warn('den: applied assistant requests could not be pruned', error);
+      console.warn('asst/prune', error);
     }
   }
 }
