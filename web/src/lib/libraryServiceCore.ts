@@ -631,6 +631,7 @@ function isConcurrentRequest(
     kind === 'library.metadata' ||
     kind === 'source.wait' ||
     kind === 'download.sources' ||
+    kind === 'assistant.connection' ||
     kind === 'assistant.publish'
   );
 }

@@ -502,6 +502,68 @@ describe('LibraryServiceCore', () => {
     expect(signals[1]?.aborted).toBe(false);
   });
 
+  it('cancels a held assistant connection lookup without blocking replacement publish or actor work', async () => {
+    let connectionStarted!: () => void;
+    const started = new Promise<void>((resolve) => (connectionStarted = resolve));
+    const held = {
+      ...authority(),
+      async query(query: LibraryQuery, signal?: AbortSignal) {
+        if (query.kind !== 'assistant.connection') throw new Error('unsupported query');
+        connectionStarted();
+        await new Promise<void>((_resolve, reject) =>
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        );
+        return { kind: 'assistant.connection' as const, connection: null };
+      },
+      async task(task: { kind: string }) {
+        if (task.kind !== 'assistant.publish') throw new Error('unsupported task');
+        return { result: { kind: 'assistant.publish' as const, published: 1 }, affected: [] };
+      },
+    };
+    const core = new LibraryServiceCore(async () => held, 'instance-1');
+    await core.dispatch(hello);
+    const requestId = 'held-assistant-connection';
+    const connection = core.dispatch({
+      type: 'query',
+      protocol: LIBRARY_SERVICE_PROTOCOL,
+      requestId,
+      query: { kind: 'assistant.connection' },
+    });
+    await started;
+    await core.dispatch({ type: 'cancel', protocol: LIBRARY_SERVICE_PROTOCOL, requestId });
+    await expect(connection).resolves.toEqual([
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ code: 'internal' }),
+      }),
+    ]);
+    await expect(
+      core.dispatch({
+        type: 'task',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'replacement-publish',
+        operationId: 'replacement-publish',
+        task: { kind: 'assistant.publish' },
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        type: 'task-result',
+        result: { kind: 'assistant.publish', published: 1 },
+      }),
+    ]);
+    await expect(
+      core.dispatch({
+        type: 'command',
+        protocol: LIBRARY_SERVICE_PROTOCOL,
+        requestId: 'command-after-connection-cancel',
+        operationId: 'command-after-connection-cancel',
+        command: { kind: 'watchlist.add', title },
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'command-result' })]),
+    );
+  });
+
   it('carries playback receipt ensure and apply through the production task lane', async () => {
     const tasks: string[] = [];
     const held = {

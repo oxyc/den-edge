@@ -99,6 +99,17 @@ const EMPTY: AssistantRecords = {
   dropped: [],
 };
 
+const abortable = <T>(work: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return work;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+};
+
 const sameConfigValue = (left: ConfigValue | null | undefined, right: ConfigValue): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
@@ -350,12 +361,12 @@ export class LibraryAssistantAuthority {
    * head, with every revocation its rows show joined to this device's records first. Null while den-edge does not
    * know this library as a member.
    */
-  async lend(): Promise<AssistantConnection | null> {
+  async lend(signal?: AbortSignal): Promise<AssistantConnection | null> {
     if (__DEN_TV_LEGACY_JS_CORE__) return null;
-    await this.port.refresh();
+    await abortable(this.port.refresh(), signal);
     if (CONNECTION_ROWS.some((name) => Object.keys(this.#row(name)?.values ?? {}).length))
-      await this.grants();
-    const member = await this.port.membership();
+      await abortable(this.grants(), signal);
+    const member = await abortable(this.port.membership(), signal);
     if (!member) return null;
     const rows = CONNECTION_ROWS.flatMap((name) => {
       const row = this.#row(name);
@@ -363,7 +374,7 @@ export class LibraryAssistantAuthority {
         ? [{ kind: row.kind, schema: row.schema, name: row.name, values: row.values }]
         : [];
     });
-    return { member, rows, revoked: (await this.#load()).revoked };
+    return { member, rows, revoked: (await abortable(this.#load(), signal)).revoked };
   }
 
   async #load(strict = false): Promise<AssistantRecords> {

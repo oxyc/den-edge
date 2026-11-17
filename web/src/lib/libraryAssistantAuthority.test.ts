@@ -658,6 +658,26 @@ test('an abort while durable publication records load cannot suppress the surviv
   expect(savedRecords()?.publication?.sent).toHaveProperty(grant);
 });
 
+test('an aborted held split-household connection lookup releases without inheriting replacement authority', async () => {
+  const shared = library();
+  let release!: () => void;
+  let hold = true;
+  const made = device(shared, [], {
+    refresh: async () => {
+      if (hold) await new Promise<void>((resolve) => (release = resolve));
+    },
+  });
+  const lifecycle = new AbortController();
+  const stalled = made.authority.lend(lifecycle.signal);
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+  lifecycle.abort();
+  await expect(stalled).rejects.toMatchObject({ name: 'AbortError' });
+  hold = false;
+  await expect(made.authority.lend()).resolves.toMatchObject({ member: expect.any(Object) });
+  release();
+});
+
 test('an aborted held projection DELETE is not remembered and remains idempotently retryable', async () => {
   const shared = library();
   let settle!: (value: boolean) => void;

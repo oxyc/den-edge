@@ -823,7 +823,7 @@ export class LibraryLogAuthority {
       case 'assistant.connection':
         return {
           kind: 'assistant.connection',
-          connection: this.#options.mode === 'local' ? null : await this.#assistant.lend(),
+          connection: this.#options.mode === 'local' ? null : await this.#assistant.lend(signal),
         };
       case 'download.refresh':
         return {
