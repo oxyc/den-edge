@@ -23,11 +23,16 @@ class MemoryVault implements ProfileKidCreateVault {
   readonly reads: string[] = [];
   readonly writes: string[] = [];
   readonly failedWrites = new Map<string, number>();
+  failReceiptWrites = 0;
 
   constructor(readonly libraryId = HOUSEHOLD) {}
 
   async keepRequired(name: string, value: unknown, binding = ''): Promise<void> {
     this.writes.push(name);
+    if (name.startsWith('profile-create/v2/receipt/') && this.failReceiptWrites > 0) {
+      this.failReceiptWrites -= 1;
+      throw new Error('receipt storage unavailable');
+    }
     const failures = this.failedWrites.get(name) ?? 0;
     if (failures > 0) {
       this.failedWrites.set(name, failures - 1);
@@ -58,6 +63,14 @@ function ownerDirectory(): ProfileDirectoryDocument {
     expect?: { directory: unknown };
   }>;
   return validateStoredProfileDirectory(structuredClone(cases[0]!.expect!.directory));
+}
+
+async function receiptName(operationId: string): Promise<[string, string]> {
+  const digest = Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(operationId))),
+    (byte) => byte.toString(16).padStart(2, '0'),
+  ).join('');
+  return [`profile-create/v2/receipt/${digest}`, `profile-create:${HOUSEHOLD}:2:receipt:${digest}`];
 }
 
 function harness(
@@ -269,7 +282,15 @@ describe('persistent Kid profile Worker lifecycle', () => {
   it('recovers when the indexed receipt lands before terminal cleanup', async () => {
     const h = harness();
     const first = await h.coordinator.begin('receipt-before-clear', 'Sam', 8, stamps);
-    h.vault.failedWrites.set('profile-create/v2/state', 1);
+    h.vault.failReceiptWrites = 1;
+
+    await expect(h.coordinator.acknowledge(first.receipt)).rejects.toThrow(
+      'receipt storage unavailable',
+    );
+    expect(
+      [...h.vault.values.keys()].filter((name) => name.startsWith('profile-create/v2/receipt/')),
+    ).toHaveLength(0);
+    h.vault.failedWrites.set('profile-create/v1/state', 1);
 
     await expect(h.coordinator.acknowledge(first.receipt)).rejects.toThrow('storage unavailable');
     expect(
@@ -289,16 +310,16 @@ describe('persistent Kid profile Worker lifecycle', () => {
     await h.coordinator.acknowledge(first.receipt);
     const indexed = [...h.vault.values.entries()].find(([name]) =>
       name.startsWith('profile-create/v2/receipt/'),
-    )![1] as { receipt: unknown };
+    )![1];
     h.vault.values.clear();
     h.vault.bindings.clear();
     h.vault.values.set('profile-create/v1/state', {
       version: 1,
       householdId: HOUSEHOLD,
-      settled: [indexed.receipt],
+      settled: [indexed],
     });
     h.vault.bindings.set('profile-create/v1/state', `profile-create:${HOUSEHOLD}:1`);
-    h.vault.failedWrites.set('profile-create/v2/state', 1);
+    h.vault.failedWrites.set('profile-create/v1/state', 1);
     const restarted = () =>
       new ProfileKidCreateCoordinator(HOUSEHOLD, new ProfileKidCreateStore(h.vault), h.io);
 
@@ -306,8 +327,7 @@ describe('persistent Kid profile Worker lifecycle', () => {
       'storage unavailable',
     );
     await expect(restarted().begin('legacy-operation', 'Sam', 8, stamps)).resolves.toEqual(first);
-    expect(h.vault.values.has('profile-create/v1/state')).toBe(false);
-    expect(h.vault.values.get('profile-create/v2/state')).toEqual({
+    expect(h.vault.values.get('profile-create/v1/state')).toEqual({
       version: 2,
       householdId: HOUSEHOLD,
     });
@@ -346,7 +366,7 @@ describe('persistent Kid profile Worker lifecycle', () => {
         },
       );
       expect(vault.reads).toEqual([
-        'profile-create/v2/state',
+        'profile-create/v1/state',
         expect.stringMatching(/^profile-create\/v2\/receipt\/[0-9a-f]{64}$/),
       ]);
     },
@@ -377,11 +397,19 @@ describe('persistent Kid profile Worker lifecycle', () => {
       await h.coordinator.acknowledge(receipt.receipt);
     }
 
-    const envelope = h.vault.values.get('profile-create/v2/state');
+    const envelope = h.vault.values.get('profile-create/v1/state');
     expect(new TextEncoder().encode(JSON.stringify(envelope)).byteLength).toBeLessThan(256);
+    const receipts = [...h.vault.values.entries()].filter(([name]) =>
+      name.startsWith('profile-create/v2/receipt/'),
+    );
+    expect(receipts).toHaveLength(36);
     expect(
-      [...h.vault.values.keys()].filter((name) => name.startsWith('profile-create/v2/receipt/')),
-    ).toHaveLength(36);
+      Math.max(
+        ...receipts.map(
+          ([, receipt]) => new TextEncoder().encode(JSON.stringify(receipt)).byteLength,
+        ),
+      ),
+    ).toBeLessThan(2_048);
     expect(JSON.stringify([...h.vault.values.values()])).not.toContain('"key"');
     const next = await h.coordinator.begin('no-arbitrary-cap', 'Another Kid', 8, stamps);
     await h.coordinator.acknowledge(next.receipt);
@@ -390,7 +418,7 @@ describe('persistent Kid profile Worker lifecycle', () => {
       h.coordinator.begin(`${'😀'.repeat(120)}-0`, '😀'.repeat(64), 8, stamps),
     ).resolves.toEqual(first);
     expect(h.vault.reads).toEqual([
-      'profile-create/v2/state',
+      'profile-create/v1/state',
       expect.stringMatching(/^profile-create\/v2\/receipt\/[0-9a-f]{64}$/),
     ]);
     expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledTimes(37);
@@ -416,14 +444,30 @@ describe('persistent Kid profile Worker lifecycle', () => {
       candidate.startsWith('profile-create/v2/receipt/'),
     )!;
     const envelope = structuredClone(h.vault.values.get(name)) as {
-      receipt: { result: { profile: string } };
+      result: { profile: string };
     };
-    envelope.receipt.result.profile = 'f'.repeat(32);
+    envelope.result.profile = 'f'.repeat(32);
     h.vault.values.set(name, envelope);
 
     await expect(h.coordinator.begin('tampered-mapping', 'Sam', 8, stamps)).rejects.toThrow(
       /not directory-bound/,
     );
+    expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed if an indexed record contains a different full operation id', async () => {
+    const h = harness();
+    const created = await h.coordinator.begin('indexed-source', 'Sam', 8, stamps);
+    await h.coordinator.acknowledge(created.receipt);
+    const sourceName = [...h.vault.values.keys()].find((candidate) =>
+      candidate.startsWith('profile-create/v2/receipt/'),
+    )!;
+    const source = structuredClone(h.vault.values.get(sourceName));
+    const [collisionName, collisionBinding] = await receiptName('indexed-target');
+    h.vault.values.set(collisionName, source);
+    h.vault.bindings.set(collisionName, collisionBinding);
+
+    await expect(h.store.create('indexed-target', 'Sam', 8, stamps)).rejects.toThrow(/collided/);
     expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledOnce();
   });
 
