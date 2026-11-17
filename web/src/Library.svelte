@@ -3398,6 +3398,7 @@
       episode={target.episode}
       filename={target.filename}
       content={session.content}
+      region={detailPrefs.region}
       {scout}
       {releaseAuthority}
       {routes}

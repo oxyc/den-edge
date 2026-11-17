@@ -30,12 +30,23 @@ function session(sequence, audioTrack = 0) {
   };
 }
 
-async function routePlayback(page, externalSubtitles = undefined, subtitleTracks = undefined) {
+async function routePlayback(
+  page,
+  externalSubtitles = undefined,
+  subtitleTracks = undefined,
+  { duration = 60, runtime } = {},
+) {
   let sequence = 0;
   const ended = [];
   const reports = [];
   const sessionRequests = [];
-  await page.route('**/tmdb/3/**', (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
+  await page.route('**/tmdb/3/**', (route) =>
+    route.fulfill({
+      json: new URL(route.request().url()).pathname.endsWith('/external_ids')
+        ? { imdb_id: 'tt42' }
+        : { id: 42, title: 'The Movie', release_date: '2001-01-01', runtime, genres: [] },
+    }),
+  );
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
@@ -50,6 +61,7 @@ async function routePlayback(page, externalSubtitles = undefined, subtitleTracks
       status: 201,
       json: {
         ...session(sequence, request.audioTrack ?? 0),
+        duration,
         ...(subtitleTracks ? { subtitles: subtitleTracks } : {}),
         externalSubtitles,
       },
@@ -78,6 +90,24 @@ async function routePlayback(page, externalSubtitles = undefined, subtitleTracks
   });
   return { ended, sessionRequests, reports };
 }
+
+test('Samsung AVPlay saves exact progress with metadata when the engine duration is unknown', async ({
+  page,
+}) => {
+  await installAvplayInitScript(page, 0);
+  await routePlayback(page, undefined, undefined, { duration: 0, runtime: 2 });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
+  await page.evaluate(() => window.__avplayFixture.latest().oncurrentplaytime(31_000));
+  expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
+  await expect
+    .poll(() => page.locator('.player video').evaluate((element) => element.paused))
+    .toBe(true);
+
+  await expect
+    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
+    .toMatchObject({ fraction: 31 / 120, seconds: 31, playing: false });
+});
 
 test('Samsung AVPlay bridges resume, transport, tracks, stale callbacks and visibility cleanup', async ({
   page,

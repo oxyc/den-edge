@@ -43,9 +43,42 @@ async function trackIntervals(page) {
   });
 }
 
-async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
+async function mockPlayer(
+  page,
+  {
+    onSession,
+    onSkip,
+    onTmdb,
+    releases = [],
+    sessionAnswer = session,
+    runtime,
+    episodeRuntime,
+  } = {},
+) {
   await guardNetwork(page);
-  await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
+  await routeTmdb(page, (route) => {
+    if (onTmdb) return onTmdb(route);
+    const path = new URL(route.request().url()).pathname;
+    return route.fulfill({
+      json: path.endsWith('/external_ids')
+        ? { imdb_id: 'tt42' }
+        : path.includes('/season/')
+          ? {
+              episodes: [
+                { episode_number: 1, name: 'Episode one', runtime: episodeRuntime },
+                { episode_number: 2, name: 'Episode two', runtime: 3 },
+              ],
+            }
+          : {
+              id: 42,
+              ...(episodeRuntime === undefined
+                ? { title: 'The Movie', release_date: '2001-01-01' }
+                : { name: 'The Series', first_air_date: '2001-01-01' }),
+              runtime,
+              genres: [],
+            },
+    });
+  });
   await page.route(
     `${ORIGIN}/skipdb/**`,
     onSkip ?? ((route) => route.fulfill({ status: 404, json: {} })),
@@ -54,7 +87,7 @@ async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
   await page.route(
     `${ORIGIN}/direct/session`,
-    onSession ?? ((route) => route.fulfill({ status: 201, json: session })),
+    onSession ?? ((route) => route.fulfill({ status: 201, json: sessionAnswer })),
   );
   await page.route(`${ORIGIN}/direct/releases`, (route) => route.fulfill({ json: { releases } }));
   await page.route(`${ORIGIN}/direct/s/**`, async (route) => {
@@ -69,6 +102,159 @@ async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
     });
   });
 }
+
+test('unknown media duration uses trusted title runtime only for the saved fraction', async ({
+  page,
+}) => {
+  let releaseRuntime;
+  let startRuntime;
+  const held = new Promise((resolve) => {
+    releaseRuntime = resolve;
+  });
+  const started = new Promise((resolve) => {
+    startRuntime = resolve;
+  });
+  await mockPlayer(page, {
+    sessionAnswer: { ...session, duration: 0 },
+    onTmdb: async (route) => {
+      if (new URL(route.request().url()).pathname.endsWith('/external_ids'))
+        return route.fulfill({ json: { imdb_id: 'tt42' } });
+      startRuntime();
+      await held;
+      return route.fulfill({
+        json: {
+          id: 42,
+          title: 'The Movie',
+          release_date: '2001-01-01',
+          runtime: 2,
+          genres: [],
+        },
+      });
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  await started;
+  const video = page.locator('.player video');
+  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
+    timeout: 30_000,
+  });
+  await video.evaluate((element) => {
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
+    element.currentTime = 31;
+    element.pause();
+  });
+  await expect(page.getByTestId('player-progress-writes')).toHaveText('0');
+  releaseRuntime();
+
+  await expect
+    .poll(async () => {
+      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+      return saved.seconds === 31 ? saved.fraction : 0;
+    })
+    .toBeCloseTo(31 / 120, 2);
+});
+
+test('unknown episode duration prefers its exact runtime over the series estimate', async ({
+  page,
+}) => {
+  await mockPlayer(page, {
+    sessionAnswer: { ...session, duration: 0 },
+    runtime: 10,
+    episodeRuntime: 2,
+  });
+  await page.goto(`${ORIGIN}/test/player.html?series&episodes`);
+  const video = page.locator('.player video');
+  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
+    timeout: 30_000,
+  });
+  await video.evaluate((element) => {
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
+    element.currentTime = 31;
+    element.pause();
+  });
+
+  await expect
+    .poll(async () => {
+      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+      return saved.seconds === 31 ? saved.fraction : 0;
+    })
+    .toBeCloseTo(31 / 120, 2);
+});
+
+test('late runtime from a replaced episode cannot become the active denominator', async ({
+  page,
+}) => {
+  let releaseFirst;
+  let startFirst;
+  const firstHeld = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const firstStarted = new Promise((resolve) => {
+    startFirst = resolve;
+  });
+  await mockPlayer(page, {
+    sessionAnswer: { ...session, duration: 0 },
+    onTmdb: async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/external_ids')) return route.fulfill({ json: { imdb_id: 'tt42' } });
+      if (path.endsWith('/season/1')) {
+        startFirst();
+        await firstHeld;
+        return route
+          .fulfill({ json: { episodes: [{ episode_number: 1, name: 'Old', runtime: 1 }] } })
+          .catch(() => undefined);
+      }
+      if (path.endsWith('/season/2'))
+        return route.fulfill({
+          json: { episodes: [{ episode_number: 1, name: 'Current', runtime: 3 }] },
+        });
+      return route.fulfill({
+        json: { id: 42, name: 'The Series', first_air_date: '2001-01-01', runtime: 10, genres: [] },
+      });
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html?series&replaceEpisode`);
+  await firstStarted;
+  await page.getByTestId('replace-player-episode').evaluate((button) => button.click());
+  const video = page.locator('.player video');
+  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
+    timeout: 30_000,
+  });
+  await video.evaluate((element) => {
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
+    element.currentTime = 31;
+    element.pause();
+  });
+  await expect
+    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
+    .toMatchObject({ fraction: 31 / 180, seconds: 31, playing: false });
+
+  releaseFirst();
+  await video.evaluate(async (element) => {
+    await element.play();
+    element.currentTime = 32;
+    element.pause();
+  });
+  await expect
+    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
+    .toMatchObject({ fraction: 32 / 180, seconds: 32, playing: false });
+});
+
+test('unknown media duration without trustworthy runtime remains fail-closed', async ({ page }) => {
+  await mockPlayer(page, { sessionAnswer: { ...session, duration: 0 } });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  const video = page.locator('.player video');
+  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
+    timeout: 30_000,
+  });
+  await video.evaluate((element) => {
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
+    element.currentTime = 31;
+    element.pause();
+  });
+
+  await expect(page.getByTestId('player-progress-writes')).toHaveText('0');
+});
 
 test('playback progress clears startup and leaves no hls.js head poll behind', async () => {
   const browser = await chromium.launch({

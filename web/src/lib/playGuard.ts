@@ -40,6 +40,19 @@ export async function titleAllowed(
   );
 }
 
+/** The existing region-keyed detail lookup, shared by admission and post-start metadata consumers. */
+export async function titleDetail(
+  content: ContentServiceClientPort,
+  title: { type: MediaType; id: number },
+  region: string,
+  signal?: AbortSignal,
+) {
+  const answer = await content
+    .query({ kind: 'title.detail', title: { type: title.type, id: title.id }, region }, signal)
+    .catch(() => null);
+  return answer?.detail.state === 'ready' ? answer.detail.value : null;
+}
+
 /**
  * Resolves to the refusal message when `ref` may not play, or `null` when it may.
  *
@@ -55,12 +68,8 @@ export async function playGuard(
   if (!(await titleAllowed(ref, { content, restricted, signal }))) return BLOCKED_MESSAGE;
   if (signal?.aborted) return BLOCKED_MESSAGE;
   if (!ceiling) return null;
-  const request = { kind: 'title.detail' as const, title: ref, region };
-  const answer = await (signal ? content.query(request, signal) : content.query(request)).catch(
-    () => null,
-  );
+  const detail = await titleDetail(content, ref, region, signal);
   if (signal?.aborted) return BLOCKED_MESSAGE;
-  const detail = answer?.detail.state === 'ready' ? answer.detail.value : null;
   if (!detail) return BLOCKED_MESSAGE;
   return isBlocked(detail.certifications, region, ceiling) ? BLOCKED_MESSAGE : null;
 }
