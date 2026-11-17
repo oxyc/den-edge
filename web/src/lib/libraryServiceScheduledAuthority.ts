@@ -349,6 +349,9 @@ export function libraryLogMaintenance(
   return {
     mode,
     async run(options) {
+      // Foreground readiness has already been signalled before this scheduler runs. Keep upgrade storage I/O off the
+      // first paint and retry a failed bounded page on a later maintenance pass.
+      await log.cleanupRetiredOwnerSplitRecords();
       let changed =
         mode === 'online' ? await log.refresh(options?.waitSeconds, options?.stopWaiting) : false;
       if (log.moved) return { changed, status: logStatus(log) };

@@ -14,6 +14,7 @@ import { libraryGenerationVault } from './libraryRetirementLease';
 import { openLibraryLocalValue, sealLibraryLocalValue } from './libraryLocalValue';
 import { LibraryFactStore, type LibraryFactEntry } from './libraryFactStore';
 import { retryAfterMs } from './retryAfter';
+import { RetiredOwnerSplitRecords } from './retiredOwnerSplitRecords';
 import { validateStoredProfileDirectory, type ProfileDirectoryDocument } from './profileDirectory';
 import {
   kidApprovalName,
@@ -505,6 +506,7 @@ export class LibraryLog {
   private factStore: LibraryFactStore | null = null;
   private runtimeFallback = false;
   private runtimeChannel?: BroadcastChannel;
+  private retiredOwnerSplitRecords?: RetiredOwnerSplitRecords;
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -939,6 +941,7 @@ export class LibraryLog {
       vault,
       wire,
     );
+    log.retiredOwnerSplitRecords = new RetiredOwnerSplitRecords(vault, keys.id);
     await log.initializeRuntime();
     log.factStore = vault ? await LibraryFactStore.open(libraryKey, vault) : null;
     await ensureSyncPolicy();
@@ -2420,6 +2423,7 @@ export class LibraryLog {
       generationVault,
       wire,
     );
+    if (vault) log.retiredOwnerSplitRecords = new RetiredOwnerSplitRecords(vault, keys.id);
     await log.initializeRuntime();
     log.factStore = generationVault
       ? await LibraryFactStore.open(libraryKey, generationVault)
@@ -3212,6 +3216,11 @@ export class LibraryLog {
   async discardKept(name: string): Promise<void> {
     if (!this.local) throw new Error('Encrypted library storage is unavailable');
     await this.local.vault.delete(`${this.keys.id}:${name}`);
+  }
+
+  /** One bounded pass over records left by the removed Web Owner-split implementation. */
+  async cleanupRetiredOwnerSplitRecords(): Promise<boolean> {
+    return (await this.retiredOwnerSplitRecords?.run()) ?? true;
   }
 
   /**

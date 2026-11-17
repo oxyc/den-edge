@@ -58,6 +58,12 @@ export async function libraryGenerationVault(vault: Vault, id: string): Promise<
             ]),
         }
       : {}),
+    ...(vault.keys
+      ? {
+          keys: async (prefix: string, after: string | undefined, limit: number) =>
+            (await vault.keys!(key(prefix), after && key(after), limit)).map(unkey),
+        }
+      : {}),
     put: (value, bytes) => vault.put(key(value), bytes),
     ...(vault.update
       ? {

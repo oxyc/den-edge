@@ -261,6 +261,13 @@ describe('indexedVault', () => {
     expect(await vault.page?.('lib:pending:', 'lib:pending:a:longer', 2)).toEqual([
       ['lib:pending:b', bytes(2)],
     ]);
+    expect(await vault.keys?.('lib:pending:', undefined, 2)).toEqual([
+      'lib:pending:a',
+      'lib:pending:a:longer',
+    ]);
+    expect(await vault.keys?.('lib:pending:', 'lib:pending:a:longer', 2)).toEqual([
+      'lib:pending:b',
+    ]);
 
     await vault.commit?.([
       { kind: 'put', key: 'lib:pending:c', value: bytes(6) },

@@ -16,6 +16,8 @@ export interface Vault {
     after: string | undefined,
     limit: number,
   ): Promise<Array<[key: string, value: Uint8Array]>>;
+  /** One bounded page of keys whose names start with `prefix`, without reading their values. */
+  keys?(prefix: string, after: string | undefined, limit: number): Promise<string[]>;
   put(key: string, value: Uint8Array): Promise<void>;
   /** Atomically replace one value from its current value. `updater` runs synchronously inside a write transaction. */
   update?(
@@ -268,6 +270,20 @@ export function indexedVault(factory: IDBFactory): Vault {
           );
       });
       return found ?? [];
+    },
+    keys: async (prefix, after, limit) => {
+      if (!Number.isSafeInteger(limit) || limit <= 0)
+        throw new Error('Vault key page limit must be positive');
+      const found = await run('readonly', (kept) => {
+        const upper = prefix + String.fromCharCode(0xffff);
+        const range = after
+          ? IDBKeyRange.bound(after, upper, true, false)
+          : IDBKeyRange.bound(prefix, upper);
+        return kept.getAllKeys(range, limit);
+      });
+      return (found ?? []).flatMap((key) =>
+        typeof key === 'string' && key.startsWith(prefix) ? [key] : [],
+      );
     },
     put: async (key, value) => {
       await run('readwrite', (kept) => kept.put(value, key));
