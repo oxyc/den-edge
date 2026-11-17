@@ -31,7 +31,7 @@ export interface TitleSource {
 /** The releases as `rank_releases` takes them: scout's attributes, with each one's identity and file name (a
  *  download's pick sinks an AVI or XviD file by its name, which scout reads no codec from). */
 export const rankable = (sources: TitleSource[]) =>
-  sources.map(({ attributes, identity, filename, size, seeders }) => ({
+  sources.map(({ attributes, identity, filename, size, seeders }): Record<string, unknown> => ({
     ...attributes,
     identity,
     filename,
