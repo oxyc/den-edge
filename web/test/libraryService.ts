@@ -523,7 +523,9 @@ export function fixtureLibraryService({
       contentWarnings: () => undefined,
     }),
     ...(libraryKey ? { libraryKey, vault } : {}),
-    refreshDownloads: refreshDownloads ?? (async () => driver.run({ force: true })),
+    refreshDownloads:
+      refreshDownloads ??
+      (async () => driver.run({ force: true }, effects.wanted ? effects : null)),
     downloadArtwork,
   });
   const fixtureService = new FixtureService(

@@ -1487,7 +1487,7 @@ describe('DownloadCoordinator', () => {
     const driver = new DownloadCoordinatorDriver(queue);
     await queue.want(title);
 
-    await driver.run({ now: T0 + MINUTE, observedFor: 0 });
+    await driver.run({ now: T0 + MINUTE, observedFor: 0 }, {});
     expect(handed.map((items) => items.length)).toEqual([1]);
     const download = queue.get(NAME)!;
     shared.land(removedRow(download.row, [T0 + 2 * MINUTE, 0, DEVICE]));
@@ -1513,7 +1513,7 @@ describe('DownloadCoordinator', () => {
     });
     const driver = new DownloadCoordinatorDriver(queue);
 
-    await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
+    await driver.run({ now: T0 + 30_000, observedFor: 120_001 }, {});
     expect(handed).toEqual([[]]);
     await driver.run({ now: T0 + MINUTE, observedFor: 120_001 });
     expect(handed).toEqual([[]]);
@@ -1540,10 +1540,10 @@ describe('DownloadCoordinator', () => {
     const driver = new DownloadCoordinatorDriver(queue);
     const old = driver.run({ now: T0, observedFor: 120_001 }, {});
     await sending;
-    const replacement = driver.run({ now: T0 + 30_000, observedFor: 120_001 }, {});
+    void driver.run({ now: T0 + 30_000, observedFor: 120_001 }, {});
     release();
     await expect(old).resolves.toBe(false);
-    await replacement;
+    await driver.run({ now: T0 + 30_000, observedFor: 120_001 });
     expect(handed).toEqual([0, 0]);
     await driver.run({ now: T0 + MINUTE, observedFor: 120_001 }, null);
     expect(handed).toHaveLength(2);
@@ -1576,7 +1576,7 @@ describe('DownloadCoordinator', () => {
     );
     const driver = new DownloadCoordinatorDriver(queue);
     await queue.want(title);
-    await driver.run({ now: T0 + MINUTE, observedFor: 0 });
+    await driver.run({ now: T0 + MINUTE, observedFor: 0 }, {});
     shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));
 
     const clearing = driver.run({
@@ -1615,7 +1615,7 @@ describe('DownloadCoordinator', () => {
     );
     const driver = new DownloadCoordinatorDriver(queue);
     await queue.want(title);
-    await driver.run({ now: T0 + MINUTE, observedFor: 0 });
+    await driver.run({ now: T0 + MINUTE, observedFor: 0 }, {});
     shared.land(removedRow(queue.get(NAME)!.row, [T0 + 2 * MINUTE, 0, DEVICE]));
 
     await expect(driver.run({ now: T0 + 2 * MINUTE, observedFor: 0 })).resolves.toBe(false);

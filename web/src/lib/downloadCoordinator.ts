@@ -113,7 +113,7 @@ export interface DownloadCoordinatorEffects {
   /** Maps a persisted ticket to one this service instance can reach. */
   ticket(url: string): string | null;
   /** Hand Hearth the wanted list and read back what it started (`hearthWanted`); absent with no Hearth. */
-  wanted?(items: WantedItem[], authority?: object): Promise<WantedStatus[] | null>;
+  wanted?(items: WantedItem[], authority: object): Promise<WantedStatus[] | null>;
 }
 
 export interface DownloadCoordinatorOptions {

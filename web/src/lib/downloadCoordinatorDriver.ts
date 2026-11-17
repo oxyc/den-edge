@@ -81,7 +81,7 @@ export class DownloadCoordinatorDriver {
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
   /** Exact Hearth binding, last acknowledged digest and its time. */
-  #hearth: [id?: object | null, digest?: string, at?: number] = [];
+  #hearth: [id: object | null, digest?: string, at?: number] = [null];
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
@@ -90,7 +90,6 @@ export class DownloadCoordinatorDriver {
   run(options: DownloadDriveOptions = {}, hearth?: object | null): Promise<boolean> {
     if (hearth !== undefined && this.#hearth[0] !== hearth) {
       this.#hearth = [hearth];
-      options.force = true;
     }
     // A forced pass (a refresh) is asked for figures from now: the pass in flight began before it, with an older
     // `now`, the rows as they were, and possibly other names, so one more pass follows it, shared by every refresh
@@ -139,11 +138,7 @@ export class DownloadCoordinatorDriver {
     if (!current()) return false;
     // A final removal still has work to do: clear Hearth's previously acknowledged non-empty list. Once that clear
     // is acknowledged there is no reason to acquire an otherwise idle download lease.
-    if (
-      !downloads.length &&
-      (!this.queue.effects.wanted || this.#hearth[0] === null || this.#hearth[1] === '[]')
-    )
-      return false;
+    if (!downloads.length && (this.#hearth[0] === null || this.#hearth[1] === '[]')) return false;
     await ensureDeferredSyncPolicy();
     if (!(await this.#holdLease(now, options.observedFor)) || !current()) return false;
     return this.#holderPass(now);
@@ -427,17 +422,16 @@ export class DownloadCoordinatorDriver {
     const send = this.queue.effects.wanted;
     const binding = this.#hearth;
     const [authority, last, at] = binding;
-    if (!send || authority === null) return false;
+    if (!send || !authority) return false;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
     if (last === digest && (!items.length || now - at! < HEARTH_EVERY)) return false;
     const statuses = await send(items, authority).catch(() => null);
     // Discovery can rebind the same driver while the old authority's request is in flight. Its late response belongs
     // only to that old authority and must neither acknowledge nor delay the replacement's identical digest.
-    if (this.#hearth !== binding) return false;
     // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. The existing
     // maintenance cadence retries it, while a changed (newer) digest also remains immediately eligible.
-    if (!statuses || !this.#active(now)) return false;
+    if (this.#hearth !== binding || !statuses || !this.#active(now)) return false;
     this.#hearth = [authority, digest, now];
     let wrote = false;
     for (const status of statuses) {
