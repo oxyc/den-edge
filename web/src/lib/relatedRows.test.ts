@@ -453,7 +453,7 @@ describe('moreLikeThisRow', () => {
 
     await pager.more();
     await pager.more();
-    expect(pager.failure).toBe('unknown');
+    expect(pager.failure).toBe('Couldn’t load');
     expect(pager.titles.map((title) => title.id)).toEqual(pageOf(100).map((title) => title.id));
 
     pageTwoDown = false;

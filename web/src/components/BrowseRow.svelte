@@ -17,7 +17,7 @@
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { gatesPlacement } from '../lib/placementGate';
-  import { Pager, pagerFailureCopy } from '../lib/pager.svelte';
+  import { Pager } from '../lib/pager.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
   import PosterRow from './PosterRow.svelte';
@@ -353,7 +353,7 @@
     {#if pager.failure}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
       <button class="retry" onclick={() => void pager.retry()}>
-        {i18n.phrase(pagerFailureCopy(pager.failure))}
+        {i18n.phrase(pager.failure)}
         Try again
       </button>
     {/if}

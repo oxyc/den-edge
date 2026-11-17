@@ -3,34 +3,17 @@
 // with nothing left to show. This keeps asking while that happens, a few pages at most per go.
 
 import { appendUniqueTitles } from './catalog';
-import { ContentServiceError } from './contentServiceClient';
 import type { Title } from './library';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
 const FILL = 8;
 const MAX_BURST = 3;
 
-export type PagerFailureReason = 'offline' | 'rate-limited' | 'unavailable' | 'unknown';
-
-const failureReason = (error: unknown): PagerFailureReason => {
-  if (globalThis.navigator?.onLine === false) return 'offline';
-  if (!(error instanceof ContentServiceError)) return 'unknown';
-  if (error.failure.code === 'rate-limited') return 'rate-limited';
-  return ['unavailable', 'not-ready', 'internal'].includes(error.failure.code)
-    ? 'unavailable'
-    : 'unknown';
-};
-
-const failureCopy: Record<PagerFailureReason, string> = {
-  offline: 'Couldn’t load this page. Check that this device is online.',
-  'rate-limited':
-    'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
-  unavailable: 'Services unavailable',
-  unknown: 'Something went wrong on this page.',
-};
-
-export const pagerFailureCopy = (failure: PagerFailureReason | null): string =>
-  failureCopy[failure ?? 'unknown'];
+export type PagerFailure =
+  | 'Couldn’t load this page. Check that this device is online.'
+  | 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
+  | 'Services unavailable'
+  | 'Couldn’t load';
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -42,7 +25,7 @@ export class Pager {
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
   /** The current Pager generation's failed `page + 1`, with only a presentation-safe reason. */
-  failure = $state<PagerFailureReason | null>(null);
+  failure = $state<PagerFailure | null>(null);
   #loading = false;
   readonly #lifetime = new AbortController();
   readonly #load: (page: number, signal?: AbortSignal) => Promise<Title[]>;
@@ -63,9 +46,8 @@ export class Pager {
     this.#loading = true;
     try {
       for (let burst = 0; burst < MAX_BURST && !this.done; burst++) {
-        const page = this.page + 1;
         try {
-          const next = await this.#load(page, signal);
+          const next = await this.#load(this.page + 1, signal);
           // A provider may ignore cancellation. Disposal still owns every observable mutation after the await.
           if (signal.aborted) break;
           this.page++;
@@ -74,7 +56,15 @@ export class Pager {
         } catch (error) {
           if (signal.aborted) break;
           // Keep raw provider/transport details out of presentation and ordinary device logs.
-          this.failure = failureReason(error);
+          const code = (error as { failure?: { code?: string } } | null)?.failure?.code;
+          this.failure =
+            globalThis.navigator?.onLine === false
+              ? 'Couldn’t load this page. Check that this device is online.'
+              : code === 'rate-limited'
+                ? 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
+                : ['unavailable', 'not-ready', 'internal'].includes(code as string)
+                  ? 'Services unavailable'
+                  : 'Couldn’t load';
           this.done = true;
           break;
         }

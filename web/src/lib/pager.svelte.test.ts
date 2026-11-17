@@ -110,15 +110,18 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
-    expect(pager.failure).toBe('unknown');
+    expect(pager.failure).toBe('Couldn’t load');
     expect(pager.page + 1).toBe(1);
   });
 
   it.each([
-    ['rate-limited', 'rate-limited'],
-    ['unavailable', 'unavailable'],
-    ['internal', 'unavailable'],
-    ['refused', 'unknown'],
+    [
+      'rate-limited',
+      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
+    ],
+    ['unavailable', 'Services unavailable'],
+    ['internal', 'Services unavailable'],
+    ['refused', 'Couldn’t load'],
   ] as const)('keeps only a safe %s service reason', async (code, reason) => {
     const pager = new Pager(
       async () => {
@@ -145,7 +148,7 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failure).toBe('offline');
+    expect(pager.failure).toBe('Couldn’t load this page. Check that this device is online.');
     expect(pager.page + 1).toBe(1);
     expect(warning).not.toHaveBeenCalled();
     expect(JSON.stringify(warning.mock.calls)).not.toContain('credential');
@@ -164,7 +167,7 @@ describe('Pager', () => {
     );
     await pager.more();
     await pager.more();
-    expect(pager.failure).toBe('unknown');
+    expect(pager.failure).toBe('Couldn’t load');
     expect(pager.page + 1).toBe(2);
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
@@ -187,9 +190,11 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failure).toBe('rate-limited');
+    expect(pager.failure).toBe(
+      'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.',
+    );
     await pager.retry();
-    expect(pager.failure).toBe('unavailable');
+    expect(pager.failure).toBe('Services unavailable');
     expect(pager.page).toBe(0);
   });
 

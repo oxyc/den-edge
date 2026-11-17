@@ -38,7 +38,7 @@
   import type { ExploreType, MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { i18n } from '../lib/i18n.svelte';
-  import { Pager, pagerFailureCopy } from '../lib/pager.svelte';
+  import { Pager } from '../lib/pager.svelte';
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
   import { FACET, fansOf, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
@@ -726,7 +726,7 @@
         {#if feed.pager.failure}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            {i18n.phrase(pagerFailureCopy(feed.pager.failure))}
+            {i18n.phrase(feed.pager.failure)}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button
             >
