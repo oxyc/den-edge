@@ -721,9 +721,7 @@
         return household.ensureDefaultKidProfile();
       },
       { live: () => alive },
-    ).catch((error: unknown) =>
-      console.error('den: the household’s Kid profile could not be made', error),
-    );
+    ).catch(() => console.error('den: the household kid profile could not be made'));
   });
 
   // Kid chosen before the household existed: once it does and its Kid is there, the PIN chosen then becomes the
@@ -743,13 +741,10 @@
         return coordinator.switchToPersistent(kid.id!);
       })
       .then((result) => {
-        if (result.outcome === 'failed') throw result.cause;
-        if (result.outcome === 'denied')
-          throw new Error('the Kid transition was unexpectedly refused');
+        if (result.outcome === 'failed' || result.outcome === 'denied')
+          console.warn('den: profile switch', 'kid', result.outcome);
       })
-      .catch((error: unknown) =>
-        console.warn('den: the Kid chosen before the household could not be opened', error),
-      );
+      .catch(() => console.warn('den: the staged kid profile transition failed'));
   });
 
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
@@ -1341,7 +1336,7 @@
       if (error instanceof LibraryServiceError && error.failure.code === 'unauthorized') {
         return 'unauthorized';
       }
-      console.warn('den: the profile key reset could not start', error);
+      console.warn('den: the profile key reset could not start');
       return pendingReset?.compound && pendingReset.from === from ? 'blocked' : 'failed';
     } finally {
       resetInFlight = false;
@@ -1426,9 +1421,7 @@
           if (alive && (result === 'waiting' || result === 'blocked'))
             compoundRetry = setTimeout(() => (pendingReset = readPendingReset()), 15_000);
         })
-        .catch((error: unknown) =>
-          console.warn('den: the profile key reset could not continue', error),
-        );
+        .catch(() => console.warn('den: the profile key reset could not continue'));
     run();
     return () => clearTimeout(compoundRetry);
   });
@@ -1875,7 +1868,7 @@
         if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
           setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
       })
-      .catch((error: unknown) => console.warn('den: a guest library could not be started', error))
+      .catch(() => console.warn('den: a guest library could not be started'))
       .finally(() => (guestStarting = false));
   });
 </script>

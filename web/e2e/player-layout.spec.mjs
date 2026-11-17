@@ -711,6 +711,15 @@ for (const [engine, browserType] of engines) {
         await expect(rows.nth(3)).toHaveAttribute('aria-disabled', 'true');
         expect(seasons).toEqual([1]);
         const box = await menu.boundingBox();
+        // Whatever scrolls the list (the popover itself, or a sheet's items) never scrolls sideways.
+        expect(
+          await menu.locator('.episode-list').evaluate((list) => {
+            let scroller = list.parentElement;
+            while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY))
+              scroller = scroller.parentElement;
+            return scroller ? scroller.scrollWidth - scroller.clientWidth : 0;
+          }),
+        ).toBe(0);
         expect(box.y).toBeGreaterThanOrEqual(0);
         expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
         // A popover's foot stays just above its button, however long the season it shows.
@@ -730,6 +739,8 @@ for (const [engine, browserType] of engines) {
         await expect(rows.nth(1)).toHaveAttribute('aria-disabled', 'true');
         await expect(rows.nth(1)).toContainText('Upcoming');
         await expect.poll(footAboveTrigger).toBeUndefined();
+        // A shorter season keeps the list's size: it doesn't resize under the pointer.
+        expect((await menu.boundingBox()).height).toBeCloseTo(box.height, 0);
         await rows.nth(1).click({ force: true });
         await expect(page.getByTestId('player-picked-episodes')).toHaveText('');
 

@@ -41,7 +41,7 @@
       const result = await profiles.switchToOwner(pin);
       if (result.outcome === 'denied') denied = true;
       else if (result.outcome === 'failed') {
-        console.error('den: Owner could not be opened', result.cause);
+        console.error('den: profile switch', 'owner', result.outcome);
         failed = true;
       }
     } finally {

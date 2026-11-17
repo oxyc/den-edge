@@ -1091,7 +1091,7 @@ export class LibraryLog {
     }
   }
 
-  private async rememberCompacted(keys: string[]) {
+  private async rememberCompacted(keys: string[]): Promise<boolean> {
     for (const k of keys) this.compacted.add(k);
     if (this.runtimeVault)
       try {
@@ -1101,10 +1101,12 @@ export class LibraryLog {
       } catch {
         // `putMeta` below reports the persistence failure; this visit still remembers its own keys.
       }
-    if (!(await this.putMeta('compacted', JSON.stringify([...this.compacted])))) {
-      // Storage failed after the compaction: this page still remembers them.
-      console.warn("den: the library rows removed by compaction couldn't be kept");
+    const kept = await this.putMeta('compacted', JSON.stringify([...this.compacted]));
+    if (!kept) {
+      // This page still remembers the fences when durable storage fails.
+      console.warn('den: local discard fences could not be kept');
     }
+    return kept;
   }
 
   /**
@@ -1150,7 +1152,6 @@ export class LibraryLog {
         if (removing.has(entry.k)) {
           const opened = await openEntry(this.keys, entry.k, entry.v);
           if ('unreadable' in opened && opened.unreadable === 'open') {
-            console.warn(`den: removing the library row ${entry.k}, which fails to open`);
             removedKeys.push(entry.k);
             removed++;
             continue;
@@ -1429,7 +1430,7 @@ export class LibraryLog {
     for (const { k, v } of rows) {
       const opened = await openEntry(this.keys, k, v);
       if ('unreadable' in opened)
-        throw new Error(`Library row ${k} does not open (${opened.unreadable})`);
+        throw new Error(`A library row does not open (${opened.unreadable})`);
       if ('invalidProfileDirectory' in opened) throw new Error('The profile directory is invalid');
       if ('profileDirectory' in opened) directory = opened.profileDirectory;
       else if ('row' in opened) names.push(rowName(opened.row));
@@ -2008,17 +2009,18 @@ export class LibraryLog {
       console.warn('den: a profile-aware household needs the compound key reset');
       return { refused: options.replaceProfileDirectory ? 'unavailable' : 'profiles' };
     }
+    let unreadableRows = false;
     for (const { k, v, opened } of entries) {
       if ('profileDirectory' in opened || 'invalidProfileDirectory' in opened) continue;
       // A compound household reset deliberately drops title exceptions; they never acquire successor authority.
       if ('kidTitleApprovals' in opened) continue;
       if ('unknown' in opened || 'newerFraming' in opened) {
-        console.warn(`den: the library row ${k} can't be moved by this build`);
+        console.warn("den: a library row can't be moved by this build");
         return { refused: 'update_required' };
       }
       if ('unreadable' in opened) {
         // Not attributable to a name, so not movable; §4 removes it anyway. It never blocks the move.
-        console.warn(`den: the unreadable library row ${k} stays behind (${opened.unreadable})`);
+        unreadableRows = true;
         continue;
       }
       const row = opened.row;
@@ -2037,6 +2039,7 @@ export class LibraryLog {
         kept.push({ name: rowName(row), plaintext: (await openPlaintext(this.keys, k, v))! });
       else rows.push(row);
     }
+    if (unreadableRows) console.warn('den: unreadable library rows stay behind');
     // Assistant v1 §10: no drop-box key is carried, and every grant goes revoked.
     const assistant = await resetAssistantRows(rows, Date.now());
     return {
@@ -2178,8 +2181,8 @@ export class LibraryLog {
         if (!(await to.keepPending(movedKey, JSON.stringify(moved))))
           throw new Error('destination runtime storage refused the pending edit');
         await this.discard(key);
-      } catch (error) {
-        console.warn('den: an unsent edit could not be moved to the new library key', error);
+      } catch {
+        console.warn('den: an unsent edit could not be moved to the new library key');
       }
     }
   }
@@ -2194,6 +2197,7 @@ export class LibraryLog {
     await ensureDeferredSyncPolicy();
     const rows = new Map(moving.rows.map((row) => [rowName(row), row]));
     const kept = new Map(moving.kept.map((entry) => [entry.name, entry.plaintext]));
+    let oversized = false;
     for (let round = 0; round < ROUNDS && (rows.size || kept.size); round++) {
       const writes: { name: string; row?: Row; base: number; k: string; v: string }[] = [];
       for (const [name, ours] of rows) {
@@ -2208,7 +2212,7 @@ export class LibraryLog {
           continue;
         }
         if (isDocument(row) && !encodeDocument(row, false)) {
-          console.warn(`den: ${name} would be too large merged with the library it moves into`);
+          oversized = true;
           rows.delete(name);
           continue;
         }
@@ -2272,6 +2276,7 @@ export class LibraryLog {
         }
       }
     }
+    if (oversized) console.warn('den: library rows were too large after the move merge');
     return rows.size === 0 && kept.size === 0;
   }
 
@@ -2569,8 +2574,12 @@ export class LibraryLog {
       const page = coherentResponsePage(res, await res.json());
       if (!page) return null;
       if (log.generation && page.generation && log.generation !== page.generation) {
-        if (log.directoryCommitted) await log.adoptProfileDirectory();
-        else if (!(await log.stageRecovery(page.generation))) return null;
+        if (
+          log.directoryCommitted
+            ? !(await log.adoptProfileDirectory())
+            : !(await log.stageRecovery(page.generation))
+        )
+          return null;
         log.memberRegistered = false;
         // Registered under the generation it now reads: under the old one den-edge refuses it.
         log.generation = page.generation;
@@ -2684,12 +2693,14 @@ export class LibraryLog {
       this.columnsIndex!.upsert(JSON.stringify(documents));
     } catch {
       // One refused document refuses its whole batch: add the rest one at a time.
+      let refused = false;
       for (const document of documents)
         try {
           this.columnsIndex!.upsert(JSON.stringify([document]));
-        } catch (error) {
-          console.warn(`den: ${rowName(document)} is left out of the library's lists`, error);
+        } catch {
+          refused = true;
         }
+      if (refused) console.warn("den: documents are left out of the library's lists");
     }
   }
 
@@ -2801,7 +2812,7 @@ export class LibraryLog {
         console.warn(`den: ${PRE_V4_BACKUP_ERROR}`);
         return null;
       }
-      console.warn(`den: the library row ${entry.k} is unreadable (${opened.unreadable})`);
+      console.warn(`den: a library row is unreadable (${opened.unreadable})`);
       this.unreadable.set(entry.k, opened.unreadable);
       return null;
     }
@@ -3017,8 +3028,12 @@ export class LibraryLog {
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (this.directoryCommitted) await this.adoptProfileDirectory(active);
-            else if (!(await this.stageRecovery(page.generation, active))) return null;
+            if (
+              this.directoryCommitted
+                ? !(await this.adoptProfileDirectory(active))
+                : !(await this.stageRecovery(page.generation, active))
+            )
+              return null;
             if (!active()) return null;
             this.memberRegistered = false;
             // Registered under the generation it now reads: under the old one den-edge refuses it.
@@ -3932,7 +3947,7 @@ export class LibraryLog {
         const name = rowName(document);
         const encoded = encodeDocument(document, true);
         if (!encoded) {
-          console.warn(`den: ${name} is full, so this change to it was not saved`);
+          console.warn('den: a library document is full, so this change was not saved');
           this.refusal = 'document_full';
           outcome.refused = true;
           return false;
@@ -4418,20 +4433,17 @@ export class LibraryLog {
     return this.wireMin >= 5 && this.profileDirectorySeq === 0;
   }
 
-  /** `rows` as a profile-aware household takes them (`householdScoped`), with what was held back named once. */
+  /** `rows` as a profile-aware household takes them (`householdScoped`), with bounded refusal counts. */
   private householdRows(rows: Row[]): Row[] {
     if (!this.profileAware) return rows;
     const kept: Row[] = [];
-    const refused: string[] = [];
+    let refusedCount = 0;
     for (const row of rows) {
       const scoped = householdScoped(row);
       if (scoped) kept.push(scoped);
-      else refused.push(rowName(row));
+      else refusedCount++;
     }
-    if (refused.length)
-      console.error(
-        `den: ${refused.length} rows belong to a profile library and were not written to the household: ${refused.join(', ')}`,
-      );
+    if (refusedCount) console.error(`den: household refused ${refusedCount} profile rows`);
     return kept;
   }
 
@@ -4440,10 +4452,18 @@ export class LibraryLog {
    * household — rows, the kept copies of the log, and work kept to send — is discarded, and the new log is read from
    * 0. Writing any of it back would put the Owner's rows (titles, trackers, delivery state, the Owner half of
    * preferences and keys) into the household, which every profile reads. Kept edits are not routed to a profile
-   * library from here: this log has none, so they are dropped and named.
+   * library from here: this log has none, so they are dropped and counted without exposing their identities.
    */
-  private async adoptProfileDirectory(active: () => boolean = () => true): Promise<void> {
-    if (!active()) return;
+  private async adoptProfileDirectory(active: () => boolean = () => true): Promise<boolean> {
+    if (!active()) return false;
+    const opened = await this.keptWork();
+    if (!active()) return false;
+    const pending = [...this.pending.keys()];
+    if (pending.length && !(await this.rememberCompacted(pending))) return false;
+    if (!active()) return false;
+    const unknown = pending.length - opened.length;
+    if (pending.length)
+      console.error(`den: ${pending.length} pre-split edits dropped (unknown=${unknown})`);
     console.warn(
       `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
     );
@@ -4462,30 +4482,9 @@ export class LibraryLog {
           ]),
         )
         .then(() => undefined)
-        .catch((error: unknown) =>
-          console.error(
-            'den: the kept copy of the household from before its split could not be removed',
-            error,
-          ),
-        );
-    await this.refreshPending();
-    if (!active()) return;
-    const opened = new Map((await this.keptWork()).map((work) => [work.key, work]));
-    if (!active()) return;
-    for (const key of [...this.pending.keys()]) {
-      if (!active()) return;
-      const work = opened.get(key);
-      const names = !work
-        ? 'unreadable'
-        : work.kind === 'ops'
-          ? [...touched(work.ops ?? []), ...(work.riders ?? []).map(rowName)].join(', ')
-          : work.rows.map(rowName).join(', ');
-      console.error(
-        `den: ${work?.kind ?? 'kept'} work kept for the household from before its split is dropped (${names})`,
-      );
-      await this.discard(key);
-      if (!active()) return;
-    }
+        .catch(() => console.error('den: the pre-split household cache could not be removed'));
+    await this.keptWork();
+    return active();
   }
 
   private async stageRecovery(
@@ -4524,10 +4523,9 @@ export class LibraryLog {
       }
       this.recoveryRows = [...retained.values()];
       return true;
-    } catch (error) {
+    } catch {
       console.warn(
         'den: the library changed generation, but its rows could not be kept to recover',
-        error,
       );
       return false;
     } // Do not discard the old cursors until recovery work is safely retained.
@@ -4573,17 +4571,19 @@ export class LibraryLog {
             const previous = this.entries.get(rowName(local));
             return previous ? merge(previous.row, local) : local;
           });
+          let oversized = false;
           const due = this.householdRows(merged).flatMap((row) => {
             const name = rowName(row),
               previous = this.entries.get(name);
             if (this.holds(name, row)) return [];
             // A merge over the cap leaves the log's version as it stands, and this copy's extra state goes (§11).
             if (isDocument(row) && !encodeDocument(row, false)) {
-              console.warn(`den: ${name} would be too large merged with this browser's copy`);
+              oversized = true;
               return [];
             }
             return [{ row, name, base: previous?.seq ?? 0 }];
           });
+          if (oversized) console.warn('den: library rows were too large after the recovery merge');
           if (!due.length) continue;
           const sealed = await Promise.all(
             due.map(async (entry) => ({ ...entry, ...(await seal(this.keys, entry.row)) })),
@@ -4678,7 +4678,13 @@ export class LibraryLog {
   private async keptWork(): Promise<KeptWork[]> {
     await this.refreshPending();
     const kept: KeptWork[] = [];
+    let failed = 0;
     for (const [key, encoded] of this.pending) {
+      if (this.compacted.has(key)) {
+        await this.discard(key);
+        if (this.pending.has(key)) failed++;
+        continue;
+      }
       try {
         const pending = JSON.parse(encoded) as {
           k: string;
@@ -4717,6 +4723,8 @@ export class LibraryLog {
         /* Unreadable: `replay` keeps it, and it has nothing to show. */
       }
     }
+    if (failed)
+      console.error(`den: ${failed} pre-split edits remain quarantined for deletion retry`);
     return kept;
   }
 

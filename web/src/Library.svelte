@@ -80,8 +80,8 @@
   import { scheduleAfterStartupMilestone } from './lib/startupScheduling';
   import { abortableDelay } from './lib/abortableDelay';
   import { optionalImport } from './lib/keyboardNavigation';
-  import type { AtlasCatalog } from './lib/services';
-  import type { Service } from './settings/services';
+  import type { AtlasCatalog, ResolvedService } from './lib/services';
+  import type { Service, ServiceDirectorySession } from './settings/services';
   import { setTitleActionsContext } from './lib/titleActions';
   import { setContentServiceContext } from './lib/contentContext';
   import { setToastContext } from './lib/toast';
@@ -212,7 +212,6 @@
   let homeMetadataReady = $state(model === null || untrack(() => route.page) !== 'library');
   let homeServices = $state.raw<typeof import('./lib/services') | null>(null);
   let homeServicesSettled = $state(false);
-  let directoryServices = $state.raw<typeof import('./settings/services') | null>(null);
   let HomeCatalogue = $state.raw<typeof import('./components/HomeCatalogue.svelte').default | null>(
     null,
   );
@@ -2102,19 +2101,23 @@
     };
   });
   /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
-  const radar = (only?: 'movie' | 'tv') => {
+  const radar = (
+    only?: 'movie' | 'tv',
+    names: Record<number, string> = {},
+    ready = route.page !== 'library',
+  ) => {
     const content = session.content;
     // Home publishes its ordinary TMDB/recipe rows without waiting for provider discovery. Its provider rows join
     // only once their captions are final; direct Movies/Series routes retain their existing eager behavior.
-    return atlas && homeServices && (route.page !== 'library' || providerRowsReady)
+    return atlas && homeServices && ready
       ? homeServices.radarRows(serviceCatalogs, servicePicks, {
           only,
-          names: serviceNames,
+          names,
           content,
         })
       : [];
   };
-  const rows = $derived.by(() => {
+  function catalogueRows() {
     const minYear = prefs.minReleaseYear;
     // The genre, recipe, decade and country rows ask atlas's filter first, TMDB where it can't answer.
     const filter = atlas
@@ -2159,7 +2162,13 @@
       atlas: filter,
     });
     const plot = atlas ? atlasRows(session.content, 'movie').slice(0, 3) : [];
-    const pooled = radar();
+    const pooled = radar(
+      undefined,
+      directoryState.names,
+      session.kid ||
+        (atlasReady && (!atlas || !servicePicks.length)) ||
+        (atlasReady && !!atlas && (directoryServices === null || directoryState.pending === 0)),
+    );
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
     const spine =
       arrivals && homeServices
@@ -2179,7 +2188,7 @@
       ],
       homeTaste,
     );
-  });
+  }
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
@@ -2187,74 +2196,47 @@
   const servicePicks = $derived(
     prefs.servicesConfigured ? prefs.services : (homeServices?.GUEST_PICKS ?? []),
   );
-  /** Provider directories are below the first screen. Admit them only as their rail approaches the viewport. */
-  let serviceDirectoriesAdmitted = $state(false);
-  let directoryServicesFailed = $state(false);
-  $effect(() => {
-    if (!serviceDirectoriesAdmitted || directoryServices) return;
-    let current = true;
-    void optionalImport(import('./settings/services')).then(
-      (directory) => {
-        if (current) directoryServices = directory;
-      },
-      () => {
-        // A stale optional chunk is retried on the next full page visit; the row remains unavailable meanwhile.
-        if (current) directoryServicesFailed = true;
-      },
-    );
-    return () => {
-      current = false;
-    };
+  /** Provider directories stay behind Home's visible rail, including the optional module itself. */
+  let directoryServices = $state.raw<
+    Pick<typeof import('./settings/services'), 'watchServiceDirectories'> | null | false | undefined
+  >(false);
+  let directoryState = $state.raw<ServiceDirectorySession<ResolvedService>>({
+    retrying: false,
+    failed: false,
+    services: [],
+    names: {},
+    pending: 0,
   });
-  /** Which locale/countries have been asked for; a directory is one request per locale/country, not one per pick. */
-  const askedFor: Record<string, true> = {};
-  let directories = $state.raw<Record<string, Service[]>>({});
-  const directoryKey = (language: string, country: string) => `${language}:${country}`;
-  /** Locale-owned directory requests: an old language cannot keep the replacement Services row pending. */
-  let namingByLanguage = $state.raw<Record<string, number>>({});
-  const naming = $derived(namingByLanguage[i18n.language] ?? 0);
+  let retryDirectories = $state.raw<() => void>(() => {});
+  async function admitDirectories() {
+    if (directoryServices !== false) return;
+    directoryServices = undefined;
+    try {
+      directoryServices = await optionalImport(
+        import('./settings/services').then(({ watchServiceDirectories }) => ({
+          watchServiceDirectories,
+        })),
+      );
+    } catch {
+      directoryServices = null;
+    }
+  }
   $effect(() => {
     const directory = directoryServices;
     const language = i18n.language;
-    if (!serviceDirectoriesAdmitted || !directory) return;
-    for (const { country } of servicePicks) {
-      const key = directoryKey(language, country);
-      if (askedFor[key]) continue;
-      askedFor[key] = true;
-      namingByLanguage = {
-        ...namingByLanguage,
-        [language]: (namingByLanguage[language] ?? 0) + 1,
-      };
-      void directory
-        .contentServices(session.content, country, language)
-        .then(
-          (listed) => {
-            directories = { ...directories, [key]: listed };
-          },
-          () => {
-            // One request per country per visit includes failures. Leaving it admitted lets `naming` settle to the
-            // reserved unavailable row; a later visit gets a fresh page and asks again.
-          },
-        )
-        .finally(() => {
-          namingByLanguage = {
-            ...namingByLanguage,
-            [language]: Math.max(0, (namingByLanguage[language] ?? 1) - 1),
-          };
-        });
-    }
+    const picks = servicePicks;
+    if (!directory) return;
+    const controller = directory.watchServiceDirectories(
+      session.content,
+      picks,
+      language,
+      homeServices?.resolvePicks ?? (() => []),
+      (state) => (directoryState = state),
+    );
+    retryDirectories = controller.retry;
+    return controller.cancel;
   });
-  /** The picks their country's directory can account for, named and ordered by it. */
-  const services = $derived(
-    [...new Set(servicePicks.map((pick) => pick.country))].flatMap(
-      (country) =>
-        homeServices?.resolvePicks(
-          servicePicks,
-          directories[directoryKey(i18n.language, country)] ?? [],
-          country,
-        ) ?? [],
-    ),
-  );
+  const rows = $derived(catalogueRows());
   // The base catalogue is useful independently of provider discovery. Once admitted it stays mounted; the distinct
   // Atlas row ids join it below only when their provider captions are final.
   let homeBrowseReady = $state(false);
@@ -2263,29 +2245,6 @@
     startupRenderPhase('home_metadata');
     homeBrowseReady = true;
   });
-  const providerRowsReady = $derived(
-    session.kid ||
-      (atlasReady && (!atlas || !servicePicks.length)) ||
-      (serviceDirectoriesAdmitted && directoryServicesFailed) ||
-      (atlasReady &&
-        !!atlas &&
-        serviceDirectoriesAdmitted &&
-        !!directoryServices &&
-        naming === 0 &&
-        servicePicks.every(({ country }) => askedFor[directoryKey(i18n.language, country)])),
-  );
-  /**
-   * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
-   * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
-   * A visitor has no directory and so no names: their cards say when a title lands, not where.
-   */
-  const serviceNames: Record<number, string> = $derived(
-    Object.fromEntries(
-      services.flatMap(({ service }) =>
-        [service.id, ...service.variants].map((id) => [id, service.name]),
-      ),
-    ),
-  );
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
@@ -3345,16 +3304,24 @@
           browseReady={homeBrowseReady}
           browseIdentity="home"
           showServices
-          {services}
-          servicePending={serviceDirectoriesAdmitted
-            ? naming
-              ? servicePicks.length
-              : 0
-            : servicePicks.length}
-          serviceEmpty={serviceDirectoriesAdmitted && !naming && !services.length
+          services={directoryState.services}
+          servicePending={directoryServices !== null &&
+          (!directoryServices || directoryState.pending)
+            ? servicePicks.length
+            : 0}
+          serviceEmpty={directoryServices !== false &&
+          !directoryState.pending &&
+          !directoryState.services.length &&
+          (directoryServices === null || !directoryState.failed)
             ? 'Services unavailable'
             : undefined}
-          onServiceVisible={() => (serviceDirectoriesAdmitted = true)}
+          serviceRecovery={directoryState.retrying
+            ? 'retrying'
+            : !directoryState.pending && directoryState.failed
+              ? 'failed'
+              : undefined}
+          onServiceRetry={retryDirectories}
+          onServiceVisible={() => void admitDirectories()}
           onServiceIntent={primeService}
         />
       {:else}
@@ -3373,9 +3340,6 @@
         browseReady
         browseIdentity={facet}
         showServices={false}
-        {services}
-        servicePending={0}
-        onServiceVisible={() => {}}
         onServiceIntent={primeService}
       />
     {/if}

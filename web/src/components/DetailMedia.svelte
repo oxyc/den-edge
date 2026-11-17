@@ -309,7 +309,6 @@
       !ended &&
       !failed,
   );
-
   onMount(() => {
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const small = matchMedia('(max-width: 759px)');
@@ -456,7 +455,7 @@
   $effect(() => {
     const player = video;
     const master = managed;
-    if (__DEN_TV_LEGACY_JS_CORE__ || !player || !master) return;
+    if (__DEN_TV_LEGACY_JS_CORE__ || !allowed || !player || !master) return;
     let live = true;
     let engine: Hls | undefined;
     const starting = loadHls().then(({ default: Hls }) => {
@@ -488,6 +487,7 @@
       // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
       // Naming level 0 therefore asked for the WORST rung. ABR takes over once a fragment is in.
       engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (!live) return;
         const levels = engine?.levels ?? [];
         const best = levels.reduce(
           (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
@@ -522,12 +522,17 @@
       engine.attachMedia(player);
     });
     void starting.catch((error: unknown) => {
+      // Losing the retained page's ownership while the lazy chunk resolves is ordinary teardown, not a failed
+      // trailer. It must not advance the cursor or emit a diagnostic for the inactive generation.
       if (!live) return;
       reportTrailerEngineFailure('startup', error);
       nextTrailer();
     });
     return () => {
       live = false;
+      // Preserve the retained page's visible position before destroy detaches MediaSource and releases its buffers.
+      // A source replacement while still allowed is a real cursor transition and must not keep the old frame.
+      if (!allowed && managed === master) keepFrame(player);
       engine?.destroy();
     };
   });

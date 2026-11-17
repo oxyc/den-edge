@@ -7,7 +7,6 @@
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
   import type { Service } from '../settings/services';
-  import JustWatchCredit from './JustWatchCredit.svelte';
   import ServiceTile from './ServiceTile.svelte';
 
   let {
@@ -15,6 +14,8 @@
     heading = 'Services',
     pending = 0,
     empty,
+    recovery,
+    onretry,
     onintent,
     onvisible,
   }: {
@@ -27,6 +28,9 @@
     pending?: number;
     /** A settled empty directory keeps the reserved row geometry instead of shifting every later shelf upward. */
     empty?: string;
+    /** A recoverable directory failure. Its action occupies the same tile geometry as loading and empty states. */
+    recovery?: 'failed' | 'retrying';
+    onretry?: () => void;
     /** A tile is about to be opened (`ServiceTile`): the page behind it can start loading. */
     onintent?: (service: Service, country: string) => void;
     /** Called once when this rail is close enough that its provider directories should start loading. */
@@ -34,6 +38,22 @@
   } = $props();
   const localizedHeading = $derived(capitalizeHeading(i18n.phrase(heading), i18n.language));
   let section = $state<HTMLElement>();
+  let retryButton = $state<HTMLButtonElement>();
+  let restoreRetryFocus = false;
+
+  function retry() {
+    restoreRetryFocus = document.activeElement === retryButton;
+    onretry?.();
+  }
+
+  $effect(() => {
+    const state = recovery;
+    if (!restoreRetryFocus || state === 'retrying') return;
+    requestAnimationFrame(() => {
+      (state === 'failed' ? retryButton : section?.querySelector<HTMLElement>('.tile'))?.focus();
+      restoreRetryFocus = false;
+    });
+  });
 
   $effect(() => {
     const element = section;
@@ -59,11 +79,11 @@
   });
 </script>
 
-{#if services.length || pending || empty}
+{#if services.length || pending || empty || recovery}
   <section
     class="row services-row"
     aria-label={localizedHeading}
-    data-layout-state={pending ? 'pending' : 'settled'}
+    data-layout-state={pending || recovery === 'retrying' ? 'pending' : 'settled'}
     bind:this={section}
   >
     <h2>{localizedHeading}</h2>
@@ -82,15 +102,32 @@
               ><span class="plate"></span><span>&nbsp;</span></span
             >
           {/each}
-        {:else if empty}
-          <span class="hold empty"
-            ><span class="plate" aria-hidden="true">—</span><span>{i18n.phrase(empty)}</span></span
-          >
         {/if}
       {/each}
+      {#if recovery || (!services.length && empty)}
+        <span class="hold empty">
+          {#if recovery}
+            <button
+              class="plate retry"
+              type="button"
+              aria-label={i18n.phrase('Try again')}
+              aria-disabled={recovery === 'retrying'}
+              bind:this={retryButton}
+              onclick={retry}>↻</button
+            >
+          {:else}
+            <span class="plate" aria-hidden="true">—</span>
+          {/if}
+          <span role="status"
+            >{i18n.phrase(
+              recovery === 'retrying' ? 'Trying again…' : (empty ?? 'Services unavailable'),
+            )}</span
+          >
+        </span>
+      {/if}
     </div>
   </section>
-  <JustWatchCredit />
+  <p class="justwatch-credit credit">Streaming availability by JustWatch</p>
 {/if}
 
 <style>
@@ -157,5 +194,20 @@
   .empty .plate {
     width: var(--tile-w);
     font-size: 28px;
+  }
+
+  .retry {
+    appearance: none;
+
+    /* Reduced Tizen gives buttons border-box sizing while the reserved span plate is content-box. Keep the same
+       two-border geometry instead of shrinking the settled/retrying row by 2px when the placeholder is replaced. */
+    box-sizing: content-box;
+    padding: 0;
+    color: inherit;
+  }
+
+  .retry:focus-visible {
+    outline: var(--ring-width) solid var(--focus-ring);
+    outline-offset: calc(-1 * var(--ring-width));
   }
 </style>

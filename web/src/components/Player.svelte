@@ -1312,6 +1312,23 @@
   });
   const seasonLabel = (number: number) =>
     number === 0 ? i18n.phrase('Specials') : `${i18n.phrase('Season')} ${number}`;
+  /**
+   * Scrolls the season chips sideways to centre the one shown, on opening and on every switch: a long series (South
+   * Park's 29) otherwise opens on seasons 1–10 with the one playing out of sight. Sets `scrollLeft` rather than
+   * `scrollIntoView`, which would also move the list under it. The row is rendered while its popover is still hidden,
+   * with no width to measure, so it also reveals when the row is first given a size.
+   */
+  function revealSeason(row: HTMLElement, _shown: number | undefined) {
+    const reveal = () => {
+      const chip = row.querySelector<HTMLElement>('[aria-checked="true"]');
+      if (chip && row.clientWidth)
+        row.scrollLeft = chip.offsetLeft - (row.clientWidth - chip.offsetWidth) / 2;
+    };
+    const sized = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(reveal);
+    sized?.observe(row);
+    reveal();
+    return { update: reveal, destroy: () => sized?.disconnect() };
+  }
 
   // The page under the player is not on screen while it plays (its `active` is off), so it names the tab no more:
   // the player does, as the title's page would.
@@ -7335,7 +7352,12 @@
 {#snippet episodeList(_: MenuItem[], run: (item: MenuItem, event: MouseEvent) => void)}
   <div class="episode-list" role="none">
     {#if seasons && seasons.length > 1}
-      <div class="episode-seasons" role="group" aria-label={i18n.phrase('Season')}>
+      <div
+        class="episode-seasons"
+        role="group"
+        aria-label={i18n.phrase('Season')}
+        use:revealSeason={shownSeason}
+      >
         {#each seasons as item (item.number)}
           <button
             type="button"
@@ -7366,9 +7388,10 @@
            every page loads, for a list that only exists inside the player. -->
       {#snippet rowContent()}
         <span class="episode-still">
-          {#if item.stillPath}<img
+          <!-- An episode TMDB has no still for yet (often the newest) shows the series backdrop, as the title page does. -->
+          {#if item.stillPath || title.backdropPath}<img
               class="episode-image"
-              src={`https://image.tmdb.org/t/p/w300${item.stillPath}`}
+              src={`https://image.tmdb.org/t/p/w300${item.stillPath ?? title.backdropPath}`}
               alt=""
               loading="lazy"
             />{/if}
@@ -8976,14 +8999,18 @@
   }
 
   /* Episodes: wider than the options, since each row carries a still and two lines of synopsis. Its season chips stay
-     at the top while the episodes scroll under them. */
+     at the top while the episodes scroll under them. One height for every season, so switching seasons doesn't resize
+     the list under the pointer; a short season leaves room below. ActionMenu's inline max-height still caps it to the
+     room beside its trigger. */
   :global(div.menu:not(.sheet):has(.episode-list)) {
     width: 420px;
     max-width: calc(100vw - 16px);
+    height: min(600px, calc(100dvh - 16px));
     max-height: min(600px, calc(100dvh - 16px));
   }
 
   :global(div.menu.sheet:has(.episode-list)) {
+    height: 72dvh;
     max-height: 72dvh;
   }
 
@@ -8997,7 +9024,21 @@
     margin: -6px -6px 6px;
     padding: 8px 8px 6px;
     background: #222228;
+
+    /* A hairline and a short shade along its foot, so the episodes scrolling under the pinned chips read as passing
+       beneath them rather than running into them. A shadow, not a pseudo-element: the chips scroll sideways in here. */
+    box-shadow:
+      0 1px 0 var(--line, rgb(255 255 255 / 0.14)),
+      0 8px 12px -6px rgb(0 0 0 / 0.6);
     scrollbar-width: none;
+  }
+
+  /* The negative margins above reach a popover's 6px padding, where the list scrolls in the menu itself. A phone
+     sheet scrolls its unpadded items instead, so there they would push the row 6px past both edges and the whole list
+     would scroll sideways. */
+  :global(.menu.sheet) .episode-seasons {
+    top: 0;
+    margin: 0 0 6px;
   }
 
   .episode-season {

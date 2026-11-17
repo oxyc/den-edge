@@ -406,5 +406,8 @@ if (process.argv.includes('--capture')) {
   // (120,408 -> 122,353), nearly all in the lazy Player chunk: the list, its season reader and its styles. CI measured
   // the same head at 122,509 (#1282's run-to-run variance), so allow the boundary above CI's figure plus one more,
   // retaining 115 bytes there.
-  if (coreTotalDelta > 122624) throw new Error('Browser total JS/CSS budget exceeded');
+  // The Episodes list's series-backdrop fallback for missing stills and its current-season chip reveal add 162 gzip
+  // bytes to the complete graph on matched base/head builds (122,647 -> 122,809), all in the lazy Player chunk. CI
+  // measured the head at 122,754; allow the next 128-byte boundary above it, retaining 126 bytes.
+  if (coreTotalDelta > 122880) throw new Error('Browser total JS/CSS budget exceeded');
 }
