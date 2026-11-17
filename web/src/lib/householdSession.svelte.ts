@@ -40,10 +40,7 @@ export class HouseholdSession {
     this.#identity = identity;
     this.#model = model;
     this.policy = profilePolicy(model);
-    this.services = new SessionServices(model, content, undefined, undefined, () => [
-      this.#identity.kind,
-      this.#identity.libraryKey,
-    ]);
+    this.services = new SessionServices(model, content);
   }
 
   get identity(): HouseholdIdentity {
@@ -140,16 +137,15 @@ export class HouseholdSession {
   }
 
   configureServices(profile: string): void {
-    this.services.activateProfile(profile);
-    if (this.#model && this.#model.connection !== 'ready') return;
-    this.services.configure(this.#model?.runtime.value);
+    const authority = [this.#identity.kind, this.#identity.libraryKey, profile] as const;
+    this.services.configure(this.#model?.runtime.value, authority);
   }
 
   foreground(profile: string): void {
-    this.services.activateProfile(profile);
+    const authority = [this.#identity.kind, this.#identity.libraryKey, profile] as const;
     if (this.#foregroundReady || this.#closed) return;
     this.#foregroundReady = true;
-    this.services.foregroundReady();
+    this.services.foregroundReady(authority);
     void this.#model?.foregroundReady().catch(() => {});
   }
 

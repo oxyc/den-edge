@@ -39,17 +39,7 @@ function fake(verdicts: () => Record<string, string>) {
 }
 
 describe('Availability', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (_algorithm, input) => {
-      const bytes = new Uint8Array(input as ArrayBuffer);
-      const digest = new Uint8Array(32);
-      let hash = 0;
-      for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193);
-      digest.fill(hash & 0xff);
-      return digest.buffer;
-    });
-  });
+  beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
@@ -153,25 +143,25 @@ describe('Availability', () => {
     const { fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
     const first = new Availability(storage, () => now);
     expect(first.unavailable({ type: 'movie', id: 1 }), 'nothing before authority').toBe(false);
-    await first.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    first.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
     expect(data.has('den.availability'), 'legacy owner is unknowable').toBe(false);
     first.want({ type: 'movie', id: 1 });
     await vi.advanceTimersByTimeAsync(100);
     expect(first.unavailable({ type: 'movie', id: 1 })).toBe(true);
     expect(
       data.get('den.availability'),
-      'one verdict: 31 authority bytes over the legacy row',
-    ).toHaveLength(62);
+      'one verdict: 20 authority bytes over the legacy row',
+    ).toHaveLength(51);
 
     const reloaded = new Availability(storage, () => now);
     expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'still unknown before connect').toBe(
       false,
     );
-    await reloaded.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    reloaded.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
     expect(reloaded.unavailable({ type: 'movie', id: 1 }), 'exact authority restores').toBe(true);
 
     const other = new Availability(storage, () => now);
-    await other.connect(SCOUT, content, fetchImpl, PROFILE_B);
+    other.connect(SCOUT, content, fetchImpl, PROFILE_B);
     expect(other.unavailable({ type: 'movie', id: 1 }), 'other household fails closed').toBe(false);
     expect(JSON.stringify([...data.entries()])).not.toContain('household-a');
     expect(JSON.stringify([...data.entries()])).not.toContain('sealed-cfg');
@@ -282,16 +272,24 @@ describe('Availability', () => {
     expect(calls.some((c) => c.url === '/scout/sealed-cfg/availability')).toBe(true);
   });
 
-  it('does not restore or ask when no Scout supersedes a held authority digest', async () => {
-    let release!: (scope: string) => void;
-    const digest = new Promise<string>((resolve) => (release = resolve));
+  it('does not restore or ask during a no-Scout bootstrap', async () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => void data.set(key, value),
+      removeItem: (key: string) => void data.delete(key),
+    } as Storage;
     const { calls, fetchImpl } = fake(() => ({ tt0000001: 'unavailable' }));
-    const availability = new Availability(undefined, Date.now, () => digest);
-    availability.want({ type: 'movie', id: 1 });
-    availability.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    const first = new Availability(storage);
+    first.connect(SCOUT, content, fetchImpl, HOUSEHOLD_A);
+    first.want({ type: 'movie', id: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+    calls.length = 0;
+
+    const availability = new Availability(storage);
     availability.connect(null, content, fetchImpl, HOUSEHOLD_A);
-    release('held-a');
-    await vi.advanceTimersByTimeAsync(1_000);
+    availability.want({ type: 'movie', id: 1 });
+    await vi.advanceTimersByTimeAsync(100);
 
     expect(calls).toEqual([]);
     expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(false);
@@ -523,7 +521,7 @@ describe('Availability — series', () => {
   it('fades Familjen Andersson after one batched S1E1 verdict', async () => {
     const { calls, fetchImpl } = scout(unavailable);
     const availability = new Availability();
-    await availability.connect(SCOUT, seriesContent, fetchImpl);
+    availability.connect(SCOUT, seriesContent, fetchImpl);
     availability.want(andersson);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toEqual([[ID(1, 1)]]);
@@ -628,17 +626,17 @@ describe('Availability — series', () => {
     } as Storage;
     const { fetchImpl } = scout(unavailable);
     const availability = new Availability(storage);
-    await availability.connect(SCOUT, seriesContent, fetchImpl);
+    availability.connect(SCOUT, seriesContent, fetchImpl);
     availability.want(andersson);
     await vi.advanceTimersByTimeAsync(100);
     const kept = new Availability(storage);
-    await kept.connect(SCOUT, seriesContent, fetchImpl);
+    kept.connect(SCOUT, seriesContent, fetchImpl);
     expect(kept.unavailable(andersson), 'kept').toBe(true);
 
     availability.confirm(andersson, { season: 1, episode: 1 }, true);
     expect(availability.unavailable(andersson)).toBe(false);
     const healed = new Availability(storage);
-    await healed.connect(SCOUT, seriesContent, fetchImpl);
+    healed.connect(SCOUT, seriesContent, fetchImpl);
     expect(healed.unavailable(andersson)).toBe(false);
   });
 });

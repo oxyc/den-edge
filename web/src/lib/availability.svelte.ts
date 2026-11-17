@@ -85,21 +85,8 @@ export type AvailabilityAuthority = readonly [
 type Kept = Record<string, [Verdict, number]>;
 type Stored = [version: typeof STORAGE_VERSION, authority: string, verdicts: Kept];
 
-/** An opaque local name for credential-bearing household/add-on authority. Old TV engines use the same
- * non-cryptographic fallback as release memory; it is a namespace, never a credential or server proof. */
-async function authorityDigest(value: string): Promise<string> {
-  try {
-    const subtle = globalThis.crypto?.subtle;
-    if (subtle) {
-      const bytes = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(value)));
-      return btoa(String.fromCharCode(...bytes.subarray(0, 18)))
-        .replaceAll('+', '-')
-        .replaceAll('/', '_')
-        .replace(/=+$/, '');
-    }
-  } catch {
-    // Some supported TV webviews expose SubtleCrypto without a working digest implementation.
-  }
+/** Opaque local namespace for credential-bearing authority; never a credential or server proof. */
+function authorityKey(value: string): string {
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
   for (let index = 0; index < value.length; index++) {
@@ -161,10 +148,9 @@ export class Availability {
   private pausedUntil = 0;
   private scout: Scout | null = null;
   /** Exact in-memory authority. Persisted storage contains only its opaque digest. */
-  private answeredBy: string | undefined;
-  private household: string | undefined;
-  private storageAuthority: string | undefined;
-  private connection = 0;
+  private owner: string | undefined;
+  private home: string | undefined;
+  private scope: string | undefined;
 
   /** Storage is restored only by `connect`, after the exact household and Scout authority are known. */
   constructor(
@@ -172,7 +158,6 @@ export class Availability {
       ? undefined
       : localStorage,
     private readonly now: () => number = Date.now,
-    private readonly digest: (value: string) => Promise<string> = authorityDigest,
   ) {}
 
   /**
@@ -192,37 +177,24 @@ export class Availability {
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
     authority: AvailabilityAuthority = ['test', null, 'test'],
-  ): Promise<void> {
-    const connection = ++this.connection;
-    const household = JSON.stringify(authority);
-    if (this.household !== undefined && household !== this.household) this.reset();
-    this.household = household;
+  ): void {
+    const home = JSON.stringify(authority);
+    if (this.home !== undefined && home !== this.home) this.reset();
+    this.home = home;
     this.scout = null;
-    if (!scout) return Promise.resolve();
+    if (!scout) return;
     const exact = JSON.stringify([authority, scout.install, scout.base]);
-    if (exact === this.answeredBy && this.storageAuthority) {
+    if (exact === this.owner) {
       this.scout = { base: scout.base, content, fetch: fetchImpl };
       this.gather();
-      return Promise.resolve();
+      return;
     }
-    if (exact !== this.answeredBy) {
-      this.reset();
-      this.answeredBy = exact;
-    }
+    this.reset();
+    this.owner = exact;
+    this.scope = authorityKey(exact);
+    this.restore();
     this.scout = { base: scout.base, content, fetch: fetchImpl };
     this.gather();
-    const generation = this.generation;
-    return this.digest(exact).then((digest) => {
-      if (
-        connection !== this.connection ||
-        generation !== this.generation ||
-        exact !== this.answeredBy
-      )
-        return;
-      this.storageAuthority = digest;
-      this.restore(digest);
-      if (this.verdicts.size || this.episodeVerdicts.size) this.keep();
-    });
   }
 
   private reset(): void {
@@ -238,8 +210,8 @@ export class Availability {
     this.asking = undefined;
     this.pausedUntil = 0;
     this.scout = null;
-    this.answeredBy = undefined;
-    this.storageAuthority = undefined;
+    this.owner = undefined;
+    this.scope = undefined;
     this.verdicts.clear();
     this.settled.clear();
     this.givenAt.clear();
@@ -254,34 +226,23 @@ export class Availability {
     this.episodeTries.clear();
   }
 
-  private restore(authority: string): void {
+  private restore(): void {
     try {
-      const stored = JSON.parse(this.storage?.getItem(STORAGE_KEY) ?? 'null') as Stored | null;
-      if (stored?.[0] !== STORAGE_VERSION || stored[1] !== authority) {
+      const stored = JSON.parse(this.storage?.getItem(STORAGE_KEY) ?? 'null') as Stored;
+      if (stored?.[0] !== STORAGE_VERSION || stored[1] !== this.scope) {
         if (stored !== null) this.storage?.removeItem(STORAGE_KEY);
         return;
       }
-      for (const [id, row] of Object.entries(stored[2])) {
-        if (!Array.isArray(row)) continue;
-        const [verdict, at] = row;
-        if (
-          (verdict !== 'available' && verdict !== 'unavailable') ||
-          typeof at !== 'number' ||
-          !(this.now() - at < KEPT_MS)
-        )
-          continue;
+      for (const [id, [verdict, at]] of Object.entries(stored[2])) {
+        if (verdict === 'unknown' || !(this.now() - at < KEPT_MS)) continue;
         if (id.startsWith('tv:')) {
           const key = id.slice(3);
-          if (!this.episodeAnswers.get(key)?.settled) {
-            this.episodeVerdicts.set(key, verdict);
-            this.episodeAnswers.set(key, { at, settled: false });
-          }
-        } else if (/^\d+$/.test(id)) {
+          this.episodeVerdicts.set(key, verdict);
+          this.episodeAnswers.set(key, { at, settled: false });
+        } else {
           const key = Number(id);
-          if (!this.settled.has(key)) {
-            this.verdicts.set(key, verdict);
-            this.givenAt.set(key, at);
-          }
+          this.verdicts.set(key, verdict);
+          this.givenAt.set(key, at);
         }
       }
     } catch {
@@ -572,7 +533,7 @@ export class Availability {
 
   /** Scout's verdicts, for the next visit's posters. Unknowns aren't kept: they are asked again anyway. */
   private keep(): void {
-    if (!this.storageAuthority) return;
+    if (!this.scope) return;
     const kept: Kept = {};
     for (const [id, verdict] of this.verdicts) {
       const at = this.givenAt.get(id);
@@ -583,10 +544,7 @@ export class Availability {
       if (verdict !== 'unknown' && at !== undefined) kept[`tv:${key}`] = [verdict, at];
     }
     try {
-      this.storage?.setItem(
-        STORAGE_KEY,
-        JSON.stringify([STORAGE_VERSION, this.storageAuthority, kept]),
-      );
+      this.storage?.setItem(STORAGE_KEY, JSON.stringify([STORAGE_VERSION, this.scope, kept]));
     } catch {
       // Refused storage: the verdicts are this visit's.
     }

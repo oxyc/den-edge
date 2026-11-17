@@ -1,7 +1,7 @@
 // Session-scoped provider discovery. Durable inputs and retained results belong to LibraryModel; this class only
 // owns the live probes and the render-facing addresses they discover.
 
-import { availability } from './availability.svelte';
+import { availability, type AvailabilityAuthority } from './availability.svelte';
 import { readDebridState, type DebridState } from './debridStatus';
 import { discoverServices } from './discoverServices';
 import { guestGrants } from './grants.svelte';
@@ -74,7 +74,7 @@ export class SessionServices {
   #foregroundReady = false;
   #atlasGeneration = 0;
   #atlasAcknowledgedGeneration = 0;
-  #availabilityProfile = 'test';
+  #availabilityAuthority: AvailabilityAuthority = ['test', null, 'test'];
   /** The current discovery run's inputs, run again by `retry`. */
   #rerun?: () => void;
   readonly #model: LibraryModel | null;
@@ -84,10 +84,6 @@ export class SessionServices {
     private readonly content: ContentServiceClientPort,
     private readonly fetchRouteTable: () => Promise<Routes | null> = fetchRoutesForDiscovery,
     private readonly grants: Grants = guestGrants,
-    private readonly availabilityHousehold: () => readonly [string, string | null] = () => [
-      'test',
-      null,
-    ],
   ) {
     this.#model = model;
   }
@@ -104,16 +100,12 @@ export class SessionServices {
   }
 
   #connectAvailability(scout: Addon | null): void {
-    void availability.connect(scout, this.content, relayFetch, [
-      ...this.availabilityHousehold(),
-      this.#availabilityProfile,
-    ]);
+    availability.connect(scout, this.content, relayFetch, this.#availabilityAuthority);
   }
 
-  /** Viewer identity is presentation authority even though discovery remains household-owned. */
-  activateProfile(profile: string): void {
-    if (profile === this.#availabilityProfile) return;
-    this.#availabilityProfile = profile;
+  #activateAvailability(authority: AvailabilityAuthority): void {
+    if (authority.every((part, index) => part === this.#availabilityAuthority[index])) return;
+    this.#availabilityAuthority = authority;
     this.#connectAvailability(this.#foregroundReady ? this.scout : null);
   }
 
@@ -150,8 +142,13 @@ export class SessionServices {
   }
 
   /** Reconfigure from the authority's deliberately narrow discovery view. */
-  configure(runtime: Runtime | undefined): void {
+  configure(
+    runtime: Runtime | undefined,
+    authority: AvailabilityAuthority = this.#availabilityAuthority,
+  ): void {
     if (this.#stopped) return;
+    this.#activateAvailability(authority);
+    if (this.#model?.connection && this.#model.connection !== 'ready') return;
     // This read must stay synchronous: it is the Svelte dependency that re-runs the caller's real `$effect` when a
     // redeem, expiry, replacement, or A→B→A grant transition changes authority. Async refresh and discovery below
     // are fenced separately.
@@ -437,7 +434,8 @@ export class SessionServices {
     });
   }
 
-  foregroundReady(): void {
+  foregroundReady(authority: AvailabilityAuthority = this.#availabilityAuthority): void {
+    this.#activateAvailability(authority);
     if (this.#foregroundReady) return;
     this.#foregroundReady = true;
     if (this.#grantRetryNeeded) this.#scheduleGrantRetry();

@@ -140,16 +140,16 @@ describe('SessionServices', () => {
     services.foregroundReady();
     connect.mockClear();
 
-    services.activateProfile('profile-a');
+    services.configure(runtime(), ['test', null, 'profile-a']);
     expect(connect).toHaveBeenLastCalledWith(null, content, expect.any(Function), [
       'test',
       null,
       'profile-a',
     ]);
     connect.mockClear();
-    services.activateProfile('profile-a');
+    services.configure(runtime(), ['test', null, 'profile-a']);
     expect(connect).not.toHaveBeenCalled();
-    services.activateProfile('profile-b');
+    services.configure(runtime(), ['test', null, 'profile-b']);
     expect(connect).toHaveBeenLastCalledWith(null, content, expect.any(Function), [
       'test',
       null,
