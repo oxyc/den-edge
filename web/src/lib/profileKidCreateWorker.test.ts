@@ -20,10 +20,19 @@ const stamps = [
 class MemoryVault implements ProfileKidCreateVault {
   readonly values = new Map<string, unknown>();
   readonly bindings = new Map<string, string>();
+  readonly reads: string[] = [];
+  readonly writes: string[] = [];
+  readonly failedWrites = new Map<string, number>();
 
   constructor(readonly libraryId = HOUSEHOLD) {}
 
   async keepRequired(name: string, value: unknown, binding = ''): Promise<void> {
+    this.writes.push(name);
+    const failures = this.failedWrites.get(name) ?? 0;
+    if (failures > 0) {
+      this.failedWrites.set(name, failures - 1);
+      throw new Error('storage unavailable');
+    }
     this.values.set(name, structuredClone(value));
     this.bindings.set(name, binding);
   }
@@ -32,6 +41,7 @@ class MemoryVault implements ProfileKidCreateVault {
     name: string,
     binding = '',
   ): Promise<{ kind: 'absent' } | { kind: 'value'; value: T }> {
+    this.reads.push(name);
     if (!this.values.has(name)) return { kind: 'absent' };
     if (this.bindings.get(name) !== binding) throw new Error('sealed value binding changed');
     return { kind: 'value', value: structuredClone(this.values.get(name)) as T };
@@ -256,6 +266,92 @@ describe('persistent Kid profile Worker lifecycle', () => {
     expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledOnce();
   });
 
+  it('recovers when the indexed receipt lands before terminal cleanup', async () => {
+    const h = harness();
+    const first = await h.coordinator.begin('receipt-before-clear', 'Sam', 8, stamps);
+    h.vault.failedWrites.set('profile-create/v2/state', 1);
+
+    await expect(h.coordinator.acknowledge(first.receipt)).rejects.toThrow('storage unavailable');
+    expect(
+      [...h.vault.values.keys()].filter((name) => name.startsWith('profile-create/v2/receipt/')),
+    ).toHaveLength(1);
+    await expect(h.coordinator.acknowledge(first.receipt)).resolves.toBeUndefined();
+    await expect(
+      h.coordinator.begin('after-recovered-ack', 'Mina', 9, stamps),
+    ).resolves.toMatchObject({
+      name: 'Mina',
+    });
+  });
+
+  it('migrates v1 settled history idempotently after an interrupted state write', async () => {
+    const h = harness();
+    const first = await h.coordinator.begin('legacy-operation', 'Sam', 8, stamps);
+    await h.coordinator.acknowledge(first.receipt);
+    const indexed = [...h.vault.values.entries()].find(([name]) =>
+      name.startsWith('profile-create/v2/receipt/'),
+    )![1] as { receipt: unknown };
+    h.vault.values.clear();
+    h.vault.bindings.clear();
+    h.vault.values.set('profile-create/v1/state', {
+      version: 1,
+      householdId: HOUSEHOLD,
+      settled: [indexed.receipt],
+    });
+    h.vault.bindings.set('profile-create/v1/state', `profile-create:${HOUSEHOLD}:1`);
+    h.vault.failedWrites.set('profile-create/v2/state', 1);
+    const restarted = () =>
+      new ProfileKidCreateCoordinator(HOUSEHOLD, new ProfileKidCreateStore(h.vault), h.io);
+
+    await expect(restarted().begin('legacy-operation', 'Sam', 8, stamps)).rejects.toThrow(
+      'storage unavailable',
+    );
+    await expect(restarted().begin('legacy-operation', 'Sam', 8, stamps)).resolves.toEqual(first);
+    expect(h.vault.values.has('profile-create/v1/state')).toBe(false);
+    expect(h.vault.values.get('profile-create/v2/state')).toEqual({
+      version: 2,
+      householdId: HOUSEHOLD,
+    });
+    expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledOnce();
+  });
+
+  it.each([1, 8, 32, 256, 1024])(
+    'migrates %i receipts once and keeps steady replay to two indexed reads',
+    async (count) => {
+      const vault = new MemoryVault();
+      vault.values.set('profile-create/v1/state', {
+        version: 1,
+        householdId: HOUSEHOLD,
+        settled: Array.from({ length: count }, (_, index) => ({
+          request: { operationId: `operation-${index}`, name: 'Sam', maximumAge: 8 },
+          result: {
+            profile: index.toString(16).padStart(32, '0'),
+            name: 'Sam',
+            maximumAge: 8,
+          },
+          directoryDigest: 'a'.repeat(64),
+        })),
+      });
+      vault.bindings.set('profile-create/v1/state', `profile-create:${HOUSEHOLD}:1`);
+      const store = new ProfileKidCreateStore(vault);
+
+      await expect(store.load()).resolves.toBeNull();
+      expect(
+        [...vault.values.keys()].filter((name) => name.startsWith('profile-create/v2/receipt/')),
+      ).toHaveLength(count);
+      expect(vault.writes).toHaveLength(count + 1);
+      vault.reads.length = 0;
+      await expect(store.create(`operation-${count - 1}`, 'Sam', 8, stamps)).resolves.toMatchObject(
+        {
+          kind: 'receipt',
+        },
+      );
+      expect(vault.reads).toEqual([
+        'profile-create/v2/state',
+        expect.stringMatching(/^profile-create\/v2\/receipt\/[0-9a-f]{64}$/),
+      ]);
+    },
+  );
+
   it('retains the terminal receipt when its pre-ack directory proof fails', async () => {
     const h = harness();
     const created = await h.coordinator.begin('terminal-proof', 'Sam', 8, stamps);
@@ -267,12 +363,9 @@ describe('persistent Kid profile Worker lifecycle', () => {
     );
   });
 
-  it('keeps compact replay protection one-for-one with more than 32 created profiles', async () => {
+  it('indexes replay protection one-for-one without rereading settled history', async () => {
     const h = harness();
     let first: Awaited<ReturnType<typeof h.coordinator.begin>> | undefined;
-    let halfwayBytes = 0;
-    // Each create re-reads and re-validates every settled receipt, so the work grows with the square of the count;
-    // 36 is the smallest even count past the old 32-receipt cap, and the halfway reading is at its midpoint.
     for (let index = 0; index < 36; index += 1) {
       const receipt = await h.coordinator.begin(
         `${'😀'.repeat(120)}-${index}`,
@@ -282,26 +375,26 @@ describe('persistent Kid profile Worker lifecycle', () => {
       );
       first ??= receipt;
       await h.coordinator.acknowledge(receipt.receipt);
-      if (index === 17)
-        halfwayBytes = new TextEncoder().encode(
-          JSON.stringify(h.vault.values.get('profile-create/v1/state')),
-        ).byteLength;
     }
 
-    const envelope = h.vault.values.get('profile-create/v1/state');
-    const fullBytes = new TextEncoder().encode(JSON.stringify(envelope)).byteLength;
-    expect(fullBytes).toBeLessThan(65_536);
-    expect(fullBytes).toBeLessThan(halfwayBytes * 2.1);
-    expect(JSON.stringify(envelope)).not.toContain('"key"');
+    const envelope = h.vault.values.get('profile-create/v2/state');
+    expect(new TextEncoder().encode(JSON.stringify(envelope)).byteLength).toBeLessThan(256);
+    expect(
+      [...h.vault.values.keys()].filter((name) => name.startsWith('profile-create/v2/receipt/')),
+    ).toHaveLength(36);
+    expect(JSON.stringify([...h.vault.values.values()])).not.toContain('"key"');
     const next = await h.coordinator.begin('no-arbitrary-cap', 'Another Kid', 8, stamps);
     await h.coordinator.acknowledge(next.receipt);
+    h.vault.reads.length = 0;
     await expect(
       h.coordinator.begin(`${'😀'.repeat(120)}-0`, '😀'.repeat(64), 8, stamps),
     ).resolves.toEqual(first);
+    expect(h.vault.reads).toEqual([
+      'profile-create/v2/state',
+      expect.stringMatching(/^profile-create\/v2\/receipt\/[0-9a-f]{64}$/),
+    ]);
     expect(h.io.createAndVerifyProfileLibrary).toHaveBeenCalledTimes(37);
-    // ~0.55 s of CPU on an idle machine, nearly all of it den-core's WASM validating the growing envelope and
-    // directory on every create; the default 5 s is then under 10x headroom, which a busy runner removes.
-  }, 20_000);
+  });
 
   it('fails closed when a settled replay no longer has an authoritative directory mapping', async () => {
     const h = harness();
@@ -319,11 +412,14 @@ describe('persistent Kid profile Worker lifecycle', () => {
     const h = harness();
     const created = await h.coordinator.begin('tampered-mapping', 'Sam', 8, stamps);
     await h.coordinator.acknowledge(created.receipt);
-    const envelope = structuredClone(h.vault.values.get('profile-create/v1/state')) as {
-      settled: Array<{ result: { profile: string } }>;
+    const name = [...h.vault.values.keys()].find((candidate) =>
+      candidate.startsWith('profile-create/v2/receipt/'),
+    )!;
+    const envelope = structuredClone(h.vault.values.get(name)) as {
+      receipt: { result: { profile: string } };
     };
-    envelope.settled[0]!.result.profile = 'f'.repeat(32);
-    h.vault.values.set('profile-create/v1/state', envelope);
+    envelope.receipt.result.profile = 'f'.repeat(32);
+    h.vault.values.set(name, envelope);
 
     await expect(h.coordinator.begin('tampered-mapping', 'Sam', 8, stamps)).rejects.toThrow(
       /not directory-bound/,
