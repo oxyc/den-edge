@@ -117,12 +117,20 @@ test('TV remote reaches the exact-title Kid access handoff and collapses it with
     const handoff = page.getByRole('button', { name: 'Manage Kid access on Den Web' });
     const action = page.getByRole('button', { name: 'Share', exact: true });
     await action.focus();
+    // The first arrow loads the geometry module, so its move lands after the press has returned, and a later key
+    // cancels a move still pending. Let each press move focus before sending the next, or a late move and the
+    // following press both apply and focus steps past the handoff.
     for (
       let attempt = 0;
       attempt < 4 && !(await handoff.evaluate((node) => node === document.activeElement));
       attempt++
-    )
+    ) {
+      const before = await page.evaluateHandle(() => document.activeElement);
       await page.keyboard.press('ArrowDown');
+      await expect
+        .poll(() => before.evaluate((node) => node !== document.activeElement))
+        .toBe(true);
+    }
     await expect(handoff).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(handoff).toHaveAttribute('aria-expanded', 'true');
