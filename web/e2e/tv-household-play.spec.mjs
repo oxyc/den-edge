@@ -95,9 +95,9 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
   try {
     await context.addInitScript(() => {
       const setItem = Storage.prototype.setItem;
-      globalThis.__denRefusePlayKeyStorage = true;
+      setItem.call(localStorage, 'den.e2eRefusePlayKeyStorage', '1');
       Storage.prototype.setItem = function (key, value) {
-        if (key === 'den.tvPlayKey.v1' && globalThis.__denRefusePlayKeyStorage)
+        if (key === 'den.tvPlayKey.v1' && this.getItem('den.e2eRefusePlayKeyStorage'))
           throw new DOMException('fixture refuses play-key storage', 'SecurityError');
         return setItem.call(this, key, value);
       };
@@ -172,7 +172,7 @@ test('a TV in the library starts a fresh play sent to its household queue, and n
     // Recover storage and replace Owner with Kids and back. Each session checks in, but it is still the same
     // household: persistence retries without rotation, and the key now stored is the exact authority every drain
     // already named (inbox-v1 §5).
-    await tv.evaluate(() => (globalThis.__denRefusePlayKeyStorage = false));
+    await tv.evaluate(() => localStorage.removeItem('den.e2eRefusePlayKeyStorage'));
     const tvOwner = tv.getByRole('button', { name: 'Switch profile, current Owner' });
     await tvOwner.click();
     await tv.getByRole('button', { name: 'Use Kids' }).click();
