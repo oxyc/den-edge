@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
-  currentPlayKey,
   laneId,
   laneQueue,
   playKeyFor,
@@ -63,11 +62,9 @@ describe("a TV's household play key", () => {
     const first = await playKeyFor('library-one', storage);
     expect(fromBase64url(first)).toHaveLength(32);
     expect(await playKeyFor('library-one', storage)).toBe(first);
-    expect(currentPlayKey()).toBe(first);
 
     const second = await playKeyFor('library-two', storage);
     expect(second).not.toBe(first);
-    expect(currentPlayKey()).toBe(second);
     expect(await playKeyFor('library-one', storage)).not.toBe(first);
   });
 
@@ -89,7 +86,6 @@ describe("a TV's household play key", () => {
     };
     const key = await playKeyFor('library-one', storage);
     expect(fromBase64url(key)).toHaveLength(32);
-    expect(currentPlayKey()).toBe(key);
     expect(await playKeyFor('library-one', storage)).toBe(key);
 
     storage.setItem = persist;
@@ -106,7 +102,6 @@ describe("a TV's household play key", () => {
     };
     const current = await playKeyFor('new-household', storage);
     expect(current).not.toBe(old);
-    expect(currentPlayKey()).toBe(current);
   });
 
   it('persists the same visit key when unavailable storage itself recovers', async () => {

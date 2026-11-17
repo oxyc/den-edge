@@ -15,6 +15,7 @@ const WAIT_S = 25;
 const DRAIN_GAP_MS = 5_000;
 /** After a refused or failed drain. */
 const RETRY_MS = 15_000;
+const FOREVER_MS = 0x7fffffff;
 
 interface VisitKey {
   library: string;
@@ -38,13 +39,6 @@ function replace(library: string, key: string): VisitKey {
   changed = new AbortController();
   return (visit = { library, key, retired: new AbortController() });
 }
-
-const untilAborted = (signal: AbortSignal) =>
-  signal.aborted
-    ? Promise.resolve()
-    : new Promise<void>((resolve) =>
-        signal.addEventListener('abort', () => resolve(), { once: true }),
-      );
 
 /** A short, one-way tag of the library key, so a stored play key can say which library it was made for. */
 async function libraryTag(libraryKey: string): Promise<string> {
@@ -103,9 +97,6 @@ export async function playKeyFor(
   return key;
 }
 
-/** The play key this TV made for the household established during this visit. */
-export const currentPlayKey = (): string | undefined => visit?.key;
-
 /**
  * Run `use` for each visit key while it remains current. A household replacement aborts the old work before the new
  * key is exposed; a same-household profile replacement keeps the key and work intact.
@@ -117,7 +108,7 @@ export async function whilePlayKey(
   while (!signal.aborted) {
     const current = visit;
     if (!current) {
-      await untilAborted(AbortSignal.any([signal, changed.signal]));
+      await abortableDelay(FOREVER_MS, signal, changed.signal);
       continue;
     }
     const active = AbortSignal.any([signal, current.retired.signal]);
@@ -126,7 +117,7 @@ export async function whilePlayKey(
     } catch (error) {
       if (!active.aborted) throw error;
     }
-    if (!active.aborted) await untilAborted(active);
+    if (!active.aborted) await abortableDelay(FOREVER_MS, active);
   }
 }
 
