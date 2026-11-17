@@ -1,6 +1,7 @@
 import {
   downloadDiagnostic,
   downloadPollDelay,
+  downloadPollable,
   raceKey,
   sourceAnswerComplete,
   type DownloadCoordinator,
@@ -144,17 +145,11 @@ export class DownloadCoordinatorDriver {
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
     const current = this.#current;
+    const queue = this.queue;
     const polled = downloads.filter((download) => {
-      const state = this.queue.status(download, now).state;
-      if (
-        (force && state === 'ready') ||
-        state === 'no_working_release' ||
-        state === 'awaiting_air' ||
-        state === 'release_gone' ||
-        state === 'paused'
-      )
-        return false;
-      const last = this.queue.asked.get(download.name);
+      const state = queue.status(download, now).state;
+      if (state === 'awaiting_air' || !downloadPollable(state, force)) return false;
+      const last = queue.asked.get(download.name);
       return force || !last || now - last.at >= downloadPollDelay(last.quiet);
     });
     for (let index = 0; index < polled.length; index += CONCURRENCY) {
@@ -164,14 +159,13 @@ export class DownloadCoordinatorDriver {
           await this.#pollAndRenew(download, now);
           if (!current()) return;
           const said = JSON.stringify([
-            this.queue.answers.get(download.name) ?? null,
+            queue.answers.get(download.name) ?? null,
             ...download.race.entries.map(
-              (entry) =>
-                this.queue.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
+              (entry) => queue.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
             ),
           ]);
-          const last = this.queue.asked.get(download.name);
-          this.queue.asked.set(download.name, {
+          const last = queue.asked.get(download.name);
+          queue.asked.set(download.name, {
             at: now,
             quiet: last?.said === said ? last.quiet + 1 : 0,
             said,
@@ -179,22 +173,23 @@ export class DownloadCoordinatorDriver {
         }),
       );
     }
-    if (current()) this.queue.changed();
+    if (current()) queue.changed();
   }
 
   async #pollAndRenew(download: Download, now: number): Promise<void> {
     const current = this.#current;
-    const answer = await this.queue.poll(download);
+    const queue = this.queue;
+    const answer = await queue.poll(download);
     if (!current()) return;
     for (const entry of download.race.entries) {
       if (!current()) return;
-      await this.queue.pollEntry(download, entry, { current, now });
+      await queue.pollEntry(download, entry, { current, now });
     }
     if (!current() || answer.state !== 'expired' || answer.message === GONE) return;
-    const url = await this.queue.renew(download);
+    const url = await queue.renew(download);
     if (!current() || url === null || url === 'gone') return;
-    if (answer.message !== FOREIGN) this.queue.lapsed.add(download.name);
-    await this.queue.poll(download);
+    if (answer.message !== FOREIGN) queue.lapsed.add(download.name);
+    await queue.poll(download);
   }
 
   #since(at: number, mono: number, now: number): number | undefined {
@@ -204,29 +199,29 @@ export class DownloadCoordinatorDriver {
   }
 
   async #holdLease(now: number, observedFor?: number): Promise<boolean> {
-    const log = this.queue.log;
+    const queue = this.queue;
+    const log = queue.log;
     const name = `set:${LEASE_ROW}`;
     const row = log.settings(LEASE_ROW);
     const seq = log.seqOf(name);
     const value = row?.values.lease?.value;
     const [holder = '', epochText = '0'] = value && 'strings' in value ? value.strings : [];
     const epoch = Number(epochText) || 0;
-    const mono = this.queue.monotonicNow();
+    const mono = queue.monotonicNow();
     if (!this.#observed || this.#observed.seq !== seq) this.#observed = { seq, at: now, mono };
     const watched =
       this.#observed.seq === seq
         ? (this.#since(this.#observed.at, this.#observed.mono, now) ?? 0)
         : 0;
     const mine = this.#held;
-    const ours = holder === this.queue.device && mine?.epoch === epoch;
+    const ours = holder === queue.device && mine?.epoch === epoch;
     const openFor =
-      observedFor ??
-      Math.max(now - this.queue.startedAt, this.queue.monotonicNow() - this.queue.startedMono);
+      observedFor ?? Math.max(now - queue.startedAt, queue.monotonicNow() - queue.startedMono);
     const decision = syncPolicy<{ action: string; epoch?: number }>({
       op: 'lease',
       input: {
-        device: this.queue.device,
-        holder: ours ? this.queue.device : holder === this.queue.device ? ANOTHER_WINDOW : holder,
+        device: queue.device,
+        holder: ours ? queue.device : holder === queue.device ? ANOTHER_WINDOW : holder,
         epoch,
         elapsed: ours && mine ? this.#since(mine.at, mine.mono, now) : undefined,
         observed: Math.max(watched, holder ? 0 : openFor),
@@ -240,13 +235,13 @@ export class DownloadCoordinatorDriver {
     }
     const next = decision.epoch ?? epoch + 1;
     const base: SettingsRow = row ?? emptyRow(LEASE_ROW);
-    const at = await this.queue.stamp(now);
+    const at = await queue.stamp(now);
     if (!this.#current() || log.seqOf(name) !== seq) return false;
     const leased: SettingsRow = {
       ...base,
       values: {
         ...base.values,
-        lease: { value: { strings: [this.queue.device, String(next)] }, at },
+        lease: { value: { strings: [queue.device, String(next)] }, at },
       },
     };
     if (!(await log.writeAt(leased, seq))) {
@@ -282,14 +277,15 @@ export class DownloadCoordinatorDriver {
 
   async #holderPass(now: number): Promise<boolean> {
     const current = this.#current;
+    const queue = this.queue;
     let wrote = await this.#syncHearth(now);
     const states: Record<string, string> = {};
-    const decided = this.queue.list();
+    const decided = queue.list();
     for (const download of decided) {
       if (!this.#active(now)) break;
-      const status = this.queue.status(download, now);
+      const status = queue.status(download, now);
       if (status.state) states[download.name] = status.state;
-      this.queue.clocks.set(download.name, status.clock);
+      queue.clocks.set(download.name, status.clock);
       if (download.exhausted) {
         // Never given up on: den-core says when it searches again (backing off to 6 h, never before its air date).
         const retry = syncPolicy<{ due: boolean; at: number; attempt: number }>({
@@ -303,17 +299,17 @@ export class DownloadCoordinatorDriver {
       }
       for (const entry of download.race.entries) {
         // An entry whose add never landed (a relaunch, another device's ticket) is asked for again.
-        const answer = this.queue.entryAnswers.get(raceKey(download.name, entry.identity));
-        const url = answer?.state === 'not-queued' ? this.queue.entryUrl(download, entry) : null;
-        if (url && this.#active(now)) await this.queue.addEntry(download.name, entry.identity, url);
+        const answer = queue.entryAnswers.get(raceKey(download.name, entry.identity));
+        const url = answer?.state === 'not-queued' ? queue.entryUrl(download, entry) : null;
+        if (url && this.#active(now)) await queue.addEntry(download.name, entry.identity, url);
       }
       if (
         status.state === 'starting' &&
         download.resumeAt !== undefined &&
         download.resumeAt <= now
       ) {
-        const url = this.queue.urlFor(download);
-        const at = url ? await this.queue.stamp(now) : undefined;
+        const url = queue.urlFor(download);
+        const at = url ? await queue.stamp(now) : undefined;
         if (
           url &&
           at &&
@@ -329,11 +325,11 @@ export class DownloadCoordinatorDriver {
           ))
         ) {
           wrote = true;
-          await this.queue.add(download.name, url);
+          await queue.add(download.name, url);
         }
         continue;
       }
-      if (this.queue.lapsed.has(download.name)) {
+      if (queue.lapsed.has(download.name)) {
         wrote = (await this.#writeTicket(download, now)) || wrote;
         continue;
       }
@@ -353,7 +349,7 @@ export class DownloadCoordinatorDriver {
       }
       const values: Record<string, Stamped<ConfigValue | null>> = {};
       if (status.report || status.announce || status.write_progress || status.reannounce) {
-        const at = await this.queue.stamp(now);
+        const at = await queue.stamp(now);
         if (!current()) break;
         if (status.report) values.reported = { value: { bool: true }, at };
         if (status.announce) values.announced = { value: { bool: true }, at };
@@ -363,13 +359,13 @@ export class DownloadCoordinatorDriver {
       if (!Object.keys(values).length) continue;
       const written = await this.#write(download, values, now);
       wrote = written || wrote;
-      const url = status.reannounce && written ? this.queue.urlFor(download) : undefined;
-      if (url) await this.queue.effects.cancel(url, true);
+      const url = status.reannounce && written ? queue.urlFor(download) : undefined;
+      if (url) await queue.effects.cancel(url, true);
     }
 
     if (this.#active(now)) {
       // Only the downloaded titles' documents decide whether they were watched: a title's and its episode's season's.
-      const log = this.queue.log;
+      const log = queue.log;
       const names = new Set(
         decided.flatMap(({ title }) => [
           `title:${title.mediaType}:${title.mediaId}`,
@@ -403,12 +399,12 @@ export class DownloadCoordinatorDriver {
       for (const name of pruned.remove) {
         const download = byName.get(name);
         if (!download || !this.#active(now)) continue;
-        const at = await this.queue.stamp(now);
+        const at = await queue.stamp(now);
         if (!this.#active(now)) break;
-        wrote = (await this.queue.log.writeAt(removedRow(download.row, at), download.seq)) || wrote;
+        wrote = (await queue.log.writeAt(removedRow(download.row, at), download.seq)) || wrote;
       }
     }
-    if (wrote) this.queue.changed();
+    if (wrote) queue.changed();
     return wrote;
   }
 
@@ -419,18 +415,19 @@ export class DownloadCoordinatorDriver {
   async #syncHearth(now: number): Promise<boolean> {
     const send = this.queue.effects.wanted;
     const binding = this.#hearth;
-    const [authority, last, at] = binding;
+    const authority = binding[0];
     if (!send || !authority) return false;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    if (last === digest && (!items.length || now - at! < HEARTH_EVERY)) return false;
-    const statuses = await send(items, authority).catch(() => null);
+    if (binding[1] === digest && (!items.length || now - binding[2]! < HEARTH_EVERY)) return false;
+    const statuses = await send(items, authority).catch(() => {});
     // Discovery can rebind the same driver while the old authority's request is in flight. Its late response belongs
     // only to that old authority and must neither acknowledge nor delay the replacement's identical digest.
     // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. The existing
     // maintenance cadence retries it, while a changed (newer) digest also remains immediately eligible.
     if (this.#hearth !== binding || !statuses || !this.#active(now)) return false;
-    this.#hearth = [authority, digest, now];
+    binding[1] = digest;
+    binding[2] = now;
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;

@@ -72,6 +72,12 @@ export interface DownloadStatus {
   announce: boolean;
 }
 
+export const downloadPollable = (state: DownloadStatus['state'], skipReady = true): boolean =>
+  (!skipReady || state !== 'ready') &&
+  state !== 'no_working_release' &&
+  state !== 'release_gone' &&
+  state !== 'paused';
+
 /**
  * `fresh` asks scout to rebuild the list past its caches (`?fresh=1`), for a viewer checking again by hand. `early` is a
  * list a viewer is looking at, which scout may answer before its slowest indexer (`fetchSourceList`).

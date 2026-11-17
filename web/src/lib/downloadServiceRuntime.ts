@@ -1,6 +1,11 @@
 import type { ClockStore } from './clockStore';
 import type { ContentReader } from './contentAuthority';
-import { DownloadCoordinator, downloadPollDelay, raceKey } from './downloadCoordinator';
+import {
+  DownloadCoordinator,
+  downloadPollDelay,
+  downloadPollable,
+  raceKey,
+} from './downloadCoordinator';
 import { DownloadCoordinatorDriver } from './downloadCoordinatorDriver';
 import type { LibraryLog } from './log';
 import type { DownloadTarget } from './libraryServiceProtocol';
@@ -11,13 +16,7 @@ import { relayFetch } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { sendWanted } from './hearthWanted';
 import { DEN, DEN_IDS, findAddon, SCOUT, type Addon } from './scout';
-import {
-  cancelSource,
-  fetchSourceList,
-  prepareSource,
-  scoutTicket,
-  type Preparation,
-} from './titleSources';
+import { cancelSource, fetchSourceList, prepareSource, scoutTicket } from './titleSources';
 
 export type DownloadContent = Pick<ContentReader, 'identifiers' | 'season'>;
 
@@ -25,7 +24,6 @@ interface Providers {
   scout: Addon | null;
   den: Addon | null;
   routes: Routes;
-  input: string;
 }
 
 export interface DownloadBackgroundWork {
@@ -61,13 +59,12 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         const result = await this.content.season(seriesId, season);
         return result.kind === 'found' ? result.value : null;
       });
-    const providers = () => this.#getProviders();
     this.coordinator = new DownloadCoordinator(
       log,
       clock,
       {
-        prepare: (url, queue, prefetch) => prepareSource(url, queue, this.fetchImpl, prefetch),
-        cancel: (url, reannounce) => cancelSource(url, reannounce, this.fetchImpl),
+        prepare: (url, queue, prefetch) => prepareSource(url, queue, fetchImpl, prefetch),
+        cancel: (url, reannounce) => cancelSource(url, reannounce, fetchImpl),
         ticket: (url) => {
           if (url.startsWith('/scout/') || url.startsWith('/den/')) return url;
           const current = this.#resolved;
@@ -75,7 +72,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
           return current?.scout ? scoutTicket(url, current.scout, current.routes) : null;
         },
         resolve: async (title, fresh, early, signal) => {
-          const { scout, routes } = await providers();
+          const { scout, routes } = await this.#getProviders();
           if (!scout) return { sources: null, failure: 'not-configured' };
           const identifier = title.imdbId
             ? null
@@ -102,7 +99,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             title.season,
             title.episode,
             signal,
-            this.fetchImpl,
+            fetchImpl,
             fresh,
             early,
           );
@@ -110,7 +107,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
             ? { ...found, imdb: 'resolved' as const, failure: 'unreachable' as const }
             : { ...found, imdb: 'resolved' as const };
         },
-        wanted: (items, den) => sendWanted((den as Addon).base, items, this.fetchImpl),
+        wanted: (items, den) => sendWanted((den as Addon).base, items, fetchImpl),
       },
       {
         changed: () => {
@@ -144,14 +141,10 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   }
 
   nextDelay(now = Date.now()): number | undefined {
-    const downloads = this.coordinator.list().filter((download) => {
-      const state = this.coordinator.status(download, now).state;
-      return (
-        state !== 'ready' &&
-        state !== 'no_working_release' &&
-        state !== 'release_gone' &&
-        state !== 'paused'
-      );
+    const coordinator = this.coordinator;
+    const downloads = coordinator.list().filter((download) => {
+      const state = coordinator.status(download, now).state;
+      return downloadPollable(state);
     });
     // An unasked download is due immediately only when a pass can actually ask Scout. Without a configured or
     // reachable provider, returning zero makes the authority run maintenance and this no-op again without pause.
@@ -159,7 +152,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
     if (!downloads.length || this.#providersUnavailable) return undefined;
     return Math.min(
       ...downloads.map((download) => {
-        const asked = this.coordinator.asked.get(download.name);
+        const asked = coordinator.asked.get(download.name);
         return asked ? Math.max(0, downloadPollDelay(asked.quiet) - (now - asked.at)) : 0;
       }),
     );
@@ -168,10 +161,6 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   listen(listener: () => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
-  }
-
-  async prepare(url: string, queue: boolean, prefetch: boolean): Promise<Preparation> {
-    return this.coordinator.effects.prepare(url, queue, prefetch);
   }
 
   async refresh(target?: DownloadTarget): Promise<boolean> {
@@ -214,15 +203,15 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
   }
 
   #digest(): string {
+    const coordinator = this.coordinator;
     return JSON.stringify(
-      this.coordinator
+      coordinator
         .list()
         .map((download) => [
           download.name,
-          this.coordinator.status(download),
+          coordinator.status(download),
           download.race.entries.map(
-            (entry) =>
-              this.coordinator.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
+            (entry) => coordinator.entryAnswers.get(raceKey(download.name, entry.identity)) ?? null,
           ),
         ]),
     );
@@ -239,7 +228,7 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
       // Hearth, which searches on for the wanted downloads while this page is closed. Without a legacy Scout it is
       // also the source service, as playback takes it (`findScout`).
       const den = await findAddon(plugins, routes, { ...DEN, id: DEN_IDS }, this.fetchImpl);
-      return { scout: legacy ?? den, den, routes, input };
+      return { scout: legacy ?? den, den, routes };
     })();
     this.#providers = request;
     try {
