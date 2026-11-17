@@ -7,52 +7,26 @@ const RECEIPT_VALUE = Uint8Array.of(1);
 
 /**
  * Removes only the encrypted records written by the retired Web Owner-split implementation. One bounded page is
- * handled per foreground maintenance pass; a durable receipt keeps later sessions from scanning the prefix again.
+ * handled per foreground maintenance pass. Null means a durable receipt now keeps later sessions from scanning.
  */
-export class RetiredOwnerSplitRecords {
-  readonly #prefix: string;
-  readonly #receipt: string;
-  #after?: string;
-  #complete = false;
-
-  constructor(
-    private readonly vault: Vault,
-    libraryId: string,
-  ) {
-    if (!LIBRARY_ID.test(libraryId)) throw new TypeError('Library identity is not canonical');
-    this.#prefix = `${libraryId}:profile-migration/v1/`;
-    this.#receipt = `${libraryId}:retired/m1`;
-  }
-
-  /** Whether this pass completed the cleanup. Failures remain retryable and disclose no stored key or value. */
-  async run(): Promise<boolean> {
-    if (this.#complete) return true;
-    try {
-      const receipt = await this.vault.get(this.#receipt);
-      if (receipt?.length === 1 && receipt[0] === RECEIPT_VALUE[0]) {
-        this.#complete = true;
-        return true;
-      }
-      if (!this.vault.page || !this.vault.commit)
-        throw new Error('Atomic bounded Vault cleanup is unavailable');
-      const page = await this.vault.page(this.#prefix, this.#after, PAGE_SIZE);
-      const changes: VaultChange[] = page.flatMap(([key]) =>
-        this.#retired(key) ? [{ kind: 'delete' as const, key }] : [],
-      );
-      const final = page.length < PAGE_SIZE;
-      if (final) changes.push({ kind: 'put', key: this.#receipt, value: RECEIPT_VALUE });
-      await this.vault.commit(changes);
-      if (final) this.#complete = true;
-      else this.#after = page.at(-1)?.[0];
-      return this.#complete;
-    } catch {
-      // A later maintenance pass retries. Stored key names and adapter errors stay out of diagnostics.
-      console.warn('den: retired browser migration storage cleanup will be retried');
-      return false;
-    }
-  }
-
-  #retired(key: string): boolean {
-    return key.startsWith(this.#prefix) && RETIRED_RECORD.test(key.slice(this.#prefix.length));
-  }
+export async function purgeRetiredOwnerSplitRecords(
+  vault: Vault,
+  libraryId: string,
+  after?: string,
+): Promise<string | null> {
+  if (!LIBRARY_ID.test(libraryId)) throw new TypeError('Library identity is not canonical');
+  const prefix = `${libraryId}:profile-migration/v1/`;
+  const receiptKey = `${libraryId}:retired/m1`;
+  const receipt = after === undefined && (await vault.get(receiptKey));
+  if (receipt && receipt.length === 1 && receipt[0] === RECEIPT_VALUE[0]) return null;
+  if (!vault.page || !vault.commit) throw new Error('Atomic bounded Vault cleanup is unavailable');
+  const page = await vault.page(prefix, after, PAGE_SIZE);
+  const changes: VaultChange[] = page.flatMap(([key]) =>
+    key.startsWith(prefix) && RETIRED_RECORD.test(key.slice(prefix.length))
+      ? [{ kind: 'delete' as const, key }]
+      : [],
+  );
+  if (page.length < PAGE_SIZE) changes.push({ kind: 'put', key: receiptKey, value: RECEIPT_VALUE });
+  await vault.commit(changes);
+  return page.length < PAGE_SIZE ? null : page.at(-1)![0];
 }

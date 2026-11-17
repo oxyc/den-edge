@@ -844,6 +844,17 @@ describe('LibraryLog', () => {
 
   it('purges retired Owner-split records from the raw library namespace only after opening', async () => {
     const { data, vault } = memoryVault();
+    let failCleanup = false;
+    const cleanupVault: Vault = {
+      ...vault,
+      commit: async (changes) => {
+        if (failCleanup) {
+          failCleanup = false;
+          throw new Error('private adapter detail');
+        }
+        await vault.commit!(changes);
+      },
+    };
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
     const generation = '11111111-1111-1111-1111-111111111111';
     const state = `${keys.id}:profile-migration/v1/state`;
@@ -855,7 +866,14 @@ describe('LibraryLog', () => {
     data.set(current, Uint8Array.of(3));
     const server = await edge();
 
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, cleanupVault))!;
+    expect(data.has(state)).toBe(true);
+    failCleanup = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      'den: retired browser migration storage cleanup will be retried',
+    );
     expect(data.has(state)).toBe(true);
     await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(true);
 
@@ -863,6 +881,7 @@ describe('LibraryLog', () => {
     expect(data.has(candidate)).toBe(false);
     expect(data.get(current)).toEqual(Uint8Array.of(3));
     expect(data.get(`${keys.id}:retired/m1`)).toEqual(Uint8Array.of(1));
+    warn.mockRestore();
   });
 
   it('fails a durable edit before the request when the vault refuses its pending record', async () => {

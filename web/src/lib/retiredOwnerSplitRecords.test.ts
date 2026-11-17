@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Vault, VaultChange } from './localVault';
-import { RetiredOwnerSplitRecords } from './retiredOwnerSplitRecords';
+import { purgeRetiredOwnerSplitRecords } from './retiredOwnerSplitRecords';
 
 const LIBRARY_A = 'a'.repeat(32);
 const LIBRARY_B = 'b'.repeat(32);
@@ -56,7 +56,7 @@ describe('retired Owner-split browser records', () => {
     const other = candidate(LIBRARY_B, '3');
     const memory = memoryVault([state, ...candidates, current, malformed, other]);
 
-    await expect(new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A).run()).resolves.toBe(true);
+    await expect(purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A)).resolves.toBeNull();
 
     expect([...memory.data.keys()].sort()).toEqual(
       [current, malformed, other, `${LIBRARY_A}:retired/m1`].sort(),
@@ -67,11 +67,8 @@ describe('retired Owner-split browser records', () => {
 
   it('uses a durable receipt for absent and already-cleaned libraries', async () => {
     const memory = memoryVault();
-    const first = new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
-    await expect(first.run()).resolves.toBe(true);
-    await expect(first.run()).resolves.toBe(true);
-    const reopened = new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
-    await expect(reopened.run()).resolves.toBe(true);
+    await expect(purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A)).resolves.toBeNull();
+    await expect(purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A)).resolves.toBeNull();
 
     expect(memory.vault.page).toHaveBeenCalledTimes(1);
     expect(memory.commits).toHaveLength(1);
@@ -83,7 +80,7 @@ describe('retired Owner-split browser records', () => {
     const memory = memoryVault([state, receipt]);
     memory.data.set(receipt, Uint8Array.of(2));
 
-    await expect(new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A).run()).resolves.toBe(true);
+    await expect(purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A)).resolves.toBeNull();
     expect(memory.data.has(state)).toBe(false);
     expect(memory.data.get(receipt)).toEqual(Uint8Array.of(1));
   });
@@ -95,29 +92,24 @@ describe('retired Owner-split browser records', () => {
         `${LIBRARY_A}:profile-migration/v1/candidate/${index.toString(16).padStart(64, '0')}`,
     );
     const memory = memoryVault(records);
-    const cleanup = new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
-
-    await expect(cleanup.run()).resolves.toBe(false);
+    const after = await purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
+    expect(after).toBeTypeOf('string');
     expect(memory.data.has(records[64]!)).toBe(true);
     expect(memory.data.has(`${LIBRARY_A}:retired/m1`)).toBe(false);
-    await expect(cleanup.run()).resolves.toBe(true);
+    await expect(
+      purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A, after!),
+    ).resolves.toBeNull();
     expect(records.some((key) => memory.data.has(key))).toBe(false);
   });
 
-  it('does not mark a failed pass complete and retries without logging adapter details', async () => {
+  it('does not mark a failed pass complete', async () => {
     const state = `${LIBRARY_A}:profile-migration/v1/state`;
     const memory = memoryVault([state]);
     memory.failNextCommit();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const cleanup = new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
-
-    await expect(cleanup.run()).resolves.toBe(false);
+    await expect(purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A)).rejects.toThrow();
     expect(memory.data.has(state)).toBe(true);
     expect(memory.data.has(`${LIBRARY_A}:retired/m1`)).toBe(false);
-    expect(warn).toHaveBeenCalledWith(
-      'den: retired browser migration storage cleanup will be retried',
-    );
-    await expect(cleanup.run()).resolves.toBe(true);
+    await expect(purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A)).resolves.toBeNull();
     expect(memory.data.has(state)).toBe(false);
   });
 
@@ -126,10 +118,10 @@ describe('retired Owner-split browser records', () => {
     const second = candidate(LIBRARY_B, '2');
     const memory = memoryVault([first, second]);
 
-    await new RetiredOwnerSplitRecords(memory.vault, LIBRARY_A).run();
+    await purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_A);
     expect(memory.data.has(first)).toBe(false);
     expect(memory.data.has(second)).toBe(true);
-    await new RetiredOwnerSplitRecords(memory.vault, LIBRARY_B).run();
+    await purgeRetiredOwnerSplitRecords(memory.vault, LIBRARY_B);
     expect(memory.data.has(second)).toBe(false);
   });
 });

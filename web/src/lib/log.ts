@@ -506,7 +506,7 @@ export class LibraryLog {
   private runtimeFallback = false;
   private runtimeChannel?: BroadcastChannel;
   private retiredOwnerSplitVault?: Vault;
-  private retiredOwnerSplitRecords?: { run(): Promise<boolean> };
+  private retiredOwnerSplitAfter?: string;
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -3220,20 +3220,22 @@ export class LibraryLog {
 
   /** One bounded pass over records left by the removed Web Owner-split implementation. */
   async cleanupRetiredOwnerSplitRecords(): Promise<boolean> {
-    if (!this.retiredOwnerSplitRecords && this.retiredOwnerSplitVault)
-      try {
-        const { RetiredOwnerSplitRecords } = await import('./retiredOwnerSplitRecords');
-        this.retiredOwnerSplitRecords = new RetiredOwnerSplitRecords(
-          this.retiredOwnerSplitVault,
-          this.keys.id,
-        );
-        this.retiredOwnerSplitVault = undefined;
-      } catch {
-        // The post-foreground asset or storage adapter may be transiently unavailable. Retry without exposing either.
-        console.warn('den: retired browser migration storage cleanup will be retried');
-        return false;
-      }
-    return (await this.retiredOwnerSplitRecords?.run()) ?? true;
+    if (!this.retiredOwnerSplitVault) return true;
+    try {
+      const { purgeRetiredOwnerSplitRecords } = await import('./retiredOwnerSplitRecords');
+      const after = await purgeRetiredOwnerSplitRecords(
+        this.retiredOwnerSplitVault,
+        this.keys.id,
+        this.retiredOwnerSplitAfter,
+      );
+      if (after === null) this.retiredOwnerSplitVault = undefined;
+      else this.retiredOwnerSplitAfter = after;
+      return after === null;
+    } catch {
+      // The post-foreground asset or storage adapter may be transiently unavailable. Retry without exposing either.
+      console.warn('den: retired browser migration storage cleanup will be retried');
+      return false;
+    }
   }
 
   /**
