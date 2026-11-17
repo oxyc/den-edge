@@ -112,7 +112,9 @@ export class DownloadServiceRuntime implements DownloadBackgroundWork {
         },
         wanted: async (items, authority) => {
           const { den } = await providers();
-          return den?.install === authority ? sendWanted(den.base, items, this.fetchImpl) : null;
+          return den && den.install === authority
+            ? sendWanted(den.base, items, this.fetchImpl)
+            : null;
         },
       },
       {

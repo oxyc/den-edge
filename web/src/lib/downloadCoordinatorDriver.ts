@@ -82,8 +82,8 @@ export class DownloadCoordinatorDriver {
   #again?: { options: DownloadDriveOptions; pass: Promise<boolean> };
   /** By row name: when a due search that got an incomplete answer may ask again. */
   readonly #unanswered = new Map<string, number>();
-  /** Exact Hearth binding plus the last digest's acknowledgement (`failures: 0`) or retry schedule. */
-  #hearth: [id?: string | null, sent?: [digest: string, failures: number, at: number]] = [];
+  /** Exact Hearth binding plus the last digest's acknowledgement (`retry: 0`) or retry schedule. */
+  #hearth: [id?: string | null, digest?: string, retry?: number, at?: number] = [];
   /** By row name: the releases a race last decided on, and when they were resolved. */
   readonly #raceLists = new Map<string, { at: number; sources: TitleSource[] }>();
 
@@ -161,12 +161,12 @@ export class DownloadCoordinatorDriver {
     if (!this.queue.effects.wanted || this.#hearth[0] === null) return undefined;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    const last = this.#hearth[1];
-    if (last?.[0] === digest && last[1]) return Math.max(0, last[2] - now);
+    const [, last, retry = 0, at = 0] = this.#hearth;
+    if (last === digest && retry) return Math.max(0, at - now);
     // A fresh driver also sends one empty replacement. That clears intent retained by Hearth if the previous page or
     // worker disappeared after its local row removal but before receiving the clear response.
-    if (last?.[0] !== digest) return 0;
-    return items.length ? Math.max(0, last[2] + HEARTH_EVERY - now) : undefined;
+    if (last !== digest) return 0;
+    return items.length ? Math.max(0, at + HEARTH_EVERY - now) : undefined;
   }
 
   async #refresh(downloads: Download[], now: number, force: boolean): Promise<void> {
@@ -444,18 +444,13 @@ export class DownloadCoordinatorDriver {
    * it changed and otherwise every few minutes (an empty one once, to clear what Hearth holds).
    */
   async #syncHearth(now: number): Promise<boolean> {
-    const current = this.#current;
     const send = this.queue.effects.wanted;
     const binding = this.#hearth;
-    const authority = binding[0];
+    const [authority, last, retry = 0, at = 0] = binding;
     if (!send || authority === null) return false;
     const items = wantedItems(this.queue.list());
     const digest = JSON.stringify(items);
-    const last = binding[1];
-    if (
-      last?.[0] === digest &&
-      (last[1] ? now < last[2] : !items.length || now - last[2] < HEARTH_EVERY)
-    )
+    if (last === digest && (retry ? now < at : !items.length || now - at < HEARTH_EVERY))
       return false;
     let statuses: WantedStatus[] | null;
     try {
@@ -470,11 +465,11 @@ export class DownloadCoordinatorDriver {
     if (this.#hearth !== binding) return false;
     // A missing/refused response, profile replacement, or lost lease cannot acknowledge this intent. Keeping one
     // digest-scoped retry owner also means a changed (newer) intent bypasses the old intent's delay immediately.
-    if (!statuses || !current() || !this.#stillHeld(now)) {
+    if (!statuses || !this.#active(now)) {
       this.#retryHearth(digest, now);
       return false;
     }
-    binding[1] = [digest, 0, now];
+    this.#hearth = [authority, digest, 0, now];
     let wrote = false;
     for (const status of statuses) {
       if (status.state !== 'started' || !status.identity || !this.#stillHeld(now)) continue;
@@ -488,10 +483,10 @@ export class DownloadCoordinatorDriver {
   }
 
   #retryHearth(digest: string, now: number): void {
-    const previous = this.#hearth[1];
-    const failures = previous?.[0] === digest ? previous[1] + 1 : 1;
-    const delay = Math.min(HEARTH_EVERY, HEARTH_RETRY_MIN * 2 ** (failures - 1));
-    this.#hearth[1] = [digest, failures, now + delay];
+    const [authority, previous, retry = 0] = this.#hearth;
+    const delay =
+      previous === digest && retry ? Math.min(HEARTH_EVERY, retry * 2) : HEARTH_RETRY_MIN;
+    this.#hearth = [authority, digest, delay, now + delay];
   }
 
   /**
