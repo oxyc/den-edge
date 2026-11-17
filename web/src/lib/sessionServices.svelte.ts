@@ -104,7 +104,7 @@ export class SessionServices {
   }
 
   #connectAvailability(scout: Addon | null): void {
-    availability.connect(scout, this.content, relayFetch, [
+    void availability.connect(scout, this.content, relayFetch, [
       ...this.availabilityHousehold(),
       this.#availabilityProfile,
     ]);

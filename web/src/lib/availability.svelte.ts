@@ -83,7 +83,7 @@ export type AvailabilityAuthority = readonly [
 ];
 
 type Kept = Record<string, [Verdict, number]>;
-type Stored = { version: typeof STORAGE_VERSION; authority: string; verdicts: Kept };
+type Stored = [version: typeof STORAGE_VERSION, authority: string, verdicts: Kept];
 
 /** An opaque local name for credential-bearing household/add-on authority. Old TV engines use the same
  * non-cryptographic fallback as release memory; it is a namespace, never a credential or server proof. */
@@ -192,18 +192,18 @@ export class Availability {
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
     authority: AvailabilityAuthority = ['test', null, 'test'],
-  ): void {
+  ): Promise<void> {
     const connection = ++this.connection;
     const household = JSON.stringify(authority);
     if (this.household !== undefined && household !== this.household) this.reset();
     this.household = household;
     this.scout = null;
-    if (!scout) return;
+    if (!scout) return Promise.resolve();
     const exact = JSON.stringify([authority, scout.install, scout.base]);
     if (exact === this.answeredBy && this.storageAuthority) {
       this.scout = { base: scout.base, content, fetch: fetchImpl };
       this.gather();
-      return;
+      return Promise.resolve();
     }
     if (exact !== this.answeredBy) {
       this.reset();
@@ -212,7 +212,7 @@ export class Availability {
     this.scout = { base: scout.base, content, fetch: fetchImpl };
     this.gather();
     const generation = this.generation;
-    void this.digest(exact).then((digest) => {
+    return this.digest(exact).then((digest) => {
       if (
         connection !== this.connection ||
         generation !== this.generation ||
@@ -257,11 +257,11 @@ export class Availability {
   private restore(authority: string): void {
     try {
       const stored = JSON.parse(this.storage?.getItem(STORAGE_KEY) ?? 'null') as Stored | null;
-      if (stored?.version !== STORAGE_VERSION || stored.authority !== authority) {
+      if (stored?.[0] !== STORAGE_VERSION || stored[1] !== authority) {
         if (stored !== null) this.storage?.removeItem(STORAGE_KEY);
         return;
       }
-      for (const [id, row] of Object.entries(stored.verdicts)) {
+      for (const [id, row] of Object.entries(stored[2])) {
         if (!Array.isArray(row)) continue;
         const [verdict, at] = row;
         if (
@@ -585,11 +585,7 @@ export class Availability {
     try {
       this.storage?.setItem(
         STORAGE_KEY,
-        JSON.stringify({
-          version: STORAGE_VERSION,
-          authority: this.storageAuthority,
-          verdicts: kept,
-        }),
+        JSON.stringify([STORAGE_VERSION, this.storageAuthority, kept]),
       );
     } catch {
       // Refused storage: the verdicts are this visit's.
