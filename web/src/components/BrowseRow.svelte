@@ -304,9 +304,9 @@
   class="row-window"
   class:placed
   class:near={gatesPlacement && rowNear}
-  class:gone={done && !pager.failure && visible.length === 0}
+  class:gone={done && !pager.failed && visible.length === 0}
   data-row-id={row.id}
-  data-layout-state={pager.failure ? 'error' : pager.page === 0 ? 'pending' : 'settled'}
+  data-layout-state={pager.failed ? 'error' : pager.page === 0 ? 'pending' : 'settled'}
 >
   <PosterRow
     heading={localizedHeading}
@@ -350,10 +350,10 @@
         {#each { length: 6 } as _, i (i)}<span class="skeleton" aria-hidden="true"></span>{/each}
       {/if}
     {/each}
-    {#if pager.failure}
+    {#if pager.failed}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
       <button class="retry" onclick={() => void pager.retry()}>
-        {i18n.phrase(pager.failure)}
+        {i18n.phrase(pager.failed)}
         Try again
       </button>
     {/if}

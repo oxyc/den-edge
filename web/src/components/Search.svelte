@@ -711,22 +711,22 @@
         {/if}
         {#if feedHits.length}
           <SearchResults hits={feedHits} onend={() => void feed.pager.more()} />
-        {:else if feed.pager.done && !feed.pager.failure && culprit}
+        {:else if feed.pager.done && !feed.pager.failed && culprit}
           <p class="note empty" role="status">
             No results with {culprit.label}.
             <button type="button" class="clear" onclick={() => pick(culprit.id, false)}
               >Remove {culprit.label}</button
             >
           </p>
-        {:else if feed.pager.done && !feed.pager.failure}
+        {:else if feed.pager.done && !feed.pager.failed}
           <p class="note">Nothing here yet. Try taking a pick out.</p>
         {:else if !feed.pager.done}
           <Loading label="Loading" />
         {/if}
-        {#if feed.pager.failure}
+        {#if feed.pager.failed}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            {i18n.phrase(feed.pager.failure)}
+            {i18n.phrase(feed.pager.failed)}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button
             >

@@ -63,6 +63,7 @@
   import { startupMarkOnce, startupRenderPhase } from './lib/startupTiming';
   import { lastPromiseCache } from './lib/lastPromiseCache';
   import { isHidden } from './lib/prefs';
+  import { SERVICES_UNAVAILABLE, TMDB_LIMITED } from './lib/recoveryPhrases';
   import { nativeHls, prepareTrailers } from './lib/reel';
   import { navigate } from './lib/navigation';
   import { openProfileSwitcher } from './lib/profileSwitcherControl';
@@ -2986,9 +2987,7 @@
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    {keptNotice
-      ? i18n.phrase(keptNotice)
-      : 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'}
+    {i18n.phrase(keptNotice ?? TMDB_LIMITED)}
   </p>
 {/if}
 
@@ -3335,7 +3334,7 @@
           !directoryState.pending &&
           !directoryState.services.length &&
           (directoryServices === null || !directoryState.failed)
-            ? 'Services unavailable'
+            ? SERVICES_UNAVAILABLE
             : undefined}
           serviceRecovery={directoryState.retrying
             ? 'retrying'

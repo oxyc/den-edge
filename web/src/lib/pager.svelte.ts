@@ -4,16 +4,14 @@
 
 import { appendUniqueTitles } from './catalog';
 import type { Title } from './library';
+import { COULDNT_LOAD, OFFLINE_PAGE, SERVICES_UNAVAILABLE, TMDB_LIMITED } from './recoveryPhrases';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
 const FILL = 8;
 const MAX_BURST = 3;
 
 export type PagerFailure =
-  | 'Couldn’t load this page. Check that this device is online.'
-  | 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
-  | 'Services unavailable'
-  | 'Couldn’t load';
+  typeof OFFLINE_PAGE | typeof TMDB_LIMITED | typeof SERVICES_UNAVAILABLE | typeof COULDNT_LOAD;
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -25,7 +23,7 @@ export class Pager {
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
   /** The current Pager generation's failed `page + 1`, with only a presentation-safe reason. */
-  failure = $state<PagerFailure | null>(null);
+  failed = $state<PagerFailure | false>(false);
   #loading = false;
   readonly #lifetime = new AbortController();
   readonly #load: (page: number, signal?: AbortSignal) => Promise<Title[]>;
@@ -57,14 +55,14 @@ export class Pager {
           if (signal.aborted) break;
           // Keep raw provider/transport details out of presentation and ordinary device logs.
           const code = (error as { failure?: { code?: string } } | null)?.failure?.code;
-          this.failure =
+          this.failed =
             globalThis.navigator?.onLine === false
-              ? 'Couldn’t load this page. Check that this device is online.'
+              ? OFFLINE_PAGE
               : code === 'rate-limited'
-                ? 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'
+                ? TMDB_LIMITED
                 : ['unavailable', 'not-ready', 'internal'].includes(code as string)
-                  ? 'Services unavailable'
-                  : 'Couldn’t load';
+                  ? SERVICES_UNAVAILABLE
+                  : COULDNT_LOAD;
           this.done = true;
           break;
         }
@@ -81,8 +79,8 @@ export class Pager {
 
   /** Ask again for the page that failed, and carry on from there. */
   retry(): Promise<void> {
-    if (!this.failure || this.#loading || this.#lifetime.signal.aborted) return Promise.resolve();
-    this.failure = null;
+    if (!this.failed || this.#loading || this.#lifetime.signal.aborted) return Promise.resolve();
+    this.failed = false;
     this.done = false;
     return this.more();
   }
