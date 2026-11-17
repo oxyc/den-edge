@@ -129,8 +129,9 @@ describe("a TV's household play key", () => {
     expect(await playKeyFor('library-one', storage)).toBe(first);
     expect(firstWork.aborted).toBe(false);
 
-    const second = await playKeyFor('library-two', storage);
+    const replacing = playKeyFor('library-two', storage);
     expect(firstWork.aborted).toBe(true);
+    const second = await replacing;
     await vi.waitFor(() => expect(seen).toEqual([first, second]));
     stop.abort();
     await running;

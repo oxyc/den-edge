@@ -295,6 +295,13 @@
     // profile: an Owner's own library key differs from it, and would make a new key once that profile opened.
     const libraryKey = session.household.identity.libraryKey;
     const stop = new AbortController();
+    const playKey =
+      __DEN_TV__ && libraryKey
+        ? import('./lib/householdPlays').then(({ playKeyFor }) =>
+            playKeyFor(libraryKey, undefined, stop.signal),
+          )
+        : Promise.resolve(undefined);
+    void playKey.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
     void Promise.all([model.initialReadSettled, profileModel?.initialReadSettled]).then(() => {
       if (stop.signal.aborted) return;
@@ -302,18 +309,13 @@
         () =>
           void (async () => {
             // A TV publishes its household play key, so any device holding the library can play on it.
-            const playKey =
-              __DEN_TV__ && libraryKey
-                ? await (
-                    await import('./lib/householdPlays')
-                  ).playKeyFor(libraryKey, undefined, stop.signal)
-                : undefined;
+            const householdPlayKey = await playKey;
             if (stop.signal.aborted) return;
             await model.heartbeatDevice(
               name,
               undefined,
               __DEN_TV__ ? 'tv' : 'browser',
-              playKey,
+              householdPlayKey,
               __DEN_TV__ ? 1 : undefined,
             );
           })().catch((error: unknown) =>
