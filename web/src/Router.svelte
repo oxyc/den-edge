@@ -223,7 +223,13 @@
         behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
       });
     }
-    async function follow(path: string, push: boolean, replace = false, native = false) {
+    async function follow(
+      path: string,
+      push: boolean,
+      replace = false,
+      native = false,
+      replaceEntry = false,
+    ) {
       if (push && appPath(path, location.href) === null) return;
       // A newer release is kept: the page opened next is loaded whole, onto it, rather than drawn in place
       // (`release.ts`). Not for a query growing by a letter, which opens nothing.
@@ -314,14 +320,25 @@
       }
       restoring = true;
       if (push && address() !== path) {
-        position++;
-        for (const at of entries.keys()) if (at >= position) entries.delete(at);
         const pageKey =
           key.startsWith('title/') || key.startsWith('person/') || key.startsWith('service/')
             ? crypto.randomUUID()
             : key;
-        entries.set(position, { routeKey: key, pageKey });
-        history.pushState({ denNavigation: { scope, position, profile: ownProfile } }, '', path);
+        if (replaceEntry) {
+          // A directional TV sweep visits only its settled destination. Replace the preceding intermediate tab
+          // with a complete page transition while retaining the useful entry from before the sweep for Back.
+          entries.set(position, { routeKey: key, pageKey });
+          history.replaceState(
+            { denNavigation: { scope, position, profile: ownProfile } },
+            '',
+            path,
+          );
+        } else {
+          position++;
+          for (const at of entries.keys()) if (at >= position) entries.delete(at);
+          entries.set(position, { routeKey: key, pageKey });
+          history.pushState({ denNavigation: { scope, position, profile: ownProfile } }, '', path);
+        }
       }
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;
@@ -455,8 +472,10 @@
       else void follow('/', true);
     };
     const requested = (event: Event) => {
-      const { path, replace } = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
-      void follow(path, true, replace);
+      const { path, replace, replaceEntry } = (
+        event as CustomEvent<{ path: string; replace?: boolean; replaceEntry?: boolean }>
+      ).detail;
+      void follow(path, true, replace, false, replaceEntry);
     };
     const traversed = (event: PopStateEvent) => {
       // Back into a page another profile opened would show that page to this one; land on Home instead, in place.

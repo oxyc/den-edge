@@ -1,5 +1,10 @@
 import { flushSync } from 'svelte';
-import { appPath, navigate, routeKey as pageRouteKey } from '../lib/navigation';
+import {
+  appPath,
+  navigate,
+  navigateReplacingEntry,
+  routeKey as pageRouteKey,
+} from '../lib/navigation';
 import { parseRoute } from '../lib/route';
 import { currentAppPath } from '../lib/runtimeUrl';
 import { SearchScreen } from '../lib/screens.svelte';
@@ -180,6 +185,8 @@ export function installTVNavigation(): () => void {
   let locationKey = routeKey();
   let editing: HTMLElement | null = null;
   let forwardingBackToEditor = false;
+  let menuFocusSweep = false;
+  let menuFocusOriginKey: string | null = null;
 
   // A phone used to inspect the TV build needs Search mounted before its tap ends: mobile WebKit only starts the
   // software keyboard when the destination input receives focus during that activation. On a TV, remote focus is
@@ -213,6 +220,12 @@ export function installTVNavigation(): () => void {
     void preloadSearch();
   const searchButton = (target: EventTarget | null) =>
     target instanceof Element ? target.closest('.tv-search-button') : null;
+  const focusedMenuPath = (target: EventTarget | null) => {
+    if (!(target instanceof Element)) return null;
+    if (searchButton(target)) return '/search';
+    const anchor = target.closest<HTMLAnchorElement>('.tv-bar nav a');
+    return anchor ? appPath(anchor.href, location.href) : null;
+  };
   const prepareSearch = (event: Event) => {
     if (searchButton(event.target)) void preloadSearch();
   };
@@ -296,6 +309,11 @@ export function installTVNavigation(): () => void {
   const onFocus = () => {
     document.documentElement.classList.add('tv-remote-active');
     if (document.activeElement !== editing) editing = null;
+    const active = document.activeElement;
+    if (!(active instanceof Element) || !active.closest('.tv-bar nav')) {
+      menuFocusSweep = false;
+      menuFocusOriginKey = null;
+    }
     // Anchor navigation is intercepted directly by Router and does not emit den:navigate. Its first page control
     // can focus before popstate ever occurs, so associate it with the address now on screen instead of overwriting
     // the source route's remembered control.
@@ -305,15 +323,23 @@ export function installTVNavigation(): () => void {
   const activateFocusedMenu = () => {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement)) return;
-    const search = searchButton(active);
-    const anchor = active.closest<HTMLAnchorElement>('.tv-bar nav a');
-    const path = search ? '/search' : anchor ? appPath(anchor.href, location.href) : null;
+    const path = focusedMenuPath(active);
     if (!path) return;
     const next = routeKey(path);
     if (next === locationKey) return;
+    if (!menuFocusSweep) menuFocusOriginKey = locationKey;
     const identity = focusIdentity(active);
-    if (identity) rememberAt(next, identity);
-    navigate(path);
+    if (identity) {
+      rememberAt(next, identity);
+      // Back returns to the final tab the viewer reached, not the first intermediate tab crossed in the sweep.
+      if (menuFocusOriginKey) rememberAt(menuFocusOriginKey, identity);
+    }
+    // Keep the page the viewer came from as one useful Back destination, then replace the intermediate pages
+    // crossed during this uninterrupted focus sweep. A five-item remote traversal must not require five Backs.
+    const replace = menuFocusSweep;
+    menuFocusSweep = true;
+    if (replace) navigateReplacingEntry(path);
+    else navigate(path);
   };
   const onKey = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -358,6 +384,24 @@ export function installTVNavigation(): () => void {
     }
     // The player has a richer remote state machine and owns every key while focus is inside it.
     if (target?.closest('[data-tv-player], .player, video')) return;
+    if (event.key === 'Enter') {
+      const menuPath = focusedMenuPath(target);
+      // Directional focus has already activated this page. Consume Select rather than navigating the same menu
+      // destination a second time while its retained route is mounting. Search gives Select one useful action:
+      // enter its editor, waiting for the lazy route when necessary.
+      if (menuPath && routeKey(menuPath) === locationKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (searchButton(target)) {
+          const inputSelector = '[data-route-page][data-active="true"] .tv-search-input';
+          flushSync();
+          const input = document.querySelector<HTMLInputElement>(inputSelector);
+          if (input) input.focus({ preventScroll: true });
+          else restoreSoon(inputSelector);
+        }
+        return;
+      }
+    }
     // The browser already chose body as this press's target, so its own activation would do nothing.
     // An editor keeps its own Select handling below (the first press starts editing).
     const recoveredEditor: boolean = isEditable(recovered ?? null);

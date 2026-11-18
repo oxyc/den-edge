@@ -138,6 +138,11 @@ export function navigate(path: string, replace = false) {
   document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path, replace } }));
 }
 
+/** TV menu focus can cross several pages in one remote sweep; replace an intermediate entry with a real page visit. */
+export function navigateReplacingEntry(path: string) {
+  document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path, replaceEntry: true } }));
+}
+
 /** Navbar and other explicit Back controls use the same scoped router as gestures. */
 export function navigateBack() {
   document.dispatchEvent(new Event('den:back'));
