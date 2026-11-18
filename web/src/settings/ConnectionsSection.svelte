@@ -59,7 +59,6 @@
   import { parseTVLink } from '../lib/tvLink';
   import type { LibraryJoinPresentationOwner } from '../lib/libraryJoinPresentation';
   import type { CompoundResetStartResult } from '../lib/profileKeyResetPage';
-  import { LatestMutation } from './latestMutation';
 
   let {
     link,
@@ -409,21 +408,17 @@
   void fetchSimklClientId().then((id) => (simklClientId = id));
   let simklPin = $state<SimklPin | null>(null);
   let simklNote = $state<{ text: string; bad: boolean } | null>(null);
-  let retrySimklDisconnect = $state(false);
   let disconnectingSimkl = $state(false);
-  const simklWrites = new LatestMutation<typeof saveSimkl, null>();
   /** Said when an approval found the held list changed under it. */
   let removalsNote = $state<string | null>(null);
   let simklAttempt = 0;
   $effect(() => () => {
     simklAttempt++;
-    simklWrites.retire();
   });
   $effect(() => {
     if (simklConnected) return;
     untrack(() => {
-      simklWrites.retire();
-      retrySimklDisconnect = false;
+      simklAttempt++;
       disconnectingSimkl = false;
       if (simklNote?.text === 'Couldn’t disconnect it. Try again in a moment.') simklNote = null;
     });
@@ -432,20 +427,16 @@
   async function disconnectSimkl() {
     if (disconnectingSimkl) return;
     const writer = saveSimkl;
-    const claim = simklWrites.begin(writer, null);
+    const attempt = ++simklAttempt;
     disconnectingSimkl = true;
-    retrySimklDisconnect = false;
     simklNote = null;
-    let saved = false;
-    try {
-      saved = await writer(claim.intent);
-    } catch (error) {
+    const saved = await writer(null).catch((error) => {
       console.warn('den: SIMKL disconnect could not be saved', error);
-    }
-    if (!simklWrites.isCurrent(claim, saveSimkl)) return;
+      return false;
+    });
+    if (attempt !== simklAttempt || writer !== saveSimkl) return;
     disconnectingSimkl = false;
     if (!saved) {
-      retrySimklDisconnect = true;
       simklNote = { text: 'Couldn’t disconnect it. Try again in a moment.', bad: true };
     }
   }
@@ -1120,7 +1111,7 @@
         >
           {i18n.phrase(simklNote.text)}
         </p>{/if}
-      {#if retrySimklDisconnect}<Button
+      {#if simklNote?.text === 'Couldn’t disconnect it. Try again in a moment.'}<Button
           variant="secondary"
           label={disconnectingSimkl ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
           busy={disconnectingSimkl}

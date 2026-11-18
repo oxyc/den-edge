@@ -18,7 +18,6 @@
   import type { ProfilePreferences } from './lib/profilePreferences.svelte';
   import { i18n, setInterfaceLanguage } from './lib/i18n.svelte';
   import { rememberFreshPresentationLanguage } from './lib/translationCache';
-  import { LatestMutation, type MutationClaim } from './settings/latestMutation';
 
   let {
     session,
@@ -30,18 +29,13 @@
   });
   let saving = $state(false);
   type PreferenceChanges = Parameters<ProfilePreferences['patch']>[0];
-  type PreferenceClaim = MutationClaim<ProfileSession, PreferenceChanges>;
-  type PreferenceFailure =
-    | { kind: 'write'; authority: ProfileSession; claim: PreferenceClaim }
-    | {
-        kind: 'presentation';
-        authority: ProfileSession;
-        claim: PreferenceClaim;
-        language: NonNullable<PreferenceChanges['interfaceLanguage']>;
-      }
-    | { kind: 'policy'; authority: ProfileSession };
+  type PreferenceFailure = {
+    kind: 'write' | 'presentation' | 'policy';
+    authority: ProfileSession;
+    retry?: () => void;
+  };
   let failure = $state<PreferenceFailure | null>(null);
-  const preferenceWrites = new LatestMutation<ProfileSession, PreferenceChanges>();
+  let preferenceGeneration = 0;
   let saveSession = untrack(() => session);
   const role = $derived(
     i18n.text(session.identity.kind === 'visitor' ? 'profile.visitor' : 'profile.kid'),
@@ -57,14 +51,14 @@
     const active = session;
     if (active === saveSession) return;
     saveSession = active;
-    preferenceWrites.retire();
+    preferenceGeneration++;
     failure = null;
     saving = false;
   });
 
   onDestroy(() => {
     unlockAttempt++;
-    preferenceWrites.retire();
+    preferenceGeneration++;
   });
 
   async function unlock() {
@@ -108,42 +102,52 @@
   }
 
   async function presentLanguage(
-    claim: PreferenceClaim,
+    active: ProfileSession,
+    generation: number,
     language: NonNullable<PreferenceChanges['interfaceLanguage']>,
   ) {
-    if (!preferenceWrites.isCurrent(claim, session)) return;
+    if (generation !== preferenceGeneration || active !== session) return;
     saving = true;
     failure = null;
     try {
       rememberFreshPresentationLanguage(language);
-      claim.authority.presentIn(language);
+      active.presentIn(language);
       await setInterfaceLanguage(language);
     } catch (error: unknown) {
       console.warn('den: the saved profile language could not be presented', error);
-      if (preferenceWrites.isCurrent(claim, session))
-        failure = { kind: 'presentation', authority: claim.authority, claim, language };
+      if (generation === preferenceGeneration && active === session)
+        failure = {
+          kind: 'presentation',
+          authority: active,
+          retry: () => void presentLanguage(active, generation, language),
+        };
     } finally {
-      if (preferenceWrites.isCurrent(claim, session)) saving = false;
+      if (generation === preferenceGeneration && active === session) saving = false;
     }
   }
 
   async function writePreferences(changes: PreferenceChanges) {
     const active = session;
-    const claim = preferenceWrites.begin(active, changes);
+    const generation = ++preferenceGeneration;
     saving = true;
     failure = null;
     try {
-      await (active.preferences as ProfilePreferences).patch(claim.intent);
+      await (active.preferences as ProfilePreferences).patch(changes);
     } catch (error: unknown) {
       console.warn('den: profile preference save failed', error);
-      if (preferenceWrites.isCurrent(claim, session)) saving = false;
-      if (preferenceWrites.isCurrent(claim, session))
-        failure = { kind: 'write', authority: active, claim };
+      if (generation === preferenceGeneration && active === session) {
+        saving = false;
+        failure = {
+          kind: 'write',
+          authority: active,
+          retry: () => void writePreferences(changes),
+        };
+      }
       return;
     }
-    if (!preferenceWrites.isCurrent(claim, session)) return;
-    if (claim.intent.interfaceLanguage)
-      await presentLanguage(claim, claim.intent.interfaceLanguage);
+    if (generation !== preferenceGeneration || active !== session) return;
+    if (changes.interfaceLanguage)
+      await presentLanguage(active, generation, changes.interfaceLanguage);
     else saving = false;
   }
 
@@ -153,10 +157,7 @@
 
   function retryPreferences() {
     const retry = failure;
-    if (!retry || retry.authority !== session || retry.kind === 'policy') return;
-    if (!preferenceWrites.isCurrent(retry.claim, session)) return;
-    if (retry.kind === 'write') void writePreferences(retry.claim.intent);
-    else void presentLanguage(retry.claim, retry.language);
+    if (retry?.authority === session) retry.retry?.();
   }
 </script>
 
