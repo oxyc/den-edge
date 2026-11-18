@@ -99,6 +99,22 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- The missing-library recovery (#1212) was measured on matched production builds at base `251484fd` and the repair.
+  Only the typed `refused-start` status is on the startup path: the notice copy, its Open Linked devices action and the
+  row reveal are the lazy `MissingLibraryNotice` chunk (`MissingLibraryNoticeScreen`), fetched only while a library is
+  refused. Ordinary Browser startup moves 10,512 → 10,642 over the fixed baseline (+130). appMain accounts for +102:
+  +20 is the classification itself (the session getter and the page codec case; measured by building the status
+  alone), the rest the smallest lazy wiring (registry entry with its hashed chunk path and preload deps, load effect,
+  component slot). The new chunk also renumbers the shared import map, about +3 in each of six other startup chunks.
+  The complete non-translation graph moves 126,292 → 127,187 (+895): the lazy chunk +666 and the Worker's status and
+  codec +40, the rest that renumbering. ES/SV catalogs move 51,439 → 51,549 (+110). Measured and
+  rejected: the copy and action eager in `LibraryStatus` (startup +206); the notice importing Settings' `rows` (split
+  `rows` into its own chunk, adding a request to every Settings open); a `pageVisibility` import (its own startup chunk,
+  +148 and a request); and an `{#await import()}` slot (would pull Svelte's await runtime into startup, which no eager
+  code uses yet). The reveal opens the row through its own button and focuses it once its page is shown, so Settings
+  and its rows are unchanged. Main left 44 bytes of complete-graph margin and 17 of translation margin: the complete
+  ceiling advances to 127,232 (45 bytes of margin) and the translation ceiling to 51,584 (35); the startup cap is
+  unchanged. No request outside that state, timer, polling, listener or dependency is added.
 - Consuming a segment scan the current play started (#1201) was measured on matched production builds at base
   `053a769e` and the change. Ordinary Browser startup moves 10,529 → 10,512 over the fixed baseline (-17 gzip bytes,
   minification; no startup code changed), while the complete non-translation graph moves 126,176 → 126,292 (+116);

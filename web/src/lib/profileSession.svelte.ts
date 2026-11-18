@@ -231,6 +231,14 @@ export class ProfileSession {
     return null;
   }
 
+  /**
+   * den-edge holds no log for this library and won't start one; joining the household's library is the recovery.
+   * Its notice is `MissingLibraryNotice`, loaded only in this state, so `alert` is null for it.
+   */
+  get missingLibrary(): boolean {
+    return this.model?.status.kind === 'refused-start';
+  }
+
   /** A real den-edge wire fence, distinct from an unreachable or retryable library failure. */
   get updateRequired(): boolean {
     return this.household.updateRequired || libraryUpdateRequired(this.model);

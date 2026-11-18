@@ -44,7 +44,12 @@
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
-  import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
+  import {
+    LinkScreen,
+    MissingLibraryNoticeScreen,
+    ProfileSettingsScreen,
+    SettingsScreen,
+  } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { householdAssistantFetch } from './lib/relayFetch';
@@ -441,6 +446,9 @@
     void import('./components/LegacyBackupRecovery.svelte').then(
       ({ default: component }) => (LegacyBackupRecovery = component),
     );
+  });
+  $effect(() => {
+    if (shown.missingLibrary) void MissingLibraryNoticeScreen.load();
   });
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
@@ -1915,6 +1923,12 @@
           alert={shown.alert}
           undo={shown.undo}
         />
+        {#if MissingLibraryNoticeScreen.current}
+          <MissingLibraryNoticeScreen.current
+            missing={shown.missingLibrary}
+            route={settingsRoute}
+          />
+        {/if}
         {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
           <PlaybackReceiptStatus
             state={playbackReceiptStatus.state}

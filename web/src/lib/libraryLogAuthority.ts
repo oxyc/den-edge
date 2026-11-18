@@ -2980,6 +2980,8 @@ export class LibraryLogAuthority {
         kind: 'status',
         status: { kind: 'read-only', reason: 'Couldn’t save your last change. It was not kept.' },
       });
+    else if (outcome === 'kept' && this.#log.refused)
+      announce({ kind: 'status', status: { kind: 'refused-start' } });
     else if (outcome === 'kept' && !this.#log.moved)
       announce({
         kind: 'status',

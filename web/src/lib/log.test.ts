@@ -1091,6 +1091,75 @@ describe('LibraryLog', () => {
     });
   });
 
+  it('keeps an edit to a library den-edge will not start, and stays refused until a read finds the log', async () => {
+    const server = await edge([], [], 'generation-1');
+    const { vault } = memoryVault();
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    let missing = true;
+    let unreachable = false;
+    let posts = 0;
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST') {
+        posts++;
+        if (unreachable) throw new TypeError('offline');
+        if (missing)
+          return new Response('{"error":"new_libraries_closed"}', {
+            status: 403,
+            headers: protocol,
+          });
+      } else if (missing) return new Response('{}', { status: 404, headers: protocol });
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      for (const [name, value] of Object.entries(protocol)) headers.set(name, value);
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 2 }, 0), at(1000)));
+      await vi.waitFor(() => expect(log.refused).toBe(true));
+      const refusedPosts = posts;
+      expect(log.pendingActions, 'the refused edit is kept on this device').toBe(1);
+      expect(log.title({ type: 'movie', id: 2 })?.status.value).toBe('watchlist');
+
+      await log.refresh();
+      expect(posts, 'nothing is sent again within the ten-minute re-check').toBe(refusedPosts);
+      now += 10 * 60_000 - 1;
+      await log.refresh();
+      expect(posts).toBe(refusedPosts);
+
+      // The re-check does not get through: that says nothing about the log, so the refusal stands.
+      now += 2;
+      unreachable = true;
+      await log.refresh();
+      expect(posts).toBe(refusedPosts + 1);
+      expect(log.refused).toBe(true);
+
+      // Refused once more: another ten minutes.
+      unreachable = false;
+      await log.refresh();
+      expect(posts).toBe(refusedPosts + 2);
+      await log.refresh();
+      expect(posts).toBe(refusedPosts + 2);
+      expect(log.refused).toBe(true);
+      expect(log.pendingActions).toBe(1);
+
+      // Another device in the household writes the log: one read finds it, and the kept edit goes.
+      missing = false;
+      await log.refresh();
+      expect(log.refused).toBe(false);
+      await vi.waitFor(() => expect(log.pendingActions).toBe(0));
+      expect(posts).toBe(refusedPosts + 3);
+      log.close();
+    } finally {
+      clock.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it('starts one cached pull before deferred mixed work is atomically published and replayed', async () => {
     const server = await edge([row(1)], [], 'generation-1');
     const { vault } = memoryVault();

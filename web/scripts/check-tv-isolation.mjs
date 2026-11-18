@@ -193,7 +193,10 @@ if (process.argv.includes('--capture')) {
   // The subtitle menu's "needs Den Remux" copy in Swedish and Spanish measured 51,262 against matched main's 51,187
   // (+75), which sat 13 bytes under the 50 KiB ceiling. Allow the next 128-byte boundary after the one that leaves
   // 66 bytes, retaining 194.
-  if (current.translationGzip > 51456) throw new Error('Lazy translation catalog budget exceeded');
+  // The missing-library notice and its "Open Linked devices" action (#1212) in Swedish and Spanish measure 51,549
+  // against matched main's 51,439 (+110), which sat 17 bytes under this ceiling: no localized notice fits. Allow the
+  // next 128-byte boundary, retaining 35.
+  if (current.translationGzip > 51584) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -449,5 +452,12 @@ if (process.argv.includes('--capture')) {
   // main at 053a769e), all in the lazy Player chunk: up to three re-asks of a miss on the existing progress tick, the
   // episode fence and den-edge's settled-miss header. No timer, listener or startup code; startup moves 10,529 ->
   // 10,512. Allow the smallest 128-byte boundary containing it, retaining 44.
-  if (coreTotalDelta > 126336) throw new Error('Browser total JS/CSS budget exceeded');
+  // The missing-library notice (#1212) measured 127,187 against matched main's 126,292 (+895, main at 251484fd). Only
+  // the typed `refused-start` status is on the startup path (+20: its getter and codec case); the notice copy, its
+  // Linked devices action and the row reveal are a lazy `MissingLibraryNotice` chunk (+666), fetched only while a
+  // library is refused, plus its registry entry, load effect and slot. Startup moves 10,512 -> 10,642 (appMain +102;
+  // the new chunk renumbers the shared import map, about +3 in each of six other startup chunks); the eager-copy draft
+  // measured +206. The Worker adds +40. It adds no request outside that state, timer or polling. Allow the smallest
+  // 128-byte boundary containing it, retaining 45.
+  if (coreTotalDelta > 127232) throw new Error('Browser total JS/CSS budget exceeded');
 }

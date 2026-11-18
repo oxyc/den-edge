@@ -1418,4 +1418,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Namnbyte, borttagning och skapande av vuxenprofiler är inte tillgängliga på den här TV:n. De kommer att hanteras i Den på webben.',
   'This TV is viewer-only. Profile administration is not available on this TV.':
     'Den här TV:n är endast för visning. Profiladministration är inte tillgänglig på den här TV:n.',
+  'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.':
+    'Den här enhetens bibliotek finns inte på Den. Dina ändringar sparas här – gå med i hushållets bibliotek under Inställningar › Länkade enheter.',
+  'Open Linked devices': 'Öppna Länkade enheter',
 };

@@ -2505,6 +2505,7 @@ function sessionStatus(value: unknown): value is LibrarySessionStatus {
   if (!record(value) || !text(value.kind)) return false;
   switch (value.kind) {
     case 'ready':
+    case 'refused-start':
       return exact(value, ',kind,version,') && version(value.version);
     case 'reconnecting':
       return exact(value, ',kind,version,') && nullable(value.version, version);
