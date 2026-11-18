@@ -224,6 +224,13 @@ test(
     await expect(
       page.getByRole('navigation', { name: 'Main navigation' }).locator(':focus'),
     ).toHaveCount(1);
+    // Menu focus now activates its page. Return through a real directional move before continuing this Home soak;
+    // programmatic focus alone deliberately does not impersonate remote intent.
+    const home = page.getByRole('link', { name: 'Home', exact: true });
+    await search.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(home).toBeFocused();
+    await expect(page).toHaveURL(/\/$/);
     await more.focus();
     await page.screenshot({ path: info.outputPath('tv-home.png') });
     const baselineWorkers = page.workers().length;

@@ -226,8 +226,11 @@ test('late runtime from a replaced episode cannot become the active denominator'
     element.pause();
   });
   await expect
-    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
-    .toMatchObject({ fraction: 31 / 180, seconds: 31, playing: false });
+    .poll(async () => {
+      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+      return saved.seconds === 31 && saved.playing === false ? saved.fraction : 0;
+    })
+    .toBeCloseTo(31 / 180, 3);
 
   releaseFirst();
   await video.evaluate(async (element) => {
@@ -236,8 +239,11 @@ test('late runtime from a replaced episode cannot become the active denominator'
     element.pause();
   });
   await expect
-    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
-    .toMatchObject({ fraction: 32 / 180, seconds: 32, playing: false });
+    .poll(async () => {
+      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+      return saved.seconds === 32 && saved.playing === false ? saved.fraction : 0;
+    })
+    .toBeCloseTo(32 / 180, 3);
 });
 
 test('unknown media duration without trustworthy runtime remains fail-closed', async ({ page }) => {

@@ -11,6 +11,18 @@ describe('TV Search preload admission', () => {
     );
   });
 
+  it('does not mistake TV engines exposing touch APIs for touch previews', () => {
+    expect(
+      touchNeedsSearchPreload(
+        0,
+        true,
+        'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 Chrome/120.0.6099.270 Safari/537.36 WebAppManager',
+      ),
+    ).toBe(false);
+    expect(touchNeedsSearchPreload(1, true, 'Mozilla/5.0 (SMART-TV; Tizen 8.0)')).toBe(false);
+    expect(touchNeedsSearchPreload(1, true, 'Mozilla/5.0 DenAndroidTV/1.0')).toBe(false);
+  });
+
   it('does not parse Search for a key whose intent is to leave its restored focus', () => {
     expect(searchKeyNeedsPreload('ArrowDown')).toBe(false);
     expect(searchKeyNeedsPreload('ArrowLeft')).toBe(false);

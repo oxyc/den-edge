@@ -343,7 +343,12 @@
           type="button"
           aria-label={i18n.text('nav.search')}
           aria-current={route.page === 'search' ? 'page' : undefined}
-          onclick={() => navigate(searchHref(''))}
+          onclick={() => {
+            // Directional focus may already have opened Search. Do not re-navigate that same route on Select:
+            // TV navigation's activation handler can then move focus into the editor without route restoration
+            // racing it back to this button (notably in WebKit/webOS).
+            if (route.page !== 'search') navigate(searchHref(''));
+          }}
         >
           <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
             ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg

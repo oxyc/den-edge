@@ -94,7 +94,9 @@ video {
 
 /* Where this page plays the session itself, the Cast button floats over the picture's corner, as Den's player
    buttons do. */
-.cast-button {
+.cast-button,
+.airplay-button,
+.fullscreen-button {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
@@ -112,16 +114,23 @@ video {
   -webkit-tap-highlight-color: transparent;
 }
 
-.cast-button[hidden] {
+.cast-button[hidden],
+.airplay-button[hidden],
+.fullscreen-button[hidden],
+.outputs[hidden] {
   display: none;
 }
 
-.cast-button:focus-visible {
+.cast-button:focus-visible,
+.airplay-button:focus-visible,
+.fullscreen-button:focus-visible {
   outline: 3px solid #fff;
   outline-offset: 3px;
 }
 
-.cast-button svg {
+.cast-button svg,
+.airplay-button svg,
+.fullscreen-button svg {
   width: var(--cast-icon, 22px);
   height: var(--cast-icon, 22px);
   fill: none;
@@ -186,4 +195,34 @@ html.button .cast-button {
   border: 0;
   background: transparent;
   outline: none;
+}
+
+/* Sending the picture to an AirPlay device: the glyph takes the player's "on" colour. */
+.airplay-button.on {
+  color: #8fb0ff;
+}
+
+/* Away from home with the player's transport over this page (`html.driven`): the output buttons sit in the hole the
+   player leaves for them in its top bar (`den-outputs-slot`), a row from the right, and hide with its controls. */
+html.driven .outputs:not([hidden]) {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+html.driven .cast-button,
+html.driven .airplay-button,
+html.driven .fullscreen-button {
+  position: static;
+  flex: none;
+  border-color: transparent;
+  background: transparent;
+}
+
+html.driven .cast-button:hover,
+html.driven .airplay-button:hover,
+html.driven .fullscreen-button:hover {
+  background: rgb(255 255 255 / 0.14);
 }
