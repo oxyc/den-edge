@@ -223,13 +223,7 @@
         behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
       });
     }
-    async function follow(
-      path: string,
-      push: boolean,
-      replace = false,
-      native = false,
-      replaceEntry = false,
-    ) {
+    async function follow(path: string, push: boolean, replace = false, native = false) {
       if (push && appPath(path, location.href) === null) return;
       // A newer release is kept: the page opened next is loaded whole, onto it, rather than drawn in place
       // (`release.ts`). Not for a query growing by a letter, which opens nothing.
@@ -241,7 +235,7 @@
       // The same page at a new address: a search query that grew by a letter is not somewhere a person
       // navigated to, and giving it a history entry would bury the page they came from under the spelling
       // of what they typed. The entry is rewritten in place and the page keeps its scroll and its state.
-      if (replace) {
+      if (replace && (!__DEN_TV__ || key === requestedKey)) {
         clearTimeout(unwritten?.timer);
         unwritten = { path, timer: setTimeout(writeAddress, ADDRESS_WAIT_MS) };
         // Only the route and, once typing pauses, the address. The page itself is the one already on screen, so
@@ -324,9 +318,7 @@
           key.startsWith('title/') || key.startsWith('person/') || key.startsWith('service/')
             ? crypto.randomUUID()
             : key;
-        if (replaceEntry) {
-          // A directional TV sweep visits only its settled destination. Replace the preceding intermediate tab
-          // with a complete page transition while retaining the useful entry from before the sweep for Back.
+        if (__DEN_TV__ && replace) {
           entries.set(position, { routeKey: key, pageKey });
           history.replaceState(
             { denNavigation: { scope, position, profile: ownProfile } },
@@ -472,10 +464,8 @@
       else void follow('/', true);
     };
     const requested = (event: Event) => {
-      const { path, replace, replaceEntry } = (
-        event as CustomEvent<{ path: string; replace?: boolean; replaceEntry?: boolean }>
-      ).detail;
-      void follow(path, true, replace, false, replaceEntry);
+      const { path, replace } = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
+      void follow(path, true, replace);
     };
     const traversed = (event: PopStateEvent) => {
       // Back into a page another profile opened would show that page to this one; land on Home instead, in place.

@@ -1,10 +1,5 @@
 import { flushSync } from 'svelte';
-import {
-  appPath,
-  navigate,
-  navigateReplacingEntry,
-  routeKey as pageRouteKey,
-} from '../lib/navigation';
+import { appPath, navigate, routeKey as pageRouteKey } from '../lib/navigation';
 import { parseRoute } from '../lib/route';
 import { currentAppPath } from '../lib/runtimeUrl';
 import { SearchScreen } from '../lib/screens.svelte';
@@ -338,8 +333,7 @@ export function installTVNavigation(): () => void {
     // crossed during this uninterrupted focus sweep. A five-item remote traversal must not require five Backs.
     const replace = menuFocusSweep;
     menuFocusSweep = true;
-    if (replace) navigateReplacingEntry(path);
-    else navigate(path);
+    navigate(path, replace);
   };
   const onKey = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
