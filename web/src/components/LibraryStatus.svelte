@@ -8,6 +8,7 @@
     alert,
     undo = null,
     alertRetry = null,
+    alertAction = null,
   }: {
     toast: string | null;
     /** Changes for every notice, including equal text, so its live region is presented again. */
@@ -17,6 +18,8 @@
     undo?: { label: string; run: () => void } | null;
     /** A recovery action owned by an alert which cannot live in its lazy feature chunk. */
     alertRetry?: (() => void) | null;
+    /** The alert's own way out, named for what it does ("Open Linked devices"). */
+    alertAction?: { label: string; run: () => void } | null;
   } = $props();
 </script>
 
@@ -25,6 +28,8 @@
         type="button"
         class="undo"
         onclick={alertRetry}>{i18n.phrase('Try again')}</button
+      >{:else if alertAction}<button type="button" class="undo" onclick={alertAction.run}
+        >{i18n.phrase(alertAction.label)}</button
       >{/if}
   </p>{/if}
 {#key presentation}

@@ -378,7 +378,9 @@ export function librarySimklDelivery(
   };
 }
 
-function logStatus(log: LibraryLog): LibraryAuthorityStatus {
+export function logStatus(
+  log: Pick<LibraryLog, 'moved' | 'upgradeRequired' | 'refused' | 'readOnlyReason'>,
+): LibraryAuthorityStatus {
   if (log.moved) return { kind: 'moved' };
   if (log.upgradeRequired !== null)
     return {
@@ -390,6 +392,7 @@ function logStatus(log: LibraryLog): LibraryAuthorityStatus {
         requiredWire: log.upgradeRequired,
       },
     };
+  if (log.refused) return { kind: 'refused-start' };
   if (log.readOnlyReason) return { kind: 'read-only', reason: log.readOnlyReason };
   return { kind: 'ready' };
 }

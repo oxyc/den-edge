@@ -2510,6 +2510,8 @@ function sessionStatus(value: unknown): value is LibrarySessionStatus {
       return exact(value, ',kind,version,') && nullable(value.version, version);
     case 'read-only':
       return exact(value, ',kind,version,reason,') && version(value.version) && text(value.reason);
+    case 'refused-start':
+      return exact(value, ',kind,version,') && version(value.version);
     case 'moved':
       return exact(value, ',kind,successor,') && optional(value.successor, text);
     case 'failed':

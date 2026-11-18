@@ -5,6 +5,7 @@
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
   import { getContext, type Snippet } from 'svelte';
+  import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { rows, SECTION } from './rows.svelte';
 
   let {
@@ -36,11 +37,23 @@
     rows.expandable.set(id, section ?? '');
     return () => rows.expandable.delete(id);
   });
+
+  // A route page is mounted hidden and shown after, and nothing in it takes focus until then.
+  const page = pageVisibility();
+  let button = $state<HTMLButtonElement>();
+  $effect(() => {
+    const target = button;
+    if (rows.reveal !== id || !page.active || !target) return;
+    rows.reveal = null;
+    // After the Router's own scroll for the page it just opened.
+    requestAnimationFrame(() => target.focus());
+  });
 </script>
 
 <div class="item" {id} data-spatial-item>
   {#if children}
     <button
+      bind:this={button}
       type="button"
       class="row"
       data-spatial-anchor

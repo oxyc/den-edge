@@ -1438,4 +1438,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'El cambio de nombre, la eliminación y la creación de perfiles de adulto no están disponibles en este televisor. Se administrarán en Den en la web.',
   'This TV is viewer-only. Profile administration is not available on this TV.':
     'Este televisor es solo para visualización. La administración de perfiles no está disponible en este televisor.',
+  'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.':
+    'La biblioteca de este dispositivo no está en Den. Tus cambios se guardan aquí; únete a la biblioteca de tu hogar en Configuración › Dispositivos vinculados.',
+  'Open Linked devices': 'Abrir Dispositivos vinculados',
 };

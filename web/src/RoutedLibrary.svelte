@@ -43,6 +43,7 @@
     KeyResetOutcome,
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
+  import { navigate } from './lib/navigation';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
   import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
@@ -277,6 +278,13 @@
   $effect(() => {
     if (settingsOpen && settingsRoute === 'personal') void ProfileSettingsScreen.load();
   });
+  // The missing-library notice's action: household Settings opens on Linked devices, where the household's library
+  // is joined. Nothing is joined, created or reset until the person does it there.
+  let revealLinkedDevices = $state(false);
+  function openLinkedDevices() {
+    revealLinkedDevices = true;
+    navigate('/settings');
+  }
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
@@ -1913,6 +1921,9 @@
           toast={shown.toast}
           presentation={shown.toastPresentation}
           alert={shown.alert}
+          alertAction={shown.missingLibrary && settingsRoute === 'household'
+            ? { label: 'Open Linked devices', run: openLinkedDevices }
+            : null}
           undo={shown.undo}
         />
         {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
@@ -1990,6 +2001,9 @@
                     pendingReset.from === libraryIdentity}
                   heldReset={pendingReset?.held === true}
                   onadoptheld={adoptHeldReset}
+                  revealLinkedDevices={revealLinkedDevices
+                    ? () => (revealLinkedDevices = false)
+                    : undefined}
                 />
               {:else}
                 <ScreenLoading screen={SettingsScreen} />

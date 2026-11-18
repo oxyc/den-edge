@@ -227,8 +227,15 @@ export class ProfileSession {
     const status = this.model?.status;
     if (this.updateRequired) return 'Library update required';
     if (status?.kind === 'read-only') return status.reason;
+    if (this.missingLibrary)
+      return 'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.';
     if (status?.kind === 'moved') return 'This library moved to a new key';
     return null;
+  }
+
+  /** den-edge holds no log for this library and won't start one; joining the household's library is the recovery. */
+  get missingLibrary(): boolean {
+    return this.model?.status.kind === 'refused-start';
   }
 
   /** A real den-edge wire fence, distinct from an unreachable or retryable library failure. */

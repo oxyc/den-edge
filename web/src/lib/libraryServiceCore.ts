@@ -79,6 +79,7 @@ export type LibraryAuthorityStatus =
   | { kind: 'ready' }
   | { kind: 'reconnecting' }
   | { kind: 'read-only'; reason: string }
+  | { kind: 'refused-start' }
   | { kind: 'moved'; successor?: string }
   | { kind: 'failed'; error: LibraryServiceFailure };
 
@@ -594,6 +595,7 @@ export class LibraryServiceCore {
     if (status.kind === 'reconnecting') return { kind: 'reconnecting', version: this.#version() };
     if (status.kind === 'read-only')
       return { kind: 'read-only', version: this.#version(), reason: status.reason };
+    if (status.kind === 'refused-start') return { kind: 'refused-start', version: this.#version() };
     if (status.kind === 'moved')
       return { kind: 'moved', ...(status.successor ? { successor: status.successor } : {}) };
     return status;

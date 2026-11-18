@@ -517,7 +517,8 @@ export class LibraryLog {
    * `NEW_LIBRARIES=members`: only a device holding another library there may). Recovery is not sent again until a
    * read finds the log — the TV writing it back — or `RECHECK_MS` has passed, instead of on every refresh: one
    * browser in this state sent 101 refused batches over nearly six hours, one on each 30-second refresh while its
-   * tab was visible. The occasional re-check is what notices den-edge opened to new libraries again.
+   * tab was visible. The occasional re-check is what notices den-edge opened to new libraries again. It is the
+   * `refused-start` status the page shows, and only a read that finds the log clears it.
    */
   refused = false;
   /** When den-edge last refused (`Date.now()`). */
@@ -4826,8 +4827,8 @@ export class LibraryLog {
       return this.projectKeptChanged(projected, active);
     // den-edge's write budget for this library is spent: kept work goes again once the `Retry-After` has passed.
     if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected, active);
-    // Tried again: refused once more, it waits another `RECHECK_MS`.
-    this.refused = false;
+    // A refused start is tried again here, but stays `refused` until a read finds the log: refused once more, it waits
+    // another `RECHECK_MS`; a send that does not get through says nothing about whether the log is there.
     const waiting = this.pendingActions;
     let delivered = false;
     const kept = (await this.keptWork()).sort(

@@ -13,6 +13,7 @@
   import SettingRow from './settings/SettingRow.svelte';
   import SettingsSection from './settings/SettingsSection.svelte';
   import SharingSection from './settings/SharingSection.svelte';
+  import { rows } from './settings/rows.svelte';
   import type { PreferenceChanges } from './settings/preferences';
   import { flushSync, onDestroy } from 'svelte';
   import type { Link } from './lib/links.svelte';
@@ -61,6 +62,7 @@
     onadoptheld,
     oninterfacelanguage,
     preferences = null,
+    revealLinkedDevices,
   }: {
     link: Link | null;
     model: LibraryModel;
@@ -82,7 +84,22 @@
     heldReset?: boolean;
     onadoptheld?: () => Promise<void>;
     oninterfacelanguage?: (language: InterfaceLanguage) => void;
+    /**
+     * Set when the missing-library notice sent the person here: Linked devices opens and is focused once it is on
+     * screen (`rows.reveal`). Called as soon as that is asked, so a later visit opens Settings as usual.
+     */
+    revealLinkedDevices?: () => void;
   } = $props();
+
+  $effect(() => {
+    const revealed = revealLinkedDevices;
+    if (!revealed) return;
+    untrack(() => {
+      rows.open.add('linked-devices');
+      rows.reveal = 'linked-devices';
+      revealed();
+    });
+  });
 
   type SettingsAuthority = {
     /** Household control authority: devices, credentials shared by the household, recovery and Owner PIN. */

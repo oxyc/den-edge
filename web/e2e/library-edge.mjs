@@ -12,6 +12,9 @@ export const FIXTURE = `${E2E_ORIGIN}/test/worker-hydration.html`;
  * - `edge.drop`: batch writes never get through, as with no connection.
  * - `edge.batches`: how many batch writes arrived, answered or not.
  * - `edge.upgradeRequired`: the library's minimum wire; a request on an older one gets a 426 (`edge.refused` counts).
+ * - `edge.missing`: a library with no rows has no log, and den-edge won't start one (`NEW_LIBRARIES=members`): its
+ *   reads are 404s and its batches 403 `new_libraries_closed` (`edge.refusedStarts` counts). Clearing it is another
+ *   device of the household writing the log.
  * - `edge.seedRow(libraryId, key, value)`: seed one opaque server row for an already-opened library.
  */
 export async function routeLibraryEdge(page, edge = {}) {
@@ -19,6 +22,7 @@ export async function routeLibraryEdge(page, edge = {}) {
   edge.wires = [];
   edge.libraryRequests = [];
   edge.refused = 0;
+  edge.refusedStarts = 0;
   const generation = 'optimistic-actions';
   const libraries = new Map();
   const libraryFor = (libraryId) => {
@@ -74,9 +78,15 @@ export async function routeLibraryEdge(page, edge = {}) {
     }
     if (url.pathname.endsWith('/member') && request.method() === 'PUT')
       return route.fulfill({ status: 200, headers });
+    const absent = edge.missing && library.head === 0;
+    if (absent && url.pathname.endsWith('/changes') && request.method() === 'GET') {
+      recorded.status = 404;
+      return route.fulfill({ status: 404, headers, json: {} });
+    }
     if (url.pathname.endsWith('/changes') && request.method() === 'GET') {
       const since = Number(url.searchParams.get('since') ?? 0);
       const entries = [...library.rows.values()].filter((entry) => entry.seq > since);
+      recorded.status = 200;
       recorded.entries = entries.length;
       recorded.entryKeys = entries.map(({ k }) => k);
       return route.fulfill({
@@ -89,6 +99,10 @@ export async function routeLibraryEdge(page, edge = {}) {
       if (edge.hold) await edge.hold;
       if (edge.delay) await new Promise((done) => setTimeout(done, edge.delay));
       if (edge.drop) return route.abort('connectionfailed');
+      if (absent) {
+        edge.refusedStarts++;
+        return route.fulfill({ status: 403, headers, json: { error: 'new_libraries_closed' } });
+      }
       if (edge.refuse)
         return route.fulfill({ status: 400, headers, json: { error: 'invalid_batch' } });
       const body = request.postDataJSON();
