@@ -33,6 +33,13 @@ test('a linked TV library den-edge will not start keeps the edit and hands off t
   await expect
     .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('den.links') ?? '[]').length))
     .toBe(1);
+  // The relay sees the upload before the page commits its new identity; the saved title on the linked Home is the
+  // end of that handover, and navigating before it races it.
+  await expect(
+    page
+      .getByRole('region', { name: 'Watchlist', exact: true })
+      .getByRole('link', { name: /Movie 1500/ }),
+  ).toBeVisible({ timeout: 15_000 });
 
   // den-edge loses the log, and the grant's one library is spoken for: nothing may start it again.
   edge.libraries.clear();
@@ -41,11 +48,18 @@ test('a linked TV library den-edge will not start keeps the edit and hands off t
   await expect(page.getByRole('heading', { name: 'Movie 1500', level: 1 })).toBeVisible({
     timeout: 30_000,
   });
+  // Relaunched, the library this TV kept is sent back to den-edge, which refuses to start it: the notice, not a wait.
+  // Managed-playback receipts need the library's relay membership too, so their own failure alert may stand beside
+  // this one (#1395); only the library's notice is checked here.
+  const alert = page.getByRole('alert').filter({ hasText: NOTICE });
+  await expect(alert).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/Waiting to sync/)).toHaveCount(0);
+  // An edit made now is kept on this TV.
+  await expect(watchlist).toHaveAttribute('aria-pressed', 'true');
   await watchlist.click();
-  const alert = page.getByRole('alert');
-  await expect(alert).toContainText(NOTICE, { timeout: 30_000 });
-  await expect(alert).not.toContainText('Waiting to sync');
   await expect(watchlist).toHaveAttribute('aria-pressed', 'false');
+  await expect(watchlist).not.toHaveAttribute('aria-busy', 'true');
+  await expect(alert).toBeVisible();
   expect(edge.refusedStarts).toBeGreaterThan(0);
   expect(edge.libraries.size, 'nothing started a library').toBe(0);
 
