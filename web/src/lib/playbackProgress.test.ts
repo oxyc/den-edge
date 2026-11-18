@@ -1,5 +1,55 @@
 import { describe, expect, it, vi } from 'vitest';
-import { persistablePlaybackFraction, PlaybackProgressReporter } from './playbackProgress';
+import {
+  persistablePlaybackFraction,
+  PlaybackProgressReporter,
+  progressDuration,
+  resumeSeekSeconds,
+} from './playbackProgress';
+
+describe('progressDuration', () => {
+  it('prefers the transport length and falls back to the expected runtime only without one', () => {
+    expect(progressDuration(3_000, 120)).toBe(3_000);
+    expect(progressDuration(0, 120)).toBe(120);
+    expect(progressDuration(Number.NaN, 120)).toBe(120);
+    expect(progressDuration(Infinity, 120)).toBe(120);
+    expect(progressDuration(0, 0)).toBe(0);
+  });
+
+  it('estimates only the fraction, keeps the floors, and stays fail-closed without a runtime', () => {
+    const write = vi.fn();
+    const progress = new PlaybackProgressReporter(write, 'movie');
+    progress.playing();
+    progress.report(30, progressDuration(0, 7_200));
+    progress.report(31.6, progressDuration(Number.NaN, 0));
+    progress.report(31.6, progressDuration(Number.NaN, 7_200));
+    expect(write.mock.calls).toEqual([[31.6 / 7_200, 31, true]]);
+  });
+
+  it('keeps a natural end at 100% against a later estimated close', () => {
+    const write = vi.fn();
+    const progress = new PlaybackProgressReporter(write, 'episode');
+    progress.playing();
+    progress.complete(40);
+    progress.final(41, progressDuration(0, 3_000));
+    expect(write.mock.calls).toEqual([[1, 40, false]]);
+  });
+});
+
+describe('resumeSeekSeconds', () => {
+  it('seeks to an exact second even when the media length is unknown', () => {
+    expect(resumeSeekSeconds({ fraction: 0.26, seconds: 31 }, 0)).toBe(31);
+    expect(resumeSeekSeconds({ fraction: 0.26, seconds: 31 }, Number.NaN)).toBe(31);
+    expect(resumeSeekSeconds({ fraction: 0.26, seconds: 31 }, 120)).toBe(31);
+  });
+
+  it('needs a length for a fraction alone, and never resumes into the credits or the first seconds', () => {
+    expect(resumeSeekSeconds({ fraction: 0.5 }, 0)).toBeNull();
+    expect(resumeSeekSeconds({ fraction: 0.5 }, 120)).toBe(60);
+    expect(resumeSeekSeconds({ fraction: 0.95, seconds: 31 }, 0)).toBeNull();
+    expect(resumeSeekSeconds({ fraction: 0.2, seconds: 115 }, 120)).toBeNull();
+    expect(resumeSeekSeconds({ fraction: 0.2, seconds: 4 }, 0)).toBeNull();
+  });
+});
 
 describe('persistablePlaybackFraction', () => {
   const played = { sourceEverPlayed: true };
