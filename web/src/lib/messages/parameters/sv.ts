@@ -65,6 +65,9 @@ export const parameters = {
   'player.upNext': 'Härnäst · {title}',
   'player.playsIn': 'Startar om {seconds} s',
   'player.nextIn': 'Nästa avsnitt om {seconds} sekunder',
+  'player.autoSkipIn': 'Hoppar över om {seconds} s',
+  'player.autoSkipNotice':
+    'Hoppas över automatiskt om {seconds} sekunder. Pausa eller spola för att fortsätta titta.',
   'player.playNow': 'Spela nu: {title}',
   'player.resumedAt': 'Fortsätter vid {time}',
   'player.volume': 'Volym {percent}%',

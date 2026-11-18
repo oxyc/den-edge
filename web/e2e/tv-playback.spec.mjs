@@ -472,6 +472,51 @@ test('TV Skip Intro remains actionable after the ordinary transport hides', asyn
   await expect(skip).toHaveCount(0);
 });
 
+test('TV auto-skip counts down on the Skip overlay and skips at its deadline', async ({ page }) => {
+  await routePlayback(page, {
+    skipSegments: { intro: { start_ms: 0, end_ms: 55_000, confidence: 0.9 } },
+  });
+  await page.goto(`${ORIGIN}/test/player.html?autoSkip`);
+
+  const video = page.locator('.player video');
+  const countdown = page.locator('.tv-skip-overlay .auto-skip-in');
+  await expect(countdown).toHaveText(/^Auto-skip in [1-8]s$/, { timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Skip Intro', exact: true })).toBeVisible();
+  expect(await video.evaluate((element) => element.currentTime)).toBeLessThan(55);
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 20_000 })
+    .toBeGreaterThanOrEqual(54.5);
+  await expect(countdown).toHaveCount(0);
+});
+
+test('TV remote Play/Pause cancels a pending auto-skip and leaves Skip Intro', async ({ page }) => {
+  await routePlayback(page, {
+    skipSegments: { intro: { start_ms: 0, end_ms: 55_000, confidence: 0.9 } },
+  });
+  await page.goto(`${ORIGIN}/test/player.html?autoSkip`);
+
+  const video = page.locator('.player video');
+  const skip = page.getByRole('button', { name: 'Skip Intro', exact: true });
+  const countdown = page.locator('.tv-skip-overlay .auto-skip-in');
+  await expect(countdown).toBeVisible({ timeout: 30_000 });
+  expect(await remoteKey(page, 'MediaPlayPause', 10252)).toBe(true);
+  await expect.poll(() => video.evaluate((element) => element.paused)).toBe(true);
+  await expect(countdown).toHaveCount(0);
+  await expect(skip).toBeVisible();
+
+  // Played on past the old deadline: no countdown comes back for the cancelled intro.
+  expect(await remoteKey(page, 'MediaPlayPause', 10252)).toBe(true);
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime), { timeout: 20_000 })
+    .toBeGreaterThan(10);
+  expect(await video.evaluate((element) => element.currentTime)).toBeLessThan(55);
+  await expect(countdown).toHaveCount(0);
+  await skip.click();
+  await expect
+    .poll(() => video.evaluate((element) => element.currentTime))
+    .toBeGreaterThanOrEqual(54.5);
+});
+
 test('TV Back closes cleanly while a playback session is still loading', async ({ page }) => {
   let requested = false;
   let answer;

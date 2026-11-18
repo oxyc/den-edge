@@ -63,6 +63,9 @@ export const PARAMETER_FALLBACKS = {
   'player.upNext': 'Up next · {title}',
   'player.playsIn': 'Plays in {seconds} s',
   'player.nextIn': 'Next episode in {seconds} seconds',
+  'player.autoSkipIn': 'Auto-skip in {seconds}s',
+  'player.autoSkipNotice':
+    'Skips automatically in {seconds} seconds. Pause or seek to keep watching.',
   'player.playNow': 'Play now: {title}',
   'player.resumedAt': 'Resumed at {time}',
   'player.volume': 'Volume {percent}%',
