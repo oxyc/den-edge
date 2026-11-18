@@ -54,12 +54,13 @@ export class Pager {
           // Keep raw provider/transport details out of presentation and ordinary device logs.
           const failure = (error as { failure?: { code?: string; retryable?: boolean } } | null)
             ?.failure;
+          const code = failure?.code;
           const reason =
             globalThis.navigator?.onLine === false
               ? 1
-              : failure?.code === 'rate-limited'
+              : code === 'rate-limited'
                 ? 2
-                : failure?.retryable || failure?.code === 'not-ready'
+                : failure?.retryable || code === 'not-ready'
                   ? 3
                   : 0;
           this.failed = PAGER_FAILURE[reason];

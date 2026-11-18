@@ -12,9 +12,9 @@ import type { HomeRowAffinity } from './homeRowRanking';
 
 /** Recovery copy shared by the eager shell and catalogue Pagers without adding another chunk edge. */
 export const PAGER_FAILURE = [
-  'Couldn’t load',
+  'Load failed',
   'Offline',
-  'TMDB rate limit. Try again shortly.',
+  'TMDB rate limit',
   'Services unavailable',
 ] as const;
 

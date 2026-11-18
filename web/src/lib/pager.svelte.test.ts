@@ -110,16 +110,16 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
-    expect(pager.failed).toBe('Couldn’t load');
+    expect(pager.failed).toBe('Load failed');
     expect(pager.page + 1).toBe(1);
   });
 
   it.each([
-    ['rate-limited', true, 'TMDB rate limit. Try again shortly.'],
+    ['rate-limited', true, 'TMDB rate limit'],
     ['unavailable', true, 'Services unavailable'],
     ['internal', true, 'Services unavailable'],
     ['not-ready', false, 'Services unavailable'],
-    ['refused', false, 'Couldn’t load'],
+    ['refused', false, 'Load failed'],
   ] as const)('keeps only a safe %s service reason', async (code, retryable, reason) => {
     const pager = new Pager(
       async () => {
@@ -165,7 +165,7 @@ describe('Pager', () => {
     );
     await pager.more();
     await pager.more();
-    expect(pager.failed).toBe('Couldn’t load');
+    expect(pager.failed).toBe('Load failed');
     expect(pager.page + 1).toBe(2);
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
@@ -188,7 +188,7 @@ describe('Pager', () => {
       () => true,
     );
     await pager.more();
-    expect(pager.failed).toBe('TMDB rate limit. Try again shortly.');
+    expect(pager.failed).toBe('TMDB rate limit');
     await pager.retry();
     expect(pager.failed).toBe('Services unavailable');
     expect(pager.page).toBe(0);

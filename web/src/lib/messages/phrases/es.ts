@@ -1161,8 +1161,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   TMDB: 'ZXQMARCA15ZXQ',
   'TMDB has no IMDb record for this title, so sources can’t be matched yet.':
     'TMDB no tiene registros de IMDb para este título, por lo que aún no se pueden comparar las fuentes.',
-  'TMDB rate limit. Try again shortly.':
-    'Límite de solicitudes de TMDB. Inténtalo de nuevo en breve.',
+  'TMDB rate limit': 'Límite de solicitudes de TMDB',
   'TMDB key': 'Llave TMDB',
   to: 'a',
   'to browse sources.': 'para buscar fuentes.',
