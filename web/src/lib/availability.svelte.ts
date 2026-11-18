@@ -17,7 +17,7 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import type { Addon } from './scout';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
-import { localAuthorityKey } from './localAuthorityKey';
+import { retainedAuthorityKey } from './profileIdentity';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
 interface Episode {
@@ -75,15 +75,15 @@ const verdictOf = (answer: Record<string, unknown>, id: string): Verdict => {
 type EpisodeProbe = Episode & { id: number };
 type BatchTarget =
   { kind: 'movie'; id: number } | { kind: 'episode'; key: string; probe: EpisodeProbe };
+type Kept = Record<string, [Verdict, number]>;
+type Stored = [authority: string, verdicts: Kept];
+
 /** Exact active viewer and household. Credential-bearing keys are admitted here but only the digest is persisted. */
 export type AvailabilityAuthority = readonly [
   householdKind: string,
   householdKey: string | null,
   profile: string,
 ];
-
-type Kept = Record<string, [Verdict, number]>;
-type Stored = [authority: string, verdicts: Kept];
 
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
@@ -181,7 +181,7 @@ export class Availability {
     }
     this.reset();
     this.key = exact;
-    this.ns = localAuthorityKey(exact);
+    this.ns = retainedAuthorityKey(exact);
     this.load();
     this.src = { base: scout.base, content, fetch: fetchImpl };
     this.queue();

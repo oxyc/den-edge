@@ -2,7 +2,7 @@
 // stable season-pack identity, never a release filename. Its storage name is a digest of every authority which may
 // make that identity meaningful, so changing profile, profile library, household or source add-on cannot reuse it.
 
-import { localAuthorityKey } from './localAuthorityKey';
+import { retainedAuthorityKey } from './profileIdentity';
 
 /** Profile, profile library, household, add-on install and source base, in that order. The compact tuple crosses
  * the always-loaded Library → lazy Player boundary without duplicating those field names in the startup chunk. */
@@ -79,7 +79,7 @@ async function digestAuthority(authority: ReleaseAuthority): Promise<string> {
   } catch {
     // Older TV webviews can expose crypto without a working digest implementation.
   }
-  return localAuthorityKey(value);
+  return retainedAuthorityKey(value);
 }
 
 /** Remove filename-bearing rows written before authority scoping. They cannot be migrated: their owner and source
