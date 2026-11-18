@@ -185,12 +185,19 @@ test('unknown episode duration prefers its exact runtime over the series estimat
     element.pause();
   });
 
-  await expect
-    .poll(async () => {
-      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
-      return saved.seconds === 31 ? saved.fraction : 0;
-    })
-    .toBeCloseTo(31 / 120, 2);
+  // Keep this wait in the page. While the HLS fixture is satisfying segment requests, a locator read can sit behind
+  // those Node-side route callbacks for the whole assertion timeout even after the production publication arrives.
+  // The predicate still requires the exact episode denominator; the series fallback (31 / 600) cannot pass.
+  await page.waitForFunction(
+    (expected) => {
+      const text = document.querySelector('[data-testid="player-progress"]')?.textContent;
+      if (!text) return false;
+      const saved = JSON.parse(text);
+      return saved.seconds === 31 && Math.abs(saved.fraction - expected) < 0.005;
+    },
+    31 / 120,
+    { timeout: 5_000 },
+  );
 });
 
 test('late runtime from a replaced episode cannot become the active denominator', async ({
