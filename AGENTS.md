@@ -99,17 +99,17 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
-- The auto-skip grace period (#1208) was measured on matched production builds at base `079ad8d1` and the repair.
-  Ordinary Browser startup moves 207,122 → 207,132 gzip bytes (+10, minification; no startup code changed), while
-  the complete graph moves 901,889 → 902,641 (+752). Independently lazy Spanish/Swedish catalogs account for +177,
-  leaving the non-translation graph 124,837 → 125,412 (+575), all in the existing lazy Player chunk: the pure
+- The auto-skip grace period (#1208) was measured on matched production builds at base `0321382f` and the repair.
+  Ordinary Browser startup moves 207,115 → 207,121 gzip bytes (+6, minification; no startup code changed), while
+  the complete graph moves 902,103 → 902,753 (+650). Independently lazy Spanish/Swedish catalogs account for +177,
+  leaving the non-translation graph 125,051 → 125,524 (+473), all in the existing lazy Player chunk: the pure
   countdown decision, the countdown and its once-spoken notice, pause/seek cancellation, the session/release fences
   and the desktop Skip button's missing `pointer-events` (it could not be clicked). It must sit with the player clock
   that decides it; another split would add a request mid-playback and cannot reduce the complete graph. No timer,
   interval, request or dependency is added: the existing `timeupdate`/progress tick drives the deadline, and
   cancellation reuses the element's existing `pause`/`seeking` handlers. The complete non-translation ceiling advances
-  from 125,056 to 125,568: the smallest boundary would retain only 28 bytes against #1282's run-to-run variance, so
-  the next one, retaining 156. Startup and translation ceilings are unchanged.
+  from 125,056 to 125,568, the smallest 128-byte boundary containing the matched build, retaining 44 bytes. Startup
+  and translation ceilings are unchanged.
 - Broader profile-lifecycle availability (#544) was measured on matched production builds at base `1fdda1db` and
   production head `572d327d`. Ordinary Browser startup moves 206,577 → 206,567 gzip bytes (-10), while its
   complete JS/CSS graph moves 895,308 → 895,653 (+345). Independently lazy Spanish/Swedish catalogs move
