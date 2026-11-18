@@ -372,6 +372,11 @@ test('a play writes its position within seconds of starting, and again on resume
     const written = async () =>
       JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
     await mediaPlaying(page);
+    await page.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) >= 1,
+      undefined,
+      { timeout: 30_000 },
+    );
 
     // The first part-way position goes out a moment after playback starts, not at the one-minute report.
     await expect(writes).toHaveText('1', { timeout: 5_000 });
