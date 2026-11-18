@@ -85,6 +85,26 @@ export async function tapPhoneControl(
   }
 }
 
+/**
+ * Click one visible desktop control as a viewer does: the mouse moves onto it first. Playing, the controls hide 2.5 s
+ * after the mouse last moved, and a click that started on a stale "visible" reading found the video owning the
+ * button's centre; Playwright's click only re-tests the hit target and never moves the pointer, so nothing brought the
+ * controls back and it waited out its whole timeout. Moving there reveals hidden controls (`onpointermove`), and a
+ * mouse resting over the top bar or the dock holds them (`webControlsMayHide`), so the click lands on the button.
+ */
+export async function clickPlayerControl(page, button) {
+  const box = await button.boundingBox();
+  if (!box) throw new Error('player control has no box to point at');
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y - 1);
+  await expect(page.locator('.player')).not.toHaveClass(/web-controls-hidden/);
+  // A second move after the reveal, so the bar drawn under the resting pointer is the one `:hover` reports.
+  await page.mouse.move(x, y);
+  await expect.poll(() => ownsCentre(button)).toBe(true);
+  await button.click();
+}
+
 /** The options opened at one row's page ("Stream", "Source", "Subtitle timing", "Audio & subtitles"). */
 export async function openOptionsPage(page, row, { tap = false } = {}) {
   await revealControls(page, { tap });
@@ -95,7 +115,7 @@ export async function openOptionsPage(page, row, { tap = false } = {}) {
     // tap. Keep the real hit test: if that deadline won, reveal as a viewer does and require the button to own its
     // visible centre before trying once more. Never force the event through the video that correctly owns it hidden.
     await tapPhoneControl(page, button);
-  } else await button.click();
+  } else await clickPlayerControl(page, button);
   const menu = optionsMenu(page);
   const item = menu.getByRole('menuitem', { name: new RegExp(`^${escape(row)}(,|$)`) });
   await (tap ? item.tap() : item.click());

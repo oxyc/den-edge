@@ -9,7 +9,12 @@ import { readFile } from 'node:fs/promises';
 import { test, expect, webkit, devices } from '@playwright/test';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
-import { openOptionsPage, optionsButton, optionsMenu } from './player-options.mjs';
+import {
+  clickPlayerControl,
+  openOptionsPage,
+  optionsButton,
+  optionsMenu,
+} from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const SEGMENT_SECS = 2;
@@ -289,7 +294,7 @@ test('a release the viewer picked is never switched away from, and the pick outl
     await page.getByRole('menuitemradio').filter({ hasText: B.filename }).click();
     await expect.poll(() => remux.served.at(-1)).toBe(B.filename);
     // The release playing is named in the options' header.
-    await optionsButton(page).click();
+    await clickPlayerControl(page, optionsButton(page));
     await expect(optionsMenu(page).locator('.options-release')).toContainText(B.label);
     await page.keyboard.press('Escape');
 

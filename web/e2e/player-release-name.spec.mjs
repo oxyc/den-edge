@@ -6,7 +6,12 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
-import { optionsButton, optionsMenu, revealControls } from './player-options.mjs';
+import {
+  clickPlayerControl,
+  optionsButton,
+  optionsMenu,
+  tapPhoneControl,
+} from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const release = {
@@ -76,8 +81,8 @@ for (const [engine, browserType] of [
           .toBeGreaterThan(1);
         // Nowhere on the player itself.
         await expect(page.getByText(release.label)).toHaveCount(0);
-        await revealControls(page, { tap: layout === 'phone' });
-        await optionsButton(page).click();
+        if (layout === 'phone') await tapPhoneControl(page, optionsButton(page));
+        else await clickPlayerControl(page, optionsButton(page));
         const name = optionsMenu(page).locator('.options-release');
         await expect(name).toHaveText(release.label);
 
