@@ -50,6 +50,8 @@ export const parameters = {
   'player.subtitles': 'Undertexter: {subtitles}',
   'player.subtitleLoadFailed':
     'Det gick inte att läsa in undertexterna {subtitle}. Dina nuvarande undertexter är oförändrade.',
+  'player.subtitleNeedsRemux':
+    'Undertexterna {subtitle} kräver Den Remux i den här spelaren. TorBox spelar vidare tills du byter.',
   'player.subtitleOffsetCompact': '{sign}{offset}s',
   'player.subtitleOffsetSpoken': '{sign}{offset} sekunder',
   'player.adjustSubtitleTiming': 'Justera undertextsynkronisering ({offset})',

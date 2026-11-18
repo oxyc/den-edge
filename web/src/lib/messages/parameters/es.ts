@@ -51,6 +51,8 @@ export const parameters = {
   'player.subtitles': 'Subtítulos: {subtitles}',
   'player.subtitleLoadFailed':
     'No se pudieron cargar los subtítulos {subtitle}. Tus subtítulos actuales no han cambiado.',
+  'player.subtitleNeedsRemux':
+    'Los subtítulos {subtitle} necesitan Den Remux en este reproductor. TorBox sigue reproduciendo hasta que cambies.',
   'player.subtitleOffsetCompact': '{sign}{offset}s',
   'player.subtitleOffsetSpoken': '{sign}{offset} segundos',
   'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset})',

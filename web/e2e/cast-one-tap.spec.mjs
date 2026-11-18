@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
+import { subtitleChoice, subtitlesButton } from './player-options.mjs';
 
 const ORIGIN = E2E_ORIGIN;
 const CAST = 'https://cast.test';
@@ -550,6 +551,11 @@ test('a Den receiver that does not answer within two seconds is asked as the cho
 test('casting a TorBox stream with its built-in subtitle on is one ask and one LOAD, subtitle included', async () => {
   const { browser, page, asked } = await open(chromium, { subtitle: true });
   try {
+    // A preference alone never replaces the stream for a built-in TorBox didn't burn in; the viewer picks it.
+    await playingPast(page, 1);
+    expect(asked.managed).toHaveLength(1);
+    await subtitlesButton(page).click();
+    await subtitleChoice(page, 'English').click();
     await expect.poll(() => asked.managed.length).toBe(2);
     expect(asked.managed[1]).toMatchObject({ subtitleTrack: 0 });
     await playingPast(page, 2);

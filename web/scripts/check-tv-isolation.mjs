@@ -190,7 +190,10 @@ if (process.argv.includes('--capture')) {
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
   // unchanged initial-graph ceiling above remains the English startup contract.
-  if (current.translationGzip > 51200) throw new Error('Lazy translation catalog budget exceeded');
+  // The subtitle menu's "needs Den Remux" copy in Swedish and Spanish measured 51,262 against matched main's 51,187
+  // (+75), which sat 13 bytes under the 50 KiB ceiling. Allow the next 128-byte boundary after the one that leaves
+  // 66 bytes, retaining 194.
+  if (current.translationGzip > 51456) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -429,5 +432,9 @@ if (process.argv.includes('--capture')) {
   // matched base/head builds (207,111 -> 207,127; 124,681 -> 124,725). The two fixed phase names and their calls must
   // be eager: a lazy boundary would begin after the profile handover/metadata flushes they identify and add a request
   // to the measured path. Both existing caps stay unchanged; the complete-graph cap retains 75 bytes.
-  if (coreTotalDelta > 124800) throw new Error('Browser total JS/CSS budget exceeded');
+  // Subtitles never switching the source, and AirPlay asking for the receiver-safe stream at once on an HEVC release,
+  // measured 124,863 locally against matched main's 124,681 (+182), all in the lazy Player chunk: the subtitle menu's
+  // explicit Den Remux switch and its notice, and the codec lookup. Startup is unchanged (10,715 -> 10,712). With the
+  // LG attribution above that is about 124,907; allow the second boundary past the first one's 65 bytes, retaining 149.
+  if (coreTotalDelta > 125056) throw new Error('Browser total JS/CSS budget exceeded');
 }

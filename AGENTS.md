@@ -62,6 +62,14 @@ rather than adding it.
 When a workaround and a removal both fix the symptom, remove. Compensating code outlives the browser bug it was
 written for, and the next reader cannot tell which is which.
 
+## Playback: subtitles never switch the source
+
+**Never start on, or switch to, Den Remux for subtitles unless the viewer explicitly switches to it.** A switch
+replaces a stream that plays fine, takes seconds to tens of seconds, and on iOS loses the tap that started playback;
+subtitles never justify it on their own. A subtitle the current stream can't show is offered as an explicit "Switch to
+Den Remux" in the subtitle menu instead. Viewer actions that need another stream (choosing AirPlay, a release, the
+Source switch) may replace it.
+
 ## Never write an unproven mechanism into a comment as fact
 
 Comments here explain why, which makes them the place a wrong theory does the most damage — it reads as established
