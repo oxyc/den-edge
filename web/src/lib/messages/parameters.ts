@@ -48,6 +48,8 @@ export const PARAMETER_FALLBACKS = {
   'player.audioTrack': 'Audio track: {track}',
   'player.subtitles': 'Subtitles: {subtitles}',
   'player.subtitleLoadFailed': 'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
+  'player.subtitleNeedsRemux':
+    '{subtitle} subtitles need Den Remux on this player. TorBox keeps playing until you switch.',
   'player.subtitleOffsetCompact': '{sign}{offset}s',
   'player.subtitleOffsetSpoken': '{sign}{offset} seconds',
   'player.adjustSubtitleTiming': 'Adjust subtitle timing ({offset})',

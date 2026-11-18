@@ -1537,20 +1537,6 @@
       title.originalLanguage,
       [interfaceLanguage],
     );
-    // Whether a subtitle will show: the one chosen, or the one `autoSubtitleLanguage` picks below on the title's first
-    // session, for audio — in the title's original language, the most that can be told before a session says — that
-    // this browser doesn't name. A title whose language is unknown is not taken for foreign.
-    const subtitleWanted =
-      compatibleSubtitles &&
-      (subtitleChoice !== null ||
-        (!replacing &&
-          subtitleLanguage === undefined &&
-          title.originalLanguage !== undefined &&
-          autoSubtitleLanguage(
-            title.originalLanguage,
-            [interfaceLanguage],
-            subtitleLanguages.map((language) => ({ language })),
-          ) !== null));
     const claimed = (decodes ??= await playable());
     if (attempt.signal.aborted || ended) return false;
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
@@ -1628,11 +1614,10 @@
     const asked: PlaybackWant = {
       ...fields,
       ...(!compatibleSubtitles ? { subtitleLanguages: [] } : {}),
-      // WebKit's system player needs captions in the HLS playlist itself. Cast does not: a selected external VTT
-      // is staged as a short-lived receiver capability, so choosing captions must never disqualify TorBox.
+      // A subtitle never rules TorBox out on its own, even where WebKit's system player shows only a playlist's
+      // captions: the viewer moves to Den Remux for one explicitly, from the subtitle menu (`subtitleNeedsRemux`).
       ...(delivery === 'fallback' ||
-      (replacing !== undefined && !replacing.external && delivery !== 'direct') ||
-      (delivery !== 'direct' && delivery !== 'refresh' && subtitleWanted && subtitlesNeedPlaylist())
+      (replacing !== undefined && !replacing.external && delivery !== 'direct')
         ? { directFailed: true }
         : {}),
       ...(delivery === 'direct' || delivery === 'refresh' ? { directOnly: true } : {}),
@@ -1647,11 +1632,7 @@
       requestedSource,
       reason: delivery,
       replacement: replacing !== undefined,
-      subtitleConstraint: asked.directFailed
-        ? 'playlist_required'
-        : compatibleSubtitles
-          ? 'allowed'
-          : 'den_subtitles_disabled',
+      subtitleConstraint: compatibleSubtitles ? 'allowed' : 'den_subtitles_disabled',
     });
     // This used to wait until the playback session had completely opened, so the stream menu could show one
     // apparently-final choice for several seconds. Source discovery does not depend on that answer and belongs in
@@ -1968,7 +1949,7 @@
     // first, or English, never overriding a choice already made. Only on the title's first session — a later
     // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand. Not on a TorBox
     // stream whose subtitles the system player could not show (`subtitlesNeedPlaylist`): the menu says Off rather
-    // than name one that never appears, and choosing one there moves to Den Remux.
+    // than name one that never appears, and choosing one there offers Den Remux (`subtitleNeedsRemux`).
     if (
       !replacing &&
       compatibleSubtitles &&
@@ -1986,40 +1967,17 @@
     }
     // Settings and auto-pick name a language; the picker names a concrete candidate. Prefer the first offered
     // full candidate (TorBox embeds precede OpenSubtitles), never a forced-only track merely because it came first,
-    // and keep an exact manual identity across same-language alternatives.
+    // and keep an exact manual identity across same-language alternatives. Only among those this stream shows as it
+    // is: a TorBox embed it was not created with, or a page-side track the system player can't show, would take
+    // another stream, and a subtitle is never a reason to replace one the viewer didn't ask to replace.
     if (subtitleChoice) {
+      const shown = (result.subtitles ?? []).filter((track) => showsOnStream(result, track));
       const picked =
-        preferredSubtitleTrack(result.subtitles ?? [], subtitleChoice) ??
+        preferredSubtitleTrack(shown, subtitleChoice) ??
         (replacingSubtitleLanguage
-          ? preferredSubtitleTrack(result.subtitles ?? [], replacingSubtitleLanguage)
+          ? preferredSubtitleTrack(shown, replacingSubtitleLanguage)
           : undefined);
       subtitleChoice = picked ? subtitleValue(picked) : null;
-    }
-    const selectedTorBoxTrack = selectedSubtitle(result)?.torboxTrack;
-    if (
-      result.external &&
-      selectedTorBoxTrack !== undefined &&
-      result.torboxSubtitle !== selectedTorBoxTrack
-    ) {
-      // The first managed request discovers TorBox's embedded tracks; a language preference can only be resolved
-      // after that answer. TorBox burns one chosen track into a newly created stream, so create that stream now
-      // instead of merely naming a track the first, subtitle-free URL does not carry.
-      // Read the assigned state back: Svelte proxies objects stored in `$state`, and replacement identity checks
-      // must compare that proxy with itself rather than with the raw response object assigned above.
-      const discovered = session;
-      const preparing = showTransition('Preparing subtitles…');
-      const moved = await begin(
-        { filename: result.release.filename, subtitleTrack: selectedTorBoxTrack },
-        extra,
-        discovered,
-        'direct',
-      );
-      if (moved !== true && session === discovered) {
-        clearTransition(preparing);
-        subtitleChoice = null;
-        castSubtitlePreparing = false;
-      }
-      return moved;
     }
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
@@ -2039,18 +1997,8 @@
           subtitleChoice === loadingValue &&
           selectionGeneration === subtitleSelectionGeneration;
         const loaded = await loadExternalSubtitle(loadingSession, loadingValue, ownsLoad);
-        const fallback = loadingTrack.fallbackTorboxTrack;
-        if (!loaded && ownsLoad() && fallback !== undefined) {
-          const preparing = showTransition('Subtitles failed—trying built-in…');
-          const moved = await begin(
-            { filename: loadingSession.release.filename, subtitleTrack: fallback },
-            extra,
-            loadingSession,
-            'direct',
-          );
-          if (moved !== true) clearTransition(preparing);
-          return moved;
-        }
+        // A failed load is said, with a retry, and never answered with a replacement stream: picked again by the
+        // viewer, a sidecar's built-in fallback is theirs to ask for (`chooseSubtitle`).
         if (!loaded && ownsLoad()) {
           subtitleChoice = null;
           subtitleLoadFailedFlag = true;
@@ -3370,6 +3318,7 @@
         airPlayStartedAt = performance.now();
         clearTimeout(webControlsTimer);
         watchAirPlayDirectProgress();
+        void airPlayHevcAtOnce();
       } else {
         clearAirPlayProgressWatch();
         airPlayFallbackSession = undefined;
@@ -3415,6 +3364,79 @@
     airPlayProgressTimer = undefined;
   }
 
+  /**
+   * This TorBox session asked for again as an AirPlay receiver. TorBox managed HLS carries HEVC in MPEG-TS: Apple TV
+   * accepts that, but Apple's AirPlay 2 TV contract requires HEVC in fMP4, and an LG receiver never advances it. The
+   * named release is kept when receiver-safe; where it is HEVC, Hearth answers `torbox_receiver_unsupported` and the
+   * unpinned retry selects an H.264 release. True when it moved.
+   */
+  async function receiverSafeDirect(current: Session): Promise<boolean> {
+    playbackRouteLog({
+      event: 'recovery',
+      from: 'torbox',
+      to: 'torbox',
+      stage: played ? 'mid_playback' : 'startup',
+      attempt: directAttempt ?? 'initial',
+    });
+    const receiverDirect = (pick: { filename: string } | undefined) => {
+      replacementRefusal = undefined;
+      return begin(
+        pick,
+        { transcode: 'never', player: 'airplay' },
+        current,
+        'refresh',
+        null,
+        true,
+      ).catch((error: unknown): Failure => {
+        console.warn('AirPlay receiver-safe TorBox recovery got no answer.', error);
+        return 'unreachable';
+      });
+    };
+    let moved = await receiverDirect({ filename: current.release.filename });
+    if (
+      moved !== true &&
+      session === current &&
+      replacementRefusal?.cause === 'torbox_receiver_unsupported'
+    )
+      moved = await receiverDirect(undefined);
+    if (moved !== true) return false;
+    airPlayReceiverSafeSession = session ?? undefined;
+    airPlayFallbackSession = undefined;
+    airPlayFailed = false;
+    airPlayFailReason = undefined;
+    return true;
+  }
+
+  /**
+   * AirPlay just began on a TorBox HEVC release, which a stricter receiver than Apple TV never plays from TorBox's
+   * MPEG-TS: the receiver-safe stream is asked for now rather than after the stall that proves it. The codec is
+   * Scout's own (`attributes.codec`, what Hearth refuses a receiver by). This replaces the stream because the viewer
+   * chose AirPlay — unlike a subtitle, which never replaces one by itself. An H.264 release, an unknown codec, or no
+   * receiver-safe answer keeps the stream playing under the stall watch (`watchAirPlayDirectProgress`).
+   */
+  async function airPlayHevcAtOnce() {
+    const current = session;
+    const unchanged = () =>
+      airPlayActive &&
+      session === current &&
+      airPlayFallbackSession !== current &&
+      airPlayReceiverSafeSession !== current;
+    if (!webTransport || !imdb || !current?.external || !unchanged()) return;
+    const listed = await sourceListFor({ ...playingEpisode });
+    const playing = listed.sources?.find((source) => source.filename === current.release.filename);
+    if (playing?.attributes.codec !== 'hevc' || !unchanged()) return;
+    clearAirPlayProgressWatch();
+    // Held as `recoverAirPlayDirect` holds it, so a stall or media error meanwhile doesn't ask a second time.
+    airPlayFallbackSession = current;
+    report();
+    carryPosition();
+    if ((await receiverSafeDirect(current)) || session !== current) return;
+    // Already asked as a receiver: a real stall now goes straight on to what follows that.
+    airPlayFallbackSession = undefined;
+    airPlayReceiverSafeSession = current;
+    watchAirPlayDirectProgress();
+  }
+
   async function recoverAirPlayDirect(current: Session): Promise<boolean> {
     if (session !== current || !current.external || airPlayFallbackSession === current)
       return false;
@@ -3423,47 +3445,9 @@
     report();
     carryPosition();
 
-    // TorBox managed HLS carries HEVC in MPEG-TS. Apple TV accepts that observed stream, but Apple's AirPlay 2 TV
-    // contract requires HEVC in fMP4 and the LG receiver consequently never advances it. Preserve the fast Apple TV
-    // path: only after a real stall ask Hearth again as a receiver. The named release is retained when receiver-safe;
-    // where it is HEVC, Hearth answers `torbox_receiver_unsupported` and the unpinned retry selects an H.264 release.
-    if (airPlayReceiverSafeSession !== current) {
-      playbackRouteLog({
-        event: 'recovery',
-        from: 'torbox',
-        to: 'torbox',
-        stage: played ? 'mid_playback' : 'startup',
-        attempt: directAttempt ?? 'initial',
-      });
-      const receiverDirect = (pick: { filename: string } | undefined) => {
-        replacementRefusal = undefined;
-        return begin(
-          pick,
-          { transcode: 'never', player: 'airplay' },
-          current,
-          'refresh',
-          null,
-          true,
-        ).catch((error: unknown): Failure => {
-          console.warn('AirPlay receiver-safe TorBox recovery got no answer.', error);
-          return 'unreachable';
-        });
-      };
-      let moved = await receiverDirect({ filename: current.release.filename });
-      if (
-        moved !== true &&
-        session === current &&
-        replacementRefusal?.cause === 'torbox_receiver_unsupported'
-      )
-        moved = await receiverDirect(undefined);
-      if (moved === true) {
-        airPlayReceiverSafeSession = session ?? undefined;
-        airPlayFallbackSession = undefined;
-        airPlayFailed = false;
-        airPlayFailReason = undefined;
-        return true;
-      }
-    }
+    // An HEVC release was asked for as a receiver the moment AirPlay began (`airPlayHevcAtOnce`); anything else that
+    // stalls is asked for as one now, and only then goes on to Den Remux.
+    if (airPlayReceiverSafeSession !== current && (await receiverSafeDirect(current))) return true;
 
     if (
       playbackSourcePolicy === 'remember' &&
@@ -4577,6 +4561,42 @@
     return !castMode && nativeHls(document.createElement('video'));
   }
 
+  /**
+   * Whether `track` shows on `current` as it plays: any of Den Remux's renditions; on TorBox the embed its stream was
+   * created with, or a page-side track (a sidecar, OpenSubtitles) where the player renders the page's own `<track>`.
+   */
+  function showsOnStream(current: Session, track: NonNullable<Session['subtitles']>[number]) {
+    if (!current.external) return true;
+    if (track.torboxTrack !== undefined) return current.torboxSubtitle === track.torboxTrack;
+    return !subtitlesNeedPlaylist();
+  }
+
+  /**
+   * A subtitle the viewer picked that this TorBox stream can't show, kept to offer Den Remux for it rather than
+   * replacing the stream unasked: a switch takes seconds, and on iOS loses the tap that started playback.
+   */
+  let subtitleNeedsRemux = $state.raw<{ session: Session; value: string } | null>(null);
+
+  function offeredRemuxSubtitle() {
+    const offer = subtitleNeedsRemux;
+    const current = session;
+    if (!offer || !current?.external || offer.session !== current) return undefined;
+    return selectedSubtitle(current, offer.value);
+  }
+
+  /** The viewer's own switch to Den Remux for the subtitle `subtitleNeedsRemux` holds, which applies there. */
+  function switchForSubtitle() {
+    const track = offeredRemuxSubtitle();
+    subtitleNeedsRemux = null;
+    if (!track) return;
+    const previous = subtitleChoice;
+    // Candidate identities are local to the direct sidecar list. Remux names its rendition by language, so carry
+    // that portable identity across the delivery switch instead of an OpenSubtitles provider id it cannot expose
+    // in its own playlist.
+    subtitleChoice = track.language;
+    switchDelivery(() => (subtitleChoice = previous), 'Switching subtitles…');
+  }
+
   async function loadExternalSubtitle(
     current: Session,
     value: string,
@@ -4689,19 +4709,16 @@
       if (next === null) subtitleTurnedOffMidPlay = true;
       else subtitleSwitchedMidPlay = true;
     }
+    subtitleNeedsRemux = null;
     if (
       next &&
       session?.external &&
       selectedSubtitle(session, next)?.torboxTrack === undefined &&
       subtitlesNeedPlaylist()
     ) {
-      // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
-      const previous = subtitleChoice;
-      // Candidate identities are local to the direct sidecar list. Remux names its rendition by language, so
-      // carry that portable identity across the delivery switch instead of an OpenSubtitles provider id it cannot
-      // expose in its own playlist.
-      subtitleChoice = selectedSubtitle(session, next)?.language ?? next;
-      switchDelivery(() => (subtitleChoice = previous), 'Switching subtitles…');
+      // Only Den Remux's playlist would show it here. The stream playing is kept: the viewer is told, in a notice
+      // and the subtitle menu, and moves there only by pressing that switch (`switchForSubtitle`).
+      if (selectedSubtitle(session, next)) subtitleNeedsRemux = { session, value: next };
       return;
     }
     const current = session;
@@ -5751,6 +5768,14 @@
         },
         urgent: true,
       });
+    const needsRemux = offeredRemuxSubtitle();
+    if (needsRemux)
+      list.push({
+        text: subtitleNeedsRemuxText(needsRemux),
+        dismiss: () => (subtitleNeedsRemux = null),
+        action: { label: switchToRemuxLabel(), run: switchForSubtitle },
+        urgent: true,
+      });
     if (session) {
       if (swapped) list.push({ text: swapped, dismiss: () => (swapped = null) });
       if (autoSwitch)
@@ -5958,10 +5983,23 @@
     ];
   }
 
+  function switchToRemuxLabel(): string {
+    return i18n.format('player.switchTo', 'Switch to {source}', { source: 'Den Remux' });
+  }
+
+  function subtitleNeedsRemuxText(track: NonNullable<Session['subtitles']>[number]): string {
+    return i18n.format(
+      'player.subtitleNeedsRemux',
+      '{subtitle} subtitles need Den Remux on this player. TorBox keeps playing until you switch.',
+      { subtitle: subtitleLabel(track) },
+    );
+  }
+
   /** Den owns the subtitle choice so it can tell built-in tracks from OpenSubtitles candidates, with their match. */
   function subtitleTrackItems(section?: string): OptionItem[] {
     const current = session;
     if (!current) return [];
+    const needsRemux = offeredRemuxSubtitle();
     return [
       {
         kind: 'radio',
@@ -5980,6 +6018,19 @@
         onselect: () => void chooseSubtitle(subtitleValue(track)),
         section,
       })),
+      // The picked subtitle this stream can't show, and the viewer's switch to the path that shows it.
+      ...(needsRemux
+        ? [
+            {
+              kind: 'item' as const,
+              label: switchToRemuxLabel(),
+              description: subtitleNeedsRemuxText(needsRemux),
+              disabled: deliverySwitching || switching,
+              onselect: switchForSubtitle,
+              section,
+            },
+          ]
+        : []),
       ...subtitleResyncItems().map((item) => ({ ...item, section })),
     ];
   }
