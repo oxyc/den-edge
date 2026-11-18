@@ -448,11 +448,12 @@ if (process.argv.includes('--capture')) {
   // 125,524 (+652, main at 2d35b3f1). About 133 is the deadlines and fallback; about 520 is the poorer compression of
   // the transport negotiation as its own lazy chunk, loaded only when a carried trailer is first tried. That split
   // takes startup 10,725 -> 10,529 (-196). Allow the smallest 128-byte boundary containing it, retaining 32.
-  // The missing-library notice (#1212) measured 126,672 against matched main's 126,176 (+496, main at 053a769e):
-  // appMain +191 (the notice copy and its Linked devices action, shown above every page), the Worker +42 (the typed
-  // `refused-start` status and its codec), lazy Settings +73 and the shared Settings row +122 (opening and focusing
-  // Linked devices once its page is shown). Startup moves 10,529 -> 10,735 inside its unchanged cap. The notice must
-  // be eager and the reveal must sit with the row it focuses, so no split reduces the total; it adds no request, timer
-  // or polling. Allow the smallest 128-byte boundary containing it, retaining 48.
-  if (coreTotalDelta > 126720) throw new Error('Browser total JS/CSS budget exceeded');
+  // The missing-library notice (#1212) measured 126,919 against matched main's 126,176 (+743, main at 053a769e). Only
+  // the typed `refused-start` status is on the startup path (+20: its getter and codec case); the notice copy, its
+  // Linked devices action and the row reveal are a lazy `MissingLibraryNotice` chunk (+656 with its loader overhead),
+  // fetched only while a library is refused, plus about +65 at startup for its registry entry, load effect and slot.
+  // Startup moves 10,529 -> 10,614; the eager-copy draft measured 10,735. The Worker adds +42. That split is what grows
+  // the complete graph; it adds no request outside that state, timer or polling. Allow the smallest 128-byte boundary
+  // containing it, retaining 57.
+  if (coreTotalDelta > 126976) throw new Error('Browser total JS/CSS budget exceeded');
 }

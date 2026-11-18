@@ -237,9 +237,8 @@ describe('ProfileSession presentation state', () => {
       content(),
     );
     expect(missing.missingLibrary).toBe(true);
-    expect(missing.alert).toBe(
-      'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.',
-    );
+    // Its notice is the lazy MissingLibraryNotice; the generic alert says nothing, least of all "Waiting to sync".
+    expect(missing.alert).toBeNull();
 
     // The ordinary outage notice is a read-only status; it never offers the join handoff.
     const offline = legacyProfileSession(

@@ -62,6 +62,10 @@ export const ConnectDialogScreen = __DEN_TV_LEGACY_JS_CORE__
 export const LibraryRetirementNoticeScreen = lazy(
   () => import('../components/LibraryRetirementNotice.svelte'),
 );
+/** Loaded only while den-edge refuses to start this library (`refused-start`). The typed status stays eager. */
+export const MissingLibraryNoticeScreen = lazy(
+  () => import('../components/MissingLibraryNotice.svelte'),
+);
 
 /** Home's bounded speculative tail. Everything absent here is loaded only by route or pointer intent. */
 export const HOME_SCREEN_PRELOADS = [[DetailScreen, SearchScreen], [PersonScreen]] as const;

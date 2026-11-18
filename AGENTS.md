@@ -100,18 +100,20 @@ everything the committed code imports is committed too.
 ## Bundle budget records
 
 - The missing-library recovery (#1212) was measured on matched production builds at base `053a769e` and the repair.
-  Ordinary Browser startup moves 10,529 → 10,735 over the fixed baseline (+206 gzip bytes; appMain +191 for the
-  notice copy, its typed status check and the Linked devices action), inside the unchanged startup cap with 17 bytes
-  of margin. The complete non-translation graph moves 126,176 → 126,672 (+496): the Worker's `refused-start` status
-  and codec +42, lazy Settings +73 and the shared Settings row chunk +122 for opening and focusing Linked devices.
-  The independently lazy Spanish/Swedish catalogs move 51,439 → 51,549 (+110). The notice is shown above every page,
-  so it must be eager; the reveal sits with the row it focuses. Two smaller drafts were measured and rejected: a
-  `pageVisibility` import from Settings split that module into its own startup chunk (+148 and a request), and a
-  `MutationObserver` reveal cost 43 complete-graph bytes more than the bounded frame retry. Folding the new action into
-  the existing `alertRetry` slot moved startup 10,760 → 10,735 (-25; complete +34), which is what fits the unchanged
-  startup cap. Main left 32 bytes of complete-graph margin and 17 of translation margin,
-  so neither fits any localized notice: the complete ceiling advances to 126,720 (48 bytes of margin) and the
-  translation ceiling to 51,584 (35). No request, timer, polling, listener or dependency is added.
+  Only the typed `refused-start` status is on the startup path: the notice copy, its Open Linked devices action and the
+  row reveal are the lazy `MissingLibraryNotice` chunk (`MissingLibraryNoticeScreen`), fetched only while a library is
+  refused. Ordinary Browser startup moves 10,529 → 10,614 over the fixed baseline (+85). Of that, +20 is the
+  classification itself (the session getter and the page codec case; measured by building the status alone) and about
+  +65 is the smallest lazy wiring: the registry entry with its hashed chunk path and preload deps, the load effect and
+  the component slot. The complete non-translation graph moves 126,176 → 126,919 (+743): the lazy chunk and its loader
+  overhead about +656, the Worker's status and codec +42. ES/SV catalogs move 51,439 → 51,549 (+110). Measured and
+  rejected: the copy and action eager in `LibraryStatus` (startup +206); the notice importing Settings' `rows` (split
+  `rows` into its own chunk, adding a request to every Settings open); a `pageVisibility` import (its own startup chunk,
+  +148 and a request); and an `{#await import()}` slot (would pull Svelte's await runtime into startup, which no eager
+  code uses yet). The reveal opens the row through its own button and focuses it once its page is shown, so Settings
+  and its rows are unchanged. Main left 32 bytes of complete-graph margin and 17 of translation margin: the complete
+  ceiling advances to 126,976 (57 bytes of margin) and the translation ceiling to 51,584 (35); the startup cap is
+  unchanged. No request outside that state, timer, polling, listener or dependency is added.
 - Bounded Reel prepare/plan/transport requests and the fail-closed relay fallback (#1257/#1258) were measured on
   matched production builds at base `2d35b3f1` and the repair. Ordinary Browser startup moves 10,725 → 10,529 over
   the fixed baseline (-196 gzip bytes), while the complete non-translation graph moves 125,524 → 126,176 (+652);

@@ -43,9 +43,13 @@
     KeyResetOutcome,
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
-  import { navigate } from './lib/navigation';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
-  import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
+  import {
+    LinkScreen,
+    MissingLibraryNoticeScreen,
+    ProfileSettingsScreen,
+    SettingsScreen,
+  } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { householdAssistantFetch } from './lib/relayFetch';
@@ -278,13 +282,6 @@
   $effect(() => {
     if (settingsOpen && settingsRoute === 'personal') void ProfileSettingsScreen.load();
   });
-  // The missing-library notice's action: household Settings opens on Linked devices, where the household's library
-  // is joined. Nothing is joined, created or reset until the person does it there.
-  let revealLinkedDevices = $state(false);
-  function openLinkedDevices() {
-    revealLinkedDevices = true;
-    navigate('/settings');
-  }
   const householdSettingsModel = $derived(
     profileHouseholdSettingsModel(session, profileCoordinator?.mode ?? null),
   );
@@ -449,6 +446,9 @@
     void import('./components/LegacyBackupRecovery.svelte').then(
       ({ default: component }) => (LegacyBackupRecovery = component),
     );
+  });
+  $effect(() => {
+    if (shown.missingLibrary) void MissingLibraryNoticeScreen.load();
   });
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
@@ -1921,11 +1921,14 @@
           toast={shown.toast}
           presentation={shown.toastPresentation}
           alert={shown.alert}
-          alertAction={shown.missingLibrary && settingsRoute === 'household'
-            ? { label: 'Open Linked devices', run: openLinkedDevices }
-            : null}
           undo={shown.undo}
         />
+        {#if MissingLibraryNoticeScreen.current}
+          <MissingLibraryNoticeScreen.current
+            missing={shown.missingLibrary}
+            route={settingsRoute}
+          />
+        {/if}
         {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
           <PlaybackReceiptStatus
             state={playbackReceiptStatus.state}
@@ -1937,7 +1940,7 @@
           <LibraryStatus
             toast={null}
             alert="Saved playback progress couldn’t be updated. Try again."
-            alertAction={{ label: 'Try again', run: () => playbackReceiptRetry++ }}
+            alertRetry={() => playbackReceiptRetry++}
           />
         {/if}
       {/if}
@@ -2001,9 +2004,6 @@
                     pendingReset.from === libraryIdentity}
                   heldReset={pendingReset?.held === true}
                   onadoptheld={adoptHeldReset}
-                  revealLinkedDevices={revealLinkedDevices
-                    ? () => (revealLinkedDevices = false)
-                    : undefined}
                 />
               {:else}
                 <ScreenLoading screen={SettingsScreen} />

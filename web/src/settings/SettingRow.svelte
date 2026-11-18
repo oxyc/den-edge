@@ -36,25 +36,11 @@
     rows.expandable.set(id, section ?? '');
     return () => rows.expandable.delete(id);
   });
-
-  let button = $state<HTMLButtonElement>();
-  $effect(() => {
-    const target = button;
-    if (rows.reveal !== id || !target) return;
-    rows.reveal = null;
-    // A route page is mounted hidden (`inert`) and shown a frame or two later; nothing in it takes focus until then.
-    // Trying each frame, from after the Router's own scroll, and for at most two seconds' worth of them.
-    let frames = 120;
-    const focus = () =>
-      target.closest('[inert]') ? --frames && requestAnimationFrame(focus) : target.focus();
-    requestAnimationFrame(focus);
-  });
 </script>
 
 <div class="item" {id} data-spatial-item>
   {#if children}
     <button
-      bind:this={button}
       type="button"
       class="row"
       data-spatial-anchor

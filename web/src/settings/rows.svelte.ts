@@ -8,8 +8,6 @@ class Rows {
   readonly open = new SvelteSet<string>();
   /** Every row on the page that opens, and the section it's in. */
   readonly expandable = new SvelteMap<string, string>();
-  /** A row to focus, and so scroll into view, once it is on screen; it then clears. */
-  reveal = $state<string | null>(null);
 
   /** The rows that open, in one section or on the whole page. */
   private ids(section?: string): string[] {
