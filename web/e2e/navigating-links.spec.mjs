@@ -11,6 +11,10 @@ import { newEdge, routeGuestEdge } from './guest-edge.mjs';
 import { routeTmdb } from './network.mjs';
 import { openedByBrowser, stubNewTab } from './new-tab.mjs';
 
+// Each case opens its own context (WebKit's its own browser) and shares nothing with the others. Run in parallel,
+// they spread over the workers and CI's shards instead of holding one worker for the whole file.
+test.describe.configure({ mode: 'parallel' });
+
 const ID = 77;
 const PAGE = `/tv/${ID}-the-series`;
 const EPISODES = 12;

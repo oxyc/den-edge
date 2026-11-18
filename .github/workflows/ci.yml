@@ -219,7 +219,7 @@ jobs:
           DEN_EDGE_REAL_RECOVERY: "1"
       - run: node scripts/test-tv-core.mjs
       - run: npm run build
-      # Keep the isolation/bundle-budget result blocking, but do not let its failure hide the TV behavior results.
+      # Keep the isolation/bundle-budget result blocking, but do not let its failure hide the suites after it.
       # The final gate reads the step's outcome after the existing suites have run, reusing this job's one browser
       # build and dependency install instead of paying for a second runner or duplicate production build.
       - name: TV isolation and bundle budgets
@@ -227,16 +227,6 @@ jobs:
         continue-on-error: true
         run: npm run check:tv-isolation
       - run: npm run test:e2e:keyboard
-      - name: LG/webOS TV behavior
-        if: ${{ !cancelled() && steps.tv_isolation.outcome != 'skipped' }}
-        run: npm run test:e2e:tv
-      # The full TV journey already ran against the platform-neutral/webOS build above and will run again in
-      # WebKit below. Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
-      # separately covers the real Tizen bundle, file origin, CSP, API routing and playback. Re-sync additionally
-      # exercises replacement of the exact same-language sidecar through the AVPlay adapter.
-      - name: Supported Samsung/Tizen TV behavior
-        if: ${{ !cancelled() && steps.tv_isolation.outcome != 'skipped' }}
-        run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-kid-title-handoff.spec.mjs tv-platform.spec.mjs tv-services-row.spec.mjs tv-subtitle-resync.spec.mjs
       - run: npm run test:e2e:tv-package
       # Every ordinary source change must compile and verify the exact legacy package too; the release workflow is
       # too late to discover that a shared import or unsupported syntax no longer reaches Chromium 47.
@@ -258,6 +248,49 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tv-failures
+          path: web/test-results-tv
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The TV journeys in Chromium, on a runner of their own: each suite builds and serves its own TV bundle, so they need
+  # none of web-checks' builds, and inside web-checks they were its longest stretch, on the run's critical path. The
+  # same runner and its Chrome as web-checks, so the browser under test is unchanged.
+  e2e_tv_chromium:
+    name: TV Chromium behavior
+    needs: scope
+    if: always() && needs.scope.outputs.source_changed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Verify the runner browser
+        run: test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+      - name: LG/webOS TV behavior
+        run: npm run test:e2e:tv
+      # The full TV journey already ran against the platform-neutral/webOS build above and runs again in WebKit
+      # (e2e_tv_webkit). Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
+      # (web-checks) separately covers the real Tizen bundle, file origin, CSP, API routing and playback. Re-sync
+      # additionally exercises replacement of the exact same-language sidecar through the AVPlay adapter.
+      - name: Supported Samsung/Tizen TV behavior
+        if: ${{ !cancelled() }}
+        run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-kid-title-handoff.spec.mjs tv-platform.spec.mjs tv-services-row.spec.mjs tv-subtitle-resync.spec.mjs
+      - name: Retain TV failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-chromium-failures
           path: web/test-results-tv
           if-no-files-found: ignore
           retention-days: 7
@@ -367,7 +400,7 @@ jobs:
           path: web/test-results
           if-no-files-found: ignore
           retention-days: 7
-  # Chromium already exercises every platform-neutral TV journey in web-checks. WebKit gets the engine-sensitive
+  # Chromium already exercises every platform-neutral TV journey in e2e_tv_chromium. WebKit gets the engine-sensitive
   # playback, input, navigation and presentation surfaces on its own runner, so it neither repeats all 71 cases nor
   # extends shard 1's critical path.
   e2e_tv_webkit:
@@ -508,7 +541,7 @@ jobs:
   # Timing budgets still run and retain evidence, but an over-budget measurement is advisory.
   web:
     if: always()
-    needs: [scope, web-checks, e2e, e2e_production, e2e_tv_webkit, android-tv, stack_e2e]
+    needs: [scope, web-checks, e2e, e2e_production, e2e_tv_chromium, e2e_tv_webkit, android-tv, stack_e2e]
     runs-on: ubuntu-latest
     steps:
       # Apart from source reuse: wherever it was due, it must have run and passed in this run.
@@ -524,14 +557,15 @@ jobs:
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
           E2E_PRODUCTION: ${{ needs.e2e_production.result }}
+          TV_CHROMIUM: ${{ needs.e2e_tv_chromium.result }}
           TV_WEBKIT: ${{ needs.e2e_tv_webkit.result }}
           ANDROID_TV: ${{ needs.android-tv.result }}
           ANDROID_CHANGED: ${{ needs.scope.outputs.android_changed }}
         run: |
           if [ "$SOURCE_CHANGED" = false ]; then
-            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$E2E_PRODUCTION" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
+            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$E2E_PRODUCTION" = skipped && test "$TV_CHROMIUM" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
           else
-            test "$CHECKS" = success && test "$E2E" = success && test "$E2E_PRODUCTION" = success && test "$TV_WEBKIT" = success
+            test "$CHECKS" = success && test "$E2E" = success && test "$E2E_PRODUCTION" = success && test "$TV_CHROMIUM" = success && test "$TV_WEBKIT" = success
             if [ "$ANDROID_CHANGED" = true ]; then
               test "$ANDROID_TV" = success
             else
