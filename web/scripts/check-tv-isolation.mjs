@@ -193,7 +193,10 @@ if (process.argv.includes('--capture')) {
   // The subtitle menu's "needs Den Remux" copy in Swedish and Spanish measured 51,262 against matched main's 51,187
   // (+75), which sat 13 bytes under the 50 KiB ceiling. Allow the next 128-byte boundary after the one that leaves
   // 66 bytes, retaining 194.
-  if (current.translationGzip > 51456) throw new Error('Lazy translation catalog budget exceeded');
+  // The missing-library notice and its "Open Linked devices" action (#1212) in Swedish and Spanish measure 51,549
+  // against matched main's 51,439 (+110), which sat 17 bytes under this ceiling: no localized notice fits. Allow the
+  // next 128-byte boundary, retaining 35.
+  if (current.translationGzip > 51584) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -445,5 +448,11 @@ if (process.argv.includes('--capture')) {
   // 125,524 (+652, main at 2d35b3f1). About 133 is the deadlines and fallback; about 520 is the poorer compression of
   // the transport negotiation as its own lazy chunk, loaded only when a carried trailer is first tried. That split
   // takes startup 10,725 -> 10,529 (-196). Allow the smallest 128-byte boundary containing it, retaining 32.
-  if (coreTotalDelta > 126208) throw new Error('Browser total JS/CSS budget exceeded');
+  // The missing-library notice (#1212) measured 126,672 against matched main's 126,176 (+496, main at 053a769e):
+  // appMain +191 (the notice copy and its Linked devices action, shown above every page), the Worker +42 (the typed
+  // `refused-start` status and its codec), lazy Settings +73 and the shared Settings row +122 (opening and focusing
+  // Linked devices once its page is shown). Startup moves 10,529 -> 10,735 inside its unchanged cap. The notice must
+  // be eager and the reveal must sit with the row it focuses, so no split reduces the total; it adds no request, timer
+  // or polling. Allow the smallest 128-byte boundary containing it, retaining 48.
+  if (coreTotalDelta > 126720) throw new Error('Browser total JS/CSS budget exceeded');
 }

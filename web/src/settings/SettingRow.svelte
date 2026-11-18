@@ -5,7 +5,6 @@
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
   import { getContext, type Snippet } from 'svelte';
-  import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { rows, SECTION } from './rows.svelte';
 
   let {
@@ -38,15 +37,17 @@
     return () => rows.expandable.delete(id);
   });
 
-  // A route page is mounted hidden and shown after, and nothing in it takes focus until then.
-  const page = pageVisibility();
   let button = $state<HTMLButtonElement>();
   $effect(() => {
     const target = button;
-    if (rows.reveal !== id || !page.active || !target) return;
+    if (rows.reveal !== id || !target) return;
     rows.reveal = null;
-    // After the Router's own scroll for the page it just opened.
-    requestAnimationFrame(() => target.focus());
+    // A route page is mounted hidden (`inert`) and shown a frame or two later; nothing in it takes focus until then.
+    // Trying each frame, from after the Router's own scroll, and for at most two seconds' worth of them.
+    let frames = 120;
+    const focus = () =>
+      target.closest('[inert]') ? --frames && requestAnimationFrame(focus) : target.focus();
+    requestAnimationFrame(focus);
   });
 </script>
 

@@ -99,6 +99,19 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- The missing-library recovery (#1212) was measured on matched production builds at base `053a769e` and the repair.
+  Ordinary Browser startup moves 10,529 → 10,735 over the fixed baseline (+206 gzip bytes; appMain +191 for the
+  notice copy, its typed status check and the Linked devices action), inside the unchanged startup cap with 17 bytes
+  of margin. The complete non-translation graph moves 126,176 → 126,672 (+496): the Worker's `refused-start` status
+  and codec +42, lazy Settings +73 and the shared Settings row chunk +122 for opening and focusing Linked devices.
+  The independently lazy Spanish/Swedish catalogs move 51,439 → 51,549 (+110). The notice is shown above every page,
+  so it must be eager; the reveal sits with the row it focuses. Two smaller drafts were measured and rejected: a
+  `pageVisibility` import from Settings split that module into its own startup chunk (+148 and a request), and a
+  `MutationObserver` reveal cost 43 complete-graph bytes more than the bounded frame retry. Folding the new action into
+  the existing `alertRetry` slot moved startup 10,760 → 10,735 (-25; complete +34), which is what fits the unchanged
+  startup cap. Main left 32 bytes of complete-graph margin and 17 of translation margin,
+  so neither fits any localized notice: the complete ceiling advances to 126,720 (48 bytes of margin) and the
+  translation ceiling to 51,584 (35). No request, timer, polling, listener or dependency is added.
 - Bounded Reel prepare/plan/transport requests and the fail-closed relay fallback (#1257/#1258) were measured on
   matched production builds at base `2d35b3f1` and the repair. Ordinary Browser startup moves 10,725 → 10,529 over
   the fixed baseline (-196 gzip bytes), while the complete non-translation graph moves 125,524 → 126,176 (+652);

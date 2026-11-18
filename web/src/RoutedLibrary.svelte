@@ -1937,7 +1937,7 @@
           <LibraryStatus
             toast={null}
             alert="Saved playback progress couldn’t be updated. Try again."
-            alertRetry={() => playbackReceiptRetry++}
+            alertAction={{ label: 'Try again', run: () => playbackReceiptRetry++ }}
           />
         {/if}
       {/if}

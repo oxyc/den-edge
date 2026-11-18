@@ -7,7 +7,6 @@
     presentation = 0,
     alert,
     undo = null,
-    alertRetry = null,
     alertAction = null,
   }: {
     toast: string | null;
@@ -16,20 +15,19 @@
     alert: string | null;
     /** Offered on the toast itself — "Removed from watchlist · Undo" — for the two actions that take something away. */
     undo?: { label: string; run: () => void } | null;
-    /** A recovery action owned by an alert which cannot live in its lazy feature chunk. */
-    alertRetry?: (() => void) | null;
-    /** The alert's own way out, named for what it does ("Open Linked devices"). */
+    /**
+     * A recovery action owned by an alert which cannot live in its lazy feature chunk, named for what it does ("Try
+     * again", "Open Linked devices").
+     */
     alertAction?: { label: string; run: () => void } | null;
   } = $props();
 </script>
 
 {#if alert}<p class="library-status" role="alert">
-    <span>{i18n.phrase(alert)}</span>{#if alertRetry}<button
+    <span>{i18n.phrase(alert)}</span>{#if alertAction}<button
         type="button"
         class="undo"
-        onclick={alertRetry}>{i18n.phrase('Try again')}</button
-      >{:else if alertAction}<button type="button" class="undo" onclick={alertAction.run}
-        >{i18n.phrase(alertAction.label)}</button
+        onclick={alertAction.run}>{i18n.phrase(alertAction.label)}</button
       >{/if}
   </p>{/if}
 {#key presentation}
