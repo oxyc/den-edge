@@ -29,6 +29,8 @@ async function mockPlayer(page, audioTracks = TWO_TRACKS) {
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
+  // The next episode's streams, warmed before the advance (`?nextEpisode`).
+  await page.route(`${ORIGIN}/scout/**`, (route) => route.fulfill({ json: { streams: [] } }));
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
   await page.route(`${ORIGIN}/direct/releases`, (route) =>
     route.fulfill({ json: { releases: [release] } }),

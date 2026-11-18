@@ -2167,7 +2167,14 @@ describe('LibraryLogAuthority', () => {
     await reopened.close();
   });
 
-  it('joins managed movie and episode receipts from the Edge callback through durable service readback without assistant consent', async () => {
+  // Opt in like log.edge.test.ts: this runs the real Rust callback/drain through `cargo test`, which compiles the
+  // whole den-edge test binary first when it is not built (~275 s cold, far past this test's budget). CI builds it
+  // before `npm test` and sets DEN_EDGE_REAL_RECOVERY=1.
+  // Run: cargo test --locked --no-run && DEN_EDGE_REAL_RECOVERY=1 npm test -- src/lib/libraryLogAuthority.test.ts
+  it('joins managed movie and episode receipts from the Edge callback through durable service readback without assistant consent', async ({
+    skip,
+  }) => {
+    skip(process.env.DEN_EDGE_REAL_RECOVERY !== '1', 'opt-in: DEN_EDGE_REAL_RECOVERY=1');
     let published: string | null = null;
     const fetchImpl: typeof fetch = async (input, init) => {
       expect(String(input)).toBe('/assistant/dropbox');
@@ -2200,7 +2207,15 @@ describe('LibraryLogAuthority', () => {
     const now = Date.now();
     const edge = spawnSync(
       'cargo',
-      ['test', 'joined_production_contract_edge_bridge', '--', '--ignored'],
+      [
+        'test',
+        '--locked',
+        '--bin',
+        'den-edge',
+        'joined_production_contract_edge_bridge',
+        '--',
+        '--ignored',
+      ],
       {
         cwd: repo,
         env: {

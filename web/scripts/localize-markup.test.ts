@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { preprocess } from 'svelte/compiler';
 import { sourcePhrases as spanish } from '../src/lib/messages/phrases/es';
 import { sourcePhrases as swedish } from '../src/lib/messages/phrases/sv';
 import { localizeMarkup } from './localize-markup';
@@ -122,14 +123,21 @@ describe('UI translation coverage', () => {
     }
   });
 
-  it('has a translation for every static phrase compiled from shipped Svelte screens', () => {
+  it('has a translation for every static phrase compiled from shipped Svelte screens', async () => {
     const root = join(process.cwd(), 'src');
     const files = readdirSync(root, { recursive: true, withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith('.svelte'))
       .map((entry) => join(entry.parentPath, entry.name));
+    // The transform localizes only the template, but parsing a component also parses its <script> and <style>:
+    // about 78% of the ~1.7 MB of components, and most of the ~1.1 s of CPU this test cost cold, which a parallel
+    // suite stretched past 5 s. Svelte's own preprocessor empties those blocks first; the phrases found are the same.
+    const blank = { script: () => ({ code: '' }), style: () => ({ code: '' }) };
     const found = new Set<string>();
     for (const filename of files) {
-      const result = localizeMarkup().markup({ content: readFileSync(filename, 'utf8'), filename });
+      const { code: content } = await preprocess(readFileSync(filename, 'utf8'), blank, {
+        filename,
+      });
+      const result = localizeMarkup().markup({ content, filename });
       for (const match of result.code.matchAll(/i18n\.phrase\(("(?:[^"\\]|\\.)*")\)/g))
         found.add(JSON.parse(match[1]));
     }
