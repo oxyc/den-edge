@@ -4,6 +4,7 @@
 import type { MediaType } from './library';
 import { ipv4Hint } from './ipv4';
 import { relayFetch } from './relayFetch';
+import type { TransportAttempt } from './reelTransport';
 import type { Entry, Routes } from './routes';
 import { apiUrl } from './runtimeUrl';
 
@@ -74,16 +75,6 @@ export interface PlaybackStep {
   crop: Crop | null;
 }
 
-interface TransportAttempt {
-  type: Exclude<PlaybackAttempt, 'external'>;
-  url: string;
-}
-
-interface TransportAnswer {
-  attempts: TransportAttempt[];
-  ipv4HintWanted: boolean;
-}
-
 export interface PlaybackCursorOptions {
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
@@ -97,7 +88,23 @@ const CAPABILITY = /^m\/s\/[A-Za-z0-9_-]{40,2048}\?s=[0-9a-fA-F]{24}$/;
 // names, where it refuses trailer bytes. Transport only redeems `m/s/`; this one goes straight to the relay.
 const NATIVE_MASTER = /^m\/n\/[A-Za-z0-9_-]{40,2048}\?s=[0-9a-fA-F]{24}$/;
 const PLAN_TTL_MS = 5 * 60_000;
+/**
+ * The longest a discovery (`/prepare`) or a lazy plan (`/sources`) may take. Either can wait on Reel's cold resolve:
+ * cold detail heroes measured 2.9–4.8 s to their first frame on iOS (2026-09), resolve and index included. Twice
+ * that keeps a slow valid answer; past it the still stays and the trailer is given up.
+ */
+const PREPARE_MS = 10_000;
+const PLAN_MS = 10_000;
+/**
+ * The whole of one cursor move — every plan, transport round and IPv4 lookup between one attempt and the next,
+ * across candidates and sources — so many unanswered candidates cannot multiply the wait.
+ */
+const SEEK_MS = 15_000;
 const prepared = new Map<string, { until: number; candidates: TrailerCandidate[] }>();
+
+/** `signal`, or nothing, joined with a deadline `ms` from now: the request and its body read abort at either. */
+const within = (ms: number, signal?: AbortSignal) =>
+  AbortSignal.any([AbortSignal.timeout(ms), ...(signal ? [signal] : [])]);
 
 /** Forget prepared play answers. Tests ask the same title twice and mean it both times. */
 export function forgetWarmedTrailers(): void {
@@ -357,7 +364,7 @@ export async function prepareTrailers(
   if (cached && Date.now() < cached.until) return cached.candidates;
   if (cached) prepared.delete(cacheKey);
   try {
-    const response = await fetchImpl(url, { signal });
+    const response = await fetchImpl(url, { signal: within(PREPARE_MS, signal) });
     if (!response.ok) return [];
     const candidates = candidatesFrom(await response.json(), base, origin, url);
     const noStore = response.headers
@@ -380,45 +387,13 @@ export async function prepareTrailers(
   }
 }
 
-function parseTransport(
-  value: unknown,
-  capability: string,
-  expectedRelay: string,
-): TransportAnswer | null {
-  if (!value || typeof value !== 'object') return null;
-  const answer = value as {
-    v?: unknown;
-    capability?: unknown;
-    attempts?: unknown;
-    ipv4HintWanted?: unknown;
-  };
-  if (answer.v !== 2 || answer.capability !== capability || !Array.isArray(answer.attempts))
-    return null;
-  const attempts: TransportAttempt[] = [];
-  for (const entry of answer.attempts) {
-    const attempt = entry as { type?: unknown; url?: unknown };
-    if (
-      !['lan', 'public', 'relay'].includes(String(attempt.type)) ||
-      typeof attempt.url !== 'string'
-    )
-      continue;
-    try {
-      const relative = attempt.url.startsWith('/') && !attempt.url.startsWith('//');
-      if ((attempt.type === 'relay') !== relative) continue;
-      if (attempt.type === 'relay' && attempt.url !== expectedRelay) continue;
-      const url = new URL(attempt.url, globalThis.location?.href ?? 'https://relative.invalid');
-      if (attempt.type !== 'relay' && url.protocol !== 'https:') continue;
-      const normalized = relative ? `${url.pathname}${url.search}` : url.href;
-      if (attempts.some((had) => had.url === normalized)) continue;
-      attempts.push({
-        type: attempt.type as TransportAttempt['type'],
-        url: normalized,
-      });
-    } catch {
-      // One malformed attempt does not discard the remaining ordered attempts.
-    }
-  }
-  return { attempts, ipv4HintWanted: answer.ipv4HintWanted === true };
+/**
+ * Whether a carried relay Edge did not offer may still be tried when its transport answer is missing. Edge refuses
+ * a carried trailer's bytes on its public names (`may_relay_reel_media`), so only a page served from a local name
+ * may assume one; a packaged TV's relative paths go to the public device API, so it never does.
+ */
+function assumesRelay(): boolean {
+  return !__DEN_TV_API_ORIGIN__ && localHost(globalThis.location?.hostname ?? '');
 }
 
 function relayFor(capability: string, planUrl: string): TransportAttempt | null {
@@ -437,33 +412,14 @@ async function transport(
   lookupIpv4: () => Promise<string | undefined>,
 ): Promise<TransportAttempt[]> {
   const relay = CAPABILITY.test(capability) ? relayFor(capability, planUrl) : null;
-  const fallback = () => (signal.aborted || !relay ? [] : [relay]);
-  const ask = async (extra: { ipv4Hint?: string; noHint?: boolean } = {}) => {
-    if (!relay) return { kind: 'failed' as const };
-    const mount = relay.url.slice(0, relay.url.length - capability.length - 1);
-    const response = await fetchImpl(`${mount}/transport`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ capability, ...extra }),
-      signal,
-    });
-    if (response.status === 403 || response.status === 410) return { kind: 'rejected' as const };
-    if (!response.ok) return { kind: 'failed' as const };
-    const answer = parseTransport(await response.json(), capability, relay.url);
-    return answer ? { kind: 'answer' as const, answer } : { kind: 'failed' as const };
-  };
+  if (!relay) return [];
   try {
-    let result = await ask();
-    if (result.kind === 'rejected' || signal.aborted) return [];
-    if (result.kind === 'failed') return fallback();
-    if (!result.answer.ipv4HintWanted) return result.answer.attempts;
-    const hint = await lookupIpv4();
-    if (signal.aborted) return [];
-    result = await ask(hint ? { ipv4Hint: hint } : { noHint: true });
-    if (result.kind === 'rejected' || signal.aborted) return [];
-    return result.kind === 'answer' ? result.answer.attempts : fallback();
-  } catch {
-    return fallback();
+    // Loaded only when a carried source is about to be tried, so no surface pays for it at startup.
+    const { negotiate } = await import('./reelTransport');
+    return await negotiate(capability, relay, assumesRelay(), fetchImpl, signal, lookupIpv4);
+  } catch (error) {
+    console.warn('den: trailer transport did not load', error);
+    return [];
   }
 }
 
@@ -544,12 +500,13 @@ export class PlaybackCursor {
   }
 
   async #seek(): Promise<PlaybackStep | null> {
-    while (!this.#closed) {
+    const signal = within(SEEK_MS, this.#controller.signal);
+    while (!this.#closed && !signal.aborted) {
       const candidate = this.#candidates[this.#candidate];
       if (!candidate) return null;
       let plan = candidate.plan;
       if (plan !== null && (plan === undefined || plan.expires * 1000 <= Date.now())) {
-        plan = await this.#fetchPlan(candidate.planUrl);
+        plan = await this.#fetchPlan(candidate.planUrl, signal);
         candidate.plan = plan && plan.expires * 1000 > Date.now() ? plan : null;
         plan = candidate.plan;
       }
@@ -577,7 +534,7 @@ export class PlaybackCursor {
                 delivery.capability,
                 candidate.planUrl,
                 this.#fetch,
-                this.#controller.signal,
+                signal,
                 this.#lookupIpv4,
               );
       if (this.#closed) return null;
@@ -591,11 +548,9 @@ export class PlaybackCursor {
     return null;
   }
 
-  async #fetchPlan(url: string): Promise<SourcePlan | null> {
+  async #fetchPlan(url: string, signal: AbortSignal): Promise<SourcePlan | null> {
     try {
-      const response = await this.#fetch(url, {
-        signal: this.#controller.signal,
-      });
+      const response = await this.#fetch(url, { signal: within(PLAN_MS, signal) });
       return response.ok ? parseSourcePlan(await response.json()) : null;
     } catch {
       return null;
