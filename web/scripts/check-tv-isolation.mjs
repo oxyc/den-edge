@@ -420,5 +420,10 @@ if (process.argv.includes('--capture')) {
   // recovered 108 gzip bytes. Its exact-key bounded scan is post-foreground in a lazy chunk; moving it eager would
   // exceed startup's remaining 13-byte margin. Keep that cap unchanged and allow the second 128-byte boundary: the
   // first leaves only 8 bytes against measured variance, while this one retains 136 bytes before final compaction.
-  if (coreTotalDelta > 124032) throw new Error('Browser total JS/CSS budget exceeded');
+  // Away from home, one transport (#1366): the player drives the cast page's video by message, and the cast page draws
+  // its own AirPlay and (on an iPhone) fullscreen buttons in the top bar's hole. Measured 124,589 locally, about 690
+  // over main's recorded 123,896, in the lazy Player chunk and the separately served cast page; startup is unchanged.
+  // The next boundary would leave 83 bytes against #1282's run-to-run variance, so allow the one after it, retaining
+  // 211.
+  if (coreTotalDelta > 124800) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -672,6 +672,11 @@
   const castStage = $derived(
     (!!session?.castOrigin || !!heldFrame) && !failure && !castView && !castActive,
   );
+  /**
+   * The picture plays in the cast page, its own away from home (`castStage`) or the receiver's it casts to (`castView`):
+   * Den's transport drives it by message, and its progress is what the transport shows.
+   */
+  const framePlays = $derived(castView || castStage);
   /** Den's Cast button, drawn where the player's other output buttons are; it shows once a receiver is found. */
   const castSlotShown = $derived(
     !castStage &&
@@ -2981,7 +2986,11 @@
     untrack(sendToCastFrame);
   });
 
-  /** What the frame's Cast button needs from this page: its layout, and the player's own glyph colour and size. */
+  /**
+   * What the frame's Cast button needs from this page: its layout, and the player's own glyph colour and size.
+   * `transport` says this player draws its own transport over the frame's picture, so the frame's video carries no
+   * native controls under it (a frame told nothing keeps them, for a player from before).
+   */
   function sendCastLayout(): void {
     const origin = frameOrigin;
     const frame = origin ? readyCastFrame(origin) : null;
@@ -2991,6 +3000,7 @@
       {
         type: 'den-layout',
         layout: castStage ? 'stage' : 'button',
+        transport: true,
         color: style?.color,
         iconSize: Number.parseFloat(style?.getPropertyValue('--button-icon-size') ?? '') || 22,
       },
@@ -3018,6 +3028,9 @@
     visible?: unknown;
     hover?: unknown;
     back?: unknown;
+    cast?: unknown;
+    airplay?: unknown;
+    fullscreen?: unknown;
   }): boolean {
     switch (message.type) {
       case 'den-cast-state':
@@ -3078,6 +3091,15 @@
         return true;
       case 'den-tab':
         castTab(message.back === true);
+        return true;
+      case 'den-outputs':
+        // The frame's own output buttons, drawn in the hole left for them in the top bar (`frameOutputsSlot`). On an
+        // iPhone that includes fullscreen, which only a press in the frame can ask of its video.
+        frameFullscreen = message.fullscreen === true;
+        frameOutputs =
+          (message.cast === true ? 1 : 0) +
+          (message.airplay === true ? 1 : 0) +
+          (frameFullscreen ? 1 : 0);
         return true;
       case 'den-activity':
         // The pointer is over the frame, where this page's own pointer events do not reach.
@@ -3144,10 +3166,10 @@
     } else if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
-      // The receiver's own volume, which Den's volume control now sets.
-      if (castView && Number.isFinite(message.volume))
+      // The frame's own volume, or the receiver's, which Den's volume control now sets.
+      if (framePlays && Number.isFinite(message.volume))
         playerVolume = Math.min(1, Math.max(0, message.volume ?? 1));
-      if (castView && typeof message.muted === 'boolean') playerMuted = message.muted;
+      if (framePlays && typeof message.muted === 'boolean') playerMuted = message.muted;
       // A length is known only once the playlist came through the media listener.
       if (remoteDuration > 0) {
         played = true;
@@ -3718,6 +3740,68 @@
     if (target.parentElement) observer.observe(target.parentElement);
     observer.observe(root);
     return () => observer.disconnect();
+  });
+
+  /** How many output buttons (Cast, AirPlay, fullscreen) the frame draws in the top bar away from home (`den-outputs`). */
+  let frameOutputs = $state(0);
+  /** Whether the frame draws fullscreen among its output buttons, so the player's own (which cannot reach it) hides. */
+  let frameFullscreen = $state(false);
+  /** The hole left for them in the top bar: Den's surface, under the frame's buttons, as `castSlot` is for Cast. */
+  let frameOutputsSlot = $state<HTMLElement>();
+  /** That hole in the stage's pixels, which are the frame's own, while the controls show; null hides the buttons. */
+  let frameOutputsBox = $state.raw<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  /** Presses on the frame's picture, which Den's video takes at home (`pictureClick`). */
+  let stagePicture = $state<HTMLElement>();
+  $effect(() => {
+    const slot = castStage && webControlsVisible ? frameOutputsSlot : undefined;
+    const stage = stageElement;
+    if (!slot || !stage) {
+      frameOutputsBox = null;
+      return;
+    }
+    const place = () => {
+      const box = slot.getBoundingClientRect();
+      const origin = stage.getBoundingClientRect();
+      const next = {
+        left: box.left - origin.left,
+        top: box.top - origin.top,
+        width: box.width,
+        height: box.height,
+      };
+      const last = frameOutputsBox;
+      if (
+        !last ||
+        (Object.keys(next) as (keyof typeof next)[]).some((key) => last[key] !== next[key])
+      )
+        frameOutputsBox = next;
+    };
+    place();
+    // Placed on the next frame, not inside the observer's callback: placing moves the frame's buttons, and a resize
+    // caused within the callback is the "ResizeObserver loop" the browser reports as an error.
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(place);
+    });
+    observer.observe(slot);
+    if (slot.parentElement) observer.observe(slot.parentElement);
+    observer.observe(stage);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  });
+  $effect(() => {
+    // Again whenever the hole moves or the frame's document is a new one.
+    const box = frameOutputsBox;
+    const origin = castStage && castFrameReady ? frameOrigin : undefined;
+    if (!origin) return;
+    untrack(() => readyCastFrame(origin)?.postMessage({ type: 'den-outputs-slot', box }, origin));
   });
 
   // Back to playing in this page, the frame stays for its button: what it had loaded is let go there.
@@ -4865,7 +4949,7 @@
   /** The native Den Apple TV exposes this beside its track/stream actions. TV browsers can seek the active decoder
    * directly: the Samsung facade turns this assignment into a serialized AVPlay seek. */
   function playFromBeginning() {
-    if (castView) {
+    if (framePlays) {
       seekTo(0);
       tellReceiver({ type: 'den-play' });
       return;
@@ -4882,9 +4966,9 @@
     seekTo(Math.max(0, total ? Math.min(from + seconds, total) : from + seconds));
   }
 
-  /** Den's transport moves the picture here, or the receiver's while casting. */
+  /** Den's transport moves the picture here, or the cast page's (`framePlays`). */
   function seekTo(time: number) {
-    if (castView) {
+    if (framePlays) {
       if (!seekCastFrame(time)) return;
       remoteTime = time;
       tvPosition = time;
@@ -4895,10 +4979,13 @@
     tvPosition = video.currentTime;
   }
 
-  /** While casting, Den's transport is the receiver's remote: what it asks goes to the cast page's Cast session. */
+  /**
+   * Where the cast page plays (`framePlays`), Den's transport is its remote: what it asks goes to the cast page, for
+   * its own video or the receiver its Cast session plays on.
+   */
   function tellReceiver(message: { type: string; [field: string]: unknown }): boolean {
     const current = session;
-    if (!castView || !current?.castOrigin) return false;
+    if (!framePlays || !current?.castOrigin) return false;
     const frame = readyCastFrame(current.castOrigin);
     if (!frame) return false;
     frame.postMessage(
@@ -4909,7 +4996,7 @@
   }
 
   function togglePlaying() {
-    if (castView) {
+    if (framePlays) {
       // Shown at once; the receiver's next progress says whether it did.
       if (tellReceiver({ type: tvPaused ? 'den-play' : 'den-pause' })) tvPaused = !tvPaused;
       return;
@@ -4934,7 +5021,7 @@
   }
 
   function toggleMuted() {
-    if (castView) {
+    if (framePlays) {
       if (tellReceiver({ type: 'den-volume', muted: !playerMuted })) playerMuted = !playerMuted;
       return;
     }
@@ -5028,7 +5115,8 @@
     if (webTransport && airPlayActive) return;
     lastPointer = event.pointerType;
     shownAtPress = webControlsVisible;
-    if (event.pointerType !== 'mouse' && event.target !== video) revealWebControls();
+    if (event.pointerType !== 'mouse' && event.target !== video && event.target !== stagePicture)
+      revealWebControls();
   }
 
   /**
@@ -5048,13 +5136,15 @@
     else scheduleWebControls();
   }
 
-  // Becoming the receiver's remote, the transport starts from where the receiver said it was, and stays shown.
+  // Becoming the cast page's remote, the transport starts from where it said it was. Casting, it stays shown.
   $effect(() => {
-    if (!castView) return;
+    const casting = castView;
+    if (!casting && !castStage) return;
     untrack(() => {
       tvPaused = remotePaused;
       tvPosition = remoteTime;
       tvDuration = length();
+      if (!casting) return;
       clearTimeout(webControlsTimer);
       webControlsVisible = true;
     });
@@ -6130,9 +6220,9 @@
     if (track) void chooseSubtitle(subtitleValue(track));
   }
 
-  /** The volume set here, or the receiver's while casting. */
+  /** The volume set here, or the cast page's (`framePlays`). */
   function applyVolume(volume: number) {
-    if (castView) {
+    if (framePlays) {
       if (tellReceiver({ type: 'den-volume', level: volume, muted: volume === 0 })) {
         playerVolume = volume;
         playerMuted = volume === 0;
@@ -6176,7 +6266,8 @@
   /** Whether the controls may hide now: never while there is something to read, hold or press in them. */
   function webControlsMayHide(): boolean {
     // A failure's message and the options to recover from it stay up, as does a paused or casting player.
-    if (!webTransport || castView || failure || video?.paused) return false;
+    if (!webTransport || castView || failure || (castStage ? tvPaused : video?.paused))
+      return false;
     if (playerMenuOpen() || tvSubtitleTimingOpen || castFocus || timelineHeld || upNext !== null)
       return false;
     // A mouse over the top bar or the dock, or keyboard focus among the controls, holds them up. A touch screen leaves
@@ -6457,7 +6548,9 @@
         </div>
         <span
           class="web-output"
-          class:web-output-empty={!(session && airPlayCapable) && !castSlotShown}
+          class:web-output-empty={!(session && airPlayCapable) &&
+            !castSlotShown &&
+            !(castStage && frameOutputs)}
         >
           {#if session && airPlayCapable}
             <button
@@ -6479,6 +6572,13 @@
           {/if}
           {#if castSlotShown}
             {@render castButtonSlot('web-glyph output-action')}
+          {/if}
+          {#if castStage && frameOutputs}
+            <span
+              class="frame-outputs"
+              bind:this={frameOutputsSlot}
+              style:width={`${frameOutputs * 44}px`}
+            ></span>
           {/if}
         </span>
       </header>
@@ -7063,6 +7163,25 @@
       sandbox="allow-scripts allow-same-origin allow-presentation"
       onload={castFrameLoaded}
     ></iframe>
+    {#if castStage && castFrameBox}
+      {@const hole = frameOutputsBox}
+      <!-- The frame's picture takes no presses of its own: a click plays or pauses, a tap shows the controls, as on Den's
+           video at home. All but the hole over the frame's output buttons, which take their own press. -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div
+        class="stage-picture"
+        bind:this={stagePicture}
+        style:left={`${castFrameBox.left}px`}
+        style:top={`${castFrameBox.top}px`}
+        style:width={`${castFrameBox.width}px`}
+        style:height={`${castFrameBox.height}px`}
+        style:clip-path={hole
+          ? `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${hole.left}px ${hole.top}px, ${hole.left + hole.width}px ${hole.top}px, ${hole.left + hole.width}px ${hole.top + hole.height}px, ${hole.left}px ${hole.top + hole.height}px, ${hole.left}px ${hole.top}px)`
+          : undefined}
+        onclick={pictureClick}
+        ondblclick={pictureDoubleClick}
+      ></div>
+    {/if}
     <!-- Pressing the Cast button while a receiver is connected opens this, beside it: the frame is a button, with no
          room for a menu of its own. -->
     <ActionMenu
@@ -7111,7 +7230,7 @@
      under the timeline instead, off the picture. Every transport is drawn and CSS shows the one for the window's size
      (`.web-centre`, `.web-remote`, `.web-dock-transport`); which pointer it is decides behaviour alone. -->
 {#snippet webControls()}
-  {@const transport = !!session && (!session.castOrigin || castView)}
+  {@const transport = !!session && (!session.castOrigin || framePlays)}
   <nav class="web-transport" aria-label="Playback controls">
     {#if session && (active || (onnext && next && upNext !== null))}
       <div class="web-floating">
@@ -7224,13 +7343,13 @@
             oninput={(event) => {
               const to = Number(event.currentTarget.value);
               tvPosition = to;
-              // A finger drag follows the finger to the second, and a receiver is asked once the thumb is let go:
+              // A finger drag follows the finger to the second, and the cast page is asked once the thumb is let go:
               // both are sought at `change`, not at every step.
-              if (!scrubbing && !castView) seekTo(to);
+              if (!scrubbing && !framePlays) seekTo(to);
             }}
             onchange={(event) => {
               timelineHeld = false;
-              if (!scrubbing && !castView) return;
+              if (!scrubbing && !framePlays) return;
               scrubbing = false;
               seekTo(Number(event.currentTarget.value));
             }}
@@ -7342,16 +7461,18 @@
                 onclick={() => void togglePictureInPicture()}>{@render pipIcon()}</button
               >
             {/if}
-            <button
-              class="web-glyph"
-              type="button"
-              aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-              data-tip={i18n.phrase('Fullscreen')}
-              data-key="F"
-              onclick={() => void toggleFullscreen()}
-            >
-              <ButtonIcon name="fullscreen" />
-            </button>
+            {#if !(castStage && frameFullscreen)}
+              <button
+                class="web-glyph"
+                type="button"
+                aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                data-tip={i18n.phrase('Fullscreen')}
+                data-key="F"
+                onclick={() => void toggleFullscreen()}
+              >
+                <ButtonIcon name="fullscreen" />
+              </button>
+            {/if}
           {/if}
           <span class="web-tip" data-tip={i18n.phrase('More')}>
             <ActionMenu
@@ -7864,6 +7985,25 @@
     background: #000;
   }
 
+  /* Over the frame's picture and under Den's bars (`stagePicture`). */
+  .stage-picture {
+    position: absolute;
+    z-index: 1;
+    cursor: pointer;
+  }
+
+  .web-custom-player.web-controls-hidden:not(.web-touch-player) .stage-picture {
+    cursor: none;
+  }
+
+  /* The hole for the frame's output buttons: a press there reaches the frame under it. */
+  .frame-outputs {
+    display: inline-block;
+    flex: none;
+    height: 44px;
+    pointer-events: none;
+  }
+
   /* A blocked cross-origin player must receive its own trusted Play click, above Den's overlapping chrome. */
   .cast-frame-stage.cast-frame-play-blocked {
     z-index: 6;
@@ -8314,6 +8454,14 @@
     justify-content: flex-end;
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .web-custom-player .web-top > .web-output {
+    pointer-events: none;
+  }
+
+  .web-custom-player:not(.web-controls-hidden) .web-output > :not(.frame-outputs) {
+    pointer-events: auto;
   }
 
   /* Every control is a bare glyph on a 44px target; only Play is filled. Pressed, a faint circle behind it. */
