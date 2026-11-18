@@ -475,6 +475,7 @@ test('remote opens Settings and Back returns to the previously focused navigatio
 
   const settings = page.getByRole('link', { name: 'Settings', exact: true });
   await remoteTo(page, settings, ['ArrowUp', 'ArrowRight']);
+  const previousUrl = page.url();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
@@ -526,7 +527,7 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await expect(hideWatched).toBeFocused();
 
   await page.keyboard.press('Escape');
-  await expect(page).toHaveURL(/\/$/);
+  await expect(page).toHaveURL(previousUrl);
   await expect(settings).toBeFocused({ timeout: 5_000 });
 });
 
