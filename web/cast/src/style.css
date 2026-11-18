@@ -202,7 +202,7 @@ html.button .cast-button {
   color: #8fb0ff;
 }
 
-/* Away from home with the player's transport over this page (`html.driven`): the output buttons sit in the hole the
+/* Away from home with the player's transport over this page (`html.driven`): Cast and AirPlay sit in the hole the
    player leaves for them in its top bar (`den-outputs-slot`), a row from the right, and hide with its controls. */
 html.driven .outputs:not([hidden]) {
   position: absolute;
@@ -219,6 +219,13 @@ html.driven .fullscreen-button {
   flex: none;
   border-color: transparent;
   background: transparent;
+}
+
+/* Fullscreen sits apart, in the hole the player leaves at its own fullscreen button in its dock: the size of that
+   button, placed by main.ts (`placeOutputs`). */
+html.driven .fullscreen-button {
+  position: absolute;
+  inset: auto;
 }
 
 html.driven .cast-button:hover,

@@ -432,6 +432,8 @@ fullscreenButton.addEventListener('click', () => fullscreenVideo.webkitEnterFull
 
 /** Whether the player has given the output buttons a place (`den-outputs-slot`). */
 let outputsSlotted = false;
+/** Whether the player has given the fullscreen button its place, in its dock (`den-outputs-slot`'s `fullscreen`). */
+let fullscreenSlotted = false;
 /** The output buttons shown, sent with every change so the player sizes the hole it leaves for them. */
 let reportedOutputs = '';
 
@@ -447,13 +449,14 @@ function renderOutputs(): void {
   airPlayButton.setAttribute('aria-pressed', String(wireless));
   airPlayButton.setAttribute('aria-label', text(wireless ? 'Change AirPlay device' : 'AirPlay'));
   airPlayButton.title = airPlayButton.getAttribute('aria-label')!;
-  fullscreenButton.hidden = !driven || !videoFullscreenOnly;
+  const fullscreen = driven && videoFullscreenOnly;
+  fullscreenButton.hidden = !fullscreen || !fullscreenSlotted;
   fullscreenButton.setAttribute('aria-label', text('Fullscreen'));
   fullscreenButton.title = text('Fullscreen');
   const shown = {
     cast: !castButton.hidden,
     airplay: !airPlayButton.hidden,
-    fullscreen: !fullscreenButton.hidden,
+    fullscreen,
   };
   const report = JSON.stringify(shown);
   if (!driven || report === reportedOutputs) return;
@@ -463,19 +466,29 @@ function renderOutputs(): void {
 
 const OUTPUTS_BOX = ['left', 'top', 'width', 'height'] as const;
 
-/** The hole in the player's top bar, in this page's pixels, or null while the player's controls are hidden. */
-function placeOutputs(box: unknown): void {
-  // As the player's Cast button (`html.button`) this page is the button and nothing else: there is no hole to fill.
-  if (!document.documentElement.classList.contains('driven')) return;
+/** Place `element` in `box`, in this page's pixels; false where the box isn't one (the player's controls hidden). */
+function placeIn(element: HTMLElement, box: unknown): boolean {
   const valid =
     !!box &&
     typeof box === 'object' &&
     OUTPUTS_BOX.every((key) => Number.isFinite((box as Record<string, unknown>)[key]));
-  outputsSlotted = valid;
-  outputs.hidden = !valid;
-  if (!valid) return;
-  for (const key of OUTPUTS_BOX)
-    outputs.style[key] = `${(box as Record<(typeof OUTPUTS_BOX)[number], number>)[key]}px`;
+  if (valid)
+    for (const key of OUTPUTS_BOX)
+      element.style[key] = `${(box as Record<(typeof OUTPUTS_BOX)[number], number>)[key]}px`;
+  return valid;
+}
+
+/**
+ * The holes the player leaves for this page's buttons: `box` in its top bar for Cast and AirPlay, `fullscreen` at its
+ * own fullscreen button in its dock. Null while the player's controls are hidden.
+ */
+function placeOutputs(box: unknown, fullscreen: unknown): void {
+  // As the player's Cast button (`html.button`) this page is the button and nothing else: there is no hole to fill.
+  if (!document.documentElement.classList.contains('driven')) return;
+  outputsSlotted = placeIn(outputs, box);
+  outputs.hidden = !outputsSlotted;
+  fullscreenSlotted = placeIn(fullscreenButton, fullscreen);
+  fullscreenButton.hidden = !fullscreenSlotted || !videoFullscreenOnly;
 }
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
@@ -1593,6 +1606,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     layout?: unknown;
     transport?: unknown;
     box?: unknown;
+    fullscreen?: unknown;
     color?: unknown;
     iconSize?: unknown;
     profile?: unknown;
@@ -1611,8 +1625,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     outputs.hidden = driven && !outputsSlotted;
     // As the player's Cast button there is no hole: the place it was given away from home goes with it.
     if (!driven) {
-      outputsSlotted = false;
+      outputsSlotted = fullscreenSlotted = false;
       outputs.removeAttribute('style');
+      fullscreenButton.removeAttribute('style');
     }
     renderOutputs();
     // The player's own button colour and glyph size, so the glyph drawn here is the one beside it.
@@ -1621,7 +1636,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     if (typeof message.iconSize === 'number' && message.iconSize >= 12 && message.iconSize <= 48)
       root.style.setProperty('--cast-icon', `${message.iconSize}px`);
   } else if (message.type === 'den-outputs-slot') {
-    placeOutputs(message.box);
+    placeOutputs(message.box, message.fullscreen);
   } else if (message.type === 'den-focus') {
     castButton.focus();
   } else if (message.type === 'den-stop') {
