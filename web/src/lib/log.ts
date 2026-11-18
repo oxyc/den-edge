@@ -2009,7 +2009,7 @@ export class LibraryLog {
           : 'profileDirectory' in opened || 'invalidProfileDirectory' in opened,
       )
     ) {
-      console.warn('den:log/profile-reset-required');
+      console.warn('den:log/profile-reset');
       return { refused: options.replaceProfileDirectory ? 'unavailable' : 'profiles' };
     }
     let unreadableRows = false;
@@ -2018,7 +2018,7 @@ export class LibraryLog {
       // A compound household reset deliberately drops title exceptions; they never acquire successor authority.
       if ('kidTitleApprovals' in opened) continue;
       if ('unknown' in opened || 'newerFraming' in opened) {
-        console.warn('den:log/move-unsupported');
+        console.warn('den:log/move-newer');
         return { refused: 'update_required' };
       }
       if ('unreadable' in opened) {
@@ -2704,7 +2704,7 @@ export class LibraryLog {
         } catch {
           refused = true;
         }
-      if (refused) console.warn('den:log/documents-omitted');
+      if (refused) console.warn('den:log/docs-omitted');
     }
   }
 
@@ -3233,7 +3233,7 @@ export class LibraryLog {
       return after === null;
     } catch {
       // The post-foreground asset or storage adapter may be transiently unavailable. Retry without exposing either.
-      console.warn('den:log/cleanup-retry');
+      console.warn('den:log/cleanup');
       return false;
     }
   }
@@ -3395,7 +3395,7 @@ export class LibraryLog {
       if (documents && this.wireMin < WIRE) this.wireMin = WIRE;
       return true;
     } catch (error) {
-      console.warn('den:log/authority-open', error);
+      console.warn('den:log/open', error);
       this.entries.clear();
       this.acknowledged.clear();
       this.resetProfileDirectory();
@@ -4462,7 +4462,7 @@ export class LibraryLog {
       if (scoped) kept.push(scoped);
       else refusedCount++;
     }
-    if (refusedCount) console.error(`den:log/profile-rows-refused:${refusedCount}`);
+    if (refusedCount) console.error(`den:log/profile-refused:${refusedCount}`);
     return kept;
   }
 
@@ -4481,8 +4481,8 @@ export class LibraryLog {
     if (pending.length && !(await this.rememberCompacted(pending))) return false;
     if (!active()) return false;
     const unknown = pending.length - opened.length;
-    if (pending.length) console.error(`den:log/pre-split-drop:${pending.length}:${unknown}`);
-    console.warn(`den:log/profile-adopt:${this.entries.size}`);
+    if (pending.length) console.error(`den:log/split-drop:${pending.length}:${unknown}`);
+    console.warn(`den:log/adopt:${this.entries.size}`);
     this.entries.clear();
     this.acknowledged.clear();
     this.recoveryRows = undefined;
@@ -4498,7 +4498,7 @@ export class LibraryLog {
           ]),
         )
         .then(() => undefined)
-        .catch(() => console.error('den:log/pre-split-cache'));
+        .catch(() => console.error('den:log/split-cache'));
     await this.keptWork();
     return active();
   }
@@ -4739,7 +4739,7 @@ export class LibraryLog {
         /* Unreadable: `replay` keeps it, and it has nothing to show. */
       }
     }
-    if (failed) console.error(`den:log/pre-split-quarantine:${failed}`);
+    if (failed) console.error(`den:log/split-held:${failed}`);
     return kept;
   }
 
@@ -4755,7 +4755,7 @@ export class LibraryLog {
     try {
       converted = this.v4Work(work);
     } catch (error) {
-      console.warn('den:log/kept-refused', error);
+      console.warn('den:log/kept-refuse', error);
       return;
     }
     for (const row of converted.restore) this.project(row);
@@ -4841,7 +4841,7 @@ export class LibraryLog {
         work.generation !== undefined &&
         work.generation !== this.generation
       ) {
-        console.warn('den:log/stale-recovery');
+        console.warn('den:log/stale');
         await this.discard(key);
         continue;
       }
@@ -4912,7 +4912,7 @@ export class LibraryLog {
         () => new Promise<void>((release) => held(release)),
       ).catch((error: unknown) => {
         // Sent without it, as where the browser has no locks: never left waiting for a lock that will not come.
-        console.error('den:log/recovery-lock', error);
+        console.error('den:log/lock', error);
         held(() => {});
       });
     });
