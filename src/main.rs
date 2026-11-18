@@ -274,7 +274,8 @@ pub struct AppState {
     /// Today (a UTC day number) and how many SkipDB answers have been kept under a new name in it (`skipdb::new_name`).
     pub skipdb_kept_new: Mutex<(u64, u32)>,
     /// den-remux's key for asking it to detect an episode's segments (env `SEGMENTS_KEY`, sent as
-    /// `X-Den-Segments-Key`). Unset, `/skipdb` reads what remux has detected but never asks for a scan.
+    /// `X-Den-Segments-Key`), and the source of the credential every read of its results carries
+    /// (`X-Den-Segments-Read`). Unset, `/skipdb` reads what remux has detected but never asks for a scan.
     pub segments_key: Option<String>,
     /// Episodes a scan was asked for lately, and when (ms), so one is asked for once per `skipdb::SCAN_EVERY`.
     pub segments_scans: Mutex<HashMap<String, u64>>,
