@@ -7,6 +7,7 @@ import {
   cancelsAutoSkip,
   fetchSkipSegments,
   nextAutoSkip,
+  recheckDue,
   SKIP_LABEL,
   type PendingAutoSkip,
   type SkipSegment,
@@ -50,7 +51,7 @@ describe('fetchSkipSegments', () => {
       fetchImpl,
     });
 
-    expect(found.map((one) => [one.kind, one.start, one.end])).toEqual([
+    expect(found.segments.map((one) => [one.kind, one.start, one.end])).toEqual([
       ['intro', 61, 91],
       ['outro', 2760, 2820],
     ]);
@@ -72,7 +73,9 @@ describe('fetchSkipSegments', () => {
     );
     const found = await fetchSkipSegments('tt0111161', { durationSeconds: 8520, fetchImpl });
 
-    expect(found).toEqual([{ kind: 'outro', start: 8331.3, end: 8552.6, confidence: 0.75 }]);
+    expect(found.segments).toEqual([
+      { kind: 'outro', start: 8331.3, end: 8552.6, confidence: 0.75 },
+    ]);
     expect(asked).toEqual(['/skipdb/tt0111161?duration=8520', '/skipdb/tt0111161']);
   });
 
@@ -81,17 +84,66 @@ describe('fetchSkipSegments', () => {
     const { fetchImpl, asked } = answering(
       body({ intro: null, recap: null, outro: null, preview: null }),
     );
-    expect(await fetchSkipSegments('tt0111161', { durationSeconds: 8520, fetchImpl })).toEqual([]);
+    expect(await fetchSkipSegments('tt0111161', { durationSeconds: 8520, fetchImpl })).toEqual({
+      segments: [],
+      settled: false,
+    });
     expect(asked).toHaveLength(1);
   });
 
-  it('is empty rather than an error when den-edge cannot answer', async () => {
+  it('is empty rather than an error when den-edge cannot answer, and may be asked again', async () => {
     const refused: typeof fetch = async () => new Response('{}', { status: 502 });
-    expect(await fetchSkipSegments('tt0111161', { fetchImpl: refused })).toEqual([]);
+    const empty = { segments: [], settled: false };
+    expect(await fetchSkipSegments('tt0111161', { fetchImpl: refused })).toEqual(empty);
     const threw: typeof fetch = async () => {
       throw new Error('offline');
     };
-    expect(await fetchSkipSegments('tt0111161', { fetchImpl: threw })).toEqual([]);
+    expect(await fetchSkipSegments('tt0111161', { fetchImpl: threw })).toEqual(empty);
+  });
+
+  /** den-edge marks a miss no scan will change; a pending scan's miss is unmarked (`skipdb.rs::detected`). */
+  it('reads whether a miss is settled', async () => {
+    const miss =
+      (said?: string): typeof fetch =>
+      async () =>
+        new Response('{"error":"not_found"}', {
+          status: 404,
+          headers: said ? { 'x-den-skipdb': said } : {},
+        });
+    const at = (said?: string) =>
+      fetchSkipSegments('tt0903747', { season: 1, episode: 1, fetchImpl: miss(said) });
+    expect((await at('none')).settled).toBe(true);
+    expect((await at('unavailable')).settled).toBe(true);
+    expect((await at()).settled).toBe(false);
+    expect((await at('hit')).settled).toBe(false);
+  });
+});
+
+/**
+ * The Apple TV's `refreshSkipSegmentsAfterScan` (`PlayerView+SkipSegments.swift`): a miss asked again ~45 s and ~120 s
+ * after its first answer, then once in the last 12 minutes — never more.
+ */
+describe('re-asking a miss', () => {
+  const length = 2700;
+
+  it('asks at 45 s and 120 s after the first answer, then near the end', () => {
+    expect(recheckDue(0, 44.9, 50, length)).toBe(false);
+    expect(recheckDue(0, 45, 50, length)).toBe(true);
+    expect(recheckDue(1, 119, 125, length)).toBe(false);
+    expect(recheckDue(1, 120, 125, length)).toBe(true);
+    // The third waits for the last 12 minutes, however long ago the first answer was.
+    expect(recheckDue(2, 900, 1979, length)).toBe(false);
+    expect(recheckDue(2, 900, 1980, length)).toBe(true);
+  });
+
+  it('keeps the order: a play resumed near the end still waits out the first two', () => {
+    expect(recheckDue(0, 10, 2650, length)).toBe(false);
+    expect(recheckDue(2, 10, 2650, length)).toBe(true);
+  });
+
+  it('stops after three, and never asks near an end it does not know', () => {
+    expect(recheckDue(3, 5_000, 2699, length)).toBe(false);
+    expect(recheckDue(2, 900, 10, 0)).toBe(false);
   });
 });
 

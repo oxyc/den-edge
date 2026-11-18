@@ -143,6 +143,7 @@
     cancelsAutoSkip,
     fetchSkipSegments,
     nextAutoSkip,
+    recheckDue,
     SKIP_LABEL,
     type PendingAutoSkip,
     type SkipKind,
@@ -4836,10 +4837,17 @@
   let segmentsOf: string | undefined;
   /** Monotonic request identity: an older release's late answer cannot reset a newer request's dedupe. */
   let segmentRequest = 0;
+  /**
+   * This episode's re-asks (`recheckDue`): how many were made, and when its first answer came (0: not yet, or never
+   * for this episode). Plain, like `skipped`: the tick reads them and nothing renders them.
+   */
+  let rechecks = 0;
+  let recheckFrom = 0;
 
   /**
    * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
-   * — see `fetchSkipSegments`. `imdb` is resolved by then: `begin` resolves it before starting a session.
+   * — see `fetchSkipSegments`. `imdb` is resolved by then: `begin` resolves it before starting a session. The tick
+   * asks a miss again (`recheckDue`), for a scan den-edge started meanwhile.
    */
   async function loadSegments() {
     if (!imdb || segments.length || ended) return;
@@ -4857,7 +4865,12 @@
       durationSeconds: length(),
     });
     if (ended || request !== segmentRequest) return;
-    if (session?.release.filename === release) segments = found;
+    if (session?.release.filename === release) {
+      segments = found.segments;
+      recheckFrom ||= performance.now();
+      // Only an episode is scanned, and neither segments nor a settled miss will change.
+      if (found.settled || segments.length || season === undefined) rechecks = 3;
+    }
     // Another release started meanwhile: these are the old encode's times. Its own are asked for once it has a length.
     else askedFor = 0;
   }
@@ -4884,9 +4897,14 @@
       progress.reportStart(at, progressLength(), { creditsReached: reachedCredits(at) });
     weighDelivery();
     warmNext(at);
+    const now = performance.now();
+    if (recheckFrom && recheckDue(rechecks, (now - recheckFrom) / 1000, at, length())) {
+      rechecks += 1;
+      askedFor = 0;
+      void loadSegments();
+    }
     if (!segments.length) return;
     active = activeAt(segments, at);
-    const now = performance.now();
     const next = nextAutoSkip(
       autoSkip,
       active,
@@ -5708,6 +5726,7 @@
     askedFor = 0;
     segmentsOf = undefined;
     segmentRequest += 1;
+    rechecks = recheckFrom = 0;
     for (const kind of Object.keys(skipped) as SkipKind[]) delete skipped[kind];
     for (const kind of Object.keys(autoSkipSettled) as SkipKind[]) delete autoSkipSettled[kind];
     retireAutoSkip();
