@@ -66,6 +66,9 @@ export const parameters = {
   'player.upNext': 'A continuación · {title}',
   'player.playsIn': 'Empieza en {seconds} s',
   'player.nextIn': 'Siguiente episodio en {seconds} segundos',
+  'player.autoSkipIn': 'Se omite en {seconds} s',
+  'player.autoSkipNotice':
+    'Se omite automáticamente en {seconds} segundos. Pausa o busca para seguir viendo.',
   'player.playNow': 'Reproducir ya: {title}',
   'player.resumedAt': 'Reanudado en {time}',
   'player.volume': 'Volumen {percent}%',

@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { activeAt, canAutoSkip, fetchSkipSegments, type SkipSegment } from './skipdb';
+import {
+  activeAt,
+  AUTO_SKIP_GRACE_MS,
+  autoSkipCountdown,
+  canAutoSkip,
+  cancelsAutoSkip,
+  fetchSkipSegments,
+  nextAutoSkip,
+  SKIP_LABEL,
+  type PendingAutoSkip,
+  type SkipSegment,
+} from './skipdb';
+import { sourcePhrases as spanish } from './messages/phrases/es';
+import { sourcePhrases as swedish } from './messages/phrases/sv';
 
 const segment = (over: Partial<SkipSegment> = {}): SkipSegment => ({
   kind: 'outro',
@@ -101,5 +114,74 @@ describe('what may be skipped unasked', () => {
     expect(activeAt(list, 150)?.kind).toBe('outro');
     expect(activeAt(list, 95)).toBeNull();
     expect(activeAt(list, 200)).toBeNull();
+  });
+});
+
+/**
+ * The Apple TV's `maybeAutoSkip` (`PlayerModel+Watchdog.swift`), tick by tick: an 8 s visible countdown from the first
+ * tick inside an eligible segment, the skip on the first tick at or after its deadline, and nothing for low confidence,
+ * a disabled setting or a kind this playback already settled.
+ */
+describe('auto-skip grace', () => {
+  const intro = segment({ kind: 'intro', start: 0, end: 40 });
+
+  it('counts down for 8 seconds, then skips on the first tick at or past the deadline', () => {
+    const started = nextAutoSkip(true, intro, false, null, 1_000);
+    expect(started).toEqual({ segment: intro, deadline: 1_000 + AUTO_SKIP_GRACE_MS });
+    const pending = started as PendingAutoSkip;
+    expect(autoSkipCountdown(pending, 1_000)).toBe(8);
+    // The same object while it waits, so the player keeps one pending skip rather than allocating per tick.
+    expect(nextAutoSkip(true, intro, false, pending, 1_250)).toBe(pending);
+    expect(autoSkipCountdown(pending, 1_250)).toBe(8);
+    expect(autoSkipCountdown(pending, 2_000)).toBe(7);
+    expect(autoSkipCountdown(pending, 8_999)).toBe(1);
+    expect(nextAutoSkip(true, intro, false, pending, 8_999.9)).toBe(pending);
+    expect(nextAutoSkip(true, intro, false, pending, 9_000)).toBe('skip');
+    // A stalled player's next tick, long after the deadline, still skips once rather than restarting.
+    expect(nextAutoSkip(true, intro, false, pending, 60_000)).toBe('skip');
+  });
+
+  it('matches the same segment by value, so a refetched list keeps the countdown', () => {
+    const pending = nextAutoSkip(true, intro, false, null, 0) as PendingAutoSkip;
+    expect(nextAutoSkip(true, { ...intro }, false, pending, 4_000)).toBe(pending);
+    const moved = nextAutoSkip(true, { ...intro, end: 45 }, false, pending, 4_000);
+    expect(moved).toEqual({ segment: { ...intro, end: 45 }, deadline: 4_000 + AUTO_SKIP_GRACE_MS });
+  });
+
+  it('never acts on low confidence, a disabled setting or a settled kind', () => {
+    expect(nextAutoSkip(true, segment({ confidence: 0.75 }), false, null, 0)).toBeNull();
+    expect(nextAutoSkip(false, intro, false, null, 0)).toBeNull();
+    expect(nextAutoSkip(true, intro, true, null, 0)).toBeNull();
+    expect(nextAutoSkip(true, null, false, null, 0)).toBeNull();
+    const pending = nextAutoSkip(true, intro, false, null, 0) as PendingAutoSkip;
+    // Turning the setting off, or the kind being settled, retires a countdown already running — even past its deadline.
+    expect(nextAutoSkip(false, intro, false, pending, 9_000)).toBeNull();
+    expect(nextAutoSkip(true, intro, true, pending, 9_000)).toBeNull();
+  });
+
+  it('drops the countdown on leaving the segment and starts a fresh one on coming back', () => {
+    const pending = nextAutoSkip(true, intro, false, null, 0) as PendingAutoSkip;
+    expect(nextAutoSkip(true, null, false, pending, 5_000)).toBeNull();
+    expect(nextAutoSkip(true, intro, false, null, 6_000)).toEqual({
+      segment: intro,
+      deadline: 6_000 + AUTO_SKIP_GRACE_MS,
+    });
+  });
+
+  it('is cancelled by play/pause and by a seek inside the segment, not by one that leaves it', () => {
+    const pending = nextAutoSkip(true, intro, false, null, 0) as PendingAutoSkip;
+    expect(cancelsAutoSkip(pending)).toBe(true);
+    expect(cancelsAutoSkip(pending, 10)).toBe(true);
+    expect(cancelsAutoSkip(pending, 0)).toBe(true);
+    expect(cancelsAutoSkip(pending, 40)).toBe(false);
+    expect(cancelsAutoSkip(pending, 120)).toBe(false);
+    expect(cancelsAutoSkip(null)).toBe(false);
+  });
+
+  it('has Spanish and Swedish for every Skip label', () => {
+    for (const label of Object.values(SKIP_LABEL)) {
+      expect(spanish[label], label).toBeTruthy();
+      expect(swedish[label], label).toBeTruthy();
+    }
   });
 });

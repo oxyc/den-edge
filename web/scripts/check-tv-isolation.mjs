@@ -436,5 +436,10 @@ if (process.argv.includes('--capture')) {
   // measured 124,863 locally against matched main's 124,681 (+182), all in the lazy Player chunk: the subtitle menu's
   // explicit Den Remux switch and its notice, and the codec lookup. Startup is unchanged (10,715 -> 10,712). With the
   // LG attribution above that is about 124,907; allow the second boundary past the first one's 65 bytes, retaining 149.
-  if (coreTotalDelta > 125056) throw new Error('Browser total JS/CSS budget exceeded');
+  // The auto-skip grace period (#1208: the Apple TV's 8 s visible countdown, cancelled by playback interaction)
+  // measured 125,524 against matched main's 125,051 (+473, main at 0321382f), all in the lazy Player chunk: the pure
+  // decision, the countdown and its once-spoken notice, the pause/seek cancellation, the reset fences and the desktop
+  // Skip button's missing `pointer-events`. It adds no timer, request or listener beyond the existing media-event
+  // handlers; startup moves 10,719 -> 10,725. Allow the smallest 128-byte boundary containing it, retaining 44.
+  if (coreTotalDelta > 125568) throw new Error('Browser total JS/CSS budget exceeded');
 }
