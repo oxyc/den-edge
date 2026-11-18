@@ -1191,14 +1191,7 @@ async fn relay_with(
     // every relayed request do a library lookup, which is the work this limit exists to protect.
     let address = crate::handler::client_addr(state, &req);
     let ip = crate::handler::client_ip(state, &req);
-    // Never a trailer's bytes on a public name: those names are served through Cloudflare, whose terms do not
-    // allow serving video. There the page plays from the direct listeners (`activate_reel`), and with neither in
-    // reach it shows no trailer, as remux shows no playback. A native master is a playlist whose segments come
-    // from Google, so it still passes. The LAN and tailnet faces relay as before (oxyc/den#197).
-    if matches!(face, crate::handler::Face::Web | crate::handler::Face::Api)
-        && media(req.uri().path())
-        && !native_master(req.uri().path(), req.uri().query())
-    {
+    if !may_relay_reel_media(face, req.uri().path(), req.uri().query()) {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
     // A trailer's bytes come through here or not at all. On the public name a browser cannot reach reel
@@ -2483,8 +2476,8 @@ enum ReelTransportError {
 
 /// Choose transports for one signed capability. Reel remains the authority for signature and expiry, but an
 /// unavailable validator, listener or direct quota can only remove the direct optimization: the same-origin relay
-/// remains a complete playback path and is always the final attempt — except on the public web name, where
-/// `relay_with` never carries a trailer's bytes, so offering it would only cost the browser a 404.
+/// remains a complete playback path and is always the final attempt — except on a face where
+/// `may_relay_reel_media` refuses its bytes, where offering it would only cost the browser a 404.
 pub async fn transport_reel(
     state: &Arc<AppState>,
     req: Request,
@@ -2502,9 +2495,10 @@ pub async fn transport_reel(
     let (blob, query) = (blob.to_owned(), query.to_owned());
     match build_reel_transport(state, request, observed, &blob, &query, rid).await {
         Ok(mut transport) => {
-            if face == crate::handler::Face::Web {
-                transport.attempts.retain(|(kind, _)| *kind != "relay");
-            }
+            transport.attempts.retain(|(kind, url)| {
+                let (path, query) = url.split_once('?').map_or((url.as_str(), None), |(p, q)| (p, Some(q)));
+                *kind != "relay" || may_relay_reel_media(face, path, query)
+            });
             transport_json(&transport)
         }
         Err(ReelTransportError::Capability(status)) => capability_rejected(status),
@@ -2877,6 +2871,19 @@ fn media(path: &str) -> bool {
 /// wrongly counted here only meets the smaller budget, and one wrongly missed would be computed on the general one.
 fn playground(path: &str) -> bool {
     path.strip_prefix("/atlas/").is_some_and(|rest| rest.split('/').any(|segment| segment == "playground"))
+}
+
+/// May `face` carry the relayed reel path `path`? The one answer for both the byte gate in `relay_with` and the
+/// relay attempt `transport_reel` offers, so transport never advertises a copy the relay then refuses.
+///
+/// Never a trailer's bytes on a public name: those names are served through Cloudflare, whose terms do not allow
+/// serving video. That is the web app's name, the device API's, and the hosted TV app's (its deployment keeps it
+/// public behind the same tunnel, and its build sends its API calls to the device API name in any case). There the
+/// page plays from the direct listeners, and with neither in reach it shows no trailer, as remux shows no playback.
+/// A native master is a playlist whose segments come from Google, so it passes everywhere. Only a name in no list —
+/// the LAN address, the tailnet's — relays trailers (oxyc/den#197); an invalid face relays none.
+fn may_relay_reel_media(face: crate::handler::Face, path: &str, query: Option<&str>) -> bool {
+    face == crate::handler::Face::Both || !media(path) || native_master(path, query)
 }
 
 /// A master a bare `<video>` plays by itself (`?native=1`), which is not a stream through here.
@@ -3534,15 +3541,21 @@ mod tests {
         );
     }
 
-    /// On the public web name `relay_with` refuses a trailer's bytes, so transport never offers the relay there.
+    /// On every public name `relay_with` refuses a trailer's bytes, so transport never offers the relay there: the
+    /// web app's and the hosted TV app's answer with no relay, and the device API's serves no reel route at all.
     #[tokio::test]
-    async fn the_public_web_name_is_never_offered_the_relay_it_refuses() {
+    async fn no_public_name_is_offered_the_relay_it_refuses() {
         let mut h = Harness::new();
-        Arc::get_mut(&mut h.state).unwrap().web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
+        state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.example");
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.example");
         let capability = format!("m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
         for (host, want) in [
-            ("d.oxy.fi", json!([])),
-            ("192.168.86.193:8094", json!([{ "type": "relay", "url": format!("/reel/{capability}") }])),
+            ("d.example", Some(json!([]))),
+            ("den-tv.example", Some(json!([]))),
+            ("d-api.example", None),
+            ("edge.lan.test:8094", Some(json!([{ "type": "relay", "url": format!("/reel/{capability}") }]))),
         ] {
             let answer = h
                 .send(
@@ -3552,6 +3565,10 @@ mod tests {
                     &[("content-type", "application/json"), ("host", host)],
                 )
                 .await;
+            let Some(want) = want else {
+                assert_eq!(answer.status(), StatusCode::NOT_FOUND, "{host}");
+                continue;
+            };
             let body = crate::handler::tests::body_json(answer).await;
             assert_eq!(body["attempts"], want, "{host}");
         }
@@ -6567,6 +6584,7 @@ mod tests {
         state.relays = crate::parse_relays(&format!("/reel={addon}"));
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
         state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.example");
+        state.tv_web_hosts = crate::parse_hosts("TV_WEB_HOSTS", "den-tv.example");
         let carried = [
             "/reel/m/s/AbC123?s=tag",
             "/reel/cfg/m/s/AbC123?s=tag",
@@ -6576,18 +6594,34 @@ mod tests {
             "/reel/hls/dQw4w9WgXcQ.m3u8?s=tag",
             "/reel/hls/seg?u=x",
         ];
-        for host in ["d.example", "d-api.example"] {
+        for host in ["d.example", "d-api.example", "den-tv.example"] {
             for path in carried {
                 let refused = h.send("GET", path, None, &[("host", host)]).await;
                 assert_eq!(refused.status(), StatusCode::NOT_FOUND, "{host}{path}");
             }
-        }
-        for path in ["/reel/m/n/AbC123?s=tag", "/reel/hls/dQw4w9WgXcQ.m3u8?s=tag&native=1"] {
-            let passed = h.send("GET", path, None, &[("host", "d.example")]).await;
-            assert_eq!(passed.status(), StatusCode::OK, "{path}");
+            // The device API's name serves no reel route at all, native master or not.
+            let native = if host == "d-api.example" { StatusCode::NOT_FOUND } else { StatusCode::OK };
+            for path in ["/reel/m/n/AbC123?s=tag", "/reel/hls/dQw4w9WgXcQ.m3u8?s=tag&native=1"] {
+                let passed = h.send("GET", path, None, &[("host", host)]).await;
+                assert_eq!(passed.status(), native, "{host}{path}");
+            }
         }
         // Any other name (the LAN address, the tailnet's) carries them as before.
         assert_eq!(h.send("GET", "/reel/play/dQw4w9WgXcQ.mp4", None, &[]).await.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn only_the_unnamed_face_relays_a_carried_trailer() {
+        use crate::handler::Face;
+        let carried = ("/reel/m/s/AbC123", Some("s=tag"));
+        let native = ("/reel/m/n/AbC123", Some("s=tag"));
+        let plan = ("/reel/sources/trailer.json", Some("v=2"));
+        for face in [Face::Web, Face::Api, Face::Tv, Face::Both, Face::Invalid] {
+            let may = |(path, query): (&str, Option<&str>)| super::may_relay_reel_media(face, path, query);
+            assert_eq!(may(carried), face == Face::Both, "{face:?} carried");
+            assert!(may(native), "{face:?} native master");
+            assert!(may(plan), "{face:?} json");
+        }
     }
 
     #[test]
