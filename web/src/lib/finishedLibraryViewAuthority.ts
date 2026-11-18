@@ -576,7 +576,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         return null;
       return (await this.factStore.history(manifest))?.page(filter, cursor, limit) ?? null;
     } catch (error) {
-      console.warn('den:view/hist-open', error);
+      console.warn('den:view/history-open', error);
       return null;
     }
   }
@@ -617,7 +617,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       );
       return titles.map((title) => ({ title, seen: seen.get(titleKey(title)) ?? [] }));
     } catch (error) {
-      console.warn('den:view/hist-read', error);
+      console.warn('den:view/history-read', error);
       return null;
     }
   }
@@ -793,7 +793,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       });
       return !Object.keys(values).length;
     } catch (error) {
-      console.warn('den:view/seed', error);
+      console.warn('den:view/preference-seed', error);
       return false;
     }
   }
@@ -1329,7 +1329,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       this.#viewWriter?.schedule();
       return true;
     } catch (error) {
-      console.warn('den:view/selection', error);
+      console.warn('den:view/selection-open', error);
       return false;
     }
   }

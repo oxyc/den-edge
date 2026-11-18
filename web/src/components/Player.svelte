@@ -1673,7 +1673,7 @@
         // boundary from holding playback indefinitely.
         receiptPreparation = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
       } catch (error) {
-        if (!attempt.signal.aborted) console.warn('den:play/receipt', error);
+        if (!attempt.signal.aborted) console.warn('den:play/receipt-authority', error);
       }
       if (attempt.signal.aborted) return false;
       if (receiptPreparation === 'unsupported') receiptUnsupported = true;
@@ -2134,7 +2134,7 @@
       } catch (error) {
         // A request a suspended page never got the answer to (an iPhone's tab put in the background): the session
         // playing carries on, as for any refusal.
-        console.warn('den:play/release', error);
+        console.warn('den:play/release-switch', error);
         moved = false;
       }
       if (moved === true) {
@@ -2313,7 +2313,9 @@
       playWhenMounted = null;
       // A held start has its own readiness boundary and resumes there.
       if (hold || !element.paused) return;
-      void element.play().catch((error: unknown) => console.warn('den:play/resume', error));
+      void element
+        .play()
+        .catch((error: unknown) => console.warn('den:play/replacement-resume', error));
     };
     // LG's webOS media pipeline accepts HLS even when its WebKit canPlayType answer is incomplete.
     // Keeping it on this element path preserves Den's existing progress, recovery and session ownership.
@@ -2837,7 +2839,9 @@
         if (hold !== held) return;
         hold = null;
         startsIn = null;
-        void element.play().catch((error: unknown) => console.warn('den:play/tizen-hold', error));
+        void element
+          .play()
+          .catch((error: unknown) => console.warn('den:play/samsung-held-start', error));
       };
       element.addEventListener('canplay', ready, { once: true });
       return () => element.removeEventListener('canplay', ready);
@@ -2853,7 +2857,7 @@
         clearInterval(tick);
         hold = null;
         startsIn = null;
-        element.play().catch((error: unknown) => console.warn('den:play/hold', error));
+        element.play().catch((error: unknown) => console.warn('den:play/held-start', error));
         return;
       }
       startsIn = seconds === null ? null : countdownLabel(seconds);
@@ -3236,7 +3240,7 @@
       // The cast page refused the load this page handed it before fetching anything: a fault in that hand-off, not
       // in the release, so no release is left out for it and no other is tried.
       if (message.message === 'Invalid media URL') {
-        console.warn('den:play/cast-url');
+        console.warn('den:play/cast-url-refused');
         reportFailure(current, 0, message.message);
         lastFailSource = 'cast_page_error';
         failure = 'protocol';
@@ -3417,7 +3421,7 @@
           null,
           true,
         ).catch((error: unknown): Failure => {
-          console.warn('den:play/airplay-torbox', error);
+          console.warn('den:play/airplay-torbox-recovery', error);
           return 'unreachable';
         });
       };
@@ -3462,7 +3466,7 @@
       null,
       true,
     ).catch((error: unknown): Failure => {
-      console.warn('den:play/airplay-remux', error);
+      console.warn('den:play/airplay-remux-recovery', error);
       return 'unreachable';
     });
     if (moved === true) {
@@ -6674,7 +6678,7 @@
               if (__DEN_TV_PLATFORM__ === 'tizen')
                 void broke(video.error.code, video.error.message, avplay?.failureKind());
               else void broke();
-            } else console.warn('den:play/no-media-error');
+            } else console.warn('den:play/missing-media-error');
           }}
         >
           <!-- WebKit does not reliably reload cues when only an existing track element's src changes. Re-key on

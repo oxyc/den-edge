@@ -871,7 +871,7 @@ describe('LibraryLog', () => {
     failCleanup = true;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(false);
-    expect(warn).toHaveBeenCalledWith('den:log/cleanup');
+    expect(warn).toHaveBeenCalledWith('den:log/cleanup-retry');
     expect(data.has(state)).toBe(true);
     await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(true);
 
@@ -1663,7 +1663,7 @@ describe('LibraryLog', () => {
       const log = (await LibraryLog.open(LIBRARY_KEY, household, undefined, null, 5))!;
       await log.write(row(550));
       const diagnostic = error.mock.calls.flat().join(' ');
-      expect(diagnostic).toContain('den:log/profile-refused:1');
+      expect(diagnostic).toContain('den:log/profile-rows-refused:1');
       expect(diagnostic).not.toContain('550');
       expect(diagnostic).not.toContain('title:movie');
     } finally {
@@ -1726,9 +1726,9 @@ describe('LibraryLog', () => {
       await expect(returned.refresh()).resolves.toBe(true);
       await vi.waitFor(() => expect(returned.pendingActions).toBe(0));
       const diagnostics = error.mock.calls.map((call) => call.join(' '));
-      const dropped = diagnostics.filter((message) => message.includes('den:log/split-drop'));
-      expect(dropped).toEqual(['den:log/split-drop:3:1']);
-      await vi.waitFor(() => expect(error).toHaveBeenCalledWith('den:log/split-cache'));
+      const dropped = diagnostics.filter((message) => message.includes('den:log/pre-split-drop'));
+      expect(dropped).toEqual(['den:log/pre-split-drop:3:1']);
+      await vi.waitFor(() => expect(error).toHaveBeenCalledWith('den:log/pre-split-cache'));
       for (const secret of [
         '550',
         OWNER_ID,
@@ -1790,7 +1790,7 @@ describe('LibraryLog', () => {
       expect(
         JSON.parse(new TextDecoder().decode(data.get(`${keys.id}:runtime:meta:compacted`))),
       ).toContain(pendingKey);
-      expect(error.mock.calls.flat().join(' ')).toContain('den:log/split-held:1');
+      expect(error.mock.calls.flat().join(' ')).toContain('den:log/pre-split-quarantine:1');
       expect(error.mock.calls.flat().join(' ')).not.toContain(privateCause);
 
       log.close();
