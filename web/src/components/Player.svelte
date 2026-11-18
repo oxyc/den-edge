@@ -81,8 +81,6 @@
     nothingFits,
     optionLabel,
     pickLabel,
-    releaseAfterMeasure,
-    restartAfterMeasure,
     swapNotice,
     unchangedNotice,
   } from '../lib/releaseVerdicts';
@@ -616,8 +614,6 @@
   /** Whether this page reaches den-remux's home-network address (`lanBase`): asked once per address (`homeHere`). */
   let lanProbe: { base: string; reachable: Promise<boolean>; answer?: boolean } | undefined;
   let publicMaxBitrate: number | undefined;
-  /** The `maxBitrate` the playing session was asked with. */
-  let askedMaxBitrate: number | undefined;
   /** What this page's own video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
   let watcher: Watcher | undefined;
   const releaseTitle = untrack(() => `${title.type}:${title.id}`);
@@ -1569,7 +1565,7 @@
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
     // A direct remote origin can be measured before creation. Through the public control relay the link is what this
     // browser remembers (timed on the title's page, or at an earlier play); with nothing remembered, the first session
-    // is measured inside and replaced only when what it chose needs more than the link carries (`castMessage`).
+    // is measured inside for the next to ask with, and plays on as it is (`castMessage`).
     const maxBitrate =
       extra.maxBitrate ??
       (/^https?:/.test(route)
@@ -1727,7 +1723,8 @@
         ...here
       } = result;
       result = { ...here, playlist: result.lanPlaylist! };
-      // No home upload sits between this page and den-remux here: a limit remembered from away doesn't apply.
+      // No home upload sits between this page and den-remux here: a limit remembered from away doesn't apply. A
+      // session already asked under one plays as it is (it is never replaced while it plays); the next asks without.
       rememberLink(route, undefined);
       publicMaxBitrate = undefined;
     }
@@ -1895,7 +1892,6 @@
       failure = null;
     }
     started = at;
-    askedMaxBitrate = maxBitrate;
     played = false;
     awaitingPress = false;
     // A switch keeps the early window it was made in: the time already played counts, or every switch would open
@@ -1968,13 +1964,6 @@
     // Hearth would have tried TorBox first, and answered Remux without a word of one that failed: it has none.
     else if (torboxTried && torbox !== 'offered') torbox = { unavailable: NO_TORBOX };
     sessionRoute = on;
-    // Played from the home network but asked under a limit remembered from away: asked again without it, as the cast
-    // page's `den-lan` has it.
-    if (lanHere && maxBitrate !== undefined && extra.maxBitrate === undefined) {
-      castSubtitlePreparing = false;
-      restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
-      return true;
-    }
     // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
     // first, or English, never overriding a choice already made. Only on the title's first session — a later
     // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand. Not on a TorBox
@@ -3094,12 +3083,10 @@
         return true;
       case 'den-outputs':
         // The frame's own output buttons, drawn in the hole left for them in the top bar (`frameOutputsSlot`). On an
-        // iPhone that includes fullscreen, which only a press in the frame can ask of its video.
+        // iPhone the frame also draws fullscreen, which only a press in the frame can ask of its video, in the hole
+        // left at the dock's own fullscreen button (`frameFullscreenSlot`).
         frameFullscreen = message.fullscreen === true;
-        frameOutputs =
-          (message.cast === true ? 1 : 0) +
-          (message.airplay === true ? 1 : 0) +
-          (frameFullscreen ? 1 : 0);
+        frameOutputs = (message.cast === true ? 1 : 0) + (message.airplay === true ? 1 : 0);
         return true;
       case 'den-activity':
         // The pointer is over the frame, where this page's own pointer events do not reach.
@@ -3195,20 +3182,19 @@
         measured <= 1_000_000_000
       ) {
         publicMaxBitrate = Math.round(measured);
+        // One startup sample reads below what the link sustains, and a session replaced for it opens while this one
+        // already plays, then cuts it off (on an iPhone, losing the press that let it play). The measure is kept for
+        // the next session to ask with; this one plays on, and a link that really can't carry it stalls, which the
+        // delivery switch answers.
         rememberLink(route, publicMaxBitrate);
-        // The cast page holds playback until told: started again only when what den-remux chose needs more than
-        // the link carries, so a release it can't open is not probed a second time for nothing.
-        if (restartAfterMeasure(current, publicMaxBitrate)) {
-          restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
-        } else
-          readyCastFrame(current.castOrigin)?.postMessage(
-            {
-              type: 'den-continue',
-              id: current.playlist,
-              generation: castLoadGeneration,
-            },
-            current.castOrigin,
-          );
+        readyCastFrame(current.castOrigin)?.postMessage(
+          {
+            type: 'den-continue',
+            id: current.playlist,
+            generation: castLoadGeneration,
+          },
+          current.castOrigin,
+        );
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -3217,12 +3203,10 @@
       lose(Number.isFinite(message.currentTime) ? (message.currentTime ?? 0) : remoteTime);
     } else if (message.type === 'den-lan') {
       // den-remux answered on the home network, where there is no upload link to fit: a limit remembered from away
-      // does not apply here, and a session asked under one is asked again without it.
+      // does not apply here. A session asked under one plays as it is, never replaced while it plays; the next asks
+      // without it.
       rememberLink(route, undefined);
       publicMaxBitrate = undefined;
-      if (askedMaxBitrate !== undefined) {
-        restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
-      }
     } else if (message.type === 'den-cast-request') {
       const report =
         message.profile === 'receiver' ? (playableOf(message.playable) ?? undefined) : undefined;
@@ -3742,29 +3726,31 @@
     return () => observer.disconnect();
   });
 
-  /** How many output buttons (Cast, AirPlay, fullscreen) the frame draws in the top bar away from home (`den-outputs`). */
+  /** How many output buttons (Cast, AirPlay) the frame draws in the top bar away from home (`den-outputs`). */
   let frameOutputs = $state(0);
-  /** Whether the frame draws fullscreen among its output buttons, so the player's own (which cannot reach it) hides. */
+  /** Whether the frame draws fullscreen, so the player's own (which cannot reach its video) leaves a hole instead. */
   let frameFullscreen = $state(false);
   /** The hole left for them in the top bar: Den's surface, under the frame's buttons, as `castSlot` is for Cast. */
   let frameOutputsSlot = $state<HTMLElement>();
-  /** That hole in the stage's pixels, which are the frame's own, while the controls show; null hides the buttons. */
-  let frameOutputsBox = $state.raw<{
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  } | null>(null);
+  /** The hole left in the dock where Den's fullscreen button is, for the frame's own. */
+  let frameFullscreenSlot = $state<HTMLElement>();
+  type FrameHole = { left: number; top: number; width: number; height: number };
+  /** Those holes in the stage's pixels, which are the frame's own, while the controls show; null hides the button. */
+  let frameOutputsBox = $state.raw<FrameHole | null>(null);
+  let frameFullscreenBox = $state.raw<FrameHole | null>(null);
   /** Presses on the frame's picture, which Den's video takes at home (`pictureClick`). */
   let stagePicture = $state<HTMLElement>();
   $effect(() => {
-    const slot = castStage && webControlsVisible ? frameOutputsSlot : undefined;
+    const shown = castStage && webControlsVisible;
+    const outputsSlot = shown ? frameOutputsSlot : undefined;
+    const fullscreenSlot = shown ? frameFullscreenSlot : undefined;
     const stage = stageElement;
-    if (!slot || !stage) {
-      frameOutputsBox = null;
+    if (!stage || (!outputsSlot && !fullscreenSlot)) {
+      frameOutputsBox = frameFullscreenBox = null;
       return;
     }
-    const place = () => {
+    const holeOf = (slot: HTMLElement | undefined, last: FrameHole | null): FrameHole | null => {
+      if (!slot) return null;
       const box = slot.getBoundingClientRect();
       const origin = stage.getBoundingClientRect();
       const next = {
@@ -3773,12 +3759,14 @@
         width: box.width,
         height: box.height,
       };
-      const last = frameOutputsBox;
-      if (
-        !last ||
-        (Object.keys(next) as (keyof typeof next)[]).some((key) => last[key] !== next[key])
-      )
-        frameOutputsBox = next;
+      return last &&
+        (Object.keys(next) as (keyof FrameHole)[]).every((key) => last[key] === next[key])
+        ? last
+        : next;
+    };
+    const place = () => {
+      frameOutputsBox = holeOf(outputsSlot, frameOutputsBox);
+      frameFullscreenBox = holeOf(fullscreenSlot, frameFullscreenBox);
     };
     place();
     // Placed on the next frame, not inside the observer's callback: placing moves the frame's buttons, and a resize
@@ -3788,8 +3776,11 @@
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(place);
     });
-    observer.observe(slot);
-    if (slot.parentElement) observer.observe(slot.parentElement);
+    for (const slot of [outputsSlot, fullscreenSlot]) {
+      if (!slot) continue;
+      observer.observe(slot);
+      if (slot.parentElement) observer.observe(slot.parentElement);
+    }
     observer.observe(stage);
     return () => {
       observer.disconnect();
@@ -3797,12 +3788,24 @@
     };
   });
   $effect(() => {
-    // Again whenever the hole moves or the frame's document is a new one.
+    // Again whenever a hole moves or the frame's document is a new one.
     const box = frameOutputsBox;
+    const fullscreen = frameFullscreenBox;
     const origin = castStage && castFrameReady ? frameOrigin : undefined;
     if (!origin) return;
-    untrack(() => readyCastFrame(origin)?.postMessage({ type: 'den-outputs-slot', box }, origin));
+    untrack(() =>
+      readyCastFrame(origin)?.postMessage({ type: 'den-outputs-slot', box, fullscreen }, origin),
+    );
   });
+
+  /** The frame's picture, less the holes over its own buttons, which take their own press. */
+  function pictureClip(holes: (FrameHole | null)[]): string | undefined {
+    const cut = holes.filter((hole) => hole !== null);
+    if (!cut.length) return undefined;
+    const ring = ({ left, top, width, height }: FrameHole) =>
+      `${left}px ${top}px, ${left + width}px ${top}px, ${left + width}px ${top + height}px, ${left}px ${top + height}px, ${left}px ${top}px`;
+    return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${cut.map(ring).join(', 0 0, ')})`;
+  }
 
   // Back to playing in this page, the frame stays for its button: what it had loaded is let go there.
   let castFrameLoad: { id: string; generation: number } | undefined;
@@ -7164,9 +7167,8 @@
       onload={castFrameLoaded}
     ></iframe>
     {#if castStage && castFrameBox}
-      {@const hole = frameOutputsBox}
       <!-- The frame's picture takes no presses of its own: a click plays or pauses, a tap shows the controls, as on Den's
-           video at home. All but the hole over the frame's output buttons, which take their own press. -->
+           video at home. All but the holes over the frame's own buttons, which take their own press. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div
         class="stage-picture"
@@ -7175,9 +7177,7 @@
         style:top={`${castFrameBox.top}px`}
         style:width={`${castFrameBox.width}px`}
         style:height={`${castFrameBox.height}px`}
-        style:clip-path={hole
-          ? `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${hole.left}px ${hole.top}px, ${hole.left + hole.width}px ${hole.top}px, ${hole.left + hole.width}px ${hole.top + hole.height}px, ${hole.left}px ${hole.top + hole.height}px, ${hole.left}px ${hole.top}px)`
-          : undefined}
+        style:clip-path={pictureClip([frameOutputsBox, frameFullscreenBox])}
         onclick={pictureClick}
         ondblclick={pictureDoubleClick}
       ></div>
@@ -7461,7 +7461,11 @@
                 onclick={() => void togglePictureInPicture()}>{@render pipIcon()}</button
               >
             {/if}
-            {#if !(castStage && frameFullscreen)}
+            {#if castStage && frameFullscreen}
+              <!-- The frame's fullscreen button sits here, in its place and of its size: only a press in the frame
+                   can make its video fill an iPhone's screen. -->
+              <span class="frame-fullscreen" bind:this={frameFullscreenSlot}></span>
+            {:else}
               <button
                 class="web-glyph"
                 type="button"
@@ -9117,6 +9121,28 @@
     display: flex;
     align-items: center;
     min-width: 0;
+  }
+
+  /* The hole for the frame's fullscreen button, the size of the dock's own. The dock and its group under it let a press
+     there through too; their other controls take theirs. */
+  .frame-fullscreen {
+    display: inline-block;
+    flex: none;
+    width: 44px;
+    height: 44px;
+  }
+
+  .web-custom-player .web-bar > .web-dock:has(.frame-fullscreen),
+  .web-dock:has(.frame-fullscreen) > .web-dock-group,
+  .web-dock-group > .frame-fullscreen {
+    pointer-events: none;
+  }
+
+  .web-custom-player:not(.web-controls-hidden)
+    .web-dock:has(.frame-fullscreen)
+    > .web-dock-group
+    > :not(.frame-fullscreen) {
+    pointer-events: auto;
   }
 
   .web-touch-player .web-dock-transport {

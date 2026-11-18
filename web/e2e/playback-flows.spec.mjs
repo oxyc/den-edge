@@ -38,6 +38,8 @@ const CHROME_MAC =
 const served = [];
 /** This test's page console and media requests, as they happened (`open`). */
 const trail = [];
+/** Whether den-remux's `/speed` answers, slowly; elsewhere it is a 404 and the cast page measures nothing. */
+let slowSpeed = false;
 
 /** What the player was doing when a wait on it ran out: the element's own state, and the page's trail. */
 async function attachTrail(video) {
@@ -98,6 +100,20 @@ function mediaServer(dir) {
           return res.writeHead(204, { ...cors, 'access-control-allow-methods': '*' }).end();
         if (req.method !== 'GET' && req.method !== 'HEAD') return res.writeHead(204, cors).end();
         if (path === '/remux/health') return res.writeHead(200, cors).end('{"status":"ok"}');
+        // A link probe that reads slow (`slowSpeed`): 640 KiB over about a second, some 5 Mbit/s.
+        if (slowSpeed && path.endsWith('/speed')) {
+          served.push({ host, file: 'speed' });
+          res.writeHead(200, { ...cors, 'content-type': 'application/octet-stream' });
+          let sent = 0;
+          const timer = setInterval(() => {
+            res.write(Buffer.alloc(32 * 1024));
+            if (++sent === 20) {
+              clearInterval(timer);
+              res.end();
+            }
+          }, 50);
+          return;
+        }
         const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
         try {
           const content = await readFile(new URL(file, hls));
@@ -131,6 +147,7 @@ test.afterAll(() => {
 test.beforeEach(() => {
   served.length = 0;
   trail.length = 0;
+  slowSpeed = false;
 });
 
 /** Den Hearth's Remux answer: the playlist on the public listener, controls as paths, no `playlist` in `session`. */
@@ -341,7 +358,7 @@ test('owner at home plays from the home-network listener in the page itself', as
   }
 });
 
-test('owner at home asks again without a link limit remembered from away', async () => {
+test('owner at home plays on under a link limit remembered from away, and forgets it for the next play', async () => {
   const { browser, page, asked } = await open({
     answer: remuxAnswer,
     home: true,
@@ -349,11 +366,15 @@ test('owner at home asks again without a link limit remembered from away', async
   });
   try {
     await playingPast(pageVideo(page), 3);
-    expect(asked.playback.map(({ maxBitrate }) => maxBitrate ?? 'none')).toEqual([
-      4_000_000,
-      'none',
-    ]);
+    // A session that plays is never replaced for a limit that doesn't apply at home.
+    await playingPast(pageVideo(page), 6);
+    expect(asked.playback.map(({ maxBitrate }) => maxBitrate ?? 'none')).toEqual([4_000_000]);
     expect(segmentHosts()).toEqual(new Set(['lan.test']));
+    const kept = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem(`den.remux.link:${location.origin}/remux`) ?? 'null'),
+    );
+    expect(kept?.maxBitrate).toBeUndefined();
+    expect(typeof kept?.at).toBe('number');
   } finally {
     await browser.close();
   }
@@ -511,6 +532,28 @@ test('owner away plays from the public listener', async () => {
     expect(segmentHosts()).toEqual(new Set(['media.test']));
     expect(asked.lanAsked).toEqual([ORIGIN]);
     await stamped(page, 'Den Remux');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('owner away keeps playing a release heavier than the link the cast page measured, and remembers the link', async () => {
+  // 1 GB over the fixture's 60 s averages some 133 Mbit/s, far over the ~3.6 Mbit/s the slow probe reads.
+  slowSpeed = true;
+  const heavy = { ...remuxAnswer, release: { ...remuxAnswer.release, size: 1_000_000_000 } };
+  const { browser, page, asked } = await open({ answer: heavy, home: false });
+  try {
+    await playingPast(castVideo(page), 3);
+    expect(served.some((s) => s.file === 'speed')).toBe(true);
+    // Long enough for a replacement asked at the measure to have been asked and to have landed.
+    await playingPast(castVideo(page), 8);
+    expect(asked.playback).toHaveLength(1);
+    await expect(page.getByText('Preparing Chromecast…')).toHaveCount(0);
+    const kept = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem(`den.remux.link:${location.origin}/remux`) ?? 'null'),
+    );
+    expect(kept?.maxBitrate).toBeGreaterThan(64_000);
+    expect(kept?.maxBitrate).toBeLessThan(20_000_000);
   } finally {
     await browser.close();
   }

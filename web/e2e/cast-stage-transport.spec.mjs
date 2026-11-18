@@ -255,7 +255,7 @@ for (const [name, browserType] of engines) {
       }
     });
 
-    test('on an iPhone fullscreen is the frame’s button, in the hole, and it fills the screen with the frame’s video', async () => {
+    test('on an iPhone fullscreen is the frame’s button, where the dock’s own is, and it fills the screen with the frame’s video', async () => {
       const { browser, page } = await open(browserType, { iphone: true });
       try {
         await playingPast(page, 1);
@@ -263,13 +263,42 @@ for (const [name, browserType] of engines) {
         const frame = page.frameLocator('iframe[title="Den Cast player"]');
         const button = frame.locator('#fullscreen');
         await expect(button).toBeVisible();
-        // The player's own cannot reach the frame's video there, so it is gone rather than a dead press.
+        // The player's own cannot reach the frame's video there, so it leaves a hole in its place for the frame's.
         await expect(
           page.getByRole('button', { name: 'Enter fullscreen', exact: true }),
         ).toHaveCount(0);
-        await expect(page.locator('.frame-outputs')).toHaveCount(1);
+        const slot = page.locator('.frame-fullscreen');
+        await expect(slot).toHaveCount(1);
+        // In the dock, where the player's fullscreen button sits: just before More, at the dock's right end. The top
+        // bar keeps its hole for Cast and AirPlay only, of which a test browser has neither.
+        await expect(page.locator('.frame-outputs')).toHaveCount(0);
+        expect(
+          await slot.evaluate((hole) => {
+            const more = hole.nextElementSibling;
+            return {
+              inDock: !!hole.closest('.web-dock'),
+              beforeMore: !!more?.querySelector('.web-more'),
+            };
+          }),
+        ).toEqual({ inDock: true, beforeMore: true });
+        const hole = await slot.boundingBox();
+        const more = await page.locator('.web-more').boundingBox();
+        expect([hole.width, hole.height]).toEqual([44, 44]);
+        expect(Math.round(hole.y)).toBe(Math.round(more.y));
+        // The frame's button fills that hole exactly.
+        await expect
+          .poll(async () => {
+            const box = await button.boundingBox();
+            return box && [box.x, box.y, box.width, box.height].map(Math.round);
+          })
+          .toEqual([hole.x, hole.y, hole.width, hole.height].map(Math.round));
+        // A press there reaches the frame, past the player's dock and its picture layer.
+        const centre = { x: hole.x + hole.width / 2, y: hole.y + hole.height / 2 };
+        expect(
+          await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.tagName, centre),
+        ).toBe('IFRAME');
 
-        await button.click();
+        await page.mouse.click(centre.x, centre.y);
         const cast = page.frames().find((f) => f.url().startsWith(CAST));
         await expect
           .poll(() => cast.evaluate(() => window.denEnteredFullscreen === true))
