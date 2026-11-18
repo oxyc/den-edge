@@ -237,12 +237,16 @@ export class ProfileSession {
     return this.household.updateRequired || libraryUpdateRequired(this.model);
   }
 
-  configureServices(): void {
+  #activateAvailability(): void {
     availability.activate([
       this.household.identity.kind,
       this.household.identity.libraryKey,
       profileSessionKey(this.identity, this.policyKey),
     ]);
+  }
+
+  configureServices(): void {
+    this.#activateAvailability();
     this.household.configureServices();
   }
 
@@ -307,6 +311,7 @@ export class ProfileSession {
 
   foregroundReady(): void {
     this.foregrounded = true;
+    this.#activateAvailability();
     this.household.foreground();
     if (!this.household.ownsModel(this.model)) void this.model?.foregroundReady().catch(() => {});
   }
