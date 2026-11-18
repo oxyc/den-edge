@@ -259,7 +259,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'couldn’t be matched': 'gick inte att matcha',
   'couldn’t be matched safely': 'kunde inte matchas säkert',
   'Couldn’t finish': 'Kunde inte avsluta',
-  'Couldn’t load': 'Det gick inte att ladda',
+  'Load failed': 'Det gick inte att ladda',
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'Avsnitten kunde inte läsas in. Inget markerades som sett.',
   'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',

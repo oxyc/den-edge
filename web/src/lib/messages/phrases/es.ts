@@ -262,7 +262,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'couldn’t be matched': 'no se pudo igualar',
   'couldn’t be matched safely': 'no se pudo emparejar de forma segura',
   'Couldn’t finish': 'No pude terminar',
-  'Couldn’t load': 'No se pudo cargar',
+  'Load failed': 'No se pudo cargar',
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'No se pudieron cargar los episodios. No se marcó ninguno como visto.',
   'Couldn’t remove that download. Try again.':
