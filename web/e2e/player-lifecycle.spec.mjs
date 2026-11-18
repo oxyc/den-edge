@@ -135,9 +135,11 @@ test('unknown media duration uses trusted title runtime only for the saved fract
   await page.goto(`${ORIGIN}/test/player.html`);
   await started;
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await page.waitForFunction(
+    () => document.querySelector('.player video')?.paused === false,
+    undefined,
+    { timeout: 30_000 },
+  );
   await video.evaluate((element) => {
     Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
@@ -164,9 +166,11 @@ test('unknown episode duration prefers its exact runtime over the series estimat
   });
   await page.goto(`${ORIGIN}/test/player.html?series&episodes`);
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await page.waitForFunction(
+    () => document.querySelector('.player video')?.paused === false,
+    undefined,
+    { timeout: 30_000 },
+  );
   await video.evaluate((element) => {
     Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
@@ -217,9 +221,11 @@ test('late runtime from a replaced episode cannot become the active denominator'
   await firstStarted;
   await page.getByTestId('replace-player-episode').evaluate((button) => button.click());
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await page.waitForFunction(
+    () => document.querySelector('.player video')?.paused === false,
+    undefined,
+    { timeout: 30_000 },
+  );
   await video.evaluate((element) => {
     Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
@@ -250,9 +256,11 @@ test('unknown media duration without trustworthy runtime remains fail-closed', a
   await mockPlayer(page, { sessionAnswer: { ...session, duration: 0 } });
   await page.goto(`${ORIGIN}/test/player.html`);
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await page.waitForFunction(
+    () => document.querySelector('.player video')?.paused === false,
+    undefined,
+    { timeout: 30_000 },
+  );
   await video.evaluate((element) => {
     Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
@@ -260,6 +268,56 @@ test('unknown media duration without trustworthy runtime remains fail-closed', a
   });
 
   await expect(page.getByTestId('player-progress-writes')).toHaveText('0');
+});
+
+test('native HLS with an unknown length saves on pause and pagehide, and the next visit resumes there', async () => {
+  // WebKit plays this playlist natively and it names no EXT-X-START, so the player's own seek is the only resume.
+  const browser = await webkit.launch();
+  try {
+    const context = await browser.newContext();
+    // The engine never reports a length for the whole visit, as an unresolved HLS/TV pipeline does.
+    await context.addInitScript(() => {
+      Object.defineProperty(HTMLMediaElement.prototype, 'duration', {
+        configurable: true,
+        get: () => Number.NaN,
+      });
+    });
+    const visit = async (path) => {
+      const page = await context.newPage();
+      await mockPlayer(page, { runtime: 2, sessionAnswer: { ...session, duration: 0 } });
+      await page.goto(`${ORIGIN}/test/player.html${path}`);
+      return page;
+    };
+    const saved = async (page) =>
+      JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+
+    const first = await visit('');
+    const video = first.locator('.player video');
+    await first.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
+      undefined,
+      { timeout: 30_000 },
+    );
+    await video.evaluate((element) => {
+      element.pause();
+      element.currentTime = 31;
+    });
+    await expect.poll(() => saved(first)).toMatchObject({ seconds: 31, playing: false });
+    expect((await saved(first)).fraction).toBeCloseTo(31 / 120, 6);
+    const writes = Number(await first.getByTestId('player-progress-writes').textContent());
+    await first.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+    await expect(first.getByTestId('player-progress-writes')).toHaveText(String(writes + 1));
+    const stored = await saved(first);
+    expect(stored).toMatchObject({ seconds: 31, playing: false });
+    await first.close();
+
+    const second = await visit(`?resume=${stored.seconds}&resumeFraction=${stored.fraction}`);
+    await expect
+      .poll(() => second.locator('.player video').evaluate((element) => element.currentTime))
+      .toBeGreaterThanOrEqual(31);
+  } finally {
+    await browser.close();
+  }
 });
 
 test('playback progress clears startup and leaves no hls.js head poll behind', async () => {
@@ -302,9 +360,11 @@ test('a play writes its position within seconds of starting, and again on resume
     const writes = page.getByTestId('player-progress-writes');
     const written = async () =>
       JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
-    await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-      timeout: 30_000,
-    });
+    await page.waitForFunction(
+      () => document.querySelector('.player video')?.paused === false,
+      undefined,
+      { timeout: 30_000 },
+    );
 
     // The first part-way position goes out a moment after playback starts, not at the one-minute report.
     await expect(writes).toHaveText('1', { timeout: 5_000 });

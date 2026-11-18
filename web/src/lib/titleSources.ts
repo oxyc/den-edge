@@ -76,6 +76,13 @@ export function scoutTicket(url: string, addon: Addon, routes: Routes): string |
   return '/scout' + suffix;
 }
 
+/** Native Den's seeder-count domain (`AddonWire`): integers 0...1,000,000. Sizes are positive safe integers. */
+const MAX_SEEDERS = 1_000_000;
+const bounded = (value: unknown, min: number, max: number): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max
+    ? value
+    : undefined;
+
 export function parseSources(body: unknown, addon: Addon, routes: Routes): TitleSource[] | null {
   const streams = (body as { streams?: unknown } | null)?.streams;
   if (!Array.isArray(streams)) return null;
@@ -86,7 +93,18 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
     const filename = s.behaviorHints?.filename ?? s.title;
     if (!url || typeof filename !== 'string' || !filename || seen.has(filename)) return [];
     seen.add(filename);
-    const a = s.attributes && typeof s.attributes === 'object' ? s.attributes : {};
+    const a = { ...(s.attributes && typeof s.attributes === 'object' ? s.attributes : {}) };
+    // Each count is checked on its own: a bad one is dropped from the attributes den-core ranks too, never the source.
+    const seeders = bounded(a.seeders, 0, MAX_SEEDERS);
+    const size = bounded(a.sizeBytes, 1, Number.MAX_SAFE_INTEGER);
+    const packSize = bounded(a.packSizeBytes, 1, Number.MAX_SAFE_INTEGER);
+    for (const [key, value] of [
+      ['seeders', seeders],
+      ['sizeBytes', size],
+      ['packSizeBytes', packSize],
+    ] as const)
+      if (value === undefined) delete a[key];
+      else a[key] = value;
     const texts = (value: unknown) =>
       Array.isArray(value) ? value.filter((s): s is string => typeof s === 'string') : [];
     return [
@@ -99,10 +117,9 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         url,
         label: typeof a.label === 'string' && a.label ? a.label : filename,
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
-        seeders: Number.isFinite(a.seeders) && a.seeders >= 0 ? a.seeders : undefined,
-        size: Number.isFinite(a.sizeBytes) && a.sizeBytes > 0 ? a.sizeBytes : undefined,
-        packSize:
-          Number.isFinite(a.packSizeBytes) && a.packSizeBytes > 0 ? a.packSizeBytes : undefined,
+        seeders,
+        size,
+        packSize,
         badges: [
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',

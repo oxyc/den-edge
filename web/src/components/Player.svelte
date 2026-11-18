@@ -35,7 +35,12 @@
   import { interfaceLocale, type InterfaceLanguage } from '../lib/interfaceLanguage';
   import { languageName } from '../lib/languageName';
   import type { Episode as EpisodeDetail } from '../lib/detail';
-  import { PLAYBACK_PROGRESS_SAVE_MS, PlaybackProgressReporter } from '../lib/playbackProgress';
+  import {
+    PLAYBACK_PROGRESS_SAVE_MS,
+    PlaybackProgressReporter,
+    progressDuration,
+    resumeSeekSeconds,
+  } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     autoSubtitleLanguage,
@@ -4112,20 +4117,20 @@
 
   /** Exact transport length when known; otherwise only the active title/episode's trusted metadata estimate. */
   function progressLength(): number {
-    const total = length();
-    return total > 0 && total < Infinity ? total : expectedRuntime;
+    return progressDuration(length(), expectedRuntime);
   }
 
   /** Pick up where it was left — or where the last session was — unless that was the very start or the credits. */
   function seekToStart() {
     const total = length();
-    if (!video || !total) return;
     const from = startAt ?? resume;
+    // An unresolved length can still seek to an exact stored second; a fraction alone waits for a later load.
+    if (!video || (!total && from.seconds === undefined && started === undefined)) return;
     // Opening mid-title says where, once a visit, with the way back to the start (`resumedAt`).
     if (webTransport && startAt === null && !resumeOffered) {
       resumeOffered = true;
-      const at = started ?? resume.seconds ?? resume.fraction * total;
-      if (at > 5 && at / total < WATCHED) resumedAt = clockTime(at);
+      const at = resumeSeekSeconds({ ...resume, seconds: started ?? resume.seconds }, total);
+      if (at !== null) resumedAt = clockTime(at);
     }
     startAt = null;
     if (started !== undefined) {
@@ -4136,8 +4141,8 @@
         video.currentTime = started;
       return;
     }
-    const at = from.seconds ?? from.fraction * total;
-    if (at > 5 && at / total < WATCHED) video.currentTime = at;
+    const at = resumeSeekSeconds(from, total);
+    if (at !== null) video.currentTime = at;
   }
 
   /** Write where playback got to, unless it is within `slack` seconds of what was last written. */

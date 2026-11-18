@@ -13,6 +13,29 @@ export interface PlaybackEvidence {
 
 export const PLAYBACK_PROGRESS_SAVE_MS = 30_000;
 
+const known = (duration: number) => duration > 0 && duration < Infinity;
+
+/**
+ * The progress denominator: the transport's own length when it has one, else the active title/episode's expected
+ * runtime (0 when none is trusted). As in DenKit, only the fraction is estimated; the saved seconds stay exact.
+ */
+export function progressDuration(transport: number, expectedRuntime: number): number {
+  return known(transport) ? transport : expectedRuntime;
+}
+
+/**
+ * The second a resume seeks to, or null for the start. Without a transport length only an exact stored second can be
+ * named, and the stored fraction alone decides whether it is past the credits.
+ */
+export function resumeSeekSeconds(
+  resume: { fraction: number; seconds?: number },
+  duration: number,
+): number | null {
+  const at = resume.seconds ?? (known(duration) ? resume.fraction * duration : 0);
+  const fraction = known(duration) ? at / duration : resume.fraction;
+  return at > 5 && fraction < WATCHED ? at : null;
+}
+
 /**
  * The web form of DenKit's PlaybackProgressPersistencePolicy. Storage and authority fencing remain with each
  * client; evidence, accidental-start floors and completion normalization must agree everywhere.
