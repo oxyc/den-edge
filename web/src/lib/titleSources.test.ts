@@ -7,6 +7,7 @@ import {
   parseAnswer,
   parseSources,
   prepareSource,
+  rankable,
   scoutTicket,
   fetchSources,
 } from './titleSources';
@@ -167,6 +168,51 @@ it('a never-opened pack sends sizeBytes:null — size must become undefined, nev
   const [source] = parseSources({ streams: [unopened] }, addon, routes)!;
   expect(source!.size).toBeUndefined();
   expect(source!.packSize).toBe(68_000_000_000);
+});
+const withAttributes = (attributes: Record<string, unknown>) =>
+  parseSources(
+    { streams: [{ ...raw, attributes: { resolution: '1080p', cached: true, ...attributes } }] },
+    addon,
+    routes,
+  )![0]!;
+const notCounts = ['12', true, 1.5, 0.5, -1, 0, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, 1e300];
+it('admits only positive safe-integer sizes, each dropped alone with its siblings kept', () => {
+  for (const bad of [...notCounts, null, {}, []]) {
+    const source = withAttributes({ sizeBytes: bad, packSizeBytes: bad, seeders: 4, hdr: true });
+    expect(source.size, String(bad)).toBeUndefined();
+    expect(source.packSize, String(bad)).toBeUndefined();
+    expect(source.attributes).not.toHaveProperty('sizeBytes');
+    expect(source.attributes).not.toHaveProperty('packSizeBytes');
+    expect(source).toMatchObject({ seeders: 4, cached: true, badges: ['1080p', 'HDR'] });
+  }
+  const max = Number.MAX_SAFE_INTEGER;
+  expect(withAttributes({ sizeBytes: 1, packSizeBytes: max })).toMatchObject({
+    size: 1,
+    packSize: max,
+  });
+  // One bad size never takes the other with it.
+  expect(withAttributes({ sizeBytes: 1.5, packSizeBytes: 68_000_000_000 })).toMatchObject({
+    size: undefined,
+    packSize: 68_000_000_000,
+  });
+  expect(withAttributes({ sizeBytes: 1_000, packSizeBytes: max + 1 })).toMatchObject({
+    size: 1_000,
+    packSize: undefined,
+  });
+});
+it('admits only integer seeder counts 0...1,000,000, as native Den does, and ranks only that', () => {
+  for (const bad of [...notCounts.filter((v) => v !== 0), 1_000_001, null, {}, []]) {
+    const source = withAttributes({ seeders: bad, sizeBytes: 2_000 });
+    expect(source.seeders, String(bad)).toBeUndefined();
+    expect(source.attributes).not.toHaveProperty('seeders');
+    expect(rankable([source])[0]).not.toHaveProperty('seeders');
+    expect(source).toMatchObject({ size: 2_000, cached: true });
+  }
+  for (const good of [0, 1, 12, 1_000_000]) {
+    const source = withAttributes({ seeders: good });
+    expect(source.seeders).toBe(good);
+    expect(rankable([source])[0]).toMatchObject({ seeders: good });
+  }
 });
 it('scopes series sources to the exact requested episode', async () => {
   let path = '';
