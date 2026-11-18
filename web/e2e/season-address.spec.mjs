@@ -15,6 +15,11 @@ const ID = 77;
 const PAGE = `/tv/${ID}-the-series`;
 
 const SIDEWAYS = { width: 844, height: 390 };
+const DEFERRED_WASM = /\/den_core_deferred_bg(?:-[\w-]+)?\.wasm$/;
+const safeUrl = (value) => {
+  const url = new URL(value, E2E_ORIGIN);
+  return `${url.origin}${url.pathname}`;
+};
 
 const series = {
   id: ID,
@@ -56,7 +61,49 @@ const episodes = (n) => ({
 async function guest(page) {
   const seasons = [];
   const errors = [];
+  const workers = [];
+  const wasmDiagnostics = [];
+  const wasmRequests = [];
+  const hearDiagnostic = (message) => {
+    const text = message.text();
+    if (text.startsWith('den: deferred-wasm-diagnostic ')) wasmDiagnostics.push(text);
+  };
   page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', hearDiagnostic);
+  page.on('worker', (worker) => {
+    workers.push(safeUrl(worker.url()));
+    worker.on?.('console', hearDiagnostic);
+  });
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (DEFERRED_WASM.test(url.pathname))
+      wasmRequests.push({ url: safeUrl(url), method: request.method(), state: 'requested' });
+  });
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if (!DEFERRED_WASM.test(url.pathname)) return;
+    const headers = response.headers();
+    wasmRequests.push({
+      url: safeUrl(url),
+      status: response.status(),
+      state: 'response',
+      headers: {
+        contentType: headers['content-type'],
+        accessControlAllowOrigin: headers['access-control-allow-origin'],
+        crossOriginResourcePolicy: headers['cross-origin-resource-policy'],
+        crossOriginEmbedderPolicy: headers['cross-origin-embedder-policy'],
+      },
+    });
+  });
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url());
+    if (DEFERRED_WASM.test(url.pathname))
+      wasmRequests.push({
+        url: safeUrl(url),
+        state: 'failed',
+        errorText: request.failure()?.errorText,
+      });
+  });
   await routeGuestEdge(page, newEdge());
   await routeTmdb(page, (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -70,7 +117,17 @@ async function guest(page) {
   });
   // Looking around, as "Look around instead" leaves it: the app with no library behind it.
   await page.addInitScript(() => localStorage.setItem('den.browsing', '1'));
-  return { seasons, errors };
+  const errorEvidence = () =>
+    JSON.stringify({
+      pageOrigin: new URL(page.url()).origin,
+      workers,
+      resolvedDeferredWasmUrl: safeUrl(
+        new URL('../src/vendor/den-core/generated/den_core_deferred_bg.wasm', E2E_ORIGIN),
+      ),
+      wasmRequests,
+      wasmDiagnostics,
+    });
+  return { seasons, errors, errorEvidence };
 }
 
 /**
@@ -115,7 +172,7 @@ async function showing(page, name, episode) {
 async function backThroughSeasons(browser) {
   const page = await browser.newPage({ viewport: SIDEWAYS, hasTouch: true });
   try {
-    const { errors } = await guest(page);
+    const { errors, errorEvidence } = await guest(page);
     await page.goto(`${E2E_ORIGIN}/`);
     // The first wait on the app booting: on a busy runner the unbundled dev server took 5.3 s to bring the page up.
     await expect(page.locator('main')).toBeVisible({ timeout: 30_000 });
@@ -158,7 +215,7 @@ async function backThroughSeasons(browser) {
     await page.goBack();
     await expect.poll(() => address(page)).toBe('/');
     await expect(active(page).getByRole('tablist', { name: 'Seasons' })).toHaveCount(0);
-    expect(errors).toEqual([]);
+    expect(errors, errorEvidence()).toEqual([]);
   } finally {
     await page.close();
   }
@@ -167,7 +224,7 @@ async function backThroughSeasons(browser) {
 async function opensOnTheAddressedSeason(browser) {
   const page = await browser.newPage({ viewport: SIDEWAYS, hasTouch: true });
   try {
-    const { seasons, errors } = await guest(page);
+    const { seasons, errors, errorEvidence } = await guest(page);
     await recordSelections(page);
     await page.goto(`${E2E_ORIGIN}${PAGE}?season=2`);
     await showing(page, 'Season 2', 'Season 2 premiere');
@@ -190,7 +247,7 @@ async function opensOnTheAddressedSeason(browser) {
       await showing(page, 'Season 1', 'Season 1 premiere');
       expect(await selections(page), wrong).toEqual(['Season 1']);
     }
-    expect(errors).toEqual([]);
+    expect(errors, errorEvidence()).toEqual([]);
   } finally {
     await page.close();
   }
@@ -201,7 +258,7 @@ async function modifiedClickLeavesThePage(browser) {
   const context = await browser.newContext({ viewport: SIDEWAYS });
   try {
     const page = await context.newPage();
-    const { errors } = await guest(page);
+    const { errors, errorEvidence } = await guest(page);
     await page.goto(`${E2E_ORIGIN}${PAGE}`);
     await showing(page, 'Season 1', 'Season 1 premiere');
     // The new tab is the browser's own, and only where it opened matters: its document is a stub.
@@ -212,7 +269,7 @@ async function modifiedClickLeavesThePage(browser) {
     expect(await openedByBrowser(browser, context, page, click)).toEqual([opening]);
     expect(address(page)).toBe(PAGE);
     await showing(page, 'Season 1', 'Season 1 premiere');
-    expect(errors).toEqual([]);
+    expect(errors, errorEvidence()).toEqual([]);
   } finally {
     await context.close();
   }

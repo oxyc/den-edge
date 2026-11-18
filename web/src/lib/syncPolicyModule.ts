@@ -16,6 +16,40 @@ const DEFERRED_WASM = new URL(
 type PolicyModule = 'startup' | 'deferred';
 const compiling: Partial<Record<PolicyModule, Promise<WebAssembly.Module>>> = {};
 
+const safeRuntimeUrl = (url: URL | string): string => {
+  const parsed = url instanceof URL ? url : new URL(url, location.href);
+  return `${parsed.origin}${parsed.pathname}`;
+};
+
+/** Failure-only, allowlisted evidence for the intermittent WebKit CORS report; never includes request headers. */
+const reportDeferredWasmFailure = (
+  wasm: URL,
+  response: Response | undefined,
+  error: unknown,
+): void => {
+  const header = (name: string) => response?.headers.get(name) ?? undefined;
+  console.warn(
+    `den: deferred-wasm-diagnostic ${JSON.stringify({
+      requestInitiator: 'page-policy-offer',
+      pageOrigin: location.origin,
+      workerUrl: null,
+      wasmUrl: safeRuntimeUrl(wasm),
+      response: response
+        ? {
+            url: safeRuntimeUrl(response.url || wasm),
+            status: response.status,
+            type: response.type,
+            contentType: header('content-type'),
+            accessControlAllowOrigin: header('access-control-allow-origin'),
+            crossOriginResourcePolicy: header('cross-origin-resource-policy'),
+            crossOriginEmbedderPolicy: header('cross-origin-embedder-policy'),
+          }
+        : null,
+      errorName: error instanceof Error ? error.name : typeof error,
+    })}`,
+  );
+};
+
 /** One compile of each lifecycle module per page; a failed one is tried again by the next Worker. */
 function syncPolicyModule(kind: PolicyModule): Promise<WebAssembly.Module> {
   const held = compiling[kind];
@@ -23,13 +57,26 @@ function syncPolicyModule(kind: PolicyModule): Promise<WebAssembly.Module> {
   const label = kind === 'startup' ? 'den-core' : 'den-core deferred';
   startupMarkOnce(`${label} compile started`);
   const wasm = kind === 'startup' ? STARTUP_WASM : DEFERRED_WASM;
-  const started = WebAssembly.compileStreaming(fetch(wasm, { signal: AbortSignal.timeout(15_000) }))
+  let response: Response | undefined;
+  const fetched = fetch(wasm, { signal: AbortSignal.timeout(15_000) });
+  // This evidence exists for the WebKit E2E investigation only. Keeping it out of release graphs avoids making
+  // every successful startup carry a reporter that can only be read by the failing Playwright assertion.
+  const request =
+    kind === 'deferred' && import.meta.env.DEN_E2E
+      ? fetched.then((value) => {
+          response = value;
+          return value;
+        })
+      : fetched;
+  const started = WebAssembly.compileStreaming(request)
     .then((module) => {
       startupMarkOnce(`${label} compiled`);
       return module;
     })
     .catch((error: unknown) => {
       delete compiling[kind];
+      if (kind === 'deferred' && import.meta.env.DEN_E2E)
+        reportDeferredWasmFailure(wasm, response, error);
       throw error;
     });
   compiling[kind] = started;
