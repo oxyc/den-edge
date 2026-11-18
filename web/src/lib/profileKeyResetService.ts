@@ -205,7 +205,7 @@ export class ProfileKeyResetService {
       snapshot = await successor.resetSnapshot();
     } catch (error) {
       // An unreadable successor is not a confirmed one; the page installs again and asks again.
-      console.warn('den: the successor household could not be read back', error);
+      console.warn('den:p/successor-readback', error);
       return 'waiting';
     }
     // Rows other devices or this page write after the commit are fine; the directory it was committed with is not
@@ -252,7 +252,7 @@ export class ProfileKeyResetService {
   }
 
   #waiting(error: Error): 'waiting' {
-    console.warn('den: the profile key reset is waiting', error);
+    console.warn('den:p/reset-wait', error);
     return 'waiting';
   }
 

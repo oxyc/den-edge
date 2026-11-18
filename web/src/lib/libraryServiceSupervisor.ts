@@ -724,7 +724,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     try {
       subscription.listener(subscription.snapshot);
     } catch (error) {
-      console.error('den: a supervised library subscription listener failed', error);
+      console.error('den:l/supervised-sub', error);
     }
   }
 
@@ -740,7 +740,7 @@ export class LibraryServiceSupervisor implements LibraryServiceClientPort {
     try {
       listener(status);
     } catch (error) {
-      console.error('den: a supervised library status listener failed', error);
+      console.error('den:l/supervised-status', error);
     }
   }
 }

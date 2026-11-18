@@ -323,7 +323,7 @@ class SessionContentService implements ContentServiceClientPort {
         try {
           listener(status);
         } catch (error) {
-          console.error('den: a session content status listener failed', error);
+          console.error('den:c/session-status', error);
         }
     });
   }

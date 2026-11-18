@@ -178,7 +178,7 @@ export class ContentServiceClient {
         try {
           listener(message.status);
         } catch (error) {
-          console.error('den: a content status listener failed', error);
+          console.error('den:c/client-status', error);
         }
       return;
     }
@@ -195,7 +195,7 @@ export class ContentServiceClient {
         try {
           pending.progress?.(message.result);
         } catch (error) {
-          console.error('den: a content progress listener failed', error);
+          console.error('den:c/client-progress', error);
         }
       return;
     }

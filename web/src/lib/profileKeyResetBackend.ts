@@ -112,7 +112,7 @@ export async function resetSend(
     } catch (error) {
       last = error;
     }
-    console.warn(`den: profile key reset ${input.method} request failed; replaying`, last);
+    console.warn(`den:p/reset-replay:${input.method}`, last);
   }
   throw new ProfileResetUnavailableError(`den-edge did not answer ${input.method}`, {
     cause: last,

@@ -342,7 +342,7 @@ export class ProfileModeCoordinator {
     try {
       return await this.#household.setKidPolicy(kid.identity.id, policy, pin);
     } catch (error) {
-      console.warn('den: the Kid’s content policy could not be changed', error);
+      console.warn('den:p/kid-policy', error);
       return false;
     }
   }
@@ -389,7 +389,7 @@ export class ProfileModeCoordinator {
       if (!current()) return KID_TITLE_APPROVAL_SUPERSEDED;
       if (cause instanceof LibraryServiceError && cause.failure.code === 'unauthorized')
         return KID_TITLE_APPROVAL_DENIED;
-      console.warn('den: Kid title access could not be changed', cause);
+      console.warn('den:p/kid-titles', cause);
       return { outcome: 'failed', cause };
     } finally {
       if (ticket === this.#kidTitleApproval) this.#kidTitleApprovalActive = false;
@@ -940,7 +940,7 @@ export class ProfileModeCoordinator {
   #seedPreferences(profile: LibraryModel): void {
     void Promise.resolve()
       .then(() => this.#household.seedProfilePreferences(profile))
-      .catch((error: unknown) => console.warn('den: profile preference seeding failed', error));
+      .catch((error: unknown) => console.warn('den:p/preference-seed', error));
   }
 
   async #preparePersistent(
@@ -1009,7 +1009,7 @@ export class ProfileModeCoordinator {
       // No one waits on a restore: the page stays at the profile gate, and the reason is logged. A failed legacy
       // marker convergence also discards the session prepared above.
       next?.close();
-      console.warn('den: the remembered profile could not be opened', error);
+      console.warn('den:p/remembered-open', error);
     } finally {
       this.#restoring--;
     }

@@ -378,7 +378,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       this.#titlesServed.set(titleKey(ref), { type: ref.type, id: ref.id });
       return view;
     } catch (error) {
-      console.warn('den: a title could not be read from library facts', error);
+      console.warn('den:view/title-read', error);
       return null;
     }
   }
@@ -445,7 +445,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     const names = narrowEditNames(command);
     if (!names || !this.openNarrow || !this.factStore || this.#narrowSending) return null;
     const edit = await this.openNarrow(names).catch((error: unknown) => {
-      console.warn('den: a narrow edit could not be opened', error);
+      console.warn('den:view/edit-open', error);
       return null;
     });
     if (!edit) return null;
@@ -461,7 +461,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
     try {
       result = await edit.authority.command(command, operationId);
     } catch (error) {
-      console.warn('den: a narrow edit failed; the whole log makes it', error);
+      console.warn('den:view/edit-full', error);
       await finish();
       return null;
     }
@@ -489,7 +489,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         await this.#checking?.catch(() => undefined);
         await this.#reconcile();
       })
-      .catch((error: unknown) => console.warn('den: a narrow edit could not be taken in', error));
+      .catch((error: unknown) => console.warn('den:view/edit-apply', error));
     return result;
   }
   query: LibraryServiceAuthority['query'] = async (query, signal) => {
@@ -576,7 +576,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
         return null;
       return (await this.factStore.history(manifest))?.page(filter, cursor, limit) ?? null;
     } catch (error) {
-      console.warn('den: the materialized History index could not be opened', error);
+      console.warn('den:view/history-open', error);
       return null;
     }
   }
@@ -617,7 +617,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       );
       return titles.map((title) => ({ title, seen: seen.get(titleKey(title)) ?? [] }));
     } catch (error) {
-      console.warn('den: exact History details could not be read from library facts', error);
+      console.warn('den:view/history-read', error);
       return null;
     }
   }
@@ -793,7 +793,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       });
       return !Object.keys(values).length;
     } catch (error) {
-      console.warn('den: the preference seed could not be decided from facts', error);
+      console.warn('den:view/preference-seed', error);
       return false;
     }
   }
@@ -830,7 +830,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
           ),
         });
       } while (this.#refillAgain);
-    })().catch((error: unknown) => console.warn('den: library facts could not be refilled', error));
+    })().catch((error: unknown) => console.warn('den:view/refill', error));
     this.#refilling = refilling;
     void refilling.finally(() => {
       if (this.#refilling === refilling) this.#refilling = undefined;
@@ -1329,7 +1329,7 @@ class FinishedLibraryViewAuthority implements LibraryServiceAuthority {
       this.#viewWriter?.schedule();
       return true;
     } catch (error) {
-      console.warn('den: selected library facts could not be opened', error);
+      console.warn('den:view/selection-open', error);
       return false;
     }
   }
@@ -1735,7 +1735,7 @@ async function importNewestFirst(
         if (!current.more || !current.entries.length) return true;
       }
     })().catch((error: unknown) => {
-      console.warn('den: the rest of the library could not be read', error);
+      console.warn('den:view/rest-read', error);
       return false;
     });
     return {
@@ -1833,7 +1833,7 @@ async function importNewestFirst(
       if (!current.more || !current.entries.length) return true;
     }
   })().catch((error: unknown) => {
-    console.warn('den: the rest of the library could not be read', error);
+    console.warn('den:view/rest-read', error);
     return false;
   });
   return { store, manifest: opened, filling: { done, page, cancel: () => reading.cancel() } };

@@ -1107,7 +1107,7 @@ export class LibraryLog {
     const kept = await this.putMeta('compacted', JSON.stringify([...this.compacted]));
     if (!kept) {
       // This page still remembers the fences when durable storage fails.
-      console.warn('den: local discard fences could not be kept');
+      console.warn('den:log/discard-fences');
     }
     return kept;
   }
@@ -2009,7 +2009,7 @@ export class LibraryLog {
           : 'profileDirectory' in opened || 'invalidProfileDirectory' in opened,
       )
     ) {
-      console.warn('den: a profile-aware household needs the compound key reset');
+      console.warn('den:log/profile-reset-required');
       return { refused: options.replaceProfileDirectory ? 'unavailable' : 'profiles' };
     }
     let unreadableRows = false;
@@ -2018,7 +2018,7 @@ export class LibraryLog {
       // A compound household reset deliberately drops title exceptions; they never acquire successor authority.
       if ('kidTitleApprovals' in opened) continue;
       if ('unknown' in opened || 'newerFraming' in opened) {
-        console.warn("den: a library row can't be moved by this build");
+        console.warn('den:log/move-unsupported');
         return { refused: 'update_required' };
       }
       if ('unreadable' in opened) {
@@ -2042,7 +2042,7 @@ export class LibraryLog {
         kept.push({ name: rowName(row), plaintext: (await openPlaintext(this.keys, k, v))! });
       else rows.push(row);
     }
-    if (unreadableRows) console.warn('den: unreadable library rows stay behind');
+    if (unreadableRows) console.warn('den:log/unreadable-kept');
     // Assistant v1 §10: no drop-box key is carried, and every grant goes revoked.
     const assistant = await resetAssistantRows(rows, Date.now());
     return {
@@ -2185,7 +2185,7 @@ export class LibraryLog {
           throw new Error('destination runtime storage refused the pending edit');
         await this.discard(key);
       } catch {
-        console.warn('den: an unsent edit could not be moved to the new library key');
+        console.warn('den:log/unsent-move');
       }
     }
   }
@@ -2704,7 +2704,7 @@ export class LibraryLog {
         } catch {
           refused = true;
         }
-      if (refused) console.warn("den: documents are left out of the library's lists");
+      if (refused) console.warn('den:log/documents-omitted');
     }
   }
 
@@ -3204,7 +3204,7 @@ export class LibraryLog {
       if (opened !== undefined) return opened;
       return (await openLibraryLocalValue(this.local.key, name, bytes)) as T;
     } catch (error) {
-      console.warn(`den: the kept ${name} could not be read`, error);
+      console.warn(`den:log/${name}-read`, error);
       return undefined;
     }
   }
@@ -3233,7 +3233,7 @@ export class LibraryLog {
       return after === null;
     } catch {
       // The post-foreground asset or storage adapter may be transiently unavailable. Retry without exposing either.
-      console.warn('den: retired browser migration storage cleanup will be retried');
+      console.warn('den:log/cleanup-retry');
       return false;
     }
   }
@@ -3262,7 +3262,7 @@ export class LibraryLog {
       )
       .catch((error: unknown) => {
         this.dirty = true;
-        console.warn('den: the library could not be kept for the next visit', error);
+        console.warn('den:log/store', error);
       });
   }
 
@@ -3395,7 +3395,7 @@ export class LibraryLog {
       if (documents && this.wireMin < WIRE) this.wireMin = WIRE;
       return true;
     } catch (error) {
-      console.warn('den: individual library authority could not be opened', error);
+      console.warn('den:log/authority-open', error);
       this.entries.clear();
       this.acknowledged.clear();
       this.resetProfileDirectory();
@@ -3517,14 +3517,12 @@ export class LibraryLog {
       if (!manifest?.complete || manifest.generation !== generation || manifest.head !== saved.head)
         throw new Error('the moved copy does not read back at its head');
     } catch (error) {
-      console.warn('den: the library kept whole could not be moved into the fact store', error);
+      console.warn('den:log/facts-move', error);
       await store?.clear().catch(() => undefined);
     } finally {
       await Promise.all(
         [SNAPSHOT, SNAPSHOT_V4].map((name) => local.vault.delete(`${this.keys.id}:${name}`)),
-      ).catch((error: unknown) =>
-        console.warn('den: the library kept whole could not be removed', error),
-      );
+      ).catch((error: unknown) => console.warn('den:log/whole-remove', error));
     }
   }
 
@@ -3575,7 +3573,7 @@ export class LibraryLog {
         if (!active()) return;
       }
     } catch (error) {
-      console.warn('den: incremental library facts could not be kept', error);
+      console.warn('den:log/facts-store', error);
       this.factStore = null;
     }
   }
@@ -3620,7 +3618,7 @@ export class LibraryLog {
       .then(() => this.keep(PARTIAL, snapshot))
       .catch((error: unknown) => {
         kept = false;
-        console.warn('den: the partial library import could not be kept', error);
+        console.warn('den:log/import-store', error);
       });
     await this.saving;
     return kept;
@@ -4397,16 +4395,13 @@ export class LibraryLog {
         // Remembered for the next visit, which opens without registering again; a failure only costs it that.
         if (registered)
           await this.keep(MEMBER, registered).catch((error: unknown) =>
-            console.warn("den: this browser's membership could not be remembered", error),
+            console.warn('den:log/member-store', error),
           );
-      } else
-        console.warn(
-          `den: den-edge did not register this browser's membership (${res.status} ${(await errorCode(res)) ?? ''})`,
-        );
+      } else console.warn(`den:log/member-refused:${res.status}:${(await errorCode(res)) ?? ''}`);
     } catch (error) {
       if (!active()) return;
       // Sync and playback remain usable; a later write/open retries registration.
-      console.warn("den: this browser's membership could not be registered", error);
+      console.warn('den:log/member-register', error);
     }
   }
 
@@ -4467,7 +4462,7 @@ export class LibraryLog {
       if (scoped) kept.push(scoped);
       else refusedCount++;
     }
-    if (refusedCount) console.error(`den: household refused ${refusedCount} profile rows`);
+    if (refusedCount) console.error(`den:log/profile-rows-refused:${refusedCount}`);
     return kept;
   }
 
@@ -4486,11 +4481,8 @@ export class LibraryLog {
     if (pending.length && !(await this.rememberCompacted(pending))) return false;
     if (!active()) return false;
     const unknown = pending.length - opened.length;
-    if (pending.length)
-      console.error(`den: ${pending.length} pre-split edits dropped (unknown=${unknown})`);
-    console.warn(
-      `den: the household committed profiles; ${this.entries.size} rows held from before it are dropped, not written back`,
-    );
+    if (pending.length) console.error(`den:log/pre-split-drop:${pending.length}:${unknown}`);
+    console.warn(`den:log/profile-adopt:${this.entries.size}`);
     this.entries.clear();
     this.acknowledged.clear();
     this.recoveryRows = undefined;
@@ -4506,7 +4498,7 @@ export class LibraryLog {
           ]),
         )
         .then(() => undefined)
-        .catch(() => console.error('den: the pre-split household cache could not be removed'));
+        .catch(() => console.error('den:log/pre-split-cache'));
     await this.keptWork();
     return active();
   }
@@ -4747,8 +4739,7 @@ export class LibraryLog {
         /* Unreadable: `replay` keeps it, and it has nothing to show. */
       }
     }
-    if (failed)
-      console.error(`den: ${failed} pre-split edits remain quarantined for deletion retry`);
+    if (failed) console.error(`den:log/pre-split-quarantine:${failed}`);
     return kept;
   }
 
@@ -4764,7 +4755,7 @@ export class LibraryLog {
     try {
       converted = this.v4Work(work);
     } catch (error) {
-      console.warn('den: kept library work was refused', error);
+      console.warn('den:log/kept-refused', error);
       return;
     }
     for (const row of converted.restore) this.project(row);
@@ -4850,9 +4841,7 @@ export class LibraryLog {
         work.generation !== undefined &&
         work.generation !== this.generation
       ) {
-        console.warn(
-          'den: a recovery staged for an earlier generation of the library is stale; it is dropped',
-        );
+        console.warn('den:log/stale-recovery');
         await this.discard(key);
         continue;
       }
@@ -4890,7 +4879,7 @@ export class LibraryLog {
           this.recoveryRows = undefined;
       } catch (error) {
         // Keep unsent work; never acknowledge or delete it.
-        console.warn(`den: kept ${kind} work could not be sent; it stays kept`, error);
+        console.warn(`den:log/kept-${kind}-send`, error);
       } finally {
         this.flushing.delete(key);
         release?.();
@@ -4923,7 +4912,7 @@ export class LibraryLog {
         () => new Promise<void>((release) => held(release)),
       ).catch((error: unknown) => {
         // Sent without it, as where the browser has no locks: never left waiting for a lock that will not come.
-        console.error('den: the library recovery lock failed', error);
+        console.error('den:log/recovery-lock', error);
         held(() => {});
       });
     });

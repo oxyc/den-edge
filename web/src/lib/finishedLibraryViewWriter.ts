@@ -187,9 +187,7 @@ export class FinishedLibraryViewWriter {
     this.#force = false;
     this.#saving = this.#saving
       .then(() => this.#write(force))
-      .catch((error: unknown) =>
-        console.warn('den: the library views could not be derived from facts', error),
-      );
+      .catch((error: unknown) => console.warn('den:view/derive', error));
   }
 
   async #write(force: boolean): Promise<void> {

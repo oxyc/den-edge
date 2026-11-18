@@ -585,7 +585,7 @@ export class LibraryServiceCore {
       try {
         listener(messages);
       } catch (error) {
-        console.error('den: a library service listener failed', error);
+        console.error('den:l/core-listener', error);
       }
   }
 

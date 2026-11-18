@@ -329,7 +329,7 @@ export class LibraryServiceClient {
       try {
         subscription.listener(message.value, message.version);
       } catch (error) {
-        console.error('den: a library subscription listener failed', error);
+        console.error('den:l/client-sub', error);
       }
       return;
     }
@@ -342,7 +342,7 @@ export class LibraryServiceClient {
         try {
           listener(message.status);
         } catch (error) {
-          console.error('den: a library status listener failed', error);
+          console.error('den:l/client-status', error);
         }
       return;
     }
@@ -353,7 +353,7 @@ export class LibraryServiceClient {
       try {
         this.#progress?.(message.progress);
       } catch (error) {
-        console.error('den: a library opening listener failed', error);
+        console.error('den:l/client-open', error);
       }
       return;
     }
@@ -404,7 +404,7 @@ export class LibraryServiceClient {
       try {
         listener({ kind: 'failed', error: failure });
       } catch (listenerError) {
-        console.error('den: a library status listener failed', listenerError);
+        console.error('den:l/client-status', listenerError);
       }
   }
 
