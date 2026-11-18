@@ -2279,7 +2279,7 @@ export class LibraryLog {
         }
       }
     }
-    if (oversized) console.warn('den: library rows were too large after the move merge');
+    if (oversized) console.warn('den:log/move-size');
     return rows.size === 0 && kept.size === 0;
   }
 
@@ -3850,9 +3850,7 @@ export class LibraryLog {
         this.flushing.add(kept);
         void this.deliverOps(ops, outcome, kept, undefined, true, riders)
           .then((result) => this.settleDeferred(ops, outcome, result))
-          .catch((error: unknown) =>
-            console.error('den: a library write could not be settled', error),
-          );
+          .catch((error: unknown) => console.error('den:log/write-settle', error));
         return true;
       }
     }
@@ -3878,7 +3876,7 @@ export class LibraryLog {
     this.writes = run.catch(() => false);
     const sent = await run
       .catch((error: unknown) => {
-        console.warn('den: a library write failed', error);
+        console.warn('den:log/write-send', error);
         return false;
       })
       .finally(() => kept && this.flushing.delete(kept));
@@ -3969,7 +3967,7 @@ export class LibraryLog {
         const name = rowName(document);
         const encoded = encodeDocument(document, true);
         if (!encoded) {
-          console.warn('den: a library document is full, so this change was not saved');
+          console.warn('den:log/document-full');
           this.refusal = 'document_full';
           outcome.refused = true;
           return false;
@@ -4054,7 +4052,7 @@ export class LibraryLog {
         this.projected++;
       }
     } catch (error) {
-      console.warn('den: a kept library write could not be drawn', error);
+      console.warn('den:log/write-draw', error);
     }
   }
 
@@ -4216,7 +4214,7 @@ export class LibraryLog {
     const code = await errorCode(res);
     if (res.status === 429) {
       this.throttledUntil = Date.now() + retryAfterMs(res, 60_000);
-      console.warn('den: den-edge asked for fewer library writes; the write is kept and will wait');
+      console.warn('den:log/write-throttle');
       return code;
     }
     if (res.status === 409 && code === 'migration_in_progress') {

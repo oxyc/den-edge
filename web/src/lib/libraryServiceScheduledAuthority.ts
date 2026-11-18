@@ -260,11 +260,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
             )
               this.#emit({ kind: 'changed', affected: [{ kind: 'downloads' }] });
           } catch (error) {
-            if (!this.#closed) console.warn('den: download maintenance failed', error);
+            if (!this.#closed) console.warn('den:maintenance/download', error);
           }
       } catch (error) {
         if (this.#closed) return;
-        console.warn('den: library service maintenance failed', error);
+        console.warn('den:maintenance/library', error);
         const status: LibraryAuthorityStatus = { kind: 'reconnecting' };
         if (!sameStatus(this.#lastStatus, status)) {
           this.#lastStatus = status;
@@ -319,7 +319,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
         )
           this.#emit({ kind: 'changed', affected: [{ kind: 'simkl' }, { kind: 'connections' }] });
       } catch (error) {
-        if (!this.#closed) console.warn('den: SIMKL delivery failed', error);
+        if (!this.#closed) console.warn('den:maintenance/simkl', error);
       }
     })();
     this.#deliveryRunning = running;
@@ -344,7 +344,7 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
       try {
         listener(event);
       } catch (error) {
-        console.error('den: a library authority listener failed', error);
+        console.error('den:l/authority-listener', error);
       }
   }
 }

@@ -130,7 +130,7 @@ export async function ageAllowed(
       explicitApproval,
     });
   } catch (error) {
-    console.error('den: the age policy could not be evaluated; the title stays hidden', error);
+    console.error('den:policy/evaluate', error);
     return false;
   }
 }

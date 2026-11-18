@@ -130,8 +130,7 @@ function createServiceConnection(
     if (!grants.length && !sharedGrants) return;
     sharedGrants = true;
     content.query({ kind: 'grants.configure', grants }).catch((error: unknown) => {
-      if (!closed)
-        console.warn('den: the library Worker could not be given the held grants', error);
+      if (!closed) console.warn('den:l/worker-grants', error);
     });
   });
   const stopGrantEnded = content.onStatus((status) => {

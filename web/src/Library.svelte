@@ -178,7 +178,7 @@
   const EVERYONE_NAMED = 20;
   /** Let the hero's loaded image reach a paint before background provider synchronization starts. */
   const PROVIDERS_AFTER_HERO_MS = 1_000;
-  const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
+  const warnKeep = (error: unknown) => console.warn('den:home/store', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   const model = untrack(() => session.model);
@@ -1512,7 +1512,7 @@
     session.notify(push.title ? `Starting “${push.title}”…` : 'Starting…');
     void householdModel
       ?.markPlayed()
-      .catch((error: unknown) => console.warn('den: could not record the play', error));
+      .catch((error: unknown) => console.warn('den:play/record', error));
   }
 
   // Hosted webOS and packaged Tizen TVs take the plays and transport commands any device holding the library sends
@@ -2002,10 +2002,7 @@
   function rememberPlaybackSource(source: 'torbox' | 'den-remux'): void {
     const patch = { preferredPlaybackSource: source } as const;
     const saving = session.preferences?.patch(patch) ?? model?.patchPreferences(patch);
-    if (saving)
-      void saving.catch((error: unknown) =>
-        console.warn('den: playback source preference save failed', error),
-      );
+    if (saving) void saving.catch((error: unknown) => console.warn('den:play/source-save', error));
   }
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */

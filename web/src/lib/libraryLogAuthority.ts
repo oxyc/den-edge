@@ -1875,7 +1875,7 @@ export class LibraryLogAuthority {
     try {
       shown = heldSimklRemovals(this.#log);
     } catch (error) {
-      console.warn('den: held SIMKL removals could not be projected', error);
+      console.warn('den:simkl/project', error);
     }
     const signature = JSON.stringify([account, shown.titles, shown.approval]);
     if (!shown.approval || shown.titles.length === 0) this.#simklApproval = undefined;

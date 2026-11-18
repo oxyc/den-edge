@@ -89,7 +89,7 @@
         writes: historyImportItems(result.marks, result.shows),
       };
     } catch (error) {
-      console.warn('den: Netflix import failed', error);
+      console.warn('den:import/netflix', error);
       owned.state = { step: 'failed', message: 'Couldn’t read that history. Please try again.' };
     }
   }

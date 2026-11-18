@@ -318,7 +318,7 @@
       }
     } catch (error) {
       if (generation !== pinGeneration) return;
-      console.warn('den: the Owner PIN could not be checked', error);
+      console.warn('den:p/owner-pin', error);
       pinProblem = 'Owner PIN couldn’t be checked. Try again.';
     } finally {
       if (generation === pinGeneration) pinBusy = false;
