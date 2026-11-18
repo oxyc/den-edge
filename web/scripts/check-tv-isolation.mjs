@@ -441,5 +441,9 @@ if (process.argv.includes('--capture')) {
   // decision, the countdown and its once-spoken notice, the pause/seek cancellation, the reset fences and the desktop
   // Skip button's missing `pointer-events`. It adds no timer, request or listener beyond the existing media-event
   // handlers; startup moves 10,719 -> 10,725. Allow the smallest 128-byte boundary containing it, retaining 44.
-  if (coreTotalDelta > 125568) throw new Error('Browser total JS/CSS budget exceeded');
+  // Bounded Reel requests and the fail-closed relay fallback (#1257/#1258) measured 126,176 against matched main's
+  // 125,524 (+652, main at 2d35b3f1). About 133 is the deadlines and fallback; about 520 is the poorer compression of
+  // the transport negotiation as its own lazy chunk, loaded only when a carried trailer is first tried. That split
+  // takes startup 10,725 -> 10,529 (-196). Allow the smallest 128-byte boundary containing it, retaining 32.
+  if (coreTotalDelta > 126208) throw new Error('Browser total JS/CSS budget exceeded');
 }

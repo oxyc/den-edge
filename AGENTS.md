@@ -99,6 +99,16 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Bounded Reel prepare/plan/transport requests and the fail-closed relay fallback (#1257/#1258) were measured on
+  matched production builds at base `2d35b3f1` and the repair. Ordinary Browser startup moves 10,725 → 10,529 over
+  the fixed baseline (-196 gzip bytes), while the complete non-translation graph moves 125,524 → 126,176 (+652);
+  translations are unchanged. About 133 bytes are the four deadlines and the local-page relay check; about 520 are the
+  poorer compression of Edge's transport negotiation as its own lazy `reelTransport` chunk. That chunk is fetched only
+  the first time a carried trailer is tried, and it imports nothing at runtime: a lazy module importing `reel.ts`
+  pulled it out of the eager PosterCard chunk and fragmented `ipv4`/`retryAfter` (-1,142 startup, +1,381 complete),
+  while keeping everything inline cost +118 startup. Trailers are second-class, so the startup saving wins. The
+  complete ceiling advances to 126,208, the smallest 128-byte boundary containing the build (32 bytes of margin); the
+  startup and translation ceilings are unchanged.
 - The auto-skip grace period (#1208) was measured on matched production builds at base `0321382f` and the repair.
   Ordinary Browser startup moves 207,115 → 207,121 gzip bytes (+6, minification; no startup code changed), while
   the complete graph moves 902,103 → 902,753 (+650). Independently lazy Spanish/Swedish catalogs account for +177,
