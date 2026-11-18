@@ -244,6 +244,60 @@ test('a touch preview opens Search and focuses its editor within the activating 
   }
 });
 
+test('LG touch APIs do not parse Search before TV intent', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 },
+    hasTouch: true,
+    userAgent:
+      'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.270 Safari/537.36 WebAppManager',
+  });
+  const page = await context.newPage();
+  try {
+    await page.addInitScript(() => {
+      window.__tvSearchPreloaded = false;
+      document.addEventListener('den:tv-search-preloaded', () => {
+        window.__tvSearchPreloaded = true;
+      });
+    });
+    await setup(page);
+    await browse(page);
+    expect(await page.evaluate(() => window.__tvSearchPreloaded)).toBe(false);
+
+    await page.getByRole('button', { name: 'Search', exact: true }).tap();
+    await expect(page).toHaveURL(/\/search/);
+    await expect.poll(() => page.evaluate(() => window.__tvSearchPreloaded)).toBe(true);
+    await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();
+  } finally {
+    await context.close();
+  }
+});
+
+test('directional menu focus switches TV pages without Select', async ({ page }) => {
+  await setup(page);
+  await browse(page);
+
+  const search = page.getByRole('button', { name: 'Search', exact: true });
+  await remoteTo(page, search, ['ArrowUp', 'ArrowLeft']);
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/search`);
+
+  await page.keyboard.press('ArrowRight');
+  const home = page.getByRole('link', { name: 'Home', exact: true });
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+  await expect(home).toBeFocused();
+
+  await page.keyboard.press('ArrowRight');
+  const movies = page.getByRole('link', { name: 'Movies', exact: true });
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/movies`);
+  await expect(movies).toHaveAttribute('aria-current', 'page');
+  await expect(movies).toBeFocused();
+
+  await page.keyboard.press('ArrowRight');
+  const series = page.getByRole('link', { name: 'Series', exact: true });
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/series`);
+  await expect(series).toHaveAttribute('aria-current', 'page');
+  await expect(series).toBeFocused();
+});
+
 test('TV Search opens when the legacy browser has no userActivation API', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'userActivation', {

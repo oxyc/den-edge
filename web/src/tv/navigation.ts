@@ -1,5 +1,5 @@
 import { flushSync } from 'svelte';
-import { appPath, routeKey as pageRouteKey } from '../lib/navigation';
+import { appPath, navigate, routeKey as pageRouteKey } from '../lib/navigation';
 import { parseRoute } from '../lib/route';
 import { currentAppPath } from '../lib/runtimeUrl';
 import { SearchScreen } from '../lib/screens.svelte';
@@ -23,9 +23,13 @@ const move = (
   include?: Parameters<typeof moveFocus>[1],
 ) => moveFocus(direction, include, 'auto');
 
-/** A real touch digit, unlike a Magic Remote's coarse pointer, needs Search ready inside its activating tap. */
-export const touchNeedsSearchPreload = (touchPoints: number, hasTouchEvents: boolean): boolean =>
-  touchPoints > 0 || hasTouchEvents;
+/** A real touch preview, unlike a TV remote or Magic Remote, needs Search ready inside its activating tap. */
+export const touchNeedsSearchPreload = (
+  touchPoints: number,
+  hasTouchEvents: boolean,
+  userAgent = '',
+): boolean =>
+  !/(?:Web0S|webOS|Tizen|DenAndroidTV\/)/.test(userAgent) && (touchPoints > 0 || hasTouchEvents);
 
 /** Leaving a restored Search focus is not Search intent; arriving on it is handled after spatial movement. */
 export const searchKeyNeedsPreload = (key: string): boolean =>
@@ -203,7 +207,9 @@ export function installTVNavigation(): () => void {
   };
   // Magic Remote and ordinary TV remotes report a coarse pointer too, but have no software keyboard activation to
   // preserve. Only an actual touch digit needs Search ready before its first tap; remote focus remains intent.
-  if (touchNeedsSearchPreload(navigator.maxTouchPoints, 'ontouchstart' in window))
+  if (
+    touchNeedsSearchPreload(navigator.maxTouchPoints, 'ontouchstart' in window, navigator.userAgent)
+  )
     void preloadSearch();
   const searchButton = (target: EventTarget | null) =>
     target instanceof Element ? target.closest('.tv-search-button') : null;
@@ -295,6 +301,19 @@ export function installTVNavigation(): () => void {
     // the source route's remembered control.
     locationKey = routeKey();
     remember();
+  };
+  const activateFocusedMenu = () => {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    const search = searchButton(active);
+    const anchor = active.closest<HTMLAnchorElement>('.tv-bar nav a');
+    const path = search ? '/search' : anchor ? appPath(anchor.href, location.href) : null;
+    if (!path) return;
+    const next = routeKey(path);
+    if (next === locationKey) return;
+    const identity = focusIdentity(active);
+    if (identity) rememberAt(next, identity);
+    navigate(path);
   };
   const onKey = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -455,6 +474,7 @@ export function installTVNavigation(): () => void {
           : undefined;
       if (move(direction, contentOnly)) {
         if (searchButton(document.activeElement)) void preloadSearch();
+        activateFocusedMenu();
         event.preventDefault();
         event.stopImmediatePropagation();
       } else if (direction === 'up' && scrollY > 8) {
