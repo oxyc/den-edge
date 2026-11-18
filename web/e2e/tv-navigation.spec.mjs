@@ -473,9 +473,9 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await setup(page);
   await browse(page);
 
+  const previousUrl = page.url();
   const settings = page.getByRole('link', { name: 'Settings', exact: true });
   await remoteTo(page, settings, ['ArrowUp', 'ArrowRight']);
-  const previousUrl = page.url();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
