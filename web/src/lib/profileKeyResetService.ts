@@ -205,7 +205,7 @@ export class ProfileKeyResetService {
       snapshot = await successor.resetSnapshot();
     } catch (error) {
       // An unreadable successor is not a confirmed one; the page installs again and asks again.
-      console.warn('den:p/successor-readback', error);
+      console.warn('den:p/next-read', error);
       return 'waiting';
     }
     // Rows other devices or this page write after the commit are fine; the directory it was committed with is not

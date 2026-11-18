@@ -983,7 +983,7 @@ export class LibraryLogAuthority {
           return admission === undefined || admission === true;
         } catch (error) {
           // A refused or unreachable source read keeps the reset closed; it is not an answer to guess past.
-          console.warn('den:p/reset-gate', error);
+          console.warn('den:p/gate', error);
           return false;
         }
       },
@@ -1231,7 +1231,7 @@ export class LibraryLogAuthority {
         error instanceof LibraryStartRefused &&
         (error.status === 429 || error.status === 503 || error.status === 413);
       const refused = error instanceof LibraryStartRefused && error.status === 403;
-      console.warn('den:p/household-start', error);
+      console.warn('den:p/home-start', error);
       return {
         result: {
           kind: 'household.create',
@@ -2228,7 +2228,7 @@ export class LibraryLogAuthority {
     try {
       await this.#log.keep(RETAINED_PREFERENCE_SEED, acceptedHousehold);
     } catch (error) {
-      console.warn('den:p/preference-seed-store', error);
+      console.warn('den:p/seed-store', error);
     }
     return result;
   }

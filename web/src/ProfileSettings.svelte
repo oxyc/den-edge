@@ -58,7 +58,7 @@
       const unlocked = await coordinator.unlockSettings(entered);
       if (current()) denied = !unlocked;
     } catch (error) {
-      console.warn('den:p/pin-check', error);
+      console.warn('den:p/pin', error);
       if (current()) verificationFailed = true;
     } finally {
       if (current()) {
@@ -92,7 +92,7 @@
         return setInterfaceLanguage(changes.interfaceLanguage);
       })
       .catch((error: unknown) => {
-        console.warn('den:p/preference-save', error);
+        console.warn('den:p/pref-save', error);
         failure = i18n.text('profile.saveFailed');
       })
       .finally(() => (saving = false));

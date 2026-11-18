@@ -153,7 +153,7 @@ export class ScopedReleaseMemory {
       );
     } catch (error) {
       // A private window or a full store: the pick still holds in this mounted player.
-      console.warn('den:p/release-store', error);
+      console.warn('den:p/release', error);
     }
   }
 

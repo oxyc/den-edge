@@ -290,6 +290,7 @@ describe('ProfileSession presentation state', () => {
       'household-key',
       `profile:${KID_ID}:kid-library-key`,
     ]);
+    expect(activate).toHaveBeenCalledOnce();
     expect(householdForeground).toHaveBeenCalledOnce();
     expect(profileForeground).toHaveBeenCalledOnce();
     expect(profileClose).toHaveBeenCalledOnce();

@@ -315,7 +315,7 @@
               __DEN_TV__ ? 1 : undefined,
             );
           })().catch((error: unknown) => {
-            if (current) console.warn('den:p/device-checkin', error);
+            if (current) console.warn('den:p/checkin', error);
           }),
         1_000,
       );
@@ -744,7 +744,7 @@
         if (result.outcome === 'failed' || result.outcome === 'denied')
           console.warn('den: profile switch', 'kid', result.outcome);
       })
-      .catch(() => console.warn('den:p/kid-transition'));
+      .catch(() => console.warn('den:p/kid-switch'));
   });
 
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
@@ -848,7 +848,7 @@
       await retireMovedLibrary(source);
       return 'joined';
     } catch (error) {
-      console.warn('den:p/household-join', error);
+      console.warn('den:p/h-join', error);
       return 'failed';
     } finally {
       opened.close();
@@ -1011,7 +1011,7 @@
       } else if (outcome === 'refused') householdRefused = true;
       else if (outcome !== 'empty') retryMs = retryAfterMs ?? HOUSEHOLD_RETRY_MS;
     } catch (error) {
-      console.warn('den:p/household-create', error);
+      console.warn('den:p/h-create', error);
       retryMs = HOUSEHOLD_RETRY_MS;
     } finally {
       householdStarting = false;
@@ -1105,7 +1105,7 @@
       staged?.dispose();
       return 'adopted';
     } catch (error) {
-      console.warn('den:p/household-move', error);
+      console.warn('den:p/h-move', error);
       owner.close();
       destination.close();
       return waitMs;
@@ -1421,7 +1421,7 @@
           if (alive && (result === 'waiting' || result === 'blocked'))
             compoundRetry = setTimeout(() => (pendingReset = readPendingReset()), 15_000);
         })
-        .catch(() => console.warn('den:p/reset-continue'));
+        .catch(() => console.warn('den:p/reset-next'));
     run();
     return () => clearTimeout(compoundRetry);
   });
@@ -1862,7 +1862,7 @@
         if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
           setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
       })
-      .catch(() => console.warn('den:p/guest-start'))
+      .catch(() => console.warn('den:p/guest'))
       .finally(() => (guestStarting = false));
   });
 </script>

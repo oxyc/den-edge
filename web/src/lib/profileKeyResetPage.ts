@@ -139,7 +139,7 @@ export class CompoundResetPage<Destination> {
     try {
       worker = await this.deps.worker(pending.from);
     } catch (error) {
-      console.warn('den:p/reset-service', error);
+      console.warn('den:p/reset-svc', error);
       return 'blocked';
     }
     try {
@@ -213,7 +213,7 @@ export class CompoundResetPage<Destination> {
       // The readback: the destination reads under the new key before anything points at it.
       destination = await this.deps.openDestination(pending.to);
     } catch (error) {
-      console.warn('den:p/successor-open', error);
+      console.warn('den:p/next-open', error);
       return 'waiting';
     }
     if (!this.#ownsPresentation(pending)) {
