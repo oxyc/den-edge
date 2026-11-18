@@ -165,7 +165,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
         resp.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         resp.headers_mut().insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-den-wire-min, x-den-generation"),
+            HeaderValue::from_static("x-den-wire-min, x-den-generation, x-den-skipdb"),
         );
     }
     if !state.web_origins.is_empty() {

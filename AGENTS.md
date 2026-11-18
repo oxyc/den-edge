@@ -99,6 +99,14 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Consuming a segment scan the current play started (#1201) was measured on matched production builds at base
+  `053a769e` and the change. Ordinary Browser startup moves 10,529 → 10,512 over the fixed baseline (-17 gzip bytes,
+  minification; no startup code changed), while the complete non-translation graph moves 126,176 → 126,292 (+116);
+  translations are unchanged. All of it is in the existing lazy Player chunk: the re-ask schedule (the Apple TV's
+  45 s, 120 s and last-12-minutes re-asks), the per-episode reset and reading den-edge's settled-miss
+  `x-den-skipdb`. It must sit with the player clock that drives it; no timer, interval, listener or request beyond
+  those three re-asks is added. The complete ceiling advances to 126,336, the smallest 128-byte boundary containing
+  the build (44 bytes of margin); the startup and translation ceilings are unchanged.
 - Bounded Reel prepare/plan/transport requests and the fail-closed relay fallback (#1257/#1258) were measured on
   matched production builds at base `2d35b3f1` and the repair. Ordinary Browser startup moves 10,725 → 10,529 over
   the fixed baseline (-196 gzip bytes), while the complete non-translation graph moves 125,524 → 126,176 (+652);

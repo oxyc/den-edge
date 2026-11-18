@@ -241,6 +241,18 @@ async fn detected(
             miss.headers_mut().insert(header::CACHE_CONTROL, value);
         }
     }
+    // Said only where no scan will change this answer, so a player stops asking again (`web/src/lib/skipdb.ts`).
+    // A scan pending and one just asked for stay alike: on this public route, telling them apart would say that
+    // somebody is watching the episode right now.
+    let settled = match tag {
+        "none" => Some("none"),
+        "unknown" if state.segments_key.is_some() => None,
+        "unknown" | "unavailable" => Some("unavailable"),
+        _ => None,
+    };
+    if let Some(settled) = settled {
+        miss.headers_mut().insert("x-den-skipdb", HeaderValue::from_static(settled));
+    }
     miss.extensions_mut().insert(crate::handler::SrcTag(tag));
     miss
 }
@@ -1021,6 +1033,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
         assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "unknown");
+        assert!(resp.headers().get("x-den-skipdb").is_none(), "a scan may still answer this");
         scans(&remux, 1).await;
         let (key, body) = crate::lock(&remux.scans)[0].clone();
         assert_eq!(key.as_deref(), Some("segkey"));
@@ -1052,15 +1065,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
         assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "pending");
+        // Pending reads exactly like a scan just asked for: nothing says somebody is watching it right now.
+        assert!(resp.headers().get("x-den-skipdb").is_none());
         scans(&remux, 0).await;
 
-        // No key: remux is read, never asked to scan.
+        // No key: remux is read, never asked to scan, so the miss says none is coming.
         *crate::lock(&remux.answer) = UNKNOWN;
         let keyless = harness(&remux, None);
         let (answers, _) = skipdb("tt0000505");
         *crate::lock(&answers) = (StatusCode::OK, NOTHING);
         let resp = keyless.send("GET", "/skipdb/tt0000505/1/1", None, &[]).await;
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
+        assert_eq!(resp.headers()["x-den-skipdb"], "unavailable");
+        scans(&remux, 0).await;
+
+        // A scan pending elsewhere (an Apple TV asks remux itself) may still land, key or not.
+        *crate::lock(&remux.answer) = PENDING;
+        let resp = keyless.send("GET", "/skipdb/tt0000505/1/2", None, &[]).await;
+        assert!(resp.headers().get("x-den-skipdb").is_none());
+    }
+
+    /// Scanned with nothing found: no scan will change it, and the miss says so.
+    #[tokio::test]
+    async fn a_scan_that_found_nothing_is_settled() {
+        let remux = remux((StatusCode::OK, r#"{"duration":2700.0,"intro":null,"credits":null}"#)).await;
+        let h = harness(&remux, Some("k"));
+        let (answers, _) = skipdb("tt0000511");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        let resp = h.send("GET", "/skipdb/tt0000511/1/1?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "none");
+        assert_eq!(resp.headers()["x-den-skipdb"], "none");
         scans(&remux, 0).await;
     }
 
@@ -1121,6 +1156,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::NOT_FOUND);
             assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
             assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "unavailable");
+            assert_eq!(resp.headers()["x-den-skipdb"], "unavailable");
         }
         assert_eq!(*crate::lock(&remux.gets), 3);
         scans(&remux, 0).await;

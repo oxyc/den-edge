@@ -136,13 +136,33 @@ function parse(body: unknown): Answer {
 async function ask(path: string, signal: AbortSignal | undefined, fetchImpl: typeof fetch) {
   try {
     const res = await fetchImpl(path, { signal, headers: { accept: 'application/json' } });
-    // A miss is a normal empty result, never an error: skip is an enhancement, not a required path.
-    if (!res.ok) return null;
-    return parse((await res.json()) as unknown);
+    // A miss is a normal empty result, never an error: skip is an enhancement, not a required path. `settled` is
+    // den-edge's word that no scan will change it (`skipdb.rs::detected`): scanned with nothing found, or no scan to
+    // be had. A pending scan is never said, so only these two stop a re-ask (`recheckDue`).
+    return {
+      ...parse(res.ok ? ((await res.json()) as unknown) : null),
+      settled: /^(none|unavailable)$/.test(res.headers.get('x-den-skipdb')!),
+    };
   } catch {
     return null;
   }
 }
+
+/** What `fetchSkipSegments` found, and whether den-edge said no scan will add to it. */
+export interface SkipAnswer {
+  segments: SkipSegment[];
+  settled: boolean;
+}
+
+/**
+ * Whether this tick asks an episode's miss again, on the Apple TV's schedule (`refreshSkipSegmentsAfterScan`): 45 s
+ * and 120 s after the first answer, while a scan den-edge started for this play may land, then once in the last 12
+ * minutes — three re-asks at most. `made` is the re-asks made, `since` the seconds since the first answer and
+ * `at`/`length` the playhead and runtime. The caller stops at any segments (remux keeps a scan's intro and credits as
+ * one result, and a SkipDB answer is never remux's) and at a settled miss.
+ */
+export const recheckDue = (made: number, since: number, at: number, length: number): boolean =>
+  made < 2 ? since >= (made ? 120 : 45) : made < 3 && length > 0 && at >= length - 720;
 
 /**
  * The skip segments for what is playing, best aligned to this release.
@@ -170,7 +190,7 @@ export async function fetchSkipSegments(
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
   } = {},
-): Promise<SkipSegment[]> {
+): Promise<SkipAnswer> {
   const episodePath = season !== undefined && episode !== undefined ? `/${season}/${episode}` : '';
   const base = `/skipdb/${encodeURIComponent(imdb)}${episodePath}`;
   const runtime =
@@ -179,6 +199,8 @@ export async function fetchSkipSegments(
       : undefined;
 
   const aligned = await ask(runtime ? `${base}?duration=${runtime}` : base, signal, fetchImpl);
-  if (aligned?.segments.length || !runtime || !aligned?.named) return aligned?.segments ?? [];
-  return (await ask(base, signal, fetchImpl))?.segments ?? [];
+  const settled = !!aligned?.settled;
+  if (aligned?.segments.length || !runtime || !aligned?.named)
+    return { segments: aligned?.segments ?? [], settled };
+  return { segments: (await ask(base, signal, fetchImpl))?.segments ?? [], settled };
 }
