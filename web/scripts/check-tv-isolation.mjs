@@ -425,5 +425,9 @@ if (process.argv.includes('--capture')) {
   // over main's recorded 123,896, in the lazy Player chunk and the separately served cast page; startup is unchanged.
   // The next boundary would leave 83 bytes against #1282's run-to-run variance, so allow the one after it, retaining
   // 211.
+  // Physical LG startup attribution adds 16 gzip bytes to the initial graph and 44 bytes to the complete graph on
+  // matched base/head builds (207,111 -> 207,127; 124,681 -> 124,725). The two fixed phase names and their calls must
+  // be eager: a lazy boundary would begin after the profile handover/metadata flushes they identify and add a request
+  // to the measured path. Both existing caps stay unchanged; the complete-graph cap retains 75 bytes.
   if (coreTotalDelta > 124800) throw new Error('Browser total JS/CSS budget exceeded');
 }

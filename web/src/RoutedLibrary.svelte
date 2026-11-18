@@ -75,6 +75,7 @@
     startupFailure,
     startupHandedOver,
     startupMark,
+    startupRenderPhase,
     watchStartupHandover,
   } from './lib/startupTiming';
   import type { CompoundResetPage, CompoundResetStartResult } from './lib/profileKeyResetPage';
@@ -681,6 +682,7 @@
     const active = coordinator.session;
     if (!active) return;
     if (session !== active) {
+      startupRenderPhase('profile_handover');
       // The first authenticated session replaces a hidden bootstrap model, not another viewer. Preserve a direct
       // launch URL for that initial Owner/Kid/Visitor; only later changes retire an already-visible route scope.
       const next = profileSessionKey(active.identity, active.policyKey);

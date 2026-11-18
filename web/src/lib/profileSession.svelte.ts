@@ -29,6 +29,7 @@ import {
   readFreshPresentationLanguageHint,
   readPresentationLanguageHint,
 } from './translationCache';
+import { startupRenderPhase } from './startupTiming';
 
 const TOAST_MS = 6_000;
 /** How long the first content request waits for the profile settings that name the watch region. */
@@ -244,6 +245,7 @@ export class ProfileSession {
     shapes: ReadonlyArray<readonly [string, Shape]>,
     missing: readonly TitleRef[] = [],
   ): void {
+    startupRenderPhase('library_metadata');
     for (const title of titles) {
       const key = titleKey(title);
       if (!this.#displays.has(key)) this.#displays.set(key, title);
