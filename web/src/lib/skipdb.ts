@@ -20,7 +20,7 @@ export interface SkipSegment {
   confidence: number;
 }
 
-/** What a Skip button says for each kind — the same words the Apple TV uses. */
+/** What a Skip button says for each kind — the same words the Apple TV uses. `Button` translates them (`i18n.phrase`). */
 export const SKIP_LABEL: Record<SkipKind, string> = {
   intro: 'Skip Intro',
   recap: 'Skip Recap',
@@ -46,6 +46,55 @@ export const AUTO_SKIP_CONFIDENCE = 0.8;
 /** Whether this segment may be skipped without the viewer asking. Below the bar it still offers its button. */
 export const canAutoSkip = (segment: SkipSegment): boolean =>
   segment.confidence >= AUTO_SKIP_CONFIDENCE;
+
+/**
+ * How long an automatic skip waits, visibly, before it seeks: the Apple TV's `PlayerModel.autoSkipCountdown`.
+ * Long enough to refuse a bad boundary through ordinary playback interaction, short enough not to slow an intro.
+ */
+export const AUTO_SKIP_GRACE_MS = 8_000;
+
+/** An automatic skip the player has announced and not yet made. `deadline` is on a monotonic clock. */
+export interface PendingAutoSkip {
+  readonly segment: SkipSegment;
+  readonly deadline: number;
+}
+
+const sameSegment = (a: SkipSegment, b: SkipSegment): boolean =>
+  a.kind === b.kind && a.start === b.start && a.end === b.end;
+
+/**
+ * One progress tick of auto-skip, as the Apple TV's `maybeAutoSkip` decides it: nothing, a countdown, or the skip.
+ *
+ * `settled` is a kind this playback already skipped, cancelled or tried to auto-skip: scrubbing back into it, or
+ * pausing during its countdown, leaves it to the Skip button. A segment below `AUTO_SKIP_CONFIDENCE` only ever
+ * offers that button. Entering a segment (or a different one) starts its countdown; leaving it drops the countdown,
+ * and coming back starts a new one. `now` is a monotonic clock (`performance.now()`), so a wall-clock change can
+ * neither shorten nor extend the warning. The same `pending` is returned while it waits, so a caller can keep it.
+ */
+export function nextAutoSkip(
+  enabled: boolean,
+  active: SkipSegment | null,
+  settled: boolean,
+  pending: PendingAutoSkip | null,
+  now: number,
+): PendingAutoSkip | 'skip' | null {
+  if (!enabled || !active || !canAutoSkip(active) || settled) return null;
+  if (!pending || !sameSegment(pending.segment, active))
+    return { segment: active, deadline: now + AUTO_SKIP_GRACE_MS };
+  return now >= pending.deadline ? 'skip' : pending;
+}
+
+/** The whole seconds a countdown shows: 8 when it starts, never 0 — the skip itself replaces the 1. */
+export const autoSkipCountdown = (pending: PendingAutoSkip, now: number): number =>
+  Math.max(1, Math.ceil((pending.deadline - now) / 1000));
+
+/**
+ * Whether a viewer's play/pause (`at` omitted) or seek to `at` cancels the countdown, as a Play/Pause or arrow press
+ * does on the Apple TV. A seek that lands inside the segment means they are watching it; one that leaves it only
+ * drops the countdown (`nextAutoSkip`), as scrubbing away does there.
+ */
+export const cancelsAutoSkip = (pending: PendingAutoSkip | null, at?: number): boolean =>
+  !!pending && (at === undefined || (at >= pending.segment.start && at < pending.segment.end));
 
 /** The segment under the playhead, if any — what a Skip button should offer. */
 export function activeAt(segments: readonly SkipSegment[], time: number): SkipSegment | null {

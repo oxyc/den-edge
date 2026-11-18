@@ -133,9 +133,13 @@
   import { airDate, cleanedOverview } from '../lib/detailPresentation';
   import {
     activeAt,
-    canAutoSkip,
+    AUTO_SKIP_GRACE_MS,
+    autoSkipCountdown,
+    cancelsAutoSkip,
     fetchSkipSegments,
+    nextAutoSkip,
     SKIP_LABEL,
+    type PendingAutoSkip,
     type SkipKind,
     type SkipSegment,
   } from '../lib/skipdb';
@@ -2017,6 +2021,7 @@
       segments = [];
       active = null;
       askedFor = 0;
+      retireAutoSkip();
     }
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
@@ -4797,6 +4802,29 @@
   // SvelteSet, and reactivity is the one thing this must not have — nothing renders it, and a write must not
   // re-run the tick that made it. Four kinds do not need a Set anyway.
   const skipped: Partial<Record<SkipKind, true>> = {};
+  /**
+   * Kinds whose countdown the viewer cancelled, or which reached their deadline, in this session: they keep the Skip
+   * button and are not counted down again (`nextAutoSkip`'s `settled`). A deadline whose seek failed is settled too,
+   * so it cannot loop. Plain, like `skipped`.
+   */
+  const autoSkipSettled: Partial<Record<SkipKind, true>> = {};
+  /** The announced automatic skip, if one is counting down. Plain: `autoSkipIn` is what renders. */
+  let autoSkipPending: PendingAutoSkip | null = null;
+  /** The countdown's whole seconds, changing once a second rather than at every tick. */
+  let autoSkipIn = $state<number | null>(null);
+
+  function retireAutoSkip() {
+    autoSkipPending = null;
+    autoSkipIn = null;
+  }
+
+  /** A viewer's play/pause (`at` omitted) or seek: inside the counting-down segment, it cancels that countdown. */
+  function engageAutoSkip(at?: number) {
+    if (!cancelsAutoSkip(autoSkipPending, at)) return;
+    autoSkipSettled[autoSkipPending!.segment.kind] = true;
+    retireAutoSkip();
+  }
+
   /** The length SkipDB was last asked about; 0 before it was asked. */
   let askedFor = 0;
   /** The release SkipDB was last asked about, by filename. */
@@ -4853,8 +4881,21 @@
     warmNext(at);
     if (!segments.length) return;
     active = activeAt(segments, at);
-    if (!autoSkip || !active || !canAutoSkip(active) || skipped[active.kind]) return;
-    skipActive();
+    const now = performance.now();
+    const next = nextAutoSkip(
+      autoSkip,
+      active,
+      !!active && !!(skipped[active.kind] || autoSkipSettled[active.kind]),
+      autoSkipPending,
+      now,
+    );
+    if (next === 'skip') {
+      autoSkipSettled[active!.kind] = true;
+      skipActive();
+      return;
+    }
+    autoSkipPending = next;
+    autoSkipIn = next && autoSkipCountdown(next, now);
   }
 
   /** Whether the next episode has already been warmed. Not `$state`: nothing renders it. */
@@ -4958,6 +4999,7 @@
   function skipActive() {
     const segment = active;
     if (!segment) return;
+    retireAutoSkip();
     const total = length();
     const to = total > 0 ? Math.min(total, segment.end) : segment.end;
     if (video) video.currentTime = to;
@@ -4988,6 +5030,7 @@
 
   /** Den's transport moves the picture here, or the cast page's (`framePlays`). */
   function seekTo(time: number) {
+    engageAutoSkip(time);
     if (framePlays) {
       if (!seekCastFrame(time)) return;
       remoteTime = time;
@@ -5016,6 +5059,7 @@
   }
 
   function togglePlaying() {
+    engageAutoSkip();
     if (framePlays) {
       // Shown at once; the receiver's next progress says whether it did.
       if (tellReceiver({ type: tvPaused ? 'den-play' : 'den-pause' })) tvPaused = !tvPaused;
@@ -5660,6 +5704,8 @@
     segmentsOf = undefined;
     segmentRequest += 1;
     for (const kind of Object.keys(skipped) as SkipKind[]) delete skipped[kind];
+    for (const kind of Object.keys(autoSkipSettled) as SkipKind[]) delete autoSkipSettled[kind];
+    retireAutoSkip();
     warmedNext = false;
     nextDetailRequest?.abort();
     nextDetailRequest = undefined;
@@ -6839,8 +6885,15 @@
             }, AUTOPLAY_GRACE_MS);
           }}
           onplay={playing}
-          onpause={paused}
-          onseeking={stay}
+          onpause={() => {
+            // Every pause: Den's controls, the browser's own in fullscreen, a TV remote, a headset.
+            engageAutoSkip();
+            paused();
+          }}
+          onseeking={() => {
+            stay();
+            engageAutoSkip(video?.currentTime);
+          }}
           ontimeupdate={tick}
           onended={finished}
           onerror={() => {
@@ -6973,14 +7026,7 @@
             <button type="button" onclick={close}>Close</button>
           </nav>
         {/if}
-        {#if fullTvTransport && active}
-          <Button
-            variant="primary"
-            class="tv-skip-overlay"
-            label={SKIP_LABEL[active.kind]}
-            onclick={skipActive}
-          />
-        {/if}
+        {#if fullTvTransport}{@render skipAction('tv-skip-overlay')}{/if}
         {#if customTransport && tvSubtitleTimingOpen}
           <section
             bind:this={subtitleTimingPanel}
@@ -7165,9 +7211,7 @@
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
              fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
              auto-skip, being a seek, still works there. -->
-        {#if !customTransport && active}
-          <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
-        {/if}
+        {#if !customTransport}{@render skipAction('')}{/if}
         {#if onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
@@ -7285,14 +7329,7 @@
   <nav class="web-transport" aria-label="Playback controls">
     {#if session && (active || (onnext && next && upNext !== null))}
       <div class="web-floating">
-        {#if active}
-          <Button
-            variant="primary"
-            class="web-skip"
-            label={SKIP_LABEL[active.kind]}
-            onclick={skipActive}
-          />
-        {/if}
+        {@render skipAction('web-skip')}
         {#if onnext && next && upNext !== null}
           <div
             class="web-up-next"
@@ -7788,6 +7825,36 @@
     <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
     <rect class="filled" x="12" y="11.3" width="7" height="5.7" rx="1.2" />
   </svg>
+{/snippet}
+
+<!-- Skip Intro/Credits, and while an automatic skip counts down, its seconds. The button stays pressable throughout and
+     its name never changes: the seconds are hidden from assistive technology, and the countdown is said once, as it
+     starts. Playback interaction (pause, play, a seek within the segment) is "keep watching", as on the Apple TV. -->
+{#snippet skipAction(className: string)}
+  {#if active}
+    {@const counting = autoSkip && autoSkipIn !== null}
+    <Button
+      variant="primary"
+      class={className}
+      label={SKIP_LABEL[active.kind]}
+      aria-describedby={counting ? 'auto-skip-notice' : undefined}
+      onclick={skipActive}
+      >{#if counting}<span class="auto-skip-in" aria-hidden="true"
+          >{i18n.format('player.autoSkipIn', 'Auto-skip in {seconds}s', {
+            seconds: autoSkipIn!,
+          })}</span
+        >{/if}</Button
+    >
+    {#if counting}
+      <p id="auto-skip-notice" class="web-sr" role="status">
+        {i18n.format(
+          'player.autoSkipNotice',
+          'Skips automatically in {seconds} seconds. Pause or seek to keep watching.',
+          { seconds: AUTO_SKIP_GRACE_MS / 1000 },
+        )}
+      </p>
+    {/if}
+  {/if}
 {/snippet}
 
 {#snippet skipIcon(direction: 'back' | 'forward')}
@@ -8649,6 +8716,13 @@
     display: none;
   }
 
+  .auto-skip-in {
+    margin-inline-start: 0.6em;
+    font-weight: 400;
+    opacity: 0.8;
+    font-variant-numeric: tabular-nums;
+  }
+
   .web-sr {
     position: absolute;
     width: 1px;
@@ -8895,6 +8969,9 @@
     font-weight: 600;
     backdrop-filter: var(--web-glass-blur);
     -webkit-backdrop-filter: var(--web-glass-blur);
+
+    /* `.web-floating > *` cannot reach Button's own element (scoped `*`), and `.web-transport` turns presses off. */
+    pointer-events: auto;
   }
 
   .web-up-next {
