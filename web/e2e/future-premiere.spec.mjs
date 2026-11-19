@@ -94,7 +94,7 @@ test('a real current-series Continue still crosses the future-title playback bou
   // Continue is computed against the series' episode layout, which needs an aired episode to resume into.
   const boundaryRequests = await open(page, {
     lastAired: { season_number: 1, episode_number: 2 },
-    query: '&current-series-continue&direct-play',
+    query: '&current-series-continue&direct-play&owner',
   });
   // Continue reaches the page after its episode layout is read, so the target (and the Play it enables) is not there
   // when the title heading first draws.
