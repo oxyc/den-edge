@@ -196,7 +196,12 @@ if (process.argv.includes('--capture')) {
   // The missing-library notice and its "Open Linked devices" action (#1212) in Swedish and Spanish measure 51,549
   // against matched main's 51,439 (+110), which sat 17 bytes under this ceiling: no localized notice fits. Allow the
   // next 128-byte boundary, retaining 35.
-  if (current.translationGzip > 51584) throw new Error('Lazy translation catalog budget exceeded');
+  // The profile switcher's own copy (#1158) in Swedish and Spanish measured 51,689 in CI against main's 51,549 (+140,
+  // main at d4d42ac1): the two new PIN-field labels, the parameterised Owner-PIN and Kid age lines, and the `profile`
+  // fallback. The first draft measured 51,749; dropping the two fragments the parameterised Owner-PIN line replaced
+  // removed 60. The catalogs are already lazy, and every phrase left is visible or spoken copy. Allow the next 128-byte
+  // boundary, retaining 23.
+  if (current.translationGzip > 51712) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -459,10 +464,15 @@ if (process.argv.includes('--capture')) {
   // the new chunk renumbers the shared import map, about +3 in each of six other startup chunks); the eager-copy draft
   // measured +206. The Worker adds +40. It adds no request outside that state, timer or polling. Allow the smallest
   // 128-byte boundary containing it, retaining 45.
+  // Localizing the profile switcher (#1158) measured 127,242 in CI against main's 127,190 (+52, main at d4d42ac1):
+  // the `i18n.phrase`/`format` calls around the switcher's existing English copy and the Kid/Visitor/Owner description
+  // helper. They render in the always-mounted switcher and its dialog; moving the dialog behind a dynamic import would
+  // add a request to every open and still count here. Allow the next 128-byte boundary, retaining 118.
   // A return visit with unsent work (#1401) draws at once and sends that work on the first refresh, and a cached
   // opening pull no longer holds the write lane until it is adopted (the deadlock behind the return-visit e2e). All of
-  // it is in the library Worker's log, which the complete graph counts twice; startup is unchanged. CI measured the
-  // first draft at 127,368; dropping its redundant body cancels and the vault-less recovery clause takes about 90 off
-  // that. Allow the smallest 128-byte boundary containing it.
-  if (coreTotalDelta > 127360) throw new Error('Browser total JS/CSS budget exceeded');
+  // it is in the library Worker's log (+81 gzip bytes as one minified file), which the complete graph counts twice:
+  // about +162 over main's 127,242, past the 118 bytes main left. CI measured the first draft at 127,368 on main
+  // 082bcab6; dropping its redundant body cancels and the vault-less recovery clause took about 90 off. Startup is
+  // unchanged. Allow the next 128-byte boundary.
+  if (coreTotalDelta > 127488) throw new Error('Browser total JS/CSS budget exceeded');
 }
