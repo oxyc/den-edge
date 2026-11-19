@@ -147,7 +147,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Back: 'Atrás',
   'Back 10 seconds': 'Atrás 10 segundos',
   'Back or forward 10 seconds': 'Atrás o adelante 10 segundos',
-  'back to the Owner': 'volver al propietario',
   Bingeable: 'Atracones',
   Biopic: 'película biográfica',
   'Blocked by parental controls': 'Bloqueado por controles parentales',
@@ -657,7 +656,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Narco Series': 'Serie Narco',
   'Natural Disasters': 'Desastres Naturales',
   Neck: 'cuello',
-  'Needed to switch from': 'Necesario para cambiar de',
   'needs a download before it’s ready to play here.':
     'necesita una descarga antes de que esté listo para reproducirse aquí.',
   'Neo-Noir': 'Neo-Noir',

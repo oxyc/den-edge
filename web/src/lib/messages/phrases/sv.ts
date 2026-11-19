@@ -144,7 +144,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Back: 'Tillbaka',
   'Back 10 seconds': 'Tillbaka 10 sekunder',
   'Back or forward 10 seconds': 'Tillbaka eller framåt 10 sekunder',
-  'back to the Owner': 'tillbaka till ägaren',
   Bingeable: 'Bingeable',
   Biopic: 'Biopic',
   'Blocked by parental controls': 'Blockerad av föräldrakontroll',
@@ -641,7 +640,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Narco Series': 'Narco-serien',
   'Natural Disasters': 'Naturkatastrofer',
   Neck: 'Hals',
-  'Needed to switch from': 'Behövde byta från',
   'needs a download before it’s ready to play here.':
     'behöver en nedladdning innan den är redo att spelas här.',
   'Neo-Noir': 'Neo-Noir',
