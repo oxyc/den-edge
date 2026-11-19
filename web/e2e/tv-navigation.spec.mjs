@@ -548,6 +548,18 @@ test('remote opens Settings and Back returns to the previously focused navigatio
       },
       true,
     );
+    addEventListener(
+      'focusout',
+      (e) => {
+        const t = e.target;
+        note('focusout', {
+          label: (t.getAttribute?.('aria-label') ?? t.textContent ?? '').trim().slice(0, 30),
+          toNull: !e.relatedTarget,
+          connected: t.isConnected,
+        });
+      },
+      true,
+    );
     for (const m of ['pushState', 'replaceState']) {
       const orig = history[m];
       history[m] = function (...args) {
@@ -572,7 +584,14 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   {
     const log = (await diag()).slice(prior.length);
     const entered = log.findIndex((entry) => entry.what === 'focusin' && entry.inNav);
-    const escaped = log.slice(entered).filter((entry) => entry.what === 'focusin' && !entry.inNav);
+    const escaped = log
+      .slice(entered)
+      .filter(
+        (entry) =>
+          (entry.what === 'focusin' && !entry.inNav) ||
+          (entry.what === 'focusout' && entry.toNull),
+      );
+    if (log.filter((entry) => entry.what === 'pushState').length > 1) escaped.push('EXTRA PUSH');
     if (escaped.length)
       throw new Error(`ESCAPED ${JSON.stringify(escaped)} DIAG ${JSON.stringify(log)}`);
   }
