@@ -174,7 +174,7 @@
         return new Promise<boolean>((resolve) => (releaseHeldPin = resolve));
       return pin === ownerPin;
     },
-    setParentalPin: async (pin: string) => {
+    setParentalPin: async (_current: string | null, pin: string) => {
       ownerPin = pin;
       connectionsSnapshot = {
         connection: 'ready',
