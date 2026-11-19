@@ -41,7 +41,6 @@ const WORKERS = Math.max(1, Math.min(4, Math.floor((memory - GB) / (1.5 * GB))))
 export const PRODUCTION_BUILD_SPECS = [
   'big-library-crash.spec.mjs',
   'continue-airing-tracker.spec.mjs',
-  'future-premiere.spec.mjs',
   'guest-library.spec.mjs',
   'hidden-start.spec.mjs',
   'household-downloads.spec.mjs',
