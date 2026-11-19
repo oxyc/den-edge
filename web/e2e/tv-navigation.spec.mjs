@@ -557,7 +557,8 @@ test('remote opens Settings and Back returns to the previously focused navigatio
     }
     addEventListener(
       'keydown',
-      (e) => note('keydown', { key: e.key, activeInBar: !!document.activeElement?.closest?.('.tv-bar') }),
+      (e) =>
+        note('keydown', { key: e.key, activeInBar: !!document.activeElement?.closest?.('.tv-bar') }),
       true,
     );
   });
