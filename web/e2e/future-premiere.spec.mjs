@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
-const series = (id, firstAir) => ({
+const series = (id, firstAir, lastAired = null) => ({
   id,
   name: id === 2007 ? 'Future Series' : 'Other Series',
   ...(firstAir ? { first_air_date: firstAir } : {}),
@@ -17,12 +17,12 @@ const series = (id, firstAir) => ({
   vote_count: 500,
   genres: [{ id: 18, name: 'Drama' }],
   seasons: [{ season_number: 1, name: 'Season 1', episode_count: 2 }],
-  last_episode_to_air: null,
+  last_episode_to_air: lastAired,
   aggregate_credits: { cast: [], crew: [] },
   recommendations: { results: [] },
 });
 
-async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
+async function open(page, { firstAir = '2099-01-01', lastAired, query = '' } = {}) {
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   const boundaryRequests = [];
@@ -50,7 +50,9 @@ async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
         },
       });
     const id = Number(path.match(/\/tv\/(\d+)/)?.[1] ?? 2007);
-    return route.fulfill({ json: series(id, id === 2007 ? firstAir : '2020-01-01') });
+    return route.fulfill({
+      json: series(id, id === 2007 ? firstAir : '2020-01-01', id === 2007 ? lastAired : undefined),
+    });
   });
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
@@ -89,7 +91,11 @@ for (const profile of ['Kid', 'Owner'])
 test('a real current-series Continue still crosses the future-title playback boundary', async ({
   page,
 }) => {
-  const boundaryRequests = await open(page, { query: '&current-series-continue&direct-play' });
+  // Continue is computed against the series' episode layout, which needs an aired episode to resume into.
+  const boundaryRequests = await open(page, {
+    lastAired: { season_number: 1, episode_number: 2 },
+    query: '&current-series-continue&direct-play',
+  });
   await expect
     .poll(() => boundaryRequests.find(({ url }) => url.endsWith('/remux/releases'))?.body)
     .toMatchObject({ season: 1, episode: 1 });
