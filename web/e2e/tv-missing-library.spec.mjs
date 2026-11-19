@@ -49,10 +49,11 @@ test('a linked TV library den-edge will not start keeps the edit and hands off t
     timeout: 30_000,
   });
   // Relaunched, the library this TV kept is sent back to den-edge, which refuses to start it: the notice, not a wait.
-  // Managed-playback receipts need the library's relay membership too, so their own failure alert may stand beside
-  // this one (#1395); only the library's notice is checked here.
+  // Managed-playback receipts need the library's relay membership too; their failure alert, with a Try again that
+  // cannot succeed, must not stand beside the notice (#1395).
   const alert = page.getByRole('alert').filter({ hasText: NOTICE });
   await expect(alert).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('Saved playback progress couldn’t be updated')).toHaveCount(0);
   await expect(page.getByText(/Waiting to sync/)).toHaveCount(0);
   // An edit made now is kept on this TV.
   await expect(watchlist).toHaveAttribute('aria-pressed', 'true');

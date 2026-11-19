@@ -41,6 +41,8 @@ test('a library den-edge will not start keeps the edit, hands off to Linked devi
   const alert = page.getByRole('alert');
   await expect(alert).toContainText(NOTICE);
   await expect(alert).not.toContainText('Waiting to sync');
+  // Receipt setup fails for the same reason; its Try again cannot succeed, so it must not stand beside the notice.
+  await expect(page.getByText('Saved playback progress couldn’t be updated')).toHaveCount(0);
   const action = alert.getByRole('button', { name: 'Open Linked devices' });
   await expect(action).toBeVisible();
   // The edit is kept on this device and still shown.

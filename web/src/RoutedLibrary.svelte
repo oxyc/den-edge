@@ -1632,6 +1632,9 @@
     if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__) return;
     const current = session;
     const retry = playbackReceiptRetry;
+    // Receipts need the library's relay membership, withheld while den-edge refuses to start it: set them up again
+    // once a read finds the log, instead of leaving the failure from that wait standing.
+    void session.missingLibrary;
     const heldStatus = untrack(() => playbackReceiptStatus);
     if (heldStatus && heldStatus.owner !== current) playbackReceiptStatus = null;
     if (!session.foregrounded || !memberModel) {
@@ -1929,7 +1932,11 @@
             route={settingsRoute}
           />
         {/if}
-        {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
+        <!-- While den-edge refuses to start the library the notice above is the one truthful message: a receipt
+             failure here would offer a Try again that cannot succeed. -->
+        {#if shown.missingLibrary}
+          <!-- no receipt status -->
+        {:else if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
           <PlaybackReceiptStatus
             state={playbackReceiptStatus.state}
             retry={() => playbackReceiptRetry++}
