@@ -33,8 +33,8 @@ const CHARGE_PACKED: u64 = 3;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// How often one library's file is measured for compaction, and so the most often it is compacted.
 const COMPACT_INTERVAL_MS: u64 = 60 * 60 * 1000;
-/// Free space smaller than this is not worth rewriting the file for. A new store is ~1 MiB of file (redb's first
-/// region), nearly all of it free, so a ratio alone would compact every new library on its first write.
+/// Free space smaller than this is not worth rewriting the file for. A new store is a small file (about 72 KiB
+/// since redb 4.6), mostly free, so a ratio alone would compact every new library on its first write.
 const COMPACT_MIN_FREE: u64 = 2 << 20;
 /// Heap one compaction holds beyond its open database's charge. Measured with a counting allocator on redb 4.3.0 at
 /// this cache size: ~260 KB for a 13.7 MB household-sized file, ~1.04 MB for a 67 MB file with 34 MB of rows, which
@@ -2449,13 +2449,19 @@ mod tests {
     #[test]
     fn aggregate_and_per_file_disk_quotas_fail_closed() {
         let dir = temp_dir();
-        let too_small = manager(&dir.join("file"), 2, 2 << 20, 128 << 10);
+        // How big a new database file is, is redb's to choose: cut the quotas from a measured one.
+        let fresh = manager(&dir.join("probe"), 2, 32 << 20, 8 << 20)
+            .library("aaaaaaaaaaaaaaaa", TOKEN)
+            .unwrap()
+            .disk_bytes()
+            .unwrap();
+        let too_small = manager(&dir.join("file"), 2, 2 << 20, fresh - 1);
         assert!(matches!(too_small.library("aaaaaaaaaaaaaaaa", TOKEN), Err(StoreError::Full)));
 
         let root = dir.join("aggregate");
-        let one = manager(&root, 2, 1200 << 10, 1100 << 10);
+        let one = manager(&root, 2, fresh * 3 / 2, fresh);
         let first = one.library("aaaaaaaaaaaaaaaa", TOKEN).unwrap();
-        assert!(first.disk_bytes().unwrap() <= 1100 << 10);
+        assert!(first.disk_bytes().unwrap() <= fresh);
         assert!(matches!(one.library("bbbbbbbbbbbbbbbb", TOKEN), Err(StoreError::Full)));
     }
 
