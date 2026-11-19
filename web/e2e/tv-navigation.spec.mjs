@@ -595,6 +595,12 @@ test('Up from a navigation item stays in the bar while the page is scrolled', as
   await page.evaluate(() => {
     const spacer = document.createElement('div');
     spacer.style.height = '5000px';
+    // A control the scrolled page has carried up beneath the fixed bar, above every navigation item.
+    const hidden = document.createElement('button');
+    hidden.id = 'under-the-bar';
+    hidden.textContent = 'Scrolled content';
+    hidden.style.cssText = 'position:absolute;top:300px;left:200px;width:200px;height:60px';
+    spacer.append(hidden);
     document.body.append(spacer);
     scrollTo({ top: 600, behavior: 'instant' });
   });
