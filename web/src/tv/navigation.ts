@@ -506,16 +506,22 @@ export function installTVNavigation(): () => void {
       // The fixed bar remains visible for the LG pointer, but a remote should not jump out of content into it
       // while the page is scrolled. At the upper content boundary the first Up scrolls home; only a subsequent
       // Up, now genuinely at the top, can enter navigation.
+      //
+      // The filter only applies from content. From a bar control, Up has nothing above it: with the page scrolled,
+      // content sits geometrically above the bar (it scrolls underneath it), so keeping `!closest('.tv-bar')` there
+      // would hand focus to a control hidden behind the bar, take it out of `.tv-bar nav` and end the focus sweep, so
+      // the next menu destination pushed a history entry instead of replacing (den-edge#1376).
+      const fromBar = target instanceof Element && !!target.closest('.tv-bar');
       const contentOnly =
         direction === 'up' && scrollY > 8
-          ? (candidate: HTMLElement) => !candidate.closest('.tv-bar')
+          ? (candidate: HTMLElement) => fromBar === !!candidate.closest('.tv-bar')
           : undefined;
       if (move(direction, contentOnly)) {
         if (searchButton(document.activeElement)) void preloadSearch();
         activateFocusedMenu();
         event.preventDefault();
         event.stopImmediatePropagation();
-      } else if (direction === 'up' && scrollY > 8) {
+      } else if (direction === 'up' && scrollY > 8 && !fromBar) {
         event.preventDefault();
         event.stopImmediatePropagation();
         // Do not leave focus stranded on the billboard while a smooth scroll is still in flight: repeated remote

@@ -278,7 +278,7 @@ jobs:
       - name: Verify the runner browser
         run: test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
       - name: LG/webOS TV behavior
-        run: npm run test:e2e:tv -- tv-navigation.spec.mjs -g "Up from a navigation item" --repeat-each=5
+        run: npm run test:e2e:tv -- tv-navigation.spec.mjs -g "Up from a navigation item|remote opens Settings" --repeat-each=20 --workers=8
       # The full TV journey already ran against the platform-neutral/webOS build above and runs again in WebKit
       # (e2e_tv_webkit). Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
       # (web-checks) separately covers the real Tizen bundle, file origin, CSP, API routing and playback. Re-sync
@@ -427,7 +427,7 @@ jobs:
       - name: WebKit TV engine-sensitive behavior
         run: >-
           DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv --
-          tv-navigation.spec.mjs -g "Up from a navigation item" --repeat-each=5
+          tv-navigation.spec.mjs -g "Up from a navigation item|remote opens Settings" --repeat-each=20 --workers=8
       - name: Retain native TV failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
