@@ -574,6 +574,11 @@ export class LibraryLog {
     return this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS;
   }
 
+  /** This exact log instance is still waiting before probing a refused start again. */
+  private get refusalWaiting(): boolean {
+    return this.refused && Date.now() - this.refusedAt < RECHECK_MS;
+  }
+
   /** An Owner Restore aborted the migration attempt that held the household: its lock is gone. */
   noteMigrationReleased(): void {
     this.migrationLockedAt = 0;
@@ -3847,6 +3852,29 @@ export class LibraryLog {
           : {}),
       };
       if (!(await this.keepPending(kept, JSON.stringify(work)))) return false;
+      // A fresh edit is already durable and drawn locally. Leave it queued until a read finds the log or this exact
+      // instance's refusal wait expires; starting a delivery task here would bypass replay's refused-start fence.
+      if (this.refusalWaiting) {
+        if (this.profileAware) {
+          const stored = (name: string) => {
+            const row = this.acknowledged.get(name)?.row;
+            return row && isDocument(row) ? row : undefined;
+          };
+          const documents = applyOps(ops, stored);
+          if (
+            this.householdRows([...documents, ...riders]).length !==
+            documents.length + riders.length
+          ) {
+            this.refusal = 'profile_scoped';
+            outcome.refused = true;
+            await this.discard(kept);
+            return false;
+          }
+        }
+        this.projectOps(ops);
+        for (const row of riders) this.project(row);
+        return true;
+      }
       if (answerFirst) {
         this.projectOps(ops);
         for (const row of riders) this.project(row);
@@ -3939,6 +3967,9 @@ export class LibraryLog {
    * (§8).
    */
   private async sendOps(ops: Op[], outcome: Outcome, riders: SettingsRow[] = []): Promise<boolean> {
+    // Checked at the serialized transport boundary too: an earlier held write can establish the refusal after this
+    // work was queued behind it.
+    if (this.refusalWaiting) return false;
     const stored = (name: string) => {
       const row = this.acknowledged.get(name)?.row;
       return row && isDocument(row) ? row : undefined;
@@ -4078,6 +4109,7 @@ export class LibraryLog {
     if (!row) return false;
     let changed = false;
     const run = this.writes.then(async () => {
+      if (this.refusalWaiting) return false;
       const name = rowName(row);
       const { k, v } = await seal(this.keys, row);
       const res = await this.send(`/lib/${this.keys.id}/batch`, {
@@ -4156,6 +4188,9 @@ export class LibraryLog {
         return null;
       }
       target = scoped;
+      // This runs under `writes`; a preceding request may have established the refusal while this row was waiting.
+      // Check after household scoping so a refused start cannot turn a profile-scoped write into queued success.
+      if (this.refusalWaiting) return null;
       const name = rowName(target);
       const base = this.entries.get(name)?.seq ?? 0;
       const { k, v } = await seal(this.keys, target);
@@ -4589,6 +4624,7 @@ export class LibraryLog {
     // Replayed by `replay` only once this send is over, rather than sent twice at once.
     this.flushing.add(key);
     const run = this.writes.then(async () => {
+      if (this.refusalWaiting) return false;
       for (const group of groups) {
         const rows = coalesce(group);
         for (let offset = 0; offset < rows.length; offset += 32) {
@@ -4819,8 +4855,7 @@ export class LibraryLog {
     const projected = this.projected;
     if (!active()) return false;
     // Kept, and sent once a read finds the log again (`refresh`).
-    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
-      return this.projectKeptChanged(projected, active);
+    if (this.refusalWaiting) return this.projectKeptChanged(projected, active);
     // A migration holds the household (`migrationLockedAt`): kept work waits a minute between probes, where the
     // 30-second refresh would otherwise send every piece of it again each time.
     if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
