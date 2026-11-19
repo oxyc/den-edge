@@ -326,7 +326,7 @@ jobs:
         shard: [1, 2, 3, 4]
     name: e2e (${{ matrix.shard }}/4)
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -344,8 +344,8 @@ jobs:
       - name: Verify Playwright image matches the lockfile
         run: |
           version=$(node -p "require('./node_modules/@playwright/test/package.json').version")
-          test "$version" = 1.64.1 || {
-            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.64.1-noble"
+          test "$version" = 1.65.0 || {
+            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.65.0-noble"
             exit 1
           }
           node --input-type=module -e "import { chromium, firefox, webkit } from '@playwright/test'; import { existsSync } from 'node:fs'; for (const browser of [chromium, firefox, webkit]) if (!existsSync(browser.executablePath())) throw new Error('browser missing: ' + browser.executablePath())"
@@ -375,7 +375,7 @@ jobs:
     runs-on: ubuntu-latest
     name: e2e (production build)
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -409,7 +409,7 @@ jobs:
     if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -448,7 +448,7 @@ jobs:
     runs-on: ubuntu-latest
     name: e2e budgets
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:

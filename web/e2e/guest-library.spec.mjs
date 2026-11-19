@@ -194,7 +194,9 @@ test('a profile Owner’s language chosen while the household is still confirmin
     await laptop.goto(`${E2E_ORIGIN}/settings`);
     const language = laptop.getByRole('combobox', { name: 'Interface language', exact: true });
     await expect(language).toBeEnabled({ timeout: 30_000 });
-    await language.selectOption('es');
+    // The optimistic first frame is `inert`, so a person cannot reach the select yet; the write path behind it is
+    // what is under test, and Playwright's inert wait would otherwise hold the action until the frame is released.
+    await language.selectOption('es', { force: true });
     await expect(laptop.locator('html')).toHaveAttribute('lang', 'es');
     await expect(
       laptop.getByRole('combobox', { name: 'Idioma de la interfaz', exact: true }),

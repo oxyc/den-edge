@@ -54,7 +54,7 @@
     onadvance,
     reel,
     routes,
-    // eslint-disable-next-line no-useless-assignment -- An output binding: written below, read by the parent.
+    // An output binding: written below, read by the parent.
     showing = $bindable(),
     rowOf,
     onwatchlist,
