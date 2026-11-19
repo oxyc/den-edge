@@ -3767,26 +3767,30 @@ export class LibraryLog {
           blankEpisode(row.title, row.season, row.episode));
   }
 
+  /** A document exactly as last acknowledged by den-edge, without locally kept work. */
+  private acknowledgedDocument(name: string): DocumentRow | undefined {
+    const row = this.acknowledged.get(name)?.row;
+    return row && isDocument(row) ? row : undefined;
+  }
+
   /**
    * `before` as den-edge holds it, without kept work drawn over it: kept work is drawn into `entries` as soon as the
    * library opens, so an edit kept from before read from there would already be made, and would be dropped unsent.
    */
   private storedBefore(row: TitleRow | EpisodeRow): Row {
-    const stored = (name: string) => {
-      const held = this.acknowledged.get(name)?.row;
-      return held && isDocument(held) ? held : undefined;
-    };
     if (row.kind === 'rec') {
-      const document = stored(`title:${row.title.type}:${row.title.id}`);
+      const document = this.acknowledgedDocument(`title:${row.title.type}:${row.title.id}`);
       return document
         ? (projectDocument(document)[0] as TitleRow)
         : blankTitle(row.title, row.addedAt);
     }
-    const season = row.title.type === 'tv' && stored(`season:tv:${row.title.id}:${row.season}`);
+    const season =
+      row.title.type === 'tv' &&
+      this.acknowledgedDocument(`season:tv:${row.title.id}:${row.season}`);
     return (
       (season &&
         projectEpisode(
-          stored(`title:tv:${row.title.id}`),
+          this.acknowledgedDocument(`title:tv:${row.title.id}`),
           season,
           row.title,
           row.season,
@@ -3856,17 +3860,8 @@ export class LibraryLog {
       // instance's refusal wait expires; starting a delivery task here would bypass replay's refused-start fence.
       if (this.refusalWaiting) {
         if (this.profileAware) {
-          const stored = (name: string) => {
-            const row = this.acknowledged.get(name)?.row;
-            return row && isDocument(row) ? row : undefined;
-          };
-          const documents = applyOps(ops, stored);
-          if (
-            this.householdRows([...documents, ...riders]).length !==
-            documents.length + riders.length
-          ) {
-            this.refusal = 'profile_scoped';
-            outcome.refused = true;
+          const documents = applyOps(ops, (name) => this.acknowledgedDocument(name));
+          if (!this.scopeWrite(documents, riders, outcome)) {
             await this.discard(kept);
             return false;
           }
@@ -3970,27 +3965,19 @@ export class LibraryLog {
     // Checked at the serialized transport boundary too: an earlier held write can establish the refusal after this
     // work was queued behind it.
     if (this.refusalWaiting) return false;
-    const stored = (name: string) => {
-      const row = this.acknowledged.get(name)?.row;
-      return row && isDocument(row) ? row : undefined;
-    };
     // Settings rows that go in the same batch as these writes (`withRider`): merged over den-edge's version of each,
     // and on a conflict merged again and sent again with the writes, until each has landed.
     let waiting = riders;
     for (let round = 0; round < ROUNDS; round++) {
       // A document of a newer format is never written: the write waits for this build to be updated (§4).
       if (touched(ops).some((name) => this.newerDocuments.has(name))) return false;
-      const documents = applyOps(ops, stored);
+      const documents = applyOps(ops, (name) => this.acknowledgedDocument(name));
       if (!documents.length && !waiting.length) return true;
       if (this.profileAware) {
         // An edit is sent whole or not at all: part of it in the household would be part of it in the wrong library.
-        const scoped = this.householdRows([...documents, ...waiting]);
-        if (scoped.length !== documents.length + waiting.length) {
-          this.refusal = 'profile_scoped';
-          outcome.refused = true;
-          return false;
-        }
-        waiting = scoped.slice(documents.length) as SettingsRow[];
+        const scoped = this.scopeWrite(documents, waiting, outcome);
+        if (!scoped) return false;
+        waiting = scoped;
       }
       const writes: { name: string; document: Row; base: number; k: string; v: string }[] = [];
       for (const rider of waiting) {
@@ -4505,6 +4492,20 @@ export class LibraryLog {
     }
     if (refusedCount) console.error(`den: household refused ${refusedCount} profile rows`);
     return kept;
+  }
+
+  /** Household-scope a whole write, or refuse it without admitting a partial profile write. */
+  private scopeWrite(
+    documents: DocumentRow[],
+    riders: SettingsRow[],
+    outcome: Outcome,
+  ): SettingsRow[] | null {
+    const scoped = this.householdRows([...documents, ...riders]);
+    if (scoped.length === documents.length + riders.length)
+      return scoped.slice(documents.length) as SettingsRow[];
+    this.refusal = 'profile_scoped';
+    outcome.refused = true;
+    return null;
   }
 
   /**
