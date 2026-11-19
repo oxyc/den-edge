@@ -26,7 +26,6 @@ const DESTINATION = process.env.DEN_IOS_DESTINATION;
 const SIMULATOR_ID = DESTINATION?.match(/(?:^|,)id=([^,]+)/)?.[1];
 const MOBILE_BUNDLE_ID = process.env.DEN_MOBILE_BUNDLE_IDENTIFIER ?? 'fi.oxy.den';
 const KEEP = process.env.REHEARSE_KEEP === '1';
-const work = mkdtempSync(join(tmpdir(), 'den-cross-host-'));
 const sleep = (milliseconds) =>
   new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 
@@ -38,6 +37,10 @@ if (!SIMULATOR_ID)
   throw new Error(
     'DEN_IOS_DESTINATION must include the exact Simulator id=<UDID> for store qualification',
   );
+
+// Do not allocate retained evidence until every argument that can be checked without side effects
+// is valid.
+const work = mkdtempSync(join(tmpdir(), 'den-cross-host-'));
 
 const eventually = async (description, predicate, timeout = 45_000) => {
   const deadline = Date.now() + timeout;
@@ -237,9 +240,19 @@ function runNative(origin) {
       stdio: ['ignore', 'inherit', 'inherit'],
     },
   );
+  const exited = new Promise((done) => {
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      done(result);
+    };
+    child.once('error', (error) => settle({ code: null, error }));
+    child.once('exit', (code) => settle({ code, error: null }));
+  });
   return {
     child,
-    exited: new Promise((done) => child.once('exit', (code) => done(code))),
+    exited,
   };
 }
 
@@ -460,8 +473,10 @@ async function main() {
     await coordinator.command('cleanup', { timeoutSeconds: 45 });
     nativeCleaned = true;
     await coordinator.command('finish');
-    const code = await native.exited;
-    if (code !== 0) throw new Error(`native xcodebuild exited ${code}`);
+    const nativeExit = await native.exited;
+    if (nativeExit.error)
+      throw new Error(`native xcodebuild failed to start: ${nativeExit.error}`);
+    if (nativeExit.code !== 0) throw new Error(`native xcodebuild exited ${nativeExit.code}`);
     succeeded = true;
     console.log(
       KEEP
@@ -469,7 +484,13 @@ async function main() {
         : 'PASS native↔browser cross-host qualification; isolated artifacts verified and removed',
     );
   } finally {
-    if (blockedStore) chmodSync(blockedStore.path, blockedStore.mode);
+    if (blockedStore) {
+      try {
+        chmodSync(blockedStore.path, blockedStore.mode);
+      } catch (error) {
+        console.error(`failed to restore blocked native store permissions: ${String(error)}`);
+      }
+    }
     if (coordinator && !nativeCleaned) {
       try {
         await coordinator.command('cleanup', { timeoutSeconds: 45 });
