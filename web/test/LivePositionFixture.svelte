@@ -1,7 +1,7 @@
 <!-- A title playing on another device while this page watches it. The page is the production RoutedLibrary on a
      paired library, so the lifecycle it reports (`playbackActive`) and the Worker's refresh cadence are the real
      ones. `?writer` is that other device instead: its own browser and library, writing a position on request
-     (`fixturePlay`), as the Apple TV does every few seconds. -->
+     (`fixturePlay`), as a production player does for its first, periodic, pause and resume saves. -->
 <script lang="ts">
   import RoutedLibrary from '../src/RoutedLibrary.svelte';
   import NavigationBar from '../src/components/NavigationBar.svelte';
@@ -59,21 +59,26 @@
           title: { type: 'movie' | 'tv'; id: number },
           seconds: number,
           episode?: { season: number; episode: number },
-        ) => Promise<unknown>;
+          playing?: boolean,
+        ) => Promise<{ source: 'fixture-play'; observedAt: number }>;
       }
-    ).fixturePlay = (title, seconds, episode) =>
-      model.recordProgress(
+    ).fixturePlay = async (title, seconds, episode, playing = true) => {
+      const observedAt = Date.now();
+      await model.recordProgress(
         {
           title,
           ...(episode ? { episode: { ...title, type: 'tv', ...episode } } : {}),
-          // Never quite the last one: this library skips a write identical to the row, and the TV's paused
-          // player writes a new stamp at one position every three seconds (den's `PlayerView` loop).
+          // Never quite the last one: this library skips a write identical to the row. `playing` carries the
+          // production transition explicitly, including a pause whose position did not move.
           fraction: 0.4 + written * 1e-6,
           seconds,
-          observedAt: Date.now(),
+          playing,
+          observedAt,
         },
         `fixture-play-${++written}`,
       );
+      return { source: 'fixture-play', observedAt };
+    };
   }
 </script>
 
