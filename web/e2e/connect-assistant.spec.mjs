@@ -367,8 +367,25 @@ async function pumpPairingPolls(contexts) {
 
 /** Link the consent page's browser to the host's library through the dialog's link screen. */
 async function linkThroughDialog(hostPage, dialog) {
-  await hostPage.goto(`${ORIGIN}/test/settings.html`);
-  await hostPage.getByRole('button', { name: /Linked devices/ }).click();
+  const lines = [];
+  hostPage.on('console', (m) => lines.push(`console.${m.type()} ${m.text()}`));
+  hostPage.on('pageerror', (e) => lines.push(`pageerror ${e.message}`));
+  hostPage.on('requestfailed', (r) => lines.push(`requestfailed ${r.url()} ${r.failure()?.errorText}`));
+  hostPage.on('worker', (w) => lines.push(`worker ${w.url()}`));
+  await hostPage.context().tracing.start({ screenshots: true, snapshots: true });
+  try {
+    await hostPage.goto(`${ORIGIN}/test/settings.html`);
+    await hostPage.getByRole('button', { name: /Linked devices/, timeout: 20_000 }).click();
+  } catch (error) {
+    await hostPage
+      .context()
+      .tracing.stop({ path: test.info().outputPath('host-trace.zip') })
+      .catch(() => undefined);
+    await test.info().attach('host-console', { body: lines.join('\n'), contentType: 'text/plain' });
+    console.log(`HOST-DIAG\n${lines.join('\n')}`);
+    throw error;
+  }
+  await hostPage.context().tracing.stop();
   const devices = hostPage.getByRole('region', { name: 'Linked devices' });
   await devices.getByRole('button', { name: 'Get a code' }).click();
   const code = await devices.locator('.code').textContent();
