@@ -96,8 +96,15 @@ test('a real current-series Continue still crosses the future-title playback bou
     lastAired: { season_number: 1, episode_number: 2 },
     query: '&current-series-continue&direct-play',
   });
+  // Continue reaches the page after its episode layout is read, so the target (and the Play it enables) is not there
+  // when the title heading first draws.
+  await expect(
+    page.locator('header.hero').getByRole('link', { name: /^(Play|Resume)$/ }),
+  ).toBeVisible({ timeout: 15_000 });
   await expect
-    .poll(() => boundaryRequests.find(({ url }) => url.endsWith('/remux/releases'))?.body)
+    .poll(() => boundaryRequests.find(({ url }) => url.endsWith('/remux/releases'))?.body, {
+      timeout: 15_000,
+    })
     .toMatchObject({ season: 1, episode: 1 });
 });
 
