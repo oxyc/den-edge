@@ -37,4 +37,14 @@ describe('split-household boundary diagnostics', () => {
     expect(rekey).not.toMatch(/console\.warn\([^;]*,\s*error/s);
     expect(recovery).not.toMatch(/console\.warn\([^;]*,\s*error/s);
   });
+
+  it('shows no playback-receipt failure (a Try again that cannot succeed) while the library is missing', () => {
+    const routed = readFileSync(new URL('../RoutedLibrary.svelte', import.meta.url), 'utf8');
+    // Both renderers (the lazy status and the eager fallback) sit behind the missing-library branch.
+    const block = routed.match(/\{#if shown\.missingLibrary\}[\s\S]*?\{\/if\}\s*\{\/if\}/)?.[0];
+    expect(block).toContain('{:else if PlaybackReceiptStatus');
+    expect(block).toContain('alertRetry={() => playbackReceiptRetry++}');
+    // Receipts are set up again once a read finds the log.
+    expect(routed).toMatch(/void session\.missingLibrary;/);
+  });
 });
