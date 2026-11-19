@@ -4859,10 +4859,9 @@ export class LibraryLog {
     if (this.refusalWaiting) return this.projectKeptChanged(projected, active);
     // A migration holds the household (`migrationLockedAt`): kept work waits a minute between probes, where the
     // 30-second refresh would otherwise send every piece of it again each time.
-    if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
-      return this.projectKeptChanged(projected, active);
+    if (this.migrationLocked) return this.projectKeptChanged(projected, active);
     // den-edge's write budget for this library is spent: kept work goes again once the `Retry-After` has passed.
-    if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected, active);
+    if (this.retryAfterMs) return this.projectKeptChanged(projected, active);
     // A refused start is tried again here, but stays `refused` until a read finds the log: refused once more, it waits
     // another `RECHECK_MS`; a send that does not get through says nothing about whether the log is there.
     const waiting = this.pendingActions;
