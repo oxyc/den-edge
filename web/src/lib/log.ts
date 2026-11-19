@@ -574,6 +574,11 @@ export class LibraryLog {
     return this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS;
   }
 
+  /** This exact log instance is still waiting before probing a refused start again. */
+  private get refusalWaiting(): boolean {
+    return this.refused && Date.now() - this.refusedAt < RECHECK_MS;
+  }
+
   /** An Owner Restore aborted the migration attempt that held the household: its lock is gone. */
   noteMigrationReleased(): void {
     this.migrationLockedAt = 0;
@@ -3762,26 +3767,30 @@ export class LibraryLog {
           blankEpisode(row.title, row.season, row.episode));
   }
 
+  /** A document exactly as last acknowledged by den-edge, without locally kept work. */
+  private acknowledgedDocument(name: string): DocumentRow | undefined {
+    const row = this.acknowledged.get(name)?.row;
+    return row && isDocument(row) ? row : undefined;
+  }
+
   /**
    * `before` as den-edge holds it, without kept work drawn over it: kept work is drawn into `entries` as soon as the
    * library opens, so an edit kept from before read from there would already be made, and would be dropped unsent.
    */
   private storedBefore(row: TitleRow | EpisodeRow): Row {
-    const stored = (name: string) => {
-      const held = this.acknowledged.get(name)?.row;
-      return held && isDocument(held) ? held : undefined;
-    };
     if (row.kind === 'rec') {
-      const document = stored(`title:${row.title.type}:${row.title.id}`);
+      const document = this.acknowledgedDocument(`title:${row.title.type}:${row.title.id}`);
       return document
         ? (projectDocument(document)[0] as TitleRow)
         : blankTitle(row.title, row.addedAt);
     }
-    const season = row.title.type === 'tv' && stored(`season:tv:${row.title.id}:${row.season}`);
+    const season =
+      row.title.type === 'tv' &&
+      this.acknowledgedDocument(`season:tv:${row.title.id}:${row.season}`);
     return (
       (season &&
         projectEpisode(
-          stored(`title:tv:${row.title.id}`),
+          this.acknowledgedDocument(`title:tv:${row.title.id}`),
           season,
           row.title,
           row.season,
@@ -3847,6 +3856,20 @@ export class LibraryLog {
           : {}),
       };
       if (!(await this.keepPending(kept, JSON.stringify(work)))) return false;
+      // A fresh edit is already durable and drawn locally. Leave it queued until a read finds the log or this exact
+      // instance's refusal wait expires; starting a delivery task here would bypass replay's refused-start fence.
+      if (this.refusalWaiting) {
+        if (this.profileAware) {
+          const documents = applyOps(ops, (name) => this.acknowledgedDocument(name));
+          if (!this.scopeWrite(documents, riders, outcome)) {
+            await this.discard(kept);
+            return false;
+          }
+        }
+        this.projectOps(ops);
+        for (const row of riders) this.project(row);
+        return true;
+      }
       if (answerFirst) {
         this.projectOps(ops);
         for (const row of riders) this.project(row);
@@ -3939,27 +3962,22 @@ export class LibraryLog {
    * (§8).
    */
   private async sendOps(ops: Op[], outcome: Outcome, riders: SettingsRow[] = []): Promise<boolean> {
-    const stored = (name: string) => {
-      const row = this.acknowledged.get(name)?.row;
-      return row && isDocument(row) ? row : undefined;
-    };
+    // Checked at the serialized transport boundary too: an earlier held write can establish the refusal after this
+    // work was queued behind it.
+    if (this.refusalWaiting) return false;
     // Settings rows that go in the same batch as these writes (`withRider`): merged over den-edge's version of each,
     // and on a conflict merged again and sent again with the writes, until each has landed.
     let waiting = riders;
     for (let round = 0; round < ROUNDS; round++) {
       // A document of a newer format is never written: the write waits for this build to be updated (§4).
       if (touched(ops).some((name) => this.newerDocuments.has(name))) return false;
-      const documents = applyOps(ops, stored);
+      const documents = applyOps(ops, (name) => this.acknowledgedDocument(name));
       if (!documents.length && !waiting.length) return true;
       if (this.profileAware) {
         // An edit is sent whole or not at all: part of it in the household would be part of it in the wrong library.
-        const scoped = this.householdRows([...documents, ...waiting]);
-        if (scoped.length !== documents.length + waiting.length) {
-          this.refusal = 'profile_scoped';
-          outcome.refused = true;
-          return false;
-        }
-        waiting = scoped.slice(documents.length) as SettingsRow[];
+        const scoped = this.scopeWrite(documents, waiting, outcome);
+        if (!scoped) return false;
+        waiting = scoped;
       }
       const writes: { name: string; document: Row; base: number; k: string; v: string }[] = [];
       for (const rider of waiting) {
@@ -4078,6 +4096,7 @@ export class LibraryLog {
     if (!row) return false;
     let changed = false;
     const run = this.writes.then(async () => {
+      if (this.refusalWaiting) return false;
       const name = rowName(row);
       const { k, v } = await seal(this.keys, row);
       const res = await this.send(`/lib/${this.keys.id}/batch`, {
@@ -4156,6 +4175,9 @@ export class LibraryLog {
         return null;
       }
       target = scoped;
+      // This runs under `writes`; a preceding request may have established the refusal while this row was waiting.
+      // Check after household scoping so a refused start cannot turn a profile-scoped write into queued success.
+      if (this.refusalWaiting) return null;
       const name = rowName(target);
       const base = this.entries.get(name)?.seq ?? 0;
       const { k, v } = await seal(this.keys, target);
@@ -4472,6 +4494,20 @@ export class LibraryLog {
     return kept;
   }
 
+  /** Household-scope a whole write, or refuse it without admitting a partial profile write. */
+  private scopeWrite(
+    documents: DocumentRow[],
+    riders: SettingsRow[],
+    outcome: Outcome,
+  ): SettingsRow[] | null {
+    const scoped = this.householdRows([...documents, ...riders]);
+    if (scoped.length === documents.length + riders.length)
+      return scoped.slice(documents.length) as SettingsRow[];
+    this.refusal = 'profile_scoped';
+    outcome.refused = true;
+    return null;
+  }
+
   /**
    * Adopt a committed profile directory (profiles-v1 §8.2) instead of restoring into it: everything held from the old
    * household — rows, the kept copies of the log, and work kept to send — is discarded, and the new log is read from
@@ -4589,6 +4625,7 @@ export class LibraryLog {
     // Replayed by `replay` only once this send is over, rather than sent twice at once.
     this.flushing.add(key);
     const run = this.writes.then(async () => {
+      if (this.refusalWaiting) return false;
       for (const group of groups) {
         const rows = coalesce(group);
         for (let offset = 0; offset < rows.length; offset += 32) {
@@ -4819,14 +4856,12 @@ export class LibraryLog {
     const projected = this.projected;
     if (!active()) return false;
     // Kept, and sent once a read finds the log again (`refresh`).
-    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
-      return this.projectKeptChanged(projected, active);
+    if (this.refusalWaiting) return this.projectKeptChanged(projected, active);
     // A migration holds the household (`migrationLockedAt`): kept work waits a minute between probes, where the
     // 30-second refresh would otherwise send every piece of it again each time.
-    if (this.migrationLockedAt > 0 && Date.now() - this.migrationLockedAt < MIGRATION_RECHECK_MS)
-      return this.projectKeptChanged(projected, active);
+    if (this.migrationLocked) return this.projectKeptChanged(projected, active);
     // den-edge's write budget for this library is spent: kept work goes again once the `Retry-After` has passed.
-    if (Date.now() < this.throttledUntil) return this.projectKeptChanged(projected, active);
+    if (this.retryAfterMs) return this.projectKeptChanged(projected, active);
     // A refused start is tried again here, but stays `refused` until a read finds the log: refused once more, it waits
     // another `RECHECK_MS`; a send that does not get through says nothing about whether the log is there.
     const waiting = this.pendingActions;

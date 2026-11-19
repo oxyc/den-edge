@@ -99,6 +99,28 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Refused-start fresh-write fencing (#1392) was measured on clean, matched production builds at exact base
+  `d4d42ac1` and production/test head `08e93a63`, from equal-length detached worktree paths with identical lockfile
+  dependencies and Node/Vite toolchains. Browser startup moves 207,038 → 207,012 gzip bytes (-26), while its
+  complete JS/CSS graph moves 904,526 → 904,529 (+3); independently lazy Spanish/Swedish catalogs remain 51,549,
+  leaving the non-translation graph 852,977 → 852,980 (+3). LG/webOS startup moves 242,008 → 242,021 (+13),
+  complete moves 1,003,457 → 1,003,609 (+152), and non-translation moves 951,908 → 952,060 (+152).
+  Supported Tizen 8 startup moves 242,716 → 242,697 (-19), complete moves 1,324,069 → 1,324,155 (+86), and
+  non-translation moves 1,272,520 → 1,272,606 (+86). Reduced Tizen 3 startup moves 193,680 → 193,683 (+3),
+  complete moves 2,405,024 → 2,405,205 (+181), non-translation moves 2,353,381 → 2,353,562 (+181), and its
+  raw JS/CSS graph moves 8,350,689 → 8,351,714 (+1,025). Every target retains the same
+  JS/CSS file count (Browser 120, webOS 140, Tizen 8 151, Tizen 3 98) and unchanged translation graph (51,549 on
+  Browser/modern TV, 51,643 on Tizen 3); all target verifiers pass, and emitted products contain no source maps or
+  named coverage/instrumentation artifacts. The hosted exact-head budget gate also passes at startup 207,012,
+  complete 904,529, translations 51,549 and core delta 127,190, preserving 42 bytes of its existing margin.
+  Before retaining the delta, the implementation consolidates repeated refusal-time checks behind the existing
+  exact-`LibraryLog` `refusalWaiting` accessor and reuses the existing acknowledged-document and household-scope
+  helpers instead of adding another authority owner, queue, timer or transport. The fence must remain at the
+  existing serialized Worker write boundaries so a refusal established by an earlier held write also stops queued
+  document, settings, exact-CAS and bulk-row sends; moving it behind a page-level lazy import would omit non-page
+  writers or add an asynchronous authority gap. It adds no module, dynamic import, dependency, translation, route,
+  polling, task, listener, request during the wait, cache or persisted schema. No budget changes are required.
+
 - The missing-library recovery (#1212) was measured on matched production builds at base `251484fd` and the repair.
   Only the typed `refused-start` status is on the startup path: the notice copy, its Open Linked devices action and the
   row reveal are the lazy `MissingLibraryNotice` chunk (`MissingLibraryNoticeScreen`), fetched only while a library is
