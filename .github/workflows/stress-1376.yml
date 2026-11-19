@@ -1,0 +1,38 @@
+name: stress-1376 (temporary)
+on:
+  push:
+    branches: [fix/1376-tv-actions-home, fix/1376-tv-actions, fix/1376-tv-home]
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        spec: [tv-actions.spec.mjs, tv-home.spec.mjs]
+        workers: [1, 4]
+        shard: [1, 2]
+    env:
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Stress
+        run: npx playwright test --config playwright.tv.config.ts ${{ matrix.spec }} --repeat-each=${{ matrix.workers == 1 && 25 || 40 }} --workers=${{ matrix.workers }} --reporter=line
+      - name: Keep evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stress-${{ matrix.spec }}-w${{ matrix.workers }}-s${{ matrix.shard }}
+          path: web/test-results-tv
+          if-no-files-found: ignore
+          retention-days: 3

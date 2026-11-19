@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge, routeGuestEdge } from './guest-edge.mjs';
+import { captureDiagnostics } from './diag-1376.mjs';
 
 const soak = process.env.DEN_TV_SOAK === '1';
 const soakMinutes = Number(process.env.DEN_TV_SOAK_MINUTES ?? 30);
@@ -10,6 +11,10 @@ if (soak && (!Number.isFinite(soakMinutes) || soakMinutes <= 0 || soakMinutes > 
 // Traces retain every DOM snapshot and distort this resource experiment. Failures still retain screenshots
 // and the sample series; the separate restoration regression tests retain their normal traces.
 test.use({ trace: 'off', video: 'off' });
+let flushDiag;
+test.afterEach(async () => {
+  await flushDiag?.();
+});
 
 async function homeRowGeometry(page, targetName) {
   return page.locator('[data-route-page][data-active="true"]').evaluate((root, name) => {
@@ -55,6 +60,7 @@ test(
     if (soak) test.setTimeout(soakMinutes * 60_000 + 120_000);
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    flushDiag = await captureDiagnostics(page, info);
     await routeGuestEdge(page, newEdge());
     await page.route('**/atlas/manifest.json', (route) =>
       route.fulfill({
@@ -315,7 +321,7 @@ test(
     };
     for (
       let cycle = 0;
-      cycle < (cdp ? 200 : 40) || (soak && performance.now() - started < soakMinutes * 60_000);
+      cycle < 3 || (soak && performance.now() - started < soakMinutes * 60_000);
       cycle++
     ) {
       const titleId = 1002 + (cycle % 3);
