@@ -1232,6 +1232,41 @@ describe('LibraryLog', () => {
     }
   });
 
+  it('tells the page once when any write is the one den-edge refuses to start', async () => {
+    const { vault } = memoryVault();
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    const connection: typeof fetch = async (_input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST')
+        return new Response('{"error":"new_libraries_closed"}', {
+          status: 403,
+          headers: protocol,
+        });
+      return new Response('{}', { status: 404, headers: protocol });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      let told = 0;
+      log.onRefused = () => told++;
+      // A write that is not an edit made by hand (no `onDeferred`) is the first refused.
+      const heartbeat: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'devices',
+        values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+      };
+      await log.write(heartbeat);
+      expect(log.refused).toBe(true);
+      expect(told).toBe(1);
+      await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 41 }, 0), at(1041)));
+      expect(told, 'a refusal already told is not told again').toBe(1);
+      log.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('keeps refused-start waiting local to the exact LibraryLog instance', async () => {
     const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
     let refusedPosts = 0;

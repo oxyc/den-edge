@@ -384,6 +384,10 @@ export class LibraryLogAuthority {
     this.#downloadsCoordinator = options.downloads;
     this.#fetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
     log.onDeferred = (delivery) => this.#deferred(delivery);
+    log.onRefused = () => {
+      for (const listener of this.#listeners)
+        listener({ kind: 'status', status: { kind: 'refused-start' } });
+    };
     if (
       options.mode === 'online' &&
       options.savedViews !== false &&
@@ -576,6 +580,7 @@ export class LibraryLogAuthority {
     this.#projectionTimer = undefined;
     this.#listeners.clear();
     this.#log.onDeferred = null;
+    this.#log.onRefused = null;
     await this.#admin?.close();
     await this.#viewWriter?.close();
     this.#log.close();
