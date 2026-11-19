@@ -474,5 +474,8 @@ if (process.argv.includes('--capture')) {
   // Settings retries (#1045) measured 127,629 in CI against main's 127,284 (+345, main at 20463fa0), all in the lazy
   // Settings route: the profile-preference and SIMKL-disconnect generation/session fences and their Retry controls.
   // Startup measures 206,967, within its cap. Allow the smallest 128-byte boundary containing it, retaining 115.
-  if (coreTotalDelta > 127744) throw new Error('Browser total JS/CSS budget exceeded');
+  // Ending a read held before first paint (#1378) measured 127,771 against main's 127,740 (+31, main at 5a8eef62): one
+  // branch in the library Worker's foreground-ready handler, which every Worker graph carries. A lazy split cannot
+  // reduce it. Startup is unchanged within chunk-hash churn. Allow the smallest 128-byte boundary, retaining 101.
+  if (coreTotalDelta > 127872) throw new Error('Browser total JS/CSS budget exceeded');
 }

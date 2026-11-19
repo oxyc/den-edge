@@ -99,6 +99,14 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Ending a read held before first paint (#1378) was measured by the hosted gate, and reproduced locally, on the PR head
+  rebased onto main `5a8eef62` (core delta 127,740, translations 51,722, startup 206,998): core delta 127,771 (+31),
+  translations 51,722 (unchanged), startup 207,001 (+3; chunk-hash churn, the change is Worker-only). The growth is one
+  branch in the library Worker's `foreground-ready` handler. That is the Worker's own refresh loop, carried by every
+  Worker graph, so a lazy split cannot reduce the complete graph. The complete ceiling advances from 127,744 to 127,872
+  (retaining 101); the translation and startup ceilings are unchanged. It adds no request, timer, listener or
+  dependency.
+
 - Settings retries (#1045, #1296) were measured by the hosted gate on the PR head rebased onto main `20463fa0`
   (core delta 127,284, translations 51,689): core delta 127,629 (+345), translations 51,722 (+33), startup 206,967
   (within its cap). The core growth is all in the lazy Settings route: the profile-preference and SIMKL-disconnect
