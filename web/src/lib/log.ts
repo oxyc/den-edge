@@ -2927,17 +2927,24 @@ export class LibraryLog {
    */
   async refresh(waitSeconds = 0, stopWaiting?: AbortSignal): Promise<boolean> {
     const opening = this.openingPass;
+    let finished: { changed: boolean };
     if (opening) {
       opening.adopt();
       try {
-        return (await opening.result).changed;
+        finished = await opening.result;
       } finally {
         if (this.openingPass === opening) this.openingPass = undefined;
       }
+    } else {
+      if (waitSeconds > 0 && !this.sendKeptNow) await this.awaitChange(waitSeconds, stopWaiting);
+      this.sendKeptNow = false;
+      finished = await this.pass();
     }
-    if (waitSeconds > 0 && !this.sendKeptNow) await this.awaitChange(waitSeconds, stopWaiting);
-    this.sendKeptNow = false;
-    return (await this.pass()).changed;
+    // Said here, and only here: a pass whose caller does not report (`readToHead`) leaves what it changed for the next
+    // refresh that finishes.
+    if (!finished.changed) return false;
+    this.unreported = false;
+    return true;
   }
 
   /**
@@ -3160,12 +3167,12 @@ export class LibraryLog {
     // A generation change in this pass is read from zero, but its write-back (`replay`, below) has yet to land: a
     // reader that must act on a current row waits for the next pass (recovery-code §7).
     const reachedHead = read === 'head' && this.generationChanges === generationsBefore;
-    const changed = this.unreported;
-    this.unreported = false;
     this.persist();
     // Rows that arrived may carry actions to project; with none, the projections already stand.
-    if (changed) this.projectJournal();
-    return { changed: (await this.replay(opening?.active)) || changed, reachedHead };
+    if (this.unreported) this.projectJournal();
+    // Kept work that reached den-edge is a change too; `refresh` says so, whichever pass sent it.
+    if (await this.replay(opening?.active)) this.unreported = true;
+    return { changed: this.unreported, reachedHead };
   }
 
   /**

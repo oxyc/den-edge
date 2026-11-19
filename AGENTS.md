@@ -100,15 +100,11 @@ everything the committed code imports is committed too.
 ## Bundle budget records
 
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
-  foreground refresh, and a cached opening pull takes the log's write lane only once a foreground refresh adopts it
-  (holding it earlier deadlocked against the service's ordered request lane). Measured in CI against main
-  `082bcab6`: the first half alone 127,196, the first draft of both 127,368; startup 10,604 → 10,659 is inside its
-  unchanged cap. All of it is in the library Worker's `log.ts` (+81 gzip bytes as one minified file), which the
-  complete graph counts twice: about +162 over main's 127,242 (#1158, below), past the 118 bytes main left.
-  Dropped from the draft: body cancels the opening's abort signal already covers, and sending vault-less recovery
-  rows on the first refresh (they go on the next one). The complete ceiling advances by one 128-byte step from
-  127,360 to 127,488; startup and translation ceilings are unchanged. It adds no request, timer, listener or
-  dependency.
+  foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
+  non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip
+  bytes as one minified file). CI measured the merged head at 127,284 against #1158's 127,360 ceiling (an earlier
+  draft measured 127,368 on main `082bcab6` before its redundant body cancels were dropped). No ceiling changes. It
+  adds no request, timer, listener or dependency.
 
 - Localizing the profile switcher (#1158) was measured by the hosted gate at exact base `d4d42ac1` (core delta
   127,190, translations 51,549, startup 207,012) and the PR head: translations 51,689 (+140), core delta 127,242

@@ -1570,7 +1570,9 @@ describe('LibraryLog', () => {
       expect(log.pendingActions).toBe(0);
 
       const before = changes;
-      await log.refresh();
+      // That read's caller reports nothing: the page learns the kept work went (its "Waiting to sync" count) from the
+      // next refresh, or it never does.
+      await expect(log.refresh(), 'the refresh says what the read changed').resolves.toBe(true);
       // The early page predates the read above: taken now it would move the cursor back, so the adopted pass asks
       // again from where the log is.
       expect(changes).toBe(before + 1);
@@ -1578,6 +1580,7 @@ describe('LibraryLog', () => {
       expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
       expect(log.settings('devices')).toMatchObject(kept);
       expect(log.settings('tracker')).toMatchObject(fresh);
+      await expect(log.refresh(), 'and says it once').resolves.toBe(false);
     } finally {
       log.close();
       warn.mockRestore();

@@ -468,11 +468,5 @@ if (process.argv.includes('--capture')) {
   // the `i18n.phrase`/`format` calls around the switcher's existing English copy and the Kid/Visitor/Owner description
   // helper. They render in the always-mounted switcher and its dialog; moving the dialog behind a dynamic import would
   // add a request to every open and still count here. Allow the next 128-byte boundary, retaining 118.
-  // A return visit with unsent work (#1401) draws at once and sends that work on the first refresh, and a cached
-  // opening pull no longer holds the write lane until it is adopted (the deadlock behind the return-visit e2e). All of
-  // it is in the library Worker's log (+81 gzip bytes as one minified file), which the complete graph counts twice:
-  // about +162 over main's 127,242, past the 118 bytes main left. CI measured the first draft at 127,368 on main
-  // 082bcab6; dropping its redundant body cancels and the vault-less recovery clause took about 90 off. Startup is
-  // unchanged. Allow the next 128-byte boundary.
-  if (coreTotalDelta > 127488) throw new Error('Browser total JS/CSS budget exceeded');
+  if (coreTotalDelta > 127360) throw new Error('Browser total JS/CSS budget exceeded');
 }
