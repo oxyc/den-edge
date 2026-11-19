@@ -331,7 +331,6 @@ async function linkingContexts(
   const joiner = await browser.newContext();
   await host.route('**/*', relay);
   await joiner.route('**/*', relay);
-  await pumpPairingPolls([host, joiner]);
   return {
     host,
     joiner,
@@ -347,13 +346,15 @@ const PAIR_POLL_MS = 1_000;
 
 /**
  * Both browsers poll the pairing relay on their own one-second timer. Their clocks are installed and moved on a poll
- * at a time, in the background, for as long as the contexts are open, instead of the test waiting the polls out.
+ * at a time, in the background, instead of the test waiting the polls out. Pumped time runs far faster than real
+ * time, so it is only for the pairing itself: the pages are loaded before it starts, and the returned function stops it.
  */
 async function pumpPairingPolls(contexts) {
   for (const context of contexts) await context.clock.install();
-  void (async () => {
+  let running = true;
+  const pumping = (async () => {
     try {
-      for (;;) {
+      while (running) {
         // runFor, not fastForward: every frame in the second is run, so no page sees a one-second stalled frame.
         for (const context of contexts) await context.clock.runFor(PAIR_POLL_MS);
         // A turn for the relay's answers to the polls just made, before the next ones are due.
@@ -363,21 +364,35 @@ async function pumpPairingPolls(contexts) {
       // A context closed: the test is over.
     }
   })();
+  return async () => {
+    running = false;
+    await pumping;
+  };
 }
 
 /** Link the consent page's browser to the host's library through the dialog's link screen. */
 async function linkThroughDialog(hostPage, dialog) {
+  const page = dialog.page();
+  // Settings starts on the real clock: its startup work (the den-core wasm fetch carries a 15 s deadline) must not be
+  // measured in pumped seconds while a loaded runner is still serving it.
   await hostPage.goto(`${ORIGIN}/test/settings.html`);
   await hostPage.getByRole('button', { name: /Linked devices/ }).click();
-  const devices = hostPage.getByRole('region', { name: 'Linked devices' });
-  await devices.getByRole('button', { name: 'Get a code' }).click();
-  const code = await devices.locator('.code').textContent();
+  const stopPolls = await pumpPairingPolls([hostPage.context(), page.context()]);
+  try {
+    const devices = hostPage.getByRole('region', { name: 'Linked devices' });
+    await devices.getByRole('button', { name: 'Get a code' }).click();
+    const code = await devices.locator('.code').textContent();
 
-  await dialog.getByRole('button', { name: 'Link this browser' }).click();
-  await expect(dialog).toContainText('Settings › Linked devices › Get a code');
-  await dialog.getByLabel('Link code, twelve characters').fill(code);
-  await dialog.getByRole('button', { name: 'Link', exact: true }).click();
-  await devices.getByRole('button', { name: 'Allow', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Link this browser' }).click();
+    await expect(dialog).toContainText('Settings › Linked devices › Get a code');
+    await dialog.getByLabel('Link code, twelve characters').fill(code);
+    await dialog.getByRole('button', { name: 'Link', exact: true }).click();
+    await devices.getByRole('button', { name: 'Allow', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('den.links'))).not.toBeNull();
+  } finally {
+    // Pairing is over: the linked browser opens its library on the real clock, as the host's did.
+    await stopPolls();
+  }
 }
 
 // A library linked at another address of Den is not linked here (web storage is per address), so the consent page
