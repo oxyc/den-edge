@@ -474,8 +474,7 @@ async function main() {
     nativeCleaned = true;
     await coordinator.command('finish');
     const nativeExit = await native.exited;
-    if (nativeExit.error)
-      throw new Error(`native xcodebuild failed to start: ${nativeExit.error}`);
+    if (nativeExit.error) throw new Error(`native xcodebuild failed to start: ${nativeExit.error}`);
     if (nativeExit.code !== 0) throw new Error(`native xcodebuild exited ${nativeExit.code}`);
     succeeded = true;
     console.log(
