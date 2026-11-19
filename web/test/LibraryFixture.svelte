@@ -303,19 +303,20 @@
           // the title's first-air date is in the future.
           ...(params.has('other-series-continue')
             ? [
-                blankTitle({ type: 'tv', id: 2002 }, 10_000),
+                blankTitle({ type: 'tv', id: 2002 }, downloadAt + 1),
                 {
                   ...blankEpisode({ type: 'tv', id: 2002 }, 1, 1),
-                  progress: { value: 0.4, at: [10_000, 0, 'test'], viewing: 1 },
+                  progress: { value: 0.4, at: [downloadAt + 1, 0, 'test'], viewing: 1 },
                 } satisfies EpisodeRow,
               ]
             : []),
           ...(params.has('current-series-continue')
             ? [
-                blankTitle({ type: 'tv', id: 2007 }, 9_000),
+                blankTitle({ type: 'tv', id: 2007 }, downloadAt),
                 {
                   ...blankEpisode({ type: 'tv', id: 2007 }, 1, 1),
-                  progress: { value: 0.4, at: [9_000, 0, 'test'], viewing: 1 },
+                  // Recent: Continue Watching drops a resume point left long ago.
+                  progress: { value: 0.4, at: [downloadAt, 0, 'test'], viewing: 1 },
                 } satisfies EpisodeRow,
               ]
             : []),
