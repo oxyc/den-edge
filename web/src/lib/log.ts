@@ -2975,17 +2975,32 @@ export class LibraryLog {
     const active = () => opening?.active() ?? true;
     // Null when den-edge couldn't be read (a page, or the rest of them); `unreported` keeps what the pages read did.
     // `missing` when den-edge holds no log for this library: nothing was read to a head.
-    const run = this.writes.then(async (): Promise<'head' | 'missing' | null> => {
+    const ask = () =>
+      this.send(
+        `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
+        { headers: this.headers(), ...(opening ? { signal: opening.signal } : {}) },
+        // An opening response belongs to no foreground authority yet. Observe its protocol minimum only after
+        // the same adoption barrier as its rows, generation and cursor.
+        opening === undefined,
+      );
+    // An opening read starts at once but takes the write lane only once adopted. Holding the lane while it waited for
+    // the foreground refresh kept every write and read of this log behind that refresh, and one queued first (the
+    // device check-in, in the service's ordered request lane) kept the refresh itself from ever being asked for.
+    const askedAt = this.head;
+    let early = opening && ask();
+    void early?.then(opening!.response, () => undefined);
+    const discardEarly = () => void early?.then((res) => res.body?.cancel()).catch(() => undefined);
+    const body = async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
           if (!active()) return null;
-          const res = await this.send(
-            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
-            { headers: this.headers(), ...(opening ? { signal: opening.signal } : {}) },
-            // An opening response belongs to no foreground authority yet. Observe its protocol minimum only after
-            // the same adoption barrier as its rows, generation and cursor.
-            opening === undefined,
-          );
+          // Another pass read past where the early read began: its page would take the cursor back, so ask again.
+          if (early && this.head !== askedAt) {
+            discardEarly();
+            early = undefined;
+          }
+          const res = await (early ?? ask());
+          early = undefined;
           opening?.response(res);
           // A cached opening read may finish before its retained overlay or foreground owner exists. Do not mutate
           // any visible/log authority from that response until both boundaries accept it. A superseded open cancels
@@ -3135,8 +3150,19 @@ export class LibraryLog {
       } catch {
         return null;
       }
-    });
-    this.writes = run.catch(() => null);
+    };
+    const enter = () => {
+      const slot = this.writes.then(body);
+      this.writes = slot.catch(() => null);
+      return slot;
+    };
+    const run = opening
+      ? opening.ready.then((ready) => {
+          if (ready && opening.active()) return enter();
+          discardEarly();
+          return null;
+        })
+      : enter();
     const read = await run;
     if (read === null) return { changed: false, reachedHead: false };
     if (opening && !opening.active()) return { changed: false, reachedHead: false };

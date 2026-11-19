@@ -1516,6 +1516,74 @@ describe('LibraryLog', () => {
     });
   });
 
+  it('lets writes and reads past a cached opening pull that waits for its foreground refresh', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const server = await edge([row(1)], [], 'generation-1');
+    const { vault } = memoryVault();
+    let refuseWrites = false;
+    let posts = 0;
+    let changes = 0;
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST') {
+        posts++;
+        if (refuseWrites) throw new TypeError('offline');
+      } else if (String(input).includes('/changes?')) changes++;
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '4');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    refuseWrites = true;
+    const kept: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'devices',
+      values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+    };
+    await first.write(kept);
+    await vi.waitFor(() => expect(first.pendingActions).toBe(1));
+    first.close();
+    refuseWrites = false;
+    const sent = posts;
+    const read = changes;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    try {
+      expect(log.fromCache).toBe(true);
+      expect(changes, 'the opening pull starts with the open').toBe(read + 1);
+      // The service orders its requests: a write that waited here for the foreground refresh kept the request that
+      // starts that refresh from ever running, and the kept work was never sent.
+      const fresh: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'tracker',
+        values: { connected: { value: { bool: true }, at: at(1002) } },
+      };
+      let wrote = false;
+      void log.write(fresh).then(() => (wrote = true));
+      await vi.waitFor(() => expect(wrote, 'a write does not wait for adoption').toBe(true));
+      expect(posts, 'the fresh write was sent').toBe(sent + 1);
+      expect(log.pendingActions, 'the kept work still waits').toBe(1);
+      // A read of the log sends kept work after it, as every pass does.
+      await expect(log.readToHead(), 'nor does a read wait').resolves.toBe(true);
+      expect(posts).toBe(sent + 2);
+      expect(log.pendingActions).toBe(0);
+
+      const before = changes;
+      await log.refresh();
+      // The early page predates the read above: taken now it would move the cursor back, so the adopted pass asks
+      // again from where the log is.
+      expect(changes).toBe(before + 1);
+      expect(posts, 'the adopted opening pull sends nothing again').toBe(sent + 2);
+      expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
+      expect(log.settings('devices')).toMatchObject(kept);
+      expect(log.settings('tracker')).toMatchObject(fresh);
+    } finally {
+      log.close();
+      warn.mockRestore();
+    }
+  });
+
   it('cancels an unadopted cached pull when its speculative log closes', async () => {
     const server = await edge([row(1)], [], 'generation-1');
     const { vault } = memoryVault();
