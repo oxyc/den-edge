@@ -8,6 +8,11 @@ const ROUTED_FIXTURE = `${E2E_ORIGIN}/test/live-position.html`;
 const NOTICE =
   'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.';
 
+let captured = [];
+test.afterEach(async ({}, info) => {
+  await info.attach('capture.txt', { body: captured.join('\n') });
+});
+
 async function openTitle(page, id) {
   await page.goto(ROUTED_FIXTURE);
   await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
@@ -24,8 +29,9 @@ test('a library den-edge will not start keeps the edit, hands off to Linked devi
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const edge = { missing: true };
-  const log = [];
+  const log = (captured = []);
   const t0 = Date.now();
+  page.on('worker', (w) => stamp(`worker ${w.url()}`));
   const stamp = (line) => log.push(`${Date.now() - t0} ${line}`);
   page.on('console', (m) => stamp(`console.${m.type()} ${m.text()}`));
   page.on('pageerror', (e) => stamp(`pageerror ${e.message}`));
